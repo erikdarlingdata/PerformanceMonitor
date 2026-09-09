@@ -118,6 +118,46 @@ public sealed class EntraCredentialSelectionTests : IDisposable
     }
 
     /// <summary>
+    /// <para><b>Payload slot 0 is the credential type, asserted by NAME on a real written event.</b>
+    /// The listener reads <c>Payload[0]</c> positionally, so a future upstream parameter added or
+    /// reordered ahead of <c>credentialType</c> would silently change what that index means — and
+    /// <c>Azure.Identity</c> arrives transitively and unpinned (#3219), so such a move needs no code
+    /// change here to happen. The runtime barrier against it is the type-name shape check, which
+    /// declines the value rather than logging it; this is the pin that makes the move LOUD instead of
+    /// merely survivable.</para>
+    ///
+    /// <para>Read off <see cref="EventWrittenEventArgs.PayloadNames"/> rather than the reflected
+    /// method signature, because the name the runtime reports is what actually accompanies the
+    /// payload — and the two can disagree. The count assertion is the control: an empty
+    /// <c>PayloadNames</c> (which some event formats produce) would make an index check vacuous.</para>
+    /// </summary>
+    [Fact]
+    public void PayloadSlotZero_IsTheCredentialType_OnARealWrittenEvent()
+    {
+        Singleton();
+        using var recorder = new PayloadNameListener();
+
+        Raise(SelectedMethod, CliCredential);
+
+        var captured = recorder.Captured
+            .Where(c => c.EventId == EntraCredentialSelectionListener.CredentialSelectedEventId)
+            .ToList();
+
+        Assert.Single(captured);
+
+        var (_, names, payload) = captured[0];
+
+        Assert.True(
+            names.Count > 0,
+            "the runtime reported no payload names for event 13, so an index assertion on them would "
+                + "be vacuous — this event format does not carry them and this pin needs rewriting");
+
+        Assert.Equal("credentialType", names[0]);
+        Assert.Single(payload);
+        Assert.Equal(CliCredential, payload[0]);
+    }
+
+    /// <summary>
     /// <para><b>Why the filter is an allowlist and not a level or a keyword.</b> Not one event in
     /// that source declares <c>Keywords</c>, so <c>EnableEvents</c> has no dimension to exclude the
     /// sensitive siblings on; and event 13 is itself <c>Informational</c>, so there is no level that
@@ -718,6 +758,47 @@ public sealed class EntraCredentialSelectionTests : IDisposable
     [EventSource(Name = "PerformanceMonitorLite-Tests-Bystander")]
     private sealed class BystanderEventSource : EventSource
     {
+    }
+
+    /// <summary>
+    /// Captures the event id together with the runtime's own payload NAMES and values, so the
+    /// positional read the production listener performs can be checked against the name the runtime
+    /// attaches to that position.
+    /// </summary>
+    private sealed class PayloadNameListener : EventListener
+    {
+        private readonly List<(int EventId, IReadOnlyList<string> Names, IReadOnlyList<string> Payload)> _captured = new();
+
+        internal IReadOnlyList<(int EventId, IReadOnlyList<string> Names, IReadOnlyList<string> Payload)> Captured
+        {
+            get { lock (_captured) { return _captured.ToList(); } }
+        }
+
+        protected override void OnEventSourceCreated(EventSource eventSource)
+        {
+            if (string.Equals(
+                    eventSource?.Name,
+                    EntraCredentialSelectionListener.AzureIdentitySourceName,
+                    StringComparison.Ordinal))
+            {
+                EnableEvents(eventSource!, EventLevel.Informational);
+            }
+        }
+
+        protected override void OnEventWritten(EventWrittenEventArgs eventData)
+        {
+            var names = eventData.PayloadNames is null
+                ? Array.Empty<string>()
+                : eventData.PayloadNames.ToArray();
+            var payload = eventData.Payload is null
+                ? Array.Empty<string>()
+                : eventData.Payload.Select(o => o?.ToString() ?? string.Empty).ToArray();
+
+            lock (_captured)
+            {
+                _captured.Add((eventData.EventId, names, payload));
+            }
+        }
     }
 
     private sealed class RecordingListener : EventListener
