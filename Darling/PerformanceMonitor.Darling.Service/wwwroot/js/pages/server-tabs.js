@@ -2890,13 +2890,24 @@ const DEFAULT_TRACE_COLUMNS = [
 
 /* #2484: the raw log's columns. The duration SPLIT is the reason this table earns its place beside the
    rollup -- total time cannot separate a collector that is slow because the monitored server is slow from
-   one that is slow because the store is, and that is the first question anyone asks of a slow collector. */
+   one that is slow because the store is, and that is the first question anyone asks of a slow collector.
+
+   #3192: this column was headed "On Server", and on the collectors that fetch plan XML or statement text
+   that header was false. The deferred fetches run inside the driver's per-item SQL stopwatch and each one
+   round-trips the STORE before writing back what came off the target, so a measured 107,334 ms of a
+   124,972 ms query_store figure was the monitoring store -- 86% -- under a header naming the monitored
+   server. Headed "SQL" now, matching what the WPF viewer's grid has always called it, with the store share
+   in its own column beside it. "Store (in SQL)" is blank on the ~98% of runs that perform no deferred
+   fetch, and blank there means "nothing to attribute", not "no store time": the per-item watermark refresh
+   is a store read inside the same stopwatch and is recorded nowhere, which is why that column is a floor
+   and "On Store" (the binary COPY of the collected rows) is not where the probe went either. */
 const COLLECTION_LOG_COLUMNS = [
   { key: "collection_time", label: "When", format: "time" },
   { key: "collector", label: "Collector" },
   { key: "status", label: "Status", statusSev: true },
   { key: "duration_ms", label: "Total", format: "ms" },
-  { key: "sql_duration_ms", label: "On Server", format: "ms" },
+  { key: "sql_duration_ms", label: "SQL", format: "ms" },
+  { key: "sql_store_ms", label: "Store (in SQL)", format: "ms" },
   { key: "store_duration_ms", label: "On Store", format: "ms" },
   { key: "rows_collected", label: "Rows", format: "int" },
   { key: "error_message", label: "Error", wrap: true },
