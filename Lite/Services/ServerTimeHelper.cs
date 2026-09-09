@@ -101,9 +101,42 @@ public static class ServerTimeHelper
         _ => $"UTC{(_utcOffsetMinutes >= 0 ? "+" : "")}{_utcOffsetMinutes / 60}:{Math.Abs(_utcOffsetMinutes % 60):D2}"
     };
 
+    /// <summary>
+    /// Formats a NAIVE-UTC timestamp for display. The offset add converts UTC to the server's own clock,
+    /// which is <see cref="ConvertForDisplay"/>'s input; use <see cref="FormatServerClock"/> instead for a
+    /// value that is already the server's clock.
+    /// </summary>
     public static string FormatServerTime(DateTime utcTime, string format = "yyyy-MM-dd HH:mm:ss")
         => ConvertForDisplay(utcTime.AddMinutes(_utcOffsetMinutes), CurrentDisplayMode).ToString(format);
 
+    /// <inheritdoc cref="FormatServerTime(DateTime, string)"/>
     public static string FormatServerTime(DateTime? utcTime, string format = "yyyy-MM-dd HH:mm:ss")
         => utcTime.HasValue ? ConvertForDisplay(utcTime.Value.AddMinutes(_utcOffsetMinutes), CurrentDisplayMode).ToString(format) : "";
+
+    /// <summary>
+    /// Formats a timestamp that is ALREADY the monitored server's own wall clock: the
+    /// <c>sys.dm_exec_*</c> family (<c>creation_time</c>, <c>cached_time</c>, <c>last_execution_time</c>),
+    /// <c>plan_correction</c>'s recommendation and action stamps, the blocked-process report's
+    /// <c>*_last_tran_started</c> / <c>*_last_batch_*</c> attributes, <c>query_snapshots.tran_start_time</c>
+    /// and msdb Agent's <c>start_execution_date</c>.
+    ///
+    /// <para><see cref="ConvertForDisplay"/> already takes the server's clock and honours the selected
+    /// display mode, so this is <see cref="FormatServerTime"/> with the offset add removed rather than a
+    /// second conversion. That add is the whole defect it exists to prevent: it is correct for naive UTC
+    /// and, applied to a value already in the server's frame, skews it by the collected offset a second
+    /// time — the fleet's -240 renders four hours early, in every display mode.</para>
+    ///
+    /// <para>Darling's <c>ViewerDataService.FormatServerClock</c> is the mirror of this, under the same
+    /// name and with the same input contract, reached the other way round: its
+    /// <c>ViewerTimeHelper.ConvertToDisplay</c> takes naive UTC, so the server-clock conversion there
+    /// SUBTRACTS the offset first, where this one starts from the server's clock and the naive-UTC renderer
+    /// adds it. Either way there is exactly one offset step between the two frames, and both renderers
+    /// honour the display preference.</para>
+    /// </summary>
+    public static string FormatServerClock(DateTime serverLocal, string format = "yyyy-MM-dd HH:mm:ss")
+        => ConvertForDisplay(serverLocal, CurrentDisplayMode).ToString(format);
+
+    /// <inheritdoc cref="FormatServerClock(DateTime, string)"/>
+    public static string FormatServerClock(DateTime? serverLocal, string format = "yyyy-MM-dd HH:mm:ss")
+        => serverLocal.HasValue ? ConvertForDisplay(serverLocal.Value, CurrentDisplayMode).ToString(format) : "";
 }

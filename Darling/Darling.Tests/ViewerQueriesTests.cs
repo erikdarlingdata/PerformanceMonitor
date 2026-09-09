@@ -382,14 +382,24 @@ public sealed class ViewerQueriesSqlTests
 /// <summary>The Queries row models' pure display helpers: raw server-clock formatting, FullName, totals.</summary>
 public sealed class ViewerQueriesDisplayTests
 {
+    /// <summary>
+    /// <c>query_stats</c>' and <c>procedure_stats</c>' execution and cache stamps are the SQL server's
+    /// own wall clock, shown raw — NOT run through the naive-UTC conversion the <c>collection_time</c>
+    /// columns get. <c>query_store_stats</c>' stamps are not in this family: the collector normalises
+    /// them to UTC, so they take <c>ViewerTimeHelper.ForDisplay</c> instead (#3207).
+    ///
+    /// <para>Only the NULL contract is asserted here, and deliberately: both renderers honour the display
+    /// mode, so a pinned rendered value depends on the process-wide
+    /// <c>ViewerTimeHelper.CurrentDisplayMode</c>, which this class does not serialize — xUnit runs classes
+    /// in parallel and three others flip it. The values are asserted in
+    /// <c>ViewerTimeHelperTests.FormatServerClock_HonoursTheDisplayMode_AtTheFleetOffset</c>, which is in
+    /// the <c>viewer-time-statics</c> collection. Empty-for-null is the same in every mode.</para>
+    /// </summary>
     [Fact]
-    public void FormatServerClock_ShowsRawServerWallClock_EmptyForNull()
+    public void TheTwoClockRenderers_RenderEmptyForNull()
     {
-        /* last_execution_time / creation_time are the SQL server's local wall clock — shown raw, NOT run
-           through the naive-UTC-to-local conversion the collection_time columns get. */
-        var t = new DateTime(2026, 7, 1, 13, 45, 7);
-        Assert.Equal("2026-07-01 13:45:07", ViewerDataService.FormatServerClock(t));
         Assert.Equal("", ViewerDataService.FormatServerClock(null));
+        Assert.Equal("", ViewerDataService.FormatStoredUtc(null));
     }
 
     [Fact]

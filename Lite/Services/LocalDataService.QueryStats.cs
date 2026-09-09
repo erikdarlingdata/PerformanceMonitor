@@ -1476,8 +1476,8 @@ public class QueryStatsRow
     public string QueryHash { get; set; } = "";
     public DateTime? LastExecutionTime { get; set; }
     public DateTime? CreationTime { get; set; }
-    public string LastExecutionTimeLocal => Services.ServerTimeHelper.FormatServerTime(LastExecutionTime);
-    public string CreationTimeLocal => Services.ServerTimeHelper.FormatServerTime(CreationTime);
+    public string LastExecutionTimeLocal => Services.ServerTimeHelper.FormatServerClock(LastExecutionTime);
+    public string CreationTimeLocal => Services.ServerTimeHelper.FormatServerClock(CreationTime);
     public long TotalExecutions { get; set; }
     public long TotalCpuUs { get; set; }
     public long TotalElapsedUs { get; set; }
@@ -1599,8 +1599,8 @@ public class ProcedureStatsRow
     public double MaxCpuMs => MaxWorkerTimeUs / 1000.0;
     public double MinElapsedMs => MinElapsedTimeUs / 1000.0;
     public double MaxElapsedMs => MaxElapsedTimeUs / 1000.0;
-    public string CachedTimeFormatted => Services.ServerTimeHelper.FormatServerTime(CachedTime);
-    public string LastExecutionTimeLocal => Services.ServerTimeHelper.FormatServerTime(LastExecutionTime);
+    public string CachedTimeFormatted => Services.ServerTimeHelper.FormatServerClock(CachedTime);
+    public string LastExecutionTimeLocal => Services.ServerTimeHelper.FormatServerClock(LastExecutionTime);
 }
 
 public class QueryStatsHistoryRow
@@ -1668,8 +1668,8 @@ public class QueryStatsHistoryRow
     public double TotalCpuMs => TotalCpuUs / 1000.0;
     public double TotalElapsedMs => TotalElapsedUs / 1000.0;
     public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
-    public string CreationTimeLocal => ServerTimeHelper.FormatServerTime(CreationTime);
-    public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerTime(LastExecutionTime);
+    public string CreationTimeLocal => ServerTimeHelper.FormatServerClock(CreationTime);
+    public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerClock(LastExecutionTime);
 }
 
 public class ProcedureStatsHistoryRow
@@ -1722,6 +1722,6 @@ public class ProcedureStatsHistoryRow
     public double TotalCpuMs => TotalCpuUs / 1000.0;
     public double TotalElapsedMs => TotalElapsedUs / 1000.0;
     public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
-    public string CachedTimeLocal => ServerTimeHelper.FormatServerTime(CachedTime);
-    public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerTime(LastExecutionTime);
+    public string CachedTimeLocal => ServerTimeHelper.FormatServerClock(CachedTime);
+    public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerClock(LastExecutionTime);
 }

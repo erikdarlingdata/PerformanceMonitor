@@ -702,13 +702,62 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// one that renders raw, i.e. that takes the server's own clock. <c>FormatServerTime</c> is Lite's
     /// <c>ForDisplay</c>, not its <c>FormatServerClock</c>: it adds the offset and names its parameter
     /// <c>utcTime</c>. Lite has no raw renderer at all, which is why a comment in the Darling viewer
-    /// claiming parity with it is wrong in the direction that hid this.</summary>
+    /// claiming parity with it is wrong in the direction that hid this.
+    ///
+    /// <para><c>FormatStoredUtc</c> is the Darling viewer's named UTC renderer, beside
+    /// <c>FormatServerClock</c> so the choice between the pair is reviewable at the site. Registering it
+    /// is not optional: this scan keys on the renderer's NAME, so an unlisted one is invisible and its
+    /// sites would leave the census as the price of being fixed.</para>
+    ///
+    /// <para><b>This list's completeness is the guard's own soft spot, and two checks cover it.</b>
+    /// <see cref="TheOneHopRenderWrappers_AreExactlyTheDeclaredSet"/> derives the ALIASES — a static
+    /// formatter over a <c>DateTime</c> reaching a renderer under a different name — and pins them at set
+    /// equality, so a new one must be declared. That criterion is a SHAPE, and a shape can be evaded, so
+    /// <see cref="NoUnregisteredRenderCapableMember_IsAppliedToACensusColumn"/> closes the residual with
+    /// no shape assumption at all: whatever its signature, a member that renders may not be handed a
+    /// census timestamp column unless it is registered here or declared as an alias.</para></summary>
     private static readonly (string Renderer, ClockFrame Expects)[] Renderers =
     [
         ("ForDisplay", ClockFrame.Utc),
         ("FormatServerTime", ClockFrame.Utc),
+        ("FormatStoredUtc", ClockFrame.Utc),
         ("FormatServerClock", ClockFrame.ServerLocal),
     ];
+
+    /// <summary>
+    /// A ONE-HOP RENDER WRAPPER: a static formatter in the render roots that reaches one of the
+    /// <see cref="Renderers"/> instead of being one. A wrapper hides the renderer's NAME from the
+    /// render scan, which keys on it - so a column rendered through one is invisible to a census that
+    /// calls itself closed. That is not hypothetical: four server-local <c>plan_correction</c> stamps
+    /// reached <c>ForDisplay</c> through <c>ViewerDataService.PlanCorrection</c>'s <c>Local()</c>, in
+    /// the wrong frame, and no scan here could see them.
+    ///
+    /// <para>Declared with the renderer each one reaches and pinned at SET EQUALITY against the
+    /// derived set by <see cref="TheOneHopRenderWrappers_AreExactlyTheDeclaredSet"/>, so a new or
+    /// renamed wrapper fails the build and has to declare its frame rather than quietly reopening the
+    /// hole.</para>
+    /// </summary>
+    private static readonly (string File, string Method, string Renderer)[] RenderWrappers =
+    [
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.PlanCorrection.cs", "Local", "ForDisplay"),
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", "Local", "ForDisplay"),
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerHistoryRows.cs", "CollectionLocal", "ForDisplay"),
+        ("Darling/PerformanceMonitor.Darling.Viewer/ViewerPostgresDisplay.cs", "Timestamp", "ForDisplay"),
+        ("Lite/Services/LocalDataService.ConfigChanges.cs", "Local", "FormatServerTime"),
+        ("Lite/Services/LocalDataService.SystemEvents.cs", "Local", "FormatServerTime"),
+    ];
+
+    /// <summary>A static formatter over a <c>DateTime</c>. Return type and parameter both matter: the
+    /// wrappers in the tree return <c>string</c> or <c>DateTime</c> and take one nullable-or-not
+    /// <c>DateTime</c>, and widening this past that shape drags in every method that merely mentions
+    /// a renderer somewhere in a long body.</summary>
+    private static readonly Regex WrapperSignature =
+        new(@"\b(?:public|private|internal|protected)\s+static\s+(?:string|DateTime)\??\s+(\w+)\s*\(\s*DateTime\??\s+\w+");
+
+    /// <summary>How far past a wrapper's signature its body is read for a renderer call. These are
+    /// one-expression formatters; a bound is what keeps the NEXT member's renderer call from being
+    /// read as this one's.</summary>
+    private const int WrapperBodyBound = 400;
 
     private enum SiteLabel
     {
@@ -837,71 +886,25 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             "#1262: get_cpu_utilization de-skews sample_time in SQL by the per-batch quantised offset, then "
             + "buckets the de-skewed value, so the emitted expression is the bucket key"),
 
-        /* ── desktop renders: the column's frame against the renderer's (#3207) ── */
-        (SiteLabel.DesktopRenderFrameMismatch,
-            "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.QueryStore.cs",
-            "first_execution_time", "query_store_stats", 1,
-            "naive UTC rendered RAW, so four hours late; Lite gets this one right"),
-        (SiteLabel.DesktopRenderFrameMismatch,
-            "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.QueryStore.cs",
-            "last_execution_time", "query_store_stats", 1, "naive UTC rendered RAW, so four hours late"),
-        (SiteLabel.DesktopRenderFrameMismatch,
-            "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.QueryStoreRegressions.cs",
-            "last_execution_time", "query_store_stats", 1,
-            "naive UTC rendered RAW; the doc at :29 states the wrong frame outright and appeals to the "
-            + "sibling Query Store tab, which is how one wrong site became three"),
-        (SiteLabel.DesktopRenderFrameMismatch,
-            "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.RunningJobs.cs",
-            "start_time", "running_jobs", 1,
-            "server-local through ForDisplay, so four hours EARLY, beside a CollectionTimeLocal that is right"),
-        (SiteLabel.DesktopRenderFrameMismatch,
-            "Darling/PerformanceMonitor.Darling.Viewer/ViewerHistoryRows.cs",
-            "first_execution_time", "query_store_stats", 1,
-            "the file header lumps Query Store in with the DMVs; true of query_stats/procedure_stats in the "
-            + "same file, false of query_store_stats"),
-        (SiteLabel.DesktopRenderFrameMismatch,
-            "Darling/PerformanceMonitor.Darling.Viewer/ViewerHistoryRows.cs",
-            "last_execution_time", "query_store_stats", 1,
-            "same file, same header; the query_stats and procedure_stats rows beside it are correct, which "
-            + "is why the Tables column is part of this key"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.Blocking.cs",
-            "blocked_last_tran_started", "blocked_process_reports+dmv_blocking_snapshots", 1,
-            "server-local through FormatServerTime, which adds the offset again; EventTimeLocal in the same "
-            + "class is correct"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.Blocking.cs",
-            "blocked_last_batch_started", "blocked_process_reports", 1, "server-local through FormatServerTime"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.Blocking.cs",
-            "blocked_last_batch_completed", "blocked_process_reports", 1, "server-local through FormatServerTime"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.Blocking.cs",
-            "tran_start_time", "query_snapshots", 1,
-            "server-local through FormatServerTime; Darling renders the same column through FormatServerClock "
-            + "and its comment claims the two agree"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.PlanCorrection.cs",
-            "valid_since", "plan_correction", 1,
-            "server-local through FormatServerTime; not in #3207's list, found by deriving the census"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.PlanCorrection.cs",
-            "last_refresh", "plan_correction", 1, "server-local through FormatServerTime; not in #3207's list"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.PlanCorrection.cs",
-            "execute_action_initiated_time", "plan_correction", 1,
-            "server-local through FormatServerTime; not in #3207's list"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.PlanCorrection.cs",
-            "revert_action_initiated_time", "plan_correction", 1,
-            "server-local through FormatServerTime; not in #3207's list"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.QueryStats.cs",
-            "creation_time", "query_stats", 2,
-            "server-local through FormatServerTime, in two row types; the Lite read de-skews only the WINDOW "
-            + "BOUND ($2 + $5 * INTERVAL '1' MINUTE) and returns the raw local value, which is #3198's "
-            + "half-fix shape. Darling renders the same column through FormatServerClock"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.QueryStats.cs",
-            "cached_time", "procedure_stats", 2, "server-local through FormatServerTime; not in #3207's list"),
-        (SiteLabel.DesktopRenderFrameMismatch, "Lite/Services/LocalDataService.QueryStats.cs",
-            "last_execution_time", "procedure_stats+query_stats", 4,
-            "server-local through FormatServerTime in four row types; both tables agree on the frame, so the "
-            + "ambiguous NAME resolves here even though it does not in general"),
+        /* ── desktop renders: the column's frame against the renderer's (#3207) ──
+
+           EMPTY, and that is a result rather than an omission. #3207 fixed all twenty-two sites this
+           label carried, so their rows are gone with them - set equality fails in the removing
+           direction too, which is what made the deletions provable. The scan below still fails on a
+           new offender: found is compared against this label's rows, and a non-empty found against
+           no rows is a failure. What an empty label costs is the reach evidence NotEmpty(actual)
+           used to give for free, so the floor on sites actually JUDGED is now the exact measured
+           baseline rather than a loose bound, and
+           TheRenderVerdict_FlagsBothDirections_AndPassesTheCorrectPairings exercises the scan's own
+           verdict against a planted offender in each direction. */
     ];
 
+    /* #3206 (via #3212) took the MCP label from 33 to 1 by de-skewing at the read; the survivor is
+       Lite get_plan_cache_bloat's oldest_plan_create_time, which that lane does not touch. #3207 took
+       the render label from 22 to 0. Both labels moved by fixing their sites and deleting their rows in
+       the same change, which is the ratchet working in the removing direction. */
     private const int McpPayloadUnmarkedSites = 1;
-    private const int DesktopRenderMismatchSites = 22;
+    private const int DesktopRenderMismatchSites = 0;
     private const int DeSkewedAtReadSites = 34;
 
     /* ═══════════════════════ 5. resolving which table a site's column came from ═══════════════════════ */
@@ -1040,6 +1043,39 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     private const int MinimumMcpEmissionSites = 110;
     private const int MinimumRenderFiles = 380;
 
+    /* The render sites the scan JUDGES - resolved to one frame and compared against their renderer.
+       Measured on this branch at 43: the 38 #3220 measured, plus Lite's running-job start time (which
+       reached DateTime.ToLocalTime() rather than any renderer, so nothing judged it) and the four
+       plan_correction stamps in the Darling viewer that now name FormatServerClock at the site
+       instead of reaching ForDisplay through a wrapper. */
+    private const int JudgedRenderSites = 43;
+
+    /* Call sites of a declared RenderWrapper passing a census column, and how many (file, method)
+       wrappers reach one at all. Measured at 16 sites across 2 of the 6 wrappers - every one of them
+       event_time through a SystemEvents wrapper. Floored, and the reaching-wrapper count pinned
+       exactly, so the check cannot report a clean bill of health by examining nothing: with no
+       offenders left, "examined nothing" and "found nothing" are otherwise the same result. */
+    private const int WrapperCallSitesOverCensusColumns = 16;
+
+    /* Calls of ANY identifier on a census timestamp column across the render surface. Floored so the
+       shape-free residual check cannot satisfy its set equality with an empty left side. */
+    private const int CallsOnACensusColumn = 72;
+    private const int WrapperFilesReachingACensusColumn = 2;
+
+    /// <summary>
+    /// The render scan's per-site verdict: the column's frame in its resolved table against what the
+    /// renderer at the site expects. Factored out so
+    /// <see cref="TheRenderVerdict_FlagsBothDirections_AndPassesTheCorrectPairings"/> exercises THIS
+    /// predicate rather than a retyped copy - a second, weaker copy of the resolution logic is how
+    /// three of #3220's marker-reachability exemptions came to be unfalsifiable.
+    /// </summary>
+    private static bool RenderFrameDisagrees(
+        Dictionary<(string Table, string Column), ClockFrame> register,
+        string table,
+        string column,
+        string renderer) =>
+        register[(table, column)] != Renderers.Single(r => r.Renderer == renderer).Expects;
+
     /// <summary>
     /// A payload field named after a store column whose frame is ServerLocal, stamped by
     /// <c>ToString("o")</c>. Derived end to end: the field name comes from the catalog, the frame from the
@@ -1106,6 +1142,14 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                 }
             }
         }
+
+        /* Reach, in the direction AssertMatchesInventory no longer asserts. Its own NotEmpty went when
+           #3207 emptied the render label, so it is asserted here instead, where it is still TRUE: this
+           arm has one McpPayloadUnmarked row left after #3206 - Lite get_plan_cache_bloat's
+           oldest_plan_create_time, which that lane does not touch - plus 34 DeSkewedAtRead rows, so an
+           empty found here is a broken matcher rather than a clean tree. It goes when that last row
+           does. */
+        Assert.NotEmpty(found);
 
         AssertMatchesInventory(found, [SiteLabel.McpPayloadUnmarked, SiteLabel.DeSkewedAtRead]);
 
@@ -1266,7 +1310,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
             foreach (var column in register.Keys.Select(k => k.Column).Distinct(StringComparer.Ordinal))
             {
-                foreach (var (renderer, expects) in Renderers)
+                foreach (var (renderer, _) in Renderers)
                 {
                     foreach (var site in RenderCall(renderer, column).Matches(text).Cast<Match>())
                     {
@@ -1280,7 +1324,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
                         judged++;
 
-                        if (register[(tables.Split('+')[0], column)] != expects)
+                        if (RenderFrameDisagrees(register, tables.Split('+')[0], column, renderer))
                         {
                             Bump(found, (Relative(path), column, tables));
                         }
@@ -1290,13 +1334,300 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         }
 
         /* A floor on the sites actually JUDGED, not only on the files opened: a matcher that stopped
-           recognising the renderers would otherwise report an empty offender set over 459 files. */
-        Assert.True(judged >= 30, $"only {judged} render sites were judged — check the renderer patterns");
+           recognising the renderers would otherwise report an empty offender set over 459 files. It is
+           the EXACT measured population rather than a loose bound, because the offender set is now
+           empty and this is the only thing left standing between a crippled matcher and a green
+           census. Adding a render site raises it and is a deliberate edit; removing one lowers it and
+           is the direction that must be loud. */
+        Assert.True(
+            judged >= JudgedRenderSites,
+            $"only {judged} render sites were judged, expected at least {JudgedRenderSites} — check the renderer patterns");
         Assert.Equal(
             DeclinedAmbiguousRenderSites.OrderBy(d => d, StringComparer.Ordinal).ToArray(),
             declined.OrderBy(d => d, StringComparer.Ordinal).ToArray());
 
         AssertMatchesInventory(found, [SiteLabel.DesktopRenderFrameMismatch]);
+    }
+
+    /// <summary>
+    /// The scan's verdict, exercised against a planted offender in BOTH directions and against the two
+    /// correct pairings of the same columns. With #3207's twenty-two sites fixed the offender set is
+    /// empty, and an empty offender set is otherwise indistinguishable from a verdict that never says
+    /// yes - so the verdict is asked directly, over the real register and the real renderer table.
+    ///
+    /// <para>Both directions, because they are different defects and a pin for one can be blind to the
+    /// other: a server-local value through <c>ForDisplay</c> adds the collected offset a second time
+    /// and shows four hours EARLY on the fleet's measured -240, while a naive-UTC value through
+    /// <c>FormatServerClock</c> renders raw and shows four hours LATE. The two columns are the two the
+    /// fixes moved in opposite directions, and their frames are asserted here rather than assumed, so
+    /// a register that lost a frame fails on the frame rather than on the verdict.</para>
+    /// </summary>
+    [Fact]
+    public void TheRenderVerdict_FlagsBothDirections_AndPassesTheCorrectPairings()
+    {
+        var register = FrameRegister();
+
+        Assert.Equal(ClockFrame.ServerLocal, register[("running_jobs", "start_time")]);
+        Assert.Equal(ClockFrame.Utc, register[("query_store_stats", "last_execution_time")]);
+
+        /* four hours EARLY: the server's own clock through a renderer that adds the offset. */
+        Assert.True(RenderFrameDisagrees(register, "running_jobs", "start_time", "ForDisplay"));
+        Assert.True(RenderFrameDisagrees(register, "running_jobs", "start_time", "FormatServerTime"));
+
+        /* four hours LATE: naive UTC through the renderer that renders raw. */
+        Assert.True(RenderFrameDisagrees(register, "query_store_stats", "last_execution_time", "FormatServerClock"));
+
+        /* And the pairings the fixes landed on are NOT flagged, or the check above would pass by
+           flagging everything. */
+        Assert.False(RenderFrameDisagrees(register, "running_jobs", "start_time", "FormatServerClock"));
+        Assert.False(RenderFrameDisagrees(register, "query_store_stats", "last_execution_time", "ForDisplay"));
+        Assert.False(RenderFrameDisagrees(register, "query_store_stats", "last_execution_time", "FormatServerTime"));
+    }
+
+    /// <summary>
+    /// The one-hop render wrappers in the tree are exactly <see cref="RenderWrappers"/>. A wrapper is
+    /// the census's blind spot - the render scan keys on the renderer's NAME, and a wrapper is a
+    /// different name reaching the same renderer - so a new one has to be declared rather than
+    /// discovered later by hand, which is how the four plan_correction stamps were found.
+    ///
+    /// <para>A method that IS a renderer is not a wrapper of itself: <c>FormatServerTime</c>'s
+    /// nullable overload calls its own name and would otherwise be reported here.</para>
+    /// </summary>
+    [Fact]
+    public void TheOneHopRenderWrappers_AreExactlyTheDeclaredSet()
+    {
+        var files = RenderSourceFiles().ToArray();
+
+        Assert.True(files.Length >= MinimumRenderFiles, $"only {files.Length} viewer/Lite files scanned — check the globs");
+
+        var derived = new List<(string File, string Method, string Renderer)>();
+
+        foreach (var path in files)
+        {
+            /* Comments out: WrapperSignature matches a doc-comment line that merely QUOTES a
+               declaration, and this file is full of prose about these very methods, so a note would
+               otherwise be derived as a wrapper and fail set equality against the real ones. Same
+               inversion CollectorTimestampFrameTests.QueryTextOf makes, and it also stops a renderer
+               named only in a comment inside a body from deciding which renderer that body reaches. */
+            var text = WithoutComments(File.ReadAllText(path));
+
+            foreach (var signature in WrapperSignature.Matches(text).Cast<Match>())
+            {
+                var method = signature.Groups[1].Value;
+
+                if (Renderers.Any(r => string.Equals(r.Renderer, method, StringComparison.Ordinal)))
+                {
+                    continue;
+                }
+
+                var body = text.Substring(
+                    signature.Index,
+                    Math.Min(WrapperBodyBound, text.Length - signature.Index));
+
+                foreach (var (renderer, _) in Renderers)
+                {
+                    if (Regex.IsMatch(body, @"\b" + Regex.Escape(renderer) + @"\s*\("))
+                    {
+                        derived.Add((Relative(path), method, renderer));
+                        break;
+                    }
+                }
+            }
+        }
+
+        static string Render((string File, string Method, string Renderer) w) =>
+            $"{w.File}|{w.Method}|{w.Renderer}";
+
+        Assert.Equal(
+            RenderWrappers.Select(Render).OrderBy(x => x, StringComparer.Ordinal).ToArray(),
+            derived.Select(Render).OrderBy(x => x, StringComparer.Ordinal).ToArray());
+    }
+
+    /// <summary>
+    /// Identifiers applied to a census timestamp column that are NOT rendering it. The matcher below
+    /// takes any identifier before <c>(</c>, deliberately — that is what makes it shape-free — so the
+    /// benign ones are declared with what they actually are rather than filtered out by a pattern that
+    /// would also hide a real renderer.
+    /// </summary>
+    private static readonly (string Name, string Why)[] NonRenderingCallsOnACensusColumn =
+    [
+        ("if", "a null test - if (row.EventTime.HasValue) and if (summary.OldestPlanCreateTime is not "
+            + "{ } oldest). The matcher reads the identifier before the parenthesis and a keyword is one"),
+        ("DateTime", "new DateTime(d.SampleTime.Year, ..., d.SampleTime.Hour, 0, 0) - an hour-truncating "
+            + "bucket key built FROM a timestamp, not a rendering of one"),
+        ("Compare", "Nullable.Compare(a.EventTime, b.EventTime) - a sort comparison"),
+    ];
+
+    /// <summary>
+    /// <b>The residual, with no shape assumption.</b> Whatever its signature, no member may be handed a
+    /// census timestamp column unless it is a registered renderer, a declared alias, or declared as not
+    /// rendering. Every identifier applied to one is derived and the set is pinned at set equality.
+    ///
+    /// <para><b>Why this exists next to the alias derivation.</b> That one keys on a SHAPE — static,
+    /// over a <c>DateTime</c>, returning a formatted value — and a shape can be evaded: an instance
+    /// method, an extension method, a different return type. This check cannot be evaded that way
+    /// because it does not ask what a member looks like, only what it is applied to. The two fail in
+    /// different directions: the alias check fails when a new formatter appears at all, this one when a
+    /// new name reaches a census column, and neither subsumes the other.</para>
+    ///
+    /// <para>It is also the only check here that would have caught the four <c>plan_correction</c>
+    /// stamps from the OUTSIDE — <c>Local(ValidSince)</c> is an unregistered name applied to a census
+    /// column, which is the defect stated without reference to what <c>Local</c> happens to be.</para>
+    /// </summary>
+    [Fact]
+    public void NoUnregisteredRenderCapableMember_IsAppliedToACensusColumn()
+    {
+        var files = RenderSourceFiles().ToArray();
+
+        Assert.True(files.Length >= MinimumRenderFiles, $"only {files.Length} viewer/Lite files scanned — check the globs");
+
+        var columns = TablesByColumn().Keys.Select(Pascal).Distinct(StringComparer.Ordinal).ToArray();
+        var applied = new Dictionary<string, int>(StringComparer.Ordinal);
+        var total = 0;
+
+        Assert.NotEmpty(columns);
+
+        /* Any identifier, then a census column as the first argument, off an optional receiver. The
+           receiver group is the same one RenderCall carries, and for the same reason: three real render
+           sites pass the property off a lambda parameter. */
+        var call = new Regex(
+            @"\b(\w+)\s*\(\s*(?:[A-Za-z_]\w*\.)?(?:" + string.Join("|", columns.Select(Regex.Escape)) + @")\b");
+
+        foreach (var path in files)
+        {
+            foreach (var site in call.Matches(WithoutComments(File.ReadAllText(path))).Cast<Match>())
+            {
+                total++;
+                Bump(applied, site.Groups[1].Value);
+            }
+        }
+
+        /* Reach: a matcher that stopped matching would satisfy the set equality below with an empty
+           left side, over 459 files. */
+        Assert.True(
+            total >= CallsOnACensusColumn,
+            $"only {total} calls on a census timestamp column were found, expected at least "
+            + $"{CallsOnACensusColumn} — check the identifier matcher");
+
+        var accounted = Renderers.Select(r => r.Renderer)
+            .Concat(RenderWrappers.Select(w => w.Method))
+            .Concat(NonRenderingCallsOnACensusColumn.Select(n => n.Name))
+            .ToHashSet(StringComparer.Ordinal);
+
+        /* THE PROPERTY: nothing unaccounted reaches a census timestamp column. */
+        Assert.Equal(
+            Array.Empty<string>(),
+            applied.Keys.Where(name => !accounted.Contains(name))
+                .OrderBy(x => x, StringComparer.Ordinal).ToArray());
+
+        /* Not set equality, because a DECLARED ALIAS need not reach a census column at all - two of the
+           six only ever render collection_time, which the collector framework stamps and no
+           CollectorColumn declares. Their staleness is caught by
+           TheOneHopRenderWrappers_AreExactlyTheDeclaredSet instead, against the derived set, so nothing
+           is left unguarded by relaxing it here. The other two directions ARE asserted: */
+
+        /* a registered renderer that reaches no census column is a typo in the map, and it would take
+           its sites out of the judged population silently; */
+        Assert.Equal(
+            Array.Empty<string>(),
+            Renderers.Select(r => r.Renderer).Where(name => !applied.ContainsKey(name))
+                .OrderBy(x => x, StringComparer.Ordinal).ToArray());
+
+        /* and a declared non-renderer that no longer appears is an exemption asserting nothing, which is
+           the direction an exemption list rots in. */
+        Assert.Equal(
+            Array.Empty<string>(),
+            NonRenderingCallsOnACensusColumn.Select(n => n.Name).Where(name => !applied.ContainsKey(name))
+                .OrderBy(x => x, StringComparer.Ordinal).ToArray());
+
+        /* Every declared non-renderer carries its reasoning, so the exemption list cannot grow by a
+           bare name. */
+        Assert.All(
+            NonRenderingCallsOnACensusColumn,
+            n => Assert.False(string.IsNullOrWhiteSpace(n.Why), $"{n.Name}: an exemption with no reasoning"));
+    }
+
+    /// <summary>
+    /// No declared wrapper is handed a census column that EVERY table declaring it frames the other
+    /// way. That was the shape of the four <c>plan_correction</c> stamps: <c>valid_since</c>,
+    /// <c>last_refresh</c> and the two action stamps are server-local in the only table that declares
+    /// them, and they reached <c>ForDisplay</c> through a wrapper named <c>Local</c>.
+    ///
+    /// <para><b>Unanimous disagreement only, and that bound is deliberate.</b> Where a column NAME
+    /// spans both frames - <c>event_time</c> is five tables and two of them - a wrapper site cannot be
+    /// judged from the name, and the direct-call scan's resolution machinery does not apply here: a
+    /// wrapper is not the site of the read, so the file it sits in is not the file whose SQL decides
+    /// the table. Sixteen <c>event_time</c> sites through the two <c>SystemEvents</c> wrappers are
+    /// therefore out of this check's reach rather than cleared by it, which is why the count of sites
+    /// EXAMINED is floored: a check that decides nothing and examines nothing look identical.</para>
+    /// </summary>
+    [Fact]
+    public void NoRenderWrapper_IsHandedAColumnEveryTableFramesTheOtherWay()
+    {
+        var register = FrameRegister();
+        var byColumn = TablesByColumn();
+        var offenders = new List<string>();
+        var reached = new HashSet<string>(StringComparer.Ordinal);
+        var examined = 0;
+
+        /* Per (file, method), not per method: two different wrappers in the Darling viewer are both
+           named Local, over different frames, so a name-keyed scan would judge each one's sites
+           against the other's renderer as well as its own. */
+        foreach (var (file, method, renderer) in RenderWrappers)
+        {
+            var expects = Renderers.Single(r => string.Equals(r.Renderer, renderer, StringComparison.Ordinal)).Expects;
+            var text = File.ReadAllText(RepoPath(file));
+
+            foreach (var column in byColumn.Keys)
+            {
+                foreach (var site in RenderCall(method, column).Matches(text).Cast<Match>())
+                {
+                    examined++;
+                    reached.Add($"{file}|{method}");
+
+                    if (byColumn[column].All(table => register[(table, column)] != expects))
+                    {
+                        offenders.Add(
+                            $"{file}:{text[..site.Index].Count(c => c == '\n') + 1}"
+                            + $" {method}({Pascal(column)}) reaches {renderer}, which takes {expects}");
+                    }
+                }
+            }
+        }
+
+        /* Every wrapper CALL SITE over a census column sits in a file that declares a wrapper of that
+           name. Without this the scan above is scoped to a fact nobody checked - that these six are
+           only ever called from their own file - and a wrapper called from elsewhere would be back
+           outside the census with nothing failing. */
+        var declared = RenderWrappers.Select(w => $"{w.File}|{w.Method}").ToHashSet(StringComparer.Ordinal);
+        var names = RenderWrappers.Select(w => w.Method).Distinct(StringComparer.Ordinal).ToArray();
+        var elsewhere = new List<string>();
+
+        foreach (var path in RenderSourceFiles())
+        {
+            var text = File.ReadAllText(path);
+
+            foreach (var method in names)
+            {
+                if (declared.Contains($"{Relative(path)}|{method}"))
+                {
+                    continue;
+                }
+
+                foreach (var column in byColumn.Keys.Where(c => RenderCall(method, c).IsMatch(text)))
+                {
+                    elsewhere.Add($"{Relative(path)}|{method}({Pascal(column)})");
+                }
+            }
+        }
+
+        Assert.Empty(elsewhere);
+        Assert.True(
+            examined >= WrapperCallSitesOverCensusColumns,
+            $"only {examined} wrapper call sites over census columns were examined, expected at least "
+            + $"{WrapperCallSitesOverCensusColumns} — check WrapperSignature and RenderCall");
+        Assert.Equal(WrapperFilesReachingACensusColumn, reached.Count);
+        Assert.Empty(offenders);
     }
 
     /// <summary>
@@ -1534,11 +1865,40 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             "last_user_access",
             ProjectionAlias.Match("    GREATEST(last_user_seek, last_user_scan) AS last_user_access,").Groups[2].Value);
 
-        /* And the two renderer families are distinguished, not merged: three names, two expectations. */
-        Assert.Equal(3, Renderers.Length);
+        /* WrapperSignature: the three real declaration shapes in the tree, and the shapes that are not
+           one-hop formatters. Bounded on BOTH the return type and the parameter, because widening it
+           past that drags in every method that merely mentions a renderer somewhere in a long body,
+           and narrowing it drops a wrapper back out of the census. */
+        Assert.Equal(
+            "Local",
+            WrapperSignature.Match("    internal static string Local(DateTime? naiveUtc)").Groups[1].Value);
+        Assert.Equal(
+            "CollectionLocal",
+            WrapperSignature.Match("    public static string CollectionLocal(DateTime collectionTimeUtc)").Groups[1].Value);
+        Assert.Equal(
+            "Timestamp",
+            WrapperSignature.Match("    internal static string Timestamp(DateTime? utc) =>").Groups[1].Value);
+        /* Not static: an instance display getter is the SITE, judged by the render scan itself. */
+        Assert.DoesNotMatch(WrapperSignature, "    public string StartTimeLocal => Format(StartTime);");
+        /* Static, but not over a DateTime: nothing here can carry a clock frame. */
+        Assert.DoesNotMatch(WrapperSignature, "    private static string Local(string text)");
+        Assert.DoesNotMatch(WrapperSignature, "    private static string Local(long ticks)");
+        /* A doc-comment mention of one is not a declaration, and the derivation strips comments before
+           matching for exactly that reason: this raw pattern DOES match the quoted form, which is why
+           the strip is load-bearing rather than tidy. */
+        Assert.Matches(WrapperSignature, "    /// public static string Local(DateTime? utc)");
+        Assert.DoesNotMatch(WrapperSignature, WithoutComments("    /// public static string Local(DateTime? utc)"));
+
+        /* And the two renderer families are distinguished, not merged: four names, two expectations. Three
+           take naive UTC and exactly ONE takes the server's own clock — asserted as a count rather than
+           left as a comment, because the defect class IS a value reaching the renderer for the other
+           frame, and a second server-local renderer appearing unnoticed would split that side. */
+        Assert.Equal(4, Renderers.Length);
         Assert.Equal(2, Renderers.Select(r => r.Expects).Distinct().Count());
         Assert.Equal(ClockFrame.ServerLocal, Renderers.Single(r => r.Renderer == "FormatServerClock").Expects);
         Assert.Equal(ClockFrame.Utc, Renderers.Single(r => r.Renderer == "FormatServerTime").Expects);
+        Assert.Equal(ClockFrame.Utc, Renderers.Single(r => r.Renderer == "FormatStoredUtc").Expects);
+        Assert.Single(Renderers.Where(r => r.Expects == ClockFrame.ServerLocal));
     }
 
     /// <summary>
@@ -1605,6 +1965,16 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         where TKey : notnull =>
         counts[key] = counts.TryGetValue(key, out var existing) ? existing + 1 : 1;
 
+    /// <summary>
+    /// Set equality between what a scan FOUND and the rows the inventory carries for its labels.
+    ///
+    /// <para>It deliberately does NOT assert that either side is non-empty. It used to, as a
+    /// stand-in for "the scan actually looked" - but an emptied label is a legitimate end state
+    /// (#3207 fixed every render site), and an assertion that blocks the fix it exists to prove is
+    /// worse than no assertion. Reach is asserted at each call site instead, against that scan's own
+    /// measured population: the MCP scan floors its file, emission and emitting-file counts, and the
+    /// render scan floors the sites it judged.</para>
+    /// </summary>
     private static void AssertMatchesInventory(
         Dictionary<(string File, string Column, string Tables), int> found,
         SiteLabel[] labels)
@@ -1623,7 +1993,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             .OrderBy(x => x, StringComparer.Ordinal)
             .ToArray();
 
-        Assert.NotEmpty(actual);
         Assert.Equal(expected, actual);
     }
 

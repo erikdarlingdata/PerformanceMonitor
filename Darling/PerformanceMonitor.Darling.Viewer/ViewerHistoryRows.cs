@@ -15,11 +15,18 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <c>QueryStatsHistoryRow</c> / <c>ProcedureStatsHistoryRow</c> / <c>QueryStoreHistoryRow</c>
 /// (LocalDataService.QueryStats.cs / .QueryStore.cs). Numeric members stay in the store's units (microseconds
 /// for CPU/duration, KB for grants); the display properties convert, mirroring Lite's grid + metric chart.
-/// The one viewer adaptation is time display: <see cref="CollectionTime"/> is the collector's naive-UTC
-/// capture time and routes through <see cref="ViewerTimeHelper.ForDisplay"/>, while the DMV / Query Store
-/// wall-clock stamps (creation / last-execution / cached / first-execution) are the SQL server's own local
-/// time and render raw through <see cref="ViewerDataService.FormatServerClock"/> — the same split every other
-/// viewer query row uses (see <see cref="ViewerQueryStatsRow"/>).
+/// The one viewer adaptation is time display, and the three row types here do NOT agree on it.
+/// <see cref="CollectionTime"/> is the collector's naive-UTC capture time in all three and routes through
+/// <see cref="ViewerTimeHelper.ForDisplay"/>. The <c>sys.dm_exec_*</c> stamps in
+/// <see cref="ViewerQueryStatsHistoryRow"/> and <see cref="ViewerProcedureStatsHistoryRow"/>
+/// (creation / cached / last-execution) are the SQL server's own local time and convert through
+/// <see cref="ViewerDataService.FormatServerClock"/> — the same split every other viewer query row uses
+/// (see <see cref="ViewerQueryStatsRow"/>). <see cref="ViewerQueryStoreHistoryRow"/>'s first- and
+/// last-execution stamps are NOT in that family: Query Store returns <c>datetimeoffset</c> and
+/// <c>QueryStoreCollector</c> normalises them through <c>((DateTimeOffset)…).UtcDateTime</c> before
+/// storing, so they are naive UTC and convert through <see cref="ViewerTimeHelper.ForDisplay"/> like
+/// <see cref="CollectionTime"/>. Two of the three row types below take one renderer for those columns
+/// and the third takes the other; the store table decides it, not the column name and not the file.
 /// </summary>
 internal static class HistoryTime
 {
@@ -224,6 +231,11 @@ public sealed class ViewerQueryStoreHistoryRow
     public double TotalDurationMs => ExecutionCount * AvgDurationMs;
     public double TotalCpuMs => ExecutionCount * AvgCpuTimeMs;
     public string CollectionTimeLocal => HistoryTime.CollectionLocal(CollectionTime);
-    public string FirstExecutionTimeLocal => ViewerDataService.FormatServerClock(FirstExecutionTime);
-    public string LastExecutionTimeLocal => ViewerDataService.FormatServerClock(LastExecutionTime);
+    /* query_store_stats, not query_stats: both stamps are naive UTC (see the file header), so they take
+       the same conversion CollectionTime above takes rather than the server-clock one the two DMV history
+       row types use for their same-named columns. Both honour the display mode; they differ only in which
+       frame they start from. */
+    public string FirstExecutionTimeLocal => ViewerDataService.FormatStoredUtc(FirstExecutionTime);
+
+    public string LastExecutionTimeLocal => ViewerDataService.FormatStoredUtc(LastExecutionTime);
 }

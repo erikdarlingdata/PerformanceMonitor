@@ -155,7 +155,13 @@ public class RunningJobRow
     public bool IsRunningLong { get; set; }
     public decimal? PercentOfAverage { get; set; }
 
-    public string StartTimeLocal => StartTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+    /// <summary>The job's start time. <c>running_jobs.start_time</c> is msdb Agent's
+    /// <c>start_execution_date</c> — the monitored instance's own clock, which the collector confirms
+    /// by taking its running duration as <c>DATEDIFF(SECOND, ja.start_execution_date, GETDATE())</c> —
+    /// so it renders through <see cref="ServerTimeHelper.FormatServerClock"/> like every other
+    /// server-clock stamp, and honours the Server / Local / UTC display preference the rest of the app
+    /// honours.</summary>
+    public string StartTimeLocal => ServerTimeHelper.FormatServerClock(StartTime);
 
     public string CurrentDurationFormatted => FormatDuration(CurrentDurationSeconds);
     public string AvgDurationFormatted => FormatDuration(AvgDurationSeconds);

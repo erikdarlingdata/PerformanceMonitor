@@ -984,13 +984,22 @@ public class DeadlockRow : DeadlockAlertRow
 /// sp_BlitzLock-style graph walk now live once on the shared <see cref="DeadlockProcessInfo"/> /
 /// <see cref="DeadlockGraphProcessParser"/> (Common); only Lite's per-server display getters
 /// (<see cref="ServerTimeHelper"/>) stay here.
+///
+/// <para>The two timestamps are in DIFFERENT frames and take different renderers.
+/// <c>DeadlockTime</c> is <c>deadlocks.deadlock_time</c>, the XE <c>@timestamp</c>, so it is naive UTC
+/// and converts through <see cref="ServerTimeHelper.FormatServerTime"/>. <c>LastTranStarted</c> is the
+/// deadlock graph's <c>lasttranstarted</c> attribute, walked out of the stored XML at READ time by
+/// <see cref="DeadlockGraphProcessParser"/>, and SQL Server writes that attribute in its own local
+/// clock — so it renders through <see cref="ServerTimeHelper.FormatServerClock"/>. No
+/// <c>CollectorColumn</c> declares it, so the catalog-derived clock-frame census cannot reach this
+/// pair and the frames are stated here instead.</para>
 /// </summary>
 public class DeadlockProcessDetail : DeadlockProcessInfo
 {
     public string DeadlockTimeLocal => ServerTimeHelper.FormatServerTime(DeadlockTime);
     public string VictimDisplay => IsVictim ? "Victim" : "";
     public string WaitTimeFormatted => WaitTime > 0 ? $"{WaitTime:N0} ms" : "";
-    public string LastTranStartedLocal => ServerTimeHelper.FormatServerTime(LastTranStarted);
+    public string LastTranStartedLocal => ServerTimeHelper.FormatServerClock(LastTranStarted);
 
     /// <summary>
     /// Parses a list of <see cref="DeadlockRow"/> into per-process detail rows via the shared
@@ -1043,9 +1052,12 @@ public class BlockedProcessReportRow : BlockedProcessAlertRow
     public string EventTimeLocal => ServerTimeHelper.FormatServerTime(EventTime);
     public string WaitTimeFormatted => WaitTimeMs < 1000 ? $"{WaitTimeMs} ms" : $"{WaitTimeMs / 1000.0:F1} sec";
     public bool IsLongBlock => WaitTimeMs > 30000;
-    public string BlockedLastTranStartedLocal => ServerTimeHelper.FormatServerTime(BlockedLastTranStarted);
-    public string BlockedLastBatchStartedLocal => ServerTimeHelper.FormatServerTime(BlockedLastBatchStarted);
-    public string BlockedLastBatchCompletedLocal => ServerTimeHelper.FormatServerTime(BlockedLastBatchCompleted);
+    /* EventTime above is the XE @timestamp and is naive UTC. These three are attributes of the
+       blocked-process report XML, which SQL Server writes in the monitored server's own clock, so
+       they take the server-clock renderer instead: one row, two frames, two renderers. */
+    public string BlockedLastTranStartedLocal => ServerTimeHelper.FormatServerClock(BlockedLastTranStarted);
+    public string BlockedLastBatchStartedLocal => ServerTimeHelper.FormatServerClock(BlockedLastBatchStarted);
+    public string BlockedLastBatchCompletedLocal => ServerTimeHelper.FormatServerClock(BlockedLastBatchCompleted);
 }
 
 public class QuerySnapshotRow
@@ -1100,7 +1112,12 @@ public class QuerySnapshotRow
     public double TranLogUsedMb { get; set; }
     public DateTime? TranStartTime { get; set; }
     public int RequestId { get; set; }
-    public string TranStartTimeLocal => ServerTimeHelper.FormatServerTime(TranStartTime);
+    /// <summary>The transaction begin time, empty when the request has no open transaction.
+    /// <c>query_snapshots.tran_start_time</c> is <c>MIN(transaction_begin_time)</c> off
+    /// <c>sys.dm_tran_active_transactions</c> — the server's own wall clock, not naive UTC — so unlike
+    /// <see cref="CollectionTimeLocal"/> beside it, it renders through
+    /// <see cref="ServerTimeHelper.FormatServerClock"/>.</summary>
+    public string TranStartTimeLocal => ServerTimeHelper.FormatServerClock(TranStartTime);
 
     // Chain mode — set by WaitDrillDownWindow when showing head blockers
     public string ChainBlockingPath { get; set; } = "";
