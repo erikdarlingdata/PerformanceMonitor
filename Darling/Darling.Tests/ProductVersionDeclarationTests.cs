@@ -50,7 +50,7 @@ namespace Darling.Tests;
 /// <para><b>The reader pins are the half that would have caught this.</b> The gate and the nightly
 /// disagreeing was the actual bug and no test had ever looked at a workflow file. They matter more with the
 /// version inherited than they would have before: an INHERITED property is not present in the inheriting
-/// project's XML, so a read left pointing at a csproj returns EMPTY. Every one of the nine reads only names
+/// project's XML, so a read left pointing at a csproj returns EMPTY. Every one of the seven reads only names
 /// something, so on its own an empty result is <c>PerformanceMonitorLite-.zip</c> and a green build; each
 /// read therefore also fails its own step on an empty value, which is the arrangement the guard pin holds.
 /// The distinction that makes the silent case the dangerous one: <c>Get-Content</c> on a MISSING file
@@ -244,9 +244,9 @@ public class ProductVersionDeclarationTests
            and finds no reads; a crippled DETECTOR scans every file and finds no reads. Either leaves the
            emptiness assertion below satisfied by having nothing to judge, and the two floors fail
            differently, so the message names which happened. The read count is the number this tree holds,
-           not a token positive number: six XML selects and three text scrapes. */
+           not a token positive number: five XML selects and two text scrapes. */
         Assert.True(scanned >= 5, $"only {scanned} candidate files were scanned; the glob is not reading the tree");
-        Assert.True(reads >= 9, $"only {reads} version reads were detected across {scanned} files; the detector is not detecting");
+        Assert.True(reads >= 7, $"only {reads} version reads were detected across {scanned} files; the detector is not detecting");
 
         Assert.True(
             offending.Count == 0,
@@ -388,10 +388,10 @@ public class ProductVersionDeclarationTests
             }
         }
 
-        /* Non-vacuity: three text reads exist in this tree — build.yml's and nightly.yml's linux jobs, and
-           package-release.cmd. Extracting none would leave the loop below asserting nothing at all. */
+        /* Non-vacuity: two text reads exist in this tree — build.yml's and nightly.yml's linux jobs.
+           Extracting none would leave the loop below asserting nothing at all. */
         Assert.True(
-            patterns.Count >= 3,
+            patterns.Count >= 2,
             $"only {patterns.Count} text-scraping version-read patterns were extracted; the extraction is not reading the source");
 
         foreach (var (source, pattern) in patterns)
@@ -416,7 +416,7 @@ public class ProductVersionDeclarationTests
     ///
     /// <para><b>No test of the readers' PATHS can cover this.</b> A read pointed at the right file still
     /// yields an empty string if the property is renamed, the file is malformed, or a comment gets in
-    /// front of the element for the text scrapers. Every one of these nine reads only NAMES something,
+    /// front of the element for the text scrapers. Every one of these seven reads only NAMES something,
     /// so an empty result is a green run and an artifact called <c>PerformanceMonitorLite-.zip</c>.</para>
     ///
     /// <para>Why the guards are not self-evidently unnecessary: on a pull request <c>build.yml</c>'s read
@@ -448,7 +448,7 @@ public class ProductVersionDeclarationTests
             }
         }
 
-        Assert.True(reads >= 9, $"only {reads} version reads were detected; the detector is not detecting");
+        Assert.True(reads >= 7, $"only {reads} version reads were detected; the detector is not detecting");
 
         Assert.True(
             unguarded.Count == 0,

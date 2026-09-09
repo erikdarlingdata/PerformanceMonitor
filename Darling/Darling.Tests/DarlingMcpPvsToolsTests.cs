@@ -68,14 +68,20 @@ public sealed class DarlingMcpPvsToolsTests
     {
         var sql = DarlingPvsReader.PvsStatsLatestSql;
 
+        /* The relation is a bare name, so it survives any aliasing and stays a plain substring search.
+           The clauses below go through SqlTextPin (#3217): each asserts a BEHAVIOUR of this statement, and
+           qualifying a column is not a change to any of them. */
         Assert.Contains("FROM v_pvs_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses("WHERE server_id = $1", sql, "the read is not scoped to the requested server");
 
         /* The snapshot pin: exactly the newest collection — a window scan would blend captures and
            double-count databases. */
-        Assert.Contains("collection_time = (", sql, StringComparison.Ordinal);
-        Assert.Contains("SELECT MAX(collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name", sql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses("collection_time = (", sql, "the read is not pinned to one capture");
+        SqlTextPin.AssertExpresses("SELECT MAX(collection_time)", sql, "the capture it pins to is not the newest");
+        SqlTextPin.AssertExpresses(
+            "ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name",
+            sql,
+            "the biggest version store no longer sorts first");
 
         /* The grid's columns ride along — the denominator the pct is computed from must be present. */
         Assert.Contains("database_data_size_mb", sql, StringComparison.Ordinal);
@@ -92,15 +98,25 @@ public sealed class DarlingMcpPvsToolsTests
            growth story matters), then every stored point in the window for just those. */
         Assert.Contains("WITH top_dbs AS", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 5", sql, StringComparison.Ordinal);
+        /* NOT normalised, and that is the same distinction #3217 draws for TheCountAndTheRowsShareTheirFilter:
+           this needle's content is a relationship BETWEEN two aliases, so alias identity is the property.
+           Through SqlTextPin it would read `ON database_name = database_name` and stop noticing a join
+           rewritten against one side twice. */
         Assert.Contains("JOIN top_dbs t ON t.database_name = p.database_name", sql, StringComparison.Ordinal);
 
         /* Percent-of-database computed per POINT from the same row's denominator — the exact ratio the
            grid shows, so the two surfaces cannot disagree. */
-        Assert.Contains("p.persistent_version_store_size_mb / p.database_data_size_mb * 100.0", sql, StringComparison.Ordinal);
-        Assert.Contains("CASE WHEN p.database_data_size_mb > 0", sql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses(
+            "p.persistent_version_store_size_mb / p.database_data_size_mb * 100.0",
+            sql,
+            "the percentage is no longer computed from the same row's denominator");
+        SqlTextPin.AssertExpresses("CASE WHEN p.database_data_size_mb > 0", sql, "a zero-size database would divide by zero");
 
-        Assert.Contains("p.collection_time >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY p.database_name, p.collection_time", sql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses("p.collection_time >= $2", sql, "the trend is no longer bounded by the requested window");
+        SqlTextPin.AssertExpresses(
+            "ORDER BY p.database_name, p.collection_time",
+            sql,
+            "the points no longer arrive grouped per database in time order");
     }
 
     [Theory]

@@ -550,7 +550,7 @@ public sealed class CommandPlaneCommandTimeoutTests
     /// Seconds of a <c>TimeSpan</c> field declared in one of this project's sources, read from the source
     /// because the field is private. Fails the test rather than returning a default when the field is gone.
     /// </summary>
-    private static int SecondsOfPrivateTimeSpan(string file, string field) =>
+    internal static int SecondsOfPrivateTimeSpan(string file, string field) =>
         SecondsOfTimeSpanFile(SourcePath(file), field);
 
     /// <summary>Seconds of a <c>TimeSpan</c> field in a named source file, failing loudly on a miss.</summary>
