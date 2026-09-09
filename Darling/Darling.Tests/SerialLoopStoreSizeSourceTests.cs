@@ -146,6 +146,23 @@ public sealed class SerialLoopStoreSizeSourceTests
         string.Join("\n", CSharpSourceWalker.StringLiteralBodies(source).Select(l => l.Text));
 
     /// <summary>
+    /// The store-scaling reads one member's body sends, labelled. Extracted so
+    /// <see cref="NoSerialLoopMemberInlinesAStoreScalingRead"/> and its positive control run the SAME code
+    /// over the real population and over a planted body.
+    ///
+    /// <para>That is not tidiness. The first form inlined this loop, and deleting its one recording
+    /// statement left the whole suite green: a negative census over a population that (correctly) contains
+    /// nothing never executes its own loop body, so nothing observes whether that body works. Sharing the
+    /// scan with a fixture that DOES contain something is what makes the absence mean anything —
+    /// <c>StartupCommandTimeoutTests.TheExclusionScan_CanSeeABootstrapStamp</c> is the same construction
+    /// for the same reason.</para>
+    /// </summary>
+    private static List<string> ScanForStoreScalingReads(string label, string body) =>
+        s_storeScalingRead.Matches(LiteralsOf(body))
+            .Select(hit => $"{label}: {hit.Value.TrimEnd('(')}")
+            .ToList();
+
+    /// <summary>
     /// The one member that reads its SQL from another type, pinned twice: the source says it references
     /// <see cref="StoreSelfMetrics.LatestStoreSizeSql"/>, and the shipped constant itself says what that
     /// resolves to.
@@ -212,14 +229,11 @@ public sealed class SerialLoopStoreSizeSourceTests
 
         foreach (var (file, member, memberSites) in StartupCommandTimeoutTests.SerialLoopMembers)
         {
-            var literals = LiteralsOf(StartupCommandTimeoutTests.SerialLoopMemberBody(file, member));
             members++;
             sites += memberSites;
-
-            foreach (Match hit in s_storeScalingRead.Matches(literals))
-            {
-                offenders.Add($"{file} {member}: {hit.Value.TrimEnd('(')}");
-            }
+            offenders.AddRange(ScanForStoreScalingReads(
+                $"{file} {member}",
+                StartupCommandTimeoutTests.SerialLoopMemberBody(file, member)));
         }
 
         /* The scan having covered the WHOLE regime, before its result is believed. A projection that came
@@ -386,6 +400,44 @@ public sealed class SerialLoopStoreSizeSourceTests
         }
 
         return (compared, offenders);
+    }
+
+    /// <summary>
+    /// <see cref="NoSerialLoopMemberInlinesAStoreScalingRead"/>'s own control: the same
+    /// <see cref="ScanForStoreScalingReads"/> call, over a body written the way the defect was actually
+    /// written — the shape <c>ReadStoreSizeBytesAsync</c> had before this change, comment and all.
+    ///
+    /// <para>Without this the census is an assertion that happens to hold. Its population correctly
+    /// contains no store-scaling read, so its loop body never runs on the real tree, and a mutation
+    /// deleting the recording statement left the whole suite green — measured, not assumed. The label is
+    /// asserted too, because an offender list that reports the finding without saying WHERE sends the next
+    /// person to the wrong file.</para>
+    /// </summary>
+    [Fact]
+    public void TheMemberScan_ReportsAPlantedStoreScalingRead()
+    {
+        const string planted = """
+            private async Task<long?> ReadStoreSizeBytesAsync(CancellationToken cancellationToken)
+            {
+                /* Context for the alert text; pg_database_size is cheap. */
+                using var command = new NpgsqlCommand("SELECT pg_database_size(current_database())", connection)
+                    { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+                return (long?)await command.ExecuteScalarAsync(cancellationToken);
+            }
+            """;
+
+        var offenders = ScanForStoreScalingReads("DarlingWorker.cs ReadStoreSizeBytesAsync", planted);
+
+        Assert.Single(offenders);
+        Assert.Contains("ReadStoreSizeBytesAsync", offenders[0], StringComparison.Ordinal);
+        Assert.Contains("pg_database_size", offenders[0], StringComparison.Ordinal);
+
+        /* And the clean shape reports nothing, so the control is not simply "always reports". */
+        Assert.Empty(ScanForStoreScalingReads(
+            "clean",
+            """
+            using var command = new NpgsqlCommand(StoreSelfMetrics.LatestStoreSizeSql, connection);
+            """));
     }
 
     /// <summary>
