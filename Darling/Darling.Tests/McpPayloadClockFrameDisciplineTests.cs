@@ -349,29 +349,29 @@ public sealed class McpPayloadClockFrameDisciplineTests
     public void TheDiscriminators_FlagABareProjection_AndPassADeSkewedOne()
     {
         /* PgDeSkew recognises the shipped fix, and nothing weaker. */
-        Assert.True(PgDeSkew.IsMatch("    start_time - make_interval(mins => svr.offset_minutes) AS start_time_utc,"));
-        Assert.False(PgDeSkew.IsMatch("    start_time,"));
+        Assert.Matches(PgDeSkew, "    start_time - make_interval(mins => svr.offset_minutes) AS start_time_utc,");
+        Assert.DoesNotMatch(PgDeSkew, "    start_time,");
         /* A different CTE alias is not this convention, and must not pass as it. */
-        Assert.False(PgDeSkew.IsMatch("    start_time - make_interval(mins => o.utc_offset_minutes) AS start_time_utc,"));
+        Assert.DoesNotMatch(PgDeSkew, "    start_time - make_interval(mins => o.utc_offset_minutes) AS start_time_utc,");
 
         /* OffsetCte requires the newest single row; the shapes that would silently multiply or drop rows fail. */
         var good = "        WITH svr AS (\n            SELECT COALESCE((\n                SELECT sp.utc_offset_minutes\n"
             + "                FROM server_properties AS sp\n                WHERE sp.server_id = $1\n"
             + "                AND   sp.utc_offset_minutes IS NOT NULL\n                ORDER BY sp.collection_time DESC\n"
             + "                LIMIT 1), 0) AS offset_minutes\n        )";
-        Assert.True(OffsetCte.IsMatch(good));
-        Assert.False(OffsetCte.IsMatch(good.Replace("LIMIT 1)", "LIMIT 2)", StringComparison.Ordinal)));
-        Assert.False(OffsetCte.IsMatch(good.Replace(", 0) AS offset_minutes", ") AS offset_minutes", StringComparison.Ordinal)));
-        Assert.False(OffsetCte.IsMatch(good.Replace("ORDER BY sp.collection_time DESC", "", StringComparison.Ordinal)));
+        Assert.Matches(OffsetCte, good);
+        Assert.DoesNotMatch(OffsetCte, good.Replace("LIMIT 1)", "LIMIT 2)", StringComparison.Ordinal));
+        Assert.DoesNotMatch(OffsetCte, good.Replace(", 0) AS offset_minutes", ") AS offset_minutes", StringComparison.Ordinal));
+        Assert.DoesNotMatch(OffsetCte, good.Replace("ORDER BY sp.collection_time DESC", "", StringComparison.Ordinal));
 
         /* The bare-projection matcher: the select-list forms that shipped in the defect, and the forms it
            must not drag in — the de-skewed projection, a WHERE, and an ORDER BY. */
         var bare = BareProjection(new PayloadColumn("start_time"));
-        Assert.True(bare.IsMatch("            start_time,\n"));
-        Assert.True(bare.IsMatch("            rj.start_time,\n"));
-        Assert.False(bare.IsMatch("            rj.start_time - make_interval(mins => svr.offset_minutes) AS start_time_utc,\n"));
-        Assert.False(bare.IsMatch("        AND   start_time >= $2\n"));
-        Assert.False(bare.IsMatch("        ORDER BY start_time DESC\n"));
+        Assert.Matches(bare, "            start_time,\n");
+        Assert.Matches(bare, "            rj.start_time,\n");
+        Assert.DoesNotMatch(bare, "            rj.start_time - make_interval(mins => svr.offset_minutes) AS start_time_utc,\n");
+        Assert.DoesNotMatch(bare, "        AND   start_time >= $2\n");
+        Assert.DoesNotMatch(bare, "        ORDER BY start_time DESC\n");
 
         /* And the derived column, whose bare form is a whole expression. Both directions, because this is
            the case a name-derived matcher silently passed. */
@@ -383,20 +383,22 @@ public sealed class McpPayloadClockFrameDisciplineTests
             "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)"
             + " - make_interval(mins => svr.offset_minutes) AS last_user_access_utc",
             greatest.DeSkewed);
-        Assert.True(BareProjection(greatest).IsMatch(
-            "            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,\n"));
-        Assert.False(BareProjection(greatest).IsMatch(
+        Assert.Matches(
+            BareProjection(greatest),
+            "            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,\n");
+        Assert.DoesNotMatch(
+            BareProjection(greatest),
             "            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)\n"
-            + "                - make_interval(mins => svr.offset_minutes) AS last_user_access_utc,\n"));
+            + "                - make_interval(mins => svr.offset_minutes) AS last_user_access_utc,\n");
 
         /* LiteDeSkew recognises BOTH shipped Lite forms — the nullable one and the non-nullable one — and
            neither bare emission. The non-nullable case is real: RunningJobRow.StartTime is a DateTime. */
-        Assert.True(LiteDeSkew("StartTime").IsMatch("start_time = r.StartTime.AddMinutes(-utcOffsetMinutes).ToString(\"o\"),"));
-        Assert.True(LiteDeSkew("ValidSince").IsMatch("valid_since = r.ValidSince?.AddMinutes(-utcOffsetMinutes).ToString(\"o\"),"));
-        Assert.False(LiteDeSkew("StartTime").IsMatch("start_time = r.StartTime.ToString(\"o\"),"));
-        Assert.False(LiteDeSkew("ValidSince").IsMatch("valid_since = r.ValidSince?.ToString(\"o\"),"));
+        Assert.Matches(LiteDeSkew("StartTime"), "start_time = r.StartTime.AddMinutes(-utcOffsetMinutes).ToString(\"o\"),");
+        Assert.Matches(LiteDeSkew("ValidSince"), "valid_since = r.ValidSince?.AddMinutes(-utcOffsetMinutes).ToString(\"o\"),");
+        Assert.DoesNotMatch(LiteDeSkew("StartTime"), "start_time = r.StartTime.ToString(\"o\"),");
+        Assert.DoesNotMatch(LiteDeSkew("ValidSince"), "valid_since = r.ValidSince?.ToString(\"o\"),");
         /* And it must not match a DIFFERENT property that merely shares a prefix. */
-        Assert.False(LiteDeSkew("LastRefreshed").IsMatch("last_refresh = r.LastRefresh?.AddMinutes(-utcOffsetMinutes).ToString(\"o\"),"));
+        Assert.DoesNotMatch(LiteDeSkew("LastRefreshed"), "last_refresh = r.LastRefresh?.AddMinutes(-utcOffsetMinutes).ToString(\"o\"),");
     }
 
     /* ───────────────────────── plumbing ───────────────────────── */
