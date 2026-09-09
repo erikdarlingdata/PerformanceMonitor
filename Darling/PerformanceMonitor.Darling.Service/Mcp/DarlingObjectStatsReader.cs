@@ -195,9 +195,12 @@ internal static class DarlingObjectStatsReader
     /// transition. These four do not: <c>sys.dm_db_index_usage_stats</c> persists since the instance
     /// restarted, which on a stable production box is routinely months, so a large share of values predate
     /// the most recent transition and come back <b>60 minutes early</b> — silently, and in the plausible
-    /// direction. The fleet is exposed rather than theoretically exposed: its targets report
-    /// <c>utc_offset_minutes = -240</c>, which is EDT, a DST-observing zone on summer time.
-    /// <c>sqlserver_start_time</c> on the same row is the bound on how far back that can reach.</para>
+    /// direction. This is not a theoretical exposure: any target in a DST-observing zone has it, a target
+    /// configured to UTC does not, and on AWS RDS the instance takes its time zone from a creation-time
+    /// parameter — so a non-UTC zone is an ordinary configuration rather than an exotic one, and "it is
+    /// RDS, so it is probably UTC" is not a safe assumption. #2932 records the measured offset behind the
+    /// four-hour figure quoted above. <c>sqlserver_start_time</c> on the same row is the bound on how far
+    /// back the affected values can reach.</para>
     /// <para>Fixing it properly needs a ZONE rather than an offset — <c>CURRENT_TIMEZONE_ID()</c>
     /// (SQL Server 2019+) collected alongside the offset, then <c>AT TIME ZONE</c> at the read boundary,
     /// which handles transitions. That is a collected-column addition and a migration rung, so what is
