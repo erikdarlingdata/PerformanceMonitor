@@ -426,7 +426,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Failed to record resolution"] = "an audit-row write",
         ["Could not record Postgres alert resolution"] = "a history write",
         ["could not read the store volume free space"] = "a local filesystem read, not a store read",
-        ["could not read pg_database_size"] = "context for the alert text, not the evidence the alert is judged on",
+        ["could not read the recorded store size"] = "context for the alert text, not the evidence the alert is judged on",
         ["Store self-metrics sweep did not finish"] = "a metrics write sweep; no alert is judged on its result",
         ["Store log capture failed"] = "a telemetry write sweep (#3021); no alert is judged on its result, and the capture gap it leaves is reported by get_store_log's own denominator",
         ["Recently-failed-job check errored"] = "reads the monitored server's msdb on its own connection and timeout",

@@ -76,8 +76,15 @@ public sealed class DarlingWorker : BackgroundService
     private static readonly TimeSpan s_commandPollInterval = TimeSpan.FromSeconds(5);
 
     /* The store disk-pressure self-alert's poll cadence (fleet-level, Stage 4). Disk fills slowly, and the
-       check is one pg_database_size + one DriveInfo syscall, so 5 minutes is ample and cheap — no need to
-       run it on the 30-second alert sweep. */
+       check is one DriveInfo syscall plus one narrow store_metrics lookup, so 5 minutes is ample and cheap —
+       no need to run it on the 30-second alert sweep.
+
+       Cheap is load-bearing here rather than incidental, and #3199 is what it costs when it is not: the size
+       number came from pg_database_size, which walks every file in the store, and measured 2,090-3,745 ms on
+       a 225 GiB store against a 5 s CommandTimeout floored on 6.2 ms. ~288 nominal iterations a day (this
+       gate is start-to-start 5 minutes, stamped before the check runs and quantised to the loop's own
+       finish-to-start tick, so the delivered count sits just under that) at ~2.5 s each is ~11.9 min/day of
+       this loop's wall time, of which the ~2% that crossed 5 s were the only part that logged anything. */
     private static readonly TimeSpan s_diskCheckInterval = TimeSpan.FromMinutes(5);
 
     /* The compression-job self-heal check's cadence (fleet-level, #1581). Compression is a slow archival tier
@@ -4313,7 +4320,8 @@ LIMIT 1";
 
     /// <summary>
     /// Gathers the store disk-pressure sample and hands it to the Stage 4 evaluator (fleet-level). The store
-    /// size (<c>pg_database_size</c>, context only) is always readable; the store volume's free/total space is
+    /// size is context only, read from the hourly self-metrics series rather than measured here (#3199); the
+    /// store volume's free/total space is
     /// resolved from the MANAGED data directory's drive — the bundled store this service owns and must protect.
     /// In bring-your-own mode the store can be a remote Postgres whose disk the service cannot see, so
     /// free/total stay null and the evaluator no-ops (never a false alarm — the operator owns their own
@@ -4359,16 +4367,53 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// The store database's on-disk size in bytes (<c>pg_database_size</c>) — context for the disk-pressure
-    /// alert text, the same read the Viewer's status bar uses. Failure-isolated to null (Debug) so a transient
+    /// The store database's on-disk size in bytes — context for the disk-pressure alert text, read from the
+    /// whole-store row the hourly self-metrics sweep records
+    /// (<see cref="StoreSelfMetrics.LatestStoreSizeSql"/>). Failure-isolated to null (Debug) so a transient
     /// store hiccup never breaks the disk-pressure check.
+    ///
+    /// <para><b>Why this is not <c>pg_database_size</c> (#3199).</b> This method is one of the ten commands
+    /// awaited inline on the collection loop's serial thread, under
+    /// <see cref="ServiceCommandDeadlines.SerialLoopSeconds"/> — and running <c>pg_database_size</c> here
+    /// made it the only one of the ten whose cost scaled with the store, against a bound floored on 6.2 ms
+    /// measured on a 4.05 GB fixture. On a 225 GiB production store the same call measured
+    /// <b>3,177 ms</b> — 64% of the 5 s bound, 1.57x headroom where the derivation claimed ~806x.</para>
+    ///
+    /// <para><b>The cancelled statements are the visible 2%; the cost is the other 98%.</b> Thirteen
+    /// samples on that store spanned 2,090-3,745 ms (mean ~2.5 s) and NONE crossed 5 s, while cancels for
+    /// this statement ran 0-9 a day over six days — mean 5.8 against a nominal ~288 iterations, so 2.0%.
+    /// The remaining 98% cost ~2.5 s each and leave no trace at all: under the deadline so no cancel, not a
+    /// collector run so no <c>collection_log</c> row. That is ~11.9 minutes a day of this loop's wall time
+    /// spent computing a number the store already holds, and it is the finding — not the eight log lines
+    /// that started it, and it does not depend on knowing what ends a cluster, the question #3199's own
+    /// correction left open.</para>
+    ///
+    /// <para><b>What that stall does and does not displace, because the difference matters.</b> This check
+    /// runs AFTER the per-server launches fan out in the same tick, and
+    /// <see cref="SweepWatchdogSeconds"/> clocks per-server BODIES from their own launch rather than
+    /// clocking this loop — so 2.5 s here consumes no watchdog budget and delays no already-launched body.
+    /// What it does is stretch one collection tick in twenty from <see cref="s_sweepInterval"/> to ~17.5 s,
+    /// pushing that tick's remaining maintenance and the NEXT tick's launches out by that much on a
+    /// single-threaded loop whose delivered cadence already runs behind its schedule at fleet scale. The
+    /// bound genuinely at risk is the command's own: at 42-75% of a 5 s <c>CommandTimeout</c> floored on
+    /// millisecond reads, anything competing takes the rest.</para>
+    ///
+    /// <para><b>The walk is relocated, not eliminated.</b> The row this reads is written by
+    /// <see cref="StoreSelfMetrics.StoreInsertSql"/>, which runs <c>pg_database_size</c> itself — so the
+    /// store-wide walk still happens, hourly, under
+    /// <see cref="StoreSelfMetrics.SweepTimeoutSeconds"/> (300 s, ~120x the mean measured cost, sized by
+    /// #2317 against a production store rather than a fixture). That sweep is awaited on this same thread,
+    /// so what changes is the frequency and the budget, not the isolation: ~312 executions a day become 24,
+    /// and the ~11.9 min/day leaves the 5 s regime specifically. The ~31,000x is the single read's latency
+    /// on this path (3,177 ms against 0.101 ms cold, same store) and is never the change's overall
+    /// effect.</para>
     /// </summary>
     private async Task<long?> ReadStoreSizeBytesAsync(CancellationToken cancellationToken)
     {
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand("SELECT pg_database_size(current_database())", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+            using var command = new NpgsqlCommand(StoreSelfMetrics.LatestStoreSizeSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
             var result = await command.ExecuteScalarAsync(cancellationToken);
             return result is null || result == DBNull.Value ? null : Convert.ToInt64(result, CultureInfo.InvariantCulture);
         }
@@ -4377,7 +4422,7 @@ LIMIT 1";
             /* NOT counted by #3013's swallowed-read counter: this read is CONTEXT for the alert text, not the
                evidence the alert is judged on - that is freeBytes/totalBytes above. Losing it costs the message a
                number; it does not make the condition unjudgeable. */
-            _logger.LogDebug("Store disk-pressure check: could not read pg_database_size: {Message}", ex.Message);
+            _logger.LogDebug("Store disk-pressure check: could not read the recorded store size: {Message}", ex.Message);
             return null;
         }
     }

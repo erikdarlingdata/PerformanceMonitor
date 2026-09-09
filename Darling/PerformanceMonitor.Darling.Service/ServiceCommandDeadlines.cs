@@ -317,8 +317,8 @@ public static class ServiceCommandDeadlines
     /// The store commands awaited INLINE on the serial collection-loop thread, ahead of every per-server
     /// launch: the control-plane reload body — <c>StoreConfigProvider.LoadViewAsync</c>'s five config
     /// reads, <c>DarlingObservability.SyncServerEnabledStatesAsync</c>'s two registry statements and the
-    /// managed-role <c>statement_timeout</c> re-assert — plus the store-size read behind the disk-pressure
-    /// check and the daily retention sweep's own run-record.
+    /// managed-role <c>statement_timeout</c> re-assert — plus the store-size lookup behind the
+    /// disk-pressure check and the daily retention sweep's own run-record.
     ///
     /// <para><b>The regime, by the token test.</b> Every one of these is awaited directly inside
     /// <c>DarlingWorker</c>'s <c>while (!stoppingToken.IsCancellationRequested)</c> body, on the plain
@@ -337,11 +337,30 @@ public static class ServiceCommandDeadlines
     /// <para><b>ABOVE the measured cold worst case.</b> Measured against a 4.05 GB store built by the
     /// product's own <c>MigrateAsync</c> and seeded through <c>SeedIfEmptyAsync</c>, shared buffers
     /// dropped before the first run: <c>LoadViewAsync</c>'s five commands together took <b>16.1 ms</b>
-    /// cold (3.4-4.8 ms warm), <c>SyncServerEnabledStatesAsync</c>'s two <b>3.8 ms</b>, and
-    /// <c>pg_database_size</c> <b>6.2 ms</b> — so the worst SINGLE command on this thread is a
-    /// single-digit-millisecond read and 5 s is roughly three orders of magnitude above it. The
-    /// <c>ALTER ROLE</c> re-assert is one statement out of the 63-statement provisioning batch that
-    /// measured 79 ms in total, so it is in the same class.</para>
+    /// cold (3.4-4.8 ms warm) and <c>SyncServerEnabledStatesAsync</c>'s two <b>3.8 ms</b> — so the worst
+    /// SINGLE command on this thread is a single-digit-millisecond read and 5 s is roughly three orders of
+    /// magnitude above it. The <c>ALTER ROLE</c> re-assert is one statement out of the 63-statement
+    /// provisioning batch that measured 79 ms in total, so it is in the same class.</para>
+    ///
+    /// <para><b>And every one of them is INDEPENDENT of store size, which the floor above silently
+    /// assumed (#3199).</b> Nine of the ten are keyed single-row reads on <c>config</c> tables, one
+    /// <c>ALTER ROLE</c>, and one single-row <c>INSERT</c>; the tenth — the disk-pressure check's store-size
+    /// lookup — is now a newest-row read over <c>collect.store_metrics</c>' <c>(metric_time)</c> index
+    /// (<c>StoreSelfMetrics.LatestStoreSizeSql</c>, measured 0.101 ms cold / 0.018 ms warm on a 225 GiB
+    /// store). It USED to be <c>pg_database_size</c>, whose 6.2 ms on the 4.05 GB fixture is exactly what
+    /// makes this the interesting entry rather than a footnote: that function stats every file in the
+    /// database directory, so its cost tracks the store while the floor derived from it did not. Measured
+    /// on that same 225 GiB store — 56x the fixture — thirteen samples spanned <b>2,090-3,745 ms</b>, which
+    /// leaves <b>1.3-2.4x</b> of the ~806x this paragraph used to claim. A three-orders-of-magnitude margin
+    /// over a measurement taken on a fixture is not a margin at all if the measured quantity grows and the
+    /// fixture does not. Note which way the evidence ran: none of the thirteen breached the bound, so the
+    /// cancelled statements that found this were the 2% tail and the regime's real cost was 98% invisible.
+    /// A deadline nobody trips is not a deadline nobody needs.
+    /// So the standing invariant on this regime is not the millisecond figures — it is that <b>no command
+    /// on this thread may run a read whose cost scales with the store</b>, which is what
+    /// <c>SerialLoopStoreSizeSourceTests</c> asserts as a scan rather than leaving as prose. A member that
+    /// needs such a read belongs on a cadence with its own budget and its own connection, the way the
+    /// hourly self-metrics sweep already owned this one at <c>StoreSelfMetrics.SweepTimeoutSeconds</c>.</para>
     ///
     /// <para><b>BELOW the point where a stalled chain reports as a hang.</b> The ten run SEQUENTIALLY on
     /// one thread, so the bound that matters is the chain's, not one command's: 10 x 5 s = 50 s stays

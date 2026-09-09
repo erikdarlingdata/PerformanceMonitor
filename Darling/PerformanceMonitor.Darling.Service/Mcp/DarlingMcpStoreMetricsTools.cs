@@ -61,12 +61,12 @@ public sealed class DarlingMcpStoreMetricsTools
                 postgres, DateTime.UtcNow.AddDays(-days_back));
 
             var storeDaily = daily
-                .Where(p => p.ObjectKind == "store")
+                .Where(p => p.ObjectKind == StoreSelfMetrics.StoreObjectKind)
                 .OrderBy(p => p.Day)
                 .ToList();
             var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(storeDaily);
 
-            var storeLatest = latest.FirstOrDefault(r => r.ObjectKind == "store");
+            var storeLatest = latest.FirstOrDefault(r => r.ObjectKind == StoreSelfMetrics.StoreObjectKind);
 
             /* #2813: retention holds are read LIVE from the catalog, not from the series, because the
                series does not carry them. StoreSelfMetrics records total_runs and total_failures but not
@@ -157,7 +157,7 @@ public sealed class DarlingMcpStoreMetricsTools
                     note = JobHistoryNote(jobLogging),
                 },
                 objects = latest
-                    .Where(r => r.ObjectKind != "store")
+                    .Where(r => r.ObjectKind != StoreSelfMetrics.StoreObjectKind)
                     .OrderByDescending(r => r.TotalBytes ?? 0)
                     .Select(r => new
                     {
@@ -186,7 +186,7 @@ public sealed class DarlingMcpStoreMetricsTools
                         total_failures = r.TotalFailures,
                     }),
                 daily = daily
-                    .Where(p => p.ObjectKind != "store")
+                    .Where(p => p.ObjectKind != StoreSelfMetrics.StoreObjectKind)
                     .GroupBy(p => (p.ObjectKind, p.ObjectName))
                     .OrderBy(g => g.Key.ObjectKind, StringComparer.Ordinal)
                     .ThenBy(g => g.Key.ObjectName, StringComparer.Ordinal)

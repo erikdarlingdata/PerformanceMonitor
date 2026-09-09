@@ -240,7 +240,7 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Contains("background-job health", inventory, StringComparison.Ordinal);
 
         /* And the phantom stays gone. Disk pressure's feed reads are exempt — a local filesystem read and a
-           pg_database_size read that is context for the alert text — so naming it here would send an
+           recorded-store-size lookup that is context for the alert text — so naming it here would send an
            operator after a read that cannot fail into this number. */
         Assert.DoesNotContain("disk pressure", inventory, StringComparison.OrdinalIgnoreCase);
 

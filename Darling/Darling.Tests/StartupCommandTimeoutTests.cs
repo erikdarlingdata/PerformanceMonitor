@@ -96,7 +96,10 @@ public sealed class StartupCommandTimeoutTests
     /// dual-caller site's two bounds has to win, and it is not this one.</para>
     ///
     /// <para><c>DarlingWorker.ReadStoreSizeBytesAsync</c> runs on the same serial loop thread on the
-    /// 5-minute <c>s_diskCheckInterval</c> and fails to null at Debug. <c>ReadLatestCpuAsync</c> belongs
+    /// 5-minute <c>s_diskCheckInterval</c> and fails to null at Debug. Its statement is the newest-row
+    /// <c>collect.store_metrics</c> lookup and NOT <c>pg_database_size</c> — asserted by
+    /// <see cref="SerialLoopStoreSizeSourceTests"/>, because this census counts deadlines and would pass
+    /// unchanged if the statement went back to walking the store (#3199). <c>ReadLatestCpuAsync</c> belongs
     /// to #2882's alert pass (10 s), a site that pin's file-scoped list missed.
     /// <c>DarlingObservability.LogRetentionRunAsync</c> WAS the last unowned site in these two files —
     /// group E's audit listed it as residue — and the token test puts it in the serial-loop regime rather
@@ -157,7 +160,34 @@ public sealed class StartupCommandTimeoutTests
 
     private const int ExpectedConnectProbeSites = 2;
 
-    private const int ExpectedSerialLoopSites = 10;
+    internal const int ExpectedSerialLoopSites = 10;
+
+    /// <summary>
+    /// The serial-loop regime's members, projected out of the census above so a second pin over the same
+    /// population cannot freeze a stale copy of it.
+    ///
+    /// <para>Read by <see cref="SerialLoopStoreSizeSourceTests"/>, which asserts a property of what these
+    /// members RUN rather than of the deadline they set. Exposed as a projection rather than as a second
+    /// list because a hand-copied enumeration of ten members is a counted claim with a numeral welded on:
+    /// it would keep passing over nine of them after the tenth moved, and the pin's message would name the
+    /// wrong population. The per-member SITE COUNT travels with it for the same reason: nine members
+    /// hold the regime's ten commands (<c>SyncServerEnabledStatesAsync</c> builds two), so a consumer
+    /// counting members would silently disagree with <see cref="ExpectedSerialLoopSites"/> and could
+    /// not tell a dropped member from that arithmetic.</para>
+    /// </summary>
+    internal static IEnumerable<(string File, string Member, int Sites)> SerialLoopMembers =>
+        s_startupMembers.Where(m => m.SerialLoop > 0).Select(m => (m.File, m.Member, m.SerialLoop));
+
+    /// <summary>
+    /// One serial-loop member's body as written, resolved and brace-matched through the SAME helpers the
+    /// census uses — so a sibling pin cannot disagree with this file about where a member begins and ends,
+    /// and inherits the loud failure when a member is renamed or overloaded.
+    /// </summary>
+    internal static string SerialLoopMemberBody(string file, string member)
+    {
+        var path = SourcePath(file);
+        return MemberBody(File.ReadAllText(path), member, path);
+    }
 
     /// <summary>
     /// Members whose command sites must NOT carry either bootstrap deadline — the exclusions above,
@@ -435,7 +465,8 @@ public sealed class StartupCommandTimeoutTests
             seconds >= 2,
             $"serial-loop deadline {seconds}s leaves too little over the measured cold worst case — "
             + "LoadViewAsync's five commands at 16.1 ms together, SyncServerEnabledStatesAsync's two at "
-            + "3.8 ms, pg_database_size at 6.2 ms — on a thread whose reload body silently LOSES an "
+            + "3.8 ms, and the disk check's newest-row store_metrics lookup — on a thread whose reload "
+            + "body silently LOSES an "
             + "operator's config change if it fires, because the beacon advances _lastConfigVersion "
             + "before the reload runs");
 

@@ -46,7 +46,7 @@ namespace PerformanceMonitor.Darling.Service;
 ///   Dashboard's #1086 "Capture Down", <c>NocHealth.GetMissingCaptureSessionsAsync</c>).</item>
 /// <item><b>Store Disk Pressure</b> — the volume hosting the Darling store is nearly full. Unlike the
 ///   other three (per monitored server), this is a FLEET-level condition polled once per sweep from the
-///   store itself (<c>pg_database_size</c> for context) and the store volume's free space: when a headless
+///   store itself (its last recorded size, for context) and the store volume's free space: when a headless
 ///   service's disk fills, collection and every write stop for the WHOLE fleet, and nobody is watching. The
 ///   flagship-appropriate maintenance backstop the daily time-based purge otherwise lacks — deliberately
 ///   NOT Lite's 512MB archive-then-reset (Postgres has no single-file INSERT cliff, and a blanket reset
@@ -1429,8 +1429,10 @@ internal sealed class DarlingSelfAlertEvaluator
     /// Resolved" history row on recovery (mirrors the per-server conditions' edge shape). Gated on the master
     /// alerts switch. NO-OPS when free/total are null — a remote BYO store whose volume the service can't see —
     /// so it never false-alarms; the managed store's own volume is what it exists to protect.
-    /// <paramref name="storeSizeBytes"/> (pg_database_size) is context for the alert text only, never the
-    /// trigger. Internal (tested directly, like the sibling Apply methods); the worker calls the isolating
+    /// <paramref name="storeSizeBytes"/> is the last size the hourly self-metrics sweep recorded — context
+    /// for the alert text only, never the trigger, which is why the sentence it renders names the sample
+    /// rather than claiming the current byte count (#3199).
+    /// Internal (tested directly, like the sibling Apply methods); the worker calls the isolating
     /// <see cref="EvaluateDiskPressureAsync"/>. Testable directly with a recording deliverer + a controllable clock.
     /// </summary>
     internal async Task ApplyDiskPressureAsync(
@@ -1473,7 +1475,16 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 _lastDiskPressureAlert[DiskKey] = now;
                 _lastAlertedDiskPressurePercent[DiskKey] = percentFree;
-                var storeText = storeSizeBytes is long size ? $" The store currently holds {FormatGb(size)}." : "";
+                /* Names the sample rather than claiming currency: the size is the self-metrics series'
+                   newest whole-store row, not a live measurement (#3199 — measuring it live cost a
+                   filesystem walk on the collection loop's serial thread every five minutes, 3,177 ms of
+                   a 5 s bound on a 225 GiB store). "currently" would be a claim this value cannot make.
+                   The word "hourly" is deliberately absent too: that is the sweep's CADENCE, and measured
+                   gaps in the series run past it, so naming it here would imply an age the row does not
+                   carry. */
+                var storeText = storeSizeBytes is long size
+                    ? $" The store measured {FormatGb(size)} at its last self-metrics sample."
+                    : "";
                 await FireAsync(
                     DiskKey, StoreServerLabel, DiskPressureMetric, reason,
                     $"{warnPercent.ToString("0.#", CultureInfo.InvariantCulture)}% free",
