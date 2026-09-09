@@ -34,10 +34,12 @@ namespace PerformanceMonitorLite.Helpers;
 /// <para><b>An ALLOWLIST on the event id, because the level cannot narrow this and keywords do not
 /// exist here.</b> Event 13 is itself <c>Informational</c>, so <c>Informational</c> is the LOWEST
 /// level that delivers it — and <see cref="EventListener.EnableEvents(EventSource, EventLevel)"/>
-/// admits every event at or above the requested severity, which in this source is <b>28 of its 29
-/// events</b>: 20 at <c>Informational</c> (19 besides this one), plus 4 <c>Warning</c>, 2
-/// <c>Error</c>, 1 <c>Critical</c> and 1 <c>LogAlways</c>. Only the single <c>Verbose</c> event is
-/// excluded. Several of the 28 carry exactly what an application log must never hold:
+/// admits every event at or above the requested severity — which at 1.18.0 is <b>28 of this
+/// source's 29 events</b>: 20 at <c>Informational</c> (19 besides this one), plus 4
+/// <c>Warning</c>, 2 <c>Error</c>, 1 <c>Critical</c> and 1 <c>LogAlways</c>. Only the single
+/// <c>Verbose</c> event is excluded. Counted twice, off two things that fail differently: the
+/// <c>[Event]</c> attributes in the source at tag <c>Azure.Identity_1.18.0</c>, and reflection over
+/// the shipped <c>Azure.Identity.dll</c>. Several of the 28 carry exactly what an application log must never hold:
 /// <c>TenantIdDiscoveredAndUsed</c> / <c>TenantIdDiscoveredAndNotUsed</c> carry tenant ids,
 /// <c>AuthenticatedAccountDetails</c> carries account details, <c>GetTokenFailed</c> carries a
 /// formatted <c>Exception</c>, the six <c>MsalLog*</c> events carry MSAL's own log lines, and
@@ -153,8 +155,10 @@ internal sealed class EntraCredentialSelectionListener : EventListener
 ///
 /// <para><i>The listener's window is one connection open, not the process.</i> While the source is
 /// enabled, <c>AzureIdentityEventSource.IsEnabled(EventLevel.Informational, …)</c> answers true
-/// inside <c>Azure.Identity</c> and it performs the formatting work its seven
-/// <c>if (IsEnabled(…))</c> guards otherwise skip — formatting scope arrays, rendering exceptions.
+/// inside <c>Azure.Identity</c> and it performs the formatting work that the
+/// <c>IsEnabled(…)</c> guard on almost every one of its event methods otherwise skips — formatting
+/// scope arrays, rendering exceptions. At 1.18.0 that is 21 such guards plus 10
+/// <c>when IsEnabled(…)</c> switch arms.
 /// A monitoring tool that left it on would pay that on every token operation for the life of the
 /// process, forever, to learn a fact that can only be reported once. So <see cref="Begin"/> is
 /// called immediately before the open and the listener is disposed immediately after it; an
