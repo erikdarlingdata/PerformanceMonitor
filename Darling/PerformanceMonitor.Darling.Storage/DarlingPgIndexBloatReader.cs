@@ -120,6 +120,32 @@ public static class DarlingPgIndexBloatReader
         /// </summary>
         public DateTime? EstimatedAt =>
             SkippedReason is null && IsEstimate ? CaptureTime : null;
+
+        /// <summary>
+        /// The exact <c>pgstatindex</c> call for this index, prefixed with a <c>CREATE EXTENSION</c> when
+        /// pgstattuple is not installed on the database this row came from.
+        ///
+        /// <para><b>Defined here rather than at each surface</b> so the grid and the MCP payload cannot
+        /// disagree about the command they tell an operator to run — one expression cannot drift from
+        /// itself. Built from schema and index name and never from the collected oid, which does not
+        /// survive a dump and restore and would send the reader at whatever now holds that number.</para>
+        ///
+        /// <para>It is offered on EVERY row, including ones that estimated cleanly: the estimate is close
+        /// enough to decide which index to act on and not close enough to justify a REINDEX, so the exact
+        /// figure is the next step for any index somebody intends to touch. On a partial or deduplicated
+        /// index it is not an escalation but the ONLY route — no statistics model reaches those.</para>
+        /// </summary>
+        public string ExactMeasurementCommand
+        {
+            get
+            {
+                var qualified = (SchemaName ?? "public") + "." + (IndexName ?? "?");
+
+                return PgstattupleAvailable == false
+                    ? $"CREATE EXTENSION pgstattuple; SELECT * FROM pgstatindex('{qualified}');"
+                    : $"SELECT * FROM pgstatindex('{qualified}');";
+            }
+        }
     }
 
     /* DISTINCT ON the index identity gives one row per index in one pass. The outer ORDER BY then ranks

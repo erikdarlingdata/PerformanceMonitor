@@ -90,15 +90,8 @@ public sealed class DarlingMcpPgIndexTools
             var empty = rows.Count(r =>
                 r.SkippedReason is null && !r.IsEstimate && r.AvgLeafDensity is null);
 
-            var indexes = rows.Select(r =>
+            var indexes = rows.Select(r => new
             {
-                /* The escalation path, per index, with the command already written out - the same shape
-                   get_pg_table_bloat emits for pgstattuple. Built from schema and index name rather than
-                   from the stored oid, because an oid does not survive a dump and restore. */
-                var qualified = (r.SchemaName ?? "public") + "." + (r.IndexName ?? "?");
-
-                return new
-                {
                 database_name = r.DatabaseName,
                 schema_name = r.SchemaName,
                 table_name = r.TableName,
@@ -144,10 +137,9 @@ public sealed class DarlingMcpPgIndexTools
                 est_leaf_pages = r.EstLeafPages,
 
                 pgstattuple_available = r.PgstattupleAvailable,
-                exact_measurement_command = r.PgstattupleAvailable == false
-                    ? $"CREATE EXTENSION pgstattuple; SELECT * FROM pgstatindex('{qualified}');"
-                    : $"SELECT * FROM pgstatindex('{qualified}');",
-                };
+                /* From the row, not rebuilt here: the grid binds the same property, and a second copy of
+                   this string is a second thing to get wrong. */
+                exact_measurement_command = r.ExactMeasurementCommand,
             });
 
             return JsonSerializer.Serialize(new

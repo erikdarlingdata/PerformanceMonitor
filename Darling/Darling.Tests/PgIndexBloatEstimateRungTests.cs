@@ -148,7 +148,7 @@ public class PgIndexBloatEstimateRungTests
         /* As the TOP rung, this sentinel is the last one — and that equality is what catches a later rung
            appending a sentinel without adding its own arm. When a later rung lands, this clause moves to
            it and becomes ProbeOrdinal < arity - 1 here. */
-        Assert.Equal(arity - 1, ProbeOrdinal);
+        Assert.Equal(ProbeOrdinal, arity - 1);
 
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
