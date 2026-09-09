@@ -662,7 +662,7 @@ Add `"engine": "postgres"` to a `servers` entry and that target is collected by 
 
 ### Permissions on a PostgreSQL target
 
-`pg_monitor` covers most collectors. Two further grants decide whether three of them return anything, and neither absence reports as a permission error:
+`pg_monitor` covers most collectors. One further grant and one extension decide whether three of them return anything, and neither absence reports as a permission error:
 
 ```sql
 CREATE ROLE darling_monitor WITH LOGIN PASSWORD '<password>';
