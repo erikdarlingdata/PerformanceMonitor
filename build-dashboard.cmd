@@ -8,8 +8,8 @@ echo  Building Full Edition (Dashboard + Installers)
 echo ========================================
 echo.
 
-:: Get version from csproj
-for /f %%a in ('powershell -Command "([xml](Get-Content Dashboard\Dashboard.csproj)).Project.PropertyGroup.Version | Where-Object { $_ }"') do set VERSION=%%a
+:: Get version from the one file that declares it (#3222)
+for /f %%a in ('powershell -Command "([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version | Where-Object { $_ }"') do set VERSION=%%a
 echo Version: %VERSION%
 echo.
 

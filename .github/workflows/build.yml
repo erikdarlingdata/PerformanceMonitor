@@ -82,6 +82,13 @@ jobs:
             # affect every product, so it forces a full build/test/publish.
             root:
               - 'PerformanceMonitor.sln'
+              # #3222: every project in the tree inherits the product version from here, so a
+              # release bump touches this file and NOTHING else. Absent this entry that bump
+              # matches no area filter at all and the job that stamps the artifacts never builds
+              # them: the enumerated-list failure this file's other comments keep describing.
+              # Spelled without the angle brackets on purpose. ProductVersionDeclarationTests
+              # treats that spelling as a version READ and would score this comment as one.
+              - 'Directory.Build.props'
               - 'global.json'
               - 'nuget.config'
               - 'NuGet.config'
@@ -391,7 +398,7 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $version = ([xml](Get-Content Lite/PerformanceMonitorLite.csproj)).Project.PropertyGroup.Version | Where-Object { $_ }
+          $version = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version | Where-Object { $_ }
           echo "VERSION=$version" >> $env:GITHUB_OUTPUT
 
       # #2501: -r win-x64 --self-contained, and it makes the portable ZIP SMALLER, not bigger.
@@ -981,7 +988,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="$(grep -oPm1 '(?<=<Version>)[^<]+' Lite/PerformanceMonitorLite.csproj)"
+          version="$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)"
           echo "VERSION=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Package linux artifact + checksum
