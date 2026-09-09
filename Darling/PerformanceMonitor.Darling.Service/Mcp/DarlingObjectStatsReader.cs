@@ -199,32 +199,32 @@ internal static class DarlingObjectStatsReader
                 LIMIT 1), 0) AS offset_minutes
         )
         SELECT
-            database_name,
-            schema_name,
-            table_name,
-            index_name,
-            index_type_desc,
-            CAST(reserved_mb AS double precision) AS reserved_mb,
-            total_rows,
-            COALESCE(user_seeks, 0) AS user_seeks,
-            COALESCE(user_scans, 0) AS user_scans,
-            COALESCE(user_lookups, 0) AS user_lookups,
-            COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) AS total_reads,
-            COALESCE(user_updates, 0) AS user_updates,
-            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) - make_interval(mins => svr.offset_minutes) AS last_user_access_utc,
+            ios.database_name,
+            ios.schema_name,
+            ios.table_name,
+            ios.index_name,
+            ios.index_type_desc,
+            CAST(ios.reserved_mb AS double precision) AS reserved_mb,
+            ios.total_rows,
+            COALESCE(ios.user_seeks, 0) AS user_seeks,
+            COALESCE(ios.user_scans, 0) AS user_scans,
+            COALESCE(ios.user_lookups, 0) AS user_lookups,
+            COALESCE(ios.user_seeks, 0) + COALESCE(ios.user_scans, 0) + COALESCE(ios.user_lookups, 0) AS total_reads,
+            COALESCE(ios.user_updates, 0) AS user_updates,
+            GREATEST(ios.last_user_seek, ios.last_user_scan, ios.last_user_lookup, ios.last_user_update) - make_interval(mins => svr.offset_minutes) AS last_user_access_utc,
             CASE
-                WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
-                     AND COALESCE(user_updates, 0) = 0 THEN 'Unused'
-                WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
-                     AND COALESCE(user_updates, 0) > 0 THEN 'Write-only'
+                WHEN COALESCE(ios.user_seeks, 0) + COALESCE(ios.user_scans, 0) + COALESCE(ios.user_lookups, 0) = 0
+                     AND COALESCE(ios.user_updates, 0) = 0 THEN 'Unused'
+                WHEN COALESCE(ios.user_seeks, 0) + COALESCE(ios.user_scans, 0) + COALESCE(ios.user_lookups, 0) = 0
+                     AND COALESCE(ios.user_updates, 0) > 0 THEN 'Write-only'
                 ELSE 'Active'
             END AS classification
-        FROM v_index_object_stats, svr
-        WHERE server_id = $1
-        AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
-        AND   ($2::text IS NULL OR database_name = $2::text)
+        FROM v_index_object_stats AS ios, svr
+        WHERE ios.server_id = $1
+        AND   ios.collection_time = (SELECT MAX(latest.collection_time) FROM v_index_object_stats AS latest WHERE latest.server_id = $1)
+        AND   ($2::text IS NULL OR ios.database_name = $2::text)
         ORDER BY
-            CASE WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0 THEN 0 ELSE 1 END,
+            CASE WHEN COALESCE(ios.user_seeks, 0) + COALESCE(ios.user_scans, 0) + COALESCE(ios.user_lookups, 0) = 0 THEN 0 ELSE 1 END,
             reserved_mb DESC
         LIMIT $3
         """;
