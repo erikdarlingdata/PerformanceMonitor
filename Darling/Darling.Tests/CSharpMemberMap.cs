@@ -327,7 +327,8 @@ internal static class CSharpMemberMap
     ///
     /// <para><c>Auto</c> in <c>TsqlConventionGuardTests.TheResolver_AttributesByScope_NotByTheNearestNameAbove</c> pins the
     /// accessor-list case; found in review of #3097, where it resolved to <see cref="Unknown"/> in silence.
-    /// <c>TheWalkerRangesAreSound</c> pins the other three over the whole scanned tree, by set.</para>
+    /// <c>TsqlConventionGuardTests.TheMemberScan_ReadsEveryDeclarationWhole</c> pins the other three over
+    /// the whole scanned tree, by set, against its <c>KnownTruncatedRanges</c>.</para>
     /// </summary>
     private static int DeclarationEnd(string code, int from)
     {
