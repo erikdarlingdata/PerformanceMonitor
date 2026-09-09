@@ -288,7 +288,15 @@ public sealed class SerialLoopStoreSizeSourceTests
             }
         }
 
-        /* The census having covered the product, before its emptiness means anything. */
+        /* The census having covered the product, before its emptiness means anything — and the two guards
+           on that cover DIFFERENT failures, which is worth saying because this floor alone would not do it.
+           A project REMOVED or RENAMED is caught by name in ShippedSources()'s per-project
+           Assert.True(Directory.Exists(...)), loudly and without a threshold. This floor is only a belt
+           against the enumeration itself producing nothing — a glob that matches no files, a base directory
+           that resolves somewhere empty — which is a failure the per-project check cannot see. It is
+           deliberately far below the ~1,050 files the tree actually holds, because a count anywhere near
+           that would fail on ordinary file churn and buy nothing the existence check does not already
+           give. */
         Assert.True(
             scanned > 500,
             $"the shipped-source census only reached {scanned} files, so an empty result says nothing "
