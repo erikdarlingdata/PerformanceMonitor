@@ -292,7 +292,7 @@ difference a cumulative counter, so the first read after startup legitimately sh
 | `pg_autovacuum_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
 | `pg_table_bloat_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
 | `pg_index_usage_stats` | 24 h | **24 h** | 48 h (a scan count is a difference) |
-| `pg_index_bloat` | 24 h | **24 h** | a full PASS, not one cycle (see below) |
+| `pg_index_bloat` | 24 h | **24 h** | 24 h, complete (see below) |
 
 The per-database collectors are the ones that surprise people — seven of them at the time of writing,
 which is every collector whose `RunsPerDatabase` returns true, so count them from `CollectorCatalog`
@@ -300,14 +300,25 @@ rather than from this sentence. `pg_autovacuum_stats` and `pg_table_bloat_stats`
 first row and two before "growing or flat" can be answered; `pg_index_usage_stats` takes a **day**, and
 two before a windowed scan count exists at all.
 
-`pg_index_bloat` is the one whose first-answer column needs reading carefully. A cycle measures a
-**bounded, rotating slice** rather than every index — the cursor resumes below wherever the previous
-cycle stopped and wraps at the end of a pass — so a day gets you rows, and a complete answer for the
-whole index population takes a full pass. It also needs the `pgstattuple` extension created in
-`public`, or it reports the function as missing rather than returning bloat. And it is the **complete
-btree census with no size floor**, while `pg_index_usage_stats` floors at 64 kB, which is why the two
-report row counts differing by roughly 65% on the same target: the gap is entirely indexes too small
-for usage statistics to be worth recording.
+`pg_index_bloat` used to be the one whose first-answer column needed reading carefully, and since
+#3234 it is not. It **estimates from catalog statistics and reads no index page**, so one cycle covers
+every index rather than a rotating slice: a day gets you the whole census, not a fraction of it. What
+it needs instead is the `pg_read_all_data` grant below — `pg_stats` supplies the column widths the
+model rests on, and without them every row reports the widths-not-visible reason rather than a number.
+It no longer needs the `pgstattuple` extension at all; that is now the ON-REQUEST route to an exact
+figure, and every row carries the `pgstatindex` call for its own index.
+
+**Read the reason on a row that has no estimate, because two of them are permanent.** A never-analyzed
+parent needs an `ANALYZE`; invisible column widths need the grant. But a **partial** index cannot be
+modelled — the only row count available is the parent table's, and the index holds just the rows
+matching its predicate — and a **deduplicated** one cannot either, because PostgreSQL 13+ stores
+duplicate keys once in a posting list, so real storage is denser than per-tuple arithmetic allows and a
+correct model still over-predicts. Those two are what the exact command is for, at any grant and any
+statistics freshness.
+
+It remains the **complete btree census with no size floor**, while `pg_index_usage_stats` floors at
+64 kB, which is why the two report row counts differing by roughly 65% on the same target: the gap is
+entirely indexes too small for usage statistics to be worth recording.
 
 Those cadences are deliberate — a PostgreSQL connection is bound to one database for life, so per-database collection
 costs one connection per database per cycle, and index usage is a structural question that an hourly
@@ -333,7 +344,7 @@ Through MCP, one tool per collector:
 | `get_pg_blocking` | blocking chains that were SAMPLED, with the root attributed |
 | `get_pg_database_stats` | temp-file spills, cache hit ratio, deadlocks, commit/rollback split |
 | `get_pg_index_usage` | which indexes nothing scans — **and whether each one can actually be dropped** |
-| `get_pg_index_bloat` | how much of each index is dead space — over a **rotating slice per cycle**, so read `measured_at` before treating a density as current |
+| `get_pg_index_bloat` | how much of each index is reclaimable, **estimated** from statistics with its accuracy stated — read the reason on a row with no estimate, and `exact_measurement_command` when you need certainty on one index |
 | `get_pg_table_bloat` | how much space the vacuum lag above has cost, as an **estimate** with its own error stated |
 | `get_pg_session_states` | who is holding a transaction open — **and whether they actually pin the xmin horizon** |
 
@@ -352,9 +363,10 @@ Five results that look like bugs and are not:
   trackedness instead of letting a NULL read as a zero.
 - `get_pg_replication_slots` empty **on a reader** is per-instance, not a cluster all-clear. Slots live on
   the writer. Same for autovacuum state, index usage and bloat — all three are writer-only collectors.
-- `get_pg_table_bloat` reporting most of its rows with a **suppressed** estimate is almost always a
-  permissions gap rather than a missing ANALYZE, and it is the one step in this runbook that `GRANT
-  pg_monitor` alone does not satisfy. See the note below.
+- `get_pg_table_bloat` **or `get_pg_index_bloat`** reporting most of its rows with a **suppressed**
+  estimate is almost always a permissions gap rather than a missing ANALYZE, and it is the one step in
+  this runbook that `GRANT pg_monitor` alone does not satisfy. See the note below. Index bloat joined
+  this list in #3234, when it stopped walking pages and started modelling from `pg_stats`.
 - `get_pg_session_states` reporting a session **idle in transaction for an hour with `peak_horizon_age`
   of `-1`** is not a contradiction and not a rounding artefact. It means the session pins nothing: a
   READ COMMITTED transaction releases its snapshot at the end of each statement, and one whose write
@@ -368,9 +380,9 @@ Five results that look like bugs and are not:
 
 ### The one grant `pg_monitor` does not cover
 
-`pg_monitor` is enough for every collector here except the two that read `pg_stats` — the bloat estimate
-and per-column statistics — and the way it fails is worth knowing because it does not look like a
-failure. `pg_stats` is filtered by `has_column_privilege(..., 'select')`, and `pg_monitor` confers
+`pg_monitor` is enough for every collector here except the THREE that read `pg_stats` — table bloat,
+**index bloat since #3234**, and per-column statistics — and the way it fails is worth knowing because
+it does not look like a failure. `pg_stats` is filtered by `has_column_privilege(..., 'select')`, and `pg_monitor` confers
 **no** SELECT on user tables — so the monitoring role sees **zero**
 rows in `pg_stats` and the estimator, fed nothing, returns confident large numbers. Measured against a
 `pg_monitor`-only role on a live PostgreSQL 16 target: 88.59% reported for a table whose true bloat is
