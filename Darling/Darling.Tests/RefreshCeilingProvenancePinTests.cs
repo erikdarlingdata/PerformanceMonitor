@@ -87,6 +87,17 @@ namespace Darling.Tests;
 /// <see cref="Verify"/> requires that it CONSUMED every pin in <see cref="Pins"/>, because a pattern defined
 /// in the list and never asserted against anything looks exactly like a pattern doing work.</para>
 ///
+/// <para><b>And the #3188 half, which pins a DECISION rather than a figure.</b> Two of these guards hold
+/// prose to prose instead of prose to arithmetic, because what they protect is not a number: the estimator
+/// and the closure rule are stated in ONE paragraph that has to be word-for-word identical on both ceiling
+/// constants (<see cref="BothCeilings_StateOneEstimatorAndOneClosureRule_WordForWord"/>), and the
+/// proposition that paragraph and <see cref="TimescaleSupport.RefreshSlotHeadroom.SlotExceeded"/>'s Error
+/// band are two sides of has to appear at every site that states it
+/// (<see cref="TheSlotExceededBand_AndBothCeilings_StateOneProposition"/>). Neither can be derived from a
+/// constant, which is exactly why #3182 produced four wrong published claims with this whole file green:
+/// every FIGURE was correct arithmetic over a population the sentence above it mislabelled. Held as
+/// identity and presence rather than as wording, so an honest rewrite passes and a rewrite that moves one
+/// site without the others does not.</para>
 /// <para><b>And the SCOPING rule, held file-wide rather than only where it is stated (#3133).</b>
 /// <see cref="Verify"/> requires the ceiling paragraph's live-envelope population to carry a CLOSED scope;
 /// <see cref="NoOpenPopulationClaim_SurvivesOutsideTheSentenceThatRejectsIt"/> requires the rest of the
@@ -116,7 +127,7 @@ public sealed class RefreshCeilingProvenancePinTests
         "public const double OtherHourlyRefreshObservedCeilingSeconds";
 
     private const string GuardBandDeclaration =
-        "public static int CompressionPhaseGuardMinutes";
+        "public const int CompressionPhaseGuardMinutes";
 
     private static int Ceiling => TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds;
 
@@ -372,18 +383,20 @@ public sealed class RefreshCeilingProvenancePinTests
             @"The third-largest run is ([0-9]+)\.([0-9]+) s",
             false);
 
-        /* The guard band the light ceiling now SIZES, rather than merely characterises, and the whole of the
-           margin that sizing leaves. Both are derived, so both are swept. */
+        /* The guard band's DECLARED width and the ceiling it is CHECKED AGAINST - the direction #3188
+           inverted. The width no longer follows this constant, so what these pin is that the summary states
+           the width the code declares and the ceiling the code checks, with the coverage margin derived from
+           both. Both swept. */
         yield return (
-            "the guard band the light ceiling derives",
+            "the guard band's declared width and the ceiling it covers",
             GuardBandDeclaration,
-            @"so ([0-9]+) minutes against a ([0-9]+)\.([0-9]+) s ceiling",
+            @"a DECLARED width of ([0-9]+) minutes, checked against a ([0-9]+)\.([0-9]+) s ceiling",
             true);
 
         yield return (
-            "the guard band's rounding margin",
+            "the guard band's coverage margin",
             GuardBandDeclaration,
-            @"rounding is the whole margin, and it is ([0-9]+)\.([0-9]+) s",
+            @"coverage margin is the whole of what the width buys, and it is ([0-9]+)\.([0-9]+) s",
             true);
     }
 
@@ -807,6 +820,241 @@ public sealed class RefreshCeilingProvenancePinTests
             + "matches \\n in .NET, so a newline cannot hold two runs apart.");
     }
 
+    /* ───────────── #3188: one estimator, one closure rule, one proposition ───────────── */
+
+    /// <summary>
+    /// The paragraph that states the estimator and what closes its population, matched by its own opening so
+    /// it cannot be confused with the derivation recipe that also carries an <c>ESTIMATOR:</c> clause.
+    /// </summary>
+    private const string SharedEstimatorMarker =
+        "<para>THE ESTIMATOR, AND WHAT CLOSES THE POPULATION IT IS TAKEN OVER";
+
+    /// <summary>
+    /// The quantifier the grid's precondition is, named once so the Error band and the two constants cannot
+    /// state it differently. <see cref="TheSlotExceededBand_AndBothCeilings_StateOneProposition"/> is what
+    /// requires it at every site.
+    /// </summary>
+    private const string UniversalOverRunsToken = "UNIVERSAL over runs";
+
+    /// <summary>
+    /// What a maximum over a population a read instant merely stopped reading actually is. Required at the
+    /// same sites, because the two claims are one: the constant is evidence for the universal over the runs
+    /// it saw, which is why a later run can overtake it without any figure here being wrong.
+    /// </summary>
+    private const string PrefixMaximumToken = "PREFIX MAXIMUM";
+
+    /// <summary>The band whose Error is the falsification, addressed by its own declaration line.</summary>
+    private const string SlotExceededMember = "        SlotExceeded,";
+
+    /// <summary>
+    /// The estimator and the closure rule are ONE paragraph, and it is word-for-word identical on both
+    /// ceiling constants (#3188).
+    ///
+    /// <para><b>Identity rather than presence, and that is the whole of the pin.</b> #3182's four wrong
+    /// published claims were all made by reading one of these constants' method and applying it to the
+    /// other, and both summaries were internally careful at the time. Requiring each to STATE an estimator
+    /// would have passed then. Requiring the two statements to be the same string cannot: a decision
+    /// re-taken on one constant alone is red here, which is the only property that makes the pair safe to
+    /// read as a pair.</para>
+    ///
+    /// <para><b>What the paragraph has to contain is checked too, so an identical pair of paragraphs that
+    /// says nothing is not a pass.</b> The estimator, the closure rule, and the two tokens the Error band
+    /// shares with it.</para>
+    /// </summary>
+    [Fact]
+    public void BothCeilings_StateOneEstimatorAndOneClosureRule_WordForWord()
+    {
+        var source = ReadTimescaleSupportSource();
+        var shared = new List<string>();
+
+        foreach (var declaration in new[] { CeilingDeclaration, LightCeilingDeclaration })
+        {
+            var prose = DocProseFor(source, declaration);
+
+            var start = prose.IndexOf(SharedEstimatorMarker, StringComparison.Ordinal);
+            Assert.True(start >= 0,
+                $"'{declaration}' carries no shared estimator paragraph. It opens with "
+                + $"\"{SharedEstimatorMarker}\" and states the estimator and the closure rule for BOTH "
+                + "ceiling constants; a constant without it has no stated estimator this file can hold to "
+                + "its sibling's.");
+            Assert.True(
+                prose.IndexOf(SharedEstimatorMarker, start + 1, StringComparison.Ordinal) < 0,
+                $"'{declaration}' carries the shared estimator paragraph more than once, so this pin is not "
+                + "comparing one known paragraph");
+
+            var end = prose.IndexOf("</para>", start, StringComparison.Ordinal);
+            Assert.True(end > start,
+                $"'{declaration}''s shared estimator paragraph is not closed by </para>, so the slice this "
+                + "pin compares runs to the end of the summary");
+
+            var paragraph = prose[start..(end + "</para>".Length)];
+
+            Assert.Contains("ESTIMATOR: the maximum", paragraph, StringComparison.Ordinal);
+            Assert.Contains("CLOSURE:", paragraph, StringComparison.Ordinal);
+            Assert.Contains(UniversalOverRunsToken, paragraph, StringComparison.Ordinal);
+            Assert.Contains(PrefixMaximumToken, paragraph, StringComparison.Ordinal);
+
+            shared.Add(paragraph);
+        }
+
+        Assert.Equal(2, shared.Count);
+        Assert.Equal(shared[0], shared[1]);
+    }
+
+    /// <summary>
+    /// No <c>ESTIMATOR:</c> clause anywhere in the file names anything but the maximum (#3188).
+    ///
+    /// <para><b>Why a file-wide shape and not a check on the two constants.</b> A percentile estimator is
+    /// rejected on a ground that is not about either constant's population: what a ceiling constant carries
+    /// is the EVIDENCE for a universal over runs, and a percentile below the width the grid gives the job is
+    /// compatible with part of its own population being above that width — the negation of the claim the
+    /// grid rests on. That argument holds for any ceiling this file gains, so the guard is written over the
+    /// clause rather than over the two sites that carry it today.</para>
+    ///
+    /// <para>Read out of JOINED doc prose, because the recipe clauses wrap: one of them has
+    /// <c>ESTIMATOR: the</c> at the end of a <c>///</c> line and <c>maximum.</c> at the start of the next,
+    /// so a line-oriented scan reads a clause that names nothing and passes.</para>
+    /// </summary>
+    [Fact]
+    public void NoEstimatorClause_NamesAnythingButTheMaximum()
+    {
+        var declared = Regex.Matches(JoinedDocProse(ReadTimescaleSupportSource()), @"ESTIMATOR: ([^.,;]+)");
+
+        Assert.NotEmpty(declared);
+        Assert.All(declared, match => Assert.Equal("the maximum", match.Groups[1].Value.Trim()));
+    }
+
+    /// <summary>
+    /// The Error band and both ceiling constants state ONE proposition, at every site that states it
+    /// (#3188) — which is the half of the estimator decision that lives outside the constants.
+    ///
+    /// <para><b>The conflict this resolves, stated as the two claims rather than as a worry.</b>
+    /// <see cref="TimescaleSupport.RefreshSlotHeadroom.SlotExceeded"/>'s Error says the grid's stated
+    /// precondition is FALSE. That precondition is a universal over runs, so one run at or past the window
+    /// is a witness and the verdict is sound under any estimator. What it is NOT is a claim the constant
+    /// could establish: a prefix maximum is evidence over the runs it was measured on. The two are one
+    /// proposition read from its two sides — and a percentile ceiling would break that, because it would
+    /// assert at build time the very condition the band reports. So both sides have to say so, and a
+    /// wording that moved on one side only would leave the pair contradicting each other silently, which is
+    /// the state #3188 was filed on.</para>
+    ///
+    /// <para><b>Including the two LIVE messages, which is where the contradiction actually shipped.</b> The
+    /// staleness Warning said its constant was "the MAXIMUM of a closed population" and then that the
+    /// population "has been overtaken" — a closed population cannot be overtaken, and an operator reading
+    /// that line was being told the constant was wrong when what was true is that it had been overtaken by
+    /// a later member. Held as a forbidden SHAPE in either order, because a contradiction has as many
+    /// wordings as it has sites.</para>
+    /// </summary>
+    [Fact]
+    public void TheSlotExceededBand_AndBothCeilings_StateOneProposition()
+    {
+        var source = ReadTimescaleSupportSource();
+
+        foreach (var declaration in new[] { CeilingDeclaration, LightCeilingDeclaration, SlotExceededMember })
+        {
+            var prose = DocProseFor(source, declaration);
+
+            Assert.Contains(UniversalOverRunsToken, prose, StringComparison.Ordinal);
+            Assert.Contains(PrefixMaximumToken, prose, StringComparison.Ordinal);
+        }
+
+        /* THE TWO LIVE MESSAGES. Each is one source line, and MessageLineContaining requires exactly one
+           line to carry its anchor - so a pin aimed at a message that had been split, renamed or duplicated
+           reports a parse miss instead of reading the wrong literal. */
+        var slotError = MessageLineContaining(source, "at or past the {Slot}s window it has to fit inside");
+        Assert.Contains(UniversalOverRunsToken, slotError, StringComparison.Ordinal);
+        Assert.Contains(PrefixMaximumToken, slotError, StringComparison.Ordinal);
+
+        var staleness = MessageLineContaining(source, "which is {Over:F1}s ABOVE {Constant}");
+        Assert.Contains(PrefixMaximumToken, staleness, StringComparison.Ordinal);
+
+        /* AND THE CONTRADICTION THAT HAD TO GO, in either order and file-wide rather than in the one
+           message that carried it. A double-quote bounds the window, so a match cannot run from one prose
+           region through a cref attribute into another.
+
+           CASE-INSENSITIVE, matching the two open-population shape guards in this file and NOT the value
+           pins. The distinction is which way each fails: the token checks above compare a deliberately
+           capitalised literal, so case is part of what they hold and folding it would weaken them. This
+           one forbids a SHAPE, so folding case is what stops "Closed population ... overtaken" from
+           passing a guard written against the one capitalisation the defect happened to ship in - a
+           case-sensitive shape guard fails toward GRANTING, which is the direction that costs. */
+        var contradiction = Regex.Matches(
+            source,
+            @"closed population[^""]{0,160}?\b(?:overtaken|falsified|exceeded)\b"
+            + @"|\b(?:overtaken|falsified|exceeded)\b[^""]{0,160}?closed population",
+            RegexOptions.IgnoreCase);
+
+        Assert.Empty(contradiction);
+    }
+
+    /// <summary>
+    /// The single source line carrying <paramref name="anchor"/> — the shape the two live messages have, so
+    /// a token pin can read one known literal rather than a window around an index.
+    ///
+    /// <para>Exactly one, and a parse miss otherwise: zero means the message was reworded and the pin is
+    /// reading nothing, more than one means it is reading whichever came first. Both are indistinguishable
+    /// from a pass on the token check alone.</para>
+    /// </summary>
+    private static string MessageLineContaining(string source, string anchor)
+    {
+        var hits = source.Split('\n')
+            .Where(line => line.Contains(anchor, StringComparison.Ordinal))
+            .ToArray();
+
+        Require(hits.Length == 1,
+            $"{ParseMiss}: '{anchor}' appears on {hits.Length} source lines rather than one, so this pin is "
+            + "not reading one known message literal");
+
+        return hits[0];
+    }
+
+    /// <summary>
+    /// The guard's width is DECLARED and nothing derives it from a measurement (#3188) — checked against the
+    /// code, because the prose pins above cannot see a derivation reinstated underneath them.
+    ///
+    /// <para><b>Why the code half needs its own pin, and it is the reason the old assertion had stopped
+    /// meaning anything.</b> TimescaleSupportTests held
+    /// <c>CompressionPhaseGuardMinutes == ceil(OtherHourlyRefreshObservedCeilingSeconds / 60)</c>. That
+    /// identity is now false BY DESIGN and it still passed, because 4 and
+    /// <c>ceil(226.8 / 60)</c> are both 4 — so the assertion certified a derivation the code no longer has,
+    /// on a numeric coincidence. An identity between a declared width and a rounded measurement is exactly
+    /// the pin that cannot fail while the values happen to agree, so it is replaced by a check on the
+    /// SHAPE: the width is a constant declaration, and the rounding expression appears nowhere.</para>
+    ///
+    /// <para><b>The two clauses fail in opposite directions on purpose.</b> The declaration clause catches
+    /// the width becoming an expression again; the absence clause catches the rounding being reinstated
+    /// somewhere else and read into the grid by a different name. Either alone would pass a half-reverted
+    /// inversion.</para>
+    /// </summary>
+    [Fact]
+    public void NoGuardWidth_IsDerivedFromAMeasurement()
+    {
+        var source = ReadTimescaleSupportSource();
+
+        Assert.Contains(
+            "public const int CompressionPhaseGuardMinutes = ",
+            source,
+            StringComparison.Ordinal);
+
+        Assert.DoesNotContain(
+            "Math.Ceiling(OtherHourlyRefreshObservedCeilingSeconds",
+            source,
+            StringComparison.Ordinal);
+
+        /* And the coverage requirement the declaration is checked by, which is what replaces the identity
+           rather than being a second copy of it: an inequality cannot be satisfied by a coincidence the way
+           an equality between two 4s could. */
+        Assert.True(
+            TimescaleSupport.CompressionPhaseGuardMinutes * 60
+                >= TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds,
+            $"the declared {TimescaleSupport.CompressionPhaseGuardMinutes}-minute width is "
+            + $"{TimescaleSupport.CompressionPhaseGuardMinutes * 60}s against a "
+            + $"{TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds}s recorded light-refresh ceiling, "
+            + "so it no longer covers the class it exists to cover and a compression policy can start while "
+            + "a light refresh still holds AccessShareLock (#3012). Widening it is a scheduling decision "
+            + "bounded by WidestFeasibleCompressionPhaseGuardMinutes, not a renumbering");
+    }
+
     /* ─────────────────────────────── verification ─────────────────────────────── */
 
     /// <summary>
@@ -1140,25 +1388,29 @@ public sealed class RefreshCeilingProvenancePinTests
             $"the run called third-largest, {thirdLargest[0]}.{thirdLargest[1]} s, is at or above the "
             + "second-largest the same paragraph states, so the ordering the sentence claims is false");
 
-        /* And the guard band this constant SIZES, which is the whole of what changed about it at #3174: it
-           used to be characterised against a step-derived band, and now the band is derived from it. */
-        var guardBand = Read("the guard band the light ceiling derives");
+        /* And the guard band's DECLARED width, which is what changed at #3188: #3174 made the band the
+           ceiling rounded up, and #3188 cut that tie because a measurement whose own population is decided
+           by the width cannot set the width. These two pins keep their shape and invert their meaning - the
+           summary's width has to be the width the CODE DECLARES and its ceiling the one the code CHECKS, so
+           a summary still describing the width as derived states a figure that follows from nothing.
+           NoGuardWidth_IsDerivedFromAMeasurement holds the code half. */
+        var guardBand = Read("the guard band's declared width and the ceiling it covers");
         Require(guardBand[0] == TimescaleSupport.CompressionPhaseGuardMinutes,
-            $"the guard band is stated as {guardBand[0]} minutes against "
-            + $"{TimescaleSupport.CompressionPhaseGuardMinutes} derived");
+            $"the declared width is stated as {guardBand[0]} minutes against the "
+            + $"{TimescaleSupport.CompressionPhaseGuardMinutes} the code declares");
         Require((guardBand[1] * 10) + guardBand[2] == LightCeilingTenths,
-            $"the ceiling the guard band is derived from is stated as {guardBand[1]}.{guardBand[2]} s "
+            $"the ceiling the width is checked against is stated as {guardBand[1]}.{guardBand[2]} s "
             + $"against this constant's {LightCeilingTenths / 10}.{LightCeilingTenths % 10} s");
 
-        var guardMargin = Read("the guard band's rounding margin");
+        var guardMargin = Read("the guard band's coverage margin");
         Require(
             (guardMargin[0] * 10) + guardMargin[1]
                 == (TimescaleSupport.CompressionPhaseGuardMinutes * 600) - LightCeilingTenths,
-            $"the rounding margin is stated as {guardMargin[0]}.{guardMargin[1]} s against "
+            $"the coverage margin is stated as {guardMargin[0]}.{guardMargin[1]} s against "
             + $"{((TimescaleSupport.CompressionPhaseGuardMinutes * 600) - LightCeilingTenths) / 10}."
             + $"{((TimescaleSupport.CompressionPhaseGuardMinutes * 600) - LightCeilingTenths) % 10} s derived "
-            + "from the guard band less the ceiling it covers - if this reached zero or below, a compression "
-            + "policy could start while a light refresh still held AccessShareLock");
+            + "from the declared width less the ceiling it covers - if this reached zero or below, a "
+            + "compression policy could start while a light refresh still held AccessShareLock");
 
         /* And nothing in the pin list went unused: a pattern that is never asserted against reads, from the
            list, exactly like one that is. */
