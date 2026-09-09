@@ -450,6 +450,7 @@ It signs in as **whichever Azure identity is already established on the machine*
 
 - **With no Azure sign-in on the machine it fails rather than asking for one.** Run `az login` first. The connection dialog says which of the two failure modes happened — nothing found, or one found and broken — and the log names each source and why it declined.
 - **The order is the driver's, not yours.** There is no seam to narrow the list: the driver constructs the credential chain itself and this app cannot pass options into it. On a machine with several Azure identities set up, this connects as whichever comes first, which is not necessarily the one you signed into Windows with. When a specific identity matters, use **Service Principal**, which names it.
+- **The log says which one won.** Lite records the credential type `DefaultAzureCredential` actually selected — `AzureCliCredential`, `EnvironmentCredential`, `ManagedIdentityCredential` and so on — so "whichever comes first" is answerable after the fact rather than only a caveat. Expect exactly one such line per run of the app: `Azure.Identity` reports the selection once per credential instance and the driver caches that instance for the process, so later connections have nothing new to report and say so at `Debug`. The type name is the only thing recorded; no tenant id, account or scope.
 
 Darling does not offer this mode: the Darling service's connect path builds Windows-integrated or SQL-login connections only and acquires no tokens at all, so its viewer rejects every Azure mode at the credential step.
 
