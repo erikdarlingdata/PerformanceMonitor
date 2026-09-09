@@ -21,6 +21,33 @@
 # Not automated. A workflow committing to a Dependabot branch needs a write-scoped credential this repository
 # does not issue, and a push made with GITHUB_TOKEN triggers no workflow run — so the healed commit would
 # carry no checks at all, which is a worse place to be than one red check that names its own remedy (#3143).
+#
+# ── Reviewing a Microsoft.Data.SqlClient or Azure.Identity bump ────────────────────────────────────────
+#
+# Read this before approving one. Lite's EntraDefaultCredential mode is broker-free only because
+# Azure.Identity.Broker is absent from the dependency graph: DefaultAzureCredential's chain DOES contain a
+# broker link (ExcludeBrokerCredential defaults to false, and SqlClient sets only
+# ExcludeInteractiveBrowserCredential), and that link is inert solely because it resolves its options by
+# reflection and gives up when the separate package is not referenced.
+#
+# Azure.Identity is not pinned in Directory.Packages.props. It arrives transitively through
+# Microsoft.Data.SqlClient.Extensions.Azure's version range, at one resolved version across the seven lock
+# files that carry it — so a SqlClient bump can move it without a props diff mentioning it, which is the
+# same transitive-closure blind spot the --force-evaluate step above exists for.
+#
+# Two pins in Lite.Tests/EntraDefaultCredentialTests.cs assert that absence, each with a positive control,
+# and BOTH of them assert the absence of that PACKAGE — today's mechanism, not the outcome. So check, by
+# hand, whether the bump changed either of:
+#
+#   * ExcludeBrokerCredential's default, or which exclusions SqlClient sets when it builds the options.
+#     A default flipping to true, or SqlClient starting to set it, would make the pins redundant rather
+#     than wrong — worth knowing, and worth deleting them for.
+#   * the broker's PACKAGING. If a future Azure.Identity carries the broker options type itself, or
+#     resolves them from somewhere other than an Azure.Identity.Broker assembly, both pins stay green and
+#     the guarantee is gone with nothing to notice it.
+#
+# Deliberately prose and not a check. Nothing in the graph can be asserted about a mechanism that does not
+# exist yet, and a test asserting today's shape harder is what is already there.
 version: 2
 updates:
   # .NET packages across the solution (PerformanceMonitor.sln discovers all projects).
