@@ -511,7 +511,11 @@ public class ServerManager
             }
             else
             {
-                _logger?.LogWarning("Connectivity check failed for server '{DisplayName}': {Message}", server.DisplayName, ex.Message);
+                /* The exception object, not just its Message. A federated-auth failure arrives as a
+                   SqlException wrapping MSAL's exception wrapping the Windows broker's, and Message
+                   is the outermost layer only; the sibling generic-catch arm below already passes the
+                   whole chain, and a SqlException is the shape an Entra MFA failure actually takes. */
+                _logger?.LogWarning(ex, "Connectivity check failed for server '{DisplayName}'", server.DisplayName);
             }
         }
         catch (Exception ex)
