@@ -28,7 +28,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpJobTools
 {
-    [McpServerTool(Name = "get_running_jobs"), Description("Gets currently running SQL Agent jobs with duration comparison. Shows each job's current duration vs its historical average and p95, flagging jobs that are running longer than usual. start_time is UTC, the same frame as collection_time and as every other timestamp this server returns (msdb records the Agent start in the monitored server's local clock; this read de-skews it), so current_duration_seconds and start_time agree.")]
+    [McpServerTool(Name = "get_running_jobs"), Description("Gets currently running SQL Agent jobs with duration comparison. Shows each job's current duration vs its historical average and p95, flagging jobs that are running longer than usual. start_time is UTC, the same frame as the collection_time on this payload (msdb records the Agent start in the monitored server's local clock; this read de-skews it), so start_time and current_duration_seconds agree.")]
     public static async Task<string> GetRunningJobs(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null)

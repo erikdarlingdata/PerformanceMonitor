@@ -130,45 +130,45 @@ internal static class DarlingBlockingReader
                 LIMIT 1), 0) AS offset_minutes
         )
         SELECT
-            bpr.event_time,
-            bpr.database_name,
-            bpr.blocked_spid,
-            bpr.blocked_ecid,
-            bpr.blocking_spid,
-            bpr.blocking_ecid,
-            bpr.wait_time_ms,
-            bpr.wait_resource,
-            bpr.lock_mode,
-            bpr.blocked_status,
-            bpr.blocked_isolation_level,
-            bpr.blocked_log_used,
-            bpr.blocked_transaction_count,
-            bpr.blocked_client_app,
-            bpr.blocked_host_name,
-            bpr.blocked_login_name,
-            bpr.blocked_sql_text,
-            bpr.blocking_status,
-            bpr.blocking_isolation_level,
-            bpr.blocking_client_app,
-            bpr.blocking_host_name,
-            bpr.blocking_login_name,
-            bpr.blocking_sql_text,
-            bpr.blocked_transaction_name,
-            bpr.blocking_transaction_name,
-            bpr.blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started_utc,
-            bpr.blocking_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocking_last_tran_started_utc,
-            bpr.blocked_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_started_utc,
-            bpr.blocking_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_started_utc,
-            bpr.blocked_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_completed_utc,
-            bpr.blocking_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_completed_utc,
-            bpr.blocked_priority,
-            bpr.blocking_priority,
-            bpr.blocked_process_report_xml,
-            bpr.contentious_object
-        FROM blocked_process_reports AS bpr, svr
-        WHERE bpr.server_id = $1
-        AND   bpr.collection_time >= $2
-        AND   bpr.collection_time <= $3
+            event_time,
+            database_name,
+            blocked_spid,
+            blocked_ecid,
+            blocking_spid,
+            blocking_ecid,
+            wait_time_ms,
+            wait_resource,
+            lock_mode,
+            blocked_status,
+            blocked_isolation_level,
+            blocked_log_used,
+            blocked_transaction_count,
+            blocked_client_app,
+            blocked_host_name,
+            blocked_login_name,
+            blocked_sql_text,
+            blocking_status,
+            blocking_isolation_level,
+            blocking_client_app,
+            blocking_host_name,
+            blocking_login_name,
+            blocking_sql_text,
+            blocked_transaction_name,
+            blocking_transaction_name,
+            blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started_utc,
+            blocking_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocking_last_tran_started_utc,
+            blocked_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_started_utc,
+            blocking_last_batch_started - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_started_utc,
+            blocked_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocked_last_batch_completed_utc,
+            blocking_last_batch_completed - make_interval(mins => svr.offset_minutes) AS blocking_last_batch_completed_utc,
+            blocked_priority,
+            blocking_priority,
+            blocked_process_report_xml,
+            contentious_object
+        FROM blocked_process_reports, svr
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
         ORDER BY event_time DESC
         LIMIT 200
         """;
@@ -193,30 +193,30 @@ internal static class DarlingBlockingReader
                 LIMIT 1), 0) AS offset_minutes
         )
         SELECT
-            dbs.event_time,
-            dbs.database_name,
-            dbs.blocked_spid,
-            dbs.blocked_ecid,
-            dbs.blocking_spid,
-            dbs.blocking_ecid,
-            dbs.wait_time_ms,
-            dbs.lock_mode,
-            dbs.blocking_status,
-            dbs.contentious_object,
-            dbs.blocked_sql_text,
-            dbs.blocking_sql_text,
-            dbs.blocked_login_name,
-            dbs.blocked_host_name,
-            dbs.blocked_client_app,
-            dbs.blocking_login_name,
-            dbs.blocking_host_name,
-            dbs.blocking_client_app,
-            dbs.blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started_utc,
-            dbs.blocking_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocking_last_tran_started_utc
-        FROM v_dmv_blocking_snapshots AS dbs, svr
-        WHERE dbs.server_id = $1
-        AND   dbs.collection_time >= $2
-        AND   dbs.collection_time <= $3
+            event_time,
+            database_name,
+            blocked_spid,
+            blocked_ecid,
+            blocking_spid,
+            blocking_ecid,
+            wait_time_ms,
+            lock_mode,
+            blocking_status,
+            contentious_object,
+            blocked_sql_text,
+            blocking_sql_text,
+            blocked_login_name,
+            blocked_host_name,
+            blocked_client_app,
+            blocking_login_name,
+            blocking_host_name,
+            blocking_client_app,
+            blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started_utc,
+            blocking_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocking_last_tran_started_utc
+        FROM v_dmv_blocking_snapshots, svr
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
         ORDER BY event_time DESC
         LIMIT 200
         """;

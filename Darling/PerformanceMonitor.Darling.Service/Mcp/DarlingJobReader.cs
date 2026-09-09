@@ -43,7 +43,7 @@ internal static class DarlingJobReader
 {
     /// <summary>One currently-running SQL Agent job with its historical duration comparison. The start time is
     /// naive UTC: the read de-skews the stored msdb-local value, so it shares the frame of
-    /// <c>CollectionTime</c> and of every other timestamp the MCP surface returns.</summary>
+    /// <c>CollectionTime</c> on the same row.</summary>
     public sealed record RunningJobRow(
         DateTime CollectionTime, string JobName, string JobId, bool JobEnabled, DateTime StartTimeUtc,
         long CurrentDurationSeconds, long AvgDurationSeconds, long P95DurationSeconds, long SuccessfulRunCount,
@@ -73,20 +73,20 @@ internal static class DarlingJobReader
                 LIMIT 1), 0) AS offset_minutes
         )
         SELECT
-            rj.collection_time,
-            rj.job_name,
-            rj.job_id,
-            rj.job_enabled,
-            rj.start_time - make_interval(mins => svr.offset_minutes) AS start_time_utc,
-            rj.current_duration_seconds,
-            rj.avg_duration_seconds,
-            rj.p95_duration_seconds,
-            rj.successful_run_count,
-            rj.is_running_long,
-            rj.percent_of_average
-        FROM v_running_jobs AS rj, svr
-        WHERE rj.server_id = $1
-        AND   rj.collection_time = (
+            collection_time,
+            job_name,
+            job_id,
+            job_enabled,
+            start_time - make_interval(mins => svr.offset_minutes) AS start_time_utc,
+            current_duration_seconds,
+            avg_duration_seconds,
+            p95_duration_seconds,
+            successful_run_count,
+            is_running_long,
+            percent_of_average
+        FROM v_running_jobs, svr
+        WHERE server_id = $1
+        AND   collection_time = (
             SELECT MAX(collection_time)
             FROM v_running_jobs
             WHERE server_id = $1
