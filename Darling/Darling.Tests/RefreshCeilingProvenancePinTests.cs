@@ -985,10 +985,13 @@ public sealed class RefreshCeilingProvenancePinTests
             StringComparison.Ordinal);
 
         /* (2) THE LIGHT: rewrite the census's own run count. Through the same ordinal rewrite the drift
-           sweep uses rather than a bare string replace, because 874 appears four times in that doc run and
-           only two of them are pinned — a replace would mutate prose this pin does not read and prove
-           something other than what it was aimed at. The rewrite pads to the original width, so the count
-           comes back as a zero-padded four and parses as one, which is the intended value. */
+           sweep uses rather than a bare string replace, because that doc run states the census count in
+           sentences this pin does NOT read as well as in the two it does - so a replace would mutate
+           prose the pin is not aimed at and prove something other than what it was aimed at. Said
+           without a tally on purpose: a count of occurrences in a doc run that can be reworded is the
+           frozen-enumeration defect this file exists to catch, one level up. Addressing by ordinal has
+           the property regardless of how many there are. The rewrite pads to the original width, so the
+           count comes back zero-padded and parses as the intended value. */
         var censusPattern = PatternFor("the light-refresh census");
         var lightProse = DocProseFor(source, LightCeilingDeclaration);
         var firstCaptured = OrdinalOfFirstNumberInGroups(lightProse, censusPattern);
