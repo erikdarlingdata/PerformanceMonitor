@@ -289,12 +289,16 @@ public sealed class QueryStoreTouchGuardSingleSourceTests
            like was never taken. */
         Assert.Contains(UnguardedMarginFile, scannedNames, StringComparer.Ordinal);
 
+        /* No self-exclusion for QueryStoreLivenessTouchGuard.cs, deliberately. The token scanned for is the
+           QUALIFIED reference, which that file never writes about itself — inside the class the constant is
+           reached unqualified, and the qualified spellings in its doc comments are blanked by the walk. A
+           filter for a case that cannot arise is somewhere a future case hides, so it is measured (its own
+           file is in the sweep and out of the derived set, by the set equality below) rather than excluded. */
         var derived = projectFiles
             .Where(path => CSharpSourceWalker
                 .StripCommentsAndStrings(File.ReadAllText(path))
                 .Contains(GuardReference, StringComparison.Ordinal))
             .Select(path => Path.GetFileName(path)!)
-            .Where(name => !string.Equals(name, "QueryStoreLivenessTouchGuard.cs", StringComparison.Ordinal))
             .OrderBy(name => name, StringComparer.Ordinal)
             .ToArray();
 
