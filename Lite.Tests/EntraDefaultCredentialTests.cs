@@ -436,6 +436,17 @@ public class EntraDefaultCredentialTests
            exists to route around. This is the exact Type.GetType call
            DefaultAzureCredentialFactory.TryCreateDevelopmentBrokerOptions makes, so the pin cannot
            drift from the mechanism it guards: whatever this returns is what the chain will see. */
+
+        /* The POSITIVE CONTROL comes first, and without it this test is decoration. Type.GetType on
+           a simple assembly name answers null both when the assembly is absent and when nothing can
+           be loaded by that form at all - so in any assembly whose closure does not carry
+           Azure.Identity, the assertion below passes for entirely the wrong reason and would keep
+           passing with the broker package added. Measured: run against a harness that referenced
+           only Microsoft.Data.SqlClient, both halves of this pin passed with no Azure assembly on
+           disk. Proving the probe CAN return a type is what makes the null meaningful. */
+        Assert.NotNull(Type.GetType(
+            "Azure.Identity.DefaultAzureCredential, Azure.Identity", throwOnError: false));
+
         var brokerOptions = Type.GetType(
             "Azure.Identity.Broker.DevelopmentBrokerOptions, Azure.Identity.Broker",
             throwOnError: false);
@@ -452,6 +463,11 @@ public class EntraDefaultCredentialTests
            names change, moves one of these and not the other. */
         var beside = Path.GetDirectoryName(typeof(ServerConnection).Assembly.Location);
         Assert.False(string.IsNullOrEmpty(beside), "the app assembly must have a resolvable location");
+
+        /* Positive control, for the same reason as above: "no file matches Azure.Identity.Broker*"
+           is also true of a directory holding no Azure assemblies whatsoever, which is not the claim
+           and is not evidence for it. */
+        Assert.NotEmpty(Directory.GetFiles(beside!, "Azure.Identity.dll"));
 
         Assert.Empty(Directory.GetFiles(beside!, "Azure.Identity.Broker*"));
     }
