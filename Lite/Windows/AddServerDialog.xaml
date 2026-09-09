@@ -138,7 +138,7 @@
             <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,6,0,0"
                        Text="Because the list is searched in that order, this connects as whichever identity comes first — not necessarily the one you signed into Windows with. If several are set up on this machine and you need a specific identity, use Azure — Service Principal, which names it."/>
             <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,6,0,0"
-                       Text="Unlike Microsoft Entra MFA, this does not use the Windows account broker, so it works where that fails. It has not yet been confirmed against a live Entra tenant."/>
+                       Text="Unlike Microsoft Entra MFA, this never asks the Windows account broker for anything, so the broker cannot refuse it. That is the failure this option exists to route around — but it has not yet been confirmed against a live Microsoft Entra tenant, so please report what happens."/>
         </StackPanel>
 
         <!-- Connection Options -->
