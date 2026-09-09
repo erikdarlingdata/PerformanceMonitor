@@ -5,13 +5,6 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <RootNamespace>PerformanceMonitor.Darling.Service</RootNamespace>
     <AssemblyName>PerformanceMonitor.Darling.Service</AssemblyName>
-    <Version>3.6.0</Version>
-    <!-- #2113: <Version> is the ONE hand-set version. AssemblyVersion / FileVersion /
-         InformationalVersion derive from it at build time - the 3.4.0 release bumped only
-         <Version> and shipped binaries still STAMPED 3.3.0.0, because four hand-maintained
-         copies of one fact is a release-day trap. The suffix suppression keeps
-         InformationalVersion a clean semver instead of gaining a +sha under CI SourceLink. -->
-    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Company>Darling Data, LLC</Company>
     <Copyright>Copyright © 2026 Darling Data, LLC</Copyright>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
