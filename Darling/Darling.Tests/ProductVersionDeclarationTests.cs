@@ -88,11 +88,13 @@ public class ProductVersionDeclarationTests
     ///
     /// <para><b>Counted by parsing XML, not by matching text.</b> The issue this closes was itself
     /// mis-counted by a grep: searching for <c>3.6.0</c> found four of six declarations, because a search
-    /// shaped like the expected answer returns a confident partial count and no error. Text matching fails
-    /// the other way here too — the three shipped csprojs each carried a COMMENT quoting the property name,
-    /// so a substring count reported three per file where there was one. An element walk cannot see a
-    /// comment, and scoping to elements whose parent is a <c>PropertyGroup</c> keeps a
-    /// <c>PackageReference</c>'s nested version spelling out of the count.</para>
+    /// shaped like the expected answer returns a confident partial count and no error. A substring count
+    /// fails the other way, and by more: the three shipped csprojs each carried a COMMENT quoting the
+    /// property name, so counting the angle-bracket spelling over the six files returned 12 where the
+    /// element walk returned 6. Three methods, three answers, on one tree. On the tree AFTER this change
+    /// the two agree at 1, so the walk changes no answer today and is here for the reason it disagreed
+    /// before. An element walk cannot see a comment, and scoping to elements whose parent is a
+    /// <c>PropertyGroup</c> keeps a <c>PackageReference</c>'s nested version spelling out of the count.</para>
     ///
     /// <para><b>Root placement and shadowing are part of the same property.</b> A declaration that moved to
     /// a subdirectory would still be the only one, and every project outside that subdirectory would stamp
