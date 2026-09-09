@@ -498,13 +498,23 @@ public static class ComposeCompiler
     /// <see cref="AnnotationClockFrame.ServerLocal"/> annotation source. Keyed on <c>server_name</c> because
     /// that is the column an annotation query already scopes on, and <c>DISTINCT ON</c> because each server
     /// carries its own offset — one panel routinely overlays several servers at once, so a single scalar
-    /// would de-skew all of them by whichever server answered first. Every identifier here is a compiler
-    /// constant; the join adds no parameter.</summary>
-    private const string ServerOffsetJoin =
+    /// would de-skew all of them by whichever server answered first. Every identifier is a compiler
+    /// constant, and the join adds no parameter of its own.
+    ///
+    /// <para><c>server_properties</c> is indexed <c>(server_id, collection_time)</c> and NOT on
+    /// <c>server_name</c>, so this subquery's <c>DISTINCT ON</c> sort has no index to ride. When the panel
+    /// names its servers, the SAME bound array the outer query filters on scopes the subquery too, which
+    /// bounds the sort by the requested servers instead of the whole fleet's retained offset history. That
+    /// is safe rather than merely cheaper: every <c>f</c> row surviving the outer predicate already has a
+    /// <c>server_name</c> in that array, so restricting the right side of the LEFT JOIN to it cannot change
+    /// which offset any surviving row matches. A fleet-wide panel supplies no array and needs the whole
+    /// relation, so it keeps the unscoped form.</para></summary>
+    private static string ServerOffsetJoin(string? serverScopeParam) =>
         "LEFT JOIN (\n"
         + "        SELECT DISTINCT ON (server_name) server_name, utc_offset_minutes\n"
         + "        FROM " + PgSchemaGenerator.CollectSchema + ".server_properties\n"
         + "        WHERE utc_offset_minutes IS NOT NULL\n"
+        + (serverScopeParam is null ? "" : "        AND   server_name = ANY(" + serverScopeParam + ")\n")
         + "        ORDER BY server_name, collection_time DESC\n"
         + "      ) AS o ON o.server_name = f.server_name\n";
 
@@ -541,7 +551,7 @@ public static class ComposeCompiler
             .Append(" AS ").Append(FactAlias).Append('\n');
         if (serverLocal)
         {
-            sql.Append("      ").Append(ServerOffsetJoin);
+            sql.Append("      ").Append(ServerOffsetJoin(serverScopeParam));
         }
 
         sql.Append("WHERE ").Append(ts).Append(" >= ").Append(startParam).Append('\n');

@@ -255,6 +255,38 @@ public sealed class ServerLocalReadFrameDisciplineTests
         }
     }
 
+    /// <summary>
+    /// The offset join is scoped by the panel's own server array when it has one, and unscoped when it does
+    /// not. <c>server_properties</c> is indexed <c>(server_id, collection_time)</c>, so this subquery's
+    /// <c>DISTINCT ON (server_name)</c> sort has no index to ride and would otherwise sort the whole fleet's
+    /// retained offset history on every compile of a server-scoped panel.
+    ///
+    /// <para>Asserted as the parameter COUNT as well as the predicate, because the cheap way to scope a
+    /// subquery is to bind the server list a second time — which would work, would look right here, and
+    /// would silently shift the ordinals every other assertion in <c>DarlingComposeTests</c> depends on.
+    /// Reusing the array the outer query already binds is the whole point.</para>
+    /// </summary>
+    [Fact]
+    public void CompiledAnnotationSql_ScopesTheOffsetJoin_ToThePanelsOwnServerArray()
+    {
+        var serverLocal = MeasureCatalog.AnnotationSources
+            .Single(a => a.Frame == AnnotationClockFrame.ServerLocal).Key;
+
+        var scoped = CompiledAnnotation(serverLocal, new[] { "SERVER-A", "SERVER-B" });
+        Assert.Contains("AND   server_name = ANY($3)", scoped.Sql, StringComparison.Ordinal);
+        /* The outer predicate is still there and still binds the same $3 — one array, two uses. */
+        Assert.Contains("f.server_name = ANY($3)", scoped.Sql, StringComparison.Ordinal);
+        Assert.Equal(3, scoped.Parameters.Count);
+        Assert.DoesNotContain("$4", scoped.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SERVER-A", scoped.Sql, StringComparison.Ordinal);
+
+        /* A fleet-wide panel names no servers, so it needs the whole relation and binds only the window. */
+        var fleet = CompiledAnnotation(serverLocal, null);
+        Assert.DoesNotContain("server_name = ANY", fleet.Sql, StringComparison.Ordinal);
+        Assert.Contains("DISTINCT ON (server_name) server_name, utc_offset_minutes", fleet.Sql, StringComparison.Ordinal);
+        Assert.Equal(2, fleet.Parameters.Count);
+    }
+
     /* ───────────────────────── the discriminators, both directions ───────────────────────── */
 
     [Fact]
@@ -324,7 +356,9 @@ public sealed class ServerLocalReadFrameDisciplineTests
 
     /* ───────────────────────── plumbing ───────────────────────── */
 
-    private static string CompiledAnnotation(string key)
+    private static string CompiledAnnotation(string key) => CompiledAnnotation(key, null).Sql;
+
+    private static ComposeCompiled CompiledAnnotation(string key, IReadOnlyList<string>? servers)
     {
         var json = "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\","
             + "\"timeBucket\":\"hour\",\"viz\":\"line\",\"annotations\":[\"" + key + "\"]}";
@@ -336,9 +370,9 @@ public sealed class ServerLocalReadFrameDisciplineTests
         var end = new DateTime(2026, 7, 18, 6, 0, 0, DateTimeKind.Utc);
         var compiled = ComposeCompiler.CompileAnnotations(
             plan!,
-            new ComposeRunContext(null, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end, RollupCoverage.Unknown));
+            new ComposeRunContext(servers, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end, RollupCoverage.Unknown));
 
-        return Assert.Single(compiled).Compiled.Sql;
+        return Assert.Single(compiled).Compiled;
     }
 
     /// <summary>Comment spans out, string literals kept — the SQL under test IS a verbatim literal, and this
