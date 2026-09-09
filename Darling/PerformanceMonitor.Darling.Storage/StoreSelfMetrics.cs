@@ -262,6 +262,26 @@ SELECT
     /// that store, it cannot decay, and nothing here guarantees it. Quote the cadence and the provenance,
     /// never "worst case is 2.47 hours".</para>
     ///
+    /// <para><b>Its cheapness is incidental, not structural, and that is stated rather than glossed.</b>
+    /// Every row one <see cref="SweepAsync"/> run writes carries the SAME <c>metric_time</c> — one
+    /// <c>utcNow</c> stamps all of them, deliberately, so a run's rows join — and
+    /// <c>idx_store_metrics_time</c> (V53) indexes <c>(metric_time)</c> alone. So a backward scan reaches
+    /// this row early only because <see cref="StoreInsertSql"/> happens to run LAST in the sweep, not
+    /// because the query says so. Measured on a 225 GiB store it is 3 buffers, which is that ordering
+    /// holding; reordering the sweep, a <c>VACUUM</c> or a <c>REINDEX</c> could make the scan step past the
+    /// rest of the tied group first.</para>
+    ///
+    /// <para><b>Why that is accepted here when #3199 rejected the same shape of argument.</b> The growth
+    /// axis is different, and the axis is what made <c>pg_database_size</c> unbounded. The tied group is
+    /// one sweep's output — <see cref="TimescaleSupport.HypertableCount"/> hypertable rows (70 today), one
+    /// row per Timescale background job, two dimension rows and this one — so it tracks the COLLECTOR
+    /// CATALOG, a product constant that moves only when a migration rung adds a hypertable, and every
+    /// element is a narrow row on a plain table. <c>pg_database_size</c> tracked the store's file count,
+    /// which retention span and ingest rate grow without anything choosing to. A composite
+    /// <c>(object_kind, metric_time DESC)</c> index would make it exact and is the right follow-up; it
+    /// needs a migration rung, and taking a rung number alongside unmerged siblings is its own
+    /// documented hazard, so it is not bundled into the change that removed the unbounded read.</para>
+    ///
     /// <para><c>total_bytes IS NOT NULL</c> because the column is nullable for the per-hypertable rows'
     /// sake: without it a hypothetical NULL newest row would mask a good older one, and both would arrive
     /// as the same null. On a store that has never completed a sweep this returns no row and the alert text
