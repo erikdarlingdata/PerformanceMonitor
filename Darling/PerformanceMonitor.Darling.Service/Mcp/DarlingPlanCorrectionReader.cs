@@ -55,36 +55,36 @@ WITH svr AS (
         LIMIT 1), 0) AS offset_minutes
 )
 SELECT
-    pc.collection_time,
-    pc.database_name,
-    pc.query_text,
-    pc.recommendation_state,
-    pc.recommendation_state_reason,
-    pc.recommendation_reason,
-    pc.score,
-    pc.estimated_gain_seconds,
-    pc.query_id,
-    pc.regressed_plan_id,
-    pc.last_good_plan_id,
-    pc.last_good_plan_forcing_type,
-    pc.last_good_plan_is_forced,
-    pc.last_good_plan_force_failure_reason,
-    pc.regressed_plan_execution_count,
-    pc.regressed_plan_cpu_time_average_ms,
-    pc.last_good_plan_execution_count,
-    pc.last_good_plan_cpu_time_average_ms,
-    pc.valid_since - make_interval(mins => svr.offset_minutes) AS valid_since_utc,
-    pc.last_refresh - make_interval(mins => svr.offset_minutes) AS last_refresh_utc,
-    pc.execute_action_initiated_by,
-    pc.execute_action_initiated_time - make_interval(mins => svr.offset_minutes) AS execute_action_initiated_time_utc,
-    pc.revert_action_initiated_by,
-    pc.revert_action_initiated_time - make_interval(mins => svr.offset_minutes) AS revert_action_initiated_time_utc
-FROM plan_correction AS pc, svr
-WHERE pc.server_id = $1
-AND   pc.collection_time >= $2
-AND   pc.collection_time <= $3
-AND   pc.recommendation_name IS NOT NULL
-ORDER BY pc.collection_time DESC, pc.score DESC
+    collection_time,
+    database_name,
+    query_text,
+    recommendation_state,
+    recommendation_state_reason,
+    recommendation_reason,
+    score,
+    estimated_gain_seconds,
+    query_id,
+    regressed_plan_id,
+    last_good_plan_id,
+    last_good_plan_forcing_type,
+    last_good_plan_is_forced,
+    last_good_plan_force_failure_reason,
+    regressed_plan_execution_count,
+    regressed_plan_cpu_time_average_ms,
+    last_good_plan_execution_count,
+    last_good_plan_cpu_time_average_ms,
+    valid_since - make_interval(mins => svr.offset_minutes) AS valid_since_utc,
+    last_refresh - make_interval(mins => svr.offset_minutes) AS last_refresh_utc,
+    execute_action_initiated_by,
+    execute_action_initiated_time - make_interval(mins => svr.offset_minutes) AS execute_action_initiated_time_utc,
+    revert_action_initiated_by,
+    revert_action_initiated_time - make_interval(mins => svr.offset_minutes) AS revert_action_initiated_time_utc
+FROM plan_correction, svr
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+AND   recommendation_name IS NOT NULL
+ORDER BY collection_time DESC, score DESC
 LIMIT 200";
 
     /// <summary>

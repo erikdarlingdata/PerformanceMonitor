@@ -114,8 +114,8 @@ public sealed class McpPayloadClockFrameDisciplineTests
            subtracting four times before it. */
         ("IndexUsageSql",
             [new("last_user_access",
-                 "GREATEST(ios.last_user_seek, ios.last_user_scan, ios.last_user_lookup, ios.last_user_update)",
-                 BareForm: "GREATEST(ios.last_user_seek, ios.last_user_scan, ios.last_user_lookup, ios.last_user_update) AS last_user_access,")],
+                 "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)",
+                 BareForm: "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,")],
             "IndexObjectStatsCollector ships us.last_user_seek/scan/lookup/update from "
             + "sys.dm_db_index_usage_stats verbatim; the read GREATESTs the four"),
         ("PvsStatsLatestSql",
@@ -377,18 +377,19 @@ public sealed class McpPayloadClockFrameDisciplineTests
            the case a name-derived matcher silently passed. */
         var greatest = new PayloadColumn(
             "last_user_access",
-            "GREATEST(ios.last_user_seek, ios.last_user_scan, ios.last_user_lookup, ios.last_user_update)",
-            BareForm: "GREATEST(ios.last_user_seek, ios.last_user_scan, ios.last_user_lookup, ios.last_user_update) AS last_user_access,");
+            "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)",
+            BareForm: "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,");
         Assert.Equal(
-            "GREATEST(ios.last_user_seek, ios.last_user_scan, ios.last_user_lookup, ios.last_user_update)"
+            "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)"
             + " - make_interval(mins => svr.offset_minutes) AS last_user_access_utc",
             greatest.DeSkewed);
         Assert.Matches(
             BareProjection(greatest),
-            "            GREATEST(ios.last_user_seek, ios.last_user_scan, ios.last_user_lookup, ios.last_user_update) AS last_user_access,\n");
+            "            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,\n");
         Assert.DoesNotMatch(
             BareProjection(greatest),
-            "            GREATEST(ios.last_user_seek, ios.last_user_scan, ios.last_user_lookup, ios.last_user_update) - make_interval(mins => svr.offset_minutes) AS last_user_access_utc,\n");
+            "            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)\n"
+            + "                - make_interval(mins => svr.offset_minutes) AS last_user_access_utc,\n");
 
         /* LiteDeSkew recognises BOTH shipped Lite forms — the nullable one and the non-nullable one — and
            neither bare emission. The non-nullable case is real: RunningJobRow.StartTime is a DateTime. */
