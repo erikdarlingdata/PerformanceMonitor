@@ -47,12 +47,18 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class StoreSqlClockDisciplineTests
 {
-    /* Floors, so the scan cannot pass by finding nothing. Measured on dev at the time of writing: 563 files,
-       19,604 string literals, 1,627 of them SQL-shaped, 56 naive timestamp column names. Set well below
-       those so ordinary growth never trips them, but high enough that a broken glob or a desynchronised
-       literal walk fails instead of reporting a clean bill of health. The column-vocabulary floor is the one
-       that matters most: the discriminator needs those names, and a DDL scrape that quietly returned four of
-       them would make every offender below invisible while still reporting thousands of literals scanned. */
+    /* Floors, so the scan cannot pass by finding nothing. Measured on dev: 602 files, 20,843 string literal
+       bodies welded into 1,681 SQL-shaped UNITS (815 units weld two or more bodies; the widest welds 55),
+       57 naive timestamp column names. Set well below those so ordinary growth never trips them, but high
+       enough that a broken glob or a desynchronised literal walk fails instead of reporting a clean bill of
+       health. The column-vocabulary floor is the one that matters most: the discriminator needs those names,
+       and a DDL scrape that quietly returned four of them would make every offender below invisible while
+       still reporting thousands of literals scanned.
+
+       The SQL floor counts welded units, which is FEWER than the bodies it reads - grouping collapsed 1,752
+       per-body matches into 1,681 units while adding eight that no single body was SQL-shaped enough to
+       reach. A drop is therefore not by itself evidence of lost reach; the unit count and the body count are
+       both floored so a walk that desynchronised would fail the second one. */
     private const int MinimumFilesScanned = 200;
     private const int MinimumLiteralsScanned = 12_000;
     private const int MinimumSqlLiteralsScanned = 1_200;
@@ -126,7 +132,7 @@ public sealed class StoreSqlClockDisciplineTests
 
         var files = 0;
         var literals = 0;
-        var sqlLiterals = 0;
+        var sqlUnits = 0;
         var offenders = new List<string>();
 
         foreach (var path in StoreSourceFiles())
@@ -134,44 +140,36 @@ public sealed class StoreSqlClockDisciplineTests
             files++;
             var text = File.ReadAllText(path);
             var name = Path.GetFileName(path);
+            var scan = ScanSource(text, columns);
+
+            literals += scan.Literals;
+            sqlUnits += scan.SqlUnits;
 
             /* Built at most once per file, and only when a finding needs a name. */
             CSharpMemberMap.MemberMap? members = null;
 
-            foreach (var (start, body) in CSharpSourceWalker.StringLiteralBodies(text))
+            foreach (var (start, finding) in scan.Offenders)
             {
-                literals++;
+                members ??= CSharpMemberMap.Of(text);
+                var member = CSharpMemberMap.EnclosingMember(members, start);
 
-                if (!LooksLikeSql(body))
+                /* The waiver key is file:member, so a wrong member name is a wrong DECISION here and
+                   not merely a wrong message: it can miss a legitimate waiver, or collide with an
+                   unrelated one and swallow a real finding. #3094 replaced the copy of the resolver
+                   this file used to carry, which answered `if`, `using`, `while`, `Select` and
+                   `NpgsqlCommand` at 21 sites in this very tree. */
+                if (Waived.Contains(name + ":" + member))
                 {
                     continue;
                 }
 
-                sqlLiterals++;
-
-                foreach (var finding in MixedClockComparisons(body, columns))
-                {
-                    members ??= CSharpMemberMap.Of(text);
-                    var member = CSharpMemberMap.EnclosingMember(members, start);
-
-                    /* The waiver key is file:member, so a wrong member name is a wrong DECISION here and
-                       not merely a wrong message: it can miss a legitimate waiver, or collide with an
-                       unrelated one and swallow a real finding. #3094 replaced the copy of the resolver
-                       this file used to carry, which answered `if`, `using`, `while`, `Select` and
-                       `NpgsqlCommand` at 21 sites in this very tree. */
-                    if (Waived.Contains(name + ":" + member))
-                    {
-                        continue;
-                    }
-
-                    offenders.Add($"{name}:{member} — {finding}");
-                }
+                offenders.Add($"{name}:{member} — {finding}");
             }
         }
 
         Assert.True(files >= MinimumFilesScanned, $"scanned only {files} store source files (floor {MinimumFilesScanned})");
-        Assert.True(literals >= MinimumLiteralsScanned, $"scanned only {literals} string literals (floor {MinimumLiteralsScanned})");
-        Assert.True(sqlLiterals >= MinimumSqlLiteralsScanned, $"scanned only {sqlLiterals} SQL literals (floor {MinimumSqlLiteralsScanned})");
+        Assert.True(literals >= MinimumLiteralsScanned, $"scanned only {literals} string literal bodies (floor {MinimumLiteralsScanned})");
+        Assert.True(sqlUnits >= MinimumSqlLiteralsScanned, $"scanned only {sqlUnits} SQL-shaped units (floor {MinimumSqlLiteralsScanned})");
 
         Assert.True(
             offenders.Count == 0,
@@ -259,6 +257,378 @@ public sealed class StoreSqlClockDisciplineTests
                 "the discriminator FLAGGED a benign form: " + sql
                     + " => " + string.Join("; ", MixedClockComparisons(sql, columns)));
         }
+    }
+
+    /// <summary>
+    /// The literal GROUPING, pinned against C# SOURCE fixtures rather than SQL strings. The defect it closes
+    /// is not in the discriminator — that reads either half of a split predicate correctly — but in what the
+    /// scan hands it, so a fixture written as SQL could not reach it. Each shape below is one this corpus
+    /// contains.
+    /// </summary>
+    [Fact]
+    public void TheScan_WeldsAPredicateSplitAcrossAConcatenation_AndWeldsNothingElse()
+    {
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "collection_time" };
+
+        /* Split exactly at the operator: the first literal ends at `<`, the second opens with the clock.
+           NEITHER body is a comparison on its own, so read one at a time this reports clean — and the second
+           is not even SQL-shaped, so it never reaches the discriminator at all. */
+        const string bareGlue = @"class C { const string Sql = @""DELETE FROM t WHERE collection_time < "" + @""now() - interval '1 hour'""; }";
+
+        /* The same split with an EXPRESSION in the gap, which is the shape the store's composed SQL actually
+           ships (`QueryStorePlanMap` and `QueryStoreTextStore` interpolate a column-name constant this way,
+           and `DarlingPgColumnStatsReader.CoverageEvidenceSql` interpolates three values). */
+        const string expressionGlue = @"class C { const string Sql = @""SELECT 1 FROM t WHERE collection_time > $1 AND collection_time < "" + Cast + @""now() - interval '1 hour'""; }";
+
+        /* A comment in the gap, carrying both a clock and a `;`. The weld is judged on CODE characters, so
+           neither can split a run the compiler joins — and this repo's SQL comments discuss `now()`
+           constantly. */
+        const string commentedGlue = @"class C { const string Sql = @""DELETE FROM t WHERE collection_time < "" /* not now(); the zone shifts it */ + @""now() - interval '1 hour'""; }";
+
+        foreach (var (label, source) in new[]
+        {
+            ("bare + glue", bareGlue),
+            ("expression glue", expressionGlue),
+            ("comment in the gap", commentedGlue),
+        })
+        {
+            Assert.True(
+                ScanSource(source, columns).Offenders.Count > 0,
+                $"the scan MISSED a predicate split across a concatenation ({label}) — this is the coverage "
+                + "loss the grouping exists to close: " + source);
+        }
+
+        /* Welding these WOULD read as the hazard above, and welding them would be wrong. Each is the same
+           two literals separated by something no concatenation puts between them. */
+        var mustNotWeld = new (string Label, string Source)[]
+        {
+            ("separate statements",
+                @"class C { const string A = @""DELETE FROM t WHERE collection_time < ""; const string B = @""now() - interval '1 hour'""; }"),
+            ("separate arguments",
+                @"class C { void M() { Run(@""DELETE FROM t WHERE collection_time < "", @""now() - interval '1 hour'""); } }"),
+            ("collection elements",
+                @"class C { static readonly string[] Parts = [@""DELETE FROM t WHERE collection_time < "", @""now() - interval '1 hour'""]; }"),
+            /* The two shapes that make the glue test more than a first-character check. Each ends one
+               statement or argument mid-concatenation and opens the next the same way, so the gap holds a
+               `+` — the first at one end, the second at BOTH — and only the breaker between them says they
+               are not one expression. Without these two the corpus stays green with the whole breaker test
+               deleted, which is how a control ends up certifying nothing. */
+            ("a + in the gap, but two statements",
+                @"class C { void M() { var a = @""DELETE FROM t WHERE collection_time < "" + x; var b = @""now() - interval '1 hour'""; } }"),
+            ("a + at BOTH ends of the gap, but two statements",
+                @"class C { void M() { var a = @""DELETE FROM t WHERE collection_time < "" + x; var b = y + @""now() - interval '1 hour'""; } }"),
+            ("a + at both ends of the gap, but two arguments",
+                @"class C { void M() { Run(@""DELETE FROM t WHERE collection_time < "" + x, y + @""now() - interval '1 hour'""); } }"),
+            /* A conditional's two arms. Nothing separates them but the `:`, so the gap holds no statement
+               or argument break at all — these two are the only fixtures the `+`-at-both-ends test and the
+               depth-zero colon test respectively are the sole reason for rejecting, and welding arms that
+               never both run invents a predicate no execution can produce. */
+            ("the two arms of a conditional",
+                @"class C { void M() { var s = flag ? @""DELETE FROM t WHERE collection_time < "" + x : @""now() - interval '1 hour'""; } }"),
+            ("the two arms of a conditional, + at both ends of the gap",
+                @"class C { void M() { var s = flag ? @""DELETE FROM t WHERE collection_time < "" + x : y + @""now() - interval '1 hour'""; } }"),
+            /* A comparison used as a condition, with the second literal concatenated inside the arm it
+               governs. The gap ends with a `+` but does not START with one, and it holds no separator at
+               depth zero at all, so the `+`-at-BOTH-ends test is the only thing that rejects it. Modelled
+               on the real shape in DarlingMcpPgWraparoundTools, whose gap is
+               `&&Rank(multi)>Rank(xid)?worst+`; measured, it and one other are the only two adjacent gaps
+               in the corpus where a bare "the gap contains a +" rule would weld and this one does not. */
+            ("a comparison in a condition, with the arm concatenating the next literal",
+                @"class C { void M() { var s = k == @""DELETE FROM t WHERE collection_time < "" && Rank(m) > Rank(x) ? worst + @""now() - interval '1 hour'"" : other; } }"),
+        };
+
+        foreach (var (label, source) in mustNotWeld)
+        {
+            var found = ScanSource(source, columns).Offenders;
+
+            Assert.True(
+                found.Count == 0,
+                $"the scan WELDED two literals that are not one concatenation ({label}), inventing a "
+                + "predicate the runtime never builds: " + string.Join("; ", found.Select(o => o.Finding)));
+        }
+
+        /* The grouping's own shape, not only its end effect: one welded unit against two separate ones, so a
+           regression that stopped welding while some other change kept the end-to-end assertions passing
+           still fails here. */
+        var welded = Assert.Single(ConcatenatedLiteralUnits(bareGlue));
+        Assert.Equal(2, welded.Bodies);
+        Assert.Contains("collection_time < now()", welded.Text, StringComparison.Ordinal);
+
+        var separate = ConcatenatedLiteralUnits(mustNotWeld[0].Source);
+        Assert.Equal(2, separate.Count);
+        Assert.All(separate, unit => Assert.Equal(1, unit.Bodies));
+
+        /* Nesting, pinned on the SHAPE rather than on a finding. A literal inside an interpolation hole
+           must weld with neither its container nor its container's neighbours — two units, one body each —
+           and 144 bodies in the corpus are nested that way, so grouping by source adjacency alone would
+           splice a body into its own container. Deliberately not asserted through the discriminator: the
+           walker preserves a nested literal's own text inside the container's rendering (only CODE is
+           blanked), so a hole holding a column name is already a finding on the container alone, and a
+           findings-based fixture here would pass whatever the grouping did with it. */
+        var nested = ConcatenatedLiteralUnits(
+            @"class C { void M() { var sql = $@""SELECT a FROM t WHERE {Col(@""collection_time"")} < $1""; } }");
+
+        Assert.Equal(2, nested.Count);
+        Assert.All(nested, unit => Assert.Equal(1, unit.Bodies));
+
+        /* And the composition, which is the part the parent tracking actually buys. Here a container with a
+           hole is concatenated to a following literal: the weld belongs to the CONTAINER, so its unit must
+           carry both halves. Grouped by walk order instead, the nested body would be the run left open when
+           the trailing literal arrives and would weld to THAT — silently dropping the container's own text
+           out of the welded unit while still yielding two units, so a count-only assertion cannot see it. */
+        var weldedContainer = ConcatenatedLiteralUnits(
+            @"class C { void M() { var sql = $@""SELECT {F(@""x"")} FROM t "" + @""WHERE collection_time < now()""; } }");
+
+        Assert.Equal(2, weldedContainer.Count);
+        Assert.Contains(
+            weldedContainer,
+            unit => unit.Bodies == 2 && unit.Text.Contains("FROM t WHERE collection_time", StringComparison.Ordinal));
+
+        /* The two renderings, pinned apart. A bare `+` contributes nothing at runtime, so welding with a
+           space there would invent a token boundary in a statement split across source lines; an expression
+           contributes an unknown string, so a space is the only substitution that changes no adjacency. */
+        Assert.Contains(
+            "collection_time < now()",
+            ConcatenatedLiteralUnits(@"class C { const string S = @""WHERE collection_time < "" + @""now()""; }")[0].Text,
+            StringComparison.Ordinal);
+
+        Assert.Contains(
+            "collection_time <  now()",
+            ConcatenatedLiteralUnits(@"class C { const string S = @""WHERE collection_time < "" + Cast + @""now()""; }")[0].Text,
+            StringComparison.Ordinal);
+    }
+
+    /* ---------------- literal grouping ---------------- */
+
+    /// <summary>
+    /// What one file's scan found: the counters that certify it was not vacuous, and each offender with the
+    /// offset it starts at. One value rather than three out-parameters, so a caller cannot take the
+    /// offenders and drop the counters that are the only evidence they mean anything.
+    /// </summary>
+    internal readonly record struct SourceScan(
+        int Literals, int SqlUnits, IReadOnlyList<(int Start, string Finding)> Offenders);
+
+    /// <summary>
+    /// One C# file's SQL, judged. Internal and FILE-shaped rather than corpus-shaped so the control pin
+    /// above exercises the same grouping, the same SQL-shape filter and the same discriminator the corpus
+    /// scan runs; a control that reconstructed any of the three would certify behaviour this scan does not
+    /// have.
+    /// </summary>
+    internal static SourceScan ScanSource(string text, ISet<string> columns)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        ArgumentNullException.ThrowIfNull(columns);
+
+        var literals = 0;
+        var sqlUnits = 0;
+        var offenders = new List<(int Start, string Finding)>();
+
+        foreach (var (start, sql, bodies) in ConcatenatedLiteralUnits(text))
+        {
+            literals += bodies;
+
+            if (!LooksLikeSql(sql))
+            {
+                continue;
+            }
+
+            sqlUnits++;
+
+            foreach (var finding in MixedClockComparisons(sql, columns))
+            {
+                offenders.Add((start, finding));
+            }
+        }
+
+        return new SourceScan(literals, sqlUnits, offenders);
+    }
+
+    /// <summary>
+    /// <para>Every string in <paramref name="text"/> as a scanned UNIT: a maximal run of string literals
+    /// welded by C# <c>+</c> concatenation into the one string the runtime builds, with the offset the run
+    /// starts at and how many literal bodies went into it.</para>
+    ///
+    /// <para><b>Why a run and not a body.</b> A predicate assembled as
+    /// <c>@"… WHERE collection_time &lt; " + Bound + @"now() - interval '1 hour'"</c> is several bodies, and
+    /// a bare clock on one side of a <c>+</c> with the naive column on the other is a comparison in NEITHER
+    /// of them. Read one body at a time this scan reports clean on it, which is a pass for the wrong reason.
+    /// Measured on the corpus: 815 runs weld two or more literals, and EIGHT are units no member body is
+    /// even SQL-shaped enough to reach the discriminator — four of those eight are the
+    /// <c>config_alert_log</c> reads in <c>DarlingAlertReader</c> and <c>ViewerDataService.AlertHistory</c>,
+    /// which is the site class this pin's own remarks name as its reason for existing.</para>
+    ///
+    /// <para><b>The gap is rendered by what the runtime puts there.</b> Glue that is a bare <c>+</c>
+    /// contributes nothing, so those bodies weld with nothing — inserting a space would invent a token
+    /// boundary in a statement merely split across source lines. Glue carrying an EXPRESSION contributes an
+    /// unknown string, so those weld with a single space: the same substitution, for the same reason,
+    /// <see cref="CSharpSourceWalker.StringLiteralBodies"/> already makes for an interpolation hole — a
+    /// space changes no adjacency, and eliding it would fuse the tokens either side into one word that
+    /// neither the source nor the database ever contains.</para>
+    ///
+    /// <para><b>What is deliberately not welded</b>, because welding it would invent a predicate the runtime
+    /// never builds: literals in separate statements, in separate arguments or collection elements, or in
+    /// separate blocks, and the two arms of a conditional. A run is recognised by glue that begins and
+    /// ends with <c>+</c> and holds no separator at expression depth zero — see
+    /// <see cref="WeldBetween"/>, which measures what each of those two tests is the sole reason for
+    /// rejecting. Judged on CODE characters only, so a <c>;</c> written in a comment between two
+    /// concatenated literals cannot split a run the compiler joins.</para>
+    ///
+    /// <para><b>Nesting is respected.</b> A literal inside an interpolation hole is a body of its own and
+    /// its container has that hole blanked, so it welds only with its own siblings inside the hole. 144
+    /// bodies in the corpus are nested that way.</para>
+    ///
+    /// <para><b>Stated limit.</b> The glue's VALUE is not resolved, so a hazard whose column or clock lives
+    /// in the interpolated constant rather than in a literal is still outside this scan — welding cannot
+    /// invent text it never sees. Resolving constants across files is a different instrument.</para>
+    /// </summary>
+    internal static IReadOnlyList<(int Start, string Text, int Bodies)> ConcatenatedLiteralUnits(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+
+        /* The same walk the bodies come from, with the literals blanked instead of kept, so the gap between
+           two bodies is read with exactly the walker's notion of what is code. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+
+        var bodies = CSharpSourceWalker.StringLiteralBodies(text)
+            .Select(body => (body.Start, body.Text, End: body.Start + body.Text.Length))
+            .OrderBy(body => body.Start)
+            .ThenByDescending(body => body.End)
+            .ToList();
+
+        /* The innermost body strictly containing each one, or -1 at the top level. A container sorts before
+           its content, so the first enclosing span found walking backwards is the innermost. */
+        var parent = new int[bodies.Count];
+
+        for (var i = 0; i < bodies.Count; i++)
+        {
+            parent[i] = -1;
+
+            for (var j = i - 1; j >= 0; j--)
+            {
+                if (bodies[j].Start <= bodies[i].Start && bodies[i].End <= bodies[j].End)
+                {
+                    parent[i] = j;
+                    break;
+                }
+            }
+        }
+
+        var starts = new List<int>();
+        var texts = new List<StringBuilder>();
+        var counts = new List<int>();
+        var ends = new List<int>();
+
+        /* The run currently open at each nesting level, so a body welds with the previous body under its
+           OWN parent and never with whatever literal happened to be walked most recently. */
+        var open = new Dictionary<int, int>();
+
+        for (var i = 0; i < bodies.Count; i++)
+        {
+            if (open.TryGetValue(parent[i], out var run)
+                && WeldBetween(code, ends[run], bodies[i].Start) is { } weld)
+            {
+                texts[run].Append(weld).Append(bodies[i].Text);
+                counts[run]++;
+                ends[run] = bodies[i].End;
+                continue;
+            }
+
+            starts.Add(bodies[i].Start);
+            texts.Add(new StringBuilder(bodies[i].Text));
+            counts.Add(1);
+            ends.Add(bodies[i].End);
+            open[parent[i]] = starts.Count - 1;
+        }
+
+        var units = new List<(int Start, string Text, int Bodies)>(starts.Count);
+
+        for (var i = 0; i < starts.Count; i++)
+        {
+            units.Add((starts[i], texts[i].ToString(), counts[i]));
+        }
+
+        return units;
+    }
+
+    /// <summary>
+    /// What the runtime puts between two literal bodies — <c>""</c> for a bare <c>+</c>, a single space for
+    /// glue carrying an expression — or null when the two are not one concatenation.
+    ///
+    /// <para><b>Two tests, and each is load-bearing on a shape the other clears.</b> A `+` at BOTH ends is
+    /// what an argument list, a collection initializer and the second arm of a conditional fail. A
+    /// separator at expression depth ZERO is what a gap that ends one statement mid-concatenation and opens
+    /// the next the same way fails — <c>… + x; var b = y + …</c> has a `+` at both ends and is two
+    /// statements. Measured on the corpus: 2,175 gaps have a `+` at both ends and 10 of them are that
+    /// shape, in files whose business is composing SQL (<c>ComposeCompiler</c>, <c>DarlingNetworkConfigEditor</c>).
+    /// Welding one would splice unrelated fragments and could invent an offender.</para>
+    ///
+    /// <para><b>Depth is why the separator test is a walk and not a <c>Contains</c>.</b> A comma inside the
+    /// glue's own call — <c>+ DarlingToolExitCode.Diagnose(exitCode, exePath) +</c>, four times in this
+    /// corpus — is one concatenation, and rejecting it would be a miss for no gain. A comma at depth zero
+    /// is an argument boundary. Same for a colon: parenthesised it is a conditional inside the glue, bare
+    /// it is a conditional's two arms and welding across it splices branches that never both run.</para>
+    /// </summary>
+    private static string? WeldBetween(string code, int end, int start)
+    {
+        if (start < end)
+        {
+            return null;
+        }
+
+        var glue = new StringBuilder(start - end);
+
+        for (var i = end; i < start; i++)
+        {
+            if (!char.IsWhiteSpace(code[i]))
+            {
+                glue.Append(code[i]);
+            }
+        }
+
+        var between = glue.ToString();
+
+        if (between.Length == 0 || between[0] != '+' || between[^1] != '+')
+        {
+            return null;
+        }
+
+        var depth = 0;
+
+        for (var i = 0; i < between.Length; i++)
+        {
+            var c = between[i];
+
+            if (c is '(' or '[' or '{')
+            {
+                depth++;
+            }
+            else if (c is ')' or ']' or '}')
+            {
+                /* Below zero means the gap CLOSED a scope that was already open when it started, so the
+                   two literals sit in different arguments or different blocks. */
+                if (--depth < 0)
+                {
+                    return null;
+                }
+            }
+            else if (depth == 0 && (c is ';' or ','))
+            {
+                return null;
+            }
+            else if (depth == 0 && c == ':')
+            {
+                /* `global::Foo` is the one legitimate top-level colon pair in an expression — the same
+                   carve-out CSharpSourceWalker makes inside an interpolation hole. */
+                if (i + 1 >= between.Length || between[i + 1] != ':')
+                {
+                    return null;
+                }
+
+                i++;
+            }
+        }
+
+        return depth == 0 ? between.Length == 1 ? string.Empty : " " : null;
     }
 
     /* ---------------- the discriminator ---------------- */
@@ -535,7 +905,12 @@ public sealed class StoreSqlClockDisciplineTests
         {
             var text = File.ReadAllText(path);
 
-            foreach (var (_, body) in CSharpSourceWalker.StringLiteralBodies(text))
+            /* The same welded units the SQL scan reads, not raw bodies, because a DDL literal assembled by
+               concatenation splits its own column list and this vocabulary is what the discriminator has -
+               a name it never learns is an offender it cannot see. Measured, this changes nothing today:
+               57 names either way, because every rung's DDL is one literal. It is here so the two sites
+               cannot disagree about what a literal IS, which is the way the split above went unnoticed. */
+            foreach (var (_, body, _) in ConcatenatedLiteralUnits(text))
             {
                 foreach (Match match in declaration.Matches(body))
                 {
@@ -639,12 +1014,9 @@ public sealed class StoreSqlClockDisciplineTests
     /// recognised by carrying both a clock and a comparison, which is all the discriminator needs to judge
     /// it.</para>
     ///
-    /// <para>Known limit, stated rather than papered over: the scan reads ONE literal at a time, so a
-    /// predicate whose column sits in one literal and whose clock sits in another — welded together only by
-    /// concatenation — is outside it. No such split exists in the corpus today; the one fragment pairing a
-    /// clock with a column, <c>ViewerDataService.MonitoredServers</c>, already uses the rescued
-    /// <c>AT TIME ZONE 'UTC'</c> form. Catching it would mean resolving concatenation rather than reading
-    /// literals.</para>
+    /// <para>Applied to a welded UNIT, not to one literal body, so a fragment whose column sits in one
+    /// literal and whose clock sits in the next is read as the predicate it is — see
+    /// <see cref="ConcatenatedLiteralUnits"/> for why, and for the limit that remains.</para>
     /// </summary>
     private static bool LooksLikeSql(string body) =>
         body.Contains("SELECT ", StringComparison.OrdinalIgnoreCase)
