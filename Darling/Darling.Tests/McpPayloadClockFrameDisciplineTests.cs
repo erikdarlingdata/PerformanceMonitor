@@ -64,9 +64,17 @@ public sealed class McpPayloadClockFrameDisciplineTests
         + @"ORDER BY sp\.collection_time DESC\s*LIMIT 1\), 0\) AS offset_minutes",
         RegexOptions.Singleline);
 
-    /// <summary>Lite's de-skew: the offset is subtracted from the row in C#, because DuckDB has no
-    /// <c>make_interval</c> and the affected reads are shared with the WPF grids.</summary>
-    private static string LiteDeSkew(string property) => property + "?.AddMinutes(-utcOffsetMinutes)";
+    /// <summary>
+    /// Lite's de-skew: the offset is subtracted from the row in C#, because DuckDB has no
+    /// <c>make_interval</c> and the affected reads are shared with the WPF grids.
+    ///
+    /// <para>The <c>?.</c> is OPTIONAL because nullability is a property of the row type rather than of this
+    /// convention — <c>RunningJobRow.StartTime</c> is a non-nullable <c>DateTime</c> and ships without it,
+    /// the other fifteen are <c>DateTime?</c> and ship with it. Requiring the null-conditional made this
+    /// assertion vacuous for the one field that cannot carry it, which is what CI caught.</para>
+    /// </summary>
+    private static Regex LiteDeSkew(string property) =>
+        new(Regex.Escape(property) + @"\??\.AddMinutes\(-utcOffsetMinutes\)");
 
     /// <summary>
     /// One payload column: its output alias, the SQL expression whose value must be de-skewed, and the bare
@@ -289,7 +297,12 @@ public sealed class McpPayloadClockFrameDisciplineTests
 
             foreach (var property in properties)
             {
-                Assert.Contains(LiteDeSkew(property), text, StringComparison.Ordinal);
+                Assert.True(
+                    LiteDeSkew(property).IsMatch(text),
+                    $"{relativePath} emits {property} without subtracting this server's offset. The stored "
+                    + "value is the monitored server's local wall clock and every other timestamp on the "
+                    + "payload is naive UTC, so leaving it raw is wrong by the whole offset — 4 hours on the "
+                    + "production fleet, measured at 42 of 42 servers in #2932.");
 
                 /* And no bare emission of the same property survives. */
                 Assert.DoesNotContain($"= r.{property}?.ToString(\"o\")", text, StringComparison.Ordinal);
@@ -299,20 +312,35 @@ public sealed class McpPayloadClockFrameDisciplineTests
     }
 
     /// <summary>
-    /// Darling and Lite must cover the SAME sixteen columns. Pinned as a count comparison per tool rather
-    /// than a name mapping, because the two SKUs legitimately spell the same column differently (snake_case
-    /// SQL alias vs PascalCase row property) and a name map would either be a second source of truth or a
-    /// tautology. What must not drift is the arity: a field de-skewed on one SKU and not the other is the
-    /// one-sided port that #2992 found nothing guarding against.
+    /// Darling and Lite must cover the SAME sixteen payload FIELDS. Pinned as a count rather than a name
+    /// mapping, because the two SKUs legitimately spell the same column differently (snake_case SQL alias vs
+    /// PascalCase row property) and a name map would be either a second source of truth or a tautology. What
+    /// must not drift is the arity: a field de-skewed on one SKU and not the other is the one-sided port that
+    /// #2992 found nothing guarding against.
+    ///
+    /// <para><b>Distinct fields, not per-read declarations.</b> Darling declares EIGHTEEN (read, column)
+    /// pairs for sixteen fields, because <c>get_blocking</c> is served by two reads and the always-on DMV
+    /// fallback arm re-serves <c>blocked_last_tran_started</c> and <c>blocking_last_tran_started</c> — the
+    /// two columns a DMV snapshot has. Lite reaches the same six through one <c>LocalDataService</c> call, so
+    /// it declares them once. Comparing the raw sums asserted 18 == 16 and failed for a reason that had
+    /// nothing to do with parity, which is what CI caught.</para>
     /// </summary>
     [Fact]
     public void TheTwoSkus_DeSkewTheSameNumberOfFields()
     {
-        var darling = ServerLocalPayloadColumns.Sum(x => x.Columns.Length);
-        var lite = LiteToolSites.Sum(x => x.Properties.Length);
+        var darlingDeclarations = ServerLocalPayloadColumns.Sum(x => x.Columns.Length);
+        var darlingFields = ServerLocalPayloadColumns
+            .SelectMany(x => x.Columns.Select(c => c.Alias))
+            .Distinct(StringComparer.Ordinal)
+            .Count();
+        var liteFields = LiteToolSites.Sum(x => x.Properties.Length);
 
-        Assert.Equal(16, darling);
-        Assert.Equal(darling, lite);
+        Assert.Equal(16, darlingFields);
+        Assert.Equal(darlingFields, liteFields);
+
+        /* And the overlap is exactly the DMV fallback's two columns — named as a number so that a THIRD read
+           quietly re-serving a field has to be a deliberate edit here rather than absorbed silently. */
+        Assert.Equal(2, darlingDeclarations - darlingFields);
     }
 
     /* ───────────────────────── the discriminators, both directions ───────────────────────── */
@@ -361,12 +389,14 @@ public sealed class McpPayloadClockFrameDisciplineTests
             "            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)\n"
             + "                - make_interval(mins => svr.offset_minutes) AS last_user_access_utc,\n"));
 
-        /* LiteDeSkew recognises the shipped Lite form and not the bare one. */
-        Assert.Equal("StartTime?.AddMinutes(-utcOffsetMinutes)", LiteDeSkew("StartTime"));
-        Assert.Contains(
-            LiteDeSkew("StartTime"),
-            "start_time = r.StartTime?.AddMinutes(-utcOffsetMinutes).ToString(\"o\"),",
-            StringComparison.Ordinal);
+        /* LiteDeSkew recognises BOTH shipped Lite forms — the nullable one and the non-nullable one — and
+           neither bare emission. The non-nullable case is real: RunningJobRow.StartTime is a DateTime. */
+        Assert.True(LiteDeSkew("StartTime").IsMatch("start_time = r.StartTime.AddMinutes(-utcOffsetMinutes).ToString(\"o\"),"));
+        Assert.True(LiteDeSkew("ValidSince").IsMatch("valid_since = r.ValidSince?.AddMinutes(-utcOffsetMinutes).ToString(\"o\"),"));
+        Assert.False(LiteDeSkew("StartTime").IsMatch("start_time = r.StartTime.ToString(\"o\"),"));
+        Assert.False(LiteDeSkew("ValidSince").IsMatch("valid_since = r.ValidSince?.ToString(\"o\"),"));
+        /* And it must not match a DIFFERENT property that merely shares a prefix. */
+        Assert.False(LiteDeSkew("LastRefreshed").IsMatch("last_refresh = r.LastRefresh?.AddMinutes(-utcOffsetMinutes).ToString(\"o\"),"));
     }
 
     /* ───────────────────────── plumbing ───────────────────────── */
