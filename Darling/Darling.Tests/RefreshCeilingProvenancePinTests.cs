@@ -968,11 +968,19 @@ public sealed class RefreshCeilingProvenancePinTests
 
         /* AND THE CONTRADICTION THAT HAD TO GO, in either order and file-wide rather than in the one
            message that carried it. A double-quote bounds the window, so a match cannot run from one prose
-           region through a cref attribute into another. */
+           region through a cref attribute into another.
+
+           CASE-INSENSITIVE, matching the two open-population shape guards in this file and NOT the value
+           pins. The distinction is which way each fails: the token checks above compare a deliberately
+           capitalised literal, so case is part of what they hold and folding it would weaken them. This
+           one forbids a SHAPE, so folding case is what stops "Closed population ... overtaken" from
+           passing a guard written against the one capitalisation the defect happened to ship in - a
+           case-sensitive shape guard fails toward GRANTING, which is the direction that costs. */
         var contradiction = Regex.Matches(
             source,
             @"closed population[^""]{0,160}?\b(?:overtaken|falsified|exceeded)\b"
-            + @"|\b(?:overtaken|falsified|exceeded)\b[^""]{0,160}?closed population");
+            + @"|\b(?:overtaken|falsified|exceeded)\b[^""]{0,160}?closed population",
+            RegexOptions.IgnoreCase);
 
         Assert.Empty(contradiction);
     }
