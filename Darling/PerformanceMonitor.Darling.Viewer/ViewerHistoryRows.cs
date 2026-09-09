@@ -234,11 +234,7 @@ public sealed class ViewerQueryStoreHistoryRow
     /* query_store_stats, not query_stats: both stamps are naive UTC (see the file header), so they take
        the same conversion CollectionTime above takes rather than the raw render the two DMV history
        row types use for their same-named columns. */
-    public string FirstExecutionTimeLocal => FirstExecutionTime.HasValue
-        ? ViewerTimeHelper.ForDisplay(FirstExecutionTime.Value).ToString("yyyy-MM-dd HH:mm:ss")
-        : "";
+    public string FirstExecutionTimeLocal => ViewerDataService.FormatStoredUtc(FirstExecutionTime);
 
-    public string LastExecutionTimeLocal => LastExecutionTime.HasValue
-        ? ViewerTimeHelper.ForDisplay(LastExecutionTime.Value).ToString("yyyy-MM-dd HH:mm:ss")
-        : "";
+    public string LastExecutionTimeLocal => ViewerDataService.FormatStoredUtc(LastExecutionTime);
 }

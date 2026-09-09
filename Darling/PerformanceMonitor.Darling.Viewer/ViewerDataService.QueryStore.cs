@@ -96,14 +96,10 @@ public sealed class ViewerQueryStoreRow
     /// <c>query_store_stats.first_execution_time</c> and <c>last_execution_time</c> are naive UTC —
     /// unlike the <c>sys.dm_exec_*</c> stamps, which are the server's own clock. They therefore convert
     /// through <see cref="ViewerTimeHelper.ForDisplay"/> rather than rendering raw.</summary>
-    public string FirstExecutionTimeLocal => FirstExecutionTime.HasValue
-        ? ViewerTimeHelper.ForDisplay(FirstExecutionTime.Value).ToString("yyyy-MM-dd HH:mm:ss")
-        : "";
+    public string FirstExecutionTimeLocal => ViewerDataService.FormatStoredUtc(FirstExecutionTime);
 
     /// <inheritdoc cref="FirstExecutionTimeLocal"/>
-    public string LastExecutionTimeLocal => LastExecutionTime.HasValue
-        ? ViewerTimeHelper.ForDisplay(LastExecutionTime.Value).ToString("yyyy-MM-dd HH:mm:ss")
-        : "";
+    public string LastExecutionTimeLocal => ViewerDataService.FormatStoredUtc(LastExecutionTime);
     public double TotalCpuMs => TotalExecutions * AvgCpuTimeMs;
     public double TotalDurationMs => TotalExecutions * AvgDurationMs;
 }

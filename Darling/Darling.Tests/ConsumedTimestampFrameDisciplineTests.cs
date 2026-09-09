@@ -702,11 +702,25 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// one that renders raw, i.e. that takes the server's own clock. <c>FormatServerTime</c> is Lite's
     /// <c>ForDisplay</c>, not its <c>FormatServerClock</c>: it adds the offset and names its parameter
     /// <c>utcTime</c>. Lite has no raw renderer at all, which is why a comment in the Darling viewer
-    /// claiming parity with it is wrong in the direction that hid this.</summary>
+    /// claiming parity with it is wrong in the direction that hid this.
+    ///
+    /// <para><c>FormatStoredUtc</c> is the Darling viewer's named UTC renderer, beside
+    /// <c>FormatServerClock</c> so the choice between the pair is reviewable at the site. Registering it
+    /// is not optional: this scan keys on the renderer's NAME, so an unlisted one is invisible and its
+    /// sites would leave the census as the price of being fixed.</para>
+    ///
+    /// <para><b>This list's completeness is the guard's own soft spot, and two checks cover it.</b>
+    /// <see cref="TheOneHopRenderWrappers_AreExactlyTheDeclaredSet"/> derives the ALIASES — a static
+    /// formatter over a <c>DateTime</c> reaching a renderer under a different name — and pins them at set
+    /// equality, so a new one must be declared. That criterion is a SHAPE, and a shape can be evaded, so
+    /// <see cref="NoUnregisteredRenderCapableMember_IsAppliedToACensusColumn"/> closes the residual with
+    /// no shape assumption at all: whatever its signature, a member that renders may not be handed a
+    /// census timestamp column unless it is registered here or declared as an alias.</para></summary>
     private static readonly (string Renderer, ClockFrame Expects)[] Renderers =
     [
         ("ForDisplay", ClockFrame.Utc),
         ("FormatServerTime", ClockFrame.Utc),
+        ("FormatStoredUtc", ClockFrame.Utc),
         ("FormatServerClock", ClockFrame.ServerLocal),
     ];
 
@@ -1042,6 +1056,10 @@ public sealed class ConsumedTimestampFrameDisciplineTests
        exactly, so the check cannot report a clean bill of health by examining nothing: with no
        offenders left, "examined nothing" and "found nothing" are otherwise the same result. */
     private const int WrapperCallSitesOverCensusColumns = 16;
+
+    /* Calls of ANY identifier on a census timestamp column across the render surface. Floored so the
+       shape-free residual check cannot satisfy its set equality with an empty left side. */
+    private const int CallsOnACensusColumn = 72;
     private const int WrapperFilesReachingACensusColumn = 2;
 
     /// <summary>
@@ -1426,6 +1444,110 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     }
 
     /// <summary>
+    /// Identifiers applied to a census timestamp column that are NOT rendering it. The matcher below
+    /// takes any identifier before <c>(</c>, deliberately — that is what makes it shape-free — so the
+    /// benign ones are declared with what they actually are rather than filtered out by a pattern that
+    /// would also hide a real renderer.
+    /// </summary>
+    private static readonly (string Name, string Why)[] NonRenderingCallsOnACensusColumn =
+    [
+        ("if", "a null test - if (row.EventTime.HasValue) and if (summary.OldestPlanCreateTime is not "
+            + "{ } oldest). The matcher reads the identifier before the parenthesis and a keyword is one"),
+        ("DateTime", "new DateTime(d.SampleTime.Year, ..., d.SampleTime.Hour, 0, 0) - an hour-truncating "
+            + "bucket key built FROM a timestamp, not a rendering of one"),
+        ("Compare", "Nullable.Compare(a.EventTime, b.EventTime) - a sort comparison"),
+    ];
+
+    /// <summary>
+    /// <b>The residual, with no shape assumption.</b> Whatever its signature, no member may be handed a
+    /// census timestamp column unless it is a registered renderer, a declared alias, or declared as not
+    /// rendering. Every identifier applied to one is derived and the set is pinned at set equality.
+    ///
+    /// <para><b>Why this exists next to the alias derivation.</b> That one keys on a SHAPE — static,
+    /// over a <c>DateTime</c>, returning a formatted value — and a shape can be evaded: an instance
+    /// method, an extension method, a different return type. This check cannot be evaded that way
+    /// because it does not ask what a member looks like, only what it is applied to. The two fail in
+    /// different directions: the alias check fails when a new formatter appears at all, this one when a
+    /// new name reaches a census column, and neither subsumes the other.</para>
+    ///
+    /// <para>It is also the only check here that would have caught the four <c>plan_correction</c>
+    /// stamps from the OUTSIDE — <c>Local(ValidSince)</c> is an unregistered name applied to a census
+    /// column, which is the defect stated without reference to what <c>Local</c> happens to be.</para>
+    /// </summary>
+    [Fact]
+    public void NoUnregisteredRenderCapableMember_IsAppliedToACensusColumn()
+    {
+        var files = RenderSourceFiles().ToArray();
+
+        Assert.True(files.Length >= MinimumRenderFiles, $"only {files.Length} viewer/Lite files scanned — check the globs");
+
+        var columns = TablesByColumn().Keys.Select(Pascal).Distinct(StringComparer.Ordinal).ToArray();
+        var applied = new Dictionary<string, int>(StringComparer.Ordinal);
+        var total = 0;
+
+        Assert.NotEmpty(columns);
+
+        /* Any identifier, then a census column as the first argument, off an optional receiver. The
+           receiver group is the same one RenderCall carries, and for the same reason: three real render
+           sites pass the property off a lambda parameter. */
+        var call = new Regex(
+            @"\b(\w+)\s*\(\s*(?:[A-Za-z_]\w*\.)?(?:" + string.Join("|", columns.Select(Regex.Escape)) + @")\b");
+
+        foreach (var path in files)
+        {
+            foreach (var site in call.Matches(WithoutComments(File.ReadAllText(path))).Cast<Match>())
+            {
+                total++;
+                Bump(applied, site.Groups[1].Value);
+            }
+        }
+
+        /* Reach: a matcher that stopped matching would satisfy the set equality below with an empty
+           left side, over 459 files. */
+        Assert.True(
+            total >= CallsOnACensusColumn,
+            $"only {total} calls on a census timestamp column were found, expected at least "
+            + $"{CallsOnACensusColumn} — check the identifier matcher");
+
+        var accounted = Renderers.Select(r => r.Renderer)
+            .Concat(RenderWrappers.Select(w => w.Method))
+            .Concat(NonRenderingCallsOnACensusColumn.Select(n => n.Name))
+            .ToHashSet(StringComparer.Ordinal);
+
+        /* THE PROPERTY: nothing unaccounted reaches a census timestamp column. */
+        Assert.Equal(
+            Array.Empty<string>(),
+            applied.Keys.Where(name => !accounted.Contains(name))
+                .OrderBy(x => x, StringComparer.Ordinal).ToArray());
+
+        /* Not set equality, because a DECLARED ALIAS need not reach a census column at all - two of the
+           six only ever render collection_time, which the collector framework stamps and no
+           CollectorColumn declares. Their staleness is caught by
+           TheOneHopRenderWrappers_AreExactlyTheDeclaredSet instead, against the derived set, so nothing
+           is left unguarded by relaxing it here. The other two directions ARE asserted: */
+
+        /* a registered renderer that reaches no census column is a typo in the map, and it would take
+           its sites out of the judged population silently; */
+        Assert.Equal(
+            Array.Empty<string>(),
+            Renderers.Select(r => r.Renderer).Where(name => !applied.ContainsKey(name))
+                .OrderBy(x => x, StringComparer.Ordinal).ToArray());
+
+        /* and a declared non-renderer that no longer appears is an exemption asserting nothing, which is
+           the direction an exemption list rots in. */
+        Assert.Equal(
+            Array.Empty<string>(),
+            NonRenderingCallsOnACensusColumn.Select(n => n.Name).Where(name => !applied.ContainsKey(name))
+                .OrderBy(x => x, StringComparer.Ordinal).ToArray());
+
+        /* Every declared non-renderer carries its reasoning, so the exemption list cannot grow by a
+           bare name. */
+        Assert.All(
+            NonRenderingCallsOnACensusColumn,
+            n => Assert.False(string.IsNullOrWhiteSpace(n.Why), $"{n.Name}: an exemption with no reasoning"));
+    }
+
+    /// <summary>
     /// No declared wrapper is handed a census column that EVERY table declaring it frames the other
     /// way. That was the shape of the four <c>plan_correction</c> stamps: <c>valid_since</c>,
     /// <c>last_refresh</c> and the two action stamps are server-local in the only table that declares
@@ -1767,11 +1889,16 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         Assert.Matches(WrapperSignature, "    /// public static string Local(DateTime? utc)");
         Assert.DoesNotMatch(WrapperSignature, WithoutComments("    /// public static string Local(DateTime? utc)"));
 
-        /* And the two renderer families are distinguished, not merged: three names, two expectations. */
-        Assert.Equal(3, Renderers.Length);
+        /* And the two renderer families are distinguished, not merged: four names, two expectations. Three
+           take naive UTC and exactly ONE takes the server's own clock — asserted as a count rather than
+           left as a comment, because the defect class IS a value reaching the renderer for the other
+           frame, and a second server-local renderer appearing unnoticed would split that side. */
+        Assert.Equal(4, Renderers.Length);
         Assert.Equal(2, Renderers.Select(r => r.Expects).Distinct().Count());
         Assert.Equal(ClockFrame.ServerLocal, Renderers.Single(r => r.Renderer == "FormatServerClock").Expects);
         Assert.Equal(ClockFrame.Utc, Renderers.Single(r => r.Renderer == "FormatServerTime").Expects);
+        Assert.Equal(ClockFrame.Utc, Renderers.Single(r => r.Renderer == "FormatStoredUtc").Expects);
+        Assert.Single(Renderers.Where(r => r.Expects == ClockFrame.ServerLocal));
     }
 
     /// <summary>

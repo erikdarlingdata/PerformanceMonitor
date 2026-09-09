@@ -65,9 +65,7 @@ public sealed class ViewerQueryStoreRegressionRow
     public DateTime? LastExecutionTime { get; set; }
 
     /// <summary>The last-execution stamp, naive UTC in the store, converted to the display mode.</summary>
-    public string LastExecutionTimeLocal => LastExecutionTime.HasValue
-        ? ViewerTimeHelper.ForDisplay(LastExecutionTime.Value).ToString("yyyy-MM-dd HH:mm:ss")
-        : "";
+    public string LastExecutionTimeLocal => ViewerDataService.FormatStoredUtc(LastExecutionTime);
 }
 
 public sealed partial class ViewerDataService
