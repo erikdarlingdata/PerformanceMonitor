@@ -105,6 +105,31 @@ public sealed class SqlTextPinTests
     }
 
     /// <summary>
+    /// T-SQL's schema qualifiers survive too, so the same pin shape can be taken to the collectors' queries
+    /// without silently loosening them. <c>sys.</c> and <c>dbo.</c> select relations exactly as
+    /// <c>collect.</c> does; stripped, a needle on <c>sys.dm_xe_database_sessions</c> would be satisfied by
+    /// a query that dropped the schema, and nothing would go red to say so.
+    /// </summary>
+    [Fact]
+    public void ItKeepsTsqlSchemaQualifiers_SoTheSamePinShapeTravels()
+    {
+        Assert.Equal(
+            "JOIN sys.dm_xe_database_sessions AS xes",
+            SqlTextPin.Normalise("JOIN sys.dm_xe_database_sessions AS xes"));
+        Assert.Equal("EXEC dbo.usp_Thing", SqlTextPin.Normalise("EXEC dbo.usp_Thing"));
+
+        Assert.Throws<Xunit.Sdk.TrueException>(
+            () => SqlTextPin.AssertExpresses(
+                "FROM sys.dm_exec_requests",
+                "FROM dm_exec_requests",
+                "the schema was dropped"));
+
+        /* And an alias on the same statement still normalises, so the pin stays insensitive to the thing it
+           is meant to be insensitive to. */
+        Assert.Equal("WHERE rn = 1", SqlTextPin.Normalise("WHERE rs.rn = 1"));
+    }
+
+    /// <summary>
     /// The normaliser reads identifiers, not every dot. A numeric literal, a chained qualifier and a
     /// <c>::</c> cast all sit next to the pattern it matches, and mangling any of them would make a pin
     /// pass by comparing two equally-mangled strings — the failure mode a one-directional test cannot see.

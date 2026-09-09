@@ -61,8 +61,19 @@ internal static class SqlTextPin
     private static readonly Regex WhitespaceRun = new(@"\s+", RegexOptions.CultureInvariant);
 
     /// <summary>
-    /// The prefixes that are NOT aliases. Taken from the generator rather than typed, so a renamed schema
-    /// moves this with it; the three PostgreSQL-owned ones cannot be read off anything and are named.
+    /// The prefixes that are NOT aliases. The store's two come from the generator rather than being typed,
+    /// so a renamed schema moves this with it; the engine-owned ones cannot be read off anything and are
+    /// named.
+    ///
+    /// <para><b>T-SQL's schemas are here too, and that is the point of listing them.</b> The obvious next
+    /// use of this helper is the same pin shape over the collectors' T-SQL, where <c>sys.</c> and
+    /// <c>dbo.</c> are schema qualifiers exactly as <c>collect.</c> is — and without them a needle like
+    /// <c>JOIN sys.dm_xe_database_sessions AS xes</c> would normalise to
+    /// <c>JOIN dm_xe_database_sessions AS xes</c>, so a query that DROPPED the schema would stay green.
+    /// That is the one direction #3217 says must not move. They are listed now rather than left to the
+    /// adopter because the loosening is silent: nothing reds, the pin simply stops discriminating. A
+    /// PostgreSQL alias named <c>sys</c> or <c>dbo</c> would only make a pin stricter, so naming them costs
+    /// nothing here.</para>
     /// </summary>
     private static readonly HashSet<string> SchemaNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -71,6 +82,9 @@ internal static class SqlTextPin
         "public",
         "pg_catalog",
         "information_schema",
+        "sys",
+        "dbo",
+        "INFORMATION_SCHEMA",
     };
 
     /// <summary>Alias qualifiers dropped, whitespace runs collapsed, ends trimmed.</summary>
