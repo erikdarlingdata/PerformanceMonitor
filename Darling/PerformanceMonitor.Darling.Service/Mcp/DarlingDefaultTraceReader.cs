@@ -28,22 +28,24 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>StartTime</c> — and thus this table's <c>event_time</c> — is the monitored server's LOCAL wall-clock
 /// time (the .trc files store local time). Storing it raw keeps the collector's dedup watermark bulletproof
 /// (local StartTime vs a local watermark, no conversion), which is why the STORED frame stays local and
-/// <c>CollectorTimestampFrameTests</c> pins it that way. Every read then de-skews to naive UTC by the
-/// collected <c>server_properties.utc_offset_minutes</c> (V16) — the same expression, on the same column,
-/// that <c>ViewerDataService.DefaultTraceEventsByWindowSql</c> uses for the System Events tab. A server with
+/// <c>CollectorTimestampFrameTests</c> pins it that way. Each of this column's three readers then de-skews
+/// to naive UTC by the collected <c>server_properties.utc_offset_minutes</c> (V16) — this read, the
+/// viewer's <c>ViewerDataService.DefaultTraceEventsByWindowSql</c> by the same expression on the same
+/// column, and Lite's, in C# on the loaded row. A server with
 /// no offset yet collected falls back to 0 (treat local == UTC) and the single-row COALESCE CTE guarantees
 /// the cross join never drops the events.</para>
 ///
-/// <para><b>Why the returned value is converted and not merely labelled.</b> Every other timestamp an MCP
-/// caller can reach is naive UTC — <c>collection_time</c>, <c>list_servers.last_collection</c>, the XE
-/// <c>event_time</c> columns, and this tool's own <c>as_of</c> argument — so a server-local
-/// <c>event_time</c> beside them reads as UTC by default and is wrong by the offset in the direction that
-/// INVERTS causality: an event at 04:28 UTC on a UTC-4 server renders as 00:28 and appears to precede the
-/// 04:28 collector error it actually coincided with. A suffix or a note would leave that value in the
-/// response for a reader to line up against UTC surfaces anyway. Converting is also what the two sibling
-/// readers of this very column already do — the viewer's <c>event_time_utc</c> above, and Lite's
-/// <c>get_default_trace_events</c>, which de-skews to <c>DefaultTraceEventRow.EventTimeUtc</c> — so a second
-/// convention here would be the only local-frame timestamp on any read surface in the tree.</para>
+/// <para><b>Why the returned value is converted and not merely labelled.</b> The surfaces a caller
+/// actually correlates these events against are naive UTC — <c>collection_log.collection_time</c>,
+/// <c>list_servers.last_collection</c>, the XE <c>event_time</c> columns, and this tool's own
+/// <c>as_of</c> argument — so a server-local <c>event_time</c> beside them reads as UTC by default and is
+/// wrong by the offset in the direction that INVERTS causality: an event at 04:28 UTC on a server at UTC-4
+/// renders as 00:28 and appears to precede the 04:28 collector error it actually coincided with. A suffix
+/// or a note would leave that value in the response for a reader to line up against those surfaces anyway.
+/// Converting is also what the two sibling readers of this very column already do — the viewer's
+/// <c>event_time_utc</c> above, and Lite's <c>get_default_trace_events</c>, which de-skews to
+/// <c>DefaultTraceEventRow.EventTimeUtc</c> — so a second convention here would leave one column read three
+/// ways.</para>
 /// </summary>
 internal static class DarlingDefaultTraceReader
 {
