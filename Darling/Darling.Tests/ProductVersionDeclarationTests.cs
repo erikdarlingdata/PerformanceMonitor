@@ -40,19 +40,23 @@ namespace Darling.Tests;
 /// or a second <c>Directory.Build.props</c> shadows it for a subtree, either of which leaves projects
 /// inheriting nothing (both in the first pin); a consumer reads a path that is not the declaration
 /// (<see cref="EveryVersionRead_NamesTheDeclarationFile"/>); the detector that judges those consumers stops
-/// detecting (<see cref="TheReadDetector_SeesEachShippedShapeAndReportsAWrongPath"/>); and the declaration
+/// detecting (<see cref="TheReadDetector_SeesEachShippedShapeAndReportsAWrongPath"/>); the declaration
 /// file resolves for one reader shape but not another
-/// (<see cref="EveryShippedTextReadPattern_AgreesWithTheXmlRead"/>).</para>
+/// (<see cref="EveryShippedTextReadPattern_AgreesWithTheXmlRead"/>); and a reader aimed at the right
+/// file reads nothing out of it anyway and carries on
+/// (<see cref="EveryVersionRead_FailsItsStepOnAnEmptyResult"/>, with
+/// <see cref="TheGuardDetector_CreditsOnlyAGuardThatFailsTheStep"/> holding its detector).</para>
 ///
 /// <para><b>The reader pins are the half that would have caught this.</b> The gate and the nightly
-/// disagreeing was the actual bug and no test had ever looked at a workflow file. They matter more after the
-/// fix than before it: an INHERITED property is not present in the inheriting project's XML, so a read left
-/// pointing at a csproj returns EMPTY rather than failing. Every one of these nine reads only names an
-/// artifact, so an empty result produces <c>PerformanceMonitorLite-.zip</c> and a green build. That is not a
-/// hypothetical either — <c>nightly.yml</c>'s own header records the 2026-07-26 nightly dying on a version
-/// read whose path had moved (#1550/#1551 before it), and that variant at least had the decency to be loud,
-/// because <c>Get-Content</c> on a MISSING file throws while <c>Get-Content</c> on a present file with no
-/// such element returns nothing.</para>
+/// disagreeing was the actual bug and no test had ever looked at a workflow file. They matter more with the
+/// version inherited than they would have before: an INHERITED property is not present in the inheriting
+/// project's XML, so a read left pointing at a csproj returns EMPTY. Every one of the nine reads only names
+/// something, so on its own an empty result is <c>PerformanceMonitorLite-.zip</c> and a green build; each
+/// read therefore also fails its own step on an empty value, which is the arrangement the guard pin holds.
+/// The distinction that makes the silent case the dangerous one: <c>Get-Content</c> on a MISSING file
+/// throws, while <c>Get-Content</c> on a present file with no such element returns nothing. Both variants
+/// are real — <c>nightly.yml</c>'s own header records the 2026-07-26 nightly dying on a version read
+/// whose path had moved (#1550/#1551 before it), and that one at least had the decency to be loud.</para>
 /// </summary>
 public class ProductVersionDeclarationTests
 {
@@ -543,7 +547,7 @@ public class ProductVersionDeclarationTests
     /// <c>exit /b 1</c> in a cmd script.</para>
     ///
     /// <para>The bash arm requires the exit as well as the test. <c>[ -n "</c> on its own is not a
-    /// guard &#8212; the workflows already use that spelling for unrelated conditions, and one sitting
+    /// guard — the workflows already use that spelling for unrelated conditions, and one sitting
     /// near a read would otherwise be credited as protecting it.</para>
     /// </summary>
     private static bool IsGuardLine(string line) =>
