@@ -102,12 +102,17 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
     public void ObjectSizeGrowthSql_RollsUpPerTable_ComputesGrowth()
     {
         var sql = DarlingObjectStatsReader.ObjectSizeGrowthSql;
+        /* Bare relation and column names survive aliasing, so they stay plain substring searches; the
+           clause-shaped needles go through SqlTextPin (#3217). */
         Assert.Contains("FROM v_index_object_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("SUM(reserved_mb)", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY database_name, schema_name, table_name", sql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses("SUM(reserved_mb)", sql, "the per-table size is no longer a sum of its indexes");
+        SqlTextPin.AssertExpresses(
+            "GROUP BY database_name, schema_name, table_name",
+            sql,
+            "the rollup is no longer per table");
         Assert.Contains("growth_7d_mb", sql, StringComparison.Ordinal);
         Assert.Contains("growth_30d_mb", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY l.current_reserved_mb DESC", sql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses("ORDER BY l.current_reserved_mb DESC", sql, "the biggest table no longer sorts first");
     }
 
     [Fact]
@@ -115,7 +120,8 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
     {
         var sql = DarlingObjectStatsReader.IndexUsageSql;
         Assert.Contains("FROM v_index_object_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses("MAX(collection_time)", sql, "the read is no longer the latest snapshot");
+        /* Case is NOT normalised: these are the values the tool emits and callers compare. */
         Assert.Contains("'Unused'", sql, StringComparison.Ordinal);
         Assert.Contains("'Write-only'", sql, StringComparison.Ordinal);
         Assert.Contains("'Active'", sql, StringComparison.Ordinal);
@@ -130,7 +136,7 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
         Assert.Contains("row_lock_wait_in_ms", sql, StringComparison.Ordinal);
         Assert.Contains("page_io_latch_wait_in_ms", sql, StringComparison.Ordinal);
         Assert.Contains("index_lock_promotion_count", sql, StringComparison.Ordinal);
-        Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses("MAX(collection_time)", sql, "the read is no longer the latest snapshot");
     }
 
     [Fact]
@@ -141,7 +147,7 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
         Assert.Contains("total_size_mb", sql, StringComparison.Ordinal);
         Assert.Contains("max_size_mb", sql, StringComparison.Ordinal);
         Assert.Contains("volume_free_mb", sql, StringComparison.Ordinal);
-        Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses("MAX(collection_time)", sql, "the read is no longer the latest snapshot");
     }
 
     [Theory]

@@ -72,12 +72,15 @@ public sealed class DarlingMcpPlanCorrectionToolsTests
         /* THE semantic pin: one collector row carries two layers, and a database with nothing to recommend
            lands an enablement-only row whose recommendation fields are NULL — without this predicate every
            such database shows up as a phantom "recommendation" in the tool output. */
-        Assert.Contains("recommendation_name IS NOT NULL", sql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses(
+            "recommendation_name IS NOT NULL",
+            sql,
+            "every enablement-only database comes back as a phantom recommendation");
 
-        Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses("WHERE server_id = $1", sql, "the read is not scoped to the requested server");
+        SqlTextPin.AssertExpresses("collection_time >= $2", sql, "the window's start no longer bounds the read");
+        SqlTextPin.AssertExpresses("collection_time <= $3", sql, "the window's end no longer bounds the read");
+        SqlTextPin.AssertExpresses("ORDER BY collection_time DESC", sql, "the newest recommendations no longer come first");
 
         /* Mirrors the Viewer grid read's bound. */
         Assert.Contains("LIMIT 200", sql, StringComparison.Ordinal);
@@ -93,10 +96,13 @@ public sealed class DarlingMcpPlanCorrectionToolsTests
 
         /* The enablement columns repeat on every one of a database's recommendation rows — the snapshot is
            the newest capture DISTINCTed back to one row per database, never a window scan. */
-        Assert.Contains("collection_time = (SELECT MAX(collection_time) FROM plan_correction WHERE server_id = $1)", sql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses(
+            "collection_time = (SELECT MAX(collection_time) FROM plan_correction WHERE server_id = $1)",
+            sql,
+            "the snapshot is a window scan rather than the newest capture");
         Assert.Contains("force_last_good_plan_desired_state", sql, StringComparison.Ordinal);
         Assert.Contains("force_last_good_plan_actual_state", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY database_name", sql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses("ORDER BY database_name", sql, "the one row per database no longer arrives ordered");
     }
 
     [Theory]
