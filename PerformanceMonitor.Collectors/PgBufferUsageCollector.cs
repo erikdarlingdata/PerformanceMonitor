@@ -135,8 +135,10 @@ ORDER BY count(*) DESC";
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) => true;
 
-    /// <summary>A plain <c>CREATE EXTENSION</c> in the connect database, with no restart — which is what
-    /// makes the <c>ObjectMissing</c> degradation above a setup step rather than a wall.</summary>
+    /// <summary>
+    /// A plain <c>CREATE EXTENSION</c> in the connect database, with no restart — which is what
+    /// makes the <c>ObjectMissing</c> degradation above a setup step rather than a wall.
+    /// </summary>
     public override IReadOnlyList<PgExtensionDependency> RequiredPgExtensions { get; } = new[]
     {
         new PgExtensionDependency("pg_buffercache", PgExtensionInstallKind.CreateExtension),

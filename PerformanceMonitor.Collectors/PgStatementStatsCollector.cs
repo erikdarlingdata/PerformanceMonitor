@@ -239,8 +239,10 @@ WHERE calls > 0";
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) => true;
 
-    /// <summary>The view this reads is the extension's, and the module has to be preloaded before a
-    /// <c>CREATE EXTENSION</c> for it does anything.</summary>
+    /// <summary>
+    /// The view this reads is the extension's, and the module has to be preloaded before a
+    /// <c>CREATE EXTENSION</c> for it does anything.
+    /// </summary>
     public override IReadOnlyList<PgExtensionDependency> RequiredPgExtensions { get; } = new[]
     {
         new PgExtensionDependency("pg_stat_statements", PgExtensionInstallKind.SharedPreloadLibraries),

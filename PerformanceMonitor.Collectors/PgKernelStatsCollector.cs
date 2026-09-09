@@ -121,9 +121,11 @@ LIMIT 500";
     /// </summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 
-    /// <summary>Preloaded, and the restart is the whole cost of turning this on. Only the extension whose
+    /// <summary>
+    /// Preloaded, and the restart is the whole cost of turning this on. Only the extension whose
     /// function this query calls is declared: <c>pg_stat_statements</c> underneath it is a property of
-    /// <c>pg_stat_kcache</c> rather than of this collector.</summary>
+    /// <c>pg_stat_kcache</c> rather than of this collector.
+    /// </summary>
     public override IReadOnlyList<PgExtensionDependency> RequiredPgExtensions { get; } = new[]
     {
         new PgExtensionDependency("pg_stat_kcache", PgExtensionInstallKind.SharedPreloadLibraries),
