@@ -405,9 +405,13 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
     /// <summary>
     /// The frames a resolved relation yields for one of ITS columns. The relation name has to end where it
-    /// ends: <c>sys.dm_exec_query_stats</c> is a prefix of <c>sys.dm_exec_query_statistics_xml</c>, which
-    /// <c>QuerySnapshotsCollector</c> applies two lines from a timestamp column, so a plain substring test
-    /// would lend one relation's documented frame to an unrelated one.
+    /// ends, or the vocabulary lends one relation's documented frame to any longer name that starts with it —
+    /// and this tree is full of near-miss DMV names (<c>sys.dm_exec_query_stats</c> beside
+    /// <c>sys.dm_exec_query_statistics_xml</c>, <c>sys.dm_hadr_database_replica_states</c> beside
+    /// <c>sys.dm_hadr_availability_replica_states</c>). No pair in the vocabulary collides TODAY;
+    /// <see cref="TheDiscriminators_FlagTheShippedShapes_AndPassTheBenignOnes"/> pins the boundary on a
+    /// synthetic longer name, because a matcher contract that only holds for the names currently present is
+    /// one collector away from not holding.
     /// </summary>
     private static HashSet<ClockFrame> FramesInRelation(string relation, string column)
     {
@@ -1346,10 +1350,11 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         Assert.Empty(FramesInRelation("sys.dm_os_sys_info", "ms_ticks"));
         Assert.Empty(FramesInRelation("sys.dm_db_resource_stats", "end_time"));
         Assert.Empty(FramesInRelation("sys.query_store_runtime_stats", "last_execution_time"));
-        /* The relation name ends where it ends, or one DMV lends its documented frame to a longer-named
-           sibling: sys.dm_exec_query_stats is a prefix of the TVF QuerySnapshotsCollector applies. */
-        Assert.Equal([ClockFrame.ServerLocal], FramesInRelation("sys.dm_exec_query_stats AS qs", "creation_time"));
-        Assert.Empty(FramesInRelation("sys.dm_exec_query_statistics_xml(der.session_id)", "creation_time"));
+        /* The relation name ends where it ends. Pinned on a synthetic longer name rather than on a real
+           pair, because no two vocabulary entries collide today and a pin that only discriminates once a
+           colliding collector exists asserts nothing until then. */
+        Assert.Equal([ClockFrame.ServerLocal], FramesInRelation("sys.dm_os_sys_info AS osi", "sqlserver_start_time"));
+        Assert.Empty(FramesInRelation("sys.dm_os_sys_info_extended AS x", "sqlserver_start_time"));
 
         /* FramesInText: the clock markers, and the fact that a UTC one is not a local one. */
         Assert.Equal([ClockFrame.Utc], FramesInText("evt.value('(@timestamp)[1]', 'datetime2')"));
