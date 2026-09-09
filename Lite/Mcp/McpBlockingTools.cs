@@ -114,7 +114,7 @@ public sealed class McpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_blocked_process_reports"), Description("Gets detailed blocked process reports from extended events (parsed via sp_HumanEventsBlockViewer). Provides detailed blocked/blocking session info: isolation levels, transaction names, full query text for both sessions. Use for deep analysis of prolonged blocking.")]
+    [McpServerTool(Name = "get_blocked_process_reports"), Description("Gets detailed blocked process reports from extended events (parsed via sp_HumanEventsBlockViewer). Provides detailed blocked/blocking session info: isolation levels, transaction names, full query text for both sessions. Use for deep analysis of prolonged blocking. Every timestamp here is UTC: event_time already was, and the six blocked_/blocking_ last_tran/last_batch stamps are de-skewed from the monitored server's local clock by this read, so comparing them against event_time to see whether a transaction predates the block is direct.")]
     public static async Task<string> GetBlockedProcessReports(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -133,6 +133,14 @@ public sealed class McpBlockingTools
 
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
+
+            /* The stamps below are THIS server's local wall clock in the store, so putting them in the
+               naive-UTC frame every other field on this payload uses needs THIS server's offset, not the
+               desktop tab's. See McpServerLocalWindow. De-skewed HERE and not inside LocalDataService
+               because the WPF grids read the same rows and render them through ServerTimeHelper — that
+               surface has its own frame defect and its own issue, and folding the two together would fix
+               one by breaking the other. */
+            var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
 
             var rows = await dataService.GetRecentBlockedProcessReportsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (rows.Count == 0)
@@ -168,12 +176,12 @@ public sealed class McpBlockingTools
                 blocking_sql_text = McpHelpers.Truncate(r.BlockingSqlText, 2000),
                 blocked_transaction_name = r.BlockedTransactionName,
                 blocking_transaction_name = r.BlockingTransactionName,
-                blocked_last_tran_started = r.BlockedLastTranStarted?.ToString("o"),
-                blocking_last_tran_started = r.BlockingLastTranStarted?.ToString("o"),
-                blocked_last_batch_started = r.BlockedLastBatchStarted?.ToString("o"),
-                blocking_last_batch_started = r.BlockingLastBatchStarted?.ToString("o"),
-                blocked_last_batch_completed = r.BlockedLastBatchCompleted?.ToString("o"),
-                blocking_last_batch_completed = r.BlockingLastBatchCompleted?.ToString("o"),
+                blocked_last_tran_started = r.BlockedLastTranStarted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
+                blocking_last_tran_started = r.BlockingLastTranStarted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
+                blocked_last_batch_started = r.BlockedLastBatchStarted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
+                blocking_last_batch_started = r.BlockingLastBatchStarted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
+                blocked_last_batch_completed = r.BlockedLastBatchCompleted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
+                blocking_last_batch_completed = r.BlockingLastBatchCompleted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
                 blocked_priority = r.BlockedPriority,
                 blocking_priority = r.BlockingPriority
             });
