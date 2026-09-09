@@ -187,6 +187,12 @@ internal static class DarlingObjectStatsReader
     /// keeps it NULL. This read returns NO other timestamp, which is why converting rather than labelling
     /// matters more here than elsewhere: there is nothing else in the payload for a reader to notice a
     /// disagreement against.</para>
+    /// <para>The alias deliberately does NOT carry a <c>_utc</c> suffix, unlike the other fifteen. This one
+    /// is a projection alias rather than a column, and <c>ConsumedTimestampFrameDisciplineTests</c> reaches
+    /// the payload field through the alias — a suffix here would make the field name and the alias diverge
+    /// and drop the site out of that census. The conversion is pinned directly by
+    /// <c>EveryDeSkewedAtReadSite_CarriesItsConversionInTheReaderItDependsOn</c>, which is a stronger claim
+    /// than a suffix nothing checks.</para>
     /// </summary>
     public const string IndexUsageSql = """
         WITH svr AS (
@@ -211,7 +217,7 @@ internal static class DarlingObjectStatsReader
             COALESCE(user_lookups, 0) AS user_lookups,
             COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) AS total_reads,
             COALESCE(user_updates, 0) AS user_updates,
-            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) - make_interval(mins => svr.offset_minutes) AS last_user_access_utc,
+            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) - make_interval(mins => svr.offset_minutes) AS last_user_access,
             CASE
                 WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
                      AND COALESCE(user_updates, 0) = 0 THEN 'Unused'

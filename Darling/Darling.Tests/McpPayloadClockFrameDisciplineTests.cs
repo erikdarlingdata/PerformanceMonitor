@@ -82,12 +82,21 @@ public sealed class McpPayloadClockFrameDisciplineTests
     /// fifteen of the sixteen are stored columns projected straight through; only <c>last_user_access</c>
     /// differs, and defaulting rather than requiring it keeps that one visible as the exception it is.
     /// </summary>
-    public readonly record struct PayloadColumn(string Alias, string? Source = null, string? BareForm = null)
+    public readonly record struct PayloadColumn(
+        string Alias, string? Source = null, string? BareForm = null, string? OutAlias = null)
     {
         public string Expression => Source ?? Alias;
 
-        /// <summary>The de-skewed projection this column must carry, spelled as the read ships it.</summary>
-        public string DeSkewed => $"{Expression} - make_interval(mins => svr.offset_minutes) AS {Alias}_utc";
+        /// <summary>
+        /// The de-skewed projection this column must carry, spelled as the read ships it. The output alias is
+        /// <c>{Alias}_utc</c> for the fifteen stored columns; <c>last_user_access</c> overrides it to its own
+        /// name, because that payload field is reached through the SQL ALIAS by
+        /// <c>ConsumedTimestampFrameDisciplineTests</c>'s projection hop, and a suffix would make the field
+        /// name and the alias diverge and drop the site out of that census. Its conversion is pinned there
+        /// directly instead, which outranks a suffix nothing checks.
+        /// </summary>
+        public string DeSkewed =>
+            $"{Expression} - make_interval(mins => svr.offset_minutes) AS {OutAlias ?? Alias + "_utc"}";
     }
 
     /// <summary>
@@ -115,7 +124,8 @@ public sealed class McpPayloadClockFrameDisciplineTests
         ("IndexUsageSql",
             [new("last_user_access",
                  "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)",
-                 BareForm: "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,")],
+                 BareForm: "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,",
+                 OutAlias: "last_user_access")],
             "IndexObjectStatsCollector ships us.last_user_seek/scan/lookup/update from "
             + "sys.dm_db_index_usage_stats verbatim; the read GREATESTs the four"),
         ("PvsStatsLatestSql",
@@ -378,18 +388,19 @@ public sealed class McpPayloadClockFrameDisciplineTests
         var greatest = new PayloadColumn(
             "last_user_access",
             "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)",
-            BareForm: "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,");
+            BareForm: "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,",
+            OutAlias: "last_user_access");
         Assert.Equal(
             "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)"
-            + " - make_interval(mins => svr.offset_minutes) AS last_user_access_utc",
+            + " - make_interval(mins => svr.offset_minutes) AS last_user_access",
             greatest.DeSkewed);
         Assert.Matches(
             BareProjection(greatest),
             "            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,\n");
         Assert.DoesNotMatch(
             BareProjection(greatest),
-            "            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)\n"
-            + "                - make_interval(mins => svr.offset_minutes) AS last_user_access_utc,\n");
+            "            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)"
+            + " - make_interval(mins => svr.offset_minutes) AS last_user_access,\n");
 
         /* LiteDeSkew recognises BOTH shipped Lite forms — the nullable one and the non-nullable one — and
            neither bare emission. The non-nullable case is real: RunningJobRow.StartTime is a DateTime. */
