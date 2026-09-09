@@ -2368,6 +2368,15 @@ WITH NO DATA";
     /// covers both, because a reader cross-applying their scopes is the documented failure mode; one ROLE
     /// does not, so the direction each fails in is stated on each rather than assumed to be shared.</para>
     ///
+    /// <para><b>WHAT THEY DO SHARE IS THE PROVENANCE, and the role difference is not a difference in how
+    /// either value was arrived at (#3188).</b> This one is the duration of ONE run on ONE night, and the
+    /// WHAT REPLACES IT IS A TREND paragraph below is the demonstration rather than a caveat beside it:
+    /// the per-closed-day maximum climbs monotonically across the span, so WHICH run this constant is
+    /// depends on the night the census was read and on nothing else about the workload. Its sibling's
+    /// value has the same shape for the same reason. So "a prefix maximum cannot size a fixed budget" and
+    /// "a prefix maximum cannot evidence a universal over runs" are ONE finding in two roles, which is
+    /// why the estimator paragraph is shared and this one is not.</para>
+    ///
     /// <para><b>AND IT IS NOT THE SAME POPULATION AS ITS SIBLING'S, which has to be said here because the
     /// two constants read as a matched pair and are not one (#3182).</b>
     /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> is scoped to the runs after the narrowing
