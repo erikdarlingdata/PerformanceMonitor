@@ -41,11 +41,13 @@ public sealed class DarlingMcpFleetTools
         "This cross-server view is unique to the central store. " +
         "cpu_source names which collector produced each card's total_cpu_percent, so a missing number is never " +
         "ambiguous: RingBuffer (SQL Server, and the only arm that also fills cpu_percent / " +
-        "other_process_cpu_percent with the per-process split), PerformanceInsights (an Aurora/RDS PostgreSQL " +
-        "target's instance CPU, total only), NotCollected (a source that applies here produced no current " +
-        "reading — check get_collection_health), or NoSourceForEngine (a PostgreSQL target not known to be " +
-        "Aurora; PostgreSQL exposes no instance-CPU counter and nothing collects one here, so that null is " +
-        "structural). A PostgreSQL target's memory_mb, buffer_pool_mb and the whole threads block are null for " +
+        "other_process_cpu_percent with the per-process split), PerformanceInsights (an Aurora PostgreSQL " +
+        "target's instance CPU from the AWS API, total only — no per-process breakdown exists), NotCollected " +
+        "(a source that applies here produced no current reading — check get_collection_health), or " +
+        "NoSourceForEngine (a PostgreSQL target not known to be Aurora, INCLUDING plain RDS for PostgreSQL: " +
+        "PostgreSQL exposes no instance-CPU counter and the Performance Insights ingest is gated to Aurora, " +
+        "so that null is structural and no grant or upgrade changes it). A PostgreSQL target's memory_mb, " +
+        "buffer_pool_mb and the whole threads block are null for " +
         "the same structural reason and no band is claimed for them — those metrics are SQL Server DMV " +
         "readings with no PostgreSQL equivalent collected; get_pg_buffer_usage, get_pg_kernel_stats and " +
         "get_pg_session_states are the reads that answer the nearest PostgreSQL questions.")]

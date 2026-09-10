@@ -39,9 +39,14 @@ public enum FleetCpuSource
     /// <c>CpuUtilizationCollector</c>.</summary>
     RingBuffer,
 
-    /// <summary>AWS Performance Insights' <c>os.cpuUtilization.total.avg</c> for an Aurora/RDS PostgreSQL
-    /// target (#2719) — a host-level OS counter, so the same quantity the ring-buffer arm's total is, but
-    /// with no per-process split to publish beside it.</summary>
+    /// <summary>AWS Performance Insights' <c>os.cpuUtilization.total.avg</c> (#2719) — a host-level OS
+    /// counter, so the same quantity the ring-buffer arm's total is, but with no per-process split to
+    /// publish beside it.
+    ///
+    /// <para>This arm means a Performance Insights reading is PRESENT, and in this build only an Aurora
+    /// PostgreSQL target produces one: <c>PgCpuUtilizationCollector.AppliesTo</c> gates the ingest on
+    /// <c>IsAurora</c>, so a plain RDS-for-PostgreSQL target lands on <see cref="NoSourceForEngine"/>
+    /// instead — see that arm for why the gate, not the API's reach, is what decides.</para></summary>
     PerformanceInsights,
 
     /// <summary>This build collects no instance CPU for this target at all: a PostgreSQL target the store
