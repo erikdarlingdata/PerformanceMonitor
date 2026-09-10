@@ -389,7 +389,7 @@ public class DarlingFirewallCheckTests
         config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
 
         var mcp = Assert.Single(
-            DarlingCliCommands.PlanFirewallRules(config, mcpStore: (true, 5199)).Where(p => p.Surface == "MCP"));
+            DarlingCliCommands.PlanFirewallRules(config, mcpStore: (true, 5199)), p => p.Surface == "MCP");
 
         Assert.Equal(DarlingCliCommands.FirewallRuleAction.Open, mcp.Action);
         Assert.Equal(5199, mcp.Port);
@@ -414,7 +414,7 @@ public class DarlingFirewallCheckTests
         config.Web.Network = new WebNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
 
         var web = Assert.Single(
-            DarlingCliCommands.PlanFirewallRules(config, webStore: (true, 5188)).Where(p => p.Surface == "web dashboard"));
+            DarlingCliCommands.PlanFirewallRules(config, webStore: (true, 5188)), p => p.Surface == "web dashboard");
 
         Assert.Equal(DarlingCliCommands.FirewallRuleAction.Open, web.Action);
         Assert.Equal(5188, web.Port);
@@ -436,8 +436,8 @@ public class DarlingFirewallCheckTests
         config.Postgres.Network = new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24" };
 
         var store = Assert.Single(
-            DarlingCliCommands.PlanFirewallRules(config, mcpStore: (true, 5199), webStore: (true, 5188))
-                .Where(p => p.Surface == "store"));
+            DarlingCliCommands.PlanFirewallRules(config, mcpStore: (true, 5199), webStore: (true, 5188)),
+            p => p.Surface == "store");
 
         Assert.Equal(5641, store.Port);
         Assert.Null(store.PortNote);
@@ -458,8 +458,8 @@ public class DarlingFirewallCheckTests
         config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
 
         var mcp = Assert.Single(
-            DarlingCliCommands.PlanFirewallRules(config, storeUnavailableReason: "the store did not answer within 10 seconds")
-                .Where(p => p.Surface == "MCP"));
+            DarlingCliCommands.PlanFirewallRules(config, storeUnavailableReason: "the store did not answer within 10 seconds"),
+            p => p.Surface == "MCP");
 
         Assert.Equal(5152, mcp.Port);
         Assert.NotNull(mcp.PortNote);
@@ -496,7 +496,7 @@ public class DarlingFirewallCheckTests
 
         /* ...and the control plane, which is what the supervisor obeys, says no. */
         var mcp = Assert.Single(
-            DarlingCliCommands.PlanFirewallRules(config, mcpStore: (false, 5152)).Where(p => p.Surface == "MCP"));
+            DarlingCliCommands.PlanFirewallRules(config, mcpStore: (false, 5152)), p => p.Surface == "MCP");
 
         Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, mcp.Action);
         Assert.Null(mcp.Cidr);
@@ -521,7 +521,7 @@ public class DarlingFirewallCheckTests
         config.Web.Network = new WebNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
 
         var web = Assert.Single(
-            DarlingCliCommands.PlanFirewallRules(config, webStore: (false, 5153)).Where(p => p.Surface == "web dashboard"));
+            DarlingCliCommands.PlanFirewallRules(config, webStore: (false, 5153)), p => p.Surface == "web dashboard");
 
         Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, web.Action);
         Assert.Contains("config.config_service.web_enabled = false", web.Note, StringComparison.Ordinal);
@@ -548,8 +548,8 @@ public class DarlingFirewallCheckTests
         config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
 
         var mcp = Assert.Single(
-            DarlingCliCommands.PlanFirewallRules(config, storeUnavailableReason: "the store did not answer within 10 seconds")
-                .Where(p => p.Surface == "MCP"));
+            DarlingCliCommands.PlanFirewallRules(config, storeUnavailableReason: "the store did not answer within 10 seconds"),
+            p => p.Surface == "MCP");
 
         Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, mcp.Action);
         Assert.NotNull(mcp.Note);
@@ -583,7 +583,7 @@ public class DarlingFirewallCheckTests
         config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
 
         var note = Assert.Single(
-            DarlingCliCommands.PlanFirewallRules(config, mcpStore: (false, 5152)).Where(p => p.Surface == "MCP")).Note;
+            DarlingCliCommands.PlanFirewallRules(config, mcpStore: (false, 5152)), p => p.Surface == "MCP").Note;
 
         Assert.Contains("the CONTROL PLANE has it off", note, StringComparison.Ordinal);
         Assert.DoesNotContain("may be stale", note, StringComparison.Ordinal);
@@ -611,8 +611,8 @@ public class DarlingFirewallCheckTests
         config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
 
         var mcp = Assert.Single(
-            DarlingCliCommands.PlanFirewallRules(config, storeUnavailableReason: "the store did not answer within 10 seconds")
-                .Where(p => p.Surface == "MCP"));
+            DarlingCliCommands.PlanFirewallRules(config, storeUnavailableReason: "the store did not answer within 10 seconds"),
+            p => p.Surface == "MCP");
 
         Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, mcp.Action);
         Assert.False(mcp.SweepOtherPorts);
@@ -624,8 +624,8 @@ public class DarlingFirewallCheckTests
 
         Assert.False(
             Assert.Single(
-                DarlingCliCommands.PlanFirewallRules(webConfig, storeUnavailableReason: "the store did not answer within 10 seconds")
-                    .Where(p => p.Surface == "web dashboard"))
+                DarlingCliCommands.PlanFirewallRules(webConfig, storeUnavailableReason: "the store did not answer within 10 seconds"),
+                p => p.Surface == "web dashboard")
                 .SweepOtherPorts);
     }
 
@@ -664,8 +664,8 @@ public class DarlingFirewallCheckTests
         config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
 
         var mcp = Assert.Single(
-            DarlingCliCommands.PlanFirewallRules(config, storeUnavailableReason: "the store did not answer within 10 seconds")
-                .Where(p => p.Surface == "MCP"));
+            DarlingCliCommands.PlanFirewallRules(config, storeUnavailableReason: "the store did not answer within 10 seconds"),
+            p => p.Surface == "MCP");
 
         /* The rule for the file's port is still created — that is the fresh-install case, where the file cannot
            be wrong — and the enable command removes its own exact DisplayName first, so declining the sweep
@@ -688,7 +688,7 @@ public class DarlingFirewallCheckTests
         config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
 
         var mcp = Assert.Single(
-            DarlingCliCommands.PlanFirewallRules(config, mcpStore: (true, 5199)).Where(p => p.Surface == "MCP"));
+            DarlingCliCommands.PlanFirewallRules(config, mcpStore: (true, 5199)), p => p.Surface == "MCP");
 
         Assert.Equal(5199, mcp.Port);
         Assert.True(mcp.SweepOtherPorts);
@@ -706,8 +706,8 @@ public class DarlingFirewallCheckTests
         config.Postgres!.Network = new PostgresNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24" };
 
         var store = Assert.Single(
-            DarlingCliCommands.PlanFirewallRules(config, storeUnavailableReason: "the store did not answer within 10 seconds")
-                .Where(p => p.Surface == "store"));
+            DarlingCliCommands.PlanFirewallRules(config, storeUnavailableReason: "the store did not answer within 10 seconds"),
+            p => p.Surface == "store");
 
         Assert.Equal(DarlingCliCommands.FirewallRuleAction.Open, store.Action);
         Assert.True(store.SweepOtherPorts);
@@ -994,7 +994,7 @@ public class DarlingFirewallCheckTests
         disabled.Mcp.Enabled = true;
         disabled.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
         var disabledPlan = Assert.Single(
-            DarlingCliCommands.PlanFirewallRules(disabled, mcpStore: (false, 5152)).Where(p => p.Surface == "MCP"));
+            DarlingCliCommands.PlanFirewallRules(disabled, mcpStore: (false, 5152)), p => p.Surface == "MCP");
 
         Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, disabledPlan.Action);
         Assert.True(disabledPlan.SweepOtherPorts);
@@ -1008,8 +1008,8 @@ public class DarlingFirewallCheckTests
         unreadable.Mcp.Enabled = false;
         unreadable.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
         var withheldPlan = Assert.Single(
-            DarlingCliCommands.PlanFirewallRules(unreadable, storeUnavailableReason: "the store did not answer within 10 seconds")
-                .Where(p => p.Surface == "MCP"));
+            DarlingCliCommands.PlanFirewallRules(unreadable, storeUnavailableReason: "the store did not answer within 10 seconds"),
+            p => p.Surface == "MCP");
 
         Assert.Equal(DarlingCliCommands.FirewallRuleAction.Remove, withheldPlan.Action);
         Assert.False(withheldPlan.SweepOtherPorts);

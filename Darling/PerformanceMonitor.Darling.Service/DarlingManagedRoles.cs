@@ -64,12 +64,15 @@ namespace PerformanceMonitor.Darling.Service;
 /// checks drive it exactly as <see cref="DarlingManagedPostgres.EnsureConfAppended"/> uses its conf
 /// marker.</para>
 ///
-/// <para>Windows-only (the DPAPI credential files), like every DPAPI surface here. Managed mode provisions
+/// <para>Provisioning is Windows-only (the DPAPI credential files), like every DPAPI surface here —
+/// carried on the provisioning members rather than the type, because the compose
+/// <c>statement_timeout</c> surface (<see cref="ShouldReassertComposeStatementTimeout"/> and friends)
+/// is platform-neutral SQL that the cross-platform control-plane reload calls (#2918), and a member
+/// cannot widen a type-level platform annotation. Managed mode provisions
 /// all three roles (admin/viewer/mcp); bring-your-own Postgres provisions admin + viewer out-of-band via
 /// <c>Darling/tools/provision-roles.sql</c> and correctly has NO <c>mcp</c> role — the network MCP endpoint
 /// is managed-mode-only, so a BYO operator's own PostgreSQL governs any MCP-role exposure it wants.</para>
 /// </summary>
-[SupportedOSPlatform("windows")]
 public static class DarlingManagedRoles
 {
     /// <summary>
@@ -201,6 +204,7 @@ public static class DarlingManagedRoles
     /// never received, and since the gate only fires on a difference, that first-run mismatch would never be
     /// corrected.
     /// </returns>
+    [SupportedOSPlatform("windows")]
     public static async Task<int> EnsureProvisionedAsync(
         NpgsqlDataSource dataSource, string dataDirectory, ILogger logger, CancellationToken cancellationToken = default)
     {
@@ -368,6 +372,7 @@ ALTER ROLE {mcp}    SET statement_timeout = '{statementTimeout}';";
     /// always be re-asserted (<c>ALTER ROLE … PASSWORD</c>), so an untrusted-owned (possibly pre-planted)
     /// file is discarded and regenerated rather than trusted.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private static string EnsureRoleCredential(string credentialPath, string roleName, bool allowInteractiveRead, ILogger logger)
     {
         string password;
@@ -402,6 +407,7 @@ ALTER ROLE {mcp}    SET statement_timeout = '{statementTimeout}';";
 
     /// <summary>Best-effort restrictive ACL on a role credential; a failure is logged loud, not fatal — and the
     /// RESULT is verified afterwards, because attempting a harden is not evidence the secret is protected.</summary>
+    [SupportedOSPlatform("windows")]
     private static void TryHardenRoleCredential(string path, bool allowInteractiveRead, ILogger logger)
     {
         try

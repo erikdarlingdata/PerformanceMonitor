@@ -72,8 +72,13 @@ namespace PerformanceMonitor.Darling.Service;
 /// initdb, no restart, no credential rewrite. The conf append is marker-guarded and re-checked
 /// every start, so a crash between initdb and the append self-heals on the next run instead of
 /// silently degrading TimescaleDB to plain-PG mode.</para>
+///
+/// <para>Managed mode is Windows-only (DPAPI credentials, ACL hardening, the Windows service
+/// lifecycle), annotated on the lifecycle members rather than the type: the pure statics some
+/// cross-platform paths reuse — the role-name consts, <see cref="CertificateSanCoversIp"/> (the web
+/// dashboard's SAN check shares it) — are platform-neutral, and a member cannot widen a type-level
+/// platform annotation.</para>
 /// </summary>
-[SupportedOSPlatform("windows")]
 public sealed class DarlingManagedPostgres
 {
     /// <summary>The cluster's bootstrap superuser AND the store's database name — the managed twin of the sample's unmanaged string.</summary>
@@ -399,6 +404,7 @@ public sealed class DarlingManagedPostgres
     private int _bundledMajor;
     private string? _bundledTimescaleVersion;
 
+    [SupportedOSPlatform("windows")]
     public DarlingManagedPostgres(PostgresConfig config, ILogger logger, string? runtimeRootOverride = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -428,6 +434,7 @@ public sealed class DarlingManagedPostgres
     /// can raise a real self-alert once the alert engine is up. The store is down while an upgrade runs, so
     /// its START can only be a log line; both terminal states happen with a live store and are alertable.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     internal DarlingStoreUpgrade.StoreUpgradeOutcome LastUpgradeOutcome { get; private set; }
         = DarlingStoreUpgrade.StoreUpgradeOutcome.None;
 
@@ -1010,6 +1017,7 @@ public sealed class DarlingManagedPostgres
     /// server — for secondary consumers (the MCP host) that must never bootstrap; the worker
     /// owns the lifecycle. Null until the worker's first initdb has written the credential.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     public static string? TryBuildConnectionStringFromStoredCredential(PostgresConfig config)
     {
         var credentialPath = CredentialPathFor(ResolveDataDirectory(config));
@@ -1029,6 +1037,7 @@ public sealed class DarlingManagedPostgres
     /// has written the credential — which happens AFTER migration, later than the owner credential, so the
     /// MCP host's first-boot poll budget must tolerate the delay.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     public static string? TryBuildMcpConnectionStringFromStoredCredential(PostgresConfig config)
     {
         var credentialPath = McpCredentialPathFor(ResolveDataDirectory(config));
@@ -1048,6 +1057,7 @@ public sealed class DarlingManagedPostgres
     /// the credential (AFTER migration), so the web host's first-boot poll budget must tolerate the delay — the
     /// twin of <see cref="TryBuildMcpConnectionStringFromStoredCredential"/>.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     public static string? TryBuildViewerConnectionStringFromStoredCredential(PostgresConfig config)
     {
         var credentialPath = ViewerCredentialPathFor(ResolveDataDirectory(config));
@@ -1066,6 +1076,7 @@ public sealed class DarlingManagedPostgres
     /// ready-to-use connection string. Throws (actionably) on any failure — the worker logs it
     /// critical and exits cleanly.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     public async Task<string> EnsureRunningAsync(CancellationToken cancellationToken)
     {
         var binDirectory = await EnsureRuntimeAsync(cancellationToken);
@@ -1215,6 +1226,7 @@ public sealed class DarlingManagedPostgres
     /// (fresh install, or someone deleted the extracted copy) it self-heals by extracting.
     /// Neither present is a packaging problem with a packaging answer, not a retry loop.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private async Task<string> EnsureRuntimeAsync(CancellationToken cancellationToken)
     {
         var pgsqlDirectory = Path.Combine(_runtimeRoot, "pgsql");
@@ -1269,6 +1281,7 @@ public sealed class DarlingManagedPostgres
     /// the next attempt regenerates and overwrites it (initdb itself cleans up its partial data
     /// directory on failure).
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private async Task InitializeClusterAsync(string binDirectory, CancellationToken cancellationToken)
     {
         _logger.LogInformation("Initializing managed Postgres cluster in {DataDirectory} (first run)", _dataDirectory);
@@ -1671,6 +1684,7 @@ public sealed class DarlingManagedPostgres
     /// newer cluster with older binaries; starting anyway is how a downgrade silently corrupts a store.</item>
     /// </list>
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private async Task EnsureDataDirectoryMajorAsync(string binDirectory, CancellationToken cancellationToken)
     {
         var dataMajor = DarlingStoreUpgrade.ParseDataDirectoryMajor(
@@ -1761,6 +1775,7 @@ public sealed class DarlingManagedPostgres
         }
     }
 
+    [SupportedOSPlatform("windows")]
     private string PreviousRuntimeHint()
         => Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(_runtimeRoot), "pgsql");
 
@@ -1768,6 +1783,7 @@ public sealed class DarlingManagedPostgres
     /// manifest that could disagree with what is on disk. The probe's exit code rides out alongside it
     /// (#2186): when the answer is "unidentifiable", that code is the ONLY evidence of why, and the
     /// refusal that consumes it used to have to assert the reason instead of showing it.</summary>
+    [SupportedOSPlatform("windows")]
     private static async Task<(int? Major, int ExitCode)> ReadRuntimeMajorAsync(string binDirectory, CancellationToken cancellationToken)
     {
         var (exitCode, output) = await RunToolAsync(
@@ -1780,6 +1796,7 @@ public sealed class DarlingManagedPostgres
     /// <c>share\extension\timescaledb.control</c>. This is the version the store's extension must reach:
     /// every TimescaleDB function resolves to a version-suffixed library, and the runtime carries exactly one.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private static string? ReadBundledTimescaleVersion(string binDirectory)
     {
         try
@@ -2076,6 +2093,7 @@ public sealed class DarlingManagedPostgres
     private static bool IsTransientConnectionFault(Exception exception)
         => PostgresTransportFault.IsTransportFault(exception);
 
+    [SupportedOSPlatform("windows")]
     private string ReadStoredPassword()
     {
         if (!File.Exists(_credentialPath))
@@ -2119,6 +2137,7 @@ public sealed class DarlingManagedPostgres
     /// loud but never bricks the service — the fresh-install path (the service account owns the
     /// just-created directory) succeeds, and the trusted-owner read guard is the complementary defense.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private void TryHardenDirectory(string path)
     {
         try
@@ -2142,6 +2161,7 @@ public sealed class DarlingManagedPostgres
     /// RESULT is checked, because "we tried" is not the same claim as "the secret is not readable". These blobs
     /// are machine-scoped DPAPI, so read access IS the secret.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private void TryHardenCredentialFile(string path, bool allowInteractiveRead)
     {
         try
@@ -2287,6 +2307,7 @@ public sealed class DarlingManagedPostgres
     /// generates the TLS cert — returning the effective <see cref="NetworkPlan"/>. NEVER throws: a cert-gen
     /// failure degrades to loopback with a reason (D6/D-validate).
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private NetworkPlan BuildNetworkPlan()
     {
         var certPath = Path.Combine(ParentOf(_dataDirectory), ServerCertFileName);
@@ -2336,6 +2357,7 @@ public sealed class DarlingManagedPostgres
     /// and hardened NON-interactive (SYSTEM + Administrators + service account only) — the postmaster reads
     /// it, never an interactive user.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     internal void EnsureServerCertificate(IPAddress listenIp, string certPath, string keyPath)
     {
         var rootPath = RootCertificatePathFor(certPath);
@@ -2602,6 +2624,7 @@ public sealed class DarlingManagedPostgres
     /// (Round 4 #3): its whole body is caught so a reconcile failure logs + degrades, it does not abort the
     /// bootstrap (whose contract is throw => service-exit).
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private async Task ReconcileNetworkAsync(
         string binDirectory, NetworkPlan plan, string ownerConnectionString, CancellationToken cancellationToken)
     {

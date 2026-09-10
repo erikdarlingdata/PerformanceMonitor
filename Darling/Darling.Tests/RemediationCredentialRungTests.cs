@@ -139,7 +139,7 @@ public class RemediationCredentialRungTests
             .First();
 
         var actor = Assert.Single(
-            constructor.GetParameters().Where(p => p.Name == "Actor"));
+            constructor.GetParameters(), p => p.Name == "Actor");
 
         Assert.False(
             actor.HasDefaultValue,
@@ -155,8 +155,8 @@ public class RemediationCredentialRungTests
                 .GetConstructors()
                 .OrderByDescending(c => c.GetParameters().Length)
                 .First()
-                .GetParameters()
-                .Where(p => p.Name == "ReplicaRole"));
+                .GetParameters(),
+            p => p.Name == "ReplicaRole");
         Assert.True(replicaRole.HasDefaultValue);
     }
 
@@ -225,8 +225,8 @@ public class RemediationCredentialRungTests
     public void TheCredentialColumnsAreClassifiedWithTheSecretOnTheSecretSide()
     {
         var acl = Assert.Single(
-            DarlingManagedRoles.ViewerRestrictedConfigTables
-                .Where(t => t.Table == "config_monitored_servers"));
+            DarlingManagedRoles.ViewerRestrictedConfigTables,
+            t => t.Table == "config_monitored_servers");
 
         Assert.Contains("remediation_username", acl.NonSecretColumns);
         Assert.Contains("remediation_encrypted_password", acl.SecretColumns);

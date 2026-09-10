@@ -240,10 +240,10 @@ public sealed class PlanForceActionStoreTests
             var audited = await store.GetRecentActionsAsync(TestServerId, now.AddDays(-1), 200, ct);
             Assert.Equal(
                 PgPlanForceActionStore.ActorOperator,
-                Assert.Single(audited.Where(r => r.ActionId == operatorForce)).Actor);
+                Assert.Single(audited, r => r.ActionId == operatorForce).Actor);
             Assert.Equal(
                 PgPlanForceActionStore.ActorBot,
-                Assert.Single(audited.Where(r => r.ActionId == botForce)).Actor);
+                Assert.Single(audited, r => r.ActionId == botForce).Actor);
 
             bodySucceeded = true;
         }

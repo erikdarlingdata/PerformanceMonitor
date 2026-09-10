@@ -139,7 +139,7 @@ public sealed class ControlPlaneReloadDurabilityTests
 
         Assert.NotEqual(sentinel, StoreConfigProvider.ClampComposeStatementTimeoutSeconds(sentinel));
         Assert.NotEqual(sentinel, StoreConfigProvider.ClampComposeStatementTimeoutSeconds(0));
-        Assert.NotEqual(sentinel, StoreConfigProvider.MinComposeStatementTimeoutSeconds);
+        Assert.NotEqual(StoreConfigProvider.MinComposeStatementTimeoutSeconds, sentinel);
     }
 
     /// <summary>

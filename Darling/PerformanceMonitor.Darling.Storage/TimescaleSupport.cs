@@ -1983,7 +1983,7 @@ WITH NO DATA";
     /// deployment-bounded once, permanently, with nothing red.</para>
     ///
     /// </summary>
-    private static readonly IReadOnlySet<string> UnboundedCardinalityRefreshViews =
+    private static readonly HashSet<string> UnboundedCardinalityRefreshViews =
         HourlyRefreshDefinitions
             .Where(definition => GroupKeyIsUnboundedCardinality(definition.CreateSql))
             .Select(definition => definition.View)

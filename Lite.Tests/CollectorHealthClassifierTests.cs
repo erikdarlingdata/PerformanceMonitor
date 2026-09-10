@@ -117,11 +117,12 @@ public sealed class CollectorHealthClassifierTests
 
     /* Precedence: abandonment sits at the WARNING tier, so the louder facts still win. A collector that
        has not succeeded in 30h is FAILING whatever its abandon rate, and one that has gone dark entirely
-       is STOPPED - abandonment never downgrades either, and NEVER_RUN still wins outright. */
+       is STOPPED - abandonment never downgrades either, and NEVER_RUN's outright win is already the
+       table's first row (an abandoned cycle increments total_runs, so no distinct NEVER_RUN-with-
+       abandonment shape exists). */
     [InlineData(1226, 1000, 0, 0, 226, 30, 2, OneMinute, false, CollectorHealthClassifier.Failing)]
     [InlineData(1226, 1000, 0, 0, 226, 30, 30, OneMinute, false, CollectorHealthClassifier.Stopped)]
     [InlineData(1226, 1200, 0, 0, 26, 5, 5, OneMinute, false, CollectorHealthClassifier.Stale)]
-    [InlineData(0, 0, 0, 0, 0, 999, 999, OneMinute, false, CollectorHealthClassifier.NeverRun)]
 
     /* A collector abandoning EVERY cycle already had a band - it lands no successes, so the success clock
        runs out and staleness carries it to FAILING. Pinned so the new rate cannot be mistaken for the only
