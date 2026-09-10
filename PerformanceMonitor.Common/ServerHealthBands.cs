@@ -572,6 +572,17 @@ namespace PerformanceMonitor.Common
         /* The band strings every surface's brush / display mapping already switches on — unchanged values. */
         public const string NeverRun = "NEVER_RUN";
         public const string NoPermissions = "NO_PERMISSIONS";
+
+        /// <summary>
+        /// Every attempt in the window was refused because a PostgreSQL extension the collector DECLARES
+        /// (<c>ICollectorSchemaInfo.RequiredPgExtensions</c>) is not installed on the target (#3240). Split
+        /// out of <see cref="NoPermissions"/> because the two bands demand opposite actions: NO_PERMISSIONS
+        /// sends an operator after a grant, and for these rows a grant fixes nothing — the stored message
+        /// names the extension and <c>CREATE EXTENSION</c> is the remedy, or leaving it uninstalled is a
+        /// legitimate resting state for an optional module. Matches the <c>EXTENSION_MISSING</c>
+        /// collection_log status the PostgreSQL fault mapper writes for exactly these runs.
+        /// </summary>
+        public const string ExtensionMissing = "EXTENSION_MISSING";
         public const string Stopped = "STOPPED";
         public const string Failing = "FAILING";
         public const string Stale = "STALE";
@@ -585,10 +596,12 @@ namespace PerformanceMonitor.Common
         /// gets one decision here instead of N independent omissions, each of which fails silently by
         /// counting an unread server as read.
         ///
-        /// <para><b>NO_PERMISSIONS and STOPPED are the two the field produces.</b> NO_PERMISSIONS is every
-        /// attempt refused. STOPPED is this classifier's own "attempted nothing at all — no success, no
-        /// error, nothing" past the FAILING cutoff, which an extended outage or a stalled loop reaches while
-        /// the server is still enabled.</para>
+        /// <para><b>NO_PERMISSIONS, EXTENSION_MISSING and STOPPED are the ones the field produces.</b>
+        /// NO_PERMISSIONS is every attempt refused by a grant; EXTENSION_MISSING is every attempt skipped
+        /// because the extension the collector declares is not installed (#3240) — a different remedy, the
+        /// same "nothing of this collector's is in any total". STOPPED is this classifier's own "attempted
+        /// nothing at all — no success, no error, nothing" past the FAILING cutoff, which an extended outage
+        /// or a stalled loop reaches while the server is still enabled.</para>
         ///
         /// <para><b>NEVER_RUN is in the set on MEANING, not on reachability.</b> It is <c>totalRuns == 0</c>,
         /// which a <c>GROUP BY</c> over a run log cannot currently produce — no rows, no group — so today a
@@ -604,7 +617,7 @@ namespace PerformanceMonitor.Common
         /// fix. HEALTHY is obviously not in it.</para>
         /// </summary>
         public static readonly IReadOnlySet<string> NothingReadBands =
-            new HashSet<string>(StringComparer.Ordinal) { NeverRun, NoPermissions, Stopped };
+            new HashSet<string>(StringComparer.Ordinal) { NeverRun, NoPermissions, ExtensionMissing, Stopped };
 
         /// <summary>
         /// True when <paramref name="band"/> is one of <see cref="NothingReadBands"/> — the collector read
@@ -819,9 +832,14 @@ namespace PerformanceMonitor.Common
 
         /// <summary>
         /// Band one collector's trailing-window roll-up. Order is fixed: NEVER_RUN (no runs at all) ->
-        /// NO_PERMISSIONS (only permission denials) -> on-load (failure-rate only, never STOPPED/STALE/
-        /// FAILING) -> STOPPED (no attempt of ANY kind recently, despite a history of runs) -> FAILING ->
-        /// STALE -> WARNING (failure rate OR abandon rate over its own threshold) -> HEALTHY.
+        /// EXTENSION_MISSING (a declared extension absent, #3240) -> NO_PERMISSIONS (only permission
+        /// denials) -> on-load (failure-rate only, never STOPPED/STALE/FAILING) -> STOPPED (no attempt of
+        /// ANY kind recently, despite a history of runs) -> FAILING -> STALE -> WARNING (failure rate OR
+        /// abandon rate over its own threshold) -> HEALTHY.
+        /// <paramref name="extensionMissingCount"/> is runs recorded <c>EXTENSION_MISSING</c> — the
+        /// PostgreSQL fault mapper's named skip for a source whose DECLARED extension is not installed
+        /// (#3240); like the permission count, any success or error makes the window's story bigger than
+        /// the skip and the row falls through to the ordinary ladder.
         /// <paramref name="abandonedCount"/> is runs the #2673 wall-clock budget gave up on; see
         /// <see cref="WarningAbandonRatePercent"/> for why it bands WARNING on its own much lower rate and
         /// why it needed a band at all when a partially-abandoning collector reaches neither STALE nor FAILING.
@@ -839,6 +857,7 @@ namespace PerformanceMonitor.Common
             long successCount,
             long errorCount,
             long permissionDeniedCount,
+            long extensionMissingCount,
             long abandonedCount,
             double hoursSinceLastSuccess,
             double hoursSinceLastRun,
@@ -848,6 +867,19 @@ namespace PerformanceMonitor.Common
             if (totalRuns == 0)
             {
                 return NeverRun;
+            }
+
+            /* #3240, and BEFORE the permission arm on purpose. The only population that carries both
+               counts with no success and no error is one condition recorded under two vocabularies: a
+               window straddling the upgrade that split this status out of PERMISSIONS holds the same
+               absent-extension fault under both names, and banding it NO_PERMISSIONS for the seven days
+               the old rows take to age out would keep the wrong hint alive for exactly the deployments
+               the split is for. The two SQLSTATEs describe the same read, so one collector cannot be
+               grant-refused and extension-absent in the same cycle; a target that moved between the two
+               states lands successes or newer rows that resolve the tie as the window slides. */
+            if (extensionMissingCount > 0 && errorCount == 0 && successCount == 0)
+            {
+                return ExtensionMissing;
             }
 
             if (permissionDeniedCount > 0 && errorCount == 0 && successCount == 0)

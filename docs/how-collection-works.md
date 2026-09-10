@@ -100,11 +100,12 @@ Every run is wrapped so that one failure never stops the sweep. It writes exactl
 | --- | --- |
 | `SUCCESS` | Completed, including a legitimate zero rows |
 | `PERMISSIONS` | A grant is missing — the collector is skipped, not broken |
+| `EXTENSION_MISSING` | A PostgreSQL extension the collector declares isn't installed — the message names it; `CREATE EXTENSION` is the remedy, not a grant |
 | `SESSION_MISSING` | An expected Extended Events session isn't there |
 | `YIELDED` | Lock timeout on a collector that opted into yielding; excluded from error rates and health bands |
 | `ERROR` | Anything else. Fatal or timeout additionally forces a reconnect and re-probe on the next tick |
 
-Health is *derived* from that log by the shared `CollectorHealthClassifier` (`NEVER_RUN`, `NO_PERMISSIONS`, `FAILING`, `STALE`, `WARNING`, `HEALTHY`). Its thresholds are **relative to each collector's own cadence**, with the old flat values as floors — `FAILING` at `max(24h, 2 × interval)`, `STALE` at `max(4h, 1.5 × interval)` — so a 60-minute collector isn't judged like a 1-minute one. The on-connect collectors are exempt from staleness. One classifier is shared by Lite, the viewer, and the service so the three can't drift.
+Health is *derived* from that log by the shared `CollectorHealthClassifier` (`NEVER_RUN`, `NO_PERMISSIONS`, `EXTENSION_MISSING`, `FAILING`, `STALE`, `WARNING`, `HEALTHY`). Its thresholds are **relative to each collector's own cadence**, with the old flat values as floors — `FAILING` at `max(24h, 2 × interval)`, `STALE` at `max(4h, 1.5 × interval)` — so a 60-minute collector isn't judged like a 1-minute one. The on-connect collectors are exempt from staleness. One classifier is shared by Lite, the viewer, and the service so the three can't drift.
 
 Observability writes are deliberately failure-isolated: they log at debug and never throw, because an observability write must never break the collection loop.
 

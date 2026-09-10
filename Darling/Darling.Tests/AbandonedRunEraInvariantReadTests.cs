@@ -107,12 +107,12 @@ public sealed class AbandonedRunEraInvariantReadTests
     public void AStatusOnlyCount_BandsTheFixtureHealthy_WhichIsTheUndercount()
     {
         Assert.Equal(CollectorHealthClassifier.Healthy, CollectorHealthClassifier.Classify(
-            totalRuns: 205, successCount: 204, errorCount: 0, permissionDeniedCount: 0, abandonedCount: 1,
-            hoursSinceLastSuccess: 0.1, hoursSinceLastRun: 0.1, frequencyMinutes: 1, isOnLoad: false));
+            totalRuns: 205, successCount: 204, errorCount: 0, permissionDeniedCount: 0, extensionMissingCount: 0,
+            abandonedCount: 1, hoursSinceLastSuccess: 0.1, hoursSinceLastRun: 0.1, frequencyMinutes: 1, isOnLoad: false));
 
         Assert.Equal(CollectorHealthClassifier.Warning, CollectorHealthClassifier.Classify(
-            totalRuns: 205, successCount: 202, errorCount: 0, permissionDeniedCount: 0, abandonedCount: 3,
-            hoursSinceLastSuccess: 0.1, hoursSinceLastRun: 0.1, frequencyMinutes: 1, isOnLoad: false));
+            totalRuns: 205, successCount: 202, errorCount: 0, permissionDeniedCount: 0, extensionMissingCount: 0,
+            abandonedCount: 3, hoursSinceLastSuccess: 0.1, hoursSinceLastRun: 0.1, frequencyMinutes: 1, isOnLoad: false));
     }
 
     /* ---------------- live: the two-era window, against a real store ---------------- */

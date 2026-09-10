@@ -144,8 +144,8 @@ LIMIT 500";
     /// <summary>
     /// Any PostgreSQL target. The module's absence is a normal, non-fatal skip: reading
     /// <c>pg_wait_sampling_profile</c> where it was never loaded raises <c>42P01</c>, which the host
-    /// classifies as <c>ObjectMissing</c> and records as <c>PERMISSIONS</c> — the same degradation
-    /// <c>pg_buffer_usage</c> takes without <c>pg_buffercache</c>, and the reason
+    /// classifies as <c>ObjectMissing</c> and records as <c>EXTENSION_MISSING</c> (#3240) — the same
+    /// degradation <c>pg_buffer_usage</c> takes without <c>pg_buffercache</c>, and the reason
     /// <c>pg_extension_availability</c> exists to say which install would light it up.
     ///
     /// <para>No version gate. The extension supports PostgreSQL 13+ and the query uses nothing
