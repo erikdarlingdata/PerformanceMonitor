@@ -67,6 +67,35 @@ connects to. One installation covers the whole instance; the extension is keyed 
 databases. Skipping this is fine: the collector records a non-fatal skip that says exactly this (step 9),
 and the other six are unaffected.
 
+### Self-hosted: the log-reader grants (plan capture, deadlocks)
+
+`pg_deadlocks` and `pg_plan_capture` read the server log with `pg_read_file()`, and that is the one read
+in this step `pg_monitor` does not cover. It takes BOTH halves — the role does not carry the function's
+EXECUTE, because `pg_read_file`'s ACL is `postgres=X/postgres` (measured on #2566; granting the role
+alone changes nothing) — and the EXECUTE half lives in each database's own catalog, so **run this in the
+database Darling connects to**, not in `postgres` for good measure:
+
+```sql
+GRANT pg_read_server_files TO darling_monitor;
+GRANT EXECUTE ON FUNCTION pg_read_file(text), pg_read_file(text, bigint, bigint), pg_read_file(text, bigint, bigint, boolean) TO darling_monitor;
+```
+
+Issued in a different database on the same cluster, the grants change nothing and the failure looks
+identical — measured on a live PG18 target, where the in-database grant flipped `pg_deadlocks` from
+`PERMISSIONS` to `SUCCESS` on the next cycle, no restart needed. Self-hosted only: on Aurora/RDS there
+is no filesystem, `pg_read_server_files` is not grantable, and both collectors take the RDS log API
+route instead — that is the IAM subsection below.
+
+**Proof:** as the monitoring login, in the same database, mirror the collectors' own read:
+
+```sql
+SELECT pg_catalog.pg_read_file('log/' || name, 0, 64) FROM pg_catalog.pg_ls_logdir() ORDER BY modification DESC LIMIT 1;
+```
+
+A log line comes back. `permission denied for function pg_read_file` means the EXECUTE half is missing
+*in this database*; until both halves are in place, both collectors fail every cycle as `PERMISSIONS`,
+with an `error_message` naming this exact pair and the database to run it in.
+
 ### IAM, for the two collectors that read the server log (plan capture, deadlocks)
 
 This is a **different axis from the grant above** — it authorizes the **monitoring host's AWS identity**,
@@ -91,7 +120,7 @@ plane. Attach this to the instance role/profile the Darling service actually run
 
 `DescribeDBClusters` resolves an Aurora cluster to its current writer instance; the other two list and read
 the log file itself. Self-managed PostgreSQL doesn't need this at all — it reads `pg_read_file()` directly,
-and the DB-level grant above is the only one it wants. Skipping this on Aurora/RDS is not silent: both
+which is what the log-reader grants above are for. Skipping this on Aurora/RDS is not silent: both
 collectors log the missing action by name (see step 10).
 
 ## 2. Register the target
@@ -380,9 +409,10 @@ Five results that look like bugs and are not:
 
 ### The one grant `pg_monitor` does not cover
 
-`pg_monitor` is enough for every collector here except the THREE that read `pg_stats` — table bloat,
-**index bloat since #3234**, and per-column statistics — and the way it fails is worth knowing because
-it does not look like a failure. `pg_stats` is filtered by `has_column_privilege(..., 'select')`, and `pg_monitor` confers
+`pg_monitor` is enough for every collector here except the two self-hosted log readers — their grants are
+step 1's log-reader subsection, and they fail loudly — and the THREE that read `pg_stats`: table bloat,
+**index bloat since #3234**, and per-column statistics. The `pg_stats` way of failing is the one worth
+knowing about, because it does not look like a failure. `pg_stats` is filtered by `has_column_privilege(..., 'select')`, and `pg_monitor` confers
 **no** SELECT on user tables — so the monitoring role sees **zero**
 rows in `pg_stats` and the estimator, fed nothing, returns confident large numbers. Measured against a
 `pg_monitor`-only role on a live PostgreSQL 16 target: 88.59% reported for a table whose true bloat is
@@ -504,6 +534,7 @@ says which kind it is.
 | `status` | `error_message` says | Actually means | Fix |
 |---|---|---|---|
 | `PERMISSIONS` | a missing grant | it is one | `GRANT pg_monitor` (step 1) |
+| `PERMISSIONS` | `permission denied for function pg_read_file`, names the grant pair | the self-hosted log readers (`pg_deadlocks`, `pg_plan_capture`) lack the log-reader grants | step 1's self-hosted subsection — run it **in the database Darling connects to**; issued elsewhere on the cluster it changes nothing |
 | `PERMISSIONS` | "NOT a missing grant", view/function absent | `pg_stat_statements` never created | step 1's optional half |
 | `PERMISSIONS` | "NOT a missing grant", not implemented | reading something this engine lacks | nothing — expected off Aurora |
 | `PERMISSIONS` | "NOT a missing grant", feature disabled | switched off in the parameter group | enable it, or accept the gap |
