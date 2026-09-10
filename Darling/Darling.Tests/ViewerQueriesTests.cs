@@ -492,7 +492,8 @@ public sealed class ViewerQueriesDisplayTests
 /// to Postgres): the baseline-before-window vs. recent-in-window split ON <c>collection_time</c> (not the
 /// TVF's <c>server_last_execution_time</c>), the CPU-regression &gt; 25% gate, the added-duration ranking +
 /// TOP (50) cap, the duration-driven severity bands, the summed/counted CASTs, and the #1319 database
-/// filter — plus the row model's raw-server-clock display. String + pure-logic pins only (no live Postgres).
+/// filter — plus the row model's stored-UTC display conversion. String + pure-logic pins only (no live
+/// Postgres).
 /// </summary>
 public sealed class ViewerQueryStoreRegressionsTests
 {
@@ -549,10 +550,15 @@ public sealed class ViewerQueryStoreRegressionsTests
     }
 
     [Fact]
-    public void RegressionRow_LastExecutionLocal_ShowsRawServerClock_EmptyForNull()
+    public void RegressionRow_LastExecutionLocal_ConvertsStoredNaiveUtc_EmptyForNull()
     {
-        var row = new ViewerQueryStoreRegressionRow { LastExecutionTime = new DateTime(2026, 7, 1, 9, 30, 15) };
-        Assert.Equal("2026-07-01 09:30:15", row.LastExecutionTimeLocal);
+        /* query_store_stats' last-exec stamp is naive UTC in the store (QueryStoreCollector normalises
+           Query Store's datetimeoffset), so the row renders it through the stored-UTC conversion (#3207),
+           not the raw server-clock family. Expected is derived through the same ForDisplay the renderer
+           uses — a pinned literal only holds where the conversion is the identity (a UTC machine). */
+        var utc = new DateTime(2026, 7, 1, 9, 30, 15, DateTimeKind.Unspecified);
+        var expected = ViewerTimeHelper.ForDisplay(utc).ToString("yyyy-MM-dd HH:mm:ss");
+        Assert.Equal(expected, new ViewerQueryStoreRegressionRow { LastExecutionTime = utc }.LastExecutionTimeLocal);
         Assert.Equal("", new ViewerQueryStoreRegressionRow { LastExecutionTime = null }.LastExecutionTimeLocal);
     }
 }
