@@ -6185,6 +6185,25 @@ LIMIT 1";
               + $"so run CREATE EXTENSION in '{connectedDatabase}'. ";
 
     /// <summary>
+    /// The self-hosted log readers (#3239). Their dispatch entries send Aurora and RDS to the log-API
+    /// ingestors, so a target-side PostgresException under either name comes from the pg_read_file route.
+    /// </summary>
+    private static bool ReadsServerLogWithPgReadFile(string collectorName)
+        => collectorName is "pg_deadlocks" or "pg_plan_capture";
+
+    /// <summary>
+    /// Where the pg_read_file grants have to be issued, named when we know it (#3239) — function ACLs are
+    /// per-database catalogs, the same fact <see cref="WhereToCreateIt"/> names for extensions. Measured
+    /// on the 20260910 dogfood soak: the pair issued in the wrong database leaves a failure identical to
+    /// no grant at all.
+    /// </summary>
+    private static string WhereToGrantIt(string? connectedDatabase)
+        => string.IsNullOrWhiteSpace(connectedDatabase)
+            ? "in the database this collector connects to."
+            : $"in database '{connectedDatabase}', the one this collector connects to — issued in a "
+              + "DIFFERENT database on the same cluster, they change nothing here.";
+
+    /// <summary>
     /// The extensions <paramref name="collectorName"/> declares it cannot run without
     /// (<see cref="ICollectorSchemaInfo.RequiredPgExtensions"/>, #3191) — the seam #3240's classification
     /// consults. Empty for a collector the catalog does not know, which keeps an unknown name on the
@@ -6228,7 +6247,6 @@ LIMIT 1";
             + "cycle; the collector retries every cycle and starts collecting on the first one after the "
             + $"{noun} exists.";
     }
-
     /// <summary>
     /// Maps a PostgreSQL fault to a collection_log status plus the sentence an operator needs.
     /// <para>PERMISSIONS is the non-fatal-degradation bucket for the cases whose absent thing the code
@@ -6247,6 +6265,22 @@ LIMIT 1";
 
         return fault switch
         {
+            /* #3239: the two self-hosted log readers are the exception the general sentence below used to
+               deny to their faces. Reading the log with pg_read_file needs the pg_read_server_files role
+               AND an explicit EXECUTE grant — measured on #2566, the role alone does NOT carry it, because
+               the function's ACL is postgres=X/postgres — and the EXECUTE half lives in each database's
+               own catalog, so the grants only count in the database this collector connects to. The old
+               hint said pg_monitor covers everything, which sent an operator in a circle: the product's
+               own changelog knew better. */
+            CollectorTargetFault.Permissions when ReadsServerLogWithPgReadFile(collectorName) => ("PERMISSIONS",
+                $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — this collector reads the server log with "
+                + "pg_read_file(), which pg_monitor does NOT cover. The monitoring login needs BOTH the "
+                + "pg_read_server_files role AND an explicit GRANT EXECUTE ON FUNCTION pg_read_file(text), "
+                + "pg_read_file(text, bigint, bigint), pg_read_file(text, bigint, bigint, boolean) — the "
+                + "role alone does not carry EXECUTE, because the function's ACL is postgres=X/postgres. "
+                + "EXECUTE grants live in each database's own catalog, so issue them "
+                + WhereToGrantIt(connectedDatabase)),
+
             CollectorTargetFault.Permissions => ("PERMISSIONS",
                 $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the monitoring login lacks a grant this "
                 + "source needs. pg_monitor covers every collector here; check that it is granted."),

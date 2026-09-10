@@ -296,7 +296,9 @@ public sealed class EngineAwareVersionLabelTests
     /// viewer's silently. The copy is now deleted and this is the pin that would have caught it.
     ///
     /// <para>The <c>sql_version</c> KEY is asserted to survive: a field an MCP client keys on is a consumer
-    /// API, so the fix changes the value and not the name.</para>
+    /// API, so the #3145 fix changed the value and not the name — and #3245's addition of the
+    /// engine-neutral keys beside it keeps that promise, which is why this test still reads the label
+    /// through <c>sql_version</c> on purpose. The new keys have their own pin below.</para>
     /// </summary>
     [Fact]
     public void TheMcpServerList_LabelsAPostgresTargetByItsEngine()
@@ -320,6 +322,72 @@ public sealed class EngineAwareVersionLabelTests
         Assert.Equal("PostgreSQL 18", labels["pg-mcp-row"]);
         Assert.Equal("SQL Server 2022", labels["sql-mcp-row"]);
         Assert.DoesNotContain("SQL Server v0", json, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The #3245 addition: the payload says which engine a row describes WITHOUT the consumer parsing the
+    /// label out of a key named for the wrong engine. <c>engine_kind</c> carries the raw registry token —
+    /// the key and vocabulary <c>get_fleet_overview</c>'s <c>FleetServerCard</c> already publishes, null
+    /// (present, not omitted) when no connect has stamped the row — and <c>engine_version</c> carries the
+    /// #3145 label under a name that is true for every engine.
+    ///
+    /// <para><c>sql_version</c> survives as a deprecated alias and is asserted EQUAL to
+    /// <c>engine_version</c> on every row: two version keys that can disagree would be a worse payload
+    /// than one misnamed key, so the equality is the contract, not an implementation detail.</para>
+    /// </summary>
+    [Fact]
+    public void TheMcpServerList_PublishesEngineNeutralKeysBesideTheLegacyAlias()
+    {
+        var rows = new List<DarlingDataReader.ServerListRow>
+        {
+            new(1, "pg-neutral-row", "pg-neutral-row", SqlMajorVersion: 0, LastCollection: null,
+                EngineKind: MonitoredEngineKind.Postgres, PostgresMajorVersion: 18),
+            new(2, "sql-neutral-row", "sql-neutral-row", SqlMajorVersion: 16, LastCollection: null,
+                EngineKind: MonitoredEngineKind.SqlServer, PostgresMajorVersion: null),
+            /* The pre-V82 shape: no connect has stamped the row, so the token is null and the label falls
+               to the SQL Server table. The payload must say "no claim" — an explicit null — rather than
+               omit the key, exactly as the fleet cards do. */
+            new(3, "unstamped-neutral-row", "unstamped-neutral-row", SqlMajorVersion: 15, LastCollection: null,
+                EngineKind: null, PostgresMajorVersion: null),
+        };
+
+        var json = DarlingMcpDataTools.RenderServerList(
+            rows,
+            new DateTime(2026, 9, 7, 12, 0, 0, DateTimeKind.Utc),
+            DarlingPeerDirectory.Snapshot.Empty);
+
+        using var document = JsonDocument.Parse(json);
+        var seen = 0;
+
+        foreach (var entry in document.RootElement.GetProperty("servers").EnumerateArray())
+        {
+            seen++;
+
+            /* Both version keys present on every row, and equal — the alias contract. */
+            var engineVersion = entry.GetProperty("engine_version").GetString();
+            Assert.Equal(engineVersion, entry.GetProperty("sql_version").GetString());
+
+            switch (entry.GetProperty("server_name").GetString())
+            {
+                case "pg-neutral-row":
+                    Assert.Equal("PostgreSQL 18", engineVersion);
+                    Assert.Equal(MonitoredEngineKind.Postgres, entry.GetProperty("engine_kind").GetString());
+                    break;
+                case "sql-neutral-row":
+                    Assert.Equal("SQL Server 2022", engineVersion);
+                    Assert.Equal(MonitoredEngineKind.SqlServer, entry.GetProperty("engine_kind").GetString());
+                    break;
+                case "unstamped-neutral-row":
+                    Assert.Equal("SQL Server 2019", engineVersion);
+                    Assert.Equal(JsonValueKind.Null, entry.GetProperty("engine_kind").ValueKind);
+                    break;
+                default:
+                    Assert.Fail("A row this test did not construct appeared in the payload.");
+                    break;
+            }
+        }
+
+        Assert.Equal(rows.Count, seen);
     }
 
     /// <summary>
@@ -588,7 +656,8 @@ public sealed class EngineAwareVersionLabelTests
             {
                 /* ViewerDataService.ProbeVersionLabel — shared by both Add-server dialogs. */
                 "ProbeVersionLabel",
-                /* DarlingMcpDataTools.RenderServerList — the MCP list_servers sql_version field. */
+                /* DarlingMcpDataTools.RenderServerList — the MCP list_servers engine_version field and
+                   its deprecated sql_version alias (#3245), one call feeding both keys. */
                 "RenderServerList",
                 /* DarlingServer.VersionLabel — the fleet sidebar subtitle, MainWindow.xaml. */
                 "VersionLabel",
@@ -729,7 +798,9 @@ public sealed class EngineAwareVersionLabelTests
 
     /// <summary>The <c>server_name</c> → <c>sql_version</c> map out of a <c>list_servers</c> payload, read
     /// from the rendered JSON rather than from the renderer's inputs — the field name is asserted by being
-    /// the one this reads, so renaming the consumer-API key reds here rather than passing quietly.</summary>
+    /// the one this reads, so renaming the consumer-API key reds here rather than passing quietly.
+    /// Deliberately still the LEGACY key after #3245: its survival is the compatibility promise, and the
+    /// engine-neutral twin is pinned by <see cref="TheMcpServerList_PublishesEngineNeutralKeysBesideTheLegacyAlias"/>.</summary>
     private static Dictionary<string, string> ServerVersionLabels(JsonElement root)
     {
         var labels = new Dictionary<string, string>(StringComparer.Ordinal);

@@ -135,7 +135,18 @@ ON CONFLICT (server_id) DO UPDATE SET
             /* The raw probed SERVERPROPERTY('EngineEdition') — real box editions (2/3/4...), not
                just the 5/8 Azure classifications. */
             command.Parameters.AddWithValue(server.EngineEdition);
-            command.Parameters.AddWithValue(server.Target.SqlMajorVersion);
+            /* The probed SQL Server major. DBNull rather than 0 off a PostgreSQL target (#3243): a SQL
+               Server major is not a fact about that server — Target.SqlMajorVersion is a non-nullable int
+               the PostgreSQL connect path never assigns, so unguarded this stamped a claim-shaped 0 on
+               every PostgreSQL row. Guarded on Engine as well as on the value, exactly as
+               postgres_major_version below: 0 is also what a SQL Server probe that failed before reading
+               the major leaves behind, and the reads treat NULL as "no claim". Rows written before the
+               guard keep their 0 — every reader treats 0 and NULL alike — and a live server's next connect
+               corrects it through the ON CONFLICT arm, so there is nothing to migrate. */
+            command.Parameters.AddWithValue(
+                server.Target.Engine == CollectorTargetEngine.SqlServer && server.Target.SqlMajorVersion > 0
+                    ? server.Target.SqlMajorVersion
+                    : (object)DBNull.Value);
             /* The engine KIND (#2530), derived from the target the connector probed rather than from the
                configured engine string: Aurora-ness is not configurable — it comes from aurora_version being
                present in pg_proc — and it is half of what this column exists to carry. */
