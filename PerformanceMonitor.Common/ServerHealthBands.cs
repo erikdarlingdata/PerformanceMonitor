@@ -291,17 +291,24 @@ namespace PerformanceMonitor.Common
         /// <summary>Total non-idle CPU the CPU band evaluates (SQL + other-process), or null with no snapshot.</summary>
         public double? CpuPercentForAlert { get; init; }
 
-        /// <summary>True when the resource semaphore shows grant waiters, timeouts, or forced grants.</summary>
-        public bool HasMemoryPressure { get; init; }
+        /// <summary>True when the resource semaphore shows grant waiters, timeouts, or forced grants;
+        /// <c>null</c> when this target has no resource-semaphore source at all (#3272 — every PostgreSQL
+        /// target). Nullable for the reason <see cref="TotalThreads"/> is: <c>false</c> is a MEASUREMENT
+        /// meaning the semaphore is calm, and a target with nothing to read must not be able to make
+        /// it.</summary>
+        public bool? HasMemoryPressure { get; init; }
 
-        /// <summary>Blocking events in the window.</summary>
-        public int BlockingCount { get; init; }
+        /// <summary>Blocking events in the window, or <c>null</c> when this target has no blocking source
+        /// the card reads (#3272). Same reasoning as <see cref="HasMemoryPressure"/>: <c>0</c> is a
+        /// measured quiet window.</summary>
+        public int? BlockingCount { get; init; }
 
         /// <summary>The worst blocking wait in the window, in seconds.</summary>
         public double MaxBlockedSeconds { get; init; }
 
-        /// <summary>Deadlocks in the window.</summary>
-        public int DeadlockCount { get; init; }
+        /// <summary>Deadlocks in the window, or <c>null</c> when this target has no deadlock source the
+        /// card reads (#3272). Same reasoning as <see cref="HasMemoryPressure"/>.</summary>
+        public int? DeadlockCount { get; init; }
 
         /// <summary>Worker-thread ceiling (max_workers_count), or null with no scheduler snapshot (e.g. Azure SQL DB).</summary>
         public int? TotalThreads { get; init; }
@@ -317,6 +324,42 @@ namespace PerformanceMonitor.Common
 
         /// <summary>Collectors whose 7-day band is FAILING (no success in over 24h).</summary>
         public int FailedCollectorCount { get; init; }
+    }
+
+    /// <summary>
+    /// Whether a card's SQL-Server-DMV-sourced metric readings are measurements at all, for this target's
+    /// engine (#3272) — the ONE place that decision is made, so the service's fleet card and the viewer's
+    /// Overview card cannot disagree about whether a zero means anything.
+    ///
+    /// <para><b>Why these three travel together.</b> The memory-pressure, blocking and deadlock rows on a
+    /// card come from <c>v_memory_grant_stats</c>, <c>v_blocked_process_reports</c> /
+    /// <c>v_dmv_blocking_snapshots</c> and <c>v_deadlocks</c> — all SQL Server captures, none of which a
+    /// PostgreSQL target has a single row in. The per-metric reads therefore hand the card zeros, and a zero
+    /// is indistinguishable from a genuinely calm SQL Server. Threads already escaped this because its
+    /// ceiling is nullable and CPU escaped it in #3267; these three had no way to say "not measured" at all.
+    /// </para>
+    ///
+    /// <para><b>It names the ENGINE, not the collector state.</b> A SQL Server whose deadlock collector is
+    /// permission-denied also reads zero, and that stays Healthy here on purpose: #3017 routed that case to
+    /// <c>failed_collector_count</c> / <see cref="ServerHealthClassifier.CollectorSeverity"/> and the fleet
+    /// coverage block, which is where a fixable gap belongs. This distinguishes only the structural case,
+    /// where no grant, collector run or upgrade of the monitored server produces the number.</para>
+    /// </summary>
+    public static class ServerMetricSources
+    {
+        /// <summary>
+        /// The reading as measured, or <c>null</c> when this target's engine has no source behind it.
+        /// Generic over the reading's own type because the three metrics are a <c>bool</c> and two
+        /// <c>int</c>s, and the DECISION is the same for all three — one function rather than three that
+        /// could drift.
+        /// </summary>
+        /// <param name="reading">What the SQL Server metric read produced (a zero, for a target with no rows).</param>
+        /// <param name="isPostgres">Whether the store SAYS this target is PostgreSQL. Absence of an engine
+        /// token is false, matching <c>MonitoredEngineKind.IsPostgres</c>'s asymmetry: a row no connect has
+        /// stamped keeps the SQL Server reading rather than being told its metrics do not exist.</param>
+        public static T? DmvSourced<T>(T reading, bool isPostgres)
+            where T : struct =>
+            isPostgres ? null : reading;
     }
 
     /// <summary>
@@ -353,7 +396,28 @@ namespace PerformanceMonitor.Common
             return ServerFreshness.Fresh;
         }
 
-        /// <summary>CPU band on total non-idle CPU: >= 95% Critical, >= 80% Warning; no snapshot Unknown.</summary>
+        /// <summary>
+        /// CPU band on total non-idle CPU: &gt;= 95% Critical, &gt;= 80% Warning; no snapshot Unknown.
+        ///
+        /// <para><b>The cutoffs are stated against a QUANTITY, not against a source</b> (#3267), because two
+        /// collectors now produce it. SQL Server's arm is <c>100 - SystemIdle</c> from the
+        /// <c>SCHEDULER_MONITOR</c> ring buffer; a PostgreSQL/Aurora target's is Performance Insights'
+        /// <c>os.cpuUtilization.total.avg</c>. What makes one ladder correct over both is that they are the
+        /// same measurement of the same thing: percent of the host's own CPU capacity that is not idle,
+        /// including processes outside the database engine, averaged over one minute
+        /// (<c>RdsCpuIngestor</c> asks PI for <c>PeriodInSeconds = 60</c>; the ring buffer publishes one
+        /// record a minute). Units, denominator, and averaging window all agree, so 80 means the same
+        /// "the host is approaching saturation" on both.</para>
+        ///
+        /// <para>Two things about the PI arm are deliberately recorded rather than assumed. It is the OS
+        /// counter and NOT CloudWatch's <c>CPUUtilization</c>, which reads capacity-relative and runs roomy
+        /// on Aurora Serverless v2 — measured on one instance over one window at 6.8% against PI's 16.8%
+        /// (see <c>PgCpuUtilizationCollector</c>); banding the CloudWatch figure on these cutoffs would
+        /// under-read badly. And on Serverless v2 the denominator is the CURRENT ACU allocation, which
+        /// scales: a high reading there is a true statement that the instance is saturated at its present
+        /// capacity, and the follow-up question is the cluster's max-ACU ceiling rather than the
+        /// workload.</para>
+        /// </summary>
         public static HealthSeverity CpuSeverity(double? cpuPercentForAlert)
         {
             if (!cpuPercentForAlert.HasValue)
@@ -374,13 +438,39 @@ namespace PerformanceMonitor.Common
             return HealthSeverity.Healthy;
         }
 
-        /// <summary>Memory band — Critical on any resource-semaphore pressure, else Healthy.</summary>
-        public static HealthSeverity MemorySeverity(bool hasMemoryPressure) =>
-            hasMemoryPressure ? HealthSeverity.Critical : HealthSeverity.Healthy;
-
-        /// <summary>Blocking band: >= 60s max wait or >= 5 events Critical; >= 10s max wait, >= 2 events, or any blocking Warning.</summary>
-        public static HealthSeverity BlockingSeverity(int blockingCount, double maxBlockedSeconds)
+        /// <summary>Memory band — Critical on any resource-semaphore pressure, else Healthy; no source
+        /// Unknown (#3272).
+        ///
+        /// <para><b>The Unknown arm is not cosmetic.</b> This band is read off
+        /// <c>v_memory_grant_stats</c>, a SQL Server DMV capture a PostgreSQL target has no row in, so the
+        /// zero counters such a card carried argued <c>false</c> and this returned <b>Healthy</b> — a
+        /// positive claim of health about a metric nothing measured, rendered as a green dot. That is worse
+        /// than the null it sat beside, and it is the same failure <see cref="CpuSeverity"/> and
+        /// <see cref="ThreadsSeverity"/> already avoid by taking a nullable input.</para></summary>
+        public static HealthSeverity MemorySeverity(bool? hasMemoryPressure)
         {
+            if (!hasMemoryPressure.HasValue)
+            {
+                return HealthSeverity.Unknown;
+            }
+
+            return hasMemoryPressure.Value ? HealthSeverity.Critical : HealthSeverity.Healthy;
+        }
+
+        /// <summary>Blocking band: >= 60s max wait or >= 5 events Critical; >= 10s max wait, >= 2 events, or any blocking Warning; no source Unknown (#3272).
+        ///
+        /// <para>The COUNT carries the measured/not-measured distinction on its own — there is no second
+        /// spelling of "unknown" to get wrong — because a max wait means nothing without a population to
+        /// have waited. See <see cref="MemorySeverity"/> for why the arm exists.</para></summary>
+        public static HealthSeverity BlockingSeverity(int? blockingCountOrNullWhenUnmeasured, double maxBlockedSeconds)
+        {
+            if (!blockingCountOrNullWhenUnmeasured.HasValue)
+            {
+                return HealthSeverity.Unknown;
+            }
+
+            var blockingCount = blockingCountOrNullWhenUnmeasured.Value;
+
             if (maxBlockedSeconds >= 60)
             {
                 return HealthSeverity.Critical;
@@ -409,9 +499,26 @@ namespace PerformanceMonitor.Common
             return HealthSeverity.Healthy;
         }
 
-        /// <summary>Deadlock band — any deadlock in the window is Critical.</summary>
-        public static HealthSeverity DeadlockSeverity(int deadlockCount) =>
-            deadlockCount > 0 ? HealthSeverity.Critical : HealthSeverity.Healthy;
+        /// <summary>Deadlock band — any deadlock in the window is Critical; no source Unknown (#3272).
+        ///
+        /// <para><b>This completes #3017 rather than reversing it.</b> That issue established that a
+        /// PostgreSQL target's zero is structural — <c>v_deadlocks</c> is the SQL Server extended-event
+        /// capture and nothing joins <c>pg_deadlocks</c> into it — and gave the CARD
+        /// <see cref="FleetDeadlockSource"/> plus the fleet total a coverage denominator to say so. It
+        /// deliberately added no band to the FLEET ROLLUP, so that a quiet, fully-covered SQL Server fleet
+        /// keeps reading healthy; that reasoning is untouched here. What it left behind was this
+        /// per-metric severity still answering <b>Healthy</b> for the same uncountable zero, so the card
+        /// disclosed the gap in <c>deadlock_source</c> and contradicted itself on the dot beside
+        /// it.</para></summary>
+        public static HealthSeverity DeadlockSeverity(int? deadlockCount)
+        {
+            if (!deadlockCount.HasValue)
+            {
+                return HealthSeverity.Unknown;
+            }
+
+            return deadlockCount.Value > 0 ? HealthSeverity.Critical : HealthSeverity.Healthy;
+        }
 
         /// <summary>
         /// Threads band: work-queue starvation Critical; >= 20 runnable-waiting or under 10% workers available
@@ -536,7 +643,12 @@ namespace PerformanceMonitor.Common
             }
 
             long magnitude = (criticals * 100L) + (warnings * 10L);
-            long incidents = Math.Min(m.BlockingCount + m.DeadlockCount, 99);
+            /* An unmeasured count contributes nothing, which is what keeps the whole Unknown arm
+               rank-neutral: the magnitude terms above already skip Unknown exactly as they skip Healthy,
+               so a card that gained an Unknown where it used to claim Healthy scores identically and
+               cannot move in the worst-first ranking. Pinned by
+               UnmeasuredMetricsAreNotHealthyTests. */
+            long incidents = Math.Min((m.BlockingCount ?? 0) + (m.DeadlockCount ?? 0), 99);
             return bandRank + magnitude + incidents;
         }
 

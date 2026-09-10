@@ -97,6 +97,14 @@ public sealed class DarlingServer : INotifyPropertyChanged
     public bool IsPostgres => MonitoredEngineKind.IsPostgres(EngineKind);
 
     /// <summary>
+    /// True only when the store says this target is Amazon Aurora PostgreSQL specifically. Same asymmetry as
+    /// <see cref="IsPostgres"/>. Read for the Overview card's CPU row (#3267): instance CPU comes from
+    /// Performance Insights, which <c>PgCpuUtilizationCollector.AppliesTo</c> gates to Aurora, so this is
+    /// what separates "no reading yet" from "this build collects no instance CPU here at all".
+    /// </summary>
+    public bool IsAurora => MonitoredEngineKind.IsAurora(EngineKind);
+
+    /// <summary>
     /// How the engine reads in the per-server header, or null when the store makes no claim - in which case
     /// the header shows NO engine label rather than "SQL Server", because the tabs such a server gets are a
     /// default rather than a finding. An unrecognised token renders as the raw token: the describer's

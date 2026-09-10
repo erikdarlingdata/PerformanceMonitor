@@ -187,6 +187,7 @@ public sealed class DarlingFleetReaderSqlTests
     [InlineData(nameof(DarlingFleetReader.FleetTagsSql))]
     [InlineData(nameof(DarlingFleetReader.FleetTagForestSql))]
     [InlineData(nameof(DarlingFleetReader.FleetCpuSql))]
+    [InlineData(nameof(DarlingFleetReader.FleetPgCpuSql))]
     [InlineData(nameof(DarlingFleetReader.FleetMemorySql))]
     [InlineData(nameof(DarlingFleetReader.FleetMemoryPressureSql))]
     [InlineData(nameof(DarlingFleetReader.FleetThreadsSql))]

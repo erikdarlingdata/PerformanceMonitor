@@ -1449,6 +1449,10 @@ public partial class MainWindow : Window
                        coverage apart from a quiet SQL Server fleet: v_deadlocks holds the SQL Server
                        extended-event capture and nothing else. */
                     summary.IsPostgres = server.IsPostgres;
+                    /* #3267: and the Aurora half of the same discriminator, for the CPU row. Both are
+                       stamped from the one registry row, so a card cannot end up claiming Aurora-ness the
+                       engine token does not support. */
+                    summary.IsAurora = server.IsAurora;
                     summary.ApplyFreshness(nowUtc);
                     found.Add(summary);
                 }

@@ -15,6 +15,7 @@ using System.Windows.Media;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -58,6 +59,28 @@ public sealed partial class ViewerDataService
 SELECT sqlserver_cpu_utilization, other_process_cpu_utilization
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
+ORDER BY collection_time DESC, sample_time DESC
+LIMIT 1";
+
+    /// <summary>The newest current instance-CPU reading for one PostgreSQL/Aurora target — Performance
+    /// Insights' <c>os.cpuUtilization.total.avg</c> (#2719). $1 server_id, $2 the freshness cutoff (naive
+    /// UTC).
+    ///
+    /// <para>A SECOND read rather than a widened first one, because a PostgreSQL target has no row in
+    /// <c>v_cpu_utilization_stats</c> at all and this table has different columns (#3267). Run
+    /// unconditionally: the per-server summary reads carry no engine column, and a SQL Server target has no
+    /// row here either, so the read gates itself rather than needing the engine threaded into this method.
+    /// The bound, the two predicates and why falling out of it is the right answer are all
+    /// <c>DarlingFleetReader.FleetPgCpuSql</c>'s — the same reading for the same card, so the service and
+    /// the viewer share the shape and the <c>DarlingPgCpuUtilizationReader.Freshness</c> constant rather
+    /// than each picking a staleness window.</para></summary>
+    public const string ServerSummaryPgCpuSql = @"
+SELECT cpu_percent
+FROM pg_cpu_utilization
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   sample_time >= $2
+AND   cpu_percent IS NOT NULL
 ORDER BY collection_time DESC, sample_time DESC
 LIMIT 1";
 
@@ -162,6 +185,7 @@ WHERE server_id = $1";
 
         double? cpuPercent = null;
         double? otherProcessCpuPercent = null;
+        double? instanceCpuPercent = null;
         double? memoryMb = null;
         double? bufferPoolMb = null;
         var blockingCount = 0;
@@ -192,6 +216,23 @@ WHERE server_id = $1";
             {
                 cpuPercent = reader.IsDBNull(0) ? null : Convert.ToDouble(reader.GetValue(0));
                 otherProcessCpuPercent = reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1));
+            }
+        }
+
+        /* Latest instance CPU, for a PostgreSQL/Aurora target (#3267). Returns nothing for a SQL Server
+           target, which is why it needs no engine test — see ServerSummaryPgCpuSql. */
+        await using (var command = _dataSource.CreateCommand(ServerSummaryPgCpuSql))
+        {
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<DateTime>
+            {
+                TypedValue = DateTime.SpecifyKind(nowUtc - DarlingPgCpuUtilizationReader.Freshness, DateTimeKind.Unspecified),
+            });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                instanceCpuPercent = reader.IsDBNull(0) ? null : Convert.ToDouble(reader.GetValue(0));
             }
         }
 
@@ -314,6 +355,7 @@ WHERE server_id = $1";
             ServerId = serverId,
             CpuPercent = cpuPercent,
             OtherProcessCpuPercent = otherProcessCpuPercent,
+            InstanceCpuPercent = instanceCpuPercent,
             MemoryMb = memoryMb,
             BufferPoolMb = bufferPoolMb,
             GrantedMemoryMb = grantedMemoryMb,
@@ -436,9 +478,21 @@ public sealed class ServerSummaryItem
     /// <summary>Non-SQL-Server CPU on the host (100 - SystemIdle - ProcessUtilization). NULL on Azure SQL DB.</summary>
     public double? OtherProcessCpuPercent { get; set; }
 
-    /// <summary>Total non-idle CPU on the host = sql_server + other_process. Tracks OS user+system counters.</summary>
+    /// <summary>
+    /// Instance CPU from AWS Performance Insights (<c>os.cpuUtilization.total.avg</c>) for a
+    /// PostgreSQL/Aurora target (#2719/#3267) — the host total with no per-process split, which is why it is
+    /// its own field rather than being written into <see cref="CpuPercent"/>. NULL on every SQL Server
+    /// target, and on a PostgreSQL target this build collects no instance CPU for; <see cref="CpuSource"/>
+    /// separates those two.
+    /// </summary>
+    public double? InstanceCpuPercent { get; set; }
+
+    /// <summary>Total non-idle CPU on the host — sql_server + other_process where the ring buffer reached
+    /// it, else the Performance Insights instance reading (#3267). Tracks OS user+system counters either
+    /// way; the fallback lives in <see cref="FleetCpuProvenance"/> so this card and the service's fleet card
+    /// cannot drift on it.</summary>
     public double? TotalCpuPercent =>
-        CpuPercent.HasValue ? CpuPercent.Value + (OtherProcessCpuPercent ?? 0) : null;
+        FleetCpuProvenance.TotalNonIdleCpuPercent(CpuPercent, OtherProcessCpuPercent, InstanceCpuPercent);
 
     /// <summary>
     /// The CPU value the headline display / colour band uses. The viewer has no per-app CpuAlertMode, so
@@ -489,6 +543,32 @@ public sealed class ServerSummaryItem
     /// posture <c>DarlingServer.IsPostgres</c> takes.</para>
     /// </summary>
     public bool IsPostgres { get; set; }
+
+    /// <summary>
+    /// Whether the store says this target is Amazon Aurora PostgreSQL specifically — stamped by the Overview
+    /// loader from the registry row (<c>DarlingServer.IsAurora</c>), the same way
+    /// <see cref="IsPostgres"/> is and for the same reason (the per-server summary reads carry no engine
+    /// column).
+    ///
+    /// <para>It is here for <see cref="CpuSource"/>: instance CPU comes from Performance Insights, which
+    /// <c>PgCpuUtilizationCollector.AppliesTo</c> gates to Aurora, so this flag is what separates a
+    /// reading that has not arrived from one this build never collects. Default false keeps the
+    /// conservative reading — a card whose loader did not stamp it claims a gap someone can act on rather
+    /// than a structural absence.</para>
+    /// </summary>
+    public bool IsAurora { get; set; }
+
+    /// <summary>
+    /// Which collector produced this card's CPU number, and when there is none, which of the two reasons
+    /// (#3267) — the shared <see cref="FleetCpuProvenance.ClassifyCpuSource"/>, so this card and the
+    /// service's fleet card cannot disagree about the same server.
+    ///
+    /// <para>DERIVED rather than assigned, for <see cref="DeadlockSource"/>'s reason: a card built by a path
+    /// that sets no reading reads as <see cref="FleetCpuSource.NotCollected"/> — nothing was read — rather
+    /// than sitting at an enum default that would mean a measurement.</para>
+    /// </summary>
+    public FleetCpuSource CpuSource =>
+        FleetCpuProvenance.ClassifyCpuSource(CpuPercent, InstanceCpuPercent, IsPostgres, IsAurora);
 
     /// <summary>
     /// The <c>deadlocks</c> collector's own 7-day band for this server, or null when that collector left no
@@ -543,13 +623,20 @@ public sealed class ServerSummaryItem
     /// <summary>
     /// Headline CPU display: total non-idle CPU prominently with the SQL-only number alongside, e.g.
     /// "64% (SQL 60%)". Falls back to a single number when only one value is available.
+    ///
+    /// <para>A PostgreSQL/Aurora target reaches the single-number form (#3267): the reading is the host
+    /// total and there is no per-process share to put in the parenthetical. It renders through
+    /// <see cref="TotalCpuPercent"/> rather than a second branch on <see cref="InstanceCpuPercent"/> so
+    /// there is one place the headline number is chosen. "--" is reserved for having NO reading, which is
+    /// what keeps it distinguishable from a real 0% — and <see cref="CpuSource"/> is what says which kind of
+    /// absence "--" is.</para>
     /// </summary>
     public string CpuDisplay
     {
         get
         {
-            if (!CpuPercent.HasValue) return "--";
-            if (!OtherProcessCpuPercent.HasValue) return $"{CpuPercent:F0}%";
+            if (!TotalCpuPercent.HasValue) return "--";
+            if (!CpuPercent.HasValue || !OtherProcessCpuPercent.HasValue) return $"{TotalCpuPercent:F0}%";
             return $"{TotalCpuPercent:F0}% (SQL {CpuPercent:F0}%)";
         }
     }
@@ -698,17 +785,36 @@ public sealed class ServerSummaryItem
     /// <summary>CPU band — total non-idle CPU: >= 95% Critical, >= 80% Warning.</summary>
     public HealthSeverity CpuSeverity => ServerHealthClassifier.CpuSeverity(CpuPercentForAlert);
 
-    /// <summary>True when the resource semaphore shows grant waiters, timeouts, or forced grants.</summary>
+    /// <summary>True when the resource semaphore shows grant waiters, timeouts, or forced grants. The raw
+    /// reading, unqualified by whether there was anything to read — see
+    /// <see cref="MemoryPressureForBand"/>.</summary>
     public bool HasMemoryPressure => MemoryWaiterCount > 0 || MemoryTimeoutCount > 0 || MemoryForcedCount > 0;
 
-    /// <summary>Memory band — Critical on any resource-semaphore pressure, else Healthy.</summary>
-    public HealthSeverity MemorySeverity => ServerHealthClassifier.MemorySeverity(HasMemoryPressure);
+    /* The three DMV-sourced readings with "not measured" expressed as null (#3272), through the SAME shared
+       decision the service's fleet card uses so the two cannot disagree about whether this server's zero
+       means anything. The raw counts above and beside stay as they are: they are what the fleet total is
+       summed from, and #3017's coverage block is what explains that total. */
 
-    /// <summary>Blocking band — >= 60s max wait or >= 5 events Critical; >= 10s, >= 2 events, or any blocking Warning.</summary>
-    public HealthSeverity BlockingSeverity => ServerHealthClassifier.BlockingSeverity(BlockingCount, MaxBlockedSeconds);
+    /// <summary>Resource-semaphore pressure as a BANDABLE reading — null when this target's engine has no
+    /// semaphore to read (every PostgreSQL target).</summary>
+    public bool? MemoryPressureForBand => ServerMetricSources.DmvSourced(HasMemoryPressure, IsPostgres);
 
-    /// <summary>Deadlock band — any deadlock in the window is Critical.</summary>
-    public HealthSeverity DeadlockSeverity => ServerHealthClassifier.DeadlockSeverity(DeadlockCount);
+    /// <summary>Blocking events as a BANDABLE reading — null when this card reads no blocking source for
+    /// this engine.</summary>
+    public int? BlockingCountForBand => ServerMetricSources.DmvSourced(BlockingCount, IsPostgres);
+
+    /// <summary>Deadlocks as a BANDABLE reading — null when this card reads no deadlock source for this
+    /// engine. <see cref="DeadlockSource"/> is the same fact named for a reader (#3017).</summary>
+    public int? DeadlockCountForBand => ServerMetricSources.DmvSourced(DeadlockCount, IsPostgres);
+
+    /// <summary>Memory band — Critical on any resource-semaphore pressure, else Healthy; no source Unknown.</summary>
+    public HealthSeverity MemorySeverity => ServerHealthClassifier.MemorySeverity(MemoryPressureForBand);
+
+    /// <summary>Blocking band — >= 60s max wait or >= 5 events Critical; >= 10s, >= 2 events, or any blocking Warning; no source Unknown.</summary>
+    public HealthSeverity BlockingSeverity => ServerHealthClassifier.BlockingSeverity(BlockingCountForBand, MaxBlockedSeconds);
+
+    /// <summary>Deadlock band — any deadlock in the window is Critical; no source Unknown.</summary>
+    public HealthSeverity DeadlockSeverity => ServerHealthClassifier.DeadlockSeverity(DeadlockCountForBand);
 
     /// <summary>Threads band — work-queue starvation Critical; >= 20 runnable-waiting or under 10% available Warning; no snapshot Unknown.</summary>
     public HealthSeverity ThreadsSeverity =>
@@ -731,10 +837,10 @@ public sealed class ServerSummaryItem
     public ServerHealthMetrics ToHealthMetrics() => new()
     {
         CpuPercentForAlert = CpuPercentForAlert,
-        HasMemoryPressure = HasMemoryPressure,
-        BlockingCount = BlockingCount,
+        HasMemoryPressure = MemoryPressureForBand,
+        BlockingCount = BlockingCountForBand,
         MaxBlockedSeconds = MaxBlockedSeconds,
-        DeadlockCount = DeadlockCount,
+        DeadlockCount = DeadlockCountForBand,
         TotalThreads = TotalThreads,
         AvailableThreads = AvailableThreads,
         ThreadsWaitingForCpu = ThreadsWaitingForCpu,
