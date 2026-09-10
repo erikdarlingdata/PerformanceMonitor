@@ -353,7 +353,28 @@ namespace PerformanceMonitor.Common
             return ServerFreshness.Fresh;
         }
 
-        /// <summary>CPU band on total non-idle CPU: >= 95% Critical, >= 80% Warning; no snapshot Unknown.</summary>
+        /// <summary>
+        /// CPU band on total non-idle CPU: &gt;= 95% Critical, &gt;= 80% Warning; no snapshot Unknown.
+        ///
+        /// <para><b>The cutoffs are stated against a QUANTITY, not against a source</b> (#3267), because two
+        /// collectors now produce it. SQL Server's arm is <c>100 - SystemIdle</c> from the
+        /// <c>SCHEDULER_MONITOR</c> ring buffer; a PostgreSQL/Aurora target's is Performance Insights'
+        /// <c>os.cpuUtilization.total.avg</c>. What makes one ladder correct over both is that they are the
+        /// same measurement of the same thing: percent of the host's own CPU capacity that is not idle,
+        /// including processes outside the database engine, averaged over one minute
+        /// (<c>RdsCpuIngestor</c> asks PI for <c>PeriodInSeconds = 60</c>; the ring buffer publishes one
+        /// record a minute). Units, denominator, and averaging window all agree, so 80 means the same
+        /// "the host is approaching saturation" on both.</para>
+        ///
+        /// <para>Two things about the PI arm are deliberately recorded rather than assumed. It is the OS
+        /// counter and NOT CloudWatch's <c>CPUUtilization</c>, which reads capacity-relative and runs roomy
+        /// on Aurora Serverless v2 — measured on one instance over one window at 6.8% against PI's 16.8%
+        /// (see <c>PgCpuUtilizationCollector</c>); banding the CloudWatch figure on these cutoffs would
+        /// under-read badly. And on Serverless v2 the denominator is the CURRENT ACU allocation, which
+        /// scales: a high reading there is a true statement that the instance is saturated at its present
+        /// capacity, and the follow-up question is the cluster's max-ACU ceiling rather than the
+        /// workload.</para>
+        /// </summary>
         public static HealthSeverity CpuSeverity(double? cpuPercentForAlert)
         {
             if (!cpuPercentForAlert.HasValue)

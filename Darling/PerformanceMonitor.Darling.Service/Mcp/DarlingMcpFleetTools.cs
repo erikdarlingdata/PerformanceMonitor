@@ -38,7 +38,17 @@ public sealed class DarlingMcpFleetTools
         "blocking, deadlocks, worker threads, and collector health, each with a Healthy/Warning/Critical band), " +
         "plus a rollup — counts by band, cross-server blocking and deadlock totals, and a worst-first 'needs " +
         "attention' ranking. Use this first to decide which server to drill into, then call the per-server tools. " +
-        "This cross-server view is unique to the central store.")]
+        "This cross-server view is unique to the central store. " +
+        "cpu_source names which collector produced each card's total_cpu_percent, so a missing number is never " +
+        "ambiguous: RingBuffer (SQL Server, and the only arm that also fills cpu_percent / " +
+        "other_process_cpu_percent with the per-process split), PerformanceInsights (an Aurora/RDS PostgreSQL " +
+        "target's instance CPU, total only), NotCollected (a source that applies here produced no current " +
+        "reading — check get_collection_health), or NoSourceForEngine (a PostgreSQL target not known to be " +
+        "Aurora; PostgreSQL exposes no instance-CPU counter and nothing collects one here, so that null is " +
+        "structural). A PostgreSQL target's memory_mb, buffer_pool_mb and the whole threads block are null for " +
+        "the same structural reason and no band is claimed for them — those metrics are SQL Server DMV " +
+        "readings with no PostgreSQL equivalent collected; get_pg_buffer_usage, get_pg_kernel_stats and " +
+        "get_pg_session_states are the reads that answer the nearest PostgreSQL questions.")]
     public static async Task<string> GetFleetOverview(
         NpgsqlDataSource postgres,
         [Description("Hours of blocking/deadlock history the per-server cards and fleet totals window over. Default 1.")] int hours_back = 1)

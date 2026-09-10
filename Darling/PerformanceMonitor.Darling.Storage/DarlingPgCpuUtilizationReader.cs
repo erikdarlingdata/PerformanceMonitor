@@ -27,8 +27,14 @@ public static class DarlingPgCpuUtilizationReader
     /// the alert going silent, narrower than <see cref="DarlingPostgresAlertReadAdapter.Freshness"/>'s 2 hours
     /// because a stale CPU reading is a much weaker signal about "right now" than a wraparound age is — CPU
     /// moves in seconds, not days.
+    ///
+    /// <para><b>Public because the fleet card shares it</b> (#3267). <c>DarlingFleetReader</c>'s
+    /// cross-server read answers the same question this one does — "where does this server's CPU stand
+    /// right now" — and two surfaces answering that with different staleness windows is a surface drift of
+    /// the #2473 kind: the High CPU alert would be evaluating a reading the card had already dropped, or
+    /// the reverse. One constant, two consumers.</para>
     /// </summary>
-    internal static readonly TimeSpan Freshness = TimeSpan.FromMinutes(15);
+    public static readonly TimeSpan Freshness = TimeSpan.FromMinutes(15);
 
     internal const string LatestCpuSql = """
         SELECT cpu_percent, sample_time
