@@ -45,8 +45,9 @@ namespace Darling.Tests;
 /// claim actually being made.</para>
 ///
 /// <para>Rows are SEEDED rather than collected. The property under test belongs to the read, and seeding
-/// is what lets two cycles a day apart exist inside one test — <c>PgIndexBloatBudgetLivePostgresTests</c>
-/// is where the collector's own rotation is executed against a real catalog.</para>
+/// is what lets two cycles a day apart exist inside one test. There is no companion suite driving the
+/// collector for this any more: #3234 removed the rotation, and the budget suite that exercised it went
+/// with it.</para>
 ///
 /// <para><b>Since #3234 this suite exercises the HISTORICAL row shape, deliberately.</b> The collector no
 /// longer calls <c>pgstatindex</c> on a schedule — it estimates from catalog statistics — but the store

@@ -234,7 +234,8 @@ public sealed class CollectorStateContractTests
     /// <para><b>Why this exists as well as the query_store guard.</b>
     /// <c>QueryStoreStatePruneTests.EveryPerDatabaseKeyPrefixIsInOneSharedList</c> discovers its population
     /// by NAME PATTERN — static classes called <c>QueryStore*State</c> — which is the right census for that
-    /// family and blind to everything else. <c>PgIndexBloatCollector.RotationCursorKeyPrefix</c> is
+    /// family and blind to everything else. <c>pg_index_bloat</c>'s <c>rotate:</c> prefix — retired in
+    /// #3234, and named here as the history that justifies this census rather than as a live member — was
     /// declared on a COLLECTOR, so it matched no pattern, appeared in no list, and shipped with no verdict:
     /// the cursors accumulated for the life of the server, and because <c>BuildQuery</c> splices all of
     /// them into one statement reused per database, the end state was PostgreSQL's 65,535-parameter limit
