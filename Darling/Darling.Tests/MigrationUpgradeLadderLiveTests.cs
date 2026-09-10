@@ -208,12 +208,14 @@ public sealed class MigrationUpgradeLadderLiveTests
     /// release cut", and both the 3.4.0 and 3.5.0 cuts shipped without it, leaving the only tested upgrade
     /// population a 3.3.0 store while every real user was upgrading from 3.5.0.
     ///
-    /// <para>Derived from CHANGELOG.md's newest released heading rather than from a pinned version constant,
-    /// because a constant is the same kind of thing that decayed: it would need remembering at exactly the
-    /// moment the fixture needed remembering. The release cut moves the heading, and this fails until the
-    /// fixture beside it exists. No live PostgreSQL needed, so it runs on every build rather than only where
-    /// DARLING_TEST_PG is set — the climb tests are gated, and a gate is a poor place for the check that says
-    /// the gated thing is testing the right store.</para>
+    /// <para>Derived from CHANGELOG.md's newest SHIPPED release — the newest release heading that is NOT the
+    /// in-development version in Directory.Build.props — rather than from a pinned constant that would decay
+    /// the same way. It is deliberately the release users upgrade FROM, not the one being cut: a fixture of
+    /// the version being cut is already at the top of the ladder and would climb nothing, failing the
+    /// applied>0 assertion above. The release cut adds the new heading, and this fails until the previous
+    /// release's fixture exists beside it. No live PostgreSQL needed, so it runs on every build rather than
+    /// only where DARLING_TEST_PG is set — the climb tests are gated, and a gate is a poor place for the
+    /// check that says the gated thing is testing the right store.</para>
     /// </summary>
     [Fact]
     public void TheMostRecentRelease_HasALadderFixture()
@@ -222,10 +224,22 @@ public sealed class MigrationUpgradeLadderLiveTests
         Assert.True(root is not null, "Could not locate the repository root.");
 
         var changelog = File.ReadAllText(Path.Combine(root!, "CHANGELOG.md"));
-        var released = Regex.Match(changelog, @"^## \[(\d+\.\d+\.\d+)\]", RegexOptions.Multiline);
-        Assert.True(released.Success, "CHANGELOG.md has no released version heading to derive the expected fixture from.");
 
-        var version = released.Groups[1].Value;
+        /* The fixture we need is the most recent SHIPPED release — the store users upgrade FROM — not the
+           version currently being cut, whose changelog heading now sits at the top. A fixture of the version
+           being cut is already at the top of the ladder, so the climb theory above would apply nothing and
+           fail its applied>0 assertion. So take the newest changelog release that is NOT the in-development
+           version carried in Directory.Build.props. */
+        var props = File.ReadAllText(Path.Combine(root!, "Directory.Build.props"));
+        var current = Regex.Match(props, @"<Version>(\d+\.\d+\.\d+)</Version>");
+        Assert.True(current.Success, "Directory.Build.props has no <Version> to identify the in-development release.");
+        var inDevelopment = current.Groups[1].Value;
+
+        var version = Regex.Matches(changelog, @"^## \[(\d+\.\d+\.\d+)\]", RegexOptions.Multiline)
+            .Select(m => m.Groups[1].Value)
+            .FirstOrDefault(v => v != inDevelopment);
+        Assert.True(version is not null,
+            "CHANGELOG.md has no shipped release heading (one that is not the in-development version) to derive the expected fixture from.");
         var expected = $"migration-ladder-v{version}.sql";
         var path = Path.Combine(root!, FixtureDirectory.Replace('/', Path.DirectorySeparatorChar), expected);
 
