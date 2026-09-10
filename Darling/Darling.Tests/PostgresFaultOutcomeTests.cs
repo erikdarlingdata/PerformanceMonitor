@@ -52,6 +52,62 @@ public class PostgresFaultOutcomeTests
         Assert.Equal("PERMISSIONS", status);
         Assert.Contains("pg_monitor", explanation, StringComparison.Ordinal);
         Assert.Contains("42501", explanation, StringComparison.Ordinal);
+
+        /* And the general sentence stays general: pg_monitor genuinely covers this collector, and the
+           #3239 log-reader grant pair named here would send an operator widening a role for nothing. */
+        Assert.DoesNotContain("pg_read_server_files", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3239: the two self-hosted log readers are the exception the general pg_monitor sentence used to
+    /// deny to their faces. Reading the log with pg_read_file needs the pg_read_server_files role AND an
+    /// explicit EXECUTE grant — measured on #2566, the role alone does NOT carry it, because the
+    /// function's ACL is postgres=X/postgres — so the old hint told this exact failure to go check a
+    /// role that was granted and covers nothing here. The EXECUTE half is a per-database catalog fact,
+    /// so the hint names the database the way #2638's extension sentence does: measured on the 20260910
+    /// dogfood soak, the pair issued in the wrong database leaves a failure identical to no grant at all.
+    /// </summary>
+    [Theory]
+    [InlineData("pg_deadlocks")]
+    [InlineData("pg_plan_capture")]
+    public void ALogReaderDenialNamesTheGrantPairAndTheDatabaseItMustBeIssuedIn(string collectorName)
+    {
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42501", "permission denied for function pg_read_file"), collectorName, "appdb");
+
+        /* Still the non-fatal-degradation bucket — #3239 changes the sentence, not the classification. */
+        Assert.Equal("PERMISSIONS", status);
+
+        /* The pair, with every pg_read_file signature spelled out so the fix is paste-able. */
+        Assert.Contains("pg_read_server_files", explanation, StringComparison.Ordinal);
+        Assert.Contains(
+            "GRANT EXECUTE ON FUNCTION pg_read_file(text), pg_read_file(text, bigint, bigint), "
+            + "pg_read_file(text, bigint, bigint, boolean)",
+            explanation, StringComparison.Ordinal);
+
+        /* The per-database nuance, with the database named. */
+        Assert.Contains("database 'appdb'", explanation, StringComparison.Ordinal);
+        Assert.Contains("DIFFERENT database on the same cluster", explanation, StringComparison.Ordinal);
+
+        /* And it must not repeat the sentence this fixes. */
+        Assert.DoesNotContain("covers every collector", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An unknown connected database degrades to a phrase rather than inventing a name — the same rule
+    /// the ObjectMissing arm's WhereToCreateIt follows.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ALogReaderDenialFallsBackWhenTheDatabaseIsUnknown(string? connectedDatabase)
+    {
+        var (_, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42501"), "pg_deadlocks", connectedDatabase);
+
+        Assert.Contains("the database this collector connects to", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("''", explanation, StringComparison.Ordinal);
     }
 
     /// <summary>
