@@ -142,6 +142,19 @@ public sealed class FleetCardPostgresCpuLivePostgresTests
             Assert.Null(aurora.TotalThreads);
             Assert.Equal(HealthSeverity.Unknown, aurora.ThreadsSeverity);
 
+            /* #3272, end to end: the three DMV-sourced bands claim nothing for this engine. Worth a live
+               arm and not only the unit matrix, because the engine gate reads `servers.engine_kind` out of
+               the store — a column this test wrote and the reader round-tripped, which is the one part of
+               the decision no in-memory fixture exercises. */
+            Assert.Equal(HealthSeverity.Unknown, aurora.MemorySeverity);
+            Assert.Equal(HealthSeverity.Unknown, aurora.BlockingSeverity);
+            Assert.Equal(HealthSeverity.Unknown, aurora.DeadlockSeverity);
+            /* The counts and #3017's disclosure are deliberately untouched, so the fleet total and its
+               coverage denominator still reconcile. */
+            Assert.Equal(0, aurora.BlockingCount);
+            Assert.Equal(0, aurora.DeadlockCount);
+            Assert.Equal(FleetDeadlockSource.PostgresTarget, aurora.DeadlockSource);
+
             // ── a PostgreSQL target this build collects no instance CPU for ─────────────────────────
             var selfHosted = seeded.Single(c => c.ServerId == SelfHostedServerId);
             Assert.Null(selfHosted.TotalCpuPercent);
@@ -164,6 +177,14 @@ public sealed class FleetCardPostgresCpuLivePostgresTests
             Assert.Equal(HealthSeverity.Healthy, sqlServer.CpuSeverity);
             Assert.Equal(FleetCpuSource.RingBuffer, sqlServer.CpuSource);
             Assert.Null(sqlServer.InstanceCpuPercent);
+            /* #3272's other half, live: the same engine gate that made the Aurora card claim nothing must
+               leave a SQL Server card MEASURED. Healthy here is earned — the views exist for this engine
+               and hold no pressure, no blocking and no deadlock for this sentinel. The unit matrix covers
+               the Warning and Critical arms; what this adds is that the gate reads the real column. */
+            Assert.Equal(HealthSeverity.Healthy, sqlServer.MemorySeverity);
+            Assert.Equal(HealthSeverity.Healthy, sqlServer.BlockingSeverity);
+            Assert.Equal(HealthSeverity.Healthy, sqlServer.DeadlockSeverity);
+            Assert.Equal(FleetDeadlockSource.CollectorSilent, sqlServer.DeadlockSource);
 
             /* All four arms present in one call, which is what makes the read's per-server keying and the
                classification jointly observable rather than one-at-a-time. */

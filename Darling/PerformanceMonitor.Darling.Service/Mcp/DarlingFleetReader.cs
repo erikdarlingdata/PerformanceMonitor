@@ -453,13 +453,23 @@ GROUP BY server_id, collector_name";
         var hasMemoryPressure = pressure.WaiterCount > 0 || pressure.TimeoutCount > 0 || pressure.ForcedCount > 0;
         var maxBlockedSeconds = maxBlockingWaitMs / 1000.0;
 
+        /* The three DMV-sourced readings, with "not measured" expressed as null for an engine that has no
+           row in the views behind them (#3272). The reads above produced zeros for such a target, and a
+           zero here argued Healthy — a green dot for a metric nothing measured. The published COUNTS are
+           left exactly as they are: #3017's deadlock_source and the fleet coverage block explain a total
+           built out of those zeros, and nulling them would make the total's own denominator unreadable.
+           It is the BAND that stops claiming health. */
+        var memoryPressureForBand = ServerMetricSources.DmvSourced(hasMemoryPressure, isPostgres);
+        var blockingForBand = ServerMetricSources.DmvSourced(blockingCount, isPostgres);
+        var deadlocksForBand = ServerMetricSources.DmvSourced(deadlockCount, isPostgres);
+
         var metrics = new ServerHealthMetrics
         {
             CpuPercentForAlert = cpuForAlert,
-            HasMemoryPressure = hasMemoryPressure,
-            BlockingCount = blockingCount,
+            HasMemoryPressure = memoryPressureForBand,
+            BlockingCount = blockingForBand,
             MaxBlockedSeconds = maxBlockedSeconds,
-            DeadlockCount = deadlockCount,
+            DeadlockCount = deadlocksForBand,
             TotalThreads = threads.TotalThreads,
             AvailableThreads = availableThreads,
             ThreadsWaitingForCpu = threads.RunnableTasks,
@@ -516,13 +526,13 @@ GROUP BY server_id, collector_name";
             MemoryTimeoutCount = pressure.TimeoutCount,
             MemoryForcedCount = pressure.ForcedCount,
             HasMemoryPressure = hasMemoryPressure,
-            MemorySeverity = ServerHealthClassifier.MemorySeverity(hasMemoryPressure),
+            MemorySeverity = ServerHealthClassifier.MemorySeverity(memoryPressureForBand),
             BlockingCount = blockingCount,
             MaxBlockingWaitMs = maxBlockingWaitMs,
-            BlockingSeverity = ServerHealthClassifier.BlockingSeverity(blockingCount, maxBlockedSeconds),
+            BlockingSeverity = ServerHealthClassifier.BlockingSeverity(blockingForBand, maxBlockedSeconds),
             DeadlockCount = deadlockCount,
             DeadlockLastSeen = deadlock.LastSeen,
-            DeadlockSeverity = ServerHealthClassifier.DeadlockSeverity(deadlockCount),
+            DeadlockSeverity = ServerHealthClassifier.DeadlockSeverity(deadlocksForBand),
             DeadlockCollectorBand = collectors.DeadlockBand,
             TotalThreads = threads.TotalThreads,
             CurrentWorkers = threads.CurrentWorkers,
@@ -1213,10 +1223,13 @@ public sealed class FleetServerCard
     internal ServerHealthMetrics ToHealthMetrics() => new()
     {
         CpuPercentForAlert = TotalCpuPercent ?? CpuPercent,
-        HasMemoryPressure = HasMemoryPressure,
-        BlockingCount = BlockingCount,
+        /* Re-derived from IsPostgres rather than read back off the published counts, because those are
+           deliberately left as zeros (#3017) — reading them here would hand the ranking a measurement the
+           card's own severity says it does not have. */
+        HasMemoryPressure = ServerMetricSources.DmvSourced(HasMemoryPressure, IsPostgres),
+        BlockingCount = ServerMetricSources.DmvSourced(BlockingCount, IsPostgres),
         MaxBlockedSeconds = MaxBlockingWaitMs / 1000.0,
-        DeadlockCount = DeadlockCount,
+        DeadlockCount = ServerMetricSources.DmvSourced(DeadlockCount, IsPostgres),
         TotalThreads = TotalThreads,
         AvailableThreads = AvailableThreads,
         ThreadsWaitingForCpu = ThreadsWaitingForCpu,

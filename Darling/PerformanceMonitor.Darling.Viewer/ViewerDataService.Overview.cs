@@ -785,17 +785,36 @@ public sealed class ServerSummaryItem
     /// <summary>CPU band — total non-idle CPU: >= 95% Critical, >= 80% Warning.</summary>
     public HealthSeverity CpuSeverity => ServerHealthClassifier.CpuSeverity(CpuPercentForAlert);
 
-    /// <summary>True when the resource semaphore shows grant waiters, timeouts, or forced grants.</summary>
+    /// <summary>True when the resource semaphore shows grant waiters, timeouts, or forced grants. The raw
+    /// reading, unqualified by whether there was anything to read — see
+    /// <see cref="MemoryPressureForBand"/>.</summary>
     public bool HasMemoryPressure => MemoryWaiterCount > 0 || MemoryTimeoutCount > 0 || MemoryForcedCount > 0;
 
-    /// <summary>Memory band — Critical on any resource-semaphore pressure, else Healthy.</summary>
-    public HealthSeverity MemorySeverity => ServerHealthClassifier.MemorySeverity(HasMemoryPressure);
+    /* The three DMV-sourced readings with "not measured" expressed as null (#3272), through the SAME shared
+       decision the service's fleet card uses so the two cannot disagree about whether this server's zero
+       means anything. The raw counts above and beside stay as they are: they are what the fleet total is
+       summed from, and #3017's coverage block is what explains that total. */
 
-    /// <summary>Blocking band — >= 60s max wait or >= 5 events Critical; >= 10s, >= 2 events, or any blocking Warning.</summary>
-    public HealthSeverity BlockingSeverity => ServerHealthClassifier.BlockingSeverity(BlockingCount, MaxBlockedSeconds);
+    /// <summary>Resource-semaphore pressure as a BANDABLE reading — null when this target's engine has no
+    /// semaphore to read (every PostgreSQL target).</summary>
+    public bool? MemoryPressureForBand => ServerMetricSources.DmvSourced(HasMemoryPressure, IsPostgres);
 
-    /// <summary>Deadlock band — any deadlock in the window is Critical.</summary>
-    public HealthSeverity DeadlockSeverity => ServerHealthClassifier.DeadlockSeverity(DeadlockCount);
+    /// <summary>Blocking events as a BANDABLE reading — null when this card reads no blocking source for
+    /// this engine.</summary>
+    public int? BlockingCountForBand => ServerMetricSources.DmvSourced(BlockingCount, IsPostgres);
+
+    /// <summary>Deadlocks as a BANDABLE reading — null when this card reads no deadlock source for this
+    /// engine. <see cref="DeadlockSource"/> is the same fact named for a reader (#3017).</summary>
+    public int? DeadlockCountForBand => ServerMetricSources.DmvSourced(DeadlockCount, IsPostgres);
+
+    /// <summary>Memory band — Critical on any resource-semaphore pressure, else Healthy; no source Unknown.</summary>
+    public HealthSeverity MemorySeverity => ServerHealthClassifier.MemorySeverity(MemoryPressureForBand);
+
+    /// <summary>Blocking band — >= 60s max wait or >= 5 events Critical; >= 10s, >= 2 events, or any blocking Warning; no source Unknown.</summary>
+    public HealthSeverity BlockingSeverity => ServerHealthClassifier.BlockingSeverity(BlockingCountForBand, MaxBlockedSeconds);
+
+    /// <summary>Deadlock band — any deadlock in the window is Critical; no source Unknown.</summary>
+    public HealthSeverity DeadlockSeverity => ServerHealthClassifier.DeadlockSeverity(DeadlockCountForBand);
 
     /// <summary>Threads band — work-queue starvation Critical; >= 20 runnable-waiting or under 10% available Warning; no snapshot Unknown.</summary>
     public HealthSeverity ThreadsSeverity =>
@@ -818,10 +837,10 @@ public sealed class ServerSummaryItem
     public ServerHealthMetrics ToHealthMetrics() => new()
     {
         CpuPercentForAlert = CpuPercentForAlert,
-        HasMemoryPressure = HasMemoryPressure,
-        BlockingCount = BlockingCount,
+        HasMemoryPressure = MemoryPressureForBand,
+        BlockingCount = BlockingCountForBand,
         MaxBlockedSeconds = MaxBlockedSeconds,
-        DeadlockCount = DeadlockCount,
+        DeadlockCount = DeadlockCountForBand,
         TotalThreads = TotalThreads,
         AvailableThreads = AvailableThreads,
         ThreadsWaitingForCpu = ThreadsWaitingForCpu,
