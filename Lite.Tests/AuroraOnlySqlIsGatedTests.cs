@@ -78,6 +78,12 @@ public class AuroraOnlySqlIsGatedTests
         ["CollectorEngineCapability.cs"] =
             "PROSE. Names the surfaces in the sentence shown to an operator when a collector cannot run here. " +
             "It describes the dependency rather than depending on it.",
+
+        ["DarlingMcpPgStatementTools.cs"] =
+            "PROSE (#3261). get_pg_top_queries' description states the #2625 dual-source truth — Aurora reads " +
+            "aurora_stat_statements(), every other PostgreSQL the vanilla view with the Aurora-only columns " +
+            "null. The tool reads the STORE, never the target; the dependency itself is " +
+            "PgStatementStatsCollector's PAIRED entry above.",
     };
 
     [Fact]
