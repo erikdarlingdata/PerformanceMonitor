@@ -51,9 +51,17 @@ public static class PgPlanLogParser
 
     /* The log line prefix carries the query id via %Q, which is the ONLY place auto_explain exposes it -
        the plan JSON has no identifier of its own even with compute_query_id on. The JSON block follows,
-       tab-indented, which is what makes it recognisable as a unit rather than needing a brace counter. */
+       tab-indented, which is what makes it recognisable as a unit rather than needing a brace counter.
+
+       A space OR a colon after the bracketed pid, because the character there belongs to log_line_prefix
+       and not to auto_explain. PostgreSQL's own default spells '%m [%p] ' and puts a space; the system
+       default on a managed parameter group spells '%t:%r:%u@%d:[%p]:' and puts its own ':' there, so
+       adding the %Q this parser requires gives '%t:%r:%u@%d:[%p]:%Q ' and the line reads `]:<id> LOG:`.
+
+       PgPlanCaptureCollector holds this pattern's counterpart for the pg_read_file route, as SQL and
+       narrower: that one requires the space, which PostgreSQL's own default renders. */
     private static readonly Regex s_planBlock = new(
-        @"\[\d+\] (-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)",
+        @"\[\d+\][ :](-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)",
         RegexOptions.Compiled);
 
     /* Condition fields, where a bare number is a VALUE rather than part of a name. Enumerated rather than
@@ -80,6 +88,14 @@ public static class PgPlanLogParser
     /// <para>Blocks that will not parse are skipped rather than reported. Both transports read a bounded
     /// window, so a block cut in half at the edge is an ordinary consequence of not reading the whole file
     /// and not a fault worth surfacing every cycle.</para>
+    ///
+    /// <para><b>Skipping it is only free where the next read overlaps, and on the self-hosted route at the
+    /// default cadence it often does not.</b> <see cref="PgPlanCaptureCollector"/> reads a fixed 4 MB tail
+    /// hourly, so the windows touch only while the log grows by under 4 MB an hour — roughly 1.2 KB/s.
+    /// Past that the gap between two reads is never read at all, and the plans in it are lost rather than
+    /// deferred. <see cref="PgDeadlockLogParser"/> carries the arithmetic and the transport split; the
+    /// short version is that the RDS log API keeps a resume marker and does not have this failure, while
+    /// the <c>pg_read_file</c> tail has no marker and does.</para>
     /// </summary>
     public static List<ParsedPlan> Extract(string? logBody)
     {

@@ -32,7 +32,7 @@ public sealed class MemoryStatsCollectorDefinitionTests
 
         /* Azure: committed-target approximation + NULL workers (#857 elastic-pool grant wall). */
         Assert.Contains("committed_target_kb", azure, StringComparison.Ordinal);
-        Assert.Contains("current_workers_count = CONVERT(int, NULL)", azure, StringComparison.Ordinal);
+        Assert.Contains("current_workers_count = CONVERT(integer, NULL)", azure, StringComparison.Ordinal);
         Assert.DoesNotContain("sys.dm_os_schedulers", azure, StringComparison.Ordinal);
 
         /* On-prem/MI: real memory DMV + live worker count. */
@@ -140,6 +140,32 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
         Assert.Equal(
             new[] { "sample_time", "memory_notification", "memory_indicators_process", "memory_indicators_system" },
             MemoryPressureEventsCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray());
+    }
+
+    [Fact]
+    public void BuildQuery_ComputesSampleTimeAtMillisecondPrecision_NotSecondTruncated()
+    {
+        /* #2749 sibling fix -- see CpuUtilizationCollectorDefinitionTests' identical pin for the full
+           explanation. Same ring-buffer / client-side-watermark-dedup shape, same truncation bug. */
+        var plan = MemoryPressureEventsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas));
+
+        Assert.Contains("MILLISECOND, -((@ms_ticks - t.timestamp) % 1000)", plan.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildQuery_SplitsSampleTimeMath_ToAvoidMillisecondDateaddOverflow()
+    {
+        /* #2755 sibling fix -- see CpuUtilizationCollectorDefinitionTests' identical pin for the full
+           explanation. This collector's own live production data was the one that actually overflowed:
+           447/447 SUCCESS before the #2751 fix deployed, then 24/24 ERROR ("Arithmetic overflow error
+           converting expression to data type int") within ~14 minutes after, on a real box. */
+        var plan = MemoryPressureEventsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas));
+
+        Assert.Contains("DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), @now)", plan.Text, StringComparison.Ordinal);
+        Assert.Contains(
+            "DATEADD(\n        MILLISECOND, -((@ms_ticks - t.timestamp) % 1000),\n        DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), @now)),",
+            plan.Text.Replace("\r\n", "\n"),
+            StringComparison.Ordinal);
     }
 
     [Fact]

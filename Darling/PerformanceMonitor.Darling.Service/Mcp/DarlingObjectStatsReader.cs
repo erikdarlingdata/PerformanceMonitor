@@ -46,7 +46,7 @@ internal static class DarlingObjectStatsReader
     public sealed record IndexUsageRow(
         string DatabaseName, string SchemaName, string TableName, string? IndexName, string? IndexTypeDesc,
         double ReservedMb, long TotalRows, long UserSeeks, long UserScans, long UserLookups, long TotalReads,
-        long UserUpdates, DateTime? LastUserAccess, string Classification);
+        long UserUpdates, DateTime? LastUserAccessUtc, string Classification);
 
     /// <summary>One per-index locking / latch-contention row.</summary>
     public sealed record IndexLockingRow(
@@ -138,6 +138,7 @@ internal static class DarlingObjectStatsReader
     {
         var rows = new List<ObjectSizeGrowthRow>();
         await using var command = postgres.CreateCommand(ObjectSizeGrowthSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddTimestamp(command, cutoff7dUtc);
         DarlingMcpReadParameters.AddTimestamp(command, cutoff30dUtc);
@@ -176,8 +177,52 @@ internal static class DarlingObjectStatsReader
     /// healthy collection, full retention and zero returned rows, which reads exactly like a collection
     /// failure. The database filter is what makes the question answerable; the count below is what stops the
     /// answer being read as complete.</para>
+    /// <para><b><c>last_user_access</c> is de-skewed to naive UTC.</b> The four columns it is the
+    /// <c>GREATEST</c> of come straight off <c>sys.dm_db_index_usage_stats</c>
+    /// (<c>IndexObjectStatsCollector</c> ships <c>us.last_user_seek</c> and its three siblings verbatim), so
+    /// the stored values are the monitored server's LOCAL wall clock. All four share one offset, so
+    /// subtracting after the <c>GREATEST</c> is equivalent to subtracting before it and costs one expression
+    /// instead of four. <c>GREATEST</c> ignoring NULLs is what is wanted here — an index used in only one of
+    /// the four ways still reports that one access — and subtracting an interval from the all-NULL case
+    /// keeps it NULL. This read returns NO other timestamp, which is why converting rather than labelling
+    /// matters more here than elsewhere: there is nothing else in the payload for a reader to notice a
+    /// disagreement against.</para>
+    /// <para><b>The de-skew is exact only inside the current DST period, and this is the read where that
+    /// matters most.</b> <c>server_properties.utc_offset_minutes</c> is
+    /// <c>DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())</c> — the offset in force AT COLLECTION TIME, one
+    /// current value. The other de-skewed reads describe current state (a running job, an open transaction,
+    /// a cleaner that ran seconds ago), so their timestamps and that offset sit on the same side of any
+    /// transition. These four do not: <c>sys.dm_db_index_usage_stats</c> persists since the instance
+    /// restarted, which on a stable production box is routinely months, so a large share of values predate
+    /// the most recent transition and come back <b>60 minutes early</b> — silently, and in the plausible
+    /// direction. This is not a theoretical exposure: any target in a DST-observing zone has it, a target
+    /// configured to UTC does not, and on AWS RDS the instance takes its time zone from a creation-time
+    /// parameter — so a non-UTC zone is an ordinary configuration rather than an exotic one, and "it is
+    /// RDS, so it is probably UTC" is not a safe assumption. #2932 records the measured offset behind the
+    /// four-hour figure quoted above. <c>sqlserver_start_time</c> on the same row is the bound on how far
+    /// back the affected values can reach.</para>
+    /// <para>Fixing it properly needs a ZONE rather than an offset — <c>CURRENT_TIMEZONE_ID()</c>
+    /// (SQL Server 2019+) collected alongside the offset, then <c>AT TIME ZONE</c> at the read boundary,
+    /// which handles transitions. That is a collected-column addition and a migration rung, so what is
+    /// carried here is the SCOPE of the claim, in the #2993 shape: this read places a timestamp exactly
+    /// when it falls inside the current DST period, and within an hour otherwise.</para>
+    /// <para>The alias deliberately does NOT carry a <c>_utc</c> suffix, unlike the other fifteen. This one
+    /// is a projection alias rather than a column, and <c>ConsumedTimestampFrameDisciplineTests</c> reaches
+    /// the payload field through the alias — a suffix here would make the field name and the alias diverge
+    /// and drop the site out of that census. The conversion is pinned directly by
+    /// <c>EveryDeSkewedAtReadSite_CarriesItsConversionInTheReaderItDependsOn</c>, which is a stronger claim
+    /// than a suffix nothing checks.</para>
     /// </summary>
     public const string IndexUsageSql = """
+        WITH svr AS (
+            SELECT COALESCE((
+                SELECT sp.utc_offset_minutes
+                FROM server_properties AS sp
+                WHERE sp.server_id = $1
+                AND   sp.utc_offset_minutes IS NOT NULL
+                ORDER BY sp.collection_time DESC
+                LIMIT 1), 0) AS offset_minutes
+        )
         SELECT
             database_name,
             schema_name,
@@ -191,7 +236,7 @@ internal static class DarlingObjectStatsReader
             COALESCE(user_lookups, 0) AS user_lookups,
             COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) AS total_reads,
             COALESCE(user_updates, 0) AS user_updates,
-            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,
+            GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) - make_interval(mins => svr.offset_minutes) AS last_user_access,
             CASE
                 WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0
                      AND COALESCE(user_updates, 0) = 0 THEN 'Unused'
@@ -199,7 +244,7 @@ internal static class DarlingObjectStatsReader
                      AND COALESCE(user_updates, 0) > 0 THEN 'Write-only'
                 ELSE 'Active'
             END AS classification
-        FROM v_index_object_stats
+        FROM v_index_object_stats, svr
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
         AND   ($2::text IS NULL OR database_name = $2::text)
@@ -234,6 +279,7 @@ internal static class DarlingObjectStatsReader
     {
         var rows = new List<IndexUsageRow>();
         await using var command = postgres.CreateCommand(IndexUsageSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         command.Parameters.AddWithValue((object?)databaseName ?? DBNull.Value);
         DarlingMcpReadParameters.AddInt(command, top);
@@ -268,6 +314,7 @@ internal static class DarlingObjectStatsReader
         NpgsqlDataSource postgres, int serverId, string? databaseName = null, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(IndexUsageMatchCountSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         command.Parameters.AddWithValue((object?)databaseName ?? DBNull.Value);
 
@@ -325,6 +372,7 @@ internal static class DarlingObjectStatsReader
     {
         var rows = new List<IndexLockingRow>();
         await using var command = postgres.CreateCommand(IndexLockingSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddInt(command, top);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -381,6 +429,7 @@ internal static class DarlingObjectStatsReader
     {
         var rows = new List<DatabaseSizeRow>();
         await using var command = postgres.CreateCommand(DatabaseSizeLatestSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

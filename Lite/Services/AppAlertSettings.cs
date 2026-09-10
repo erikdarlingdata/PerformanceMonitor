@@ -53,4 +53,8 @@ public sealed class AppAlertSettings : IAlertSettings
 
     public double AnalysisNotifySeverity        => App.AnalysisNotifySeverity;
     public int    AnalysisNotifyCooldownMinutes => App.AnalysisNotifyCooldownMinutes;
+
+    /* #2710: Lite serves no web dashboard, so there is no triage page to link to — empty is the honest
+       constant, and the shared webhook service omits the link on every channel because of it. */
+    public string TriageBaseUrl => "";
 }

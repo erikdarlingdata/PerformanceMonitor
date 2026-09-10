@@ -59,12 +59,21 @@ public sealed class DeadlockProcessDetail : DeadlockProcessInfo
     /// </summary>
     public bool CanViewVictimPlan => IsVictim && HasVictimQueryPlan;
 
+    /// <summary><c>deadlocks.deadlock_time</c> is the XE <c>@timestamp</c>, so it is naive UTC and
+    /// converts through <see cref="ViewerTimeHelper.ForDisplay"/>.</summary>
     public string DeadlockTimeLocal
         => DeadlockTime is { } t ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss") : "";
     public string VictimDisplay => IsVictim ? "Victim" : "";
     public string WaitTimeFormatted => WaitTime > 0 ? $"{WaitTime:N0} ms" : "";
-    public string LastTranStartedLocal
-        => LastTranStarted is { } t ? ViewerTimeHelper.ForDisplay(t).ToString("yyyy-MM-dd HH:mm:ss") : "";
+
+    /// <summary>The deadlock graph's <c>lasttranstarted</c> attribute, walked out of the stored
+    /// <c>deadlock_graph_xml</c> at READ time by <see cref="DeadlockGraphProcessParser"/>. SQL Server
+    /// writes that attribute in its own local clock, so it converts through
+    /// <see cref="ViewerDataService.FormatServerClock"/> — the other frame from
+    /// <see cref="DeadlockTimeLocal"/> two properties up, in the same row. No <c>CollectorColumn</c>
+    /// declares it, so the catalog-derived clock-frame census cannot reach this pair and the frames are
+    /// stated here instead.</summary>
+    public string LastTranStartedLocal => ViewerDataService.FormatServerClock(LastTranStarted);
 
     /// <summary>
     /// Parses a list of <see cref="ViewerDeadlockRow"/> into per-process detail rows via the shared
@@ -117,6 +126,7 @@ public sealed partial class ViewerDataService
         var rows = new List<ViewerDeadlockRow>();
 
         await using var command = _dataSource.CreateCommand(RecentDeadlocksSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

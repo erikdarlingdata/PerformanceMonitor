@@ -53,6 +53,25 @@ namespace PerformanceMonitor.Darling.Storage;
 public static class StoreSelfMetrics
 {
     /// <summary>
+    /// The TimescaleDB GUC that decides whether <c>timescaledb_information.job_history</c> records anything
+    /// (#3175). Named ONCE, because the string has two consumers that must never disagree: the managed
+    /// provisioner writes it into postgresql.conf (<c>DarlingManagedPostgres.BuildJobExecutionLoggingConfAppend</c>)
+    /// and the MCP read probes <c>pg_settings</c> for it (<c>DarlingStoreMetricsReader.JobExecutionLoggingSql</c>).
+    /// A retyped copy that drifted would not error — <c>pg_settings</c> would simply return no row for a name
+    /// nobody registered, which this read reports as "the server has no such setting". A wrong name and a
+    /// plain-PostgreSQL store would be indistinguishable.
+    ///
+    /// <para><b>Why it lives HERE and not on the provisioner that writes it.</b>
+    /// <c>DarlingManagedPostgres</c> is <c>[SupportedOSPlatform("windows")]</c>, so a constant declared
+    /// there makes every call site platform-dependent — CA1416 on a read that is not Windows-specific and
+    /// has no reason to be, for the sake of a string. This class is the platform-neutral owner of the
+    /// store's own background-job telemetry, and it is the class whose recorded series
+    /// (<see cref="BackgroundJobInsertSql"/>, one hourly sample per job) is the reason the per-run route
+    /// matters at all: a maximum question cannot be answered from a sample.</para>
+    /// </summary>
+    public const string JobExecutionLoggingSetting = "timescaledb.enable_job_execution_logging";
+
+    /// <summary>
     /// Per-statement command timeout for the sweep (#2317) — and, at the worker's call site, the
     /// budget for the WHOLE sweep via a linked CTS (see SweepStoreSelfMetricsAsync: this sweep is
     /// awaited on the main loop, so five sequential per-statement timeouts must not stack). The
@@ -159,20 +178,123 @@ SELECT
     (SELECT count(*) FROM collect.{PayloadDimensions.QueryPlanDimTable})";
 
     /// <summary>
-    /// The whole-store summary row. <c>pg_database_size</c> is the same read the disk-pressure check and
-    /// the Viewer's status bar use; <c>is_enabled</c> over the servers registry is the fleet reader's own
-    /// enabled predicate, so "per-server" here means exactly the servers the fleet surfaces count.
-    /// $1 metric_time.
+    /// The <c>object_kind</c> the whole-store summary row carries, named ONCE because the string now has
+    /// six consumers that must never disagree: this sweep writes it (<see cref="StoreInsertSql"/>), the
+    /// disk-pressure check filters on it (<see cref="LatestStoreSizeSql"/>), and
+    /// <c>DarlingMcpStoreMetricsTools</c> partitions its response by it in four places — the store summary
+    /// is the one row those reads must separate from the per-hypertable and per-dimension rows.
+    ///
+    /// <para><b>Why a const and not six literals.</b> A reader filtering on a kind the writer stopped
+    /// writing returns ZERO ROWS, not an error, and every consumer here maps zero rows to a null or an
+    /// omitted section. So a drifted spelling is indistinguishable from a store that has not swept yet —
+    /// the honest-empty trap, on a value the shipped store already holds 400 days of. The value itself is
+    /// therefore also part of the on-disk contract and cannot be renamed without orphaning that history.
+    /// Same reasoning as <see cref="JobExecutionLoggingSetting"/>, one file over.</para>
     /// </summary>
-    public const string StoreInsertSql = @"
+    public const string StoreObjectKind = "store";
+
+    /// <summary>
+    /// The whole-store summary row. <c>pg_database_size</c> here is the ONLY place the product runs it on a
+    /// cadence: it walks every file in the database directory, so its cost scales with the store rather
+    /// than with the row it produces, and this sweep is where that cost belongs: hourly rather than every
+    /// five minutes, on its own connection, and under <see cref="SweepTimeoutSeconds"/> — a budget #2317
+    /// sized against a production store's own sizing queries rather than against a fixture. It is NOT off
+    /// the collection loop's serial thread: the worker awaits this sweep inline, so its worst case still
+    /// stalls per-server dispatch. What the sweep buys is 300 s of room and 1/12th the frequency, not
+    /// isolation.
+    /// <c>is_enabled</c> over the servers registry is the fleet reader's own enabled predicate, so
+    /// "per-server" here means exactly the servers the fleet surfaces count. $1 metric_time.
+    /// </summary>
+    public const string StoreInsertSql = $@"
 INSERT INTO collect.store_metrics
     (metric_time, object_name, object_kind, total_bytes, enabled_server_count)
 SELECT
     $1,
     current_database(),
-    'store',
+    '{StoreObjectKind}',
     pg_database_size(current_database()),
     (SELECT count(*)::integer FROM collect.servers WHERE is_enabled)";
+
+    /// <summary>
+    /// The newest recorded whole-store size in bytes — what the store disk-pressure check reads to
+    /// decorate its alert text with, instead of running <c>pg_database_size</c> itself every five minutes
+    /// on the collection loop's serial thread (#3199).
+    ///
+    /// <para><b>Why the recorded value and not the live one.</b> <c>pg_database_size</c> stats every file
+    /// in the database directory, so it is the one read on that thread whose cost scales with the store,
+    /// and the 5 s bound it inherited from <c>ServiceCommandDeadlines.SerialLoopSeconds</c> was floored on
+    /// 6.2 ms measured against a 4.05 GB fixture. Measured on a 225 GiB production store — 56x the fixture
+    /// — thirteen samples of that same call spanned <b>2,090-3,745 ms</b> (mean ~2.5 s, one reading
+    /// 3,177 ms): ~400-600x the time for 56x the size, because the cost tracks file count and a TimescaleDB
+    /// store's file count follows chunks rather than bytes. That leaves 1.3-2.4x headroom under a bound
+    /// whose derivation claimed ~806x. NONE of the thirteen crossed 5 s, which is the point: cancels ran
+    /// mean 5.8/day against a nominal ~288 iterations (2.0%), so the visible failures were the tail and the
+    /// other 98% paid ~2.5 s silently — under the deadline so no cancel, not a collector run so no
+    /// <c>collection_log</c> row. This read, measured on the same store, is <b>0.101 ms</b> cold and
+    /// 0.018 ms warm over three buffers — an <c>Index Scan Backward</c> on the existing V53
+    /// <c>(metric_time)</c> index, adding none — and its cost does not move when the store grows.</para>
+    ///
+    /// <para><b>The walk is RELOCATED, not eliminated, and the honest claim is about which path pays
+    /// it.</b> The row this reads is produced by <see cref="StoreInsertSql"/>, which runs
+    /// <c>pg_database_size</c> itself — so the store-wide walk still happens, once an hour, inside a sweep
+    /// that has room for it: <see cref="SweepTimeoutSeconds"/> is 300 s, ~120x the mean measured cost, and
+    /// #2317 sized it against this very store's sizing queries rather than against a fixture. What changes
+    /// is the count and the regime: ~312 executions a day, ~288 of them under a 5 s bound on the collection
+    /// loop's serial thread, down to the 24 a day that were already being paid where the budget is. The
+    /// per-read speedup is ~31,000x and applies to THAT read's latency, never to the change's overall
+    /// effect — 92% fewer executions is that number.</para>
+    ///
+    /// <para><b>What it costs.</b> The value is the newest recorded sample rather than the current byte
+    /// count, which is why the alert text names the sample instead of claiming currency. Priced against
+    /// what the value is FOR: <c>DarlingSelfAlertEvaluator.ApplyDiskPressureAsync</c> uses it in exactly
+    /// one place — one sentence of the alert detail — and never in a threshold, a comparison or a stored
+    /// numeric value; the condition is judged on the store volume's free/total from <c>DriveInfo</c>,
+    /// resolved on the same tick. So a stale figure cannot make the condition unjudgeable and cannot miss
+    /// a fast fill. Deliberately NOT age-bounded: an interval past which the number is suppressed would be
+    /// one more constant nobody measured, which is the defect #3199 is about; a stale sweep is reported by
+    /// the sweep's own surfaces (its Warning line, <c>get_store_metrics</c>' series, and #3175's
+    /// job-cadence self-alert) rather than by silently blanking a field here.</para>
+    ///
+    /// <para><b>How stale it actually gets is an observation, not a bound.</b> Over 30 days on one
+    /// production store the series held 737 whole-store rows across 713 distinct hours — dense, so this is
+    /// not a sparse source — with a mean gap of 58.6 minutes and the largest gap that HAPPENED to occur
+    /// being 8,890.8 s (2.47 h). That maximum is a window artifact: it is the worst case in that sample on
+    /// that store, it cannot decay, and nothing here guarantees it. Quote the cadence and the provenance,
+    /// never "worst case is 2.47 hours".</para>
+    ///
+    /// <para><b>Its cheapness is incidental, not structural, and that is stated rather than glossed.</b>
+    /// Every row one <see cref="SweepAsync"/> run writes carries the SAME <c>metric_time</c> — one
+    /// <c>utcNow</c> stamps all of them, deliberately, so a run's rows join — and
+    /// <c>idx_store_metrics_time</c> (V53) indexes <c>(metric_time)</c> alone. So a backward scan reaches
+    /// this row early only because <see cref="StoreInsertSql"/> happens to run LAST in the sweep, not
+    /// because the query says so. Measured on a 225 GiB store it is 3 buffers, which is that ordering
+    /// holding; reordering the sweep, a <c>VACUUM</c> or a <c>REINDEX</c> could make the scan step past the
+    /// rest of the tied group first.</para>
+    ///
+    /// <para><b>Why that is accepted here when #3199 rejected the same shape of argument.</b> The growth
+    /// axis is different, and the axis is what made <c>pg_database_size</c> unbounded. The tied group is
+    /// one sweep's output — <see cref="TimescaleSupport.HypertableCount"/> hypertable rows (70 today), one
+    /// row per Timescale background job, two dimension rows and this one — so it tracks the COLLECTOR
+    /// CATALOG, a product constant that moves only when a migration rung adds a hypertable, and every
+    /// element is a narrow row on a plain table. <c>pg_database_size</c> tracked the store's file count,
+    /// which retention span and ingest rate grow without anything choosing to. A composite
+    /// <c>(object_kind, metric_time DESC)</c> index would make it exact and is the right follow-up; it
+    /// needs a migration rung, and taking a rung number alongside unmerged siblings is its own
+    /// documented hazard, so it is not bundled into the change that removed the unbounded read.</para>
+    ///
+    /// <para><c>total_bytes IS NOT NULL</c> because the column is nullable for the per-hypertable rows'
+    /// sake: without it a hypothetical NULL newest row would mask a good older one, and both would arrive
+    /// as the same null. On a store that has never completed a sweep this returns no row and the alert text
+    /// simply carries no size — which is the first loop tick of a brand-new store, the disk check running
+    /// ahead of the self-metrics sweep in the same tick. No parameters.</para>
+    /// </summary>
+    public const string LatestStoreSizeSql = $@"
+SELECT total_bytes
+FROM collect.store_metrics
+WHERE object_kind = '{StoreObjectKind}'
+AND   total_bytes IS NOT NULL
+ORDER BY metric_time DESC
+LIMIT 1";
 
     /// <summary>The sweep's own retention — one bounded DELETE, no policy machinery. $1 cutoff (naive UTC,
     /// metric_time minus <see cref="RetentionDays"/> days).</summary>

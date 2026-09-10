@@ -290,7 +290,7 @@ public sealed class DarlingWebTlsTests
 
             Assert.Equal(leaf.Thumbprint, loaded.Leaf.Thumbprint);
             Assert.True(loaded.Leaf.HasPrivateKey);
-            Assert.Equal(1, loaded.Chain.Count);
+            Assert.Single(loaded.Chain);
             Assert.Equal(intermediate.Thumbprint, loaded.Chain[0].Thumbprint);
         }
     }
@@ -322,7 +322,7 @@ public sealed class DarlingWebTlsTests
 
             Assert.True(loaded.Leaf.HasPrivateKey);
             Assert.Equal("CN=localhost", loaded.Leaf.Subject);
-            Assert.Equal(1, loaded.Chain.Count);
+            Assert.Single(loaded.Chain);
             Assert.Equal(intermediate.Thumbprint, loaded.Chain[0].Thumbprint);
         }
     }

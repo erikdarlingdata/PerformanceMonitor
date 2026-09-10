@@ -162,7 +162,7 @@ DECLARE
 
 DECLARE
     @db sysname,
-    @sql NVARCHAR(500),
+    @sql nvarchar(500),
     @exec_sp nvarchar(256);
 
 DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
@@ -357,6 +357,28 @@ END;
 
     /// <inheritdoc />
     public override TimeSpan? PerItemWallClockBudget => PerDatabaseWallClockBudget;
+
+    /// <summary>
+    /// The per-command budget for this collector, on BOTH halves of a fetch (#2776) — the SQL Server read
+    /// via <see cref="DarlingCollectorRunner"/>'s <c>itemTimeout</c>, and the store-side probe/write commands
+    /// the runner hands the same value to. One number, because a fetch is one logical operation and a cancel
+    /// on either half has the identical consequence: the ids read as still-missing, the carry-over keeps them,
+    /// and the target re-decompresses the same plans next cycle.
+    ///
+    /// <para><b>500 s is an empirical over-shoot pending measurement, not settled tuning.</b> Erik chose it
+    /// deliberately against an observed <c>max_sql_ms</c> of 361 s, to see where the failures stop rather than
+    /// to sit just above the worst known case. Evidence it replaces: the store side inherited Npgsql's 30 s
+    /// default (nobody chose it — the path simply never set one) and the SQL side sat at the 60 s runner
+    /// default, while measured <c>plan_fetch</c> phases reach 91,526 ms. Baseline on use1 over 14.9 h: 125
+    /// plan-fetch failures, 16 text-fetch, 2,965 candidate-cap clamps.</para>
+    ///
+    /// <para><b>The tradeoff, stated because it may show up as a regression.</b> A fetch that previously failed
+    /// fast now HOLDS its slot for up to 500 s. Fleet concurrency is 4 and the sweep budget is 60 s, so
+    /// <c>skipping relaunch</c> and BODY_OVERRUN can get WORSE even if the failure count improves. Both
+    /// directions have to be read together or a win on one number hides a loss on the other. Sits under
+    /// <see cref="PerDatabaseWallClockBudget"/> (600 s), which remains the outer bound of last resort.</para>
+    /// </summary>
+    public override int? CommandTimeoutSecondsOverride => 500;
 
     /// <summary>
     /// The self-identification marker every collector query carries in its leading comment. Self rows
@@ -714,12 +736,20 @@ END;
            deletion. The ORDINAL is identical either way, the same discipline the version-gated columns
            above follow, so a host that has not built text storage is byte-compatible.
 
-           The query_text JOIN deliberately STAYS when the column is nulled: it is one row per key and the
-           measurement above was taken with it in place, so removing it would be an unmeasured change riding
-           along on a measured one. */
+           The query_text JOIN is now DROPPED for Darling (FetchQueryTextSeparately): the column is nulled
+           and text is pulled by-ids in BuildTextFetchByIdsQuery, so this join fed nothing. Measured on a
+           40,388-plan / 3-interval catalog (SQL 2025, warm): the final SELECT fell 398ms -> 351ms (-12%)
+           with the join removed, and it is provably non-filtering (qsq.query_text_id keys exactly one qst
+           row), so the row set is unchanged. Lite keeps the join because it reads qst.query_sql_text inline. */
         string queryTextCol = context.FetchQueryTextSeparately
             ? "query_sql_text = CONVERT(nvarchar(1), NULL),"
             : "query_sql_text = qst.query_sql_text,";
+
+        /* Gated on the SAME flag as the column above: the qst join is present only when Lite consumes
+           qst.query_sql_text inline; Darling drops it (text arrives via the separate by-ids fetch). */
+        string queryTextJoin = context.FetchQueryTextSeparately
+            ? ""
+            : "JOIN sys.query_store_query_text AS qst\n  ON qst.query_text_id = qsq.query_text_id\n";
 
         /* The replica-attribution column + its join (see hasReplicaAttribution above). Selected after every
            version-gated column, so pre-2022 targets read the nvarchar(1) NULL placeholder at the same
@@ -1021,9 +1051,7 @@ JOIN sys.query_store_plan AS qsp
   ON qsp.plan_id = qsrs.plan_id
 JOIN sys.query_store_query AS qsq
   ON qsq.query_id = qsp.query_id
-JOIN sys.query_store_query_text AS qst
-  ON qst.query_text_id = qsq.query_text_id
-LEFT JOIN sys.query_store_runtime_stats_interval AS qsrsi
+{queryTextJoin}LEFT JOIN sys.query_store_runtime_stats_interval AS qsrsi
   ON qsrsi.runtime_stats_interval_id = qsrs.runtime_stats_interval_id
 {replicaJoin}
 ORDER BY qsrs.last_execution_time {shipOrder}
@@ -1166,6 +1194,16 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
     /// catalog, K=114 and a 12 MB budget, both shapes returned the same 114 rows and 1.7 MB, and the join-back
     /// form took 274ms cold / 262ms warm against 133ms for this one. Plan-id-only with no XML touched was 114ms,
     /// so this shape sits 19ms above the floor while the join-back form pays for the decompression twice.</para>
+    ///
+    /// <para>The obvious next idea — evaluate the byte budget against the COMPRESSED length first, so plans the
+    /// budget will discard are never decompressed at all — is not available through this view, and that was
+    /// measured rather than assumed (#2791). Over 512 candidate ids: selecting <c>plan_id</c> alone is 14ms,
+    /// <c>DATALENGTH(qsp.query_plan)</c> is 321ms, and a full <c>CONVERT(nvarchar(max), ...)</c> is 331ms. The
+    /// DATALENGTH form costs what the full decompression costs because the VIEW decompresses on any access to
+    /// the column, so there is no cheap size to filter on; the compressed blob lives in the undocumented
+    /// <c>sys.plan_persist_plan</c>, which is not a surface to ship against. The budget therefore bounds what
+    /// is SHIPPED, not what is decompressed, and that is a property of the catalog rather than a shortcoming
+    /// of this query.</para>
     /// </summary>
     public CollectorQuery BuildPlanFetchByIdsQuery(string item, CollectorContext context, IReadOnlyList<long> planIds, long budgetBytes)
     {
@@ -1210,33 +1248,91 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            sp_executesql, and none of these values ever touch operator input. */
         var idList = string.Join(", ", planIds.Select(id => id.ToString(System.Globalization.CultureInfo.InvariantCulture)));
 
-        /* ROWS UNBOUNDED PRECEDING, not the RANGE default: RANGE would tie-group peers and, more to the point,
-           forces a spool. The frame is per-row precisely because the cut has to fall between two plans. */
-        var body = $@"WITH candidates AS (
-    SELECT
-        plan_id = qsp.plan_id,
-        query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1),
-        query_plan_text = CONVERT(nvarchar(max), qsp.query_plan)
-    FROM sys.query_store_plan AS qsp
-    WHERE qsp.plan_id IN ({idList})
-),
-budgeted AS (
-    SELECT
-        plan_id = c.plan_id,
-        query_plan_hash = c.query_plan_hash,
-        query_plan_text = c.query_plan_text,
-        plan_bytes = COALESCE(DATALENGTH(c.query_plan_text), 0),
-        running_bytes = SUM(COALESCE(DATALENGTH(c.query_plan_text), 0)) OVER (ORDER BY c.plan_id ROWS UNBOUNDED PRECEDING)
-    FROM candidates AS c
-)
+        /* DECOMPRESS EACH PLAN ONCE (#2675). query_plan_text = CONVERT(nvarchar(max), qsp.query_plan)
+           DECOMPRESSES the plan, and sys.query_store_plan.query_plan is decompressed BY the view on access.
+           The prior single-statement form referenced that expression THREE times inside one CTE - plan_bytes,
+           the running_bytes SUM, and the passthrough - and a CTE inlines rather than materialises, so SQL
+           Server re-ran the CONVERT (re-decompressed every plan) for each reference. Measured on a SQL 2025
+           rig at 1,500 plans x ~68 KB: 2,440 ms CPU that way vs ~540 ms decompressing once - ~4.5x, on the
+           single most expensive operation in the heaviest collector. Materialising the decompressed text to a
+           #temp first pins it to ONE decompression; DATALENGTH over the #temp column then reads a stored LOB
+           length with no further decompression. The byte-budget cut is unchanged - it still runs over the
+           SAME running-total-minus-own-bytes predicate, now against the materialised rows.
+
+           ROWS UNBOUNDED PRECEDING, not the RANGE default: RANGE would tie-group peers and, more to the point,
+           forces a spool. The frame is per-row precisely because the cut has to fall between two plans.
+
+           SET NOCOUNT ON so the SELECT INTO emits no result set: the caller's reader takes the first result
+           set as the shipped rows, and a stray done-count row would derail it. The #temp is created inside
+           this sp_executesql scope and dropped at the end - explicit DROP for clarity; it would auto-drop on
+           scope exit regardless.
+
+           HASH JOIN on the fetch statement (#2791), and it is the whole fix rather than a tuning knob.
+           sys.query_store_plan's view definition unions the on-disk table with the in-memory TVF
+           QUERY_STORE_PLAN_IN_MEM, and the optimizer has NO statistics for that TVF - it uses a fixed guess.
+           Measured on OMEGA the guess is 1,000 rows against 14,633 actual, 1,463% off, which is what makes
+           Nested Loops look cheap: the TVF lands on the INNER side and is re-executed once per candidate
+           plan_id, up to MaxCandidatePlans = 512 times, each execution scanning the whole in-memory Query
+           Store before a single plan is decompressed. sp_QuickieStore put this statement at 55,000-61,000ms
+           CPU, top of the entire instance. Under the hint it is a Hash Match reading the TVF ONCE: 0.508s.
+
+           Query-level rather than per-join because the joins live inside the view definition and cannot be
+           hinted individually. That means it also applies to the Clustered Index Seek into plan_persist_plan
+           (91% of estimated cost), and the seek->scan trade this risks DOES happen: under the hint that
+           access becomes a Clustered Index Scan. It is a non-issue, and that is measured rather than argued
+           - the scan costs 0.032s, against 0.373s for the TVF and 0.436s for the Hash Match above it, and
+           the whole statement finishes in 0.508s on an 85%-full Query Store. Recorded in this direction on
+           purpose: the estimate says the seek is 91% of the cost and the actual plan says it is 6% of a
+           half-second, so the operator the estimate points at is not the one that matters.
+
+           The cost of forcing it: a Hash Match needs a workspace memory grant where the Nested Loops it
+           replaces needs none, and that applies on EVERY invocation, including small ones the optimizer
+           would have served grant-free (review catch). Measured rather than waved through - grants on a
+           40,882-plan Query Store, no spill in any case:
+
+             4 candidate ids  : unhinted 0KB (pure loops)                -> hinted 1,264KB
+             512 candidate ids: unhinted 1,760KB (already a hash anyway) -> hinted 3,624KB
+
+           So the hint does introduce a grant on small candidate sets, and it is ~1.2MB; at the other end
+           MaxCandidatePlans caps the input at 512 and the grant at ~3.6MB, where the optimizer was already
+           choosing a hash and paying 1.8MB of it regardless. The cap is what makes this bounded rather than
+           a function of Query Store size. Sweeps are concurrent across servers but sequential within one, so
+           the fleet-wide worst case is a few concurrent sweeps' worth, single-digit MB - against a statement
+           that was burning 55,000-61,000ms of CPU. If this were ever wrong it would show as RESOURCE_SEMAPHORE
+           waits or a hash spill on the monitored instance, neither of which appears here.
+
+           The SECOND statement below keeps plain OPTION(RECOMPILE): it reads only #plan_fetch and joins
+           nothing, so there is no join strategy to force. Not an oversight - checked. */
+        var body = $@"SET NOCOUNT ON;
+
+SELECT
+    plan_id = qsp.plan_id,
+    query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1),
+    query_plan_text = CONVERT(nvarchar(max), qsp.query_plan)
+INTO #plan_fetch
+FROM sys.query_store_plan AS qsp
+WHERE qsp.plan_id IN ({idList})
+OPTION(RECOMPILE, HASH JOIN);
+
 SELECT
     plan_id = b.plan_id,
     query_plan_hash = b.query_plan_hash,
     query_plan_text = b.query_plan_text
-FROM budgeted AS b
+FROM
+(
+    SELECT
+        plan_id = p.plan_id,
+        query_plan_hash = p.query_plan_hash,
+        query_plan_text = p.query_plan_text,
+        plan_bytes = COALESCE(DATALENGTH(p.query_plan_text), 0),
+        running_bytes = SUM(COALESCE(DATALENGTH(p.query_plan_text), 0)) OVER (ORDER BY p.plan_id ROWS UNBOUNDED PRECEDING)
+    FROM #plan_fetch AS p
+) AS b
 WHERE b.running_bytes - b.plan_bytes < {budget}
 ORDER BY b.plan_id
-OPTION(RECOMPILE);";
+OPTION(RECOMPILE);
+
+DROP TABLE #plan_fetch;";
 
         var escapedBody = body.Replace("'", "''", StringComparison.Ordinal);
 
@@ -1305,33 +1401,60 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
         var budget = budgetBytes.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var idList = string.Join(", ", queryIds.Select(id => id.ToString(System.Globalization.CultureInfo.InvariantCulture)));
 
-        var body = $@"WITH candidates AS (
-    SELECT
-        query_id = qsq.query_id,
-        query_hash = CONVERT(varchar(64), qsq.query_hash, 1),
-        query_sql_text = qst.query_sql_text
-    FROM sys.query_store_query AS qsq
-    JOIN sys.query_store_query_text AS qst
-      ON qst.query_text_id = qsq.query_text_id
-    WHERE qsq.query_id IN ({idList})
-),
-budgeted AS (
-    SELECT
-        query_id = c.query_id,
-        query_hash = c.query_hash,
-        query_sql_text = c.query_sql_text,
-        text_bytes = COALESCE(DATALENGTH(c.query_sql_text), 0),
-        running_bytes = SUM(COALESCE(DATALENGTH(c.query_sql_text), 0)) OVER (ORDER BY c.query_id ROWS UNBOUNDED PRECEDING)
-    FROM candidates AS c
-)
+        /* READ EACH TEXT ONCE (#2675), the same fix as the plan fetch. query_sql_text is nvarchar(max), and
+           the prior single-statement CTE referenced it THREE times - text_bytes, the running_bytes SUM, and
+           the passthrough - which, because a CTE inlines, re-read the LOB per reference. Text is not
+           compressed so there is no decompression to repeat, but the repeated LOB reads still cost, and they
+           scale with real query-text size (in the field text_fetch is the LARGER of the two by-ids phases).
+           Materialising to a #temp pins it to one read; DATALENGTH then measures the stored length. The
+           byte-budget cut is unchanged.
+
+           SET NOCOUNT ON so the SELECT INTO emits no result set. #temp is scoped to this sp_executesql and
+           dropped at the end. ROWS UNBOUNDED PRECEDING for the same per-row-cut reason as the plan fetch.
+
+           HASH JOIN for the same reason as the plan fetch (#2791), and this one is a two-view join written
+           out in the open: sys.query_store_query and sys.query_store_query_text are BOTH TVF-backed unions
+           over their in-memory halves, driven by an IN list, which is exactly the shape that put the plan
+           fetch on the inner side of a loop 512 times over. The plan fetch is the variant that carries the
+           OMEGA measurement; this one is the same defect treated the same way, and that distinction is stated
+           rather than blurred - the join-strategy change and the identical-rowset property are verified
+           here, the 60s->0.5s number is not this statement's and is not claimed for it.
+
+           Same memory-grant trade as the plan fetch above, and the same bound: the id list is capped by the
+           caller, so the hash input does not scale with Query Store size. Measured on the same 40,882-plan
+           catalog with no spill. */
+        var body = $@"SET NOCOUNT ON;
+
+SELECT
+    query_id = qsq.query_id,
+    query_hash = CONVERT(varchar(64), qsq.query_hash, 1),
+    query_sql_text = qst.query_sql_text
+INTO #text_fetch
+FROM sys.query_store_query AS qsq
+JOIN sys.query_store_query_text AS qst
+  ON qst.query_text_id = qsq.query_text_id
+WHERE qsq.query_id IN ({idList})
+OPTION(RECOMPILE, HASH JOIN);
+
 SELECT
     query_id = b.query_id,
     query_hash = b.query_hash,
     query_sql_text = b.query_sql_text
-FROM budgeted AS b
+FROM
+(
+    SELECT
+        query_id = t.query_id,
+        query_hash = t.query_hash,
+        query_sql_text = t.query_sql_text,
+        text_bytes = COALESCE(DATALENGTH(t.query_sql_text), 0),
+        running_bytes = SUM(COALESCE(DATALENGTH(t.query_sql_text), 0)) OVER (ORDER BY t.query_id ROWS UNBOUNDED PRECEDING)
+    FROM #text_fetch AS t
+) AS b
 WHERE b.running_bytes - b.text_bytes < {budget}
 ORDER BY b.query_id
-OPTION(RECOMPILE);";
+OPTION(RECOMPILE);
+
+DROP TABLE #text_fetch;";
 
         var escapedBody = body.Replace("'", "''", StringComparison.Ordinal);
 

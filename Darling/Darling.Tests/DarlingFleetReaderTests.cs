@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
@@ -86,7 +87,9 @@ public sealed class DarlingFleetReaderSqlTests
     public void LatestSnapshotReads_AreDistinctOnPerServer()
     {
         Assert.Contains("DISTINCT ON (server_id)", DarlingFleetReader.FleetCpuSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY server_id, sample_time DESC", DarlingFleetReader.FleetCpuSql, StringComparison.Ordinal);
+        /* collection_time leads, matching FleetMemorySql; sample_time is the within-batch tiebreak. For the
+           frame, not the cost - LatestCpuReadShapeSqlTests and the constant's own doc carry both halves. */
+        Assert.Contains("ORDER BY server_id, collection_time DESC, sample_time DESC", DarlingFleetReader.FleetCpuSql, StringComparison.Ordinal);
         Assert.Contains("DISTINCT ON (server_id)", DarlingFleetReader.FleetMemorySql, StringComparison.Ordinal);
         Assert.Contains("DISTINCT ON (server_id)", DarlingFleetReader.FleetThreadsSql, StringComparison.Ordinal);
     }
@@ -133,6 +136,22 @@ public sealed class DarlingFleetReaderSqlTests
     }
 
     /// <summary>
+    /// Regression pin for a fleet false-Offline (found live on prod-pos-use1-monitor-01, 2026-08-30): this
+    /// query used to be a bare `GROUP BY server_id` with no bound at all — a full scan of the server's ENTIRE
+    /// collection_log history on every fleet-overview call, exactly the pattern already fixed elsewhere the same
+    /// day (pg_statement_stats #2691, pg_wait_stats #2695). It must stay windowed like every other fleet read
+    /// here (<see cref="FleetCollectionHealthSql_PerServerPerCollector"/>, <see cref="FleetDeadlockSql_PerServerCount_WindowedBothBounds"/>).
+    /// </summary>
+    [Fact]
+    public void FleetLastCollectionSql_IsWindowed_NotAFullHistoryScan()
+    {
+        var sql = DarlingFleetReader.FleetLastCollectionSql;
+        Assert.Contains("FROM v_collection_log", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The read-only fleet-tag join (#2020): every (server, tag) assignment, joined to the tag for its name and
     /// stored colour, ordered so a card's pills are stable. Bare table names resolve through the store's
     /// search_path to the config-schema tag tables, the same way FleetServersSql reads servers / config_mute_rules.
@@ -168,6 +187,7 @@ public sealed class DarlingFleetReaderSqlTests
     [InlineData(nameof(DarlingFleetReader.FleetTagsSql))]
     [InlineData(nameof(DarlingFleetReader.FleetTagForestSql))]
     [InlineData(nameof(DarlingFleetReader.FleetCpuSql))]
+    [InlineData(nameof(DarlingFleetReader.FleetPgCpuSql))]
     [InlineData(nameof(DarlingFleetReader.FleetMemorySql))]
     [InlineData(nameof(DarlingFleetReader.FleetMemoryPressureSql))]
     [InlineData(nameof(DarlingFleetReader.FleetThreadsSql))]
@@ -333,6 +353,233 @@ public sealed class DarlingMcpFleetToolsSurfaceTests
 }
 
 /// <summary>
+/// #3017: the denominator beside <c>total_deadlocks</c>.
+///
+/// <para><b>The defect.</b> <see cref="DarlingFleetReader.FleetDeadlockSql"/> reads <c>v_deadlocks</c>, which
+/// is <c>SELECT * FROM deadlocks</c>, and <c>deadlocks</c> is written by exactly one collector — the SQL
+/// Server extended-event capture. A PostgreSQL target's deadlocks go to <c>pg_deadlocks</c>, nothing joins
+/// the two, and there is no <c>v_pg_deadlocks</c> at all. So on a PostgreSQL fleet <c>total_deadlocks</c> is
+/// permanently zero, for every server, whatever those clusters do and whatever grants the role holds — and
+/// zero is also exactly what a genuinely quiet SQL Server fleet reports. The reading that needs no action and
+/// the reading that does not cover the fleet were the same character, which is what made the bare number
+/// unusable.</para>
+///
+/// <para><b>Both directions, deliberately.</b> The failure mode of a coverage figure is over-exclusion: a
+/// denominator that quietly shrinks reads as a smaller fleet, which is a new wrong number rather than a fix.
+/// So every test asserting a band is EXCLUDED sits beside one asserting the degraded-but-reading bands are
+/// INCLUDED.</para>
+/// </summary>
+public sealed class DarlingFleetDeadlockCoverageTests
+{
+    /* Every band a collector that DID read can be in. Their rows are in the total, so all four count as
+       covered — including FAILING, which is loud on its own surfaces and does not need to be hidden inside a
+       coverage number to be seen. */
+    [Theory]
+    [InlineData(CollectorHealthClassifier.Healthy)]
+    [InlineData(CollectorHealthClassifier.Warning)]
+    [InlineData(CollectorHealthClassifier.Stale)]
+    [InlineData(CollectorHealthClassifier.Failing)]
+    public void ADeadlockReaderThatWorked_Counts_EvenDegraded(string band)
+        => Assert.Equal(
+            FleetDeadlockSource.Read,
+            FleetDeadlockCoverage.ClassifyDeadlockSource(isPostgres: false, band));
+
+    /// <summary>
+    /// The excluded bands, each attributed to the cause that names its fix. STOPPED, NEVER_RUN and a null
+    /// band (the <c>deadlocks</c> collector left no row in the health window at all) are one bucket because
+    /// they take one action — look at the collector. NO_PERMISSIONS is its own, because a grant is the fix
+    /// and no amount of looking at the collector produces one.
+    /// </summary>
+    [Theory]
+    [InlineData(CollectorHealthClassifier.Stopped, FleetDeadlockSource.CollectorSilent)]
+    [InlineData(CollectorHealthClassifier.NeverRun, FleetDeadlockSource.CollectorSilent)]
+    [InlineData(null, FleetDeadlockSource.CollectorSilent)]
+    [InlineData(CollectorHealthClassifier.NoPermissions, FleetDeadlockSource.CollectorDenied)]
+    public void ADeadlockReaderThatReadNothing_DoesNotCount_AndNamesItsCause(
+        string? band, FleetDeadlockSource expected)
+        => Assert.Equal(expected, FleetDeadlockCoverage.ClassifyDeadlockSource(isPostgres: false, band));
+
+    /// <summary>
+    /// The issue's own case: a PostgreSQL target is never covered, and its collector's band cannot change
+    /// that. <c>pg_deadlocks</c> can be perfectly HEALTHY on all fifty targets and this total still counts
+    /// none of it — the rows are in a different table. That is why PostgreSQL is asked before any band.
+    /// </summary>
+    [Theory]
+    [InlineData(CollectorHealthClassifier.Healthy)]
+    [InlineData(CollectorHealthClassifier.NoPermissions)]
+    [InlineData(CollectorHealthClassifier.Stopped)]
+    [InlineData(null)]
+    public void APostgresTarget_IsNeverCovered_WhateverItsCollectorSays(string? band)
+        => Assert.Equal(
+            FleetDeadlockSource.PostgresTarget,
+            FleetDeadlockCoverage.ClassifyDeadlockSource(isPostgres: true, band));
+
+    /// <summary>
+    /// A card that sets nothing reads as UNCOVERED, and that is the load-bearing default. <c>DeadlockSource</c>
+    /// is derived rather than assigned precisely so a card built by a path nobody re-reads cannot sit at an
+    /// enum default meaning "read" and inflate the fleet's coverage — the silent-default shape the READER's
+    /// own <c>AbandonedCount</c> comment (inside <c>FleetCollectionHealthSql</c>) already names as a defect
+    /// class: "it would COMPILE, because the default is silent".
+    /// </summary>
+    [Fact]
+    public void ACardThatMakesNoClaim_IsUncovered_NotCovered()
+    {
+        var card = new FleetServerCard { ServerId = 1, DisplayName = "target-a", ServerName = "target-a" };
+
+        Assert.Equal(FleetDeadlockSource.CollectorSilent, card.DeadlockSource);
+        Assert.NotEqual(FleetDeadlockSource.Read, card.DeadlockSource);
+
+        var rollup = DarlingFleetReader.BuildRollup(
+            new[] { card }, Now, Now.AddHours(-1), Now);
+
+        Assert.Equal(0, rollup.DeadlockCoverage.ServersRead);
+        Assert.Equal(1, rollup.DeadlockCoverage.ServersTotal);
+    }
+
+    /// <summary>
+    /// The reduction, over one card of every kind: the coverage comes from the CARDS, the same way the totals
+    /// beside it do, so the denominator and the number it qualifies reconcile by construction rather than by
+    /// two queries agreeing.
+    /// </summary>
+    [Fact]
+    public void BuildRollup_ReducesCoverageFromTheCards_WithEveryCauseAttributed()
+    {
+        var rollup = DarlingFleetReader.BuildRollup(
+            new[]
+            {
+                Card(1, band: CollectorHealthClassifier.Healthy),
+                Card(2, band: CollectorHealthClassifier.Failing),
+                Card(3, isPostgres: true),
+                Card(4, isPostgres: true),
+                Card(5, band: CollectorHealthClassifier.Stopped),
+                Card(6, band: CollectorHealthClassifier.NoPermissions),
+                Card(7, band: null),
+            },
+            Now, Now.AddHours(-1), Now);
+
+        var coverage = rollup.DeadlockCoverage;
+
+        Assert.Equal(2, coverage.ServersRead);
+        Assert.Equal(7, coverage.ServersTotal);
+        Assert.Equal(2, coverage.PostgresServers);
+        Assert.Equal(2, coverage.ServersCollectorSilent);   // STOPPED + the null band
+        Assert.Equal(1, coverage.ServersCollectorDenied);
+
+        /* Every server is accounted for exactly once — an unattributed server would mean coverage that
+           reports a gap it cannot explain, which is the same shape as a total that reports no denominator. */
+        Assert.Equal(
+            coverage.ServersTotal,
+            coverage.ServersRead + coverage.PostgresServers
+                + coverage.ServersCollectorSilent + coverage.ServersCollectorDenied);
+
+        /* And it agrees with the field the fleet already reported. */
+        Assert.Equal(rollup.TotalServers, coverage.ServersTotal);
+    }
+
+    /// <summary>
+    /// The measured case, end to end: a PostgreSQL-only fleet reports <c>total_deadlocks: 0</c> with zero
+    /// coverage beside it, and the note sends the reader to the tool that can actually answer.
+    /// </summary>
+    [Fact]
+    public void APostgresOnlyFleet_ReportsZeroCoverage_AndNamesTheToolThatCanAnswer()
+    {
+        var rollup = DarlingFleetReader.BuildRollup(
+            new[] { Card(1, isPostgres: true), Card(2, isPostgres: true), Card(3, isPostgres: true) },
+            Now, Now.AddHours(-1), Now);
+
+        Assert.Equal(0, rollup.TotalDeadlocks);
+        Assert.Equal(0, rollup.DeadlockCoverage.ServersRead);
+        Assert.Equal(3, rollup.DeadlockCoverage.PostgresServers);
+
+        var note = rollup.DeadlockCoverage.Note;
+
+        Assert.Contains("read a deadlock source for 0 of 3", note, StringComparison.Ordinal);
+        Assert.Contains("get_pg_deadlocks", note, StringComparison.Ordinal);
+
+        /* The two causes that do not apply are absent, so a reader is not handed three actions when one is
+           called for. */
+        Assert.DoesNotContain("get_collection_health", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("needs a grant", note, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <b>The sentence this whole issue turns on.</b> The two windows genuinely diverge —
+    /// <c>total_deadlocks</c> is counted between the caller's bounds (one hour by default), while coverage is
+    /// banded over a FIXED trailing seven days of collection health — and that divergence is correct: whether
+    /// a reader works is a durable fact, and the banding thresholds are themselves defined in DAYS, so an
+    /// hour-wide health window could not produce a band at all.
+    ///
+    /// <para>But a note claiming both were "read in this window" would be the same defect one level up: a
+    /// surface asserting a scope it did not measure. So the note names each window against the figure it
+    /// belongs to, and says outright that coverage makes no claim about the caller's window.</para>
+    /// </summary>
+    [Fact]
+    public void TheNote_NamesEachWindow_AndClaimsNeitherForTheOther()
+    {
+        var note = DarlingFleetReader.BuildRollup(
+            new[] { Card(1, band: CollectorHealthClassifier.Healthy) },
+            Now, Now.AddHours(-1), Now).DeadlockCoverage.Note;
+
+        /* The coverage figure's own window, named as fixed and as seven days. */
+        Assert.Contains("fixed trailing seven days of collection health", note, StringComparison.Ordinal);
+
+        /* The total's window, named as the caller's bounds and as the ONLY thing bounded by them. */
+        Assert.Contains(
+            "total_deadlocks counts only between window_start and window_end", note, StringComparison.Ordinal);
+
+        /* And the disclaimer that keeps the first from being read as the second. */
+        Assert.Contains(
+            "makes no claim about what was read inside window_start..window_end", note, StringComparison.Ordinal);
+
+        /* The wording that would have been the defect: coverage described as something measured inside the
+           caller's window. */
+        Assert.DoesNotContain("read in this window", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("in this window for", note, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The wire shape, on the same <see cref="DarlingFleetReader.JsonOptions"/> the web <c>/api/fleet</c> and
+    /// the <c>get_fleet_overview</c> MCP tool both serialize with: the coverage rides beside the total it
+    /// qualifies, and the per-card cause is a NAME rather than an ordinal a reordering would move.
+    /// </summary>
+    [Fact]
+    public void TheCoverageSerializes_BesideTheTotal_WithTheCauseAsAName()
+    {
+        var json = JsonSerializer.Serialize(
+            DarlingFleetReader.BuildRollup(
+                new[] { Card(1, isPostgres: true), Card(2, band: CollectorHealthClassifier.Healthy) },
+                Now, Now.AddHours(-1), Now),
+            DarlingFleetReader.JsonOptions);
+
+        foreach (var field in new[]
+        {
+            "\"total_deadlocks\"", "\"deadlock_coverage\"", "\"servers_read\"", "\"servers_total\"",
+            "\"postgres_servers\"", "\"servers_collector_silent\"", "\"servers_collector_denied\"",
+            "\"note\"", "\"deadlock_source\"", "\"deadlock_collector_band\"",
+        })
+        {
+            Assert.Contains(field, json, StringComparison.Ordinal);
+        }
+
+        JsonAssert.Contains("\"deadlock_source\": \"PostgresTarget\"", json);
+        JsonAssert.Contains("\"deadlock_source\": \"Read\"", json);
+        JsonAssert.Contains("\"servers_read\": 1", json);
+    }
+
+    private static readonly DateTime Now = new(2026, 9, 5, 12, 0, 0, DateTimeKind.Unspecified);
+
+    private static FleetServerCard Card(int id, bool isPostgres = false, string? band = null) =>
+        new()
+        {
+            ServerId = id,
+            DisplayName = "target-" + id.ToString(CultureInfo.InvariantCulture),
+            ServerName = "target-" + id.ToString(CultureInfo.InvariantCulture),
+            IsPostgres = isPostgres,
+            DeadlockCollectorBand = band,
+        };
+}
+
+/// <summary>
 /// Gated (DARLING_TEST_PG) live round-trip for the fleet reader against planted rows across MULTIPLE servers —
 /// the cross-server read the Dashboard / Lite cannot run. Verifies each server's XE-preferred / DMV-fallback
 /// blocking count and the resulting card band, OWN-SCOPED to negative sentinel server ids (never global rollup
@@ -343,8 +590,62 @@ public sealed class DarlingFleetReaderLivePostgresTests
 {
     private const int XeServerId = -951001;   // 2 XE reports + 1 DMV snapshot -> XE preferred (2), no deadlock -> Warning
     private const int DmvServerId = -951002;  // 3 DMV snapshots (fallback), 1 deadlock -> Critical
+    private const int NoHistoryServerId = -951003;  // registered, zero collection_log rows ever -> never collected
     private const string XeName = "fleet-reader-e2e-xe";
     private const string DmvName = "fleet-reader-e2e-dmv";
+    private const string NoHistoryName = "fleet-reader-e2e-no-history";
+
+    /// <summary>
+    /// Regression test for a fleet false-Offline found live on prod-pos-use1-monitor-01 (2026-08-30): a server
+    /// with NO row in <c>collection_log</c> at all — the "never collected" bootstrap state — must band Warning
+    /// with <c>IsOnline = null</c> and <c>AwaitingFirstCollection = true</c>
+    /// (<see cref="ServerCollectionStatusRules.FlagsFor"/>), never <c>FleetHealthBand.Offline</c> with
+    /// <c>IsOnline = false</c>. Before the fix, <c>ReadLastCollectionAsync</c>'s dictionary miss fell through
+    /// `TryGetValue(..., out var lastColl)` to `default(DateTime)` (0001-01-01) — a value that IS non-null, so
+    /// <c>ClassifyFreshness</c> never reached its `NeverCollected` branch and instead computed an age of ~2000
+    /// years, which is always past <c>OfflineThreshold</c>. This is exactly the failure mode that showed up live
+    /// as a rotating set of actively-collecting servers reading "Offline - no recent collection".
+    /// </summary>
+    [Fact]
+    public async Task GetFleetOverview_ServerWithNoCollectionHistory_ReadsAwaitingFirstCollection_NotOffline()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live fleet-reader test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteSentinelRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = DateTime.UtcNow;
+
+            /* Registered, but no collection_log row is ever inserted for this server_id. */
+            await InsertServerAsync(connection, NoHistoryServerId, NoHistoryName, 3, ct);
+
+            var result = await DarlingFleetReader.GetFleetOverviewAsync(postgres, now.AddHours(-1), now, now, cancellationToken: ct);
+
+            var card = result.Cards.Single(c => c.ServerId == NoHistoryServerId);
+
+            Assert.Null(card.IsOnline);
+            Assert.True(card.AwaitingFirstCollection);
+            Assert.Equal(FleetHealthBand.Warning, card.Band);
+            Assert.NotEqual(FleetHealthBand.Offline, card.Band);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteSentinelRowsAsync(cleanup, cleanupCt));
+        }
+    }
 
     [Fact]
     public async Task GetFleetOverview_PerServerFallbackAndBanding_AgainstDevPostgres()
@@ -490,7 +791,7 @@ public sealed class DarlingFleetReaderLivePostgresTests
         foreach (var table in new[] { "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks", "collection_log", "servers" })
         {
             using var cleanup = new NpgsqlCommand(
-                $"DELETE FROM {table} WHERE server_id IN ({XeServerId}, {DmvServerId});", connection);
+                $"DELETE FROM {table} WHERE server_id IN ({XeServerId}, {DmvServerId}, {NoHistoryServerId});", connection);
             await cleanup.ExecuteNonQueryAsync(ct);
         }
     }

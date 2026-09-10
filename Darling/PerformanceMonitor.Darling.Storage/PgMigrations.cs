@@ -161,7 +161,66 @@ public static class PgMigrations
         new Migration(102, "pg-server-config", V102Sql),
         new Migration(103, "pg-deadlocks", V103Sql),
         new Migration(104, "pg-deadlock-identity-index", V104Sql),
+        new Migration(105, "collector-cost", V105Sql),
+        new Migration(106, "pg-cpu-utilization", V106Sql),
+        new Migration(107, "plan-force-actions", V107Sql),
+        new Migration(108, "collection-log-phase-split", V108Sql),
+        new Migration(109, "collection-log-drain-forensics", V109Sql),
+        new Migration(110, "collection-log-fetch-phase-sums", V110Sql),
+        new Migration(111, "store-log-self-monitoring", V111Sql),
+        new Migration(112, "collector-stall-wait-probes", V112Sql),
+        new Migration(113, "remediation-credential-and-actor", V113Sql),
+        new Migration(114, "pg-index-bloat-estimate-columns", V114Sql),
     };
+
+    /// <summary>
+    /// V114 — the statistics ESTIMATE columns on <c>collect.pg_index_bloat</c>, and the retirement of the
+    /// rotation cursor that the exact census needed (#3234).
+    ///
+    /// <para><b>ADD only, deliberately.</b> The seven <c>pgstatindex</c> measurement columns stay and the
+    /// collector now writes them NULL. The store holds 90 days of exact measurements taken before this
+    /// change and an on-request measurement needs somewhere to land, so dropping them would destroy
+    /// history to save nothing. A NULL there means the row was ESTIMATED — it does not mean an exact
+    /// measurement came back empty, and the read has to keep those two apart.</para>
+    ///
+    /// <para><b>Why every input is stored and not just the answer.</b> <c>index_pages</c>,
+    /// <c>table_rows</c>, <c>fillfactor</c>, <c>est_tuple_bytes</c> and <c>est_leaf_pages</c> are the
+    /// terms the estimate is computed from, and storing them is what lets a reader disagree with the
+    /// number rather than believe it. It is also the only way a later change to the width model can be
+    /// evaluated against history instead of re-measured from scratch — the model was wrong twice before
+    /// it was right, in opposite directions, and both wrong versions produced plausible percentages.</para>
+    ///
+    /// <para><b>No stored bloat percentage is derived from a density.</b> <c>est_bloat_pct</c> is a page
+    /// count comparison. It is NULL under exactly the condition that populates <c>skipped_reason</c>, so a
+    /// suppressed estimate can never be read as zero bloat, and <c>est_reclaimable_bytes</c> is what reads
+    /// rank on because a 64 kB index at 20 percent tops a percentage-ranked list and is worth 50 kB
+    /// (#2561).</para>
+    ///
+    /// <para><b>The DELETE is the cursor cleanup, and it is scoped twice.</b> The estimate covers every
+    /// index in one statement, so <c>pg_index_bloat</c> declares no <c>StateKeys</c> and the per-database
+    /// prune no longer owns the <c>rotate:</c> prefix — which means these rows would sit in
+    /// <c>collector_state</c> forever with nothing to retire them. Filtered on the collector name AND the
+    /// prefix rather than either alone: the prefix is generic enough that another collector could adopt
+    /// it, and <c>collector_name</c> alone would delete a future key belonging to this one.</para>
+    ///
+    /// <para>No index is added for the new ranking column. The read is a per-index DISTINCT ON ordered by
+    /// <c>collection_time</c> and served by <c>idx_pg_index_bloat_time</c>; a ranking index would be a
+    /// guess, and this collector has already cost enough unmeasured constants.</para>
+    /// </summary>
+    private const string V114Sql = @"
+ALTER TABLE collect.pg_index_bloat
+    ADD COLUMN IF NOT EXISTS index_pages bigint,
+    ADD COLUMN IF NOT EXISTS table_rows bigint,
+    ADD COLUMN IF NOT EXISTS fillfactor integer,
+    ADD COLUMN IF NOT EXISTS est_tuple_bytes bigint,
+    ADD COLUMN IF NOT EXISTS est_leaf_pages bigint,
+    ADD COLUMN IF NOT EXISTS est_bloat_pct double precision,
+    ADD COLUMN IF NOT EXISTS est_reclaimable_bytes bigint,
+    ADD COLUMN IF NOT EXISTS pgstattuple_available boolean;
+
+DELETE FROM collect.collector_state
+WHERE collector_name = 'pg_index_bloat'
+AND   state_key LIKE 'rotate:%';";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
@@ -2282,6 +2341,592 @@ CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     ON collect.pg_buffer_usage(server_id, collection_time);";
 
     /// <summary>
+    /// V107 — the auto force-plan bot's journal (#2138 phase 1) plus the per-server opt-in column.
+    ///
+    /// <para><c>collect.plan_force_actions</c> is the bot's audit trail and ledger, and it is a first-class
+    /// deliverable rather than logging: every decision the bot takes about writing to a monitored SQL Server
+    /// — would-force (dry run), blocked-with-reasons, live force, self-review checkpoint, unforce — lands
+    /// here with the evidence numbers that justified it. NOT a collector (no CollectorCatalog entry, so no
+    /// generator-parity pin applies): it is written by the service's post-analysis bot pass, the
+    /// store_metrics/collector_cost pattern. APPEND-ONLY by design — reviews and outcomes are their own rows
+    /// pointing back via <c>related_action_id</c>, never UPDATEs, so the trail cannot be rewritten by the
+    /// thing it audits. Enrolled in retention at the LONGEST horizon in the store
+    /// (<c>DarlingRetention.PlanForceLedgerRetentionDays</c>, a year), because an audit of writes to
+    /// production servers is the one series that should outlive the metrics that motivated it. The bot's own
+    /// cooldowns (at most one decision per query per cooldown window) bound the arrival RATE, which is not a
+    /// size bound — a bounded rate over unbounded time is unbounded — so the horizon is what keeps it
+    /// finite. A batched DELETE on <c>action_time</c>, not <c>drop_chunks</c>: the identity PRIMARY KEY that
+    /// <c>related_action_id</c> points back to is exactly what
+    /// <c>TimescaleSupport</c> excludes PK-bearing tables for.</para>
+    ///
+    /// <para><c>reasons</c> is a comma-joined text of the named gate/blocker reasons (the same strings the
+    /// MCP <c>structured_remediation</c> blockers carry) rather than <c>text[]</c>, so a future Lite twin
+    /// (DuckDB) can share the exact column shape. Identity PK because review rows reference their force row;
+    /// GENERATED ALWAYS so INSERTs need no sequence USAGE grant (the V64 reasoning).</para>
+    ///
+    /// <para><c>config.config_monitored_servers.plan_force_bot_enabled</c> is write-gate 2 of #2138's
+    /// two-gate contract (gate 1 is the global <c>forcePlanBot.enabled</c> + <c>dryRun</c> pair in
+    /// darling.json): a live write to a monitored server requires the global gates AND this row-level
+    /// opt-in, which defaults FALSE for every existing and future row. Like <c>capture_plans</c>, it has NO
+    /// darling.json counterpart on purpose — the registry is authoritative after seeding, so a file knob
+    /// would be a silent no-op on every seeded box (#2254); opting a server in is a store write (viewer
+    /// surface to follow), never a file edit.</para>
+    /// </summary>
+    private const string V107Sql = @"
+CREATE TABLE IF NOT EXISTS collect.plan_force_actions
+(
+    action_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    action_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    database_name text NOT NULL,
+    query_id bigint NOT NULL,
+    plan_id bigint NOT NULL,
+    action text NOT NULL,
+    mode text NOT NULL,
+    decision text NOT NULL,
+    reasons text NOT NULL DEFAULT '',
+    regression_factor numeric(19,2) NOT NULL DEFAULT 0,
+    latest_cpu_per_exec_us numeric(19,2) NOT NULL DEFAULT 0,
+    best_cpu_per_exec_us numeric(19,2) NOT NULL DEFAULT 0,
+    replica_role text,
+    parameter_sensitivity_cofired boolean NOT NULL DEFAULT FALSE,
+    outcome text NOT NULL,
+    detail text,
+    related_action_id bigint
+);
+
+CREATE INDEX IF NOT EXISTS idx_plan_force_actions_time
+    ON collect.plan_force_actions(server_id, action_time);
+
+CREATE INDEX IF NOT EXISTS idx_plan_force_actions_query
+    ON collect.plan_force_actions(server_id, database_name, query_id, action_time);
+
+ALTER TABLE config.config_monitored_servers
+    ADD COLUMN IF NOT EXISTS plan_force_bot_enabled boolean NOT NULL DEFAULT FALSE;";
+
+    /// <summary>
+    /// V108 - the server-scoped phase split on <c>collection_log</c> (#2851 made queryable).
+    ///
+    /// <para><b>The gap.</b> #2851 decomposes a server-scoped collector's <c>sql_duration_ms</c> into
+    /// <c>open:</c> (the <c>ExecuteReaderAsync</c>) and <c>drain:</c> (the <c>ReadAsync</c> loop), and reports
+    /// the store-side watermark read beside them. All of it existed ONLY as an app-log line, so the one
+    /// question the split was built to answer - which phase owns a collector's cost, across servers and over
+    /// time - needed an SSM session onto the box and a log scrape per server. It could not be aggregated,
+    /// trended, or read through the MCP surface at all. On 2026-09-03 an investigation into where
+    /// <c>procedure_stats</c>' 4,724 ms drain goes stalled on exactly that: AWS SSO began returning
+    /// InternalServerException, SSM went unavailable, and the numbers were unreachable even though the store
+    /// itself was answering. Three columns turn that whole class of question into a store query.</para>
+    ///
+    /// <para><b>Why columns and not a jsonb blob.</b> The phase set on this path is FIXED - open, drain, and
+    /// the watermark - so jsonb's flexibility buys nothing and costs the cheap aggregation that is the entire
+    /// point (<c>avg(sql_drain_ms)</c> against <c>avg((phases-&gt;&gt;'drain')::bigint)</c>, the latter
+    /// unindexable and materially slower over a 30-day hypertable). The shape that genuinely DOES vary - the
+    /// #2811 fetch split, with its per-chunk and per-id counts - is not a candidate for this table in either
+    /// encoding: it is emitted once per DATABASE while <c>collection_log</c> holds one row per RUN, so it is
+    /// N:1 here and needs a rollup decision of its own, exactly as the V80 fan-out did. Filed separately
+    /// rather than half-answered here.</para>
+    ///
+    /// <para><b>Why <c>other:</c> is NOT stored.</b> It is a computed residual -
+    /// <c>Math.Max(0, SqlMs - open - drain)</c> - and storing it would let it drift from the parent it is
+    /// defined against, which is the one property that makes it meaningful (the terms SUM to
+    /// <c>sql_duration_ms</c> by construction, so a large residual is itself the finding rather than a
+    /// rounding artifact). Readers derive it the same way the C# property does. A stored residual can go
+    /// stale; a derived one cannot.</para>
+    ///
+    /// <para><b>Why the watermark keeps its own column and no <c>sql_</c> prefix.</b> On this path it is
+    /// genuinely outside <c>sql_duration_ms</c> - it runs before that stopwatch starts - so folding it into
+    /// the decomposition would print a permanent zero and teach every reader that a store read #2796 clocked
+    /// at 50 s cold is free. The naming carries the semantic: <c>sql_open_ms</c> and <c>sql_drain_ms</c>
+    /// decompose <c>sql_duration_ms</c>; <c>watermark_ms</c> deliberately does not.</para>
+    ///
+    /// <para><b>No Lite twin, deliberately.</b> The two-store parity rule exists so that state added to one
+    /// store does not read as permanently empty on the other, and it does not bind here because the SOURCE of
+    /// these figures is Darling-only: the open/drain split is stamped by <c>DarlingCollectorRunner</c>'s
+    /// server-scoped path, and Lite's <c>RemoteCollectorService</c> runner has no equivalent phase to report.
+    /// A DuckDB twin would therefore be three columns that are NULL on every row Lite will ever write - which
+    /// is the exact outcome the parity rule is meant to PREVENT, not produce. Said out loud here rather than
+    /// left to inference, because this rung otherwise looks precisely like the shape that rule catches.</para>
+    ///
+    /// <para>Nullable with no DEFAULT and no backfill, the V80 reasoning exactly: a catalog-only change that
+    /// stays instant on a large compressed hypertable, where adding a column WITH a default is the shape
+    /// TimescaleDB has historically refused. A row written before this rung does not know its phases, and
+    /// NULL says so where 0 would claim a measured instant open. All three are written together or not at
+    /// all, gated on the MEASURED flag rather than on a value being non-zero - the distinction #2851 added
+    /// the flag for, so a genuinely instant open records as 0 rather than vanishing.</para>
+    /// </summary>
+    private const string V108Sql = @"
+ALTER TABLE collect.collection_log
+    ADD COLUMN IF NOT EXISTS sql_open_ms integer,
+    ADD COLUMN IF NOT EXISTS sql_drain_ms integer,
+    ADD COLUMN IF NOT EXISTS watermark_ms integer;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so without this refresh the passthrough every
+   read goes through would keep serving the pre-V108 column list forever and the new columns would be
+   invisible to an UPGRADED store while working fine on a fresh one - the V14 lesson, and V80's too. */
+CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log;";
+
+    /// <summary>
+    /// V109 - what an abandoned collection cycle was DOING, not merely that it stopped (#2864).
+    ///
+    /// <para><b>The gap.</b> A cycle the #2673 wall-clock budget abandons records <c>ABANDONED</c> and
+    /// <c>rows_collected = 0</c> - and that zero is rows STORED, which an abandoned cycle never does by
+    /// definition. So the stored row could not distinguish a target that sent no rows at all from one that
+    /// sent 149 and then went silent: a stalled target and a stalled stream, which want unrelated fixes.
+    /// V108 made the phase split queryable and the first production capture read
+    /// <c>open:104ms drain:119,945ms rows=0</c> - proving the time was in the drain and unable to say
+    /// whether the drain was slow or simply empty. These columns end that.</para>
+    ///
+    /// <para><b><c>drain_last_read_ms</c> is the one that carries the diagnosis</b>, not the row count. A
+    /// count alone still cannot separate "streaming steadily but slowly" from "delivered everything then
+    /// hung" - both end at the budget with a positive count. Subtract this from <c>sql_drain_ms</c> and you
+    /// have the time the reader sat with nothing arriving. NULL means no row ever arrived, which is
+    /// NULL beside a 0 count says nothing came, and 0 is left free to mean what it honestly means - row 1
+    /// arrived instantly.</para>
+    ///
+    /// <para><b>NULL means NOT RECORDED and nothing more.</b> It does NOT identify a pre-rung row, and
+    /// saying so would be false in two reachable ways: an abandon firing inside <c>ExecuteReaderAsync</c>
+    /// never constructs the counting reader, so all three guard to NULL on a genuine V109 row; and no
+    /// per-database ENUMERATED collector sets the measured flag at all, so <c>query_store</c> and every
+    /// <c>Pg*Stats</c> collector read NULL here forever on a fully current store. A dashboard that treated
+    /// NULL as 'old row' would silently misclassify both an open-stall and whole collector families.</para>
+    ///
+    /// <para><b><c>drain_bytes_read</c> is the string payload, and the column name is the honest one.</b> No
+    /// <c>DbDataReader</c> exposes wire size, so this counts UTF-16 bytes off the string and binary getters
+    /// and excludes numerics and protocol framing. That is the useful scope as well as the truthful one: the
+    /// collectors this rung exists for are dominated by one large text column - plan XML at a 260 KB mean -
+    /// so string bytes ARE the payload to within a rounding error, and a number pretending to be the wire
+    /// size would be a worse measurement wearing a better name.</para>
+    ///
+    /// <para><b><c>target_session_id</c> is what makes a stalled run joinable.</b> <c>waiting_tasks</c>,
+    /// <c>dmv_blocking_snapshot</c> and <c>query_snapshots</c> all carry a session id, so without ours the
+    /// question "what was our OWN stalled session waiting on" cannot be asked even for a window where the
+    /// answering snapshot was captured. Read off the open connection as a client property, never with
+    /// <c>SELECT @@SPID</c>: a round trip per collector per server per cycle is ~25,000 extra queries an
+    /// hour against the fleet to learn a number the client already holds.</para>
+    ///
+    /// <para><b><c>sweep_peer_max_ms</c> separates the two populations automatically.</b> The slowest
+    /// NON-budgeted collector already completed in the same sweep body. A genuinely large query runs beside
+    /// peers at or below baseline (one measured sweep: <c>wait_stats</c> 1 ms, <c>latch_stats</c> 1 ms,
+    /// alongside 71,977 ms for 12,557 rows); sweep-wide degradation shows those same light collectors at
+    /// 34-47x baseline BEFORE the heavy ones burn their budget. Identical stored shape, opposite causes, and
+    /// telling them apart previously meant cross-referencing neighbouring rows by hand. Budgeted collectors
+    /// are excluded because they are the heavies being explained. Written on EVERY row rather than only
+    /// abandoned ones, because a ratio needs a denominator and the baseline has to come from the same column
+    /// on ordinary bodies - recording it only on failures would rebuild the very cross-referencing this
+    /// removes.</para>
+    ///
+    /// <para><b>No Lite twin, and for V108's reason restated.</b> The parity rule exists so state added to
+    /// one store does not read as permanently empty on the other. The source here is Darling-only: the
+    /// counting reader is installed by <c>DarlingCollectorRunner</c>'s server-scoped path and the peer mark
+    /// by <c>DarlingWorker</c>'s sweep body, neither of which Lite's runner has. A DuckDB twin would be five
+    /// forever-NULL columns - precisely the outcome the rule prevents rather than the one it demands.</para>
+    ///
+    /// <para>Nullable, no DEFAULT, no backfill - the V80/V108 reasoning: a catalog-only change that stays
+    /// instant on a large compressed hypertable. A row written before this rung does not know any of this,
+    /// and NULL says so where 0 would claim a measured drain that delivered nothing.</para>
+    /// </summary>
+    private const string V109Sql = @"
+ALTER TABLE collect.collection_log
+    ADD COLUMN IF NOT EXISTS drain_rows_read bigint,
+    ADD COLUMN IF NOT EXISTS drain_bytes_read bigint,
+    ADD COLUMN IF NOT EXISTS drain_last_read_ms integer,
+    ADD COLUMN IF NOT EXISTS target_session_id integer,
+    ADD COLUMN IF NOT EXISTS sweep_peer_max_ms integer;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so without this refresh the passthrough every
+   read goes through would keep serving the pre-V109 column list forever - invisible on an UPGRADED store
+   while working fine on a fresh one. The V14 lesson, V80's, and V108's. */
+CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log;";
+
+    /// <summary>
+    /// V111 — the store's own server log as a self-monitoring source (#3021): a per-class census
+    /// (<c>collect.store_log_events</c>), the capture denominator that qualifies it
+    /// (<c>collect.store_log_captures</c>), and the per-file resume marker
+    /// (<c>config.store_log_read_marker</c>).
+    ///
+    /// <para>NOT a collector, the V53 / V105 shape: this is INTERNAL self-telemetry written by the worker's
+    /// hourly self-metrics tick, so all three tables are deliberately absent from
+    /// <c>CollectorCatalog.All</c> — which is what keeps the catalog-driven hypertable conversion and the
+    /// catalog retention purge off the tables that observe them — and hand-written DDL is therefore correct
+    /// rather than a generator-parity miss. Plain tables, bounded by
+    /// <see cref="StoreLogSweep.RetentionDays"/>'s own DELETEs.</para>
+    ///
+    /// <para><b>Why a census and not one row per line.</b> A production day of the store's log holds ~1,100
+    /// <c>ERROR:  canceling statement due to user request</c> entries — the store's rendering of a
+    /// client-side <c>CommandTimeout</c> cancel, which is the ordinary consequence of having timeouts and
+    /// not a fault. <c>occurrences</c> per class per capture is the shape that answers the question those
+    /// lines are actually asked ("did the rate move") without producing 1,100 rows a day nobody reads.
+    /// <c>message_text</c> and <c>sample_line</c> are NULL for the classes that are counted only, and that
+    /// NULL is the record that the class is a counted floor rather than a missing measurement — see
+    /// <see cref="StoreLogClassifier"/> for the class-by-class argument.</para>
+    ///
+    /// <para><b>Why <c>store_log_captures</c> is its own table.</b> Every other sampled read in the product
+    /// borrows its denominator from <c>collection_log</c> — <c>get_pg_blocking</c> reports
+    /// <c>captures_total</c> beside <c>captures_with_blocking</c> precisely because an absent capture and a
+    /// capture that found nothing are the same absence of rows. This source writes no
+    /// <c>collection_log</c> row (it is not in the catalog), so it has no denominator to borrow and must
+    /// carry its own. <c>offset_reset</c> and <c>groups_dropped</c> ride here for the same reason: a marker
+    /// discarded because the weekday ring truncated, and a distinct-message budget that folded rows, are
+    /// both facts about the capture's COVERAGE, and a coverage fact that is not recorded is one the reader
+    /// silently assumes away.</para>
+    ///
+    /// <para><b>Why the marker is in <c>config</c> and keyed by file.</b> It is state the operator's store
+    /// owns rather than collected data, so it is not subject to the census' retention DELETE — a marker
+    /// aged out would re-read a whole file. Keyed by file because rotation is by WEEKDAY NAME
+    /// (<c>postgresql-%a.log</c>), so a rotation must start a fresh marker instead of resuming a new file at
+    /// an old file's offset — the same key shape the RDS log route uses, for the same reason.
+    /// <c>last_size</c> is beside <c>byte_offset</c> rather than derived from it because
+    /// <c>log_truncate_on_rotation</c> means the file SHRINKS, and comparing the current size against the
+    /// size at the last read is what detects that (see <see cref="StoreLogSlab.ResolveResume"/>).</para>
+    ///
+    /// <para><b>No Lite twin, and the reasoning is structural rather than a deferral.</b> The parity rule
+    /// exists so state added to one store does not read as permanently empty on the other. Lite has no
+    /// embedded PostgreSQL store — its store is DuckDB, which has no server log to read — so there is no
+    /// file for a twin to point at. This is <c>get_store_metrics</c>' situation, not <c>get_deadlocks</c>'.</para>
+    ///
+    /// <para>Timestamps are naive UTC per the store contract, and they are the SWEEP's clock rather than the
+    /// log's. That is deliberate: PostgreSQL renders <c>%m</c> in <c>log_timezone</c>, which
+    /// <c>DarlingManagedPostgres</c>' v9 block leaves to the host (it pins the session <c>timezone</c> only,
+    /// asserted by <c>DarlingManagedPostgresTests</c>), so the store's own log stamps are host-local. The
+    /// server's own rendering survives verbatim inside <c>sample_line</c>, uninterpreted.</para>
+    /// </summary>
+    private const string V111Sql = @"
+CREATE TABLE IF NOT EXISTS collect.store_log_events
+(
+    capture_time timestamp NOT NULL,
+    event_class text NOT NULL,
+    severity text NOT NULL,
+    occurrences integer NOT NULL,
+    message_text text,
+    sample_line text
+);
+
+CREATE INDEX IF NOT EXISTS idx_store_log_events_time
+    ON collect.store_log_events(capture_time);
+
+CREATE INDEX IF NOT EXISTS idx_store_log_events_class
+    ON collect.store_log_events(event_class, capture_time);
+
+CREATE TABLE IF NOT EXISTS collect.store_log_captures
+(
+    capture_time timestamp NOT NULL,
+    log_file text NOT NULL,
+    bytes_read bigint NOT NULL,
+    bytes_pending bigint NOT NULL,
+    lines_read integer NOT NULL,
+    entries_read integer NOT NULL,
+    offset_reset boolean NOT NULL,
+    groups_dropped integer NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_store_log_captures_time
+    ON collect.store_log_captures(capture_time);
+
+CREATE TABLE IF NOT EXISTS config.store_log_read_marker
+(
+    log_file text NOT NULL PRIMARY KEY,
+    byte_offset bigint NOT NULL,
+    last_size bigint NOT NULL,
+    updated_at timestamp NOT NULL
+);";
+
+    /// <summary>
+    /// V110 — the PER-DATABASE fetch split, summed across the fan-out and persisted on the run's row (#2860).
+    /// V108's twin one path over: V108 decomposed a SERVER-scoped collector's <c>sql_duration_ms</c>, and this
+    /// decomposes the deferred plan/text fetch that only the ENUMERATED path performs.
+    ///
+    /// <para><b>The gap.</b> #2811's sub-split reports <c>plan_fetch:Nms = probe: + target: + write: +
+    /// other:</c> per database, and every bit of it lived only in an app-log line. Measured over 38.2 h on 42
+    /// members, the store <c>probe:</c> is the LARGEST single term — 55.4% of <c>plan_fetch</c> and 80.6% of
+    /// <c>text_fetch</c>, with the target second at 41.1% / 18.2% and <c>write:</c> a rounding error at 3.5% /
+    /// 1.1%. That inverts the illustrative shape #2811/#2812 were written against, and it is the single fact
+    /// most likely to be misread, so it needs to be queryable rather than scraped per server over SSM.</para>
+    ///
+    /// <para><b>Why SUMS, which was not one of the three options the issue offered.</b> The split is emitted
+    /// once per DATABASE while <c>collection_log</c> holds one row per RUN, so it is N:1 — N &gt; 1 on 68.8% of
+    /// <c>query_store</c> runs (mean 2.7 databases, max 7). The issue offered a slowest-database rollup, a
+    /// per-item table, and jsonb; sums dissolve the N:1 problem instead of trading against it, because the two
+    /// questions are already separated across two mechanisms. WHICH DATABASE is answered by V80's
+    /// <c>fanout_item_count</c> / <c>slowest_item</c> / <c>slowest_item_ms</c> — 1:1, persisted, and the fetch
+    /// is the dominant term inside a <c>query_store</c> item, so V80 already fingers the right one. WHICH PHASE
+    /// is what this split is for, and a sum answers it EXACTLY rather than by proxy.</para>
+    ///
+    /// <para><b>Why the slowest-database rollup was declined, stated as the measurement that decided it.</b>
+    /// It is not that it loses information — it is that its residual error points one way. The slowest database
+    /// alone names the same winning phase as the run's true argmax on 92.8% of <c>plan_fetch</c> runs (89.5%
+    /// among the multi-database ones). Of the 199 disagreements, 170 read the truth <c>probe</c> as
+    /// <c>target</c> and only 26 the reverse: a <b>~6.5 : 1 bias toward indicting the monitored target when the
+    /// cost was actually the store probe</b>. That is precisely the misreading this instrumentation family
+    /// exists to end, so a 90%-right instrument whose 10% error is systematically anti-target is the wrong
+    /// instrument for the one question anyone asks of this split. Sums carry no such bias.</para>
+    ///
+    /// <para><b>The blind spot, plainly.</b> Sums cannot say whether ONE database inside a run was pathological
+    /// while its siblings were fine — the ~10.5% of multi-database runs whose slowest database's phase mix
+    /// differs from the run's aggregate. Nothing here recovers that; the columns trade per-database resolution
+    /// for an unbiased per-run answer, and if the per-database question ever becomes live the increment is three
+    /// more columns for the slowest database's mix, an addition on top rather than a different shape.</para>
+    ///
+    /// <para><b>Row cost: zero.</b> These are columns on a row that is written anyway. The split fires on only
+    /// 22.2% of <c>query_store</c> runs (a fetch has to actually run), so they are NULL on ~98% of
+    /// <c>collection_log</c> — the V80/V108/V109 trade, very nearly free on a hypertable compressed and
+    /// segmented by <c>server_id</c>. For contrast, the per-item table the issue offered would have been
+    /// ~167 rows/day/server against ~11,955 <c>collection_log</c> rows/day/server.</para>
+    ///
+    /// <para><b>Why the counters are here after all, when #2860 §7 argued for leaving them out.</b> That
+    /// section's own condition was "add them if a question actually needs them", and #2902 supplied one: the
+    /// fetch carryover has NO eviction — no count cap, no byte cap, no age-out — and narrowing its key to
+    /// include the collector dropped drain opportunities ~52%. If <c>query_store</c>'s candidate cap cannot
+    /// cover what its probe finds missing, the backlog grows silently, and #2902 concluded twice that
+    /// <c>ids attempted</c> versus <c>probe ids</c> per run is the only instrument that would see it. They also
+    /// turn the durations into RATES, which is where the phase question stops being descriptive: <c>target</c>
+    /// ÷ <c>ids_attempted</c> measured 31.65 ms/id on production's cold plans against the ~1.6 ms/id #2806's
+    /// controlled A/B saw on hot ones — a ~20x gap that bears directly on that open issue — and <c>probe</c> ÷
+    /// <c>probe_ids</c> reproduces the documented ~0.61 ms/reference, which is what calibrated the parse.
+    /// <c>chunks</c> is still left out: it is a batching artifact no question has asked for.</para>
+    ///
+    /// <para><b>Deliberately NOT generalised to #2855's Azure per-database split.</b> Two reasons that both
+    /// survive being checked. The row-volume profile is OPPOSITE: #2893's line is explicitly not gated on
+    /// <c>batch.Count &gt; 0</c> ("the connect is paid on a quiet database exactly as on a busy one"), so its
+    /// emissions are one per database per cycle — the ungated shape V80 priced at ~10% and declined, and the
+    /// cheapness above comes entirely from this rung's gating and does not transfer. And the NAMES collide: a
+    /// persisted per-database <c>open_ms</c> / <c>drain_ms</c> would sit beside V108's <c>sql_open_ms</c> /
+    /// <c>sql_drain_ms</c>, which mean the SERVER-scoped open and drain. jsonb is the only shape that would
+    /// generalise, and it costs the cheap aggregation that is the entire reason to persist any of this.</para>
+    ///
+    /// <para><b>No <c>other:</c> column, and no stored parent — #2859's rule with one honest consequence.</b>
+    /// <c>other:</c> is a residual (<c>fetch - probe - target - write</c>) and a stored copy could drift from
+    /// the parent it completes. But unlike V108, the parent here is NOT already a column: there is no
+    /// <c>plan_fetch_ms</c>, so <c>other:</c> is not derivable from the store at all — it is simply not
+    /// recorded. That is a real loss and it is accepted rather than overlooked, because <c>other:</c> measured
+    /// 0.1% of both fetches fleet-wide: the three stored terms ARE the parent to within a rounding error, so
+    /// their sum is the fetch total and storing it separately would be storing a derived number.</para>
+    ///
+    /// <para><b>No Lite twin, and the reasoning is stronger here than V108's.</b> The parity rule exists so
+    /// state added to one store does not read as permanently empty on the other. Lite never sets
+    /// <c>CollectorContext.CapturePlanXml</c> or <c>FetchQueryTextSeparately</c> — that is what makes Darling
+    /// the plan-capturing SKU — so neither fetch ever RUNS under Lite. A DuckDB twin would be ten columns that
+    /// are NULL on every row Lite will ever write, which is the outcome the rule prevents rather than the one
+    /// it demands.</para>
+    ///
+    /// <para><b>NULL means no fetch ran</b>, per half and independently: a run that fetched text but no plans
+    /// stores the five text columns and leaves the five plan ones NULL, matching how the log line emits its two
+    /// sub-lines separately. The gate is the same <c>PerItem*FetchMs &gt; 0</c> the log line uses, deliberately,
+    /// so the stored population and the logged population are the same one and the figures above transfer
+    /// without re-deriving. The cost of reusing it is stated rather than hidden: it cannot separate "no fetch
+    /// ran" from "a fetch ran and was sub-millisecond". That is the opposite call from V108's MEASURED flag, and
+    /// on purpose — a 0 ms open is a real measurement of an event that happened, while a 0 ms fetch means the
+    /// fetch found nothing to do, so NULL is the honest record and ten zeros would be noise on the ~78% of runs
+    /// that fetch nothing.</para>
+    ///
+    /// <para>Nullable, no DEFAULT, no backfill — the V80/V108/V109 reasoning: a catalog-only change that stays
+    /// instant on a large compressed hypertable, where adding a column WITH a default is the shape TimescaleDB
+    /// has historically refused. A row written before this rung does not know its fetch split, and NULL says so.
+    /// <c>integer</c> throughout and no <c>numeric</c> anywhere: every figure is a whole millisecond or a whole
+    /// id count, matching <c>sql_duration_ms</c> and V108's columns, so there is no precision or scale to
+    /// choose. The derived rates (ms per id) are computed by the reader in floating point, which is where that
+    /// decision belongs — baking a scale into the schema would fix it for every future consumer.</para>
+    /// </summary>
+    private const string V110Sql = @"
+ALTER TABLE collect.collection_log
+    ADD COLUMN IF NOT EXISTS plan_fetch_probe_ms integer,
+    ADD COLUMN IF NOT EXISTS plan_fetch_target_ms integer,
+    ADD COLUMN IF NOT EXISTS plan_fetch_write_ms integer,
+    ADD COLUMN IF NOT EXISTS plan_fetch_ids_attempted integer,
+    ADD COLUMN IF NOT EXISTS plan_fetch_probe_ids integer,
+    ADD COLUMN IF NOT EXISTS text_fetch_probe_ms integer,
+    ADD COLUMN IF NOT EXISTS text_fetch_target_ms integer,
+    ADD COLUMN IF NOT EXISTS text_fetch_write_ms integer,
+    ADD COLUMN IF NOT EXISTS text_fetch_ids_attempted integer,
+    ADD COLUMN IF NOT EXISTS text_fetch_probe_ids integer;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so without this refresh the passthrough every
+   read goes through would keep serving the pre-V110 column list forever - invisible on an UPGRADED store
+   while working fine on a fresh one. The V14 lesson, V80's, V108's and V109's. */
+CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collection_log;";
+
+    /// <summary>
+    /// V112 — <c>collect.collector_stall_probes</c>: what the whole monitored INSTANCE was waiting on during a
+    /// collector stall, sampled out of band because nothing inside the sweep can answer it (#2880).
+    ///
+    /// <para><b>Why the rung is required rather than a column family on <c>collection_log</c>.</b> V108, V109
+    /// and V110 all widened that row, and this deliberately does not, for one reason: a probe folded onto the
+    /// stalled run's log row would have to be AWAITED by the run before the row could be written. That puts
+    /// the watchdog on the collector's critical path — it would carry up to
+    /// <see cref="!:StallWaitProbePolicy.HardBudget"/> into <c>duration_ms</c>, and it would delay the next
+    /// collector on a server whose sweep is already blown, on exactly the ~1% of runs the instrument exists
+    /// for. Its own table is what lets the probe be dispatched and forgotten. The join back to the stalled run
+    /// is <c>(server_id, collector_name, probe_time)</c> against <c>v_collection_log</c>, which is explicit
+    /// rather than free, and that is the price paid for the decoupling.</para>
+    ///
+    /// <para><b>NOT a collector.</b> It is not in <c>CollectorCatalog.All</c>, so it is absent from the
+    /// generator-parity pins, the catalog-driven hypertable conversion and the catalog retention purge —
+    /// hand-written DDL is correct here rather than a parity miss, the V53 / V105 / V111 shape. A plain table,
+    /// not a hypertable: the arrival rate is one row per stalled run, which the measured population puts at
+    /// roughly 90 rows a day across a 43-server fleet (2 servers, 2 collectors, ~1% of ~2,400 runs each), so
+    /// chunking would cost more than it saves. Bounded by <c>StallWaitProbeRunner</c>'s own retention DELETE,
+    /// the way <c>store_metrics</c> and <c>collector_cost</c> are — a bounded arrival rate over unbounded time
+    /// is unbounded.</para>
+    ///
+    /// <para><b>The trigger columns are stored, not just the sample.</b> <c>trigger_elapsed_ms</c>,
+    /// <c>trigger_rows_read</c>, <c>trigger_bytes_read</c>, <c>trigger_last_read_ms</c> and <c>budget_ms</c>
+    /// are what the client believed at the instant it decided to spend a probe, so "why did this fire" is
+    /// answerable from the row instead of from a log line on a box. <c>trigger_last_read_ms</c> in particular
+    /// is recorded and was NOT part of the decision: the measured failure mode streams slowly with 0-3 ms of
+    /// terminal silence on 8 of 8 abandoned runs, so a firing condition keyed on the reader having gone quiet
+    /// would never fire on the actual defect. Storing it beside the decision is how a later reader can check
+    /// that for themselves.</para>
+    ///
+    /// <para><b><c>outcome</c> is NOT NULL and a probe that could not connect is one of its values.</b> Whether
+    /// a connection can be obtained mid-stall has never been tested — the one open in evidence
+    /// (<c>open:104ms</c>) is the stalled collector's OWN open, taken before the stall — so
+    /// <c>CONNECT_FAILED</c> / <c>CONNECT_TIMED_OUT</c> are expected results that answer an open question, and
+    /// they get a stored row with <c>connect_ms</c> and <c>error_message</c> rather than a swallowed log line.
+    /// Every value comes from <c>StallWaitProbePolicy.Outcomes</c>; no CHECK constraint, for
+    /// <c>collection_log.status</c>'s reason — the reads bucket by explicit list, never by complement, so a
+    /// value added later joins no bucket instead of silently joining the wrong one.</para>
+    ///
+    /// <para><b><c>scheduler_count</c> is the sample's own denominator.</b> Zero waiting tasks is a real and
+    /// interesting answer — an instance answering trivial queries in milliseconds, producing rows 50x slowly,
+    /// and waiting on nothing — but it is indistinguishable from a result set that described no instance at
+    /// all. Every live SQL Server reports at least one <c>VISIBLE ONLINE</c> scheduler, so a positive count
+    /// beside an empty wait list is what makes the all-clear readable, and a sample without one is stored as
+    /// <c>NO_SAMPLE</c> rather than as a row of zeros. The same reasoning <c>get_pg_blocking</c> carries its
+    /// capture counts for.</para>
+    ///
+    /// <para><b>No Lite twin, structurally.</b> The parity rule exists so state added to one store does not
+    /// read as permanently empty on the other. The source is Darling-only: the arm is installed by
+    /// <c>DarlingCollectorRunner</c>'s server-scoped path beside the V108/V109 instrumentation it reads, and
+    /// Lite's runner has neither. A DuckDB twin would be an always-empty table. V109's situation, not
+    /// <c>get_deadlocks</c>'.</para>
+    ///
+    /// <para>Naive UTC per the store contract, and it is the PROBE's clock — the instant the sample was taken
+    /// on the client, not a timestamp read off the target, so nothing here depends on the monitored server's
+    /// <c>timezone</c>.</para>
+    /// </summary>
+    private const string V112Sql = @"
+CREATE TABLE IF NOT EXISTS collect.collector_stall_probes
+(
+    probe_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    collector_name text NOT NULL,
+    outcome text NOT NULL,
+    budget_ms integer NOT NULL,
+    trigger_elapsed_ms integer NOT NULL,
+    trigger_rows_read bigint,
+    trigger_bytes_read bigint,
+    trigger_last_read_ms integer,
+    connect_ms integer,
+    query_ms integer,
+    waiting_task_count bigint,
+    distinct_wait_types integer,
+    top_wait_type text,
+    top_wait_total_ms bigint,
+    top_wait_max_ms bigint,
+    wait_summary text,
+    scheduler_count integer,
+    runnable_tasks bigint,
+    work_queue_length bigint,
+    pending_disk_io bigint,
+    max_runnable_tasks integer,
+    error_message text
+);
+
+/* The read is newest-first per server, and the retention DELETE is by time alone, so one index serves both.
+   Not UNIQUE: two collectors on one server can stall in the same millisecond, and a unique key would drop
+   the second sample - the one that proves the degradation is not confined to a single collector. */
+CREATE INDEX IF NOT EXISTS idx_collector_stall_probes_time
+    ON collect.collector_stall_probes(server_id, probe_time);";
+
+    /// <summary>
+    /// V113 — the per-server REMEDIATION CREDENTIAL, and the journal's <c>actor</c> (#2138 phase 1).
+    ///
+    /// <para><b>The credential.</b> The monitoring credential stays read-only forever; that promise is
+    /// load-bearing (the MCP instructions and both READMEs state it, and operators grant against it), so a
+    /// write to a monitored server cannot travel on it. <c>remediation_username</c> /
+    /// <c>remediation_encrypted_password</c> are a SECOND, per-server, opt-in credential in the same shape
+    /// as <c>username</c> / <c>encrypted_password</c> beside them — same DPAPI-LocalMachine blob, same
+    /// <c>env:</c>/<c>file:</c> reference support, produced by the same <c>--encrypt-password</c>. Both
+    /// nullable with NO default and NO fallback: a server whose remediation columns are null has no
+    /// phase-1 surface at all, which is why the absence is expressed as a null credential rather than as an
+    /// <c>enabled</c> boolean — a boolean invites a disabled control, and a missing credential is supposed
+    /// to be unrenderable rather than explained.</para>
+    ///
+    /// <para>Deliberately NOT reusing the <c>auth</c> column's vocabulary: a remediation credential is
+    /// always SQL auth when present (an integrated remediation identity would be the service account,
+    /// which is the monitoring identity, which is the thing this exists to avoid). Presence of the username
+    /// IS the auth mode, so there is no third state to get wrong.</para>
+    ///
+    /// <para><b>The actor.</b> V107's journal was written when the bot was the only possible writer, and
+    /// <c>PgPlanForceActionStore.GetPendingReviewsAsync</c> rests on that: its own-forces-only property is
+    /// documented as structural because "the read starts from rows this bot journaled". Phase 1 makes an
+    /// OPERATOR a writer to the same table, and that sentence stops being true the moment it does — the
+    /// bot's self-review would pick up an operator's force and take it back, breaking the standing house
+    /// rule that operator-placed forces are never touched. <c>actor</c> restores the invariant as data: the
+    /// review read filters <c>actor = 'bot'</c>, so own-forces-only is a predicate on the table rather than
+    /// a property of who happened to be able to write to it.</para>
+    ///
+    /// <para><b>The DEFAULT is added and then dropped, and that is the point.</b> Every existing row was
+    /// written by the bot, so <c>DEFAULT 'bot'</c> backfills them correctly and is the only honest value
+    /// for rows that predate the column. Leaving the default in place afterwards would make an INSERT that
+    /// forgets <c>actor</c> silently claim to be the bot — the one direction that matters, because a bot row
+    /// is the kind the review is allowed to unforce. Dropping it makes that INSERT fail loudly instead. The
+    /// C# side reinforces it: <c>PlanForceActionRecord.Actor</c> is a required member, so a construction
+    /// site that omits it does not compile.</para>
+    /// </summary>
+    private const string V113Sql = @"
+ALTER TABLE config.config_monitored_servers
+    ADD COLUMN IF NOT EXISTS remediation_username text;
+
+ALTER TABLE config.config_monitored_servers
+    ADD COLUMN IF NOT EXISTS remediation_encrypted_password text;
+
+ALTER TABLE collect.plan_force_actions
+    ADD COLUMN IF NOT EXISTS actor text NOT NULL DEFAULT 'bot';
+
+ALTER TABLE collect.plan_force_actions
+    ALTER COLUMN actor DROP DEFAULT;
+
+/* The review read is (server_id, actor, action) with an ordering on action_time, and it is the read the
+   own-forces-only invariant rests on, so it gets its own index rather than riding
+   idx_plan_force_actions_time - which leads with server_id but knows nothing about the actor and would
+   make every pending-review scan read the operator's rows to discard them. */
+CREATE INDEX IF NOT EXISTS idx_plan_force_actions_actor
+    ON collect.plan_force_actions(server_id, actor, action, action_time);";
+
+    /// <summary>
+    /// V105 — <c>collect.collector_cost</c>, the tool's own per-collector cost on the monitored servers
+    /// (#2674). NOT a collector: it is INTERNAL self-telemetry, written by the worker's hourly self-metrics
+    /// sweep like <c>collect.store_metrics</c> (V53), so it is deliberately absent from
+    /// <c>CollectorCatalog.All</c> and therefore from the generator-parity pins. Hand-written DDL, a plain
+    /// table (not a hypertable — the sweep aggregates to one row per server+collector per hour, and its own
+    /// bounded retention DELETE keeps it small, the same shape store_metrics uses). Columns are an hourly
+    /// aggregate: run_count, total/max sql_ms (the MAX is the load-bearing one — the tail is how a collector
+    /// "sticks out" on a target), total storage_ms and total_rows. database_name is nullable for
+    /// server-scoped collectors.
+    /// </summary>
+    private const string V105Sql = @"
+CREATE TABLE IF NOT EXISTS collect.collector_cost
+(
+    metric_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    database_name text,
+    collector_name text NOT NULL,
+    run_count integer NOT NULL,
+    total_sql_ms bigint NOT NULL,
+    max_sql_ms bigint NOT NULL,
+    total_storage_ms bigint NOT NULL,
+    total_rows bigint NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_collector_cost_time
+    ON collect.collector_cost(metric_time);
+
+CREATE INDEX IF NOT EXISTS idx_collector_cost_lookup
+    ON collect.collector_cost(server_id, collector_name, metric_time);";
+
+    /// <summary>
     /// V104 — the lookup index for <c>collect.pg_deadlocks</c> (#2661), and a SEPARATE rung on purpose.
     ///
     /// <para><c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c> requires a
@@ -2291,10 +2936,13 @@ CREATE INDEX IF NOT EXISTS idx_pg_buffer_usage_time
     /// generated schema and would silently not have it. Putting it in its own rung gives BOTH populations
     /// the index, which is what was actually wanted.</para>
     ///
-    /// <para><b>Why the index earns its place.</b> The collector re-reads an OVERLAPPING tail of the server
-    /// log every cycle, deliberately, so a report cut in half at one edge is whole in the next. Every read
-    /// therefore groups or filters on <c>deadlock_hash</c> to answer once per deadlock rather than once per
-    /// sighting, and the detail read looks a report up by hash directly.</para>
+    /// <para><b>Why the index earns its place.</b> The <c>pg_read_file</c> route re-reads an OVERLAPPING
+    /// tail of the server log every cycle, deliberately, so a report cut in half at one edge is whole in
+    /// the next and one deadlock lands many times. Every read therefore groups or filters on
+    /// <c>deadlock_hash</c> to answer once per deadlock rather than once per sighting, and the detail read
+    /// looks a report up by hash directly. The consume-once RDS route repeats less often and for other
+    /// reasons (#3008, #3009), which changes how many sightings a row has rather than what the reads
+    /// do.</para>
     ///
     /// <para><b>Not UNIQUE.</b> Two servers legitimately produce identical graph text — the same query pair
     /// deadlocking with the same process ids on two hosts is not impossible — and a unique constraint would
@@ -2310,10 +2958,13 @@ CREATE INDEX IF NOT EXISTS idx_pg_deadlocks_identity
     /// We collected the COUNT (<c>pg_stat_database.deadlocks</c>) and nothing else: a number that goes up.
     /// This is which sessions, holding what, running what SQL.
     ///
-    /// <para><b>The identity column is the point.</b> Both transports read a bounded TAIL of the log on a
-    /// schedule and the window OVERLAPS deliberately — a report cut in half at the edge of one read is whole
-    /// in the next — so without <c>deadlock_hash</c> the same deadlock is stored once per cycle for as long
-    /// as it stays inside the window. The hash is over the graph text rather than over
+    /// <para><b>The identity column is the point.</b> The <c>pg_read_file</c> transport reads a bounded
+    /// TAIL of the log on a schedule and the window OVERLAPS deliberately, so without
+    /// <c>deadlock_hash</c> the same deadlock is stored once per cycle for as long as it stays inside the
+    /// window. The RDS log-API transport is consume-once and does not overlap — its repeats come from a
+    /// restart discarding the in-process marker, or from #3008 leaving it in place after a write that did
+    /// not land — and a report cut at one of its chunk boundaries is NOT whole in the next read (#3009).
+    /// The hash is over the graph text rather than over
     /// (timestamp, victim_pid): two reports in the same millisecond with the same victim pid are
     /// vanishingly unlikely, but the graph is what actually distinguishes them, and hashing the thing
     /// itself needs no argument about how unlikely a collision is.</para>
@@ -2347,6 +2998,28 @@ CREATE TABLE IF NOT EXISTS collect.pg_deadlocks (
 
 CREATE INDEX IF NOT EXISTS idx_pg_deadlocks_time
     ON collect.pg_deadlocks(server_id, collection_time);";
+
+    /// <summary>
+    /// V106 — <c>collect.pg_cpu_utilization</c>, instance-level CPU for a managed PostgreSQL/Aurora target
+    /// (#2719). Column-for-column identical to what <see cref="PgSchemaGenerator"/> generates from
+    /// <see cref="PgCpuUtilizationCollector.PayloadColumns"/> — pinned by
+    /// <c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c>, same as every other
+    /// rung above. See <see cref="PgCpuUtilizationCollector"/>'s own doc comment for why this collector has
+    /// no SQL route at all: every row here arrives through the RDS/Performance Insights API, never a
+    /// database connection.
+    /// </summary>
+    private const string V106Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_cpu_utilization (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    sample_time timestamp,
+    cpu_percent double precision
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_cpu_utilization_time
+    ON collect.pg_cpu_utilization(server_id, collection_time);";
 
     /// <summary>
     /// V102 — <c>collect.pg_server_config</c>, the server's own configuration from <c>pg_settings</c>
@@ -2705,7 +3378,15 @@ ALTER TABLE collect.pg_extension_availability
     ADD COLUMN IF NOT EXISTS database_name text;";
 
     /// <summary>
-    /// V94 — <c>collect.pg_index_bloat</c> (#2561): b-tree index bloat, MEASURED via <c>pgstatindex</c>
+    /// V94 — <c>collect.pg_index_bloat</c>. <b>Its column list carries the #3234 estimate columns that
+    /// V114 also adds, and that duplication is the convention rather than an oversight</b>: a collector's
+    /// creating rung must stay byte-identical to what <c>PgSchemaGenerator.CreateTable</c> emits from its
+    /// <c>PayloadColumns</c>, which <c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c>
+    /// asserts. So a fresh install gets the full shape here and V114's <c>ADD COLUMN IF NOT EXISTS</c> is a
+    /// no-op for it, while a store already past V94 gets the same columns from V114. Both converge, which
+    /// is what the <c>IF NOT EXISTS</c> is for. V95 did the same thing with <c>database_name</c>.
+    ///
+    /// <para>Originally (#2561): b-tree index bloat, MEASURED via <c>pgstatindex</c>
     /// rather than estimated from column statistics.
     ///
     /// <para>The issue proposed porting the ioguix estimator. Measured, that route is unusable for the role
@@ -2747,7 +3428,15 @@ CREATE TABLE IF NOT EXISTS collect.pg_index_bloat (
     deleted_pages bigint,
     avg_leaf_density double precision,
     leaf_fragmentation double precision,
-    skipped_reason text
+    skipped_reason text,
+    index_pages bigint,
+    table_rows bigint,
+    fillfactor integer,
+    est_tuple_bytes bigint,
+    est_leaf_pages bigint,
+    est_bloat_pct double precision,
+    est_reclaimable_bytes bigint,
+    pgstattuple_available boolean
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_index_bloat_time
@@ -3646,14 +4335,221 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// <c>migrate_data =&gt; true</c>, which rewrites every existing row into chunks; on a long-collected /
     /// many-server store that can exceed 30s. Mirrors <see cref="TimescaleSupport"/>'s runtime-conversion
     /// budget. Harmless for the DDL-only migrations — they finish in milliseconds regardless.
+    ///
+    /// <para><b>Per RUNG, not per statement.</b> <see cref="MigrateLockedAsync"/> issues one
+    /// <c>NpgsqlCommand</c> carrying a rung's entire SQL, so V39's two <c>CREATE INDEX</c>es share one
+    /// budget instead of getting one each. That is the unit
+    /// <see cref="MigrationLockWaitTimeoutSeconds"/>' floor is counted in.</para>
+    ///
+    /// <para><b>The cancel it sends IS honoured, on every rung this ladder has.</b> Client-side bounds
+    /// are only requests, so this was measured rather than assumed, against a seeded PostgreSQL 17.11 /
+    /// TimescaleDB 2.29.2 store carrying 13.5 million rows and 90 chunks in each of the four
+    /// floor-setting rungs' targets (unbounded there: V22 6.08 s, V39 4.28 s, V104 10.57 s, V23 25.61 s).
+    /// At a 1 s and a 2 s budget all four abort within 50 ms of it, from inside <c>IO/DataFileRead</c> and
+    /// <c>IO/BuffileRead</c> waits; the backend leaves <c>pg_stat_activity</c> inside 0.4 s, the rung's
+    /// transaction rolls back whole and the connection stays usable. The realistic overrun was run at this
+    /// constant's real value through this applier — a rung parked behind a peer's table lock, which is
+    /// what a second instance collecting into the same store produces: V22 sat in <c>Lock/relation</c> for
+    /// the entire budget and ended at 300.06 s, nothing applied and nothing stamped. So the floor in
+    /// <see cref="MigrationLockWaitTimeoutSeconds"/> is a ceiling on real holds as well, one budget per
+    /// rung.</para>
+    ///
+    /// <para><b>What it bounds is SILENCE, not wall clock — which is why #2894's residual is a
+    /// rung-SHAPE question and not a missing mechanism.</b> Npgsql implements this as a socket READ
+    /// timeout, and every message the backend sends restarts it. Matched pair, same statement and the same
+    /// 40 s of work both times: emitting one <c>RAISE NOTICE</c> a second it ran to completion in 40.18 s
+    /// and a 5 s budget never fired at all, while silent it was cancelled at 5.02 s. A rung is therefore
+    /// bounded at this many seconds of BACKEND SILENCE. Today's ladder is quiet — no rung contains a
+    /// <c>LOOP</c>, and V23's is its only <c>RAISE</c>, in an exception handler that runs only when the
+    /// rung is already failing — so the whole exposure is the two messages <c>create_hypertable</c> emits
+    /// itself, both inside the first 3 s, which offsets V23's real ceiling to 303 s while V22, V39 and
+    /// V104 are cancelled at 300.05 s. A rung that instrumented its own progress, the natural way to write
+    /// a long data move, would not be cancelled at all.</para>
     /// </summary>
     private const int MigrationCommandTimeoutSeconds = 300;
+
+    /// <summary>
+    /// Lock-wait budget (seconds) for acquiring <see cref="MigrationLockKey"/>. A different quantity from
+    /// <see cref="MigrationCommandTimeoutSeconds"/> above, which bounds ONE statement: the lock is taken once
+    /// and held while <see cref="MigrateLockedAsync"/> applies EVERY pending rung in the same session, so what
+    /// a sibling waits for here is a whole multi-rung session. Set to the statement bound (as this site first
+    /// was) a several-rung upgrade can outlast the waiter while every individual statement stayed inside its
+    /// own limit, so the two budgets are named separately and move independently.
+    ///
+    /// <para><b>Spent by polling, not by blocking.</b> <see cref="TryAcquireMigrationLockAsync"/> retries
+    /// <c>pg_try_advisory_lock</c> on a <see cref="MigrationLockPollIntervalSeconds"/> cadence until this
+    /// budget is gone, rather than parking one <c>pg_advisory_lock</c> behind an Npgsql
+    /// <c>CommandTimeout</c>. Not because the blocking form overran — measured on PostgreSQL 17.11 it
+    /// expires on time, since a backend asleep on a lock reaches an interrupt check and honours query
+    /// cancel (both <c>lock_timeout</c> and <c>statement_timeout</c> abort a blocked
+    /// <c>pg_advisory_lock</c> there too). It is because the blocking form cannot say what it waited for:
+    /// Npgsql surfaces the expiry as <c>NpgsqlException("Exception while reading from stream")</c> wrapping
+    /// <c>TimeoutException("Timeout during reading attempt")</c>, and the one production caller logs
+    /// <c>ex.Message</c> alone — so a 25-minute wait on a sibling migrator reached the operator as a
+    /// sentence about a stream, which is exactly the #2874 misdiagnosis shape. Polling also makes the wait
+    /// visible WHILE it happens rather than only after it fails, and makes the sleep cancellable by the
+    /// stopping token directly instead of through a cancel-request round trip. Each attempt is a statement
+    /// that cannot block, so nothing about this budget depends on a cancel being delivered at all.</para>
+    ///
+    /// <para><b>Lower bound — the total the lock can legitimately be held for.</b> Of the 110 rungs in
+    /// <see cref="Scripts"/> (V1-V111, V45 permanently absent), SIX touch data an earlier rung created, and
+    /// FOUR of those are big enough to spend any of this budget: V22 (index built over every existing chunk
+    /// of the populated <c>index_object_stats</c> hypertable), V23 (<c>create_hypertable</c> with
+    /// <c>migrate_data =&gt; true</c>, rewriting <c>collection_log</c>'s rows into chunks), V39 (two partial
+    /// indexes over the populated <c>query_stats</c> and <c>procedure_stats</c> hypertables) and V104 (index
+    /// over the populated <c>pg_deadlocks</c>). The other two are costed at zero rather than overlooked —
+    /// both are genuine DML against pre-existing rows, on targets that cannot carry a cost: V62 adds a CHECK
+    /// constraint to <c>config.config_service</c>, which validates every existing row of a SINGLE-ROW
+    /// control-plane table, and V77 deletes two watermark keys from <c>collect.collector_state</c>, which
+    /// holds a few rows per server per collector rather than a hypertable's worth. Every other rung creates
+    /// the table it then indexes, or is a metadata-only <c>ADD COLUMN</c> /
+    /// <c>ALTER TABLE ... SET SCHEMA</c> / <c>DROP NOT NULL</c> / view refresh — the ladder measured
+    /// 0.301 s end to end at 108 rungs on a fresh PostgreSQL 17.11 / TimescaleDB 2.29.2 store, advisory lock
+    /// and version stamps included. The applier gives each rung's WHOLE SQL a single
+    /// <see cref="MigrationCommandTimeoutSeconds"/>, so that bound is per-RUNG and V39's two indexes cost one
+    /// multiple rather than two: four rungs is four times the bound for the data-moving part of a full
+    /// V21-to-current upgrade, and the fifth multiple here is margin, sized at one rung bound because that is
+    /// the granularity this ladder grows by — one new data-moving rung. Seeded reference points on that same
+    /// local store, warm and on local NVMe (a cold busy store being why the rung bound is 300 s rather than
+    /// 30): V22 1.29 s over 907 MB / 90 chunks, V23 9.37 s over a 608 MB heap, V39 1.44 s over 1.26 GB. The
+    /// live 42-server store holds 2.72 GB, 0.69 GB and 24.5 GB in those same tables, so the real figures are
+    /// larger and colder — which is the point of taking the floor from the per-rung bound rather than from
+    /// these timings.</para>
+    ///
+    /// <para><b>Upper bound — there is none in the code, which is a finding rather than an omission.</b>
+    /// <c>MigrateAsync</c> has exactly one production caller, <c>DarlingWorker.RunCollectionLoopAsync</c>, and
+    /// it passes the plain stopping token: no <c>CancelAfter</c> anywhere on the path, no
+    /// <c>HostOptions.StartupTimeout</c> configured (so the framework default is infinite), no health check or
+    /// readiness probe in the repo, no <c>HEALTHCHECK</c> on the container image and no orchestrator manifest.
+    /// The installers' 60 s / 2 min <c>WaitForStatus('Running')</c> do not bound it either — the worker is a
+    /// <c>BackgroundService</c>, so the service reports Running before the first migration statement runs. The
+    /// value therefore comes from the failure ASYMMETRY: too short and the waiter throws into
+    /// <c>DarlingWorker</c>'s <c>LogCritical</c>-and-return, which takes that instance out of the collection
+    /// loop entirely until an operator restarts it. #2936's retry loop around that call does not save it,
+    /// and deliberately so: <c>StartupFailureTriage</c> does classify the expiry's bare
+    /// <see cref="TimeoutException"/> as retryable, but gates the retries on a 120 s WALL-CLOCK budget —
+    /// an order of magnitude under a single spend of this constant, precisely so 25 attempts cannot become
+    /// ten hours — so the first expiry has already exhausted it and lands in the terminal arm. One expiry
+    /// is terminal by design, not by omission. Too long and it only delays its own first
+    /// cycle, because its MCP and web surfaces start independently and are already serving. Waiting is the
+    /// cheap direction, so this errs long — but stays FINITE, so a genuinely wedged holder still produces a
+    /// readable deadline instead of the silent hang #2874 exists to stop.</para>
+    ///
+    /// <para><b>What expiry does, and why it is not one answer.</b> The lock is needed to APPLY rungs, not
+    /// to decide there are none: the applier commits each rung's DDL and its version stamp in one
+    /// transaction, so a stamp of N is proof that rung N and everything below it committed. So on expiry
+    /// <see cref="TryAcquireMigrationLockAsync"/> reads the stamp table once and splits. Store already at
+    /// <see cref="StorageVersion.SchemaVersion"/>: nothing would be applied, the lock was only ever needed
+    /// to establish that, and the call returns 0 applied with a warning naming the holder-hunting query.
+    /// Store BELOW it: there are rungs to apply, they cannot be applied safely without the lock, and a
+    /// <see cref="TimeoutException"/> carrying both versions and that same query is the honest answer. The
+    /// split matters because the case that actually strands an instance is not a slow migrator but a dead
+    /// one — a session advisory lock outlives the client whenever the server never notices the peer is
+    /// gone, and then the store is perfectly current and every restart used to die at this budget for want
+    /// of a lock it had nothing to do with. Never proceeding without a POSITIVE version match is what keeps
+    /// this from being "give up and collect anyway".</para>
+    ///
+    /// <para><b>What bounds a rung that overruns its own budget: that budget does, and the residual is a
+    /// rung SHAPE rather than a missing mechanism.</b> <see cref="MigrationCommandTimeoutSeconds"/> is
+    /// client-side, so whether it BINDS was measured rather than reasoned about — see that constant: the
+    /// cancel it sends is honoured by all four floor-setting rungs within 50 ms of the budget, from inside
+    /// I/O waits and from a full-budget <c>Lock/relation</c> wait, so the floor above is a ceiling on real
+    /// holds too. What it does not bound is a rung that keeps TALKING, because Npgsql restarts the timeout
+    /// on every backend message. Two rung shapes opt out of it and both are one line of plpgsql from V23's
+    /// existing <c>DO</c> block. A <c>RAISE</c> inside a <c>LOOP</c> is never cancelled and holds this lock
+    /// for as long as it runs — loud, because the waiter says so, and caught anyway by the census above
+    /// whenever such a rung also moves data. An <c>EXCEPTION WHEN query_canceled</c> is the silent one:
+    /// <c>OTHERS</c> deliberately does not match a cancel, but naming the condition does, and measured, the
+    /// applier then saw SUCCESS, committed the rung and stamped the version while the rung's own work never
+    /// happened. That destroys the "a stamp of N proves rung N committed" property the expiry split above
+    /// rests on, and permanently, so <c>MigrationDataMovingRungCensusPins</c> fails the build on the shape
+    /// rather than leaving it to be rediscovered.</para>
+    ///
+    /// <para><b>Three mechanisms considered instead of that pin, and why none of them is built.</b> A
+    /// watchdog cancelling the migrate backend out of band buys nothing measurable:
+    /// <c>pg_cancel_backend</c> stopped the same four rungs at 2.01-2.03 s and
+    /// <c>pg_terminate_backend</c> at 2.01-2.05 s, against this applier's own 2.04-2.07 s on the identical
+    /// rungs, because all three arrive through the same <c>CHECK_FOR_INTERRUPTS</c> — nothing one can stop
+    /// is beyond the others. Terminate is worse than merely redundant: it reports <c>57P01</c>, which
+    /// <c>StartupFailureTriage</c> holds retryable, so it would turn a rung that can never apply into one
+    /// that is retried. Splitting the expensive rungs so each statement gets its own budget helps exactly
+    /// one of the four — V22, V23 and V104 are each a single statement — and pays for that by raising this
+    /// floor from four multiples to five. Both server-side timeouts have the wrong unit or the wrong
+    /// reach: <c>statement_timeout</c> is per STATEMENT, not per transaction — three one-second statements
+    /// all survive a two-second setting — so it would bound V39's two <c>CREATE INDEX</c>es at one budget
+    /// EACH, making the ladder's floor five multiples instead of four and spending this constant's entire
+    /// margin to buy a bound that still is not per-rung. <c>transaction_timeout</c> has exactly the right
+    /// unit, since each rung is one transaction, but it is PostgreSQL 17+ against readers here that gate
+    /// as low as 13, and it ends the session with FATAL rather than failing the statement.</para>
+    ///
+    /// <para>A multiple rather than a literal so the two budgets cannot drift apart if the rung bound moves.
+    /// #2894 recorded two ways the wait still dies, and both are now narrowed rather than closed. A fifth
+    /// FLOOR-SETTING rung is pinned rather than trusted — <c>MigrationDataMovingRungCensusPins</c> scans
+    /// every rung's shipped SQL for data-moving shapes and fails when that set stops matching the census
+    /// above, so a new one arrives carrying this derivation in a failure message instead of arriving
+    /// silently. It resolves each statement's TARGET rather than counting keywords, because an index on a
+    /// table the same rung creates is free and 130 of this ladder's 134 <c>CREATE INDEX</c> statements are
+    /// that shape. A rung needing longer than its own bound turns out to be bounded after all, per the two
+    /// paragraphs above — one <see cref="MigrationCommandTimeoutSeconds"/> per rung, honoured, plus V23's
+    /// 3 s of <c>create_hypertable</c> chatter — and what is left of that residual is the rung shape that
+    /// opts out of the bound silently, which is pinned. Its victim also no longer dies undiagnosed, and no
+    /// longer dies at all when it had nothing to apply. The refinement deliberately NOT built is
+    /// extending this budget whenever the stamp table is seen to advance, which would make a
+    /// slow-but-progressing holder unable to strand a waiter at all: it costs a catalog probe and a read
+    /// per poll on the store being migrated, to buy a case that needs a single rung to exceed five minutes
+    /// on a ladder measured at 0.301 s.</para>
+    /// </summary>
+    private const int MigrationLockWaitTimeoutSeconds = 5 * MigrationCommandTimeoutSeconds;
+
+    /// <summary>
+    /// Gap (seconds) between <c>pg_try_advisory_lock</c> attempts while a sibling migrator holds the lock.
+    ///
+    /// <para><b>Upper side — it is the delay added to a wait that would otherwise be over.</b> Whatever the
+    /// holder is doing, this instance learns it finished up to one interval late, so the interval has to be
+    /// small against the thing being waited for. The whole 109-rung ladder measures 0.301 s on a fresh
+    /// store, so the ordinary contended case — a sibling bringing up a new store, or applying nothing — is
+    /// already gone by the first retry, and one second is the coarsest value that keeps the notice latency
+    /// the same order as the work itself.</para>
+    ///
+    /// <para><b>Lower side — poll traffic against a store that is concurrently rewriting a hypertable.</b>
+    /// Each attempt is one round trip running a function that reads a single lock-manager hash entry.
+    /// One second spends at most <see cref="MigrationLockWaitTimeoutSeconds"/> attempts over the whole
+    /// budget, which is nothing beside V23 moving a multi-gigabyte heap into chunks; going sub-second would
+    /// spend more on scheduling and round trips than the answer is worth, and the answer cannot change
+    /// faster than the holder can commit a rung.</para>
+    /// </summary>
+    private const int MigrationLockPollIntervalSeconds = 1;
+
+    /// <summary>
+    /// How much elapsed wait passes between "still waiting" log lines. Separate from
+    /// <see cref="MigrationLockPollIntervalSeconds"/> on purpose: how often to ASK is a question about
+    /// notice latency, how often to SAY is a question about what a human can read.
+    ///
+    /// <para><b>Lower side — a legitimate maximum wait must not become a log flood.</b> The lower bound on
+    /// the budget above is minutes of real data-moving work, and a line per poll would emit one per second
+    /// for all of it, which is indistinguishable in a log from a spin. At 30 s even a wait that runs the
+    /// full budget out emits tens of lines, each carrying elapsed and remaining.</para>
+    ///
+    /// <para><b>Upper side — it must be under the shortest wait worth mentioning.</b> Ordinary contention
+    /// resolves in well under this, so the common case stays silent and adds no new startup noise; the
+    /// first line only appears once a wait has outlasted every measured single-rung cost on a live-sized
+    /// store by a wide margin, at which point it is genuinely news. Going much higher would leave the
+    /// operator watching nothing during the interval where the decision to restart the service gets
+    /// made.</para>
+    /// </summary>
+    private const int MigrationLockWaitLogIntervalSeconds = 30;
 
     /// <summary>
     /// Applies every migration newer than the store's current version, each in its own
     /// transaction, stamping darling_schema_version as it goes. Idempotent — a fully migrated
     /// store is a no-op — and safe under concurrent callers (advisory-locked). The connection
     /// must be open.
+    ///
+    /// <para>Returns the number applied. A rung is NEVER applied without the lock, but returning 0 does
+    /// not by itself mean the lock was held: when a sibling holds it for the whole
+    /// <see cref="MigrationLockWaitTimeoutSeconds"/> and the store already carries this build's version,
+    /// this returns 0 rather than failing, because there was nothing the lock was needed for. A store
+    /// below this build's version in that situation throws <see cref="TimeoutException"/> instead.</para>
     /// </summary>
     public static Task<int> MigrateAsync(NpgsqlConnection connection, CancellationToken cancellationToken = default)
         => MigrateAsync(connection, logger: null, cancellationToken);
@@ -3675,10 +4571,14 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
             throw new ArgumentNullException(nameof(connection));
         }
 
-        using (var acquireLock = new NpgsqlCommand("SELECT pg_advisory_lock($1)", connection))
+        if (!await TryAcquireMigrationLockAsync(connection, logger, MigrationLockWaitTimeoutSeconds, cancellationToken))
         {
-            acquireLock.Parameters.AddWithValue(MigrationLockKey);
-            await acquireLock.ExecuteNonQueryAsync(cancellationToken);
+            /* The budget went and the lock is still someone else's, but the store already carries the
+               version this build knows — so this call has no rung to apply and wanted the lock only to
+               establish that. Nothing is applied, nothing is stamped, and the store-establishing half
+               below never needed the lock in the first place. */
+            await TrySetDatabaseSearchPathAsync(connection, logger, cancellationToken);
+            return 0;
         }
 
         int applied;
@@ -3690,7 +4590,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         {
             try
             {
-                using var releaseLock = new NpgsqlCommand("SELECT pg_advisory_unlock($1)", connection);
+                using var releaseLock = new NpgsqlCommand("SELECT pg_advisory_unlock($1)", connection) { CommandTimeout = MigrationCommandTimeoutSeconds };
                 releaseLock.Parameters.AddWithValue(MigrationLockKey);
                 await releaseLock.ExecuteNonQueryAsync(CancellationToken.None);
             }
@@ -3706,6 +4606,150 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         return applied;
     }
 
+    /// <summary>
+    /// Takes <see cref="MigrationLockKey"/> by retrying <c>pg_try_advisory_lock</c> instead of blocking in
+    /// <c>pg_advisory_lock</c>, spending at most <see cref="MigrationLockWaitTimeoutSeconds"/> and saying so
+    /// every <see cref="MigrationLockWaitLogIntervalSeconds"/> while it does. See that constant for why the
+    /// budget is polled rather than handed to a <c>CommandTimeout</c>, and for the derivation of its size.
+    ///
+    /// <para>TRUE means the lock is held and the caller may apply rungs. FALSE means the budget expired
+    /// AND the store already reports <see cref="StorageVersion.SchemaVersion"/>, so there is nothing to
+    /// apply and no reason to fail — the caller must apply nothing on that answer. A budget that expires
+    /// against a store BELOW this build's version throws instead, because those rungs genuinely cannot be
+    /// applied without the lock.</para>
+    /// </summary>
+    private static async Task<bool> TryAcquireMigrationLockAsync(
+        NpgsqlConnection connection, ILogger? logger, int waitBudgetSeconds, CancellationToken cancellationToken)
+    {
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        var attempts = 0;
+        var lastReportedSecond = 0L;
+
+        while (true)
+        {
+            bool acquired;
+            using (var attempt = new NpgsqlCommand("SELECT pg_try_advisory_lock($1)", connection) { CommandTimeout = MigrationCommandTimeoutSeconds })
+            {
+                attempt.Parameters.AddWithValue(MigrationLockKey);
+                acquired = await attempt.ExecuteScalarAsync(cancellationToken) is true;
+            }
+
+            attempts++;
+
+            if (acquired)
+            {
+                if (attempts > 1)
+                {
+                    logger?.LogInformation(
+                        "Migration advisory lock acquired after waiting {Seconds}s ({Attempts} attempts) — " +
+                        "another migrator was holding it and has finished.",
+                        (long)waited.Elapsed.TotalSeconds, attempts);
+                }
+
+                return true;
+            }
+
+            if (waited.Elapsed.TotalSeconds >= waitBudgetSeconds)
+            {
+                break;
+            }
+
+            var elapsedSeconds = (long)waited.Elapsed.TotalSeconds;
+            if (elapsedSeconds - lastReportedSecond >= MigrationLockWaitLogIntervalSeconds)
+            {
+                lastReportedSecond = elapsedSeconds;
+                logger?.LogWarning(
+                    "Still waiting for the migration advisory lock: {Elapsed}s elapsed of {Budget}s, " +
+                    "{Attempts} attempts. Another connection is migrating this store, or holds the lock " +
+                    "without releasing it. Find it with: SELECT a.pid, a.state, a.query_start, a.query " +
+                    "FROM pg_locks l JOIN pg_stat_activity a USING (pid) WHERE l.locktype = 'advisory';",
+                    elapsedSeconds, waitBudgetSeconds, attempts);
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(MigrationLockPollIntervalSeconds), cancellationToken);
+        }
+
+        /* Budget spent. Whether that is fatal depends entirely on whether this call had anything to do,
+           which the stamp table answers — see MigrationLockWaitTimeoutSeconds for why a stamp of N proves
+           every rung up to N committed, and so why reading it here is not a guess. */
+        var storeVersion = await ReadStampedSchemaVersionAsync(connection, cancellationToken);
+        var totalWaited = (long)waited.Elapsed.TotalSeconds;
+
+        if (storeVersion >= StorageVersion.SchemaVersion)
+        {
+            logger?.LogWarning(
+                "Gave up on the migration advisory lock after {Elapsed}s ({Attempts} attempts), but this " +
+                "store is already at schema v{StoreVersion} and this build needs v{BuildVersion}, so there " +
+                "was nothing to apply — continuing without migrating. Something is holding the lock and not " +
+                "releasing it, commonly an orphaned backend from an instance that died without closing its " +
+                "connection; find it with: SELECT a.pid, a.state, a.query_start, a.query FROM pg_locks l " +
+                "JOIN pg_stat_activity a USING (pid) WHERE l.locktype = 'advisory';",
+                totalWaited, attempts, storeVersion, StorageVersion.SchemaVersion);
+            return false;
+        }
+
+        throw new TimeoutException(
+            "Timed out after " + totalWaited.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            + "s (" + attempts.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            + " attempts) waiting for the migration advisory lock. This store is at schema v"
+            + storeVersion.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            + " and this build needs v"
+            + StorageVersion.SchemaVersion.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            + ", so there are migrations to apply and they cannot be applied while another connection holds "
+            + "the lock. Either a second service instance is migrating the same store, or a connection is "
+            + "holding the lock without releasing it. Find the holder with: SELECT a.pid, a.state, "
+            + "a.query_start, a.query FROM pg_locks l JOIN pg_stat_activity a USING (pid) WHERE "
+            + "l.locktype = 'advisory';");
+    }
+
+    /// <summary>
+    /// Test seam: <see cref="TryAcquireMigrationLockAsync"/> with the wait budget supplied, so real
+    /// advisory-lock contention can be exercised in seconds instead of the
+    /// <see cref="MigrationLockWaitTimeoutSeconds"/> the shipped path deliberately allows. The SAME code
+    /// path — the budget is the only thing a test is allowed to shorten, so the poll, the expiry split and
+    /// the messages under test are the ones that ship.
+    /// </summary>
+    internal static Task<bool> TryAcquireMigrationLockForTestsAsync(
+        NpgsqlConnection connection, ILogger? logger, int waitBudgetSeconds, CancellationToken cancellationToken)
+        => TryAcquireMigrationLockAsync(connection, logger, waitBudgetSeconds, cancellationToken);
+
+    /// <summary>
+    /// Test seam: the advisory lock key, so a contention test contends on the REAL one rather than a
+    /// restated literal that could drift away from it.
+    /// </summary>
+    internal static long MigrationLockKeyForTests => MigrationLockKey;
+
+    /// <summary>
+    /// The store's highest applied schema version, or 0 when the stamp table does not exist yet. Read on
+    /// the lock-wait expiry path only, so the extra round trips cost nothing that matters.
+    ///
+    /// <para>All three statements are static text. The <c>SET search_path</c> is the same one
+    /// <see cref="MigrateLockedAsync"/> issues as its first act — legal even when those schemas do not
+    /// exist yet, and it is what lets the bare name resolve either spelling, since the stamp table lives in
+    /// <c>public</c> before V8 and in <c>collect</c> after it. <c>to_regclass</c> then answers "does it
+    /// exist" with NULL instead of an error, so a fresh store whose holder has not committed V1 yet is an
+    /// ordinary 0 rather than a failed statement used as control flow.</para>
+    /// </summary>
+    private static async Task<int> ReadStampedSchemaVersionAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        using (var setPath = new NpgsqlCommand("SET search_path = " + PgSchemaGenerator.SearchPath, connection) { CommandTimeout = MigrationCommandTimeoutSeconds })
+        {
+            await setPath.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        using (var probe = new NpgsqlCommand("SELECT to_regclass('darling_schema_version') IS NOT NULL", connection) { CommandTimeout = MigrationCommandTimeoutSeconds })
+        {
+            if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
+            {
+                return 0;
+            }
+        }
+
+        using var read = new NpgsqlCommand("SELECT COALESCE(MAX(version), 0) FROM darling_schema_version", connection) { CommandTimeout = MigrationCommandTimeoutSeconds };
+        return Convert.ToInt32(await read.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
     private static async Task<int> MigrateLockedAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         /* Resolve bare names through collect/config for this migrate session. Load-bearing from V8
@@ -3715,18 +4759,18 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
            they simply resolve to public, exactly as before), so this is safe on every store version
            and independent of any connection-string Search Path. Session-scoped (outside the
            per-migration transactions), so a migration rollback never unsets it. */
-        using (var setPath = new NpgsqlCommand("SET search_path = " + PgSchemaGenerator.SearchPath, connection))
+        using (var setPath = new NpgsqlCommand("SET search_path = " + PgSchemaGenerator.SearchPath, connection) { CommandTimeout = MigrationCommandTimeoutSeconds })
         {
             await setPath.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        using (var createVersionTable = new NpgsqlCommand(VersionTableSql, connection))
+        using (var createVersionTable = new NpgsqlCommand(VersionTableSql, connection) { CommandTimeout = MigrationCommandTimeoutSeconds })
         {
             await createVersionTable.ExecuteNonQueryAsync(cancellationToken);
         }
 
         int currentVersion;
-        using (var readVersion = new NpgsqlCommand("SELECT COALESCE(MAX(version), 0) FROM darling_schema_version", connection))
+        using (var readVersion = new NpgsqlCommand("SELECT COALESCE(MAX(version), 0) FROM darling_schema_version", connection) { CommandTimeout = MigrationCommandTimeoutSeconds })
         {
             currentVersion = Convert.ToInt32(await readVersion.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
         }
@@ -3747,7 +4791,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
             }
 
             using (var stamp = new NpgsqlCommand(
-                "INSERT INTO darling_schema_version (version, name, applied_at) VALUES ($1, $2, $3)", connection, transaction))
+                "INSERT INTO darling_schema_version (version, name, applied_at) VALUES ($1, $2, $3)", connection, transaction) { CommandTimeout = MigrationCommandTimeoutSeconds })
             {
                 stamp.Parameters.AddWithValue(migration.Version);
                 stamp.Parameters.AddWithValue(migration.Name);
@@ -3796,7 +4840,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         try
         {
             using var command = new NpgsqlCommand(
-                $"ALTER DATABASE {quotedDatabase} SET search_path = {PgSchemaGenerator.SearchPath}", connection);
+                $"ALTER DATABASE {quotedDatabase} SET search_path = {PgSchemaGenerator.SearchPath}", connection) { CommandTimeout = MigrationCommandTimeoutSeconds };
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

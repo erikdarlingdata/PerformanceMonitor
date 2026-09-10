@@ -58,7 +58,7 @@ LIMIT 5";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(BadActorSql, connection);
+            using var cmd = new NpgsqlCommand(BadActorSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -104,7 +104,10 @@ LIMIT 5";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -131,7 +134,7 @@ AND   collection_time <= $3";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(ActiveQuerySql, connection);
+            using var cmd = new NpgsqlCommand(ActiveQuerySql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -169,7 +172,10 @@ AND   collection_time <= $3";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -193,7 +199,7 @@ AND   collection_time <= $3";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(RunningJobsSql, connection);
+            using var cmd = new NpgsqlCommand(RunningJobsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -225,7 +231,10 @@ AND   collection_time <= $3";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -256,7 +265,7 @@ FROM latest WHERE rn = 1";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(SessionStatsSql, connection);
+            using var cmd = new NpgsqlCommand(SessionStatsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -292,7 +301,10 @@ FROM latest WHERE rn = 1";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 

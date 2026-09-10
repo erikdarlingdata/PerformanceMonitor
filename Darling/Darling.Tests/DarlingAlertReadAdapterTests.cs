@@ -309,7 +309,7 @@ public sealed class DarlingAlertReadAdapterTests
             /* --- tempdb --- */
             var tempDb = await adapter.GetTempDbSpaceAsync(TestServerKey, ct);
             Assert.NotNull(tempDb);
-            Assert.Equal(80d, tempDb!.UsedPercent, precision: 3);
+            Assert.Equal(80d, tempDb!.ReservedPercent, precision: 3);
             Assert.Equal(55, tempDb.TopConsumerSessionId);
 
             /* --- anomalous jobs: threshold + the 60-second average noise floor --- */

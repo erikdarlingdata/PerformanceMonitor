@@ -86,6 +86,7 @@ public sealed class CollectorEngineCapabilityMovingGateTests
         public IReadOnlyList<CollectorColumn> PayloadColumns => Array.Empty<CollectorColumn>();
 
         public bool YieldsOnLockTimeout => false;
+        public TimeSpan? PerItemWallClockBudget => null;
 
         public IReadOnlyList<string> StateKeys => Array.Empty<string>();
 

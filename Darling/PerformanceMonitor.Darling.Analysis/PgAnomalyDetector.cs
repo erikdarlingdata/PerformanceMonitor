@@ -301,7 +301,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
             // Growth: biggest day-over-day table grower (indexes rolled up) over threshold.
-            using (var cmd = new NpgsqlCommand(ObjectGrowthSql, connection))
+            using (var cmd = new NpgsqlCommand(ObjectGrowthSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
             {
                 cmd.Parameters.AddWithValue(context.ServerId);
                 cmd.Parameters.AddWithValue(ObjectGrowthMbThreshold);
@@ -336,7 +336,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             }
 
             // Contention: index with the largest new row-lock wait time (no reset).
-            using (var cmd = new NpgsqlCommand(ObjectContentionSql, connection))
+            using (var cmd = new NpgsqlCommand(ObjectContentionSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
             {
                 cmd.Parameters.AddWithValue(context.ServerId);
                 cmd.Parameters.AddWithValue(ObjectLockWaitMsDeltaThreshold);
@@ -390,7 +390,7 @@ ORDER BY ms_delta DESC LIMIT 1";
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-            using var cmd = new NpgsqlCommand(HasBaselineDataSql, connection);
+            using var cmd = new NpgsqlCommand(HasBaselineDataSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);
             /* Lite binds the same window end minus 30 days here — the parameterized "now" (or the
                #2506 anchor), made Kind-Unspecified for the naive-UTC timestamp columns. */
@@ -426,7 +426,7 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(CpuWindowSql, connection);
+            using var cmd = new NpgsqlCommand(CpuWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -499,7 +499,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             double peakRate;
             double totalWaitMs;
             long collectionCount;
-            using (var rateCmd = new NpgsqlCommand(WaitRateWindowSql, connection))
+            using (var rateCmd = new NpgsqlCommand(WaitRateWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
             {
                 rateCmd.Parameters.AddWithValue(context.ServerId);
                 rateCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
@@ -559,7 +559,7 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             // Top 6 contributors — named in the metadata KEY (a Dictionary<string,double> can't hold
             // the type name in the value), value = the type's total wait ms in the window.
-            using (var contribCmd = new NpgsqlCommand(WaitContribWindowSql, connection))
+            using (var contribCmd = new NpgsqlCommand(WaitContribWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
             {
                 contribCmd.Parameters.AddWithValue(context.ServerId);
                 contribCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
@@ -603,7 +603,7 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(BlockingWindowSql, connection);
+            using var cmd = new NpgsqlCommand(BlockingWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -701,7 +701,7 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(IoWindowSql, connection);
+            using var cmd = new NpgsqlCommand(IoWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -793,7 +793,7 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(BatchRequestWindowSql, connection);
+            using var cmd = new NpgsqlCommand(BatchRequestWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -857,7 +857,7 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(SessionWindowSql, connection);
+            using var cmd = new NpgsqlCommand(SessionWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -922,7 +922,7 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(QueryDurationWindowSql, connection);
+            using var cmd = new NpgsqlCommand(QueryDurationWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -988,7 +988,7 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(MemoryWindowSql, connection);
+            using var cmd = new NpgsqlCommand(MemoryWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));

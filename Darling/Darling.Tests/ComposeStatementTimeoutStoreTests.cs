@@ -151,6 +151,33 @@ public class ComposeStatementTimeoutStoreTests
         Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"SET statement_timeout = '").Count);
     }
 
+    /// <summary>
+    /// <b>A reload carries the knob into the held config.</b> It was seeded, read back, clamped and
+    /// documented as store-authoritative, but <see cref="StoreConfigProvider.ApplyToConfig"/> never
+    /// assigned it, so <c>config.ComposeStatementTimeoutSeconds</c> reported the darling.json value for
+    /// the life of the process while <c>config_service</c> said otherwise. Pure -- ApplyToConfig does no I/O.
+    ///
+    /// <para>This pins PROPAGATION, which is not the same as delivery. The effective ceiling is whatever
+    /// startup provisioning last wrote onto the roles (see the class summary above); a reload does not
+    /// re-assert it. So the held value states the store's DESIRED timeout, and
+    /// <see cref="StoreConfigViewPropagationTests"/> holds the same invariant for the whole family.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(120)]
+    [InlineData(15)]
+    [InlineData(600)]
+    public void AReload_CarriesTheKnobIntoTheHeldConfig(int stored)
+    {
+        /* Deliberately NOT the darling.json default: an assignment that never happens has to be
+           distinguishable from one that happens to land on 15. */
+        var config = new DarlingConfig { ComposeStatementTimeoutSeconds = 42 };
+
+        StoreConfigProvider.ApplyToConfig(
+            config, new StoreConfigView { ComposeStatementTimeoutSeconds = stored });
+
+        Assert.Equal(stored, config.ComposeStatementTimeoutSeconds);
+    }
+
     /// <summary>Omitting it reproduces the constant it replaced, so an untouched install is unchanged.</summary>
     [Fact]
     public void TheDefaultReproducesTheOldConstant()

@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -80,6 +81,7 @@ RETURNING command_id";
         }
 
         await using var command = _dataSource.CreateCommand(CommandEnqueueSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CommandPlaneSeconds;
         AddNullableText(command, requestedBy);                                              // $1
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = commandType });  // $2
         command.Parameters.Add(new NpgsqlParameter                                          // $3
@@ -104,6 +106,7 @@ RETURNING command_id";
     public async Task<CommandResult?> ReadCommandResultAsync(long commandId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(CommandPollSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CommandPlaneSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = commandId });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -192,6 +195,7 @@ RETURNING command_id";
     public async Task DeleteCommandAsync(long commandId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(CommandDeleteSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CommandPlaneSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = commandId });
         await ExecuteWriteAsync(command, cancellationToken);
     }
@@ -212,6 +216,45 @@ RETURNING command_id";
         ArgumentNullException.ThrowIfNull(server);
         return JsonSerializer.Serialize(server, s_argsJsonOptions);
     }
+
+    /// <summary>
+    /// The engine-aware version label for a <c>test_connect</c> result payload (#3145) — the ONE reader of
+    /// the probe's version facts, shared by both Add-server dialogs, which each formatted this themselves.
+    /// Lives beside <see cref="BuildTestConnectArgs"/> because the two are halves of the same contract: that
+    /// builds the request, this reads the reply.
+    ///
+    /// <para>The payload carries <c>engine</c> (a <see cref="CollectorTargetEngine"/> name),
+    /// <c>postgresMajorVersion</c> and <c>isAurora</c> alongside the SQL Server <c>majorVersion</c> — the
+    /// service emits all of them on every success. The dialogs read only <c>majorVersion</c> and so could
+    /// describe a PostgreSQL probe with the SQL Server vocabulary; that they degraded to no version rather
+    /// than to "SQL Server v0" was down to a hand-rolled <c>major == 0 ? null : major</c> at each call site,
+    /// which is the same 0-is-not-a-version rule now held centrally.</para>
+    ///
+    /// <para>An ABSENT or unparseable <c>engine</c> yields a null kind, which
+    /// <see cref="MonitoredEngineVersion.DescribeEngineVersion"/> reads as "no claim" and answers on the SQL Server arm —
+    /// so a reply from an older service that never sent the field keeps its exact present behaviour.</para>
+    /// </summary>
+    public static string ProbeVersionLabel(JsonElement probeResult)
+    {
+        var sqlMajor = probeResult.TryGetProperty("majorVersion", out var mv) && mv.ValueKind == JsonValueKind.Number
+            ? mv.GetInt32()
+            : 0;
+
+        var postgresMajor = probeResult.TryGetProperty("postgresMajorVersion", out var pg) && pg.ValueKind == JsonValueKind.Number
+            ? pg.GetInt32()
+            : 0;
+
+        var isAurora = probeResult.TryGetProperty("isAurora", out var aurora) && aurora.ValueKind == JsonValueKind.True;
+
+        var engineKind =
+            probeResult.TryGetProperty("engine", out var engineName)
+            && engineName.ValueKind == JsonValueKind.String
+            && Enum.TryParse<CollectorTargetEngine>(engineName.GetString(), ignoreCase: true, out var engine)
+                ? MonitoredEngineKind.For(engine, isAurora)
+                : null;
+
+        return MonitoredEngineVersion.DescribeEngineVersion(engineKind, sqlMajor, postgresMajor);
+    }
 }
 
 /// <summary>A command row's polled status + terminal result (<c>result_json</c> is the service's probe facts
@@ -228,6 +271,17 @@ public sealed class TestConnectServer
 {
     [JsonPropertyName("name")]
     public string Name { get; set; } = "";
+
+    /// <summary>
+    /// Which engine to probe: <c>"sqlserver"</c> (default) or <c>"postgres"</c> — the same tokens, position
+    /// and omitted-means-SQL-Server contract as <c>MonitoredServer.Engine</c>, which is what the service
+    /// deserializes this into (#3244). Non-null with the SQL Server default so every request the dialogs can
+    /// build today says its engine explicitly; a future PostgreSQL-authoring dialog sets this same field, and
+    /// the probe's reply then answers in that engine's version vocabulary rather than being guessed at —
+    /// <c>17</c> is a real major in both engines, so a guess would be silently believed.
+    /// </summary>
+    [JsonPropertyName("engine")]
+    public string Engine { get; set; } = "sqlserver";
 
     [JsonPropertyName("host")]
     public string Host { get; set; } = "";

@@ -13,6 +13,7 @@ using System.Text;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -424,26 +425,6 @@ public sealed class DarlingServiceInstallLocationTests
             Assert.True(report < at,
                 $"the install-location diagnosis must run BEFORE {what}, or the operator reads the downstream failure first (#2185)");
         }
-    }
-
-    /// <summary>Walks up from the test output directory to the repo root — the same idiom
-    /// <see cref="DarlingInstallLocationTests"/> uses.</summary>
-    private static string ReadRepoFile(string relativePath)
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        for (var i = 0; i < 10 && directory is not null; i++)
-        {
-            var candidate = Path.Combine(directory.FullName, relativePath);
-            if (File.Exists(Path.Combine(directory.FullName, "PerformanceMonitor.sln")) && File.Exists(candidate))
-            {
-                return File.ReadAllText(candidate);
-            }
-
-            directory = directory.Parent;
-        }
-
-        Assert.Fail($"could not find {relativePath} above {AppContext.BaseDirectory}");
-        return string.Empty;
     }
 
     /// <summary>Counts lines per level as well as capturing them: "exactly one critical" is the assertion, and

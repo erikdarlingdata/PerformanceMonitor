@@ -31,9 +31,9 @@ public partial class LocalDataService
     /// </summary>
     internal const string InventoryQueryText = @"
 DECLARE
-    @storage_sql nvarchar(MAX) =
+    @storage_sql nvarchar(max) =
         CASE
-            WHEN CONVERT(int, SERVERPROPERTY('EngineEdition')) = 5
+            WHEN CONVERT(integer, SERVERPROPERTY('EngineEdition')) = 5
             THEN N'SELECT @gb = SUM(CAST(size AS bigint)) * 8.0 / 1024.0 / 1024.0 FROM sys.database_files'
             ELSE N'SELECT @gb = SUM(CAST(size AS bigint)) * 8.0 / 1024.0 / 1024.0 FROM sys.master_files'
         END,
@@ -50,7 +50,7 @@ IF OBJECT_ID(N'sys.dm_os_host_info', N'V') IS NOT NULL
 IF @host_os IS NULL
 BEGIN
     DECLARE @ver nvarchar(4000) = @@VERSION;
-    DECLARE @on_pos int = CHARINDEX(N' on ', @ver);
+    DECLARE @on_pos integer = CHARINDEX(N' on ', @ver);
     IF @on_pos > 0
         SET @host_os = LTRIM(SUBSTRING(@ver, @on_pos + 4, LEN(@ver)));
 END;
@@ -58,7 +58,7 @@ END;
 /* Availability Group replica role. The DMV is referenced only inside
    OBJECT_ID-guarded dynamic SQL, so this batch still compiles on Azure SQL
    Database and non-AG instances — both leave @ag_role at 'Standalone' (#980). */
-IF CONVERT(int, ISNULL(SERVERPROPERTY('IsHadrEnabled'), 0)) = 1
+IF CONVERT(integer, ISNULL(SERVERPROPERTY('IsHadrEnabled'), 0)) = 1
    AND OBJECT_ID(N'sys.dm_hadr_availability_replica_states') IS NOT NULL
 BEGIN
     DECLARE @ag_detected nvarchar(20);
@@ -78,7 +78,7 @@ SELECT
        show the actual product name + service tier (e.g. 'Azure SQL Database
        (General Purpose)') instead. */
     CASE
-        WHEN CONVERT(int, SERVERPROPERTY('EngineEdition')) = 5
+        WHEN CONVERT(integer, SERVERPROPERTY('EngineEdition')) = 5
         THEN N'Azure SQL Database'
              + ISNULL(N' (' +
                  CASE CONVERT(nvarchar(128), DATABASEPROPERTYEX(DB_NAME(), 'Edition'))
@@ -91,15 +91,15 @@ SELECT
     CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')),
     CONVERT(nvarchar(128), SERVERPROPERTY('ProductLevel')),
     CONVERT(nvarchar(128), SERVERPROPERTY('ProductUpdateLevel')),
-    CONVERT(int, NULL),
+    CONVERT(integer, NULL),
     CONVERT(bigint, NULL),
     CONVERT(datetime, NULL),
     @storage_gb,
-    CONVERT(int, NULL),
-    CONVERT(int, NULL),
-    CONVERT(int, SERVERPROPERTY('EngineEdition')),
-    CONVERT(int, SERVERPROPERTY('IsHadrEnabled')),
-    CONVERT(int, SERVERPROPERTY('IsClustered')),
+    CONVERT(integer, NULL),
+    CONVERT(integer, NULL),
+    CONVERT(integer, SERVERPROPERTY('EngineEdition')),
+    CONVERT(integer, SERVERPROPERTY('IsHadrEnabled')),
+    CONVERT(integer, SERVERPROPERTY('IsClustered')),
     @host_os,
     @ag_role;";
 

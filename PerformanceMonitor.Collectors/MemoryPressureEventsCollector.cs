@@ -36,12 +36,35 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE
     @ms_ticks bigint,
-    @now datetime2(7) = SYSDATETIME();
+    /* SYSUTCDATETIME(), not SYSDATETIME(): @now is the base for a STORED sample_time, and both readers of
+       memory_pressure_events.sample_time treat it as naive UTC -- Darling passes it to
+       ViewerTimeHelper.ForDisplay, which takes naive-UTC input, and Lite windows it with the UTC-based
+       GetTimeRange and adds UtcOffsetMinutes when plotting. A local clock here therefore put the whole
+       memory-pressure series one UTC offset away from every other lane: measured at exactly 4h behind the
+       collection_time written by the same collector run, on 42 of 42 us-east-2 servers, with the collector
+       reporting SUCCESS throughout (#2932).
+
+       Not the same answer as CpuUtilizationCollector, which shares this ring-buffer arithmetic and
+       deliberately KEEPS SYSDATETIME(): its sample_time is documented as the monitored server's local wall
+       clock and #1262 de-skews it in SQL per collection batch, so UTC there would break that correction and
+       Lite's server-local window. The frame is a property of each column's readers, not of the store, and
+       CollectorTimestampFrameTests pins both directions. */
+    @now datetime2(7) = SYSUTCDATETIME();
 
 SELECT @ms_ticks = dosi.ms_ticks FROM sys.dm_os_sys_info AS dosi;
 
 SELECT
-    sample_time = DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), @now),
+    /* MILLISECOND, not SECOND-truncated -- see CpuUtilizationCollector's identical fix (#2749) for the
+       full explanation: dividing by 1000 before DATEADD(SECOND, ...) discards the sub-second remainder,
+       which differs on every poll, so re-reading the same ring-buffer entry on a later cycle recomputes a
+       slightly different sample_time and the client-side watermark dedup below can treat it as new.
+       Split into SECOND + MILLISECOND-remainder DATEADD calls -- see CpuUtilizationCollector's identical
+       fix (#2755) for the full explanation: a single DATEADD(MILLISECOND, ...) overflows once the offset
+       exceeds int range (~24.8 days of ms), which this collector's wider ring-buffer retention window hit
+       in production within minutes of the single-step version shipping. */
+    sample_time = DATEADD(
+        MILLISECOND, -((@ms_ticks - t.timestamp) % 1000),
+        DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), @now)),
     memory_notification = t.record.value('(/Record/ResourceMonitor/Notification)[1]', 'nvarchar(100)'),
     memory_indicators_process = t.record.value('(/Record/ResourceMonitor/IndicatorsProcess)[1]', 'integer'),
     memory_indicators_system = t.record.value('(/Record/ResourceMonitor/IndicatorsSystem)[1]', 'integer')

@@ -99,6 +99,7 @@ public sealed partial class ViewerDataService
         var rows = new List<PlanCorrectionRow>();
 
         await using var command = _dataSource.CreateCommand(PlanCorrectionsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -146,6 +147,7 @@ public sealed partial class ViewerDataService
         var rows = new List<AutomaticTuningRow>();
 
         await using var command = _dataSource.CreateCommand(AutomaticTuningSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -204,16 +206,24 @@ public class PlanCorrectionRow
     public string ImplementationScript { get; set; } = "";
 
     public string CollectionTimeLocal => Local(CollectionTime);
-    public string ValidSinceLocal => Local(ValidSince);
-    public string LastRefreshLocal => Local(LastRefresh);
-    public string ExecuteActionInitiatedTimeLocal => Local(ExecuteActionInitiatedTime);
-    public string RevertActionInitiatedTimeLocal => Local(RevertActionInitiatedTime);
+
+    /* sys.dm_db_tuning_recommendations reports these four in the instance's own clock, so they convert
+       through FormatServerClock while CollectionTime above, which the collector stamps in UTC, goes
+       through Local. The renderer is named at the site rather than reached through Local: a
+       one-hop wrapper hides the renderer from the clock-frame census, which is how the frame these
+       four are in went unread. */
+    public string ValidSinceLocal => ViewerDataService.FormatServerClock(ValidSince);
+    public string LastRefreshLocal => ViewerDataService.FormatServerClock(LastRefresh);
+    public string ExecuteActionInitiatedTimeLocal => ViewerDataService.FormatServerClock(ExecuteActionInitiatedTime);
+    public string RevertActionInitiatedTimeLocal => ViewerDataService.FormatServerClock(RevertActionInitiatedTime);
 
     /* Tri-state: the flags are NULL when Query Store aged the plan out, which is not the same as "No". */
     public string ForcedDisplay => YesNo(LastGoodPlanIsForced);
     public string ExecutableDisplay => YesNo(IsExecutableAction);
     public string RevertableDisplay => YesNo(IsRevertableAction);
 
+    /// <summary>A naive-UTC stamp in the display mode. NOT for a server-clock column — every one of
+    /// those in this row uses <see cref="ViewerDataService.FormatServerClock"/> instead.</summary>
     internal static string Local(DateTime? naiveUtc)
         => naiveUtc is { } utc ? ViewerTimeHelper.ForDisplay(utc).ToString("yyyy-MM-dd HH:mm:ss") : "";
 

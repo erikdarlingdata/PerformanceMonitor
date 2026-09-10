@@ -391,6 +391,67 @@ VALUES ($1, $2, $3, $4, $5, $6)", connection);
     }
 
     /// <summary>
+    /// #2827: every ordered aggregate in the interval-grain dedup must carry the SAME
+    /// <c>ORDER BY</c>, or the "keep the latest row" contract silently breaks per column.
+    ///
+    /// <para>The dedup used to be <c>ROW_NUMBER() OVER (...) ... WHERE rn = 1</c>, which takes one row
+    /// and therefore cannot mix. Expressing it as <c>GROUP BY</c> + <c>array_agg(col ORDER BY ...)[1]</c>
+    /// is measurably faster — it lets the planner hash-aggregate at the interval grain instead of forcing
+    /// one global sort of the server's whole Query Store slice on all eight keys (23.4s to 9.6s in
+    /// isolation on the busiest use1 server; byte-identical results across six servers) — but it buys that
+    /// with a NEW failure mode the window function did not have: each aggregate sorts independently, so a
+    /// single drifted <c>ORDER BY</c> would take <c>avg_cpu_time_us</c> from one collection and
+    /// <c>execution_count</c> from another and blend two different observations into one row. That is a
+    /// silent wrong ANSWER, not a slowdown, and nothing downstream could detect it.</para>
+    ///
+    /// <para>Asserted as a property over EVERY ordered aggregate in the CTE rather than by naming the
+    /// seven columns: a pin that enumerates what exists today passes unchanged when an eighth column is
+    /// added with the wrong ordering, which is exactly how a broken sibling survived a green suite in
+    /// #2344 and again in PgStatementText.</para>
+    /// </summary>
+    [Fact]
+    public void PlanRegressionDedup_OrdersEveryAggregateIdentically()
+    {
+        var sql = PgFactCollector.PlanRegressionSql;
+
+        /* The dedup CTE runs from "WITH deduped AS" to the CTE that consumes it. */
+        var start = sql.IndexOf("WITH deduped AS", StringComparison.Ordinal);
+        var end = sql.IndexOf("plan_agg AS", StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start, "the deduped CTE should still open the query");
+
+        /* Comments stripped first. The CTE's own prose names the forms it rejects, and a pin that scans
+           raw text would match those and "pass" on the strength of a comment — the same trap as a coverage
+           ratchet counting a table named in prose as read. Measure the SQL, not what it says about itself. */
+        var dedup = Regex.Replace(sql[start..end], @"--[^\n]*", string.Empty);
+
+        var orderings = Regex
+            .Matches(dedup, @"array_agg\([^)]*?\s+ORDER\s+BY\s+(?<ord>[^)]+)\)")
+            .Select(m => m.Groups["ord"].Value.Trim())
+            .ToList();
+
+        /* If this is zero the dedup has been rewritten again and this pin is no longer measuring it. */
+        Assert.True(orderings.Count > 0, "expected ordered aggregates in the dedup CTE");
+        Assert.Single(orderings.Distinct(StringComparer.Ordinal));
+
+        /* The tie-break itself is the #1850/#1845 contract: latest collection wins, and where two
+           collections share a timestamp the one that saw more executions wins. Both halves matter. */
+        Assert.Equal("collection_time DESC, execution_count DESC", orderings[0]);
+
+        /* replica_role stays in the grouping key. Dropping it does not de-duplicate — it DISCARDS one
+           replica's row, an under-count that is strictly worse than the double-count this CTE exists to
+           fix, because a double-count is visible in the number and a dropped row is silent (#1850). */
+        Assert.Contains(
+            "GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time",
+            dedup,
+            StringComparison.Ordinal);
+
+        /* Do not go back to either measured-slower form. DISTINCT ON needs the same global sort the
+           window function did (49.8s against the window function's 23.4s), and raising work_mem is not a
+           substitute either — 512MB took the whole query from 25.6s to 59.3s. */
+        Assert.DoesNotContain("DISTINCT ON", dedup, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
     /// The chunk-exclusion bound sits BELOW the comparison window by a clock-skew margin.
     /// <c>last_execution_time</c> comes from the monitored server's clock and <c>collection_time</c> from the
     /// store's, so a monitored server running fast can report an execution later than the collection that

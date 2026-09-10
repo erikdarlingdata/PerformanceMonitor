@@ -318,6 +318,7 @@ public sealed partial class ViewerDataService
         var rows = new List<ViewerQueryStatsRow>();
 
         await using var command = _dataSource.CreateCommand(TopQueriesSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = top });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
@@ -478,6 +479,7 @@ public sealed partial class ViewerDataService
         var items = new List<QueryStatsComparisonItem>();
 
         await using var command = _dataSource.CreateCommand(QueryStatsComparisonSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddComparisonParameters(command, serverId, currentStart, currentEnd, baselineStart, baselineEnd);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -544,6 +546,7 @@ public sealed partial class ViewerDataService
         var items = new List<TimeSliceBucket>();
 
         await using var command = _dataSource.CreateCommand(sql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -593,10 +596,38 @@ public sealed partial class ViewerDataService
 
     /// <summary>
     /// Formats a SQL-server-local wall-clock time (dm_exec_* last_execution_time / creation_time /
-    /// cached_time — NOT naive UTC) for the grid: shown raw, no timezone conversion. Empty when null.
+    /// cached_time, plan_correction's action stamps, msdb Agent's job start time — NOT naive UTC) for
+    /// the grid, in the current display mode. Empty when null.
+    ///
+    /// <para>The counterpart to <see cref="FormatStoredUtc"/>. Exactly one of the pair applies the
+    /// collected offset, and which one depends only on the column's frame; picking the wrong one is
+    /// silent, because both return a plausible timestamp and they differ by the server's whole offset.
+    /// Both honour the Server / Local / UTC preference, so the choice is about the FRAME and never about
+    /// whether the user's selection is respected.</para>
     /// </summary>
     public static string FormatServerClock(DateTime? serverLocal)
-        => serverLocal.HasValue ? serverLocal.Value.ToString("yyyy-MM-dd HH:mm:ss") : "";
+        => serverLocal.HasValue
+            ? ViewerTimeHelper.ForServerClockDisplay(serverLocal.Value).ToString("yyyy-MM-dd HH:mm:ss")
+            : "";
+
+    /// <summary>
+    /// Renders a STORED naive-UTC timestamp in the current display mode — the counterpart to
+    /// <see cref="FormatServerClock"/>, which renders a value that is already the monitored server's own
+    /// clock. Named for the frame it takes rather than for what it does, because picking the wrong one of
+    /// the pair is silent: both return a plausible timestamp and they differ by the server's whole offset,
+    /// four hours on the production fleet's measured -240.
+    ///
+    /// <para>#3207 added this because five sites had no honest way to say "this column is UTC" and reached
+    /// for <see cref="FormatServerClock"/> instead — <c>query_store_stats</c>' first- and last-execution
+    /// times, which Query Store returns as <c>datetimeoffset</c> and <c>QueryStoreCollector</c> normalises
+    /// through <c>DateTimeOffset.UtcDateTime</c>. Inlining
+    /// <c>ViewerTimeHelper.ForDisplay(x).ToString(...)</c> would work identically; a named method beside its
+    /// opposite is what makes the choice reviewable.</para>
+    /// </summary>
+    public static string FormatStoredUtc(DateTime? naiveUtc)
+        => naiveUtc.HasValue
+            ? ViewerTimeHelper.ForDisplay(naiveUtc.Value).ToString("yyyy-MM-dd HH:mm:ss")
+            : "";
 
     /// <summary>
     /// Collapses whitespace runs (query text arrives with its original formatting) to a single

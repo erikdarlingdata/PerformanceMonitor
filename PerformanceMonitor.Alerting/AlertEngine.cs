@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
@@ -116,6 +117,17 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, DateTime> _lastBlockingWaitAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastDeadlockAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastPoisonWaitAlert = new();
+
+    /* The collection_time of the wait_stats row(s) last actually fired on. Read adapters answer
+       "what's the newest poison-wait row within the last 10 minutes", which is independent of
+       whether it is NEW since the previous ask — at fleet load the collector's delivered cadence
+       can lag the alert cooldown (PerformanceMonitor's own dogfooding on <monitor-host>
+       caught byte-identical duplicate alerts ~5-7 minutes apart), so the cooldown elapsing is not
+       proof a fresh observation exists. Poison wait is deliberately NOT level-triggered like CPU
+       (which resamples live every sweep): a delta is one collector cycle's computation, and
+       reading it twice is the same event surfacing twice, not two observations of a standing
+       condition. Gate re-fire on BOTH the cooldown AND a newer collection_time than last fired. */
+    private readonly ConcurrentDictionary<string, DateTime> _lastPoisonWaitCollectionTime = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastLongRunningQueryAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastTempDbSpaceAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastLowDiskAlert = new();
@@ -201,6 +213,14 @@ public sealed class AlertEngine
     /// </param>
     /// <param name="logger">Optional diagnostics logger.</param>
     /// <param name="utcNow">Test seam for the cooldown clock; production leaves it null (UtcNow).</param>
+    /// <param name="readFailures">
+    /// Where a SWALLOWED condition read is counted (#3013). Every per-check catch below logs and skips —
+    /// correctly, because firing on absent evidence fabricates an alert and resolving on it fabricates a
+    /// recovery — but the skip reached no surface a person reads, so the alert pass could go blind one
+    /// condition at a time behind a green health read. Null leaves the counting off and changes nothing
+    /// else; production passes <see cref="AlertReadFailureCounter.Shared"/>, and tests that want to
+    /// observe the counting pass their own instance rather than touching that one.
+    /// </param>
     public AlertEngine(
         IAlertEngineSettings settings,
         IAlertReadAdapter readAdapter,
@@ -210,7 +230,8 @@ public sealed class AlertEngine
         Func<string, int, CancellationToken, Task<List<FailedJobInfo>>>? failedJobsFetcher = null,
         Func<AlertResolution, CancellationToken, Task>? resolutionCallback = null,
         ILogger? logger = null,
-        Func<DateTime>? utcNow = null)
+        Func<DateTime>? utcNow = null,
+        AlertReadFailureCounter? readFailures = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _readAdapter = readAdapter ?? throw new ArgumentNullException(nameof(readAdapter));
@@ -221,7 +242,11 @@ public sealed class AlertEngine
         _resolutionCallback = resolutionCallback;
         _logger = logger;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        _readFailures = readFailures;
     }
+
+    /// <summary>#3013: the swallowed-read counter, or null when nothing is counting.</summary>
+    private readonly AlertReadFailureCounter? _readFailures;
 
     /// <summary>
     /// Runs one full alert sweep for one server — Lite's <c>CheckPerformanceAlerts(summary)</c>.
@@ -265,6 +290,11 @@ public sealed class AlertEngine
         var alertCooldown = TimeSpan.FromMinutes(_settings.CooldownMinutes);        /* :57 */
         bool suppressed = snapshot.Suppressed;                                      /* :60 (suppressPopups) */
 
+        /* #3013: the denominator for this server's swallowed-read count, recorded HERE rather than in
+           EvaluateServerAsync so the master-switch-off early return does not count a pass that never
+           looked at the store. */
+        _readFailures?.RecordPass(key);
+
         await EnsureWatermarksSeededAsync(key, ct);
 
         await CheckCpuAsync(snapshot, key, serverName, now, alertCooldown, suppressed, ct);
@@ -300,15 +330,18 @@ public sealed class AlertEngine
             return;
         }
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var blocking = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, BlockingWatermarkMetric);
+            readClock.Restart();
             if (blocking.HasValue)
             {
                 _lastAlertedBlockingCount[key] = blocking.Value;
             }
 
             var deadlock = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, DeadlockWatermarkMetric);
+            readClock.Restart();
             if (deadlock.HasValue)
             {
                 _lastAlertedDeadlockCount[key] = deadlock.Value;
@@ -326,7 +359,8 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to seed edge-trigger watermarks for {ServerKey}: {Message}", key, ex.Message);
+            _logger?.LogError("Failed to seed edge-trigger watermarks for {ServerKey} after {ElapsedMs} ms: {Message}", key, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "edge-trigger watermark seed", readClock.ElapsedMilliseconds);
         }
 
         _seededServerKeys[key] = true;
@@ -401,6 +435,7 @@ public sealed class AlertEngine
 
         if (_settings.BlockingEnabled)
         {
+            var readClock = Stopwatch.StartNew();
             try
             {
                 /* ONE fetch serves the rolling count, the excluded-database recount (:118-133),
@@ -434,7 +469,8 @@ public sealed class AlertEngine
             {
                 /* :129-132 shape — log and skip this check for the sweep (class remarks
                    adaptation (2)): never run the gate on a fabricated zero count. */
-                _logger?.LogError("Failed to check blocking for {Server}: {Message}", serverName, ex.Message);
+                _logger?.LogError("Failed to check blocking for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(key, "blocking", readClock.ElapsedMilliseconds);
                 return;
             }
         }
@@ -554,6 +590,9 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter: an occurrence total is bookkeeping ABOUT an alert,
+               not the condition read the alert is judged on. The check still fires or resolves on its own
+               evidence when this fails, so alerting did not go blind — it lost a count. */
             _logger?.LogWarning("Could not load incident occurrences for {Metric}: {Message}", metricName, ex.Message);
             persisted = EmptyOccurrenceStates;
         }
@@ -587,6 +626,8 @@ public sealed class AlertEngine
         {
             /* A dropped write costs accuracy on the next delivery's total — that fingerprint reads as new
                and restarts, with a start time saying so — never a missed or duplicated alert. */
+            /* NOT counted by #3013's counter: a WRITE, and the counter is about reads the alert pass performs
+               and swallows. Logged at Warning for the same reason. */
             _logger?.LogWarning("Could not persist incident occurrences for {Metric}: {Message}", metricName, ex.Message);
         }
     }
@@ -672,6 +713,7 @@ public sealed class AlertEngine
         CurrentBlockingWaitResult? current = null;
         if (enabled)
         {
+            var readClock = Stopwatch.StartNew();
             try
             {
                 current = await _readAdapter.GetCurrentBlockingWaitAsync(key, ct);
@@ -684,7 +726,8 @@ public sealed class AlertEngine
             {
                 /* Log and skip for the sweep — state untouched, so a transient store error neither
                    fires nor resolves (the same adaptation (2) shape as the count gate). */
-                _logger?.LogError("Failed to check blocking wait time for {Server}: {Message}", serverName, ex.Message);
+                _logger?.LogError("Failed to check blocking wait time for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(key, "blocking wait time", readClock.ElapsedMilliseconds);
                 return;
             }
         }
@@ -749,6 +792,7 @@ public sealed class AlertEngine
 
         if (_settings.DeadlockEnabled)
         {
+            var readClock = Stopwatch.StartNew();
             try
             {
                 /* ONE fetch serves the rolling count, the excluded-database recount (:198-211),
@@ -772,7 +816,8 @@ public sealed class AlertEngine
             catch (Exception ex)
             {
                 /* :207-210 shape — log and skip (class remarks adaptation (2)). */
-                _logger?.LogError("Failed to check deadlocks for {Server}: {Message}", serverName, ex.Message);
+                _logger?.LogError("Failed to check deadlocks for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(key, "deadlocks", readClock.ElapsedMilliseconds);
                 return;
             }
         }
@@ -853,14 +898,26 @@ public sealed class AlertEngine
             return;
         }
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var triggered = await _readAdapter.GetPoisonWaitDeltasAsync(key, _settings.PoisonWaitThresholdMs, ct); /* :278 */
+            readClock.Restart();
 
             if (triggered.Count > 0)
             {
                 _activePoisonWaitAlert[key] = true;                                 /* :282 */
-                if (!suppressed && CooldownElapsed(_lastPoisonWaitAlert, key, now, alertCooldown)) /* :283 */
+
+                /* The read adapter's own window can hand back the SAME wait_stats row(s) across
+                   multiple sweeps when the collector lags the cooldown — see the field's own
+                   doc comment. Only a collection_time newer than the one last fired on counts as
+                   a fresh observation; a cooldown-elapsed re-ask against an unrefreshed row must
+                   wait for the NEXT sweep rather than re-fire on data it already reported. */
+                var newestCollectionTime = triggered.Max(w => w.CollectionTime);
+                bool hasFreshCollection = !_lastPoisonWaitCollectionTime.TryGetValue(key, out var lastCollectionTime)
+                    || newestCollectionTime > lastCollectionTime;
+
+                if (!suppressed && hasFreshCollection && CooldownElapsed(_lastPoisonWaitAlert, key, now, alertCooldown)) /* :283 */
                 {
                     var worst = triggered[0];                                       /* :285 */
                     var allWaitNames = string.Join(", ", triggered.ConvertAll(w => $"{w.WaitType} ({w.AvgMsPerWait:F0}ms)")); /* :286 */
@@ -870,6 +927,7 @@ public sealed class AlertEngine
                     var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Poison Wait", WaitType = worst.WaitType };
                     bool isMuted = _isAlertMuted(muteCtx);
                     _lastPoisonWaitAlert[key] = now;                                /* :294 */
+                    _lastPoisonWaitCollectionTime[key] = newestCollectionTime;
 
                     var poisonContext = AlertContextBuilders.BuildPoisonWaitContext(triggered); /* :307 */
                     var detailText = AlertContextBuilders.ContextToDetailText(poisonContext);   /* :308 */
@@ -884,6 +942,7 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.PoisonWaitThresholdMs,
                         Muted: isMuted, Severity: poisonContext?.SeverityOverride,
                         ShortMessage: $"{worst.WaitType} avg {worst.AvgMsPerWait:F0}ms/wait"), ct);
+                    readClock.Restart();
                 }
             }
             else if (_activePoisonWaitAlert.TryGetValue(key, out var wasPoisonWait) && wasPoisonWait) /* :323 */
@@ -904,7 +963,8 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check poison waits for {Server}: {Message}", serverName, ex.Message); /* :337 */
+            _logger?.LogError("Failed to check poison waits for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :337 */
+            _readFailures?.RecordReadFailure(key, "poison waits", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -918,6 +978,7 @@ public sealed class AlertEngine
             return;
         }
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var longRunning = await _readAdapter.GetLongRunningQueriesAsync(       /* :346 */
@@ -931,6 +992,7 @@ public sealed class AlertEngine
                 _settings.LongRunningQueryExcludeCdc,
                 _settings.ExcludedDatabases,
                 ct);
+            readClock.Restart();
 
             /* #2362: observe every sweep, OUTSIDE the fire branch — the #2216 reasoning, which applies
                identically here: counting only at delivery lets an event that ages out during a cooldown mask
@@ -938,6 +1000,7 @@ public sealed class AlertEngine
                displayed top N keeps its total instead of restarting. */
             var lrqOccurrences = await ObserveOccurrencesAsync(
                 key, LongRunningQueryWatermarkMetric, AlertContextBuilders.LongRunningQueryIncidents(serverName, longRunning), now);
+            readClock.Restart();
             if (longRunning.Count > 0)
             {
                 _activeLongRunningQueryAlert[key] = true;                           /* :350 */
@@ -972,12 +1035,14 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.LongRunningQueryThresholdMinutes,
                         Muted: isMuted, Severity: lrqContext?.SeverityOverride,
                         ShortMessage: $"Session #{worst.SessionId} running {elapsedMinutes}m{previewSuffix}"), ct);
+                    readClock.Restart();
                 }
             }
             else if (_activeLongRunningQueryAlert.TryGetValue(key, out var wasLongRunning) && wasLongRunning) /* :395 */
             {
                 _activeLongRunningQueryAlert[key] = false;
                 await ClearOccurrencesAsync(key, LongRunningQueryWatermarkMetric);                          /* :397 */
+                readClock.Restart();
                 if (!suppressed)                                                    /* :398 */
                 {
                     await NotifyResolutionAsync(new AlertResolution(
@@ -993,7 +1058,8 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check long-running queries for {Server}: {Message}", serverName, ex.Message); /* :409 */
+            _logger?.LogError("Failed to check long-running queries for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :409 */
+            _readFailures?.RecordReadFailure(key, "long-running queries", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -1007,11 +1073,13 @@ public sealed class AlertEngine
             return;
         }
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var tempDb = await _readAdapter.GetTempDbSpaceAsync(key, ct);           /* :418 */
+            readClock.Restart();
 
-            if (tempDb != null && tempDb.UsedPercent >= _settings.TempDbSpaceThresholdPercent) /* :420 */
+            if (tempDb != null && tempDb.ReservedPercent >= _settings.TempDbSpaceThresholdPercent) /* :420 */
             {
                 _activeTempDbSpaceAlert[key] = true;                                /* :422 */
                 if (!suppressed && CooldownElapsed(_lastTempDbSpaceAlert, key, now, alertCooldown)) /* :423 */
@@ -1026,13 +1094,14 @@ public sealed class AlertEngine
                     /* :443-453. ShortMessage = the toast body of :435. */
                     await FireAsync(new AlertOutcome(
                         key, serverName, "tempdb Space",
-                        $"{tempDb.UsedPercent:F0}% used ({tempDb.TotalReservedMb:F0} MB)",
+                        $"{tempDb.ReservedPercent:F0}% reserved ({tempDb.TotalReservedMb:F0} MB)",
                         $"{_settings.TempDbSpaceThresholdPercent}%",
                         tempDbContext, detailText,
-                        NumericCurrentValue: tempDb.UsedPercent,
+                        NumericCurrentValue: tempDb.ReservedPercent,
                         NumericThresholdValue: _settings.TempDbSpaceThresholdPercent,
                         Muted: isMuted, Severity: tempDbContext?.SeverityOverride,
-                        ShortMessage: $"tempdb {tempDb.UsedPercent:F0}% used"), ct);
+                        ShortMessage: $"tempdb {tempDb.ReservedPercent:F0}% reserved"), ct);
+                    readClock.Restart();
                 }
             }
             else if (_activeTempDbSpaceAlert.TryGetValue(key, out var wasTempDb) && wasTempDb) /* :456 */
@@ -1040,11 +1109,11 @@ public sealed class AlertEngine
                 _activeTempDbSpaceAlert[key] = false;                               /* :458 */
                 if (!suppressed)                                                    /* :459 */
                 {
-                    var pct = tempDb != null ? $"{tempDb.UsedPercent:F0}%" : "N/A"; /* :461 */
+                    var pct = tempDb != null ? $"{tempDb.ReservedPercent:F0}%" : "N/A"; /* :461 */
                     await NotifyResolutionAsync(new AlertResolution(
                         key, serverName, "tempdb Space",
                         "tempdb Space Resolved",                                    /* :463 */
-                        $"{serverName}: tempdb usage back to {pct}"), ct);          /* :464 */
+                        $"{serverName}: tempdb reserved space back to {pct}"), ct);          /* :464 */
                 }
             }
         }
@@ -1054,7 +1123,8 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check TempDB space for {Server}: {Message}", serverName, ex.Message); /* :471 */
+            _logger?.LogError("Failed to check TempDB space for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :471 */
+            _readFailures?.RecordReadFailure(key, "TempDB space", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -1074,9 +1144,11 @@ public sealed class AlertEngine
         }
 
         bool conditionPresent = false;
+        var readClock = Stopwatch.StartNew();
         try
         {
             var volumes = await _readAdapter.GetVolumeFreeSpaceAsync(key, ct);      /* :480 */
+            readClock.Restart();
             var breached = AlertContextBuilders.GetBreachedVolumes(volumes, _settings.LowDiskThresholdPercent, _settings.LowDiskThresholdGb); /* :481 */
             conditionPresent = breached.Count > 0;                                  /* :487 — feeds the sweep result */
 
@@ -1086,6 +1158,7 @@ public sealed class AlertEngine
                displayed top N keeps its total instead of restarting. */
             var lowDiskOccurrences = await ObserveOccurrencesAsync(
                 key, VolumeFreeSpaceWatermarkMetric, AlertContextBuilders.VolumeFreeSpaceIncidents(serverName, breached), now);
+            readClock.Restart();
             if (breached.Count > 0)
             {
                 var worst = breached[0];                                            /* :489 */
@@ -1121,12 +1194,14 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.LowDiskThresholdPercent,
                         Muted: isMuted, Severity: lowDiskContext?.SeverityOverride,
                         ShortMessage: $"{worst.MountPoint} {worst.FreePercent:F0}% free ({worst.FreeGb:F1} GB)"), ct);
+                    readClock.Restart();
                 }
             }
             else if (_activeLowDiskAlert.TryGetValue(key, out var wasLowDisk) && wasLowDisk) /* :538 */
             {
                 _activeLowDiskAlert[key] = false;
                 await ClearOccurrencesAsync(key, VolumeFreeSpaceWatermarkMetric);                                   /* :540 */
+                readClock.Restart();
                 _lastAlertedLowDiskPercent.TryRemove(key, out _);                   /* :541 */
                 if (!suppressed)                                                    /* :542 */
                 {
@@ -1143,7 +1218,8 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check volume free space for {Server}: {Message}", serverName, ex.Message); /* :553 */
+            _logger?.LogError("Failed to check volume free space for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :553 */
+            _readFailures?.RecordReadFailure(key, "volume free space", readClock.ElapsedMilliseconds);
         }
 
         return conditionPresent;
@@ -1169,9 +1245,11 @@ public sealed class AlertEngine
             return;
         }
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var databases = await _readAdapter.GetPvsPressureAsync(key, ct);
+            readClock.Restart();
             var breached = AlertContextBuilders.GetBreachedPvsDatabases(databases, _settings.PvsThresholdPercent, _settings.PvsFloorGb);
 
             /* #2362: observe every sweep, OUTSIDE the fire branch — the #2216 reasoning, which applies
@@ -1180,6 +1258,7 @@ public sealed class AlertEngine
                displayed top N keeps its total instead of restarting. */
             var pvsOccurrences = await ObserveOccurrencesAsync(
                 key, PvsWatermarkMetric, AlertContextBuilders.PvsPressureIncidents(serverName, breached), now);
+            readClock.Restart();
             if (breached.Count > 0)
             {
                 var worst = breached[0];
@@ -1207,12 +1286,14 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.PvsThresholdPercent,
                         Muted: isMuted, Severity: null,
                         ShortMessage: $"{worst.DatabaseName} PVS {worst.PvsPercent:F0}% of database ({worst.PvsGb:F1} GB)"), ct);
+                    readClock.Restart();
                 }
             }
             else if (_activePvsAlert.TryGetValue(key, out var wasPvs) && wasPvs)
             {
                 _activePvsAlert[key] = false;
                 await ClearOccurrencesAsync(key, PvsWatermarkMetric);
+                readClock.Restart();
                 _lastAlertedPvsPercent.TryRemove(key, out _);
                 if (!suppressed)
                 {
@@ -1229,7 +1310,8 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check PVS pressure for {Server}: {Message}", serverName, ex.Message);
+            _logger?.LogError("Failed to check PVS pressure for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "PVS pressure", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -1262,10 +1344,12 @@ public sealed class AlertEngine
             return;
         }
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var files = await _readAdapter.GetDatabaseFileGrowthAsync(
                 key, _settings.FileGrowthLookbackMinutes, ct);
+            readClock.Restart();
 
             var breached = AlertContextBuilders.GetBreachedFiles(
                 files, _settings.FileGrowthRiseMb, _settings.FileGrowthVolumePercent);
@@ -1273,6 +1357,7 @@ public sealed class AlertEngine
             var fileGrowthOccurrences = await ObserveOccurrencesAsync(
                 key, FileGrowthWatermarkMetric,
                 AlertContextBuilders.FileGrowthIncidents(serverName, breached), now);
+            readClock.Restart();
 
             if (breached.Count > 0)
             {
@@ -1305,12 +1390,14 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.FileGrowthVolumePercent,
                         Muted: isMuted, Severity: null,
                         ShortMessage: headline), ct);
+                    readClock.Restart();
                 }
             }
             else if (_activeFileGrowthAlert.TryGetValue(key, out var wasGrowing) && wasGrowing)
             {
                 _activeFileGrowthAlert[key] = false;
                 await ClearOccurrencesAsync(key, FileGrowthWatermarkMetric);
+                readClock.Restart();
 
                 if (!suppressed)
                 {
@@ -1327,7 +1414,8 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check database file growth for {Server}: {Message}", serverName, ex.Message);
+            _logger?.LogError("Failed to check database file growth for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "database file growth", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -1341,9 +1429,11 @@ public sealed class AlertEngine
             return;
         }
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             var jobsResult = await _readAdapter.GetAnomalousJobsAsync(key, _settings.LongRunningJobMultiplier, ct); /* :562 */
+            readClock.Restart();
 
             /* #1812: a stale latest snapshot is NO evidence, in either direction. Firing on it re-alerts
                a historical run every cooldown forever (the per-run cooldown key deliberately expires each
@@ -1374,6 +1464,7 @@ public sealed class AlertEngine
                displayed top N keeps its total instead of restarting. */
             var jobOccurrences = await ObserveOccurrencesAsync(
                 key, AnomalousJobWatermarkMetric, AlertContextBuilders.AnomalousJobIncidents(serverName, anomalousJobs), now);
+            readClock.Restart();
             if (anomalousJobs.Count > 0)
             {
                 _activeLongRunningJobAlert[key] = true;                             /* :577 */
@@ -1400,12 +1491,14 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.LongRunningJobMultiplier * 100,
                         Muted: isMuted, Severity: jobContext?.SeverityOverride,
                         ShortMessage: $"{worst.JobName} at {worst.PercentOfAverage:F0}% of avg ({currentMinutes}m)"), ct);
+                    readClock.Restart();
                 }
             }
             else if (_activeLongRunningJobAlert.TryGetValue(key, out var wasJob) && wasJob) /* :616 */
             {
                 _activeLongRunningJobAlert[key] = false;
                 await ClearOccurrencesAsync(key, AnomalousJobWatermarkMetric);                            /* :618 */
+                readClock.Restart();
                 if (!suppressed)                                                    /* :619 */
                 {
                     await NotifyResolutionAsync(new AlertResolution(
@@ -1421,7 +1514,8 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to check anomalous jobs for {Server}: {Message}", serverName, ex.Message); /* :630 */
+            _logger?.LogError("Failed to check anomalous jobs for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message); /* :630 */
+            _readFailures?.RecordReadFailure(key, "anomalous jobs", readClock.ElapsedMilliseconds);
         }
     }
 
@@ -1510,6 +1604,16 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter, and the only counted-looking site that is
+               deliberately not counted. Nothing reachable in this try is a STORE read. The fetcher reads
+               the MONITORED SERVER's msdb over its own connection and timeout - the same population
+               DarlingWorker.FetchFailedJobsAsync is exempted for, and counting it here while exempting it
+               there would put a target-side outage into a number an operator reads as store contention.
+               The one store operation in the block is SaveFailedJobWatermarkAsync, a WRITE, and both
+               implementations swallow it (PgAlertStateStore and DuckDbAlertHistoryStore each log "Could
+               not persist failed-job watermark" without rethrowing), so it cannot reach this catch at
+               all. The write sitting inside this try where the blocking, deadlock and database-state
+               checks keep theirs outside is a real asymmetry and an inert one. */
             _logger?.LogError("Failed to check failed jobs for {Server}: {Message}", serverName, ex.Message); /* :715 */
         }
 
@@ -1541,6 +1645,7 @@ public sealed class AlertEngine
         }
 
         List<DatabaseStateInfo> deviations;
+        var readClock = Stopwatch.StartNew();
         try
         {
             deviations = await _readAdapter.GetDatabaseStatesAsync(key, ct);
@@ -1553,7 +1658,8 @@ public sealed class AlertEngine
         {
             /* Log-and-skip, like the other collected reads: never resolve an active database on a
                failed fetch (that would fabricate a recovery), and never fire on absent evidence. */
-            _logger?.LogError("Failed to check database state for {Server}: {Message}", serverName, ex.Message);
+            _logger?.LogError("Failed to check database state for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "database state", readClock.ElapsedMilliseconds);
             return;
         }
 
@@ -1752,6 +1858,7 @@ public sealed class AlertEngine
         }
 
         List<ForcePlanFailureInfo> failures;
+        var readClock = Stopwatch.StartNew();
         try
         {
             failures = await _readAdapter.GetForcePlanFailuresAsync(key, ct);
@@ -1764,7 +1871,8 @@ public sealed class AlertEngine
         {
             /* Log-and-skip, like every other collected read: never resolve an active plan on a failed
                fetch (that would fabricate a recovery), and never fire on absent evidence. */
-            _logger?.LogError("Failed to check forced-plan failures for {Server}: {Message}", serverName, ex.Message);
+            _logger?.LogError("Failed to check forced-plan failures for {Server} after {ElapsedMs} ms: {Message}", serverName, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "forced-plan failures", readClock.ElapsedMilliseconds);
             return;
         }
 
@@ -1933,6 +2041,9 @@ public sealed class AlertEngine
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter: this is the DELIVERY path, not a condition read.
+               A failed delivery is a different fact with a different remedy, and #3013 deliberately left
+               alerting on the alerting out of scope as its own decision. */
             _logger?.LogError("Alert resolution callback failed for {Server} / {Metric}: {Message}",
                 resolution.ServerName, resolution.MetricName, ex.Message);
         }

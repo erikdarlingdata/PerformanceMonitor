@@ -17,6 +17,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Navigation;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitor.Ui;
 
@@ -940,7 +941,11 @@ public partial class SettingsWindow : Window
         AlertSelfDiskWarnPercentBox.Text = "10";
         AlertCollectionStaleMinutesBox.Text = "30";
         AlertCollectionFailureThresholdBox.Text = "10";
-        AlertStoreJobCadenceWarnPercentBox.Text = "25";
+        /* #3060: derived, unlike its neighbours, because this one is not merely a mirrored default — it is
+           one refresh slot as a share of the hourly cadence, and a reset that handed out a stale 25 after
+           the grid moved would arm the alert past the point it exists to precede. */
+        AlertStoreJobCadenceWarnPercentBox.Text =
+            TimescaleSupport.RefreshSlotPercentOfHourlyCadence.ToString(CultureInfo.InvariantCulture);
         AnalysisNotifyCooldownBox.Text = "360";
         AlertPvsThresholdPercentBox.Text = "40";
         AlertPvsFloorGbBox.Text = "1";
@@ -1644,6 +1649,10 @@ public partial class SettingsWindow : Window
 
         public double AnalysisNotifySeverity { get; private init; }
         public int AnalysisNotifyCooldownMinutes { get; private init; }
+
+        /* #2710: test sends never carry a triage link (the builders' isTest paths skip it anyway), and the
+           Viewer edits the store, not the headless box's darling.json where web.publicBaseUrl lives. */
+        public string TriageBaseUrl => "";
 
         public static TestAlertSettings FromUi(SettingsWindow w)
         {

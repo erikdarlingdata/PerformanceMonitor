@@ -49,6 +49,8 @@ public sealed class ComposeCaggValueMapperTests
     [InlineData("qs_executions", ComposeAggregate.Avg, true)]             /* QS -> sum / sample_count */
     [InlineData("qs_executions", ComposeAggregate.Max, false)]            /* QS kept no per-row max column */
     [InlineData("qs_avg_duration_us", ComposeAggregate.Sum, true)]        /* QS execution-weighted mean */
+    [InlineData("qs_total_duration_us", ComposeAggregate.Sum, true)]      /* QS total -> *_weighted_sum (#2732) */
+    [InlineData("qs_total_cpu_us", ComposeAggregate.Sum, true)]           /* QS total -> *_weighted_sum (#2732) */
     [InlineData("qs_max_duration_us", ComposeAggregate.Max, true)]        /* QS peak -> _max */
     [InlineData("qs_max_duration_us", ComposeAggregate.Avg, false)]       /* only MAX kept */
     [InlineData("wait_time_ms", ComposeAggregate.Sum, false)]             /* no CAGG */
@@ -135,6 +137,24 @@ public sealed class ComposeCaggValueMapperTests
         Assert.Equal(
             "(CAST(SUM(f.cpu_us_weighted_sum) AS double precision) / NULLIF(SUM(f.execution_count_sum), 0))",
             ComposeCaggValueMapper.BuildCaggNativeExpr(Measure("qs_avg_cpu_us"), Measure("qs_avg_cpu_us").DefaultTimeAgg));
+    }
+
+    [Fact]
+    public void QueryStore_WeightedSum_Cpu_ReadsTheWeightedSumColumn_WithNoDenominator()
+    {
+        /* #2732: the total is the CAGG's pre-multiplied product-sum ITSELF — no execution_count_sum divisor,
+           and no NULLIF (there is no division; SUM over zero rows is already NULL). */
+        Assert.Equal(
+            "CAST(SUM(f.cpu_us_weighted_sum) AS double precision)",
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Measure("qs_total_cpu_us"), Measure("qs_total_cpu_us").DefaultTimeAgg));
+    }
+
+    [Fact]
+    public void QueryStore_WeightedSum_Duration_ReadsTheWeightedSumColumn_WithNoDenominator()
+    {
+        Assert.Equal(
+            "CAST(SUM(f.duration_us_weighted_sum) AS double precision)",
+            ComposeCaggValueMapper.BuildCaggNativeExpr(Measure("qs_total_duration_us"), Measure("qs_total_duration_us").DefaultTimeAgg));
     }
 
     [Fact]

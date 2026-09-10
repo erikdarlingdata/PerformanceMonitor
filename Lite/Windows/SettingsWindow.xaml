@@ -649,7 +649,7 @@
                 </TextBlock>
                 <TextBlock Margin="20,4,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
                     <Run Text="Automation placeholders — the first two substitute RAW JSON values (use them unquoted, e.g. &quot;context&quot;: {{context_json}}): "/>
-                    <Run FontFamily="Consolas" Text="{}{{context_json}} {{incidents_json}} {{dedup_key}}"/>
+                    <Run FontFamily="Consolas" Text="{}{{context_json}} {{incidents_json}} {{dedup_key}} {{resource_name}} {{database}}"/>
                 </TextBlock>
                 <TextBlock Margin="20,6,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
                     <Run FontWeight="SemiBold" Text="Example — re-run a GitHub Actions workflow when an alert fires:"/>

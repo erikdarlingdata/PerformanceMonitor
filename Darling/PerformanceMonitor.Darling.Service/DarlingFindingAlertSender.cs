@@ -20,9 +20,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// the same <see cref="EmailSendCore"/>/webhook flow <see cref="DarlingAlertDeliverer"/>
 /// already uses (same branding, same settings, same PG history store): the core attempts
 /// email + fans out to Teams/Slack, then ONE combined <c>config_alert_log</c> row is written
-/// per finding alert regardless of channel outcome (no channel configured → recorded as
-/// 'tray', Lite's delivered-without-email taxonomy), with the finding's numeric
+/// per finding alert regardless of channel outcome (no channel configured → the row states
+/// <see cref="AlertDelivery.ChannelNoneConfigured"/>), with the finding's numeric
 /// severity/threshold and detail text persisted like Lite's row. Never throws.
+/// <see cref="AlertDelivery.FromFanout"/> is called with <c>trayChannelPresent: false</c> for the same
+/// reason <see cref="DarlingAlertDeliverer"/> does: this service is headless and has no tray (#3169).
 ///
 /// <para>
 /// A separate class from <see cref="DarlingAlertDeliverer"/> (where Lite folds both surfaces
@@ -80,21 +82,8 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
                 alert.MetricName, alert.ServerName, alert.CurrentValue, alert.ThresholdValue,
                 alert.ServerId, alert.Context, attemptChannels: true);
 
-            /* Lite's single-row notification_type taxonomy (EmailAlertService.cs): email
-               attempted → "email"; webhook delivery upgrades to "email+webhook"/"webhook";
-               otherwise "tray". */
-            var notificationType = "tray";
-            if (result.EmailAttempted)
-            {
-                notificationType = "email";
-            }
-
-            var sent = result.EmailSent;
-            if (result.WebhookSent)
-            {
-                notificationType = notificationType == "email" ? "email+webhook" : "webhook";
-                sent = true;
-            }
+            /* trayChannelPresent: false — the headless service has no tray; see DarlingAlertDeliverer. */
+            var delivery = AlertDelivery.FromFanout(result, muted: false, trayChannelPresent: false);
 
             /* Always log the alert, regardless of channel status — the structured context
                persists as JSON alongside the flat detail_text, the numeric severity/threshold
@@ -104,7 +93,7 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
                 alert.ServerId, alert.ServerName, alert.MetricName,
                 alert.CurrentValue, alert.ThresholdValue,
                 alert.Severity, alert.NotifyThreshold,
-                sent, notificationType, result.SendError,
+                delivery,
                 false, alert.DetailText, contextJson));
         }
         catch (Exception ex)

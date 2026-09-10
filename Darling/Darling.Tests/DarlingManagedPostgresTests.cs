@@ -7,8 +7,11 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
+using System.Reflection;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
@@ -220,6 +223,260 @@ public sealed class DarlingManagedPostgresTests
     }
 
     /// <summary>
+    /// The v9 session-time-zone block: the belt behind
+    /// <c>StoreSqlClockDisciplineTests</c>. The store's timestamp columns hold naive UTC while initdb takes
+    /// <c>timezone</c> from the host OS, so on a Windows box outside UTC every comparison of a naive column
+    /// against <c>now()</c> has the naive side converted at the machine's local zone. Pinning UTC makes that
+    /// conversion the identity — for MANAGED stores only, which is why it is a backstop and not the fix.
+    ///
+    /// <para>Nothing else may ride in this block: it is appended after the v8 hardware check, whose
+    /// staleness test keys on the last fingerprint line in the text read before any of these appends. A
+    /// sizing line here would be both invisible to that check and able to override it.</para>
+    /// </summary>
+    [Fact]
+    public void TimeZoneConfAppend_PinsV9Marker_AndCarriesNothingButTheZone()
+    {
+        var block = DarlingManagedPostgres.BuildTimeZoneConfAppend();
+
+        Assert.Contains(DarlingManagedPostgres.ConfMarkerV9, block, StringComparison.Ordinal);
+        Assert.Contains("timezone = 'UTC'", block, StringComparison.Ordinal);
+
+        /* No fingerprint line, or the v8 staleness check silently stops checking. */
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfHardwareFingerprintPrefix, block, StringComparison.Ordinal);
+
+        /* The blocks compose, they don't compete. */
+        Assert.DoesNotContain("shared_buffers", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("maintenance_work_mem", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("max_worker_processes", block, StringComparison.Ordinal);
+
+        /* `timezone`, not `log_timezone`: the session zone is what resolves a mixed timestamp/timestamptz
+           comparison. Setting only the log zone would change what the log says and nothing about the data. */
+        Assert.DoesNotContain("log_timezone", block, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The v11 job-execution-logging block (#3175). This block exists for a reason no other one does: the
+    /// setting was written into the <b>v1</b> block by #1681, and v1's marker is present on every
+    /// pre-existing cluster, so the append that carried it was skipped and the GUC reached fresh initdbs
+    /// only. It is asserted as a LAST-OCCURRENCE value rather than a substring, because that is what
+    /// PostgreSQL honours and what makes the block an override rather than a hope.
+    /// </summary>
+    [Fact]
+    public void JobExecutionLoggingConfAppend_PinsV11Marker_AndTurnsTheGucOn()
+    {
+        var block = DarlingManagedPostgres.BuildJobExecutionLoggingConfAppend();
+
+        Assert.Contains(DarlingManagedPostgres.ConfMarkerV11, block, StringComparison.Ordinal);
+        Assert.Equal("on", LastSettingValue(block, StoreSelfMetrics.JobExecutionLoggingSetting));
+
+        /* No fingerprint line, or the v8 staleness check silently stops checking (it reads the conf as it
+           stood before any of these appends, and only holds while no later block writes one). */
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfHardwareFingerprintPrefix, block, StringComparison.Ordinal);
+
+        /* The blocks compose, they don't compete: this one restates exactly one setting. Every v1 name is
+           taken from the v1 builder rather than retyped, so a v1 that gained a setting is covered here too. */
+        foreach (var name in SettingNames(DarlingManagedPostgres.BuildConfAppend(5641)))
+        {
+            Assert.Null(LastSettingValue(block, name));
+        }
+    }
+
+    /// <summary>
+    /// The MOVE, pinned in both directions (#3175): the GUC is in the v11 block and is NOT in the v1 block.
+    ///
+    /// <para>Both halves matter and neither alone is the claim. Present-in-v11 alone would pass with a
+    /// duplicate left behind in v1 — harmless at runtime, and exactly the reading that produced the defect:
+    /// the repository would still assert this setting in the one block that provably cannot deliver it.
+    /// Absent-from-v1 alone would pass if the setting were dropped entirely.</para>
+    /// </summary>
+    [Fact]
+    public void TheJobExecutionLoggingGuc_IsInV11AndNotInTheUnhealableV1Block()
+    {
+        var v1 = DarlingManagedPostgres.BuildConfAppend(5641);
+        var v11 = DarlingManagedPostgres.BuildJobExecutionLoggingConfAppend();
+
+        Assert.Null(LastSettingValue(v1, StoreSelfMetrics.JobExecutionLoggingSetting));
+        Assert.DoesNotContain(StoreSelfMetrics.JobExecutionLoggingSetting, v1, StringComparison.Ordinal);
+        Assert.Equal("on", LastSettingValue(v11, StoreSelfMetrics.JobExecutionLoggingSetting));
+    }
+
+    /// <summary>
+    /// The v1 block's CONTENT IS FROZEN, and this is the pin whose absence let #3175 happen (#1681 added a
+    /// setting here and nothing said anything).
+    ///
+    /// <para><b>Why a freeze rather than a minimum.</b> v1's marker is present on every cluster that
+    /// already exists, and <c>EnsureConfAppended</c> skips a block whose marker it finds — so a setting
+    /// added to this block can only ever reach a cluster that is initdb'd afterwards. That is not a
+    /// property of any particular setting; it is a property of the BLOCK. A new setting therefore needs its
+    /// own marker, and this test is the thing that says so at the moment someone types it into the wrong
+    /// builder rather than a release later.</para>
+    ///
+    /// <para>The three names are load-bearing beyond the count: <c>shared_preload_libraries</c> is
+    /// list-valued and a later assignment REPLACES the list rather than extending it, and
+    /// <c>listen_addresses</c>/<c>port</c> govern who can reach the store — which is why this block must
+    /// never be re-appended to a cluster that already has it, and why the fix for #3175 is a new marker
+    /// rather than a looser match on this one.</para>
+    /// </summary>
+    [Fact]
+    public void ConfV1Block_ContentIsFrozen_ANewSettingNeedsItsOwnMarker()
+    {
+        var names = SettingNames(DarlingManagedPostgres.BuildConfAppend(5641));
+
+        Assert.Equal(
+            new[] { "default_toast_compression", "listen_addresses", "port", "shared_preload_libraries" },
+            names.OrderBy(n => n, StringComparer.Ordinal).ToArray());
+    }
+
+    /// <summary>
+    /// Healing an EXISTING cluster's conf adds the v11 block and re-applies NO v1 content (#3175) — the
+    /// structural half of "do not simply widen the v1 marker", stated as an invariant over the file rather
+    /// than as prose on the marker.
+    ///
+    /// <para><b>What widening would have done, and why it is measured harm rather than tidiness.</b> Making
+    /// v1's check ask "is the GUC line present?" would re-append the whole shared v1 block to every
+    /// pre-existing cluster. Measured on TimescaleDB 2.30.0/PG17: a conf carrying an operator's
+    /// <c>shared_preload_libraries = 'timescaledb,pg_stat_statements'</c> came back up serving
+    /// <c>'timescaledb'</c> alone once the v1 block was appended behind it, because the GUC is list-valued
+    /// and the last assignment replaces the list. This test fails the moment any v1 setting appears twice.
+    /// </para>
+    ///
+    /// <para>The v1 names are DERIVED from the v1 builder rather than listed, so a v1 that gains a setting
+    /// (which <see cref="ConfV1Block_ContentIsFrozen_ANewSettingNeedsItsOwnMarker"/> forbids) is covered
+    /// here without editing this test.</para>
+    ///
+    /// <para><b>The fixture carries initdb's COMMENTED defaults, and that is load-bearing.</b> A real
+    /// postgresql.conf documents every setting as a commented line before the product appends anything, so
+    /// a fixture built only from the product's own blocks cannot see an instrument that counts a comment as
+    /// an assignment — and the first version of this test used one. It passed here and failed against a
+    /// live cluster, where <c>#shared_preload_libraries = ''</c> made a substring count read 2 on a
+    /// perfectly healthy file. Counting through <see cref="CountAssignments"/> against a fixture that
+    /// contains the decoys is what makes "exactly one assignment" a claim about the product rather than
+    /// about the fixture.</para>
+    /// </summary>
+    [Fact]
+    public void HealingAConfWithoutV11_AppendsOnlyThatBlock_AndReAppliesNoV1Setting()
+    {
+        /* initdb's generated preamble, in shape: every setting present as a COMMENTED line, including the
+           ones the product also assigns. These are decoys for any instrument that counts substrings. */
+        const string StockPreamble =
+            "# -----------------------------\n" +
+            "# PostgreSQL configuration file\n" +
+            "# -----------------------------\n" +
+            "#shared_preload_libraries = ''\t# (change requires restart)\n" +
+            "#port = 5432\t\t\t\t# (change requires restart)\n" +
+            "#listen_addresses = 'localhost'\t\t# (change requires restart)\n" +
+            "#default_toast_compression = 'pglz'\t# 'pglz' or 'lz4'\n" +
+            "#timescaledb.enable_job_execution_logging = off\n";
+
+        /* The field shape: a cluster whose conf carries v1 (and every later marker) but no v11 block, so
+           the GUC has no live assignment and nothing in the file says so. */
+        var existing = StockPreamble
+            + DarlingManagedPostgres.BuildConfAppend(5641)
+            + DarlingManagedPostgres.BuildTimeZoneConfAppend()
+            + DarlingManagedPostgres.BuildMessageLocaleConfAppend();
+
+        /* The pre-heal reading, asserted rather than assumed: absent, not off. ZERO live assignments — the
+           commented decoy above is not one — which is what made the effective value `off` with
+           `source = default` in the field. */
+        Assert.Equal(0, CountAssignments(existing, StoreSelfMetrics.JobExecutionLoggingSetting));
+        Assert.Null(LastSettingValue(existing, StoreSelfMetrics.JobExecutionLoggingSetting));
+
+        var healed = existing + DarlingManagedPostgres.BuildJobExecutionLoggingConfAppend();
+
+        /* The heal: exactly one v11 block, and the GUC now has exactly one assignment, whose value is on. */
+        Assert.Equal(1, CountOccurrences(healed, DarlingManagedPostgres.ConfMarkerV11));
+        Assert.Equal(1, CountAssignments(healed, StoreSelfMetrics.JobExecutionLoggingSetting));
+        Assert.Equal("on", LastSettingValue(healed, StoreSelfMetrics.JobExecutionLoggingSetting));
+
+        /* And nothing else moved: every v1 setting still has exactly ONE live assignment, so no part of the
+           shared v1 block was re-applied. A widened v1 match would put every one of these at two. */
+        foreach (var name in SettingNames(DarlingManagedPostgres.BuildConfAppend(5641)))
+        {
+            Assert.Equal(1, CountAssignments(healed, name));
+        }
+
+        /* The v1 marker itself is untouched, which is the direct statement that v1 did not re-fire. */
+        Assert.Equal(1, CountOccurrences(healed, DarlingManagedPostgres.ConfMarker));
+    }
+
+    /// <summary>
+    /// Every managed conf marker is distinct, and none is a SUBSTRING of another (#3175). Enumerated by
+    /// reflection over the <c>ConfMarker*</c> constants, so a v12 is covered on the commit that adds it.
+    ///
+    /// <para><b>Why substring and not just equality.</b> <c>EnsureConfAppended</c> asks each question as
+    /// <c>conf.Contains(marker)</c>. If one marker were a prefix or substring of another, a cluster
+    /// carrying only the longer block would answer "present" for the shorter one and silently never gain
+    /// it — the #3175 failure reproduced by a different route, and one that a rewording could introduce by
+    /// accident. Note the v1 marker is nearly a prefix of every later one and is saved only by the
+    /// parenthesised version segment sitting where v1 has <c> -- </c>; that is not obvious by eye, which is
+    /// why it is asserted.</para>
+    /// </summary>
+    [Fact]
+    public void EveryConfMarker_IsDistinct_AndNoneIsASubstringOfAnother()
+    {
+        /* Public AND NonPublic, matching StoreLogSeverityLocaleTests.DeclaredConfMarkers: a marker does not
+           have to be public to be asked about by EnsureConfAppended, and the substring hazard is a property
+           of the Contains check, not of the accessibility of the constant it reads. */
+        var markers = typeof(DarlingManagedPostgres)
+            .GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name.StartsWith("ConfMarker", StringComparison.Ordinal))
+            .Select(f => (f.Name, Value: (string)f.GetRawConstantValue()!))
+            .ToArray();
+
+        /* A positive control on the enumeration itself: an empty or one-element set would make every
+           assertion below vacuously true, and a reflection filter that stopped matching is exactly the
+           silent failure this shape invites. Eleven blocks as of #3175. */
+        Assert.Equal(11, markers.Length);
+
+        Assert.Equal(markers.Length, markers.Select(m => m.Value).Distinct(StringComparer.Ordinal).Count());
+
+        foreach (var (name, value) in markers)
+        {
+            foreach (var (otherName, otherValue) in markers)
+            {
+                if (string.Equals(name, otherName, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                Assert.False(
+                    otherValue.Contains(value, StringComparison.Ordinal),
+                    $"{name} is a substring of {otherName}, so EnsureConfAppended's Contains check for {name} " +
+                    "would be satisfied by a cluster that only ever gained the other block.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The assignment names in a conf fragment — the left side of every non-comment <c>=</c> line. Derived
+    /// from a builder's own output so a pin over "what this block writes" cannot drift from what it writes.
+    /// </summary>
+    private static string[] SettingNames(string conf)
+    {
+        var names = new List<string>();
+        foreach (var raw in conf.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0 || line.StartsWith('#'))
+            {
+                continue;
+            }
+
+            var separator = line.IndexOf('=', StringComparison.Ordinal);
+            if (separator > 0)
+            {
+                var name = line[..separator].Trim();
+                if (!names.Contains(name, StringComparer.Ordinal))
+                {
+                    names.Add(name);
+                }
+            }
+        }
+
+        return names.ToArray();
+    }
+
+    /// <summary>
     /// The v7 compression-memory override (#1777) — the PROPAGATION half of the raised floor, and the only
     /// reason an EXISTING store adopts it. A store provisioned before #1777 carries a v3 block whose
     /// maintenance_work_mem was written under the old min(5% RAM, 1 GB) rule: on a 16 GB host that is the
@@ -254,6 +511,42 @@ public sealed class DarlingManagedPostgresTests
         Assert.DoesNotContain("shared_buffers", block, StringComparison.Ordinal);
         Assert.DoesNotContain("\nwork_mem = ", block, StringComparison.Ordinal);
         Assert.DoesNotContain("effective_cache_size", block, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// How many LIVE assignments of <paramref name="setting"/> the conf carries — the instrument for "was
+    /// this block re-applied", which a substring count cannot be.
+    ///
+    /// <para><b>Why not <c>CountOccurrences(conf, name + " = ")</c>.</b> initdb's generated
+    /// postgresql.conf documents every setting as a COMMENTED line, so a real cluster's file already
+    /// carries <c>#shared_preload_libraries = ''</c> before the product appends anything — a substring
+    /// count reads 2 on a perfectly healthy conf and the assertion then fails for a reason that has
+    /// nothing to do with the product. Not hypothetical: it is what the first version of
+    /// <see cref="ExistingStore_GainsJobExecutionLogging_OnNextStart_Gated"/> did against a live cluster,
+    /// while the synthetic fixture in
+    /// <see cref="HealingAConfWithoutV11_AppendsOnlyThatBlock_AndReAppliesNoV1Setting"/> passed because it
+    /// held only the product's own blocks and none of initdb's decoys. Same comment discipline as
+    /// <see cref="LastSettingValue"/>, so the two agree about what an assignment is.</para>
+    /// </summary>
+    private static int CountAssignments(string conf, string setting)
+    {
+        var count = 0;
+        foreach (var raw in conf.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.StartsWith('#'))
+            {
+                continue;
+            }
+
+            var separator = line.IndexOf('=', StringComparison.Ordinal);
+            if (separator > 0 && line[..separator].Trim().Equals(setting, StringComparison.Ordinal))
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     /// <summary>
@@ -423,6 +716,273 @@ public sealed class DarlingManagedPostgresTests
         Assert.Equal(3072, settings.EffectiveCacheSizeMb);  /* 75% of 4 GB */
         Assert.Equal(1024, settings.MaintenanceWorkMemMb);  /* the #1777 1536 MB floor, held to 25% of the 4 GB fallback */
         Assert.Equal(16, settings.WorkMemMb);               /* RAM/512 = 8 MB, lifted to the 16 MB floor */
+    }
+
+    /* ===================== #2845 v8 hardware re-derivation ===================== */
+
+    /// <summary>
+    /// Reporting jitter is not a hardware change (#2845 review). The fingerprint is an exact comparison and
+    /// v8 runs on EVERY start, so without quantization a host whose reported total wobbles by a few MB
+    /// between reboots would append a fresh seven-line block on every restart, forever — defeating the
+    /// "converges immediately" invariant the design rests on. <c>ullTotalPhys</c> is not guaranteed
+    /// bit-identical across reboots (balloon / Dynamic-Memory guests especially), and the fleet's own
+    /// readings are already non-round: 31.5 GB on a nominally 32 GB host.
+    ///
+    /// <para>A GB of granularity sits far above any plausible jitter and far below the smallest real resize
+    /// this class sees (4 -> 8 GB), so it cannot mask a genuine change — the last case asserts exactly
+    /// that.</para>
+    /// </summary>
+    [Fact]
+    public void HardwareFingerprint_RamJitterWithinAGb_IsNotAHardwareChange()
+    {
+        const long oneGb = 1024L * 1024 * 1024;
+        const int hypertables = 40;
+
+        /* A nominally 32 GB host, as three plausible readings of the same machine. */
+        var nominal = 32 * oneGb;
+        var short31Point5 = 31L * oneGb + 512L * 1024 * 1024;  /* what the fleet actually reports */
+        var wobble = 32 * oneGb - 7L * 1024 * 1024;            /* a few MB less on the next boot */
+
+        var conf = DarlingManagedPostgres.BuildHardwareSizingConfAppend(short31Point5, hypertables);
+
+        foreach (var reading in new[] { nominal, short31Point5, wobble })
+        {
+            Assert.True(
+                DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(
+                    conf, DarlingManagedPostgres.BuildHardwareFingerprint(reading, hypertables)),
+                $"reading {reading} should be the same machine, not a hardware change");
+        }
+
+        /* And the block is exactly reproducible from its own fingerprint - same quantized value both. */
+        Assert.Equal(
+            DarlingManagedPostgres.BuildHardwareSizingConfAppend(nominal, hypertables),
+            DarlingManagedPostgres.BuildHardwareSizingConfAppend(short31Point5, hypertables));
+
+        /* A REAL resize still reads as one - quantization cannot mask a genuine change. */
+        Assert.False(DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(
+            conf, DarlingManagedPostgres.BuildHardwareFingerprint(64 * oneGb, hypertables)));
+    }
+
+
+    /// <summary>
+    /// A NON-AUTHORITATIVE RAM reading must append nothing, whatever the conf says (#2845 review).
+    ///
+    /// <para>The subtlety this pins: <c>GetTotalPhysicalMemoryBytes</c> falls back to
+    /// <c>GC.GetGCMemoryInfo().TotalAvailableMemoryBytes</c> before it reaches the fixed 4 GB sentinel, and
+    /// that middle tier is a LIVE value — it varies between calls and sits below true physical RAM. So
+    /// normalising only the "&lt;= 0" case does not make the fingerprint stable: an intermittently failing
+    /// Win32 call would mint a NOVEL fingerprint on each blip, append a block every time (this check runs
+    /// on every start, unlike the marker-gated v1-v7), and derive the planner's cache estimate from the low
+    /// guess with immediate effect. Guarding on the VALUE cannot fix that; guarding on whether the reading
+    /// is trustworthy at all can. Absence of a reading is not evidence the hardware is unchanged, so the
+    /// answer is to do nothing and leave the last known-good block in force.</para>
+    /// </summary>
+    [Fact]
+    public void ShouldAppendHardwareSizing_NonAuthoritativeRamReading_AppendsNothing()
+    {
+        const long sixteenGb = 16L * 1024 * 1024 * 1024;
+        const long thirtyTwoGb = 32L * 1024 * 1024 * 1024;
+        const int hypertables = 40;
+
+        var conf = DarlingManagedPostgres.BuildHardwareSizingConfAppend(sixteenGb, hypertables);
+
+        /* A genuine 16 -> 32 GB resize DOES append, but only with an authoritative reading behind it. */
+        Assert.True(DarlingManagedPostgres.ShouldAppendHardwareSizing(
+            conf, ramReadingIsAuthoritative: true,
+            DarlingManagedPostgres.BuildHardwareFingerprint(thirtyTwoGb, hypertables)));
+
+        /* The same apparent change, from a reading we could not trust, must do nothing at all. */
+        Assert.False(DarlingManagedPostgres.ShouldAppendHardwareSizing(
+            conf, ramReadingIsAuthoritative: false,
+            DarlingManagedPostgres.BuildHardwareFingerprint(thirtyTwoGb, hypertables)));
+
+        /* And it stays inert for ANY value the GC fallback might invent, which is the append-loop case. */
+        foreach (var guessGb in new long[] { 3, 7, 12, 29 })
+        {
+            Assert.False(DarlingManagedPostgres.ShouldAppendHardwareSizing(
+                conf, ramReadingIsAuthoritative: false,
+                DarlingManagedPostgres.BuildHardwareFingerprint(guessGb * 1024 * 1024 * 1024, hypertables)));
+        }
+    }
+
+
+    /// <summary>
+    /// THE PROPERTY THIS ISSUE IS ABOUT: a RAM change makes the conf stale, and staleness is what triggers
+    /// re-derivation. Asserted on the decision function rather than on a code shape, so a refactor that
+    /// keeps the behaviour keeps the pin green and one that loses it goes red.
+    ///
+    /// <para>The 16 -> 31.5 GB pair is the live case from #2845: three boxes resized under a marker-keyed
+    /// scheme kept effective_cache_size at 75% of the RAM they no longer had.</para>
+    /// </summary>
+    [Fact]
+    public void HardwareFingerprint_RamChange_TriggersRederivation()
+    {
+        const long sixteenGb = 16L * 1024 * 1024 * 1024;
+        const long thirtyTwoGb = 32L * 1024 * 1024 * 1024;
+        const int hypertables = 40;
+
+        var conf = "shared_buffers = 1024MB\n" +
+            DarlingManagedPostgres.BuildHardwareSizingConfAppend(sixteenGb, hypertables);
+
+        /* Same host: already derived here, nothing to do. */
+        Assert.True(DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(
+            conf, DarlingManagedPostgres.BuildHardwareFingerprint(sixteenGb, hypertables)));
+
+        /* Resized: the sizing in the file was derived under RAM this host no longer has. */
+        Assert.False(DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(
+            conf, DarlingManagedPostgres.BuildHardwareFingerprint(thirtyTwoGb, hypertables)));
+
+        /* Collector added: the worker counts in the file are undersized for the new hypertable count. */
+        Assert.False(DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(
+            conf, DarlingManagedPostgres.BuildHardwareFingerprint(sixteenGb, hypertables + 1)));
+    }
+
+    /// <summary>
+    /// The LAST fingerprint decides, not any fingerprint — the case a <c>conf.Contains(fingerprint)</c>
+    /// test gets wrong and the reason the helper exists at all.
+    ///
+    /// <para>A host resized 16 -> 32 -> back to 16 GB has BOTH fingerprints in its conf. Contains would find
+    /// the original 16 GB line still present and skip the append, leaving the 32 GB block as the last
+    /// occurrence of effective_cache_size and therefore still in force — a box sized for RAM it does not
+    /// have, latched permanently. postgresql.conf resolves duplicates by last-occurrence-wins, so the
+    /// staleness test has to ask the same question the file answers.</para>
+    /// </summary>
+    [Fact]
+    public void HardwareFingerprint_ResizeBackToPreviousSize_StillRederives()
+    {
+        const long sixteenGb = 16L * 1024 * 1024 * 1024;
+        const long thirtyTwoGb = 32L * 1024 * 1024 * 1024;
+        const int hypertables = 40;
+
+        var conf =
+            DarlingManagedPostgres.BuildHardwareSizingConfAppend(sixteenGb, hypertables) +
+            DarlingManagedPostgres.BuildHardwareSizingConfAppend(thirtyTwoGb, hypertables);
+
+        var sixteenGbFingerprint = DarlingManagedPostgres.BuildHardwareFingerprint(sixteenGb, hypertables);
+
+        /* The 16 GB fingerprint IS present — a Contains test would return true here and skip. */
+        Assert.Contains(sixteenGbFingerprint, conf, StringComparison.Ordinal);
+
+        /* But it is not the LAST one, so the box is running 32 GB sizing and must re-derive. */
+        Assert.False(DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(conf, sixteenGbFingerprint));
+
+        /* And the 32 GB block, being last, correctly reports itself as current. */
+        Assert.True(DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(
+            conf, DarlingManagedPostgres.BuildHardwareFingerprint(thirtyTwoGb, hypertables)));
+    }
+
+    /// <summary>
+    /// CONSTRAINT PIN 1 (#1559 / #2845): the hardware block must never emit <c>shared_buffers</c>, at ANY
+    /// host size. The 1 GB cap is the Windows error-487 mitigation and the condition is live on the fleet
+    /// (measured 2026-09-03: 4-205 occurrences/day across three boxes, zero could-not-fork — the retry path
+    /// holding is exactly the margin a larger segment would spend).
+    ///
+    /// <para>Excluded STRUCTURALLY rather than by trusting min(25% RAM, 1 GB) to keep returning 1 GB: this
+    /// pin holds even if someone later raises the cap in <see cref="DarlingManagedPostgres.DeriveMemorySettings"/>,
+    /// which is the point. Raising it is a formula decision that belongs in a reviewed version-keyed block,
+    /// not something a host resize propagates to production on its own.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(4)]
+    [InlineData(16)]
+    [InlineData(32)]
+    [InlineData(64)]
+    [InlineData(512)]
+    public void HardwareSizingConfAppend_NeverEmitsSharedBuffers(long ramGb)
+    {
+        var block = DarlingManagedPostgres.BuildHardwareSizingConfAppend(ramGb * 1024 * 1024 * 1024, 40);
+
+        Assert.DoesNotContain("shared_buffers", block, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// CONSTRAINT PIN 2 (#2845): the hardware block must never emit <c>work_mem</c>, at ANY host size.
+    /// The formula would take it 31 -> 63 MB on the resized boxes, and the only measurements above 31 MB on
+    /// this store's heaviest read are worse (PlanRegressionSql: default 26,565 ms, 31 MB 25,617 ms,
+    /// 512 MB 59,323 ms). It is also the wrong KIND of setting for this block — a per-sort, per-connection
+    /// ceiling that follows from the query mix, not from the machine.
+    ///
+    /// <para>Note the theory covers 32 GB and above, where the formula clamps to the 64 MB ceiling: those
+    /// are precisely the sizes where a naive "apply the formula to the new RAM" change would have doubled
+    /// it.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(4)]
+    [InlineData(16)]
+    [InlineData(32)]
+    [InlineData(64)]
+    [InlineData(512)]
+    public void HardwareSizingConfAppend_NeverEmitsWorkMem(long ramGb)
+    {
+        var block = DarlingManagedPostgres.BuildHardwareSizingConfAppend(ramGb * 1024 * 1024 * 1024, 40);
+
+        /* Anchored on the newline that starts every setting line. A bare "work_mem = " is a SUBSTRING of
+           "maintenance_work_mem = ", so the unanchored form fails against a correct block — caught by the
+           harness before this shipped, and the reason the positive assertion below is here as a guard. */
+        Assert.DoesNotContain("\nwork_mem = ", block, StringComparison.Ordinal);
+        Assert.Contains("\nmaintenance_work_mem = ", block, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The block emits what it is for, at the values the resized fleet should have had. 31.5 GB is the
+    /// m7i.2xlarge reading; 32 GB is used here for a round assertion. effective_cache_size 24576MB is the
+    /// number #2845 was filed over — the boxes were sitting at 11.86 GB, which is 75% of the 16 GB they had
+    /// before the resize.
+    /// </summary>
+    [Fact]
+    public void HardwareSizingConfAppend_EmitsHostDerivedSettings()
+    {
+        const long thirtyTwoGb = 32L * 1024 * 1024 * 1024;
+        var block = DarlingManagedPostgres.BuildHardwareSizingConfAppend(thirtyTwoGb, 40);
+
+        Assert.Contains(DarlingManagedPostgres.ConfMarkerV8, block, StringComparison.Ordinal);
+        Assert.Contains("effective_cache_size = 24576MB", block, StringComparison.Ordinal);  /* 75% of 32 GB (was 11.86 GB = 75% of 16 GB) */
+        Assert.Contains("maintenance_work_mem = 1638MB", block, StringComparison.Ordinal);   /* 5% of 32 GB, past the 1536 floor, under the 2 GB cap */
+        Assert.Contains("timescaledb.max_background_workers = 42", block, StringComparison.Ordinal);  /* 40 hypertables + 2 */
+        Assert.Contains("max_worker_processes = 53", block, StringComparison.Ordinal);       /* 3 + 42 + 8 */
+    }
+
+    /// <summary>
+    /// The v2 block and the v8 re-derivation share ONE worker formula (#2845), so the two writers of
+    /// max_worker_processes cannot drift apart and produce a conf whose last occurrence disagrees with the
+    /// block that established it.
+    /// </summary>
+    [Fact]
+    public void HardwareSizingConfAppend_WorkerCountsMatchV2Formula()
+    {
+        var v2 = DarlingManagedPostgres.BuildWorkerSizingConfAppend();
+        var v8 = DarlingManagedPostgres.BuildHardwareSizingConfAppend(
+            32L * 1024 * 1024 * 1024, TimescaleSupport.HypertableCount);
+
+        foreach (var setting in new[] { "timescaledb.max_background_workers = ", "max_worker_processes = " })
+        {
+            var fromV2 = ExtractSettingLine(v2, setting);
+            var fromV8 = ExtractSettingLine(v8, setting);
+            Assert.Equal(fromV2, fromV8);
+        }
+
+        static string ExtractSettingLine(string block, string setting)
+        {
+            var start = block.IndexOf(setting, StringComparison.Ordinal);
+            Assert.True(start >= 0, $"block did not contain '{setting}'");
+            var end = block.IndexOf('\n', start);
+            return (end < 0 ? block[start..] : block[start..end]).TrimEnd('\r');
+        }
+    }
+
+    /// <summary>
+    /// A failed RAM reading fingerprints as the 4 GB fallback it actually derived under, not as "0". If it
+    /// recorded zero, the next successful reading would look like a hardware change and append a block on
+    /// every alternating start — an append loop rather than a converging heal.
+    /// </summary>
+    [Fact]
+    public void HardwareFingerprint_NonPositiveRam_MatchesTheFallbackItDerivedUnder()
+    {
+        const long fourGb = 4L * 1024 * 1024 * 1024;
+
+        Assert.Equal(
+            DarlingManagedPostgres.BuildHardwareFingerprint(fourGb, 40),
+            DarlingManagedPostgres.BuildHardwareFingerprint(0, 40));
     }
 
     [Fact]
@@ -838,6 +1398,184 @@ public sealed class DarlingManagedPostgresTests
             await owner.StopIfStartedByThisProcessAsync();
             TryDeleteRecursive(root.FullName);
         }
+    }
+
+    /// <summary>
+    /// #3175 PROPAGATION, proven against a real server: a cluster whose conf carries the v1 marker (and
+    /// every later one) but NO v11 block — the shape of every store initdb'd before this fix — must gain
+    /// <c>timescaledb.enable_job_execution_logging = on</c> on its next service-owned start, and must be
+    /// serving it, not merely carrying it in a file.
+    ///
+    /// <para>The pre-fix conf is reconstructed exactly rather than approximated: v11 is the last block
+    /// appended, so truncating at its marker restores the old file byte-for-byte, and the GUC then has no
+    /// assignment anywhere — which is precisely the field shape (all ten markers present, no GUC line,
+    /// effective <c>off</c> with <c>source = default</c>).</para>
+    ///
+    /// <para><b>The positive control, because "on" alone would be worthless here.</b> The reading is taken
+    /// together with <c>boot_val</c> and <c>source</c> in one row. <c>boot_val = 'off'</c> proves the
+    /// compiled-in default is off, so an observed <c>on</c> cannot be the value this server would have had
+    /// regardless — the exact confusion this whole issue is about, one level up. <c>source</c> then names
+    /// where the <c>on</c> came from, and <c>sourcefile</c> proves it was OUR postgresql.conf rather than
+    /// an <c>ALTER SYSTEM</c> in postgresql.auto.conf. Without those three the assertion would pass on a
+    /// server that was already on for an unrelated reason.</para>
+    ///
+    /// <para><c>context</c> is pinned as well, against the BUNDLED TimescaleDB rather than only the version
+    /// this was measured on locally: the marker's doc comment says a reload would carry this setting and
+    /// that the append-before-start is what makes a reload unnecessary. If TimescaleDB ever made it
+    /// restart-only, that reasoning would be wrong and this goes red instead of the comment quietly
+    /// becoming fiction.</para>
+    /// </summary>
+    [Fact]
+    public async Task ExistingStore_GainsJobExecutionLogging_OnNextStart_Gated()
+    {
+        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
+            "Set DARLING_TEST_PGRUNTIME to an assembled pg-runtime directory (the folder containing pgsql\\bin\\pg_ctl.exe; " +
+            "Darling\\tools\\fetch-pg-runtime.ps1 -KeepWork leaves one under artifacts\\pg-runtime-work\\assemble\\pg-runtime) " +
+            "to run the #3175 conf-propagation E2E.");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        Assert.SkipUnless(File.Exists(Path.Combine(runtimeRoot!, "pgsql", "bin", "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME={runtimeRoot} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-pgv11-");
+        var dataDirectory = Path.Combine(root.FullName, "pg");
+        var config = new PostgresConfig
+        {
+            Managed = true,
+            Port = FindFreeTcpPort(),
+            DataDirectory = dataDirectory,
+        };
+        var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+
+        var owner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
+
+            /* A real store, provisioned the normal way. */
+            await owner.EnsureRunningAsync(timeout.Token);
+            await owner.StopIfStartedByThisProcessAsync();
+
+            /* Rewind to the pre-#3175 shape: v11 is appended last, so its marker is a clean truncation
+               point. */
+            var fresh = await File.ReadAllTextAsync(confPath, timeout.Token);
+            var v11Index = fresh.IndexOf(DarlingManagedPostgres.ConfMarkerV11, StringComparison.Ordinal);
+            Assert.True(v11Index > 0, "The fresh conf should carry the v11 block before it is rewound.");
+
+            var legacyConf = fresh[..v11Index];
+            await File.WriteAllTextAsync(confPath, legacyConf, timeout.Token);
+
+            /* The rewound file is the field shape, asserted on both axes: the v1 marker IS present (so the
+               v1 check will skip, which is the whole defect) and the GUC has NO assignment anywhere — not
+               an assignment set to off, an absence. */
+            Assert.Contains(DarlingManagedPostgres.ConfMarker, legacyConf, StringComparison.Ordinal);
+            Assert.DoesNotContain(DarlingManagedPostgres.ConfMarkerV11, legacyConf, StringComparison.Ordinal);
+            Assert.Null(LastSettingValue(legacyConf, StoreSelfMetrics.JobExecutionLoggingSetting));
+
+            /* The service-owned start: EnsureConfAppended heals BEFORE pg_ctl start, so the setting is live
+               on this very start rather than one restart later. */
+            var healedOwner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+            var healedConnectionString = await healedOwner.EnsureRunningAsync(timeout.Token);
+            try
+            {
+                var healedConf = await File.ReadAllTextAsync(confPath, timeout.Token);
+                Assert.Equal(1, CountOccurrences(healedConf, DarlingManagedPostgres.ConfMarkerV11));
+                Assert.Equal("on", LastSettingValue(healedConf, StoreSelfMetrics.JobExecutionLoggingSetting));
+
+                /* Appended, never rewritten in place: the v1 marker still occurs exactly once, so no part
+                   of that shared block was re-applied to heal this setting. */
+                Assert.Equal(1, CountOccurrences(healedConf, DarlingManagedPostgres.ConfMarker));
+
+                /* Live ASSIGNMENTS, not substring hits: initdb's generated conf already carries a commented
+                   #shared_preload_libraries line, so a substring count reads 2 on a healthy file. That is
+                   what the first version of this assertion did, and CI is where it said so. */
+                Assert.Equal(1, CountAssignments(healedConf, "shared_preload_libraries"));
+
+                /* A PRECONDITION of the reading below, not part of what the heal is judged on — and the trap
+                   in this whole area. `timescaledb` in shared_preload_libraries loads the LOADER, and the
+                   loader pulls in the VERSIONED library only for a database that has the extension. The
+                   GUCs the versioned library defines, this one among them, are therefore not registered
+                   until then and pg_settings returns NO ROW for the name at all. Measured on 2.30.0/PG17
+                   with the loader preloaded: from a database with the extension, one row; from a database
+                   created TEMPLATE template0 without it, ZERO rows for this GUC while the LOADER-defined
+                   timescaledb.max_background_workers still had one. EnsureRunningAsync creates the store
+                   database; TimescaleSupport creates the extension later in the worker's bootstrap, so this
+                   stands in for that step.
+
+                   Through LiveTimescaleProbe, not a raw CREATE EXTENSION: that statement TERMINATES THE
+                   BACKEND when the library is on disk but unpreloaded (#1922), and the probe both risks a
+                   connection nobody else holds and sets the search_path the extension lands in. Asserted
+                   rather than fire-and-forget, so a precondition that silently did not hold cannot present
+                   as the setting being absent. */
+                Assert.True(
+                    await LiveTimescaleProbe.TryEnableAsync(healedConnectionString, timeout.Token),
+                    "TimescaleDB could not be enabled on the healed store, so the versioned library never "
+                    + "loaded and its GUCs were never registered — the reading below would be absent for that "
+                    + "reason rather than for anything the v11 heal did.");
+
+                var reading = await ReadJobExecutionLoggingSettingAsync(healedConnectionString, timeout.Token);
+
+                /* The positive control first: the compiled-in default is OFF, so the value below cannot be
+                   what this server would have served anyway. */
+                Assert.Equal("off", reading.BootValue);
+                Assert.Equal("on", reading.Setting);
+                Assert.Equal("configuration file", reading.Source);
+                Assert.Equal(
+                    Path.GetFullPath(confPath),
+                    Path.GetFullPath(reading.SourceFile ?? string.Empty));
+
+                /* SIGHUP-context, which is what makes "the append before pg_ctl start is enough, and no
+                   reload is issued" a decision rather than a gamble. */
+                Assert.Equal("sighup", reading.Context);
+            }
+            finally
+            {
+                await healedOwner.StopIfStartedByThisProcessAsync();
+            }
+
+            /* A third start must not append a second v11 block. */
+            Assert.Equal(1, CountOccurrences(await File.ReadAllTextAsync(confPath, timeout.Token), DarlingManagedPostgres.ConfMarkerV11));
+        }
+        finally
+        {
+            await owner.StopIfStartedByThisProcessAsync();
+            TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// One <c>pg_settings</c> row for the job-execution-logging GUC, read through an UNPOOLED connection so
+    /// the reading always costs real I/O against the server running right now. All five columns in one row
+    /// rather than five reads: the value only means anything beside its default and its provenance.
+    /// </summary>
+    private static async Task<(string? Setting, string? Source, string? SourceFile, string? BootValue, string? Context)>
+        ReadJobExecutionLoggingSettingAsync(string connectionString, CancellationToken cancellationToken)
+    {
+        var unpooled = new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString;
+        await using var connection = new NpgsqlConnection(unpooled);
+        await connection.OpenAsync(cancellationToken);
+        using var command = new NpgsqlCommand(
+            "SELECT setting, source, sourcefile, boot_val, context FROM pg_settings WHERE name = @name",
+            connection);
+        command.Parameters.AddWithValue("name", StoreSelfMetrics.JobExecutionLoggingSetting);
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        /* A missing row is NOT "the setting is off", and it is not only "the library is not preloaded"
+           either: the versioned TimescaleDB library that defines this GUC loads only for a database that
+           has the extension, so an unenabled store answers the same way. Both causes are named in the
+           message below rather than one guessed at — which cost a CI round to learn. */
+        Assert.True(
+            await reader.ReadAsync(cancellationToken),
+            $"pg_settings has no row for {StoreSelfMetrics.JobExecutionLoggingSetting}. Either the v1 " +
+            "shared_preload_libraries line did not take effect, or the timescaledb extension is not installed in " +
+            "this database — the versioned library that defines this GUC is only loaded for a database that has it.");
+
+        return (
+            reader.IsDBNull(0) ? null : reader.GetString(0),
+            reader.IsDBNull(1) ? null : reader.GetString(1),
+            reader.IsDBNull(2) ? null : reader.GetString(2),
+            reader.IsDBNull(3) ? null : reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4));
     }
 
     /// <summary>

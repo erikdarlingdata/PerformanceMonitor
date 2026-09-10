@@ -91,6 +91,7 @@ internal static class DarlingMemoryGrantReader
     {
         var rows = new List<ResourceSemaphoreRow>();
         await using var command = postgres.CreateCommand(ResourceSemaphoreLatestSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -155,6 +156,7 @@ internal static class DarlingMemoryGrantReader
     {
         var rows = new List<MemoryGrantRow>();
         await using var command = postgres.CreateCommand(MemoryGrantsLatestSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -206,6 +208,7 @@ internal static class DarlingMemoryGrantReader
     {
         var rows = new List<MemoryPressureEventRow>();
         await using var command = postgres.CreateCommand(MemoryPressureEventsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

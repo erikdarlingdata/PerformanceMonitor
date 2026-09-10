@@ -174,9 +174,14 @@ internal static class ComposeStoreAvailability
 
         var windowDays = (nowUtc - windowStartUtc).TotalDays;
         var heldDays = (nowUtc - oldestHeld).TotalDays;
+        /* Pluralise on the RENDERED number, not the raw double: heldDays formats as a whole number and windowDays
+           to one decimal, so "1" is singular ("1 day") while "1.5" and "30" are plural — a one-day store no
+           longer reads "reaches back about 1 days". */
+        var heldText = heldDays.ToString("0", CultureInfo.InvariantCulture);
+        var windowText = windowDays.ToString("0.#", CultureInfo.InvariantCulture);
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"partial window: this panel read the {tierName} tier, which on this store reaches back about {heldDays:0} days, but the requested window starts {windowDays:0.#} days back — older points are not included.");
+            $"partial window: this panel read the {tierName} tier, which on this store reaches back about {heldText} day{(heldText == "1" ? "" : "s")}, but the requested window starts {windowText} day{(windowText == "1" ? "" : "s")} back — older points are not included.");
     }
 
     /// <summary>
@@ -192,12 +197,14 @@ internal static class ComposeStoreAvailability
     /// beats erring toward a truncated chart that looks complete, and the reverse mistake is the bug this
     /// exists to fix.</para>
     ///
-    /// <para>TIME SERIES ONLY. A Ranked panel's LIMIT is the user's own topN — hitting it is the request
-    /// being honored, not truncation — and Scalar is a single row.</para>
+    /// <para>TIME-SERIES SHAPES ONLY — plain and the #2734 rank-then-bucket alike, whose row count is
+    /// series × buckets (the bound topN LIMIT lives in its rank CTE, not on the rows). A Ranked panel's
+    /// LIMIT is the user's own topN — hitting it is the request being honored, not truncation — and
+    /// Scalar is a single row.</para>
     /// </summary>
     internal static string? BuildRowCapNotice(PanelMode mode, int rowCount)
     {
-        if (mode != PanelMode.TimeSeries || rowCount < ComposeLimits.HardRowCap)
+        if (mode is not (PanelMode.TimeSeries or PanelMode.RankedTimeSeries) || rowCount < ComposeLimits.HardRowCap)
         {
             return null;
         }

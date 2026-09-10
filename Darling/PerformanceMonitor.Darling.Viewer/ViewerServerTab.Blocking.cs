@@ -134,6 +134,9 @@ public partial class ViewerServerTab
         switch (BlockingSubTabs.SelectedIndex)
         {
             case BlockingTrendsSubTabIndex:
+            {
+                using var readFanOut = ViewerReadFanOut.Of(3);
+
                 var lockWaitTask = _dataService.GetLockWaitTrendAsync(_server.ServerId, startUtc, endUtc);
                 var blockingTask = _dataService.GetBlockingTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
                 var deadlockTask = _dataService.GetDeadlockTrendAsync(_server.ServerId, startUtc, endUtc);
@@ -144,7 +147,11 @@ public partial class ViewerServerTab
                 RenderBlockingTrendChart(blocking);
                 RenderDeadlockTrendChart(deadlocks);
                 break;
+            }
             case BlockingStatsSubTabIndex:
+            {
+                using var readFanOut = ViewerReadFanOut.Of(3);
+
                 /* Blocking SEVERITY: the duration aggregate reconciles with the count trend (same XE→DMV
                    source selection); the deadlock COUNT is the cheap sibling of the Trends tab's deadlock
                    trend, summed here for the summary strip. The deadlock SEVERITY aggregate (victim_count +
@@ -162,7 +169,11 @@ public partial class ViewerServerTab
                 RenderDeadlockTotalWaitChart(deadlockSeverity);
                 UpdateBlockingStatsSummary(durationStats, deadlockCounts, deadlockSeverity);
                 break;
+            }
             case BlockingCurrentWaitsSubTabIndex:
+            {
+                using var readFanOut = ViewerReadFanOut.Of(2);
+
                 var durationTask = _dataService.GetWaitingTaskTrendAsync(_server.ServerId, startUtc, endUtc);
                 var blockedTask = _dataService.GetBlockedSessionTrendAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
                 var duration = await durationTask;
@@ -170,6 +181,7 @@ public partial class ViewerServerTab
                 RenderCurrentWaitsDurationChart(duration);
                 RenderCurrentWaitsBlockedChart(blocked);
                 break;
+            }
             case BlockedProcessReportsSubTabIndex:
                 await LoadBlockedProcessReportsAsync(startUtc, endUtc);
                 break;
@@ -331,14 +343,14 @@ public partial class ViewerServerTab
     {
         if (sender is not MenuItem menuItem) return;
         if (FindParentDataGrid(menuItem)?.CurrentItem is not ViewerBlockedProcessRow row || !row.HasBlockedQueryPlan) return;
-        OpenPlanTab(row.BlockedQueryPlanXml!, $"Blocked Plan - SPID {row.BlockedSpid}", row.BlockedSqlText);
+        _ = OpenPlanTab(row.BlockedQueryPlanXml!, $"Blocked Plan - SPID {row.BlockedSpid}", row.BlockedSqlText);
     }
 
     private void ViewBlockingQueryPlan_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not MenuItem menuItem) return;
         if (FindParentDataGrid(menuItem)?.CurrentItem is not ViewerBlockedProcessRow row || !row.HasBlockingQueryPlan) return;
-        OpenPlanTab(row.BlockingQueryPlanXml!, $"Blocking Plan - SPID {row.BlockingSpid}", row.BlockingSqlText);
+        _ = OpenPlanTab(row.BlockingQueryPlanXml!, $"Blocking Plan - SPID {row.BlockingSpid}", row.BlockingSqlText);
     }
 
     private void RenderLockWaitTrendChart(List<LockWaitTrendPoint> data)

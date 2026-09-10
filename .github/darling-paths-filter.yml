@@ -1,0 +1,60 @@
+# The ONE Darling path gate. Both Darling jobs in .github/workflows/build.yml — `Darling PostgreSQL
+# tests` and `Darling Linux build` — read this file through dorny/paths-filter's documented
+# `filters: <relative path>` form, so the two jobs cannot disagree about what reaches Darling.
+#
+# A FILE rather than a list per job (#3116). The PG job's own filter named `Darling/**` and the two
+# workflows and nothing else, while the Linux job in the same file already listed shared libraries;
+# a change to PerformanceMonitor.Collectors therefore ran the Linux build (1m47s) and ran the
+# TimescaleDB suite on none of it, reporting success in 17s. Two hand-maintained lists of one
+# dependency fact is what stopped agreeing, so there is one list. It lives outside
+# .github/workflows/ deliberately: anything inside that directory is parsed as a workflow.
+#
+# Every area pattern is `dir/**/!(*.md)` — any non-markdown file under the area. NOT a `dir/**`
+# include plus a bare `!**/*.md` exclude: dorny v4 evaluates each pattern as an INDEPENDENT predicate
+# under the default predicate-quantifier 'some', so a bare negation is not a subtraction, it is its
+# own rule meaning "any non-markdown file anywhere", which silently made these filters true for every
+# change in the repository (run 30218459544: "Filter darling = true, Matching files: CHANGELOG.md").
+# The markdown carve-out stays INSIDE the include, where quantifier semantics cannot detach it.
+darling:
+  - 'Darling/**/!(*.md)'
+  # The shared libraries Darling COMPILES AGAINST, read off the ProjectReference closure of
+  # Darling/Darling.Tests rather than judged: .Viewer accounts for .Ui, .Analysis and .Notifications,
+  # .Service adds .Alerting and .PlanAnalysis, and .Storage / Darling.Analysis add .Collectors, with
+  # .Common reached by nearly all of them. All seven, so the closure is what is written down here and
+  # DarlingPathFilterGateTests derives the requirement from that closure — add a shared library to a
+  # Darling project and the entry becomes mandatory rather than remembered.
+  #
+  # The Linux job takes one entry it does not compile, PerformanceMonitor.Ui, because that job
+  # publishes the service rather than the WPF viewer. One linux-x64 publish and one image build on a
+  # UI-only change is the price of the two jobs sharing one answer, and it errs toward building.
+  - 'PerformanceMonitor.Alerting/**/!(*.md)'
+  - 'PerformanceMonitor.Analysis/**/!(*.md)'
+  - 'PerformanceMonitor.Collectors/**/!(*.md)'
+  - 'PerformanceMonitor.Common/**/!(*.md)'
+  - 'PerformanceMonitor.Notifications/**/!(*.md)'
+  - 'PerformanceMonitor.PlanAnalysis/**/!(*.md)'
+  - 'PerformanceMonitor.Ui/**/!(*.md)'
+  # build.yml is in the gate so a change to the gate is exercised by the gate, and this file is in it
+  # for the same reason: it is now half of the gate, and an edit here that left both jobs skipping
+  # would otherwise be the one change neither job validates.
+  - '.github/workflows/build.yml'
+  - '.github/darling-paths-filter.yml'
+  # nightly.yml is not a build input, but Darling.Tests PARSES it: the #1888 cluster-sizing guard
+  # reads both workflows' throwaway-cluster settings and compares them against the product's
+  # worker-sizing formula, so an edit to it has to reach the suite. The Linux job runs no tests and
+  # carries this entry only by sharing the file; it costs that job one publish and one image build.
+  - '.github/workflows/nightly.yml'
+
+# Lite/** is deliberately ABSENT, though build.yml's own `darling` filter carries it. That entry
+# exists because Darling.Tests reads Lite source in its cross-app parity guards, and those guards run
+# in the `build` job, whose "Run Darling tests" step fires on that filter — a Lite-only change already
+# runs the whole Darling suite there, and darling-tree-guards is the backstop when it does not. What
+# these two jobs add over that is a live TimescaleDB cluster and a linux-x64 publish, neither of which
+# a Lite XAML edit can affect, so putting Lite/** here would buy a ~4-minute cluster and no signal.
+
+# The changed-file COUNTER the two gate-decision steps report against, so a skip notice can say how
+# many files it classified and name them rather than assert a cause for the classification. Never a
+# boolean gate: every changed file matches '**', so this filter can only ever be true — the same
+# reason build.yml states its own `all` counter is a count and not a condition.
+all:
+  - '**'

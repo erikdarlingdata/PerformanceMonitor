@@ -44,13 +44,19 @@ public sealed class DatabaseSizeStatsCollector : CollectorDefinitionBase<Databas
     {
     }
 
+    /// <summary>
+    /// <c>DatabaseId</c>, <c>FileId</c> and <c>PhysicalName</c> are nullable because the Azure
+    /// sibling arm (#2643) deliberately emits them as NULL: <c>sys.resource_stats</c> has no
+    /// per-file breakdown, so a sibling row carries a database name and a total size and honestly
+    /// nothing else. Both stores hold the columns nullable (#3262).
+    /// </summary>
     public readonly record struct Row(
         string DatabaseName,
-        int DatabaseId,
-        int FileId,
+        int? DatabaseId,
+        int? FileId,
         string FileTypeDesc,
         string FileName,
-        string PhysicalName,
+        string? PhysicalName,
         decimal TotalSizeMb,
         decimal? UsedSizeMb,
         decimal? AutoGrowthMb,
@@ -71,8 +77,8 @@ SET NOCOUNT ON;
 
 CREATE TABLE #file_space
 (
-    database_id int NOT NULL,
-    file_id int NOT NULL,
+    database_id integer NOT NULL,
+    file_id integer NOT NULL,
     used_size_mb decimal(19,2) NULL,
     /* #2169: the file's CURRENT size, read in-database alongside SpaceUsed. sys.master_files.size is the
        size recorded at configuration time and does NOT track autogrowth for tempdb, so a grown tempdb
@@ -91,7 +97,7 @@ DECLARE
 
 DECLARE
     @db_name sysname,
-    @sql nvarchar(MAX);
+    @sql nvarchar(max);
 
 DECLARE db_cursor CURSOR LOCAL FAST_FORWARD FOR
     SELECT
@@ -168,7 +174,7 @@ SELECT
     recovery_model_desc =
         d.recovery_model_desc,
     compatibility_level =
-        CONVERT(int, d.compatibility_level),
+        CONVERT(integer, d.compatibility_level),
     state_desc =
         d.state_desc,
     volume_mount_point =
@@ -182,7 +188,7 @@ SELECT
     growth_pct =
         CASE WHEN mf.is_percent_growth = 1 THEN mf.growth ELSE NULL END,
     vlf_count =
-        CASE WHEN mf.type = 1 /*LOG*/ THEN (SELECT COUNT(*) FROM sys.dm_db_log_info(mf.database_id) AS li WHERE li.file_id = mf.file_id) ELSE NULL END
+        CASE WHEN mf.type = 1 /*LOG*/ THEN (SELECT CONVERT(integer, COUNT_BIG(*)) FROM sys.dm_db_log_info(mf.database_id) AS li WHERE li.file_id = mf.file_id) ELSE NULL END
 FROM sys.master_files AS mf
 JOIN sys.databases AS d
   ON d.database_id = mf.database_id
@@ -233,8 +239,8 @@ DECLARE
     @database_sizes TABLE
 (
     database_name nvarchar(128) NULL,
-    database_id int NULL,
-    file_id int NULL,
+    database_id integer NULL,
+    file_id integer NULL,
     file_type_desc nvarchar(60) NULL,
     file_name nvarchar(128) NULL,
     physical_name nvarchar(260) NULL,
@@ -243,14 +249,14 @@ DECLARE
     auto_growth_mb decimal(19,2) NULL,
     max_size_mb decimal(19,2) NULL,
     recovery_model_desc nvarchar(12) NULL,
-    compatibility_level int NULL,
+    compatibility_level integer NULL,
     state_desc nvarchar(60) NULL,
     volume_mount_point nvarchar(256) NULL,
     volume_total_mb decimal(19,2) NULL,
     volume_free_mb decimal(19,2) NULL,
     is_percent_growth bit NULL,
-    growth_pct int NULL,
-    vlf_count int NULL
+    growth_pct integer NULL,
+    vlf_count integer NULL
 );
 
 INSERT
@@ -283,7 +289,7 @@ SELECT
     recovery_model_desc =
         CONVERT(nvarchar(12), DATABASEPROPERTYEX(DB_NAME(), N'Recovery')),
     compatibility_level =
-        CONVERT(int, NULL),
+        CONVERT(integer, NULL),
     state_desc =
         N'ONLINE',
     volume_mount_point =
@@ -297,7 +303,7 @@ SELECT
     growth_pct =
         CASE WHEN df.is_percent_growth = 1 THEN df.growth ELSE NULL END,
     vlf_count =
-        CASE WHEN df.type = 1 /*LOG*/ THEN (SELECT COUNT(*) FROM sys.dm_db_log_info(DB_ID()) AS li WHERE li.file_id = df.file_id) ELSE NULL END
+        CASE WHEN df.type = 1 /*LOG*/ THEN (SELECT CONVERT(integer, COUNT_BIG(*)) FROM sys.dm_db_log_info(DB_ID()) AS li WHERE li.file_id = df.file_id) ELSE NULL END
 FROM sys.database_files AS df;
 
 /* The sibling databases, on the one connection that can see them. Newest sample per database: the older
@@ -441,13 +447,17 @@ OPTION(RECOMPILE);";
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* Ordinals 1, 2 and 5 are NULL on every Azure sibling row (#2643's arm omits what
+               sys.resource_stats cannot measure), and an unguarded read here killed the whole
+               collection — master's own rows included — the moment the first sibling row appeared
+               (#3262). */
             rows.Add(new Row(
                 reader.GetString(0),
-                Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture),
-                Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture),
+                reader.IsDBNull(1) ? null : Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture),
+                reader.IsDBNull(2) ? null : Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture),
                 reader.GetString(3),
                 reader.GetString(4),
-                reader.GetString(5),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
                 reader.GetDecimal(6),
                 reader.IsDBNull(7) ? null : reader.GetDecimal(7),
                 reader.IsDBNull(8) ? null : reader.GetDecimal(8),

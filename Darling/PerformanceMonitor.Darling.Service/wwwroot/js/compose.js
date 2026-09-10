@@ -20,13 +20,18 @@
  * inert. The chart SVG lives entirely in charts.js (one SVG_NS occurrence, the air-gap allowlist); this file has no SVG.
  */
 
-import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSend, noticeStrip } from "./util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSend, noticeStrip, parseUtc } from "./util.js";
 import { renderLineChart, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
 import { navigateServer } from "./panels.js";
 import { getCatalog } from "./views-api.js";
 
 /** The most series a time chart draws before pooling the rest into a "+N more" note (readability + palette size). */
 const MAX_SERIES = 8;
+
+/** The #2734 residual series label — MIRRORS ComposeCompiler.OtherSeriesLabel (pinned by
+ *  TheOtherSeriesLabel_IsMirroredInTheFrontend). It is a display artifact of the compiler's CASE fold, NOT a value
+ *  any fact row carries, which is why it is never drillable and never competes for a real winner's slot below. */
+const OTHER_SERIES_LABEL = "(other)";
 
 /* ─────────────────────────── panel card + fill ─────────────────────────── */
 
@@ -38,11 +43,153 @@ const MAX_SERIES = 8;
 export function renderComposedPanelCard(panelSpec, scope) {
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
   const panel = el("div", { class: "panel card" + (panelSpec.span === 2 ? " span-2" : "") }, [
-    el("h3", {}, [panelSpec.title || measureLabel(panelSpec)]),
+    el("h3", {}, [panelSpec.title || measureLabel(panelSpec), pinBadge(panelSpec)]),
     body,
   ]);
   driveComposedPanel(body, panelSpec, scope);
   return panel;
+}
+
+/** A panel spec's per-cell window pin (#2735), normalized: {windowStart, windowEnd} (absolute) or {hours}
+ *  (relative), or null when the spec carries no usable `range` (= live: it follows the view scope). Kept
+ *  tolerant on purpose — this is the READ path, and a malformed stored range must degrade to "live", never
+ *  crash the card (the write path already rejects one). */
+export function cellRange(spec) {
+  const r = spec && spec.range;
+  if (!r || typeof r !== "object" || Array.isArray(r)) return null;
+  if (typeof r.windowStart === "string" && typeof r.windowEnd === "string" && r.windowStart && r.windowEnd) {
+    return { windowStart: r.windowStart, windowEnd: r.windowEnd };
+  }
+  if (typeof r.hours === "number" && r.hours >= 1) return { hours: r.hours };
+  return null;
+}
+
+/**
+ * The effective per-panel WINDOW OVERRIDE that makes a panel ignore the scope bar's time range — the single
+ * thing the "Pinned" badge announces AND the thing buildRunBody() actually applies, resolved HERE so the two
+ * can never drift. This closes #2788: a per-panel `hours` override pinned the rendered window (buildRunBody
+ * read it) but drew NO badge, because the badge consulted only the `range` pin. Two shapes reach the read path
+ * and BOTH override the scope: the #2735 per-cell `range` pin (absolute {windowStart,windowEnd} or relative
+ * {hours}), authored over MCP / by import; and the composer's legacy per-panel `hours` override (editor.js's
+ * "Time range" dropdown, stored top-level). The `range` pin wins when both are set, mirroring buildRunBody's
+ * precedence. Null == the panel is live and follows the scope bar.
+ */
+function effectivePin(spec) {
+  return cellRange(spec) || legacyHoursPin(spec);
+}
+
+/** The composer's per-panel `hours` override as a relative pin, or null — held to the same >=1 numeric guard
+ *  cellRange applies to a nested `range.hours`, so a degenerate value reads as "live", never a zero-length
+ *  window. Kept SEPARATE from cellRange on purpose: the notebook editor round-trip (cellToModel /
+ *  pinnedWindowStrip in notebook.js) treats `range` as the authorable #2735 pin and `hours` as the shared
+ *  panel model's own field, so folding them together there would double-store the pin and break Unpin. */
+function legacyHoursPin(spec) {
+  return spec && typeof spec.hours === "number" && spec.hours >= 1 ? { hours: spec.hours } : null;
+}
+
+/** The compose run endpoint's default window (hours) when a request omits one — kept in lockstep with
+ *  DarlingWebEndpoints.DefaultComposeHours so a live panel's drawn axis matches the server's default window. */
+const DEFAULT_COMPOSE_HOURS = 24;
+
+/** The widest window a composed panel may query (hours) — MIRRORS ComposeLimits.MaxWindowHours (ComposeSpec.cs),
+ *  the ceiling the run endpoint clamps a relative `hours` to (Math.Clamp). resolveChartWindow clamps to the SAME
+ *  value, so a stored/imported `range.hours` (or a legacy per-panel `hours`) beyond it draws an axis no wider than
+ *  the window the server actually serves — the "axis can never disagree with the query window" guarantee held even
+ *  for an out-of-range stored value the UI's own pickers can't produce (#2802 review). 24 * 90 = 90 days. */
+const MAX_COMPOSE_WINDOW_HOURS = 24 * 90;
+
+/**
+ * The x-axis DOMAIN window for a composed TIME-SERIES panel (#2802) — the window the rows were actually fetched
+ * over, so a sparse series plots at its true position instead of the renderer zooming to the data's own extent
+ * (which slid an old burst to the axis edge and dropped the date). MIRRORS buildRunBody's window precedence
+ * EXACTLY so the drawn axis can never disagree with the query window: a brush-zoom (absolute) wins, then the
+ * per-panel pin (#2735/#2788 effectivePin — absolute {windowStart,windowEnd} or relative {hours}), then the live
+ * view scope's hours (default DEFAULT_COMPOSE_HOURS, mirroring the run endpoint). Relative windows end at the
+ * client's render-time now: the run response echoes no window/as-of, and the endpoint anchors a relative `hours`
+ * at ITS now, which the render-time now matches to within request latency (negligible at minute-granularity
+ * ticks); anchoring to the last bucket instead would reintroduce the #2802 bug. Absolute windows (zoom, absolute
+ * pin) carry their own explicit end. Every ISO instant is parseUtc'd (naive == UTC), matching how the buckets are
+ * parsed, so the domain and the plotted points share one clock. Returns {windowStart, windowEnd} UTC-epoch ms.
+ */
+function resolveChartWindow(panelSpec, scope, zoom) {
+  const ms = (iso) => {
+    const d = parseUtc(iso);
+    return d ? d.getTime() : null;
+  };
+  /* 1. A transient brush-zoom is the viewer's explicit request on THIS panel — it wins, exactly as it does in
+        buildRunBody (an absolute window overrides the relative `hours` server-side). */
+  if (zoom && zoom.startIso && zoom.endIso) {
+    const a = ms(zoom.startIso);
+    const b = ms(zoom.endIso);
+    if (a != null && b != null && b > a) return { windowStart: a, windowEnd: b };
+  }
+  /* 2. The per-panel pin (the #2788 effectivePin the "Pinned" badge also reads): absolute wins with its own end;
+        relative rides the now-anchored branch below. */
+  const pin = effectivePin(panelSpec);
+  if (pin && pin.windowStart) {
+    const a = ms(pin.windowStart);
+    const b = ms(pin.windowEnd);
+    if (a != null && b != null && b > a) return { windowStart: a, windowEnd: b };
+  }
+  /* 3. Relative: a relative pin's hours, else the live view scope's hours, else the endpoint's own default —
+        then CLAMPED to the same [1, MaxWindowHours] ceiling the run endpoint applies (Math.Clamp there). The
+        server clamps a relative `hours` unconditionally at run time and serves at most MaxWindowHours of data, so
+        an unclamped axis over a larger stored/imported `range.hours` (or legacy per-panel `hours`) would be wider
+        than the window actually served — the exact axis-vs-window disagreement this fix forbids. In-range values
+        (everything the UI pickers can produce) pass through unchanged. */
+  const rawHours =
+    pin && typeof pin.hours === "number" && pin.hours >= 1
+      ? pin.hours
+      : scope && typeof scope.hours === "number" && scope.hours >= 1
+        ? scope.hours
+        : DEFAULT_COMPOSE_HOURS;
+  const hours = Math.max(1, Math.min(rawHours, MAX_COMPOSE_WINDOW_HOURS));
+  const windowEnd = Date.now();
+  return { windowStart: windowEnd - hours * 3600000, windowEnd };
+}
+
+/**
+ * The pinned-window badge (#2735, #2788): shown in the card header of any panel that overrides the scope bar's
+ * time range — a #2735 `range` pin OR a per-panel `hours` override (both resolved by effectivePin) — so it is
+ * always visible WHICH panels are pinned to their own window and which are live on the scope bar; without it the
+ * scope bar's time range would silently lie for pinned panels. Server scope still applies to a pinned panel (the
+ * pin is a window, not a server), which the tooltip spells out.
+ */
+function pinBadge(panelSpec) {
+  const range = effectivePin(panelSpec);
+  if (!range) return null;
+  const label = pinRangeLabel(range);
+  return el("span", {
+    class: "pin-badge",
+    title:
+      "This cell is pinned to its own time window (" + label + "), so the scope bar's time range does not " +
+      "apply to it. The server scope still does.",
+    text: "Pinned: " + label,
+  });
+}
+
+/** A normalized pin's display label ("last 2 days" / "8/21/26, 12:00 AM → 8/22/26, 12:00 AM") — shared with
+ *  the notebook editor's pin strip so the two surfaces describe a pin identically. */
+export function pinRangeLabel(range) {
+  return range.windowStart ? pinWindowLabel(range.windowStart, range.windowEnd) : "last " + pinHoursLabel(range.hours);
+}
+
+/** The badge's window text for an absolute pin — compact local date+time, "start → end". */
+function pinWindowLabel(startIso, endIso) {
+  const from = new Date(startIso);
+  const to = new Date(endIso);
+  if (isNaN(from.getTime()) || isNaN(to.getTime())) return "custom window";
+  const opts = { dateStyle: "short", timeStyle: "short" };
+  return from.toLocaleString(undefined, opts) + " → " + to.toLocaleString(undefined, opts);
+}
+
+/** The badge's window text for a relative pin (whole days render as days, mirroring the range picker's labels). */
+function pinHoursLabel(hours) {
+  if (hours % 24 === 0 && hours >= 24) {
+    const d = hours / 24;
+    return d + (d === 1 ? " day" : " days");
+  }
+  return hours + (hours === 1 ? " hour" : " hours");
 }
 
 /**
@@ -99,7 +246,11 @@ export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
     annotationMeta = await annotationMetaMap().catch(() => null);
   }
   try {
-    const nodes = [renderComposedResult(data, panelSpec, { ...opts, annotationMeta })];
+    /* #2802: resolve the panel's x-axis DOMAIN window from the SAME inputs buildRunBody used (zoom → pin →
+       scope), so the drawn axis matches the window the rows were fetched over. renderComposedResult has no
+       `scope`, so it is resolved here (where scope + zoom both live) and threaded through opts. */
+    const chartWindow = resolveChartWindow(panelSpec, scope, opts.zoom);
+    const nodes = [renderComposedResult(data, panelSpec, { ...opts, annotationMeta, chartWindow })];
     /* The run endpoint's partial-window notice (#1665): the chosen tier could not retain the whole
        requested window on this store — good data, honestly caveated, above the chart. */
     if (typeof data.notice === "string" && data.notice) nodes.unshift(noticeStrip(data.notice));
@@ -114,12 +265,14 @@ export function runCompose(panelSpec, scope, zoom = null) {
   return apiSend("POST", "/api/compose/run", buildRunBody(panelSpec, scope, zoom));
 }
 
-/** Build the /api/compose/run body from a panel spec + scope (a per-panel `hours` overrides the view range). */
+/** Build the /api/compose/run body from a panel spec + scope (a per-panel `hours` or `range` overrides the
+ *  view range). */
 function buildRunBody(panelSpec, scope, zoom = null) {
   const body = { panel: toRunPanel(panelSpec) };
   /* Brush-zoom (#1606): an absolute window wins over `hours` server-side; hours still rides along
      untouched so clearing the zoom needs no special casing. */
-  if (zoom && zoom.startIso && zoom.endIso) {
+  const zoomed = !!(zoom && zoom.startIso && zoom.endIso);
+  if (zoomed) {
     body.windowStart = zoom.startIso;
     body.windowEnd = zoom.endIso;
   }
@@ -128,7 +281,22 @@ function buildRunBody(panelSpec, scope, zoom = null) {
   if (s.values && Object.keys(s.values).length) body.values = s.values;
   if (s.server != null) body.server = s.server;
   if (s.hours != null) body.hours = s.hours;
-  if (panelSpec.hours != null) body.hours = panelSpec.hours;
+  /* The per-panel WINDOW OVERRIDE — the #2735 per-cell `range` pin, or the composer's legacy per-panel `hours` —
+     resolved by the SAME effectivePin() the "Pinned" badge reads, so the window a panel renders on can never
+     disagree with the badge that announces it (#2788). Either wins over the view scope above. A transient
+     brush-zoom still wins over an absolute pin — it is the viewer's explicit request on THIS panel, and clearing
+     it pops back to the pinned window, exactly the zoom-over-hours precedence a live panel has. */
+  const pin = effectivePin(panelSpec);
+  if (pin) {
+    if (pin.windowStart) {
+      if (!zoomed) {
+        body.windowStart = pin.windowStart;
+        body.windowEnd = pin.windowEnd;
+      }
+    } else {
+      body.hours = pin.hours;
+    }
+  }
   return body;
 }
 
@@ -141,6 +309,8 @@ function toRunPanel(p) {
   if (p.unit != null && p.unit !== "") out.unit = p.unit;
   if (p.timeBucket != null && p.timeBucket !== "" && p.timeBucket !== "none") out.timeBucket = p.timeBucket;
   if (p.topN != null && p.topN !== "") out.topN = p.topN;
+  /* #2734 rank-then-bucket residual — forwarded or the stored "(other)" series silently vanishes here. */
+  if (p.includeOther === true) out.includeOther = true;
   if (Array.isArray(p.filters) && p.filters.length) out.filters = p.filters;
   if (Array.isArray(p.groupBy) && p.groupBy.length) out.groupBy = p.groupBy;
   /* The second measure (#1606) — passed through verbatim; the run endpoint validates coherence. */
@@ -213,7 +383,12 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
     case "area":
     case "stacked":
     case "stacked-bar": {
-      const { points, series, hidden } = pivotTimeSeries(rows, groupDims, measureLabel(panelSpec));
+      /* Only a rank-then-bucket panel with includeOther CAN contain the synthetic residual, and the pivot must
+         be told so: several groupBy dimensions are free-form user text (database_name, program_name, login_name,
+         host_name), so a plain grouped panel may legitimately hold a row whose value IS "(other)" — sniffing the
+         string alone would strip that real member's drill and hold it out of the series cap. */
+      const hasResidual = isRankedTimeSeries(panelSpec) && panelSpec.includeOther === true;
+      const { points, series, hidden } = pivotTimeSeries(rows, groupDims, measureLabel(panelSpec), hasResidual);
       nodes.push(
         renderLineChart({
           points,
@@ -228,9 +403,24 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
           onSelect,
           series2: overlaySeries,
           onZoom,
+          /* #2802: the domain window resolved in renderComposedInto (zoom → pin → scope), so a sparse composed
+             series plots at its true position across the requested window. A brush-zoom re-runs the panel on its
+             absolute window, and resolveChartWindow returns that same window — the zoom keeps winning. */
+          windowStart: opts.chartWindow ? opts.chartWindow.windowStart : null,
+          windowEnd: opts.chartWindow ? opts.chartWindow.windowEnd : null,
         })
       );
-      if (hidden > 0) nodes.push(el("div", { class: "chart-note", text: `+${hidden} more series not shown.` }));
+      if (hidden > 0) {
+        /* On a rank-then-bucket panel the hidden series are members the author explicitly ASKED to rank, not
+           incidental low-priority groups, so the note has to say which promise the chart is not keeping. */
+        const rankedMode = isRankedTimeSeries(panelSpec);
+        nodes.push(el("div", {
+          class: "chart-note",
+          text: rankedMode
+            ? `+${hidden} of the top ${panelSpec.topN} not shown — a chart draws at most ${MAX_SERIES} series. Lower Top N to see them all.`
+            : `+${hidden} more series not shown.`,
+        }));
+      }
       break;
     }
     case "bar":
@@ -277,7 +467,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
  * with a group-by, one series per distinct dimension combination, values re-keyed per bucket. Series are capped to
  * MAX_SERIES by total magnitude (the rest reported as `hidden`) so a high-cardinality group stays legible.
  */
-export function pivotTimeSeries(rows, groupDims, label) {
+export function pivotTimeSeries(rows, groupDims, label, hasResidual = false) {
   if (!groupDims.length) {
     /* value2 (#1606) rides into each point so a dual-axis overlay can read it; absent = undefined = inert. */
     const points = rows.map((r) => ({ bucket: r.bucket, value: numOrNull(r.value), value2: numOrNull(r.value2) }));
@@ -289,6 +479,7 @@ export function pivotTimeSeries(rows, groupDims, label) {
   const drills = new Map(); // seriesKey -> drill keys [{dimension, value}] (design D6)
   const byBucket = new Map(); // bucket -> point object
   const order = []; // seriesKey first-seen order (stable colors)
+  const residual = new Set(); // seriesKeys that are the #2734 synthetic "(other)" fold
 
   for (const r of rows) {
     /* "s:"-prefixed so a group value equal to "bucket"/"value" can never collide with a point object's own keys. */
@@ -297,6 +488,18 @@ export function pivotTimeSeries(rows, groupDims, label) {
       labels.set(key, comboLabel(r, groupDims));
       drills.set(key, buildDrillKeys(r, groupDims));
       totals.set(key, 0);
+      /* Read residual-ness off the ROW's dimension values, never by re-parsing the joined label — a real value
+         containing the label's " / " separator would otherwise be mistaken for a residual combo. */
+      if (hasResidual && isResidualRow(r, groupDims)) {
+        residual.add(key);
+        /* The #2734 residual is synthetic — the compiler's CASE fold, not a stored value — so an eq filter on it
+           matches nothing and a drill would always land on an empty panel. Non-drillable for exactly the reason a
+           "(none)" bucket already is. Suppressed HERE, not in buildDrillKeys, because only the whole-row fold is
+           the residual: a real member that merely happens to be NAMED "(other)" on one of several dimensions is a
+           stored value the server can filter to, and it keeps its drill. (#2737's "(ad hoc)" likewise stays
+           drillable — the server COALESCEs the real column to it, so filtering to it works.) */
+        drills.set(key, null);
+      }
       order.push(key);
     }
     const v = numOrNull(r.value);
@@ -309,12 +512,24 @@ export function pivotTimeSeries(rows, groupDims, label) {
     pt[key] = v;
   }
 
-  let keptKeys = order;
+  /* The #2734 residual is "everything else", so it is routinely the largest-magnitude series — under a plain
+     magnitude cut it would evict a member the author EXPLICITLY ranked, replacing a real winner with a synthetic
+     bucket. It is held out of the competition instead: real members fill the cap on their own merits, and the
+     residual rides along in its own slot (it is what keeps the visible buckets summing to the window total, so
+     dropping it would make a partial chart look complete). */
+  const residualKeys = order.filter((k) => residual.has(k));
+  const realKeys = order.filter((k) => !residual.has(k));
+
+  let keptReal = realKeys;
   let hidden = 0;
-  if (order.length > MAX_SERIES) {
-    keptKeys = [...order].sort((a, b) => totals.get(b) - totals.get(a)).slice(0, MAX_SERIES);
-    hidden = order.length - keptKeys.length;
+  if (realKeys.length > MAX_SERIES) {
+    keptReal = [...realKeys].sort((a, b) => totals.get(b) - totals.get(a)).slice(0, MAX_SERIES);
+    hidden = realKeys.length - keptReal.length;
   }
+
+  /* Preserve first-seen order for stable colors, then append the residual last (it reads as the backdrop). */
+  const keptSet = new Set(keptReal);
+  const keptKeys = order.filter((k) => keptSet.has(k)).concat(residualKeys);
 
   const series = keptKeys.map((key, i) => ({
     key,
@@ -323,6 +538,18 @@ export function pivotTimeSeries(rows, groupDims, label) {
     drill: drills.get(key),
   }));
   return { points: [...byBucket.values()], series, hidden };
+}
+
+/** Whether a panel spec is the #2734 rank-then-bucket mode (both keys set) — the server's own rule. */
+function isRankedTimeSeries(panelSpec) {
+  return !!(panelSpec && panelSpec.timeBucket && panelSpec.topN != null && panelSpec.topN !== "");
+}
+
+/** Whether a row is the #2734 synthetic residual: the compiler's CASE fold sets EVERY group dimension to the
+ *  sentinel at once, so a real member that merely happens to be named "(other)" on one of several dimensions is
+ *  not mistaken for it. */
+function isResidualRow(row, dims) {
+  return dims.length > 0 && dims.every((d) => row[d] === OTHER_SERIES_LABEL);
 }
 
 /** Shape RANKED rows into charts.js's items[] ({label, value, color, drill}); the category is the group-by combo,

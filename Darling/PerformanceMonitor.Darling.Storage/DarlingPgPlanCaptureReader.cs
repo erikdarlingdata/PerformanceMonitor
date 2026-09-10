@@ -80,6 +80,7 @@ public static class DarlingPgPlanCaptureReader
 
         var rows = new List<PgPlanCaptureRow>();
         await using var command = postgres.CreateCommand(PgPlanCaptureSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* SpecifyKind(Unspecified) at the BIND, the convention every PostgreSQL read here follows. */
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));

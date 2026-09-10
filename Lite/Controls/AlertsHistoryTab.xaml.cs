@@ -32,6 +32,7 @@ public partial class AlertsHistoryTab : UserControl
 {
     private LocalDataService? _dataService;
     private DataGridFilterManager<AlertHistoryRow>? _filterManager;
+    private readonly ScopedLoadGenerations _loads = new();
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
     private DateTime? _lastRefreshed;
@@ -75,12 +76,18 @@ public partial class AlertsHistoryTab : UserControl
     {
         if (_dataService == null) return;
 
+        /* #2933: this tab has no load guard either, and its server/hours combos sit above the grid they
+           scope — two changes overlap and the later-starting read can land first, leaving the grid
+           answering for a filter the operator moved off. Same idiom as FinOpsTab's. */
+        var gen = _loads.Claim(nameof(LoadAlertsAsync));
+
         try
         {
             var hoursBack = GetSelectedHoursBack();
             int? serverId = GetSelectedServerId();
 
             var alerts = await System.Threading.Tasks.Task.Run(() => _dataService.GetAlertHistoryAsync(hoursBack, 500, serverId));
+            if (_loads.Superseded(nameof(LoadAlertsAsync), gen)) return;
 
             if (_filterManager != null)
                 _filterManager.UpdateData(alerts);

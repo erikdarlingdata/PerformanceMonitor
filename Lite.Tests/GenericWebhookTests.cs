@@ -362,6 +362,42 @@ public class GenericWebhookTests
         Assert.Equal("SRV:High CPU", JsonDocument.Parse(byName).RootElement.GetProperty("dedup").GetString());
     }
 
+    /* ---------------- Datadog-parity tags (#2710) ---------------- */
+
+    [Fact]
+    public void ResourceNameAndDatabaseTokens_UseTheFirstIncident_SameAnchorAsDedupKey()
+    {
+        const string template = """{"resource": "{{resource_name}}", "db": "{{database}}"}""";
+
+        /* TwoIncidentContext's first incident (aa11/db1.dbo.t1) carries no Database — resource_name
+           still resolves, database stays empty (not the literal word "null"). */
+        var payload = WebhookAlertService.BuildGenericPayload(
+            "Deadlocks Detected", "SRV", "2", "0", Branding, context: TwoIncidentContext(), bodyTemplate: template);
+        var root = JsonDocument.Parse(payload).RootElement;
+        Assert.Equal("db1.dbo.t1", root.GetProperty("resource").GetString());
+        Assert.Equal("", root.GetProperty("db").GetString());
+
+        /* An incident that DOES carry a Database populates both. */
+        var withDb = new AlertContext();
+        AlertIncidentRenderer.Apply(withDb, new[] { new AlertIncident("k1", new[] { "SalesDB.dbo.Orders" }, Database: "SalesDB") });
+        var dbPayload = WebhookAlertService.BuildGenericPayload(
+            "Deadlocks Detected", "SRV", "2", "0", Branding, context: withDb, bodyTemplate: template);
+        var dbRoot = JsonDocument.Parse(dbPayload).RootElement;
+        Assert.Equal("SalesDB.dbo.Orders", dbRoot.GetProperty("resource").GetString());
+        Assert.Equal("SalesDB", dbRoot.GetProperty("db").GetString());
+    }
+
+    [Fact]
+    public void ResourceNameAndDatabaseTokens_AreEmptyStrings_WhenTheAlertCarriesNoIncident()
+    {
+        const string template = """{"resource": "{{resource_name}}", "db": "{{database}}"}""";
+        var payload = Build("High CPU", "SRV", template: template);
+
+        var root = JsonDocument.Parse(payload).RootElement;
+        Assert.Equal("", root.GetProperty("resource").GetString());
+        Assert.Equal("", root.GetProperty("db").GetString());
+    }
+
     [Fact]
     public void ContextJsonToken_RedactsRemediationTsql_LikeEveryOtherChannel()
     {

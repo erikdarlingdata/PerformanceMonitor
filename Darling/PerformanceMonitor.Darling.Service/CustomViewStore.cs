@@ -93,6 +93,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
     {
         var results = new List<CustomViewSummary>();
         await using var command = _dataSource.CreateCommand(ListSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -113,6 +114,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
     public async Task<CustomViewResult> GetAsync(long id, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(GetSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -139,6 +141,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
         }
 
         await using var command = _dataSource.CreateCommand(InsertSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });                                 // $1
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Jsonb, Value = definitionJson }); // $2
         AddNullableText(command, description);                                                                      // $3
@@ -173,6 +176,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
         }
 
         await using var command = _dataSource.CreateCommand(UpdateSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });                                     // $1
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });                                 // $2
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Jsonb, Value = definitionJson }); // $3
@@ -204,6 +208,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
     public async Task<CustomViewResult> DeleteAsync(long id, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(DeleteSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });
         var affected = await command.ExecuteNonQueryAsync(cancellationToken);
         return affected > 0 ? new CustomViewResult.Ok(null) : new CustomViewResult.NotFound();
@@ -212,6 +217,7 @@ RETURNING id, name, definition, description, version, created_at, updated_at, up
     private async Task<CustomViewResult> ClassifyMissedUpdateAsync(long id, CancellationToken cancellationToken)
     {
         await using var command = _dataSource.CreateCommand(VersionProbeSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });
         var current = await command.ExecuteScalarAsync(cancellationToken);
         if (current is null or DBNull)

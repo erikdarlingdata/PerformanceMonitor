@@ -12,6 +12,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -614,32 +615,5 @@ function Get-CimInstance {
         Assert.Fail("unbalanced braces while extracting a block from install-darling.ps1");
         end = -1;
         return string.Empty;
-    }
-
-    private static string ReadRepoFile(string relativePath)
-    {
-        var root = FindRepoRoot();
-        Assert.NotNull(root);
-        var path = Path.Combine(root!, relativePath);
-        Assert.True(File.Exists(path), $"expected {path} to exist");
-        return File.ReadAllText(path);
-    }
-
-    /// <summary>Walks up from the test output directory to the repo root (the directory holding
-    /// <c>PerformanceMonitor.sln</c>) — the same idiom <c>DarlingFileSecurityTests</c> uses.</summary>
-    private static string? FindRepoRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        for (var i = 0; i < 10 && directory is not null; i++)
-        {
-            if (File.Exists(Path.Combine(directory.FullName, "PerformanceMonitor.sln")))
-            {
-                return directory.FullName;
-            }
-
-            directory = directory.Parent;
-        }
-
-        return null;
     }
 }

@@ -179,6 +179,7 @@ public static class DarlingPgIndexUsageReader
     {
         var rows = new List<PgIndexUsageRow>();
         await using var command = postgres.CreateCommand(PgIndexUsageSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* Kind-Unspecified at the BIND, per the store's naive-UTC discipline: a Kind=Utc DateTime makes
            Npgsql infer timestamptz, and PostgreSQL then resolves the comparison against these naive
@@ -260,6 +261,7 @@ public static class DarlingPgIndexUsageReader
         CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(PgIndexUsageProbeSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));

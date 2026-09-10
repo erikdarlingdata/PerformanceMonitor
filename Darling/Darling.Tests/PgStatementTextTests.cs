@@ -124,13 +124,21 @@ public sealed class PgStatementTextTests
     /// <para>Capped and ordered by total execution time, so a catalog larger than the cap keeps the text for the
     /// queries anyone would look at rather than an arbitrary slice; and parameterized rather than a hardcoded
     /// LIMIT, which the repo has had to correct once before.</para>
+    ///
+    /// <para>#2786: the ranking moved OUT to the deduplicating wrapper and is asserted there. It is pinned as
+    /// an ordering against the cap rather than as a literal clause, because that is the property being
+    /// protected — rank, then truncate — and the previous literal broke on a rewrite that preserved it.</para>
     /// </summary>
     [Fact]
     public void TheFetchAsksForTextAndIsBoundedByRank()
     {
         Assert.Contains("aurora_stat_statements(true)", PgStatementText.FetchSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY s.total_exec_time DESC", PgStatementText.FetchSql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $1", PgStatementText.FetchSql, StringComparison.Ordinal);
+
+        var rank = PgStatementText.FetchSql.IndexOf("ORDER BY d.total_exec_time DESC", StringComparison.Ordinal);
+        var cap = PgStatementText.FetchSql.IndexOf("LIMIT $1", StringComparison.Ordinal);
+
+        Assert.True(rank >= 0, "the fetch must still rank by total execution time, or the cap keeps an arbitrary slice.");
+        Assert.True(cap > rank, "the cap must be applied AFTER the ranking.");
 
         /* Every output column aliased, per the house rule — an unaliased expression comes back named after the
            function and the query stops being debuggable in psql. */

@@ -69,6 +69,15 @@ public enum MeasureRatioMode
     /// <see cref="ComposeMeasure.WeightColumn"/> (the interval's execution weight) — not numerator/denominator
     /// measures, because the pre-aggregated averages are deliberately NOT exposed as summable scalar measures.</summary>
     Weighted,
+
+    /// <summary><c>SUM(value * weight)</c> — <see cref="Weighted"/>'s numerator with NO denominator: the window
+    /// TOTAL of a pre-aggregated per-interval average times its weight (e.g. Query Store total CPU =
+    /// SUM(<c>avg_cpu_time_us</c> * <c>execution_count</c>), each interval's total consumption). Rides the Ratio
+    /// kind — not a Scalar — because its aggregation is part of the definition, exactly like a ratio's
+    /// (<see cref="ComposeMeasure.ValidAggs"/> is empty), and because its operands are the same RAW
+    /// <see cref="ComposeMeasure.WeightedValueColumn"/> / <see cref="ComposeMeasure.WeightColumn"/> pair,
+    /// not numerator/denominator measures (#2732).</summary>
+    WeightedSum,
 }
 
 /// <summary>The fixed aggregation vocabulary. <c>percentile_cont</c> is legal ONLY on
@@ -137,11 +146,34 @@ public sealed record ComposeUnitFamily(string Name, IReadOnlyList<ComposeUnit> U
 /// <summary>
 /// One dimension a source can be filtered or grouped by. <see cref="Column"/> is the physical column
 /// (usually == <see cref="Name"/>); <see cref="Likeable"/> gates the <c>LIKE</c> operator;
-/// <see cref="ViaModuleJoin"/> marks the query_stats <c>object_name</c>, which is not a query_stats
-/// column at all but is stitched read-time from <c>procedure_stats</c> via the #1568 sql_handle join
-/// (window-bounded by the compiler).
+/// <see cref="ViaModuleJoin"/> marks the query_stats dimensions stitched read-time from
+/// <c>procedure_stats</c> via the #1568 sql_handle join (window-bounded by the compiler).
+///
+/// <para>A module-join dimension's misses are NULL (every ad-hoc statement), so the compiler never emits
+/// the bare joined column (#2737): it folds NULL into <see cref="FallbackColumn"/> when one is declared
+/// (<c>COALESCE(m.col, f.fallback)</c> — the <c>statement</c> dimension, which keeps ad-hoc statements
+/// distinct by query_hash), else into the <see cref="MeasureCatalog.AdHocLabel"/> sentinel — so the
+/// dimension's VALUE is never NULL, groups are always labeled, and every filter operator (eq/neq/like/…)
+/// acts on that value with ordinary text semantics. <see cref="FallbackColumn"/> must be a real payload
+/// column of <see cref="SourceTable"/> (pinned by test); it is only meaningful with
+/// <see cref="ViaModuleJoin"/>.</para>
 /// </summary>
-public sealed record ComposeDimension(string SourceTable, string Name, string Column, bool Likeable, bool ViaModuleJoin = false);
+public sealed record ComposeDimension(string SourceTable, string Name, string Column, bool Likeable, bool ViaModuleJoin = false, string? FallbackColumn = null);
+
+/// <summary>The clock an event table's own time column is recorded in. Declared per annotation source
+/// because the store has no single answer: an XE-sourced column carries the UTC <c>@timestamp</c>, while the
+/// Default Trace ships <c>fn_trace_gettable</c>'s <c>StartTime</c>, which is the monitored server's local wall
+/// clock. <c>ServerLocalReadFrameDisciplineTests</c> checks each declaration against the owning collector's
+/// own query text rather than trusting this enum.</summary>
+public enum AnnotationClockFrame
+{
+    /// <summary>Naive UTC as stored — the XE <c>@timestamp</c> columns. Needs no conversion.</summary>
+    Utc = 0,
+
+    /// <summary>The monitored server's local wall clock as stored. The compiler de-skews it to UTC by the
+    /// collected <c>server_properties.utc_offset_minutes</c> before windowing or returning it.</summary>
+    ServerLocal = 1,
+}
 
 /// <summary>
 /// One event-annotation SOURCE (design D5): a collector event table whose rows can be overlaid as point
@@ -150,6 +182,14 @@ public sealed record ComposeDimension(string SourceTable, string Name, string Co
 /// <see cref="LabelColumn"/> a short text column for the marker tooltip. Both — like a measure's columns —
 /// are pinned to the owning collector's <c>PayloadColumns</c> by <c>DarlingComposeTests</c>, so the annotation
 /// compiler emits them schema-qualified (<c>collect.&lt;table&gt;</c>) and never touches a caller string.
+///
+/// <para><see cref="Frame"/> is what makes the overlay comparable to the measure it decorates. A panel's
+/// x-axis is naive UTC — the measure query buckets on the collector's <c>PrefixTimeColumnName</c>, which is
+/// <c>collection_time</c> — and an annotation whose <see cref="TimeColumn"/> is server-local would be both
+/// windowed against the wrong slice and plotted at the wrong x-position, silently and by the server's
+/// offset. With several sources overlaid at once the frames would differ WITHIN one chart, which is worse
+/// than a uniform error because no single correction recovers it. Declaring the frame here lets
+/// <c>ComposeCompiler.CompileAnnotation</c> de-skew exactly the sources that need it.</para>
 /// </summary>
 public sealed record ComposeAnnotationSource(
     string Key,
@@ -157,7 +197,8 @@ public sealed record ComposeAnnotationSource(
     string Category,
     string SourceTable,
     string TimeColumn,
-    string LabelColumn);
+    string LabelColumn,
+    AnnotationClockFrame Frame = AnnotationClockFrame.Utc);
 
 /// <summary>
 /// One measure — a named, composable metric. Everything identifier-bearing (<see cref="SourceTable"/>,
@@ -193,15 +234,17 @@ public sealed record ComposeMeasure
     /// pre-aggregated per-interval average.</summary>
     public MeasureRatioMode RatioMode { get; init; } = MeasureRatioMode.Sum;
 
-    /// <summary>For a <see cref="MeasureRatioMode.Weighted"/> ratio: the raw source column that is itself a
-    /// pre-aggregated per-interval AVERAGE (e.g. Query Store <c>avg_duration_us</c>), whose execution-weighted
-    /// mean is computed as <c>SUM(value * weight) / SUM(weight)</c>. A real payload column of the source
-    /// (pinned by test); null for every other kind/mode.</summary>
+    /// <summary>For a <see cref="MeasureRatioMode.Weighted"/> or <see cref="MeasureRatioMode.WeightedSum"/>
+    /// ratio: the raw source column that is itself a pre-aggregated per-interval AVERAGE (e.g. Query Store
+    /// <c>avg_duration_us</c>), whose execution-weighted mean is computed as <c>SUM(value * weight) /
+    /// SUM(weight)</c> (Weighted) or whose window total as <c>SUM(value * weight)</c> (WeightedSum). A real
+    /// payload column of the source (pinned by test); null for every other kind/mode.</summary>
     public string? WeightedValueColumn { get; init; }
 
-    /// <summary>For a <see cref="MeasureRatioMode.Weighted"/> ratio: the raw source column each interval's
-    /// <see cref="WeightedValueColumn"/> is weighted by (the interval's execution count, e.g.
-    /// <c>execution_count</c>). A real payload column of the source (pinned by test); null otherwise.</summary>
+    /// <summary>For a <see cref="MeasureRatioMode.Weighted"/> or <see cref="MeasureRatioMode.WeightedSum"/>
+    /// ratio: the raw source column each interval's <see cref="WeightedValueColumn"/> is weighted by (the
+    /// interval's execution count, e.g. <c>execution_count</c>). A real payload column of the source (pinned
+    /// by test); null otherwise.</summary>
     public string? WeightColumn { get; init; }
 
     public required string NativeUnit { get; init; }
@@ -285,9 +328,22 @@ public static class MeasureCatalog
 
     /* ─────────────────────────── dimensions ─────────────────────────── */
 
+    /// <summary>The label the compiler folds a module-join NULL into (#2737): the value of
+    /// <c>object_name</c> for every ad-hoc statement, so the group is visibly "(ad hoc)" instead of a
+    /// null-named row, and <c>eq</c>/<c>neq</c> on this literal filter to/away-from the ad-hoc population.
+    /// Parenthesized so it cannot be an UNQUOTED identifier (a bracketed <c>[(ad hoc)]</c> module is
+    /// technically creatable and would merge with the bucket — accepted as vanishingly unlikely). It is
+    /// deliberately NOT the viewer's display literal (<c>ad hoc</c>) or query_store_stats' stored
+    /// <c>Adhoc</c>: those are a computed grid column and a collected value; this one is a filterable
+    /// sentinel where non-collision matters most. A compile-time constant emitted as a SQL literal —
+    /// never a caller string.</summary>
+    public const string AdHocLabel = "(ad hoc)";
+
     /// <summary>Every dimension a slice source can be filtered / grouped by. Keyed by (source, name).
-    /// <c>object_name</c> on query_stats is the ONLY <see cref="ComposeDimension.ViaModuleJoin"/> entry —
-    /// it is not a query_stats column; the compiler stitches it from procedure_stats (#1568).</summary>
+    /// <c>object_name</c> and <c>statement</c> on query_stats are the only
+    /// <see cref="ComposeDimension.ViaModuleJoin"/> entries — neither is a query_stats column; the
+    /// compiler stitches them from procedure_stats (#1568) and folds the join's NULL misses per the
+    /// <see cref="ComposeDimension"/> doc (#2737).</summary>
     public static readonly IReadOnlyList<ComposeDimension> Dimensions = new[]
     {
         new ComposeDimension("wait_stats", "wait_type", "wait_type", Likeable: true),
@@ -298,8 +354,15 @@ public static class MeasureCatalog
 
         new ComposeDimension("query_stats", "database_name", "database_name", Likeable: true),
         new ComposeDimension("query_stats", "query_hash", "query_hash", Likeable: false),
-        /* #1568: not a query_stats column — stitched from procedure_stats.object_name via sql_handle. */
+        /* #1568: not a query_stats column — stitched from procedure_stats.object_name via sql_handle.
+           NULL misses (ad-hoc statements) fold into ONE AdHocLabel group per (database, bucket) — honest
+           and filterable, but still a blob; 'statement' below is the per-statement identity. */
         new ComposeDimension("query_stats", "object_name", "object_name", Likeable: true, ViaModuleJoin: true),
+        /* #2737: the fallback-identity twin of object_name — procedures keep their module name, ad-hoc
+           statements stay DISTINCT by query_hash instead of collapsing into the AdHocLabel bucket. This is
+           the "top statements" grouping; hash labels are ugly but resolvable (query_hash is itself a
+           dimension, and the stored query text keys on it). */
+        new ComposeDimension("query_stats", "statement", "object_name", Likeable: true, ViaModuleJoin: true, FallbackColumn: "query_hash"),
 
         new ComposeDimension("file_io_stats", "database_name", "database_name", Likeable: true),
         new ComposeDimension("file_io_stats", "file_name", "file_name", Likeable: true),
@@ -455,7 +518,7 @@ public static class MeasureCatalog
 
     private static readonly string[] WaitDims = { "wait_type" };
     private static readonly string[] ProcDims = { "database_name", "schema_name", "object_name" };
-    private static readonly string[] QueryDims = { "database_name", "query_hash", "object_name" };
+    private static readonly string[] QueryDims = { "database_name", "query_hash", "object_name", "statement" };
     private static readonly string[] FileIoDims = { "database_name", "file_name" };
     private static readonly string[] LqcDims = { "database_name", "object_name", "result" };
     private static readonly string[] NoDims = Array.Empty<string>();
@@ -1091,6 +1154,27 @@ public static class MeasureCatalog
             NativeUnit = "us", DefaultUnit = "ms", UnitFamily = FamilyDuration,
             ValidAggs = NoAggs, AllowedDimensions = QueryStoreDims,
         },
+        /* TOTAL consumption over the window (#2732): SUM(avg * execution_count) — the Weighted ratios'
+           numerator with no denominator (MeasureRatioMode.WeightedSum), since avg * execution_count IS the
+           interval's total. This is what "what consumed the most CPU" ranks by — a per-execution average
+           would rank a query that ran once at 30s over one that burned an hour at 200ms a call. Default
+           unit 's' rather than 'ms': a window total across a whole store runs to seconds-to-hours. */
+        new ComposeMeasure
+        {
+            Key = "qs_total_duration_us", DisplayName = "Query Store total duration", Category = CatQueryStore, SourceTable = "query_store_stats",
+            Kind = MeasureKind.Ratio, RatioMode = MeasureRatioMode.WeightedSum,
+            WeightedValueColumn = "avg_duration_us", WeightColumn = "execution_count",
+            NativeUnit = "us", DefaultUnit = "s", UnitFamily = FamilyDuration,
+            ValidAggs = NoAggs, AllowedDimensions = QueryStoreDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "qs_total_cpu_us", DisplayName = "Query Store total CPU time", Category = CatQueryStore, SourceTable = "query_store_stats",
+            Kind = MeasureKind.Ratio, RatioMode = MeasureRatioMode.WeightedSum,
+            WeightedValueColumn = "avg_cpu_time_us", WeightColumn = "execution_count",
+            NativeUnit = "us", DefaultUnit = "s", UnitFamily = FamilyDuration,
+            ValidAggs = NoAggs, AllowedDimensions = QueryStoreDims,
+        },
 
         /* ── ag_database_replica_states (#991). Every one is a Gauge: the DMV recomputes queue depth, rate
              and lag from the CURRENT backlog each read, so none is a counter with a delta — SUM over a
@@ -1276,7 +1360,8 @@ public static class MeasureCatalog
         new ComposeAnnotationSource("deadlocks", "Deadlocks", CatBlocking, "deadlocks", "deadlock_time", "database_name"),
         new ComposeAnnotationSource("blocked_process_reports", "Blocked-process reports", CatBlocking, "blocked_process_reports", "event_time", "contentious_object"),
         new ComposeAnnotationSource("long_query_completions", "Long-query completions", CatLongQueries, "long_query_completions", "event_time", "object_name"),
-        new ComposeAnnotationSource("default_trace_events", "Default-trace events", CatDefaultTrace, "default_trace_events", "event_time", "event_name"),
+        /* The one server-local source: fn_trace_gettable's StartTime, not an XE @timestamp. */
+        new ComposeAnnotationSource("default_trace_events", "Default-trace events", CatDefaultTrace, "default_trace_events", "event_time", "event_name", AnnotationClockFrame.ServerLocal),
         new ComposeAnnotationSource("system_health_events", "system_health events", CatSystemHealth, "system_health_events", "event_time", "event_type"),
     };
 

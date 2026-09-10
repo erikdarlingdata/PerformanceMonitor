@@ -51,7 +51,7 @@ WHERE rn = 1";
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var cmd = new NpgsqlCommand(ServerConfigSql, connection);
+        using var cmd = new NpgsqlCommand(ServerConfigSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
 
         // max/min server memory are read alongside the rooted CONFIG_* facts so the
@@ -122,7 +122,7 @@ LIMIT 1";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(ServerMetadataSql, connection);
+            using var cmd = new NpgsqlCommand(ServerMetadataSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -139,6 +139,7 @@ LIMIT 1";
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             /* Columns may not exist yet (pre-migration). An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -176,7 +177,7 @@ AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(DatabaseConfigSql, connection);
+            using var cmd = new NpgsqlCommand(DatabaseConfigSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -218,7 +219,10 @@ AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -243,7 +247,7 @@ ORDER BY trace_flag";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(TraceFlagsSql, connection);
+            using var cmd = new NpgsqlCommand(TraceFlagsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -272,7 +276,10 @@ ORDER BY trace_flag";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -295,7 +302,7 @@ LIMIT 1";
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(ServerPropertiesSql, connection);
+            using var cmd = new NpgsqlCommand(ServerPropertiesSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -338,7 +345,10 @@ LIMIT 1";
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 

@@ -46,11 +46,17 @@ public sealed partial class ViewerDataService
     /// the last-success MAX and the PERMISSIONS bucket split out for the NO_PERMISSIONS banding. $1
     /// server_id, $2 window start (naive UTC).
     /// </summary>
-    public const string CollectionHealthSql = """
+    public const string CollectionHealthSql = $"""
         SELECT
             collector_name,
             COUNT(*) AS total_runs,
-            SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS success_count,
+            -- #2926: SUCCESS excludes an abandonment that predates #2803, so the Success column beside
+            -- Abandoned cannot count the same run twice. Post-#2803 rows need no exclusion - ABANDONED
+            -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
+            -- the shared predicate is for: NULL under this NOT would have dropped it.
+            SUM(CASE WHEN status = 'SUCCESS'
+                      AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+                     THEN 1 ELSE 0 END) AS success_count,
             SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
             AVG(duration_ms) AS avg_duration_ms,
             -- SKIPPED counts as a healthy run (dedup / version-gated collectors no-op without being stale)
@@ -60,11 +66,14 @@ public sealed partial class ViewerDataService
             -- one. The status re-check is load-bearing rather than belt-and-braces: when no failing run
             -- in the window carried text, error_rank = 1 falls through to the newest row of ANY class,
             -- and without it a SUCCESS row's note could surface here as a fake last error.
-            MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error,
+            -- #3240: EXTENSION_MISSING is in the exemplar set because its stored sentence IS the remedy
+            -- (it names the extension and the database) — without it an EXTENSION_MISSING band would sit
+            -- beside a blank Last Error and the operator would have to open the run log to learn why.
+            MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) AS last_error,
             -- The newest failure OUTRIGHT, text or not — "when did this last fail" means the run, not
             -- the message. It can only name a different row than last_error if a failure was written
             -- with no text.
-            MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN collection_time END) AS last_error_time,
+            MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN collection_time END) AS last_error_time,
             SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
             -- YIELDED = the 1s LOCK_TIMEOUT guard fired (#1805): deliberate, benign for collection,
             -- counted apart from errors because clustering here is a signal about the TARGET's lock
@@ -90,7 +99,10 @@ public sealed partial class ViewerDataService
             -- sys.master_files, so it still sees databases the monitoring login cannot ENTER — exactly
             -- the case being diagnosed. database_id > 4 excludes the system databases, tempdb
             -- included: the size collector takes every ONLINE database, so a bare row check
-            -- would be true on every server alive.
+            -- would be true on every server alive. A NULL database_id is an Azure sibling row
+            -- (#2643/#3262): sys.resource_stats carries no id, and it bills only USER databases,
+            -- so those rows are inventory too — without the IS NULL arm a master-connected Azure
+            -- target with fifty user databases would read as having none.
             --
             -- The inventory window is the health read's OWN ($2) — no second parameter, and an
             -- inventory that aged out says nothing rather than something stale. Uncorrelated, so both
@@ -104,11 +116,29 @@ public sealed partial class ViewerDataService
                          FROM v_database_size_stats
                          WHERE server_id = $1
                          AND   collection_time >= $2
-                         AND   database_id > 4
+                         AND   (database_id > 4 OR database_id IS NULL)
                      )
                 THEN 1
                 ELSE 0
-            END AS has_user_databases
+            END AS has_user_databases,
+            -- #2804: runs the #2673 wall-clock budget abandoned. Appended last — this result set is
+            -- read positionally by one shared mapper serving BOTH the per-server and fleet reads.
+            --
+            -- #2926: keyed on the ROW, not on the status alone. collection_log is append-only, so a
+            -- window can still hold cycles written before #2803 gave abandonment its own status:
+            -- status = 'SUCCESS' beside rows_collected = 0 and the budget note. Counted by status
+            -- alone this read 0 for them, and the collector banded HEALTHY while losing cycles - a
+            -- filter correct against current writes and silently wrong against older ones, failing in
+            -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
+            -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
+            -- for query_store), so equality against one rendered sentence matches one collector.
+            SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
+                     THEN 1 ELSE 0 END) AS abandoned_count,
+            -- #3240: runs skipped because a PostgreSQL extension the collector DECLARES is not installed
+            -- — the EXTENSION_MISSING status the fault mapper split out of PERMISSIONS, counted apart so
+            -- the banding stops calling an uninstalled optional extension NO_PERMISSIONS. APPENDED, never
+            -- inserted: this result set is read positionally by one shared mapper.
+            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -126,6 +156,10 @@ public sealed partial class ViewerDataService
                 duration_ms,
                 status,
                 error_message,
+                -- #2926: the abandonment predicate above reads it. Projected here for the same reason
+                -- #2472's three columns are: this subquery ENUMERATES its columns, so an aggregate
+                -- outside naming one it does not carry fails at the STORE and nowhere earlier.
+                rows_collected,
                 ROW_NUMBER() OVER
                 (
                     PARTITION BY collector_name
@@ -136,7 +170,7 @@ public sealed partial class ViewerDataService
                 ROW_NUMBER() OVER
                 (
                     PARTITION BY collector_name
-                    ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) IS NULL,
+                    ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) IS NULL,
                              collection_time DESC,
                              error_message DESC
                 ) AS error_rank
@@ -170,6 +204,7 @@ public sealed partial class ViewerDataService
     public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(PermissionDeniedCollectorCountSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified) });
 
@@ -178,7 +213,7 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// The fleet-cumulative variant of <see cref="CollectionHealthSql"/>: the same 14-column per-collector
+    /// The fleet-cumulative variant of <see cref="CollectionHealthSql"/>: the same 16-column per-collector
     /// aggregate but across ALL enabled monitored servers (GROUP BY server_id, collector_name — one row per
     /// server/collector pair), for the status bar's aggregate-view total (mirrors Lite's cumulative
     /// GetHealthSummary(null)). Scoped to enabled servers so a removed server's aged-out rows don't read as
@@ -207,22 +242,46 @@ public sealed partial class ViewerDataService
     /// — precisely the cost #1855 measured and declined. The column exists to hold the ordinal.
     /// </para>
     /// </summary>
-    public const string FleetCollectionHealthSql = """
+    public const string FleetCollectionHealthSql = $"""
         SELECT
             collector_name,
             COUNT(*) AS total_runs,
-            SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS success_count,
+            -- #2926: SUCCESS excludes an abandonment that predates #2803, so the Success column beside
+            -- Abandoned cannot count the same run twice. Post-#2803 rows need no exclusion - ABANDONED
+            -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
+            -- the shared predicate is for: NULL under this NOT would have dropped it.
+            SUM(CASE WHEN status = 'SUCCESS'
+                      AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+                     THEN 1 ELSE 0 END) AS success_count,
             SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
             AVG(duration_ms) AS avg_duration_ms,
             MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
             MAX(collection_time) AS last_run_time,
             CAST(NULL AS text) AS last_error,
-            MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN collection_time END) AS last_error_time,
+            MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN collection_time END) AS last_error_time,
             SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
             SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count,
             CAST(NULL AS text) AS last_note,
             COUNT(CASE WHEN status = 'SUCCESS' THEN error_message END) AS note_count,
-            CAST(NULL AS integer) AS has_user_databases
+            CAST(NULL AS integer) AS has_user_databases,
+            -- #2804: runs the #2673 wall-clock budget abandoned. Appended last — this result set is
+            -- read positionally by one shared mapper serving BOTH the per-server and fleet reads.
+            --
+            -- #2926: keyed on the ROW, not on the status alone. collection_log is append-only, so a
+            -- window can still hold cycles written before #2803 gave abandonment its own status:
+            -- status = 'SUCCESS' beside rows_collected = 0 and the budget note. Counted by status
+            -- alone this read 0 for them, and the collector banded HEALTHY while losing cycles - a
+            -- filter correct against current writes and silently wrong against older ones, failing in
+            -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
+            -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
+            -- for query_store), so equality against one rendered sentence matches one collector.
+            SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
+                     THEN 1 ELSE 0 END) AS abandoned_count,
+            -- #3240: the fleet rollup bands through the SAME shared classifier as the per-server grid,
+            -- so it must feed it the same inputs — an unselected count defaults to 0, COMPILES, and
+            -- quietly bands an extension-missing collector FAILING here while the per-server grid says
+            -- EXTENSION_MISSING (the #2804 lesson, same shape). APPENDED, read positionally.
+            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count
         FROM v_collection_log
         WHERE collection_time >= $1
         AND   server_id IN (SELECT server_id FROM config_monitored_servers WHERE is_enabled)
@@ -290,6 +349,7 @@ public sealed partial class ViewerDataService
         var items = new List<CollectorHealthRow>();
 
         await using var command = _dataSource.CreateCommand(CollectionHealthSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
@@ -317,6 +377,7 @@ public sealed partial class ViewerDataService
         var items = new List<CollectorHealthRow>();
 
         await using var command = _dataSource.CreateCommand(FleetCollectionHealthSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
             TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified),
@@ -331,7 +392,10 @@ public sealed partial class ViewerDataService
         return items;
     }
 
-    /// <summary>Maps one row of the shared 14-column health projection (per-server or fleet) to a <see cref="CollectorHealthRow"/>.</summary>
+    /// <summary>Maps one row of the shared 16-column health projection (per-server or fleet, ordinals 0-15) to a
+    /// <see cref="CollectorHealthRow"/>. The count is load-bearing: both projections are read POSITIONALLY
+    /// through this one mapper, so it must match them exactly (16 since #3240 appended
+    /// extension_missing_count at ordinal 15; #2804's abandoned_count sits at 14).</summary>
     private static CollectorHealthRow MapHealthRow(NpgsqlDataReader reader) => new()
     {
         CollectorName = reader.GetString(0),
@@ -350,6 +414,12 @@ public sealed partial class ViewerDataService
         /* #1852: NULL on the fleet read (see FleetCollectionHealthSql) reads as "no inventory to go on",
            which is the same silence an install with no size stats gets. */
         TargetHasUserDatabases = !reader.IsDBNull(13) && Convert.ToInt64(reader.GetValue(13)) != 0,
+        /* Appended (#2804). Both reads above compute it, so unlike has_user_databases it is never a
+           NULL placeholder on the fleet side — an abandoned cycle is data loss on either surface. */
+        AbandonedCount = reader.IsDBNull(14) ? 0 : Convert.ToInt64(reader.GetValue(14)),
+        /* Appended (#3240). Both reads compute it, for the same reason: the band it feeds must agree
+           between the per-server grid and the fleet rollup. */
+        ExtensionMissingCount = reader.IsDBNull(15) ? 0 : Convert.ToInt64(reader.GetValue(15)),
     };
 
     /// <summary>
@@ -362,6 +432,7 @@ public sealed partial class ViewerDataService
     public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, DateTime startUtc, DateTime endUtc, int maxRows = 500, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(RecentCollectionLogSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
@@ -384,6 +455,7 @@ public sealed partial class ViewerDataService
     public async Task<List<CollectionLogRow>> GetCollectionLogByCollectorAsync(int serverId, string collectorName, int hoursBack = 168, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(CollectionLogByCollectorSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = collectorName });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
@@ -479,8 +551,19 @@ public class CollectorHealthRow
     public string? LastError { get; set; }
     public DateTime? LastErrorTime { get; set; }
     public long PermissionDeniedCount { get; set; }
+
+    /// <summary>Runs skipped because a PostgreSQL extension the collector declares is not installed
+    /// (#3240) — the <c>EXTENSION_MISSING</c> status split out of PERMISSIONS so an uninstalled optional
+    /// extension stops banding NO_PERMISSIONS. Always 0 for SQL Server collectors.</summary>
+    public long ExtensionMissingCount { get; set; }
+
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }
+
+    /// <summary>Runs the #2673 whole-server wall-clock budget gave up on (#2804). Counted apart from
+    /// errors for the same reason <see cref="YieldCount"/> is — a guard firing is not a fault — but unlike
+    /// a yield it is data LOSS: the cycle stored nothing and advanced no watermark.</summary>
+    public long AbandonedCount { get; set; }
 
     /// <summary>
     /// The note a non-failing run left behind (#1837): an enumeration that yielded 0 items, items whose
@@ -502,9 +585,25 @@ public class CollectorHealthRow
     public bool TargetHasUserDatabases { get; set; }
 
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
+
+    /// <summary>Share of runs the #2673 budget abandoned (#2804) — its own rate, not folded into
+    /// <see cref="FailureRatePercent"/>, because the two carry very different thresholds and merging
+    /// them would report a 2%-abandoning collector as a 2%-erroring one.</summary>
+    public double AbandonRatePercent => TotalRuns > 0 ? (double)AbandonedCount / TotalRuns * 100 : 0;
     public double HoursSinceLastSuccess => LastSuccessTime.HasValue
         ? (DateTime.UtcNow - LastSuccessTime.Value).TotalHours
         : 999;
+
+    /// <summary>Hours since the newest run of ANY status — the input <see cref="CollectorHealthClassifier"/>'s
+    /// STOPPED band reads. Distinct from <see cref="HoursSinceLastSuccess"/>: a collector that keeps being
+    /// invoked and keeps failing has a small value here even while its success clock runs out; a collector
+    /// whose gate flipped off and stopped being invoked entirely has a large value here too, which is what
+    /// tells the two apart. Falls back to <see cref="HoursSinceLastSuccess"/> rather than the bare 999
+    /// sentinel when the column is unset: a run can never be MORE certain than a known success, so absent
+    /// better information this must not read more dormant than the success clock alone already says.</summary>
+    public double HoursSinceLastRun => LastRunTime.HasValue
+        ? (DateTime.UtcNow - LastRunTime.Value).TotalHours
+        : HoursSinceLastSuccess;
 
     /// <summary>The collector's default cadence from the shared <see cref="CollectorScheduleDefaults"/>
     /// (0 for an on-load or unknown collector — both fall to the floor thresholds). The banding uses the
@@ -514,8 +613,8 @@ public class CollectorHealthRow
         CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
 
     public string HealthStatus => CollectorHealthClassifier.Classify(
-        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount,
-        HoursSinceLastSuccess, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
+        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
+        HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
 
     public string AvgDurationFormatted => AvgDurationMs < 1000
         ? $"{AvgDurationMs:F0} ms"

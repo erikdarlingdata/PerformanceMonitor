@@ -7,8 +7,13 @@
  */
 
 using System;
+using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -351,5 +356,240 @@ public class DarlingPgBlockingReaderTests
         /* All six answers distinct — a collapsed branch is the failure this test exists for. */
         var all = new[] { idle, aborted, active, unknown, other };
         Assert.Equal(all.Length, all.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    private static string DedupedByRootSql => DarlingPgBlockingReader.PgBlockingChainsDedupedByRootSql;
+
+    /// <summary>
+    /// #2714: <see cref="PgBlockingChainsSql"/> is unchanged — same candidate CTEs, same severity-ordered
+    /// LIMIT — proving the shared factoring didn't alter what the MCP tool and the Viewer's blocking grid
+    /// already ship. The behavioral fix lives entirely in the new, separate
+    /// <see cref="PgBlockingChainsDedupedByRootSql"/> query these callers do not use.
+    /// </summary>
+    [Fact]
+    public void ChainsSql_IsUnchangedByTheDedupRefactor()
+    {
+        Assert.StartsWith("WITH RECURSIVE", ChainsSql.TrimStart(), StringComparison.Ordinal);
+        Assert.EndsWith(
+            "ORDER BY s.total_victims DESC, s.max_depth DESC, d.collection_time DESC\nLIMIT $4",
+            ChainsSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2714: the dedup happens BEFORE the row-count LIMIT, not after — <c>DISTINCT ON</c> must appear
+    /// ahead of the final <c>LIMIT $4</c> in the query text, or this is the same bug re-typed. Also pins the
+    /// sentinel-aware partition key (root_backend_id = 0 falls back to root_pid, mirroring
+    /// <c>DarlingWorker.WorstPgBlockingChainPerRoot</c>'s own C# dedup identity) so the two layers of
+    /// defense-in-depth cannot silently disagree about what "the same root" means.
+    /// </summary>
+    [Fact]
+    public void DedupedByRootSql_DedupesBeforeLimit_UsingTheSameSentinelAwareRootIdentity()
+    {
+        var distinctOnIndex = DedupedByRootSql.IndexOf("DISTINCT ON (root_key)", StringComparison.Ordinal);
+        var limitIndex = DedupedByRootSql.LastIndexOf("LIMIT $4", StringComparison.Ordinal);
+
+        Assert.True(distinctOnIndex >= 0, "expected a DISTINCT ON (root_key) dedup step");
+        Assert.True(limitIndex >= 0, "expected a trailing LIMIT $4");
+        Assert.True(distinctOnIndex < limitIndex,
+            "DISTINCT ON must run BEFORE the row-count LIMIT, or this is #2714 re-typed");
+
+        Assert.Contains("WHEN root_backend_id = 0", DedupedByRootSql, StringComparison.Ordinal);
+        Assert.Contains("'pid:' || root_pid::text", DedupedByRootSql, StringComparison.Ordinal);
+        Assert.Contains("'bid:' || root_backend_id::text", DedupedByRootSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2714: the deduped query must select the exact same output columns, in the exact same order, as
+    /// <see cref="PgBlockingChainsSql"/> — <see cref="DarlingPgBlockingReader.MapChainRow"/> reads both by
+    /// ordinal, and a mismatch here is the exact "two lists that must agree, and nothing makes them" hazard
+    /// that method's own doc comment already warns about for the original query's projection.
+    /// </summary>
+    [Fact]
+    public void DedupedByRootSql_ProjectsTheSameColumnsInTheSameOrder_AsChainsSql()
+    {
+        string[] expectedColumns =
+        [
+            "captured_at", "root_backend_id", "root_pid", "databases", "root_username",
+            "root_application_name", "root_state", "root_query", "root_is_idle_in_transaction",
+            "root_xact_duration_ms", "root_query_duration_ms", "total_victims", "direct_victims",
+            "max_depth", "worst_victim_wait_ms", "worst_victim_query", "samples_as_root",
+            "query_text_may_be_truncated", "chain_may_be_truncated",
+        ];
+
+        var finalSelectStart = DedupedByRootSql.LastIndexOf("SELECT", StringComparison.Ordinal);
+        Assert.True(finalSelectStart >= 0, "expected a final SELECT projecting the deduped rows");
+        var finalSelect = DedupedByRootSql[finalSelectStart..];
+
+        var lastIndex = -1;
+        foreach (var column in expectedColumns)
+        {
+            var index = finalSelect.IndexOf(column, StringComparison.Ordinal);
+            Assert.True(index > lastIndex, $"expected '{column}' to appear, in order, in the final SELECT");
+            lastIndex = index;
+        }
+    }
+
+    /// <summary>
+    /// #2714: the wiring, not just the query shape. Neither <c>EvaluatePgBlockingAsync</c> nor
+    /// <c>WorstPgBlockingChainPerRoot</c> is otherwise exercised by a fast unit test — both talk to Postgres
+    /// directly and are covered only by the gated live test above — so nothing else would catch a future
+    /// edit quietly reverting the alert's call site back to the raw, pre-#2714
+    /// <see cref="DarlingPgBlockingReader.GetPgBlockingChainsAsync"/> without also reverting the query it
+    /// calls. Pinned at source, the same idiom <c>DatabaseMismatchTripwireTests</c> already uses for this
+    /// exact class of cross-artifact contract.
+    /// </summary>
+    [Fact]
+    public void EvaluatePgBlockingAsync_CallsTheDedupedByRootReader_NotTheRawOne()
+    {
+        var source = ReadWorkerSource();
+        var methodStart = source.IndexOf("private async Task EvaluatePgBlockingAsync(", StringComparison.Ordinal);
+        Assert.True(methodStart >= 0, "expected to find EvaluatePgBlockingAsync in DarlingWorker.cs");
+
+        var methodEnd = source.IndexOf("\n    private", methodStart + 1, StringComparison.Ordinal);
+        Assert.True(methodEnd > methodStart, "expected to find the next method after EvaluatePgBlockingAsync");
+        var body = source[methodStart..methodEnd];
+
+        Assert.Contains("DarlingPgBlockingReader.GetPgBlockingChainsDedupedByRootAsync", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("DarlingPgBlockingReader.GetPgBlockingChainsAsync(", body, StringComparison.Ordinal);
+    }
+
+    private static string ReadWorkerSource([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return File.ReadAllText(Path.Combine(dir!, relative));
+    }
+}
+
+/// <summary>
+/// Gated (DARLING_TEST_PG) proof of #2714 against a real instance: a severe root sampled repeatedly across
+/// the window really does crowd a second, distinct root entirely out of <see cref="DarlingPgBlockingReader.
+/// PgBlockingChainsSql"/>'s severity-ordered LIMIT — proven RED here — and
+/// <see cref="DarlingPgBlockingReader.PgBlockingChainsDedupedByRootSql"/> keeps both roots under the exact
+/// same LIMIT, proven GREEN. The text pins above prove the query SHAPE; this proves the query DOES what the
+/// shape claims against PostgreSQL's actual planner and DISTINCT ON semantics, which no text assertion can.
+/// </summary>
+[Collection("live-postgres")]
+public sealed class PgBlockingChainsDedupedByRootLivePostgresTests
+{
+    private const string ServerName = "darling-pgblocking-dedup-e2e";
+    private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
+
+    /* Root A: severe (3 victims/sample), sampled on 20 separate captures — enough to fill a LIMIT of 20 on
+       its own. Root B: distinct, less severe (1 victim), sampled ONCE, at a time no earlier than Root A's
+       samples, so recency cannot accidentally rescue it — only severity-before-dedup can, or #2714 is back. */
+    private const int RootABackendId = 900_001;
+    private const int RootAPid = 51_000;
+    private const int RootBBackendId = 900_002;
+    private const int RootBPid = 51_100;
+    private const int SampleCount = 20;
+    private const int LimitUnderTest = SampleCount;
+
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    [Fact]
+    public async Task ASeverePersistentRoot_DoesNotCrowdADistinctRoot_OutOfTheDedupedRead()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #2714 dedup-before-limit test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = DateTime.UtcNow;
+            var collectionId = 0L;
+
+            for (var i = 0; i < SampleCount; i++)
+            {
+                collectionId++;
+                var capturedAt = now.AddMinutes(-SampleCount + i);
+                for (var victim = 0; victim < 3; victim++)
+                {
+                    await PlantEdgeAsync(
+                        connection, collectionId, capturedAt, RootAPid, RootABackendId,
+                        blockedPid: RootAPid + 100 + victim, ct);
+                }
+            }
+
+            collectionId++;
+            await PlantEdgeAsync(
+                connection, collectionId, now, RootBPid, RootBBackendId, blockedPid: RootBPid + 100, ct);
+
+            var windowStart = now.AddHours(-2);
+            var windowEnd = now.AddMinutes(1);
+
+            /* RED: the pre-#2714 shape. Severity-ordered LIMIT, applied before any per-root dedup, spends
+               its whole budget on Root A's 20 equally-severe repeat samples and never reaches Root B at
+               all — not merely under-ranks it, DROPS it, so no downstream dedup step can recover it. */
+            var raw = await DarlingPgBlockingReader.GetPgBlockingChainsAsync(
+                postgres, ServerId, windowStart, windowEnd, LimitUnderTest, ct);
+
+            Assert.Equal(LimitUnderTest, raw.Count);
+            Assert.All(raw, row => Assert.Equal(RootABackendId, row.RootBackendId));
+            Assert.DoesNotContain(raw, row => row.RootBackendId == RootBBackendId);
+
+            /* GREEN: #2714's fix. Same LIMIT, but dedup-by-root runs BEFORE it, so the budget is spent on
+               root DIVERSITY — both roots survive even though Root A alone could have filled it twice over. */
+            var deduped = await DarlingPgBlockingReader.GetPgBlockingChainsDedupedByRootAsync(
+                postgres, ServerId, windowStart, windowEnd, LimitUnderTest, ct);
+
+            Assert.Equal(2, deduped.Count);
+            Assert.Contains(deduped, row => row.RootBackendId == RootABackendId && row.TotalVictims == 3);
+            Assert.Contains(deduped, row => row.RootBackendId == RootBBackendId && row.TotalVictims == 1);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteRowsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
+    private static async Task PlantEdgeAsync(
+        NpgsqlConnection connection, long collectionId, DateTime capturedAt, int blockingPid, int blockingBackendId,
+        int blockedPid, System.Threading.CancellationToken ct)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO collect.pg_blocking_edges
+                (collection_id, collection_time, server_id, server_name, blocked_pid, blocking_pid,
+                 blocking_backend_id, database_name, blocked_query, blocking_query,
+                 query_text_may_be_truncated, blocking_is_idle_in_transaction)
+            VALUES
+                ($1, $2, $3, $4, $5, $6, $7, 'appdb', 'select victim', 'update root set x = 1', false, false)
+            """;
+        command.Parameters.AddWithValue(collectionId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(capturedAt, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue(ServerName);
+        command.Parameters.AddWithValue(blockedPid);
+        command.Parameters.AddWithValue(blockingPid);
+        command.Parameters.AddWithValue((long)blockingBackendId);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM collect.pg_blocking_edges WHERE server_id = $1";
+        command.Parameters.AddWithValue(ServerId);
+        await command.ExecuteNonQueryAsync(ct);
     }
 }

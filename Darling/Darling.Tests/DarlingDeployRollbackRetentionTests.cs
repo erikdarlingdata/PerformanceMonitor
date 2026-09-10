@@ -14,6 +14,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -216,6 +217,54 @@ public sealed class DarlingDeployRollbackRetentionTests
             var answers = RunWindowsPowerShell(probe.ToString());
 
             Assert.Equal(["True", "False", "False"], answers);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// #2671: an install with ZERO existing <c>_rollback_manual_*</c> backups — a hand-upgraded box, or the
+    /// first run of this script — must not crash the upgrade before it copies anything.
+    ///
+    /// <para><b>The trap is PowerShell's empty-array-collapses-to-$null return.</b> <c>Get-DarlingRollbackBackups</c>
+    /// returns <c>@()</c> when nothing matches, but a bare <c>return @()</c> unrolls on the way out of the
+    /// function, so the caller's <c>$backups</c> is assigned nothing and becomes <c>$null</c>. Then
+    /// <c>@($null)</c> is a ONE-element array holding <c>$null</c>, which slips past the
+    /// <c>$ordered.Count -eq 0</c> guard, and <c>Test-DarlingRollbackBackupIsRecent</c> reaches
+    /// <c>$nowUtc - $null</c> — "Cannot find an overload for op_Subtraction" — aborting the run right after
+    /// it stopped the service. The fix makes the producer hand back a REAL empty array (unary-comma return)
+    /// and filters <c>$null</c> in the two consumers that index and subtract.</para>
+    ///
+    /// <para>This plants nothing, so it exercises the exact reported state. Before the fix the recency call
+    /// throws and its line never prints, so the sequence comes back short; after it, the producer is a real
+    /// empty array, nothing is recent, and nothing is selected for prune.</para>
+    /// </summary>
+    [Fact]
+    public void TheDeployScript_WithNoBackupsAtAll_DoesNotCrashAndReportsNothingRecent()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-prune-empty-");
+        try
+        {
+            var probe = new StringBuilder();
+            probe.AppendLine(ExtractFunction(DeployScript, "Test-DarlingRollbackBackupName"));
+            probe.AppendLine(ExtractFunction(DeployScript, "Get-DarlingRollbackBackups"));
+            probe.AppendLine(ExtractFunction(DeployScript, "Test-DarlingRollbackBackupIsRecent"));
+            probe.AppendLine(ExtractFunction(DeployScript, "Select-DarlingRollbackBackupsToPrune"));
+            probe.AppendLine($"$backups = Get-DarlingRollbackBackups '{root.FullName}'");
+
+            /* The contract the fix restores: an empty result is still an ARRAY, not $null. */
+            probe.AppendLine("$backups -is [array]");
+            probe.AppendLine("@($backups).Count");
+            /* The #2671 crash line: with $null this throws op_Subtraction; with an empty array it is False. */
+            probe.AppendLine("Test-DarlingRollbackBackupIsRecent $backups 60 ([datetime]::new(2026,8,20,0,30,0,[DateTimeKind]::Utc))");
+            /* And the delete-selection path handles empty without inventing a phantom row. */
+            probe.AppendLine("@(Select-DarlingRollbackBackupsToPrune $backups 3).Count");
+
+            var answers = RunWindowsPowerShell(probe.ToString());
+
+            Assert.Equal(["True", "0", "False", "0"], answers);
         }
         finally
         {
@@ -802,32 +851,5 @@ public sealed class DarlingDeployRollbackRetentionTests
         {
             /* A leftover temp tree is not a test failure. */
         }
-    }
-
-    private static string ReadRepoFile(string relativePath)
-    {
-        var root = FindRepoRoot();
-        Assert.NotNull(root);
-        var path = Path.Combine(root!, relativePath);
-        Assert.True(File.Exists(path), $"expected {path} to exist");
-        return File.ReadAllText(path);
-    }
-
-    /// <summary>Walks up from the test output directory to the repo root (the directory holding
-    /// <c>PerformanceMonitor.sln</c>) — the same idiom <c>DarlingFileSecurityTests</c> uses.</summary>
-    private static string? FindRepoRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        for (var i = 0; i < 10 && directory is not null; i++)
-        {
-            if (File.Exists(Path.Combine(directory.FullName, "PerformanceMonitor.sln")))
-            {
-                return directory.FullName;
-            }
-
-            directory = directory.Parent;
-        }
-
-        return null;
     }
 }

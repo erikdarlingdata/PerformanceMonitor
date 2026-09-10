@@ -113,12 +113,58 @@ public sealed class PlanCorrectionCollector : CollectorDefinitionBase<PlanCorrec
     /// connection already pointed at the database.
     ///
     /// <para>
+    /// #2673 tuning (the sp_QuickieStore rule — stage first, never naively join the Query Store views):
+    /// the recommendation set is materialised into a #temp BEFORE the Query Store views are touched.
+    /// sys.dm_db_tuning_recommendations is a DMV with no statistics, so the optimizer guesses its
+    /// cardinality high and then satisfies the joins to sys.query_store_plan / sys.query_store_query by
+    /// SCANNING the whole plan store — catastrophic on a bloated Query Store, where one prod database's
+    /// read tailed to 260s (avg ~4s). The recommendation set is invariably small (the engine keeps only
+    /// a handful of live recommendations and erases them on restart), so materialising it first — with
+    /// its details JSON already shredded — hands the optimizer a real row count. SET NOCOUNT ON so the
+    /// SELECT INTOs emit no result set and the caller's reader takes the final SELECT as the shipped
+    /// rows; every #temp is scoped to this sp_executesql and dropped explicitly.
+    /// </para>
+    ///
+    /// <para>
+    /// #2764 completes the sp_QuickieStore pattern: #2673 staged the DMV side but the final SELECT still
+    /// LEFT JOINed sys.query_store_query / sys.query_store_query_text / sys.query_store_plan LIVE. The
+    /// Query Store side is now staged too, the way sp_QuickieStore populates #query_store_plan then
+    /// #query_store_query then #query_store_query_text: each temp pulls ONLY the rows keyed by the
+    /// already-small recommendation set (plans by (query_id, last_good_plan_id), queries by query_id,
+    /// text by the queries' query_text_id), and the final SELECT joins the three temps rather than the
+    /// catalog views. The live views are therefore touched exactly once each, by a seek keyed off a
+    /// materialised row count, and never appear on the JOIN side of the shipping query at all.
+    /// </para>
+    ///
+    /// <para>
+    /// OPTION(RECOMPILE) on the staging SELECT INTO and the shipping SELECT is for PLAN CACHE HYGIENE,
+    /// not performance. This body runs once per database, per server, every cycle; caching a plan for
+    /// each of those would accumulate cache bulk across the fleet for a query whose plan nobody will
+    /// ever reuse. RECOMPILE keeps them out of cache entirely, and that costs effectively nothing:
+    /// measured post-#2764 with SET STATISTICS TIME ON, compile is ~84ms CPU TOTAL across all five
+    /// statements (50 + 13 + 6 + 4 + 11), and that number is a ceiling — it was taken on an emulated
+    /// container, so real hardware compiles faster. Do not remove these to "save" compile time.
+    /// </para>
+    ///
+    /// <para>
+    /// Correcting the record, because it was wrong once and cost a round trip: #2760 removed both hints
+    /// on the theory that ~4,237ms of avg CPU seen on &lt;host&gt;/&lt;database&gt; was compile cost. That
+    /// attribution was never verified — it was inferred from a CPU-heavy/low-read/low-row telemetry
+    /// signature. The cost was the LIVE Query Store catalog-view joins that #2764 then replaced with
+    /// staged temps. Removing RECOMPILE never addressed it; staging did.
+    /// </para>
+    ///
+    /// <para>
     /// The details JSON is shredded with JSON_VALUE rather than the OPENJSON form Microsoft's own
     /// examples use, and that is not a style preference: OPENJSON is only available at database
     /// COMPATIBILITY LEVEL 130 or higher, and a compat-100 database on a 2017+ instance is perfectly
     /// legal. Verified 2026-08-01 on SQL2022 against a compat-100 database — JSON_VALUE returned the
     /// value, OPENJSON failed to parse at all ("Incorrect syntax near '$.queryId'"). The documented
-    /// query would take out the whole collection for that database.
+    /// query would take out the whole collection for that database. For the same reason the numeric
+    /// extractions use TRY_CAST, not TRY_CONVERT: TRY_CONVERT is not a recognized built-in below
+    /// COMPATIBILITY LEVEL 110 (raises Msg 195), while TRY_CAST binds at compat 100 — verified on the
+    /// SQL 2025 rig, TRY_CAST('123' AS bigint) returns 123 at compat 100 where TRY_CONVERT throws.
+    /// (House rule: always TRY_CAST over TRY_CONVERT unless a CONVERT style code is actually needed.)
     /// </para>
     ///
     /// <para>
@@ -144,12 +190,17 @@ public sealed class PlanCorrectionCollector : CollectorDefinitionBase<PlanCorrec
     /// </para>
     /// </summary>
     private const string PayloadBodyText = @"
+SET NOCOUNT ON;
+
+/*Stage the (invariably small) recommendation set with its details JSON already shredded, so the
+  Query Store joins below seek a real row count instead of scanning the whole plan store off a
+  statistics-free DMV cardinality guess. See the summary for why this is the 260s fix.*/
+DROP TABLE IF EXISTS #pm_plan_correction_recs;
+DROP TABLE IF EXISTS #pm_plan_correction_plans;
+DROP TABLE IF EXISTS #pm_plan_correction_queries;
+DROP TABLE IF EXISTS #pm_plan_correction_query_text;
+
 SELECT
-    force_last_good_plan_desired_state = o.desired_state_desc,
-    force_last_good_plan_actual_state = o.actual_state_desc,
-    force_last_good_plan_reason = o.reason_desc,
-    create_index_actual_state = create_index.actual_state_desc,
-    drop_index_actual_state = drop_index.actual_state_desc,
     recommendation_name = dtr.name,
     recommendation_type = dtr.type,
     recommendation_state = JSON_VALUE(dtr.state, '$.currentValue'),
@@ -159,12 +210,8 @@ SELECT
     last_refresh = dtr.last_refresh,
     score = dtr.score,
     query_id = pfd.query_id,
-    query_text = qsqt.query_sql_text,
     regressed_plan_id = pfd.regressed_plan_id,
     last_good_plan_id = pfd.last_good_plan_id,
-    last_good_plan_forcing_type = qsp.plan_forcing_type_desc,
-    last_good_plan_is_forced = qsp.is_forced_plan,
-    last_good_plan_force_failure_reason = NULLIF(qsp.last_force_failure_reason_desc, N'NONE'),
     regressed_plan_execution_count = pfd.regressed_plan_execution_count,
     regressed_plan_cpu_time_average_ms = pfd.regressed_plan_cpu_time_average / 1000.0,
     regressed_plan_error_count = pfd.regressed_plan_error_count,
@@ -174,7 +221,8 @@ SELECT
     /*Microsoft's own Estimated Gain (sec) formula from the MS Learn automatic-tuning shredding
       examples: BOTH plans' execution counts are summed deliberately (total executions at the
       regressed rate minus the same total at the good rate). Live-captured data reproduces the
-      engine's number exactly (64.84s on the repro).*/
+      engine's number exactly (64.84s on the repro). Computed here off the raw microsecond averages
+      so the arithmetic is unchanged by the /1000 the ms columns carry.*/
     estimated_gain_seconds =
         (pfd.regressed_plan_execution_count + pfd.last_good_plan_execution_count)
         * (pfd.regressed_plan_cpu_time_average - pfd.last_good_plan_cpu_time_average)
@@ -192,6 +240,128 @@ SELECT
     revert_action_duration_seconds =
         CONVERT(float, DATEDIFF(millisecond, CONVERT(time(7), '00:00:00'), dtr.revert_action_duration)) / 1000.0,
     implementation_script = JSON_VALUE(dtr.details, '$.implementationDetails.script')
+INTO #pm_plan_correction_recs
+FROM sys.dm_db_tuning_recommendations AS dtr
+CROSS APPLY
+(
+    SELECT
+        query_id =
+            TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.queryId') AS bigint),
+        regressed_plan_id =
+            TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanId') AS bigint),
+        last_good_plan_id =
+            TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanId') AS bigint),
+        regressed_plan_execution_count =
+            TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanExecutionCount') AS bigint),
+        last_good_plan_execution_count =
+            TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanExecutionCount') AS bigint),
+        regressed_plan_cpu_time_average =
+            TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanCpuTimeAverage') AS float),
+        last_good_plan_cpu_time_average =
+            TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanCpuTimeAverage') AS float),
+        /*Docs defect: the column table says AbortedCount, every example says ErrorCount. Read both.*/
+        regressed_plan_error_count =
+            COALESCE
+            (
+                TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanAbortedCount') AS bigint),
+                TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanErrorCount') AS bigint)
+            ),
+        last_good_plan_error_count =
+            COALESCE
+            (
+                TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanAbortedCount') AS bigint),
+                TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanErrorCount') AS bigint)
+            )
+) AS pfd
+OPTION(RECOMPILE);
+
+/*Stage the Query Store side too (#2764, the rest of the sp_QuickieStore rule). Each temp pulls only
+  the rows the recommendation set actually names, keyed off #pm_plan_correction_recs, so the live
+  catalog views are seeked once each here and never joined by the shipping SELECT below. Plans are
+  keyed by the (query_id, last_good_plan_id) pair the final join needs; queries by query_id; text by
+  query_text_id from the queries temp, the same plan -> query -> text chain sp_QuickieStore walks.*/
+SELECT
+    query_id = qsp.query_id,
+    plan_id = qsp.plan_id,
+    plan_forcing_type_desc = qsp.plan_forcing_type_desc,
+    is_forced_plan = qsp.is_forced_plan,
+    last_force_failure_reason_desc = qsp.last_force_failure_reason_desc
+INTO #pm_plan_correction_plans
+FROM sys.query_store_plan AS qsp
+WHERE EXISTS
+(
+    SELECT
+        1/0
+    FROM #pm_plan_correction_recs AS r
+    WHERE r.query_id = qsp.query_id
+    AND   r.last_good_plan_id = qsp.plan_id
+);
+
+SELECT
+    query_id = qsq.query_id,
+    query_text_id = qsq.query_text_id
+INTO #pm_plan_correction_queries
+FROM sys.query_store_query AS qsq
+WHERE EXISTS
+(
+    SELECT
+        1/0
+    FROM #pm_plan_correction_recs AS r
+    WHERE r.query_id = qsq.query_id
+);
+
+SELECT
+    query_text_id = qsqt.query_text_id,
+    query_sql_text = qsqt.query_sql_text
+INTO #pm_plan_correction_query_text
+FROM sys.query_store_query_text AS qsqt
+WHERE EXISTS
+(
+    SELECT
+        1/0
+    FROM #pm_plan_correction_queries AS q
+    WHERE q.query_text_id = qsqt.query_text_id
+);
+
+SELECT
+    force_last_good_plan_desired_state = o.desired_state_desc,
+    force_last_good_plan_actual_state = o.actual_state_desc,
+    force_last_good_plan_reason = o.reason_desc,
+    create_index_actual_state = create_index.actual_state_desc,
+    drop_index_actual_state = drop_index.actual_state_desc,
+    recommendation_name = r.recommendation_name,
+    recommendation_type = r.recommendation_type,
+    recommendation_state = r.recommendation_state,
+    recommendation_state_reason = r.recommendation_state_reason,
+    recommendation_reason = r.recommendation_reason,
+    valid_since = r.valid_since,
+    last_refresh = r.last_refresh,
+    score = r.score,
+    query_id = r.query_id,
+    query_text = qsqt.query_sql_text,
+    regressed_plan_id = r.regressed_plan_id,
+    last_good_plan_id = r.last_good_plan_id,
+    last_good_plan_forcing_type = qsp.plan_forcing_type_desc,
+    last_good_plan_is_forced = qsp.is_forced_plan,
+    last_good_plan_force_failure_reason = NULLIF(qsp.last_force_failure_reason_desc, N'NONE'),
+    regressed_plan_execution_count = r.regressed_plan_execution_count,
+    regressed_plan_cpu_time_average_ms = r.regressed_plan_cpu_time_average_ms,
+    regressed_plan_error_count = r.regressed_plan_error_count,
+    last_good_plan_execution_count = r.last_good_plan_execution_count,
+    last_good_plan_cpu_time_average_ms = r.last_good_plan_cpu_time_average_ms,
+    last_good_plan_error_count = r.last_good_plan_error_count,
+    estimated_gain_seconds = r.estimated_gain_seconds,
+    is_executable_action = r.is_executable_action,
+    is_revertable_action = r.is_revertable_action,
+    execute_action_initiated_by = r.execute_action_initiated_by,
+    execute_action_initiated_time = r.execute_action_initiated_time,
+    execute_action_start_time = r.execute_action_start_time,
+    execute_action_duration_seconds = r.execute_action_duration_seconds,
+    revert_action_initiated_by = r.revert_action_initiated_by,
+    revert_action_initiated_time = r.revert_action_initiated_time,
+    revert_action_start_time = r.revert_action_start_time,
+    revert_action_duration_seconds = r.revert_action_duration_seconds,
+    implementation_script = r.implementation_script
 FROM
 (
     /*The one-row anchor. Every enablement lookup hangs off it as an OUTER APPLY, so this query
@@ -225,48 +395,22 @@ OUTER APPLY
     FROM sys.database_automatic_tuning_options AS di
     WHERE di.name = N'DROP_INDEX'
 ) AS drop_index
-LEFT JOIN sys.dm_db_tuning_recommendations AS dtr
+LEFT JOIN #pm_plan_correction_recs AS r
   ON 1 = 1 /*keeps the enablement row when the engine has no recommendations*/
-CROSS APPLY
-(
-    SELECT
-        query_id =
-            TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.queryId')),
-        regressed_plan_id =
-            TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanId')),
-        last_good_plan_id =
-            TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanId')),
-        regressed_plan_execution_count =
-            TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanExecutionCount')),
-        last_good_plan_execution_count =
-            TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanExecutionCount')),
-        regressed_plan_cpu_time_average =
-            TRY_CONVERT(float, JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanCpuTimeAverage')),
-        last_good_plan_cpu_time_average =
-            TRY_CONVERT(float, JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanCpuTimeAverage')),
-        /*Docs defect: the column table says AbortedCount, every example says ErrorCount. Read both.*/
-        regressed_plan_error_count =
-            COALESCE
-            (
-                TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanAbortedCount')),
-                TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanErrorCount'))
-            ),
-        last_good_plan_error_count =
-            COALESCE
-            (
-                TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanAbortedCount')),
-                TRY_CONVERT(bigint, JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanErrorCount'))
-            )
-) AS pfd
-LEFT JOIN sys.query_store_query AS qsq
-  ON qsq.query_id = pfd.query_id
-LEFT JOIN sys.query_store_query_text AS qsqt
+LEFT JOIN #pm_plan_correction_queries AS qsq
+  ON qsq.query_id = r.query_id
+LEFT JOIN #pm_plan_correction_query_text AS qsqt
   ON qsqt.query_text_id = qsq.query_text_id
-LEFT JOIN sys.query_store_plan AS qsp
-  ON qsp.query_id = pfd.query_id
-  AND qsp.plan_id = pfd.last_good_plan_id
-ORDER BY dtr.score DESC, dtr.name
-OPTION(RECOMPILE);";
+LEFT JOIN #pm_plan_correction_plans AS qsp
+  ON qsp.query_id = r.query_id
+  AND qsp.plan_id = r.last_good_plan_id
+ORDER BY r.score DESC, r.recommendation_name
+OPTION(RECOMPILE);
+
+DROP TABLE #pm_plan_correction_query_text;
+DROP TABLE #pm_plan_correction_queries;
+DROP TABLE #pm_plan_correction_plans;
+DROP TABLE #pm_plan_correction_recs;";
 
     /// <summary>
     /// The database list. The version predicate rides in the WHERE clause rather than an IF so the
@@ -323,6 +467,18 @@ OPTION(RECOMPILE);";
 
     /// <summary>Azure SQL DB rejects three-part names, so the host connects per database there instead.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target is not null && target.IsAzureSqlDb;
+
+    /// <summary>
+    /// #2673: bound the per-server wall-clock (execute + DRAIN). Measured the WORST single-collector tail in
+    /// the fleet — 260s on one prod server (avg ~4s) — because on a bloated Query Store the recommendation
+    /// read scanned the whole plan store off a statistics-free DMV cardinality guess (root cause since fixed by
+    /// staging the recommendation set to a #temp — see <see cref="PayloadBodyText"/>), and the 60s command
+    /// timeout covers only execution, not the drain. This budget stays as the backstop: server-scoped on
+    /// on-prem/RDS (where that tail is), per database on Azure SQL DB; a cycle that blows the budget ships
+    /// nothing and retries next, so this collector cannot run minutes on a monitored server even if a future
+    /// shape regresses.
+    /// </summary>
+    public override TimeSpan? PerItemWallClockBudget => TimeSpan.FromSeconds(120);
 
     /// <summary>The Azure per-database branch: already connected to the database, so read it directly.</summary>
     public override CollectorQuery BuildQuery(CollectorContext context)

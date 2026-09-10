@@ -147,10 +147,10 @@ public class SettingsValueReadTests
         Assert.Equal("kept", b.Text("kept"));
 
         Assert.True(read.TryGetProperty("c", out var c));
-        Assert.Equal(5, c.Int(5));
+        Assert.Equal(5, c.WholeNumber(5));
 
         Assert.True(read.TryGetProperty("d", out var d));
-        Assert.Equal(2.5, d.Double(2.5, 0, 10));
+        Assert.Equal(2.5, d.Number(2.5, 0, 10));
 
         Assert.True(read.TryGetProperty("e", out var e));
         Assert.Equal("kept", e.Text("kept"));
@@ -172,7 +172,7 @@ public class SettingsValueReadTests
 
         Assert.False(read.TryGetProperty("absent", out _));
         Assert.True(read.TryGetProperty("present", out var present));
-        Assert.Equal(1, present.Int(0));
+        Assert.Equal(1, present.WholeNumber(0));
         Assert.Empty(read.Problems);
     }
 
@@ -189,10 +189,10 @@ public class SettingsValueReadTests
         var read = ReaderOver("""{ "huge": 5000000000, "negative": -7 }""");
 
         Assert.True(read.TryGetProperty("huge", out var huge));
-        Assert.Equal(int.MaxValue, huge.Int(1, 0, int.MaxValue));
+        Assert.Equal(int.MaxValue, huge.WholeNumber(1, 0, int.MaxValue));
 
         Assert.True(read.TryGetProperty("negative", out var negative));
-        Assert.Equal(0, negative.Int(1, 0, 100));
+        Assert.Equal(0, negative.WholeNumber(1, 0, 100));
 
         Assert.Empty(read.Problems);
     }
@@ -209,10 +209,10 @@ public class SettingsValueReadTests
         var read = ReaderOver("""{ "vast": 99999999999999999999, "vast_negative": -99999999999999999999 }""");
 
         Assert.True(read.TryGetProperty("vast", out var vast));
-        Assert.Equal(100, vast.Int(1, 0, 100));
+        Assert.Equal(100, vast.WholeNumber(1, 0, 100));
 
         Assert.True(read.TryGetProperty("vast_negative", out var negative));
-        Assert.Equal(0, negative.Int(1, 0, 100));
+        Assert.Equal(0, negative.WholeNumber(1, 0, 100));
 
         Assert.Empty(read.Problems);
     }
@@ -230,15 +230,15 @@ public class SettingsValueReadTests
         var read = ReaderOver("""{ "whole": 30.0, "fraction": 5.5, "under": -0.5 }""");
 
         Assert.True(read.TryGetProperty("whole", out var whole));
-        Assert.Equal(30, whole.Int(99, 30, 600));
+        Assert.Equal(30, whole.WholeNumber(99, 30, 600));
 
         /* Truncated INTO the range, which is the same silent adjustment the clamp already is and is confined
            to the readers whose caller declared a range for exactly that. It is not 100. */
         Assert.True(read.TryGetProperty("fraction", out var fraction));
-        Assert.Equal(5, fraction.Int(99, 0, 100));
+        Assert.Equal(5, fraction.WholeNumber(99, 0, 100));
 
         Assert.True(read.TryGetProperty("under", out var under));
-        Assert.Equal(0, under.Int(99, 0, 100));
+        Assert.Equal(0, under.WholeNumber(99, 0, 100));
 
         Assert.Empty(read.Problems);
     }
@@ -254,17 +254,17 @@ public class SettingsValueReadTests
     {
         var exact = ReaderOver("""{ "n": 30.0 }""");
         Assert.True(exact.TryGetProperty("n", out var n));
-        Assert.Equal(30, n.Int(7));
+        Assert.Equal(30, n.WholeNumber(7));
         Assert.Empty(exact.Problems);
 
         var fractional = ReaderOver("""{ "n": 90.7 }""");
         Assert.True(fractional.TryGetProperty("n", out var f));
-        Assert.Equal(7, f.Int(7));
+        Assert.Equal(7, f.WholeNumber(7));
         Assert.Contains("not a whole number", Assert.Single(fractional.Problems).Problem, StringComparison.Ordinal);
 
         var vast = ReaderOver("""{ "n": 99999999999999999999 }""");
         Assert.True(vast.TryGetProperty("n", out var v));
-        Assert.Equal(7, v.Int(7));
+        Assert.Equal(7, v.WholeNumber(7));
 
         var problem = Assert.Single(vast.Problems);
         Assert.Contains("out of range", problem.Problem, StringComparison.Ordinal);
@@ -299,8 +299,8 @@ public class SettingsValueReadTests
         var read = ReaderOver("""{ "n": "not a number" }""");
 
         Assert.True(read.TryGetProperty("n", out var n));
-        Assert.Equal(1, n.Int(1));
-        Assert.Equal(2, n.Int(2, 0, 10));
+        Assert.Equal(1, n.WholeNumber(1));
+        Assert.Equal(2, n.WholeNumber(2, 0, 10));
 
         Assert.Equal("n", Assert.Single(read.Problems).Key);
     }

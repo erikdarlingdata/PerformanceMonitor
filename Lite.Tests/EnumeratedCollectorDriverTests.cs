@@ -435,14 +435,67 @@ public sealed class EnumeratedCollectorDriverTests
     /// healthy field passes against 37.6 minutes at the low end of the pathological ones.
     /// </summary>
     [Fact]
-    public void OnlyQueryStore_DeclaresAWallClockBudget()
+    public void TheHeavyCollectors_DeclareAWallClockBudget_AndTheLightOnesDoNot()
     {
+        // query_store: the per-database plan/text fetch (#2150).
         Assert.Equal(TimeSpan.FromMinutes(10), QueryStoreCollector.Instance.PerItemWallClockBudget);
         Assert.Equal(QueryStoreCollector.PerDatabaseWallClockBudget, QueryStoreCollector.Instance.PerItemWallClockBudget);
 
-        /* The siblings that also run per database stay unbounded: neither has an unbounded-input shape, and
-           a budget on a collector with no field evidence for one is a cut waiting to surprise somebody. */
+        /* #2673: the two heaviest server-scoped collectors get a tighter bound on the execute + drain
+           (measured tails 176s / 168s on prod). Bounds the tail so no collector runs minutes on a monitored
+           server; a cycle that blows it ships nothing and retries next. */
+        Assert.Equal(TimeSpan.FromSeconds(120), ProcedureStatsCollector.Instance.PerItemWallClockBudget);
+        Assert.Equal(TimeSpan.FromSeconds(120), QueryStatsCollector.Instance.PerItemWallClockBudget);
+        Assert.Equal(TimeSpan.FromSeconds(120), PlanCorrectionCollector.Instance.PerItemWallClockBudget);
+
+        /* The light per-database siblings stay unbounded: neither has an unbounded-input shape, and a budget
+           on a collector with no field evidence for one is a cut waiting to surprise somebody. */
         Assert.Null(DatabaseSizeStatsCollector.Instance.PerItemWallClockBudget);
         Assert.Null(DatabaseScopedConfigCollector.Instance.PerItemWallClockBudget);
+    }
+
+    /* ---------------- the status a returned run gets ---------------- */
+
+    /// <summary>
+    /// A cycle the #2673 whole-server budget abandoned must not be recorded as a success. It reaches the
+    /// logging site by RETURNING rather than throwing, so it took the ordinary path and inherited that
+    /// path's hardcoded "SUCCESS" in BOTH hosts -- while having stored nothing and advanced no watermark.
+    ///
+    /// <para>Observed on one heavily-loaded monitored server: every one of the 36 abandonments in the 17-day
+    /// retention was status SUCCESS with rows_collected = 0. The harm is not only that a health check
+    /// counting non-SUCCESS rows reported zero: DarlingSelfAlertEvaluator.ReadCollectionSignalsAsync
+    /// takes last_success from status IN ('SUCCESS', 'SKIPPED'), so a collector abandoning every cycle
+    /// read as perpetually FRESH.</para>
+    ///
+    /// <para>Asserted over the freshness-success FAMILY rather than against the "SUCCESS" literal: the
+    /// bug was a status silently joining a set, and a pin naming one member would miss the next status
+    /// added to that set.</para>
+    /// </summary>
+    [Fact]
+    public void ClassifyReturnedRun_AnAbandonedCycle_IsOutsideTheFreshnessSuccessFamily()
+    {
+        var abandoned = EnumeratedCollectorDriver.ClassifyReturnedRun(abandoned: true);
+
+        Assert.NotEqual("SUCCESS", abandoned);
+        Assert.DoesNotContain(abandoned, EnumeratedCollectorDriver.FreshnessSuccessStatuses);
+
+        /* And it must not have solved that by landing somewhere worse. ERROR/PERMISSIONS feed the error
+           counts, the health bands and the collection-failure self-alerts, so classifying a guard that is
+           working as one of those would page on healthy behaviour. YIELDED is documented as the 1s
+           LOCK_TIMEOUT guard and is read as evidence of lock contention on the TARGET -- reusing it would
+           send an operator hunting contention that is not there. */
+        Assert.NotEqual("ERROR", abandoned);
+        Assert.NotEqual("PERMISSIONS", abandoned);
+        Assert.NotEqual("YIELDED", abandoned);
+    }
+
+    /// <summary>An ordinary returned run is untouched: still SUCCESS, still counted as fresh.</summary>
+    [Fact]
+    public void ClassifyReturnedRun_AnOrdinaryRun_IsStillSuccess()
+    {
+        var ordinary = EnumeratedCollectorDriver.ClassifyReturnedRun(abandoned: false);
+
+        Assert.Equal("SUCCESS", ordinary);
+        Assert.Contains(ordinary, EnumeratedCollectorDriver.FreshnessSuccessStatuses);
     }
 }

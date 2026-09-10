@@ -91,6 +91,8 @@ public sealed class DatabaseFilterTests
     [InlineData(nameof(ViewerDataService.QueryDurationTrendSql), "database_name", 4)]
     [InlineData(nameof(ViewerDataService.ProcedureDurationTrendSql), "database_name", 4)]
     [InlineData(nameof(ViewerDataService.QueryStoreDurationTrendSql), "database_name", 4)]
+    // The #2736 rollup-routed Query Store trend adds the raw boundary as $4, so its filter is $5.
+    [InlineData(nameof(ViewerDataService.QueryStoreDurationTrendRollupSql), "database_name", 5)]
     [InlineData(nameof(ViewerDataService.ExecutionCountTrendSql), "database_name", 4)]
     // Default Trace (real column, qualified alias).
     [InlineData(nameof(ViewerDataService.DefaultTraceEventsByWindowSql), "dte.database_name", 4)]

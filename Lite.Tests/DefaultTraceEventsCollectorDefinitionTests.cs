@@ -83,7 +83,9 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
         Assert.Contains("ELSE t.max_files", text, StringComparison.Ordinal);
         Assert.Contains("t.is_default = 1", text, StringComparison.Ordinal);
         Assert.Contains("t.status = 1", text, StringComparison.Ordinal);
-        Assert.Contains("ft.StartTime > @cutoff_time", text, StringComparison.Ordinal);
+        Assert.Contains(
+            "ft.StartTime > COALESCE(@cutoff_time, DATEADD(HOUR, -24, SYSDATETIME()))",
+            text, StringComparison.Ordinal);
         Assert.Contains("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED", text, StringComparison.Ordinal);
         Assert.Contains("OPTION(RECOMPILE)", text, StringComparison.Ordinal);
     }
@@ -179,12 +181,27 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
 
         /* Archival-emptied hot store (no watermark, but HAS succeeded before): a BOUNDED recent window
            (24 h), NEVER all-history — so we don't re-scan .trc events already in the parquet archive, which
-           v_default_trace_events (hot UNION parquet, no dedup) would double-count. The Dashboard's guard. */
+           v_default_trace_events (hot UNION parquet, no dedup) would double-count. The Dashboard's guard.
+
+           The bound is NOT bound from the host: @cutoff_time is NULL on this branch and the query's COALESCE
+           derives it from SYSDATETIME(), because ft.StartTime is the monitored server's local wall clock. A
+           host-UTC bound here delivers 17 hours at UTC-7 and 34 at UTC+10 instead of 24 — a silent hole in
+           trace history on one side and the very parquet double-count this branch exists to prevent on the
+           other. Asserting NULL is what makes that non-negotiable: any host clock reintroduced here has to
+           put a value back in this parameter. */
         var archivalEmpty = DefaultTraceEventsCollector.Instance.BuildQuery(
             MakeContext(collectionTime: collectionTime, hasCollectedBefore: true));
-        var boundedCutoff = (DateTime)archivalEmpty.Parameters.Single(p => p.Name == "@cutoff_time").Value!;
-        Assert.Equal(collectionTime.AddHours(-24), boundedCutoff);
-        Assert.NotEqual(new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Utc), boundedCutoff);
+        var boundedCutoff = archivalEmpty.Parameters.Single(p => p.Name == "@cutoff_time");
+        Assert.Null(boundedCutoff.Value);
+        Assert.Equal(CollectorParameterType.DateTime2, boundedCutoff.Type);
+        Assert.Contains(
+            "COALESCE(@cutoff_time, DATEADD(HOUR, -24, SYSDATETIME()))",
+            archivalEmpty.Text, StringComparison.Ordinal);
+
+        /* And the other two branches still bind a value, so the COALESCE never reaches the server clock for
+           them: the watermark is already server-local, and the first-run sentinel is far-past. */
+        Assert.NotNull(withWatermark.Parameters.Single(p => p.Name == "@cutoff_time").Value);
+        Assert.NotNull(firstRun.Parameters.Single(p => p.Name == "@cutoff_time").Value);
     }
 
     [Fact]
@@ -312,19 +329,27 @@ public sealed class DefaultTraceEventsCollectorDefinitionTests
     private static string Lf(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
 
     [Fact]
-    public void StateKeys_DeclaresTheLastSeenTracePath_AndIsTheOnlyCollectorWithState()
+    public void StateKeys_DeclaresTheLastSeenTracePath_AndTheDeclaringSetIsPinned()
     {
         Assert.Equal(
             new[] { "last_trace_file_path" },
             DefaultTraceEventsCollector.Instance.StateKeys.ToArray());
         Assert.Equal("last_trace_file_path", DefaultTraceEventsCollector.LastTraceFilePathStateKey);
 
-        /* Every other collector's dedup IS derivable from its rows (a MAX() over the target table), so it
-           declares no state and its host runs no state query. A second collector appearing here is a real
-           design decision — both hosts must load and persist its keys — not a silent addition. */
+        /* Almost every collector's dedup IS derivable from its rows (a MAX() over the target table), so it
+           declares no state and its host runs no state query. A collector appearing here is a real design
+           decision — both hosts must load and persist its keys — not a silent addition.
+
+           ONE declares state now: default_trace_events stores the trace FILE it last read (#1962). #3153
+           had added pg_index_bloat's per-database rotation cursor -- whose absence is what made the
+           collector re-measure its largest index every cycle forever while labelling the rest as merely
+           deferred -- and #3234 retired it, because the statistics estimate covers every index in one
+           statement and there is no position to resume from. Ordered by name so this reads as a set
+           rather than as an accident of catalog order. */
         var declaring = CollectorCatalog.All
             .Where(c => c.StateKeys.Count > 0)
             .Select(c => c.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
         Assert.Equal(new[] { "default_trace_events" }, declaring);
     }

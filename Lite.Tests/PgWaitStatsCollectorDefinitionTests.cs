@@ -183,12 +183,14 @@ public class PgWaitStatsCollectorDefinitionTests
     }
 
     /// <summary>
-    /// Deltas key on the numeric event id, not the event name. Wait-event name casing differs between
-    /// Aurora majors — AutoVacuumMain on 16.11 versus AutovacuumMain on 17.7 — so a name-keyed delta
-    /// would break its own history the moment a cluster is upgraded.
+    /// Deltas key on the numeric event id, not the event name, and are computed in ReadAsync (#2694,
+    /// mirroring #2691) since the write loop starts the binary-import row before WritePayload runs —
+    /// by then it is too late for a collector to refuse to write. Wait-event name casing differs
+    /// between Aurora majors — AutoVacuumMain on 16.11 versus AutovacuumMain on 17.7 — so a name-keyed
+    /// delta would break its own history the moment a cluster is upgraded.
     /// </summary>
     [Fact]
-    public void WritePayload_KeysDeltasOnTheStableEventId()
+    public async Task ReadAsync_KeysDeltasOnTheStableEventId()
     {
         var deltas = new RecordingCollectorDeltaCalculator();
         var context = new CollectorContext
@@ -201,11 +203,9 @@ public class PgWaitStatsCollectorDefinitionTests
             ExcludedDatabases = Array.Empty<string>(),
         };
 
-        var writer = new RecordingCollectorRowWriter();
-        PgWaitStatsCollector.Instance.WritePayload(
-            new PgWaitStatsCollector.Row(10, 167772160L, "IO", "DataFileRead", 100L, 5000L),
-            writer,
-            context);
+        var reader = new FakeCollectorDataReader(
+            new object[] { 10, 167772160L, "IO", "DataFileRead", 100L, 5000L });
+        await PgWaitStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
         /* Every delta call keys on the numeric event id, never on "DataFileRead". */
         Assert.All(deltas.Calls, call => Assert.Equal("167772160", call.Key));
@@ -225,7 +225,7 @@ public class PgWaitStatsCollectorDefinitionTests
     {
         var writer = new RecordingCollectorRowWriter();
         PgWaitStatsCollector.Instance.WritePayload(
-            new PgWaitStatsCollector.Row(10, 167772160L, "IO", "DataFileRead", 100L, 5000L),
+            new PgWaitStatsCollector.Row(10, 167772160L, "IO", "DataFileRead", 100L, 5000L, DeltaWaits: 7L, DeltaWaitTime: 250L),
             writer,
             MakeContext());
 
@@ -236,6 +236,8 @@ public class PgWaitStatsCollectorDefinitionTests
         Assert.Equal("DataFileRead", writer.Values[3]);
         Assert.Equal(100L, writer.Values[4]);
         Assert.Equal(5000L, writer.Values[5]);
+        Assert.Equal(7L, writer.Values[6]);
+        Assert.Equal(250L, writer.Values[7]);
     }
 
     [Fact]

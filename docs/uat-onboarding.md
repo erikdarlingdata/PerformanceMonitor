@@ -479,7 +479,22 @@ the store holds AG data; the `#/ag` route works regardless.) Or, scriptably:
 Invoke-RestMethod http://localhost:5153/api/ping
 ```
 
-**Proof:** `status : ok`.
+**Proof:** `status : ok`, and `collecting : True`.
+
+`/api/ping` is the only health surface that does not read the store, so it is the only one that can tell you
+the store is the problem — it reports the collector's own startup verdict, in four states:
+
+| HTTP | `status` | What it means |
+|---|---|---|
+| 200 | `ok` | The collection loop started. |
+| 200 | `starting` | The service is still bootstrapping and has not reached a verdict. Normal for the first seconds of a start. |
+| 503 | `degraded` | A startup step failed transiently and is being retried — `step`, `attempt`, `attempts` and `detail` say which and why. Clears itself, or becomes `stopped`. |
+| 503 | `stopped` | A startup step failed terminally. **Collection will not start until the service is restarted**, and `detail` carries the reason the log's critical line gives. |
+
+Point an uptime check at this route and alert on the status code: the two 503 states are the ones where the
+service is up, the dashboard still answers, the Windows service still reports **Running**, and nothing is
+being collected. Note that `Invoke-RestMethod` THROWS on a 503, which is the behaviour you want from a
+scripted check — catch it and read `$_.ErrorDetails.Message` for the body.
 
 ### 3.4 What it will not do
 

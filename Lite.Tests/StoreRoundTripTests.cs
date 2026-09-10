@@ -56,7 +56,10 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
             ServerId: "7", ServerName: "Srv", MetricName: "CPU",
             CurrentValueText: "92.5%", ThresholdValueText: "80%",
             NumericCurrentValue: null, NumericThresholdValue: null,
-            AlertSent: true, NotificationType: "email", SendError: null,
+            Delivery: AlertDelivery.FromFanout(
+                new EmailFanoutResult(EmailAttempted: true, EmailSent: true, SendError: null,
+                                      WebhookSent: false, AnyChannelConfigured: true),
+                muted: false, trayChannelPresent: true),
             Muted: false, DetailText: "detail text", ContextJson: "{\"k\":1}"));
 
         var after = DateTime.UtcNow;
@@ -89,7 +92,10 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
             ServerId: "7", ServerName: "Srv", MetricName: "High CPU",
             CurrentValueText: "87% (Total CPU)", ThresholdValueText: "80%",
             NumericCurrentValue: null, NumericThresholdValue: null,
-            AlertSent: true, NotificationType: "toast", SendError: null,
+            Delivery: AlertDelivery.FromFanout(
+                new EmailFanoutResult(EmailAttempted: true, EmailSent: true, SendError: null,
+                                      WebhookSent: false, AnyChannelConfigured: true),
+                muted: false, trayChannelPresent: true),
             Muted: false, DetailText: null, ContextJson: null));
 
         var row = await ReadSingleAlertRowAsync();
@@ -108,7 +114,10 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
             ServerId: "1", ServerName: "Srv", MetricName: "Analysis",
             CurrentValueText: "not-a-number", ThresholdValueText: "also-bad",
             NumericCurrentValue: 1.8, NumericThresholdValue: 1.5,
-            AlertSent: false, NotificationType: "tray", SendError: null,
+            Delivery: AlertDelivery.FromFanout(
+                new EmailFanoutResult(EmailAttempted: false, EmailSent: false, SendError: null,
+                                      WebhookSent: false, AnyChannelConfigured: false),
+                muted: false, trayChannelPresent: true),
             Muted: false, DetailText: null, ContextJson: null));
 
         var row = await ReadSingleAlertRowAsync();
@@ -210,6 +219,40 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
         await RecordWithContextAsync(store, "9", "Blocking Detected", "webhook", JsonWith("dddd4444"));
         Assert.NotNull(await store.GetLastWebhookSentUtcAsync("9", "Blocking Detected", "dddd4444"));
         Assert.Null(await store.GetLastWebhookSentUtcAsync("9", "Blocking Detected", "eeee5555"));
+    }
+
+    /// <summary>
+    /// #2716's Postgres Tier-0-predictor cooldown seed passes a RAW database/slot name as dedupKey —
+    /// not a #1140 hash — so this filter has to be correct for arbitrary text, not just hex. Three
+    /// failure modes, proven against the real store rather than the escaping logic in isolation:
+    /// a quote/backslash breaks the naive string-concatenation match (the value Serialize() actually
+    /// writes is JSON-escaped, the old hand-built search pattern was not); an underscore is a SQL LIKE
+    /// wildcard, so a naive pattern for "orders_db" would also match "ordersXdb" for any X; and a
+    /// non-ASCII character is escaped by the default JSON encoder into a \uXXXX sequence the old
+    /// pattern never accounted for either.
+    /// </summary>
+    [Fact]
+    public async Task GetLastAlertTime_WithDedupKey_HandlesRawNonHexSubjectsSafely()
+    {
+        var store = new DuckDbAlertHistoryStore(_duckDb);
+
+        // Quote/backslash: a subject like a Windows-style path or a quoted identifier.
+        await RecordWithContextAsync(store, "20", "Wraparound Risk", "tray", JsonWith("db\"with\\quote"));
+        Assert.NotNull(await store.GetLastAlertTimeAsync("20", "Wraparound Risk", "db\"with\\quote"));
+
+        // Underscore: must match only the exact subject, never a same-shaped different one.
+        await RecordWithContextAsync(store, "21", "Wraparound Risk", "tray", JsonWith("orders_db"));
+        Assert.NotNull(await store.GetLastAlertTimeAsync("21", "Wraparound Risk", "orders_db"));
+        Assert.Null(await store.GetLastAlertTimeAsync("21", "Wraparound Risk", "ordersXdb"));
+
+        // Non-ASCII: the default JSON encoder escapes this to a \uXXXX sequence before it is stored.
+        await RecordWithContextAsync(store, "22", "Wraparound Risk", "tray", JsonWith("café"));
+        Assert.NotNull(await store.GetLastAlertTimeAsync("22", "Wraparound Risk", "café"));
+
+        // Percent: the other SQL LIKE wildcard, same shape as the underscore case.
+        await RecordWithContextAsync(store, "23", "Wraparound Risk", "tray", JsonWith("100%done"));
+        Assert.NotNull(await store.GetLastAlertTimeAsync("23", "Wraparound Risk", "100%done"));
+        Assert.Null(await store.GetLastAlertTimeAsync("23", "Wraparound Risk", "100Xdone"));
     }
 
     [Fact]
@@ -334,15 +377,20 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
         Assert.Equal("live-1", loaded[0].Id);
     }
 
+    /* These two exercise the cooldown-seed filters' notification_type predicates, so they need to store
+       an arbitrary column triple rather than one a producer would derive — the same reason the deprecated
+       SKU's hatch exists. */
+#pragma warning disable CS0618
     private static Task RecordAsync(IAlertHistoryStore store, string serverId, string metric, string type, string? error)
         => store.RecordAlertAsync(new AlertHistoryRecord(
             serverId, "Srv", metric, "90", "80", 90, 80,
-            true, type, error, false, null, null));
+            AlertDelivery.FromLegacyStoredColumns(true, type, error), false, null, null));
 
     private static Task RecordWithContextAsync(IAlertHistoryStore store, string serverId, string metric, string type, string? contextJson)
         => store.RecordAlertAsync(new AlertHistoryRecord(
             serverId, "Srv", metric, "90", "80", 90, 80,
-            true, type, null, false, null, contextJson));
+            AlertDelivery.FromLegacyStoredColumns(true, type, null), false, null, contextJson));
+#pragma warning restore CS0618
 
     /// <summary>Real serialized #1140 context carrying a single incident with the given dedup key.</summary>
     private static string JsonWith(string dedupKey)

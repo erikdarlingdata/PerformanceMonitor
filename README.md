@@ -214,7 +214,7 @@ Configuration is a single JSON file with no schedule knobs. See the **[Darling o
 | Alerts (tray + email + webhooks) | Yes | Email + webhooks (headless) | Yes |
 | Themes | Dark and light | Dark and light | Dark and light |
 | Portability | Single executable | Portable service + viewer zip | Server-bound |
-| MCP server (LLM integration) | Built-in (77 tools) | On request | Built into Dashboard (66 tools) |
+| MCP server (LLM integration) | Built-in (87 tools) | On request (139 tools) | Built into Dashboard (66 tools) |
 
 ---
 
@@ -350,7 +350,7 @@ claude mcp add --transport http --scope user sql-monitor http://localhost:5151/
 
 ### Available Tools
 
-**Lite** exposes 77 tools; **Darling** exposes the analysis + data-read surface on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
+**Lite** exposes 87 tools; **Darling** exposes 139 (the analysis + data-read surface plus its write tools) on request; the deprecated **Dashboard** exposes 66 (see [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)). Core tools are shared.
 
 | Category | Tools |
 |---|---|
@@ -408,6 +408,10 @@ Most tools accept optional `server_name` and `hours_back` parameters. If only on
 
 Application logs are written to the `logs/` folder. Collection success/failure is also logged to the `collection_log` table in DuckDB.
 
+Verbosity is the `log_minimum_level` key in `settings.json` (no UI — see `Lite/config/settings.sample.json`), one of `Trace`, `Debug`, `Information`, `Warning`, `Error`, `Critical` or `None`. It defaults to `Information` and is read at startup, so a change needs a restart.
+
+Set it to `Debug` when you need the per-database collection timing lines — `[server] collector [db] => N rows (sql:Nms, duckdb:Nms)`, one per database per collector per cycle. They are below the default because at that rate they bury the collection failures the log is usually opened for; the aggregate they decompose is in `collection_log`'s `duration_ms`, which is recorded at every level.
+
 Common issues:
 
 1. **No data after connecting** — Wait for the first collection cycle (1–5 minutes). Check logs for connection errors.
@@ -422,20 +426,35 @@ Common issues:
 
 ## Authentication
 
-Every edition supports five authentication types, defined once in `PerformanceMonitor.Common.AuthenticationTypes` and shared by Lite, Darling, the Dashboard, and the CLI installer:
+`PerformanceMonitor.Common.AuthenticationTypes` supports six authentication types, defined once there and named the same way in every edition. **Not every edition connects with all six**, so the table says which does what: Lite offers all of them, while the Darling service builds Windows-integrated or SQL-login connections only and acquires no tokens at all, so its viewer rejects every Azure mode at the credential step.
 
-| Type | Interactive? | Credential stored? | Where |
-|---|---|---|---|
-| Windows | No | None | — |
-| SQL Server | No | Password | Windows Credential Manager |
-| Entra ID (MFA) | Yes, once per session | None | — |
-| Service Principal | No | Client secret | Windows Credential Manager |
-| Managed Identity | No | None | — |
+| Type | Editions | Interactive? | Credential stored? | Where |
+|---|---|---|---|---|
+| Windows | Lite, Darling | No | None | — |
+| SQL Server | Lite, Darling | No | Password | Windows Credential Manager |
+| Entra ID (MFA) | Lite | Yes, once per session | None | — |
+| Service Principal | Lite | No | Client secret | Windows Credential Manager |
+| Managed Identity | Lite | No | None | — |
+| Existing Azure Sign-In | Lite | No | None | — (established outside the app, e.g. `az login`) |
 
 **Managed Identity and Service Principal** are non-interactive Azure AD (Entra ID) authentication modes, added for fleet onboarding of Azure SQL Database / Managed Instance without a per-server interactive MFA prompt (see [#1038](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1038)). Both map directly to `Microsoft.Data.SqlClient`'s native `SqlAuthenticationMethod` (`ActiveDirectoryServicePrincipal` / `ActiveDirectoryManagedIdentity`) — PerformanceMonitor never acquires, caches, or stores a token itself; the official Microsoft driver handles that internally.
 
 - **Managed Identity** requires the machine running the app/service to itself be an Azure resource (VM, App Service, etc.) with a system- or user-assigned managed identity. That identity is then provisioned as a user directly on each target database (see [Permissions](#permissions) below). Nothing is stored locally.
 - **Service Principal** uses an Entra app registration's client id + secret. The client id is non-secret and stored in config; the secret is stored only in Windows Credential Manager, same as a SQL auth password.
+
+### Existing Azure Sign-In (Lite only, `ActiveDirectoryDefault`)
+
+Labelled **Azure — Existing Sign-In (az login)** in Lite's connection dialog, and added because **Entra ID (MFA) cannot be repaired in place** (see [#3196](https://github.com/erikdarlingdata/PerformanceMonitor/issues/3196), [#3214](https://github.com/erikdarlingdata/PerformanceMonitor/issues/3214)). `Microsoft.Data.SqlClient` forces the Windows account broker (WAM) on for any caller using the driver's own Entra application id, and `UseWamBroker` is inert in that configuration — so when the broker refuses a sign-in, the app has no browser fallback to reach for. This mode maps to `SqlAuthenticationMethod.ActiveDirectoryDefault`, whose arm in the driver returns before any MSAL public-client application is constructed, which is the only place a broker is ever attached.
+
+It signs in as **whichever Azure identity is already established on the machine** and **never prompts** — the driver hard-codes `ExcludeInteractiveBrowserCredential = true`, so there is no browser and no account picker. It searches, in order: the `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` environment variables, a workload identity, a managed identity, a Visual Studio or VS Code sign-in, an Azure CLI session (`az login`), an Azure PowerShell session, and an Azure Developer CLI session. Two consequences worth knowing before you pick it:
+
+- **With no Azure sign-in on the machine it fails rather than asking for one.** Run `az login` first. The connection dialog says which of the two failure modes happened — nothing found, or one found and broken — and the log names each source and why it declined.
+- **The order is the driver's, not yours.** There is no seam to narrow the list: the driver constructs the credential chain itself and this app cannot pass options into it. On a machine with several Azure identities set up, this connects as whichever comes first, which is not necessarily the one you signed into Windows with. When a specific identity matters, use **Service Principal**, which names it.
+- **The log says which one won.** Lite records the credential type `DefaultAzureCredential` actually selected — `AzureCliCredential`, `EnvironmentCredential`, `ManagedIdentityCredential` and so on — so "whichever comes first" is answerable after the fact rather than only a caveat. Expect exactly one such line per run of the app: `Azure.Identity` reports the selection once per credential instance and the driver caches that instance for the process, so later connections have nothing new to report and say so at `Debug`. The type name is the only thing recorded; no tenant id, account or scope.
+
+Darling does not offer this mode: the Darling service's connect path builds Windows-integrated or SQL-login connections only and acquires no tokens at all, so its viewer rejects every Azure mode at the credential step.
+
+**Not yet confirmed against a live Entra tenant.** The mechanism above is read off the pinned `Microsoft.Data.SqlClient` 7.0.2 and `Azure.Identity` 1.18.0 sources, and the behaviour is pinned by tests; nobody here has a tenant to run it against. Treat it as worth trying rather than as known to work, and please report what happens.
 
 ### Credential Profiles (Lite, fleet onboarding)
 

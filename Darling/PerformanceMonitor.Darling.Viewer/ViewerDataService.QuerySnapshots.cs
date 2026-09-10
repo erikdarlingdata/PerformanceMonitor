@@ -80,11 +80,15 @@ public sealed class ViewerQuerySnapshotRow
     public string CollectionTimeLocal =>
         CollectionTime == DateTime.MinValue ? "" : ViewerTimeHelper.ForDisplay(CollectionTime).ToString("yyyy-MM-dd HH:mm:ss");
 
-    /// <summary>The transaction begin time, empty when the request has no open transaction. Mirrors Lite's
-    /// <c>QuerySnapshotRow.TranStartTimeLocal</c> (raw server-clock <c>FormatServerTime</c>):
+    /// <summary>The transaction begin time, empty when the request has no open transaction.
     /// transaction_begin_time from sys.dm_tran_active_transactions is a SQL-server-local wall-clock time (NOT
-    /// naive UTC), so it renders raw via <see cref="ViewerDataService.FormatServerClock"/> like the other
-    /// dm_exec_* times (last_execution_time / cached_time), NOT through the UTC-converting ForDisplay.</summary>
+    /// naive UTC), so it converts via <see cref="ViewerDataService.FormatServerClock"/> like the other
+    /// dm_exec_* times (last_execution_time / cached_time), NOT through the naive-UTC ForDisplay.
+    ///
+    /// <para>Lite's <c>QuerySnapshotRow.TranStartTimeLocal</c> is the mirror, through
+    /// <c>ServerTimeHelper.FormatServerClock</c>. It is NOT <c>FormatServerTime</c>: that method takes
+    /// naive UTC and adds the collected offset, so it is the wrong renderer for this frame in either
+    /// SKU.</para></summary>
     public string TranStartTimeLocal => ViewerDataService.FormatServerClock(TranStartTime);
 }
 
@@ -169,6 +173,7 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(LatestQuerySnapshotsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         return await ReadQuerySnapshotsAsync(command, cancellationToken);
@@ -198,6 +203,7 @@ public sealed partial class ViewerDataService
         int serverId, string waitType, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(QuerySnapshotsByWaitTypeSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = waitType });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
@@ -213,6 +219,7 @@ public sealed partial class ViewerDataService
         int serverId, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(LatestQuerySnapshotBatchSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         var rows = await ReadQuerySnapshotsAsync(command, cancellationToken);
@@ -302,6 +309,7 @@ public sealed partial class ViewerDataService
         var items = new List<TimeSliceBucket>();
 
         await using var command = _dataSource.CreateCommand(ActiveQuerySlicerSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

@@ -127,10 +127,12 @@ public sealed class QueryStoreSliceTieBreakSourceTests
         var darlingSource = File.ReadAllText(darlingGuard);
 
         /* Darling declares its own total the same way this file does. If that guard is deleted or stops
-           asserting a total, this fails rather than silently becoming a one-sided check. */
+           asserting a total, this fails rather than silently becoming a one-sided check. The literal below
+           MIRRORS Darling's declared total: raising one without the other is what broke dev on #2830, so
+           bump both in the same commit. */
         var declared = Regex.Match(darlingSource, @"Assert\.Equal\((?<total>\d+), total\);");
         Assert.True(declared.Success, "Darling's guard no longer declares a total dedup-site count.");
-        Assert.Equal(12, int.Parse(declared.Groups["total"].Value, System.Globalization.CultureInfo.InvariantCulture));
+        Assert.Equal(18, int.Parse(declared.Groups["total"].Value, System.Globalization.CultureInfo.InvariantCulture));
 
         /* And it must still enumerate its files rather than globbing, for the same reason this one does. */
         Assert.Contains("DedupSites", darlingSource, StringComparison.Ordinal);

@@ -138,7 +138,51 @@ public partial class RemoteCollectorService
     {
         public long SqlMs { get; set; }
         public long StorageMs { get; set; }
-        public string? Note { get; set; }
+
+        /// <summary>
+        /// The note the RUNNER authored — an enumeration that yielded 0 items, items whose enumeration
+        /// probe failed, a whole-cycle budget abandonment. One half of what the collection_log row
+        /// receives; <see cref="Note"/> is the whole of it. Named <c>HostNote</c> rather than <c>Note</c>
+        /// so the compiler pointed at every site that used to assume the two were the same thing.
+        /// </summary>
+        public string? HostNote { get; set; }
+
+        /// <summary>
+        /// The labelled counts the DEFINITION measured on the target this cycle (#3161), copied off
+        /// <see cref="CollectorContext.Measurements"/> when the run reaches its storage phase. Empty for
+        /// every collector that measures nothing, and for a run that never got that far.
+        /// </summary>
+        public List<CollectorMeasurement> Measurements { get; } = new();
+
+        /// <summary>
+        /// What this run puts in <c>collection_log.error_message</c>: <see cref="HostNote"/> then
+        /// <see cref="Measurements"/>, through the same shared
+        /// <see cref="CollectorMeasurementNote.Compose"/> that Darling's <c>CollectorRunResult.Note</c>
+        /// computes through — so the two SKUs cannot come to disagree about what a run note contains.
+        ///
+        /// <para><b>Computed rather than settable, and that is the parity guarantee.</b> There is no
+        /// spelling of "the host note alone" for the read site to reach for, so a definition-supplied
+        /// count cannot be dropped by a host that simply never learned about it. A shared seam wired into
+        /// one runner reads as a permanently-empty value in the other SKU and nothing fails to build,
+        /// which is the failure mode CONTRIBUTING's two-store parity rules name. Making this read-only is
+        /// also what made the compiler enumerate the six sites that used to assign it.</para>
+        /// </summary>
+        public string? Note => CollectorMeasurementNote.Compose(HostNote, Measurements);
+
+        /// <summary>Clears both halves for a new run. Called at the top of every collector.</summary>
+        public void ResetNote()
+        {
+            HostNote = null;
+            Measurements.Clear();
+        }
+
+        /// <summary>
+        /// True only for a cycle the #2673 whole-server wall-clock budget gave up on. Its own field rather
+        /// than an inference from <see cref="Note"/>'s text, so the collection_log status never depends on
+        /// wording that exists to be reworded. Darling's twin is CollectorRunResult.Abandoned — parity is
+        /// the point, since both hosts previously recorded this as SUCCESS.
+        /// </summary>
+        public bool Abandoned { get; set; }
 
         /// <summary>The per-database rollup for a run that fanned out, null for one that did not (#2472).
         /// Lives beside the fetch/store split for the same reason it does: both are things one run has to
@@ -331,6 +375,16 @@ public partial class RemoteCollectorService
                    worked as designed, so the streak does not grow). The collection_log row is
                    the visible record. */
             }
+            else if (status == EnumeratedCollectorDriver.AbandonedStatus)
+            {
+                /* #2801: a cycle the #2673 wall-clock budget abandoned. Exactly the YIELDED reasoning
+                   above and for the same reason: the guard worked as designed, so the error streak must
+                   not grow, and nothing was collected, so it is not proof the collector works and must
+                   not reset the streak either. This arm is load-bearing rather than tidy -- the chain
+                   ends in an ELSE, so without it a new status silently becomes an error here and shows
+                   the collector FAILING. The message still reaches the collection_log row, which is the
+                   visible record. */
+            }
             else
             {
                 entry.LastErrorMessage = errorMessage;
@@ -494,7 +548,8 @@ public partial class RemoteCollectorService
         var telemetry = TelemetryFor(GetServerId(server));
         telemetry.SqlMs = 0;
         telemetry.StorageMs = 0;
-        telemetry.Note = null;
+        telemetry.ResetNote();
+        telemetry.Abandoned = false;
 
         try
         {
@@ -611,6 +666,16 @@ public partial class RemoteCollectorService
                on error_message, so the note reaches the Collection Health Note column and the Collection
                Log detail grid, and is inert everywhere else. */
             errorMessage = telemetry.Note;
+
+            /* ...with the ONE exception of a cycle the #2673 whole-server wall-clock budget abandoned, which
+               arrives here on the same path because it returns normally rather than throwing. It stored
+               nothing and advanced no watermark, so leaving it SUCCESS both claimed a collection that did not
+               happen and put its message in the #1837 note channel, whose whole claim is that the run
+               succeeded. Darling's twin is the same one-line branch in DarlingWorker. */
+            if (telemetry.Abandoned)
+            {
+                status = EnumeratedCollectorDriver.ClassifyReturnedRun(abandoned: true);
+            }
 
             var elapsed = (int)(DateTime.UtcNow - startTime).TotalMilliseconds;
             AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} => {rowsCollected} rows in {elapsed}ms (sql:{telemetry.SqlMs}ms, duck:{telemetry.StorageMs}ms)");
@@ -1255,6 +1320,38 @@ WHERE server_id = $3";
     /// <summary>
     /// Gets the most recent value of a timestamp column from DuckDB for incremental collection.
     /// Returns null on first run or if the query fails (caller uses a fallback window).
+    ///
+    /// <para><b>This read is deliberately UNBOUNDED, unlike its per-database twin
+    /// <see cref="GetLastCollectedTimeForDatabaseAsync"/> and unlike Darling's server-scoped
+    /// equivalent.</b> That asymmetry looks like the oversight #2344 left on the Postgres side and
+    /// #2795 later fixed there, and it was filed as such (#2800). It is not: measured on DuckDB, the
+    /// bound does not pay here and in the common single-server shape it actively costs.</para>
+    ///
+    /// <para>Measured on DuckDB 1.5.5 (the version Lite ships) against this table's SHIPPED generated
+    /// DDL, 50M rows / 4.7 GB — far past any realistic Lite store — with the connection already open so
+    /// the figure is query cost, not connect cost:</para>
+    ///
+    /// <list type="bullet">
+    /// <item><b>One monitored server</b> (the common Lite deployment, where <c>server_id</c> selects
+    /// everything): unbounded <b>0.34 ms</b>, bounded <b>0.56 ms</b>. The bound is a 65% LOSS — DuckDB
+    /// answers the unfiltered <c>MAX</c> from column zonemap metadata, and adding a
+    /// <c>collection_time</c> predicate forces real evaluation instead.</item>
+    /// <item><b>Five monitored servers</b>: unbounded 8.26 ms, bounded 0.84 ms — a real 9.8x, but it
+    /// saves ~7 ms once per five-minute query_store cycle.</item>
+    /// </list>
+    ///
+    /// <para>The per-database twin's bound IS earned and stays: 8.40 ms to 0.79 ms with one server and
+    /// 10.42 ms to 0.93 ms with five — roughly 10x in BOTH shapes, because <c>database_name</c> is not
+    /// in <c>idx_query_store_time(server_id, collection_time)</c>, so that <c>MAX</c> genuinely scans
+    /// and genuinely prunes. The two reads have different cost structures in a columnar engine; in
+    /// Postgres both scanned every chunk, which is why the shapes match there and diverge here.</para>
+    ///
+    /// <para><b>And the failure #2795 actually fixed cannot occur here.</b> Its mechanism was Npgsql's
+    /// undocumented 30 s default <c>CommandTimeout</c> cancelling a 40-50 s read, the cancellation being
+    /// swallowed, and the resulting null reading as a first run — silently downgrading the collector to
+    /// its fallback window. <c>DuckDBCommand.CommandTimeout</c> defaults to <b>0</b>, meaning no limit,
+    /// so there is no ceiling to exceed and nothing to cancel. Confirm that default still holds before
+    /// concluding from this comment; it is what the whole argument rests on.</para>
     /// </summary>
     protected async Task<DateTime?> GetLastCollectedTimeAsync(
         int serverId, string tableName, string columnName, CancellationToken cancellationToken)

@@ -30,7 +30,7 @@ ORDER BY database_name";
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var cmd = new NpgsqlCommand(ConfigIssuesSql, connection);
+        using var cmd = new NpgsqlCommand(ConfigIssuesSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
 
         var items = new List<object>();

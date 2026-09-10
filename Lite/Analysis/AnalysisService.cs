@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 
@@ -410,9 +411,12 @@ public class AnalysisService
     }
 
     /// <summary>
-    /// Cleans up old findings beyond the retention period.
+    /// Cleans up old findings beyond the retention period. Defaults to the shared horizon
+    /// (<see cref="AnalysisRetentionDefaults.FindingsRetentionDays"/>) so this wrapper and the
+    /// store method it forwards to cannot disagree about the window when a caller names none —
+    /// the scheduler passes it explicitly, and the tests pass 0 to purge everything.
     /// </summary>
-    public async Task CleanupAsync(int retentionDays = 30)
+    public async Task CleanupAsync(int retentionDays = AnalysisRetentionDefaults.FindingsRetentionDays)
     {
         await _findingStore.CleanupOldFindingsAsync(retentionDays);
     }

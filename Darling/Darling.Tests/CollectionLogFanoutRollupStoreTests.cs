@@ -13,6 +13,7 @@ using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -256,7 +257,7 @@ public class CollectionLogFanoutRollupStoreTests
         /* Derived, not remembered: every collector source that overrides BuildEnumerationQuery drives the
            enumeration fan-out, so a sixth one starting to enumerate fails here instead of quietly falling
            out of the description. */
-        var collectorsDir = System.IO.Path.Combine(RepoRoot(), "PerformanceMonitor.Collectors");
+        var collectorsDir = System.IO.Path.Combine(RepoFile.Root, "PerformanceMonitor.Collectors");
         var enumerating = System.IO.Directory
             .EnumerateFiles(collectorsDir, "*Collector.cs", System.IO.SearchOption.TopDirectoryOnly)
             .Where(f => System.IO.File.ReadAllText(f).Contains("override CollectorQuery? BuildEnumerationQuery", StringComparison.Ordinal))
@@ -303,21 +304,5 @@ public class CollectionLogFanoutRollupStoreTests
 
     private static string ReadViewerSource() =>
         ReadRepoFile(System.IO.Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs"));
-
-    private static string ReadRepoFile(string relative) =>
-        System.IO.File.ReadAllText(System.IO.Path.Combine(RepoRoot(), relative));
-
-    private static string RepoRoot([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
-    {
-        for (var dir = new System.IO.DirectoryInfo(System.IO.Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
-        {
-            if (System.IO.Directory.Exists(System.IO.Path.Combine(dir.FullName, "PerformanceMonitor.Common")))
-            {
-                return dir.FullName;
-            }
-        }
-
-        throw new System.IO.DirectoryNotFoundException($"Could not locate the repo root walking up from {thisFile}");
-    }
 
 }

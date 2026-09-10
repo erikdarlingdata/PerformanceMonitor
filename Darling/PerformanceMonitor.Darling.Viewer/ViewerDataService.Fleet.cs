@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Media;
@@ -102,6 +103,7 @@ SELECT
     public async Task<FleetTotals> GetFleetTotalsAsync(DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(FleetTotalsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
             TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified),
@@ -209,6 +211,16 @@ public sealed class FleetRollup
     public int CriticalCount { get; init; }
     public int OfflineCount { get; init; }
 
+    /// <summary>
+    /// Registered servers whose per-server summary read did NOT complete this cycle (#2753 review finding)
+    /// — <c>TotalServers</c> minus however many summaries actually loaded. Deliberately tracked separately
+    /// from <see cref="ServersWithCollectionFailures"/>, which only reflects a LOADED summary's own FAILING
+    /// collectors: a server that failed to load this cycle has no summary to ask, so it cannot be banded
+    /// Healthy/Warning/Critical/Offline at all — it is neither known-healthy nor known-problem, and must
+    /// not be silently counted as the former just because it is absent from the "problem" list.
+    /// </summary>
+    public int UnknownCount { get; init; }
+
     /// <summary>Servers whose 7-day collection banding flags at least one FAILING collector (card reuse).</summary>
     public int ServersWithCollectionFailures { get; init; }
 
@@ -217,6 +229,21 @@ public sealed class FleetRollup
 
     /// <summary>Fleet-wide deadlocks this window (from the cross-server SQL total).</summary>
     public long TotalDeadlocks { get; init; }
+
+    /// <summary>
+    /// How much of the fleet <see cref="TotalDeadlocks"/> actually read a deadlock source for, with the
+    /// causes named (#3029) — the shared <see cref="FleetDeadlockCoverage"/>, so this panel and the
+    /// service's <c>get_fleet_overview</c> report the same denominator against the same total rather than
+    /// two surfaces each having an opinion.
+    ///
+    /// <para><see cref="FleetDeadlockCoverage.ServersTotal"/> is <see cref="TotalServers"/>, the REGISTERED
+    /// fleet — the same population the SQL total counts over, which is every server in the store and not
+    /// just the ones whose card loaded this cycle. So its four causes need not add up to it: the shortfall
+    /// is <see cref="UnknownCount"/>, the servers this cycle has no summary to classify, and that gap has
+    /// its own line already (<see cref="UnknownStatusText"/>) rather than being attributed to a cause it
+    /// was not measured to have.</para>
+    /// </summary>
+    public FleetDeadlockCoverage DeadlockCoverage { get; init; } = new();
 
     /// <summary>The worst-first problem servers (band != Healthy), capped at the requested depth.</summary>
     public IReadOnlyList<FleetRankedServer> WorstServers { get; init; } = Array.Empty<FleetRankedServer>();
@@ -229,14 +256,36 @@ public sealed class FleetRollup
     /// </summary>
     public int AdditionalProblemCount { get; init; }
 
-    /// <summary>Any server needs attention (band != Healthy) — drives the ranking list vs the all-clear line.</summary>
+    /// <summary>Any server needs attention (band != Healthy) — drives the ranking list vs the all-clear line.
+    /// Deliberately NOT widened to include <see cref="UnknownCount"/>: the ranking is a list of specific
+    /// servers to click into, and an unknown-status server cannot be ranked or clicked into, only counted.
+    /// See <see cref="IsAllClear"/> for the property that gates the all-clear text.</summary>
     public bool HasProblems => WorstServers.Count > 0;
+
+    /// <summary>
+    /// True only when EVERY registered server is accounted for AND known-healthy — no ranked problems and
+    /// no server whose status this cycle is simply unknown. #2753 review: before this, the all-clear text
+    /// could read "All N servers healthy" while some of those N had no summary this cycle at all, which is
+    /// an affirmative false claim, not an absent one — worse than the original undercount bug.
+    /// </summary>
+    public bool IsAllClear => !HasProblems && UnknownCount == 0;
 
     /// <summary>"+N more need attention" when the ranking overflows its cap, else empty.</summary>
     public string AdditionalProblemText =>
         AdditionalProblemCount > 0 ? $"+{AdditionalProblemCount} more need attention" : "";
 
-    /// <summary>The all-clear affirmation shown when nothing needs attention.</summary>
+    /// <summary>"N server(s) didn't report this cycle" when some registered server has no summary this
+    /// cycle, else empty — the only place that gap is stated in words rather than silently absorbed into
+    /// either the healthy or the problem counts.</summary>
+    public string UnknownStatusText => UnknownCount switch
+    {
+        0 => "",
+        1 => "1 server didn't report this cycle",
+        _ => $"{UnknownCount} servers didn't report this cycle",
+    };
+
+    /// <summary>The all-clear affirmation shown when nothing needs attention. Content assumes the caller
+    /// only renders this when <see cref="IsAllClear"/> is true — see that property's remarks.</summary>
     public string AllHealthyText => TotalServers == 1
         ? "All 1 server healthy"
         : $"All {TotalServers} servers healthy";
@@ -251,20 +300,182 @@ public sealed class FleetRollup
         ? "1 server"
         : $"{ServersWithCollectionFailures} servers";
 
+    /* ─────────────────────── the deadlock total's coverage (#3029) ─────────────────────── */
+
+    /// <summary>
+    /// What <see cref="TotalDeadlocks"/> is assembled from, and so why it needs a denominator at all. The
+    /// leading sentence of <see cref="DeadlockCoverageTooltip"/>.
+    /// </summary>
+    public const string DeadlockSourceNote =
+        "Deadlocks come from the SQL Server extended-event capture and nothing else, so a server this "
+        + "total does not cover contributes nothing to it whatever that server's deadlocks do.";
+
+    /// <summary>
+    /// The sentence that keeps the two figures from being read as one measurement — the desktop wording of
+    /// the same disclaimer the service's <see cref="FleetDeadlockCoverage.WindowNote"/> carries for an API
+    /// reader.
+    ///
+    /// <para><b>The two windows genuinely diverge and that is the point of saying so.</b>
+    /// <see cref="TotalDeadlocks"/> is counted over the last hour, the same window the cards use; coverage
+    /// is banded over the FIXED trailing seven days of collection health, because whether a reader works is
+    /// a durable fact and the banding thresholds are themselves defined in DAYS — an hour-wide health
+    /// window could not produce a band at all. A note claiming both were read in the same window would be
+    /// this issue's own defect one level up: a surface asserting a scope it did not measure.</para>
+    /// </summary>
+    public const string DeadlockCoverageWindowNote =
+        "Coverage bands each server's deadlock reader over the fixed trailing seven days of collection "
+        + "health - whether the reader works at all, which is a durable fact - while the deadlock total "
+        + "counts only the last hour. The two windows differ deliberately, and this coverage figure "
+        + "therefore makes no claim about what was read in the last hour.";
+
+    /// <summary>What to do about the PostgreSQL arm, appended after its count. Names no tab, because a
+    /// PostgreSQL target's deadlock grid is reached through that server's own tab rather than from here.
+    ///
+    /// <para>Every cause here is a VERB-FREE noun phrase, so one form reads correctly after both "1 server:"
+    /// and "4 servers:" — an "N are ..." shape needs a second string the moment N is one, and the surface
+    /// that forgets it prints "1 are PostgreSQL targets".</para></summary>
+    public const string DeadlockPostgresCause =
+        "PostgreSQL targets, whose deadlocks this total cannot count at all - collected separately, and "
+        + "shown on that target's own server tab.";
+
+    /// <summary>What to do about the silent arm, appended after its count.</summary>
+    public const string DeadlockCollectorSilentCause =
+        "no current deadlock collection - the collector has stopped being invoked, or has never run; the "
+        + "server's Collection Health tab shows which.";
+
+    /// <summary>What to do about the denied arm, appended after its count.</summary>
+    public const string DeadlockCollectorDeniedCause =
+        "every deadlock-collector attempt refused for permissions - needs a grant.";
+
+    /// <summary>
+    /// The arm the service's fleet reader has no equivalent of: a registered server whose per-server
+    /// summary read did not complete this cycle (<see cref="UnknownCount"/>). It is uncovered for the same
+    /// reason a null band is — nothing was read FOR IT, so counting it as read is how a coverage figure
+    /// becomes another number nobody can trust — but it is deliberately NOT folded into
+    /// <see cref="DeadlockCollectorSilentCause"/>: that one sends the reader to a collector, and this one is
+    /// the viewer's own read having failed, which is a different thing to go and look at.
+    /// </summary>
+    public const string DeadlockUnreportedCause =
+        "no summary this cycle, so whether the deadlock collection works could not be classified either "
+        + "way.";
+
+    /// <summary>Whether there is a fleet for the coverage figure to qualify. False only on an empty fleet,
+    /// where the whole roll-up panel is collapsed anyway — never as a way of hiding a complete reading.</summary>
+    public bool HasDeadlockCoverage => DeadlockCoverage.ServersTotal > 0;
+
+    /// <summary>
+    /// True when <see cref="TotalDeadlocks"/> did not read every registered server — the flag the coverage
+    /// line's colour tracks. It tracks COVERAGE rather than the deadlock count's own severity: "read all 12
+    /// servers" beside a large count is good news about a bad number and must not be painted as part of the
+    /// alarm.
+    /// </summary>
+    public bool DeadlockCoverageIsPartial => DeadlockCoverage.ServersRead < DeadlockCoverage.ServersTotal;
+
+    /// <summary>
+    /// The coverage beside the deadlock total, in the "Label: value" shape the rest of that row already
+    /// uses. Rendered whenever there is a fleet, INCLUDING at full coverage.
+    ///
+    /// <para><b>Always, rather than only when short.</b> A line that appeared only on partial coverage would
+    /// make its ABSENCE the load-bearing signal, which a reader has to already know the rule to read, and it
+    /// would leave "zero, whole fleet measured" looking identical to "zero, from a build that reports no
+    /// coverage at all" — the same defect one step out. Present unconditionally, it says which one this is.
+    /// The web fleet page's tile made the same call for the same reason.</para>
+    ///
+    /// <para>It carries its own subject rather than reading as a bare "read 0 of 12 servers": the row it
+    /// sits in is a <see cref="System.Windows.Controls.WrapPanel"/> of independently-labelled phrases, so an
+    /// unlabelled one could wrap onto the next line under a different figure and read as qualifying that.</para>
+    /// </summary>
+    public string DeadlockCoverageText
+    {
+        get
+        {
+            var total = DeadlockCoverage.ServersTotal;
+            var noun = total == 1 ? "server" : "servers";
+
+            return DeadlockCoverage.ServersRead >= total
+                ? $"Deadlock coverage: read all {total} {noun}"
+                : $"Deadlock coverage: read {DeadlockCoverage.ServersRead} of {total} {noun}";
+        }
+    }
+
+    /// <summary>
+    /// The hover detail behind <see cref="DeadlockCoverageText"/>: what the total is built from, only the
+    /// causes that actually apply, and the two windows named against the figures they belong to.
+    ///
+    /// <para>DERIVED rather than assigned, for the reason
+    /// <see cref="ServerSummaryItem.DeadlockSource"/> is: a settable string is one that can be omitted, or
+    /// can drift from the counts it describes. Computed, the numbers and the sentence cannot disagree.</para>
+    /// </summary>
+    public string DeadlockCoverageTooltip
+    {
+        get
+        {
+            var note = new StringBuilder(DeadlockSourceNote)
+                .Append(' ')
+                .Append(DeadlockCoverageWindowNote);
+
+            Cause(note, DeadlockCoverage.PostgresServers, DeadlockPostgresCause);
+            Cause(note, DeadlockCoverage.ServersCollectorSilent, DeadlockCollectorSilentCause);
+            Cause(note, DeadlockCoverage.ServersCollectorDenied, DeadlockCollectorDeniedCause);
+
+            /* The viewer-only arm, last because it is about this cycle's read rather than about a target. */
+            Cause(note, UnknownCount, DeadlockUnreportedCause);
+
+            return note.ToString();
+        }
+    }
+
+    /// <summary>
+    /// One cause, appended only when it applies, as "N server(s): what it is" — so a reader is not handed
+    /// four actions when one is called for.
+    ///
+    /// <para>The ONE place a count becomes words here, which is what keeps the four arms from disagreeing
+    /// about the noun. Nothing in the cause strings inflects, so this needs no second form for N = 1.</para>
+    /// </summary>
+    private static void Cause(StringBuilder note, int count, string cause)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        note.Append(' ').Append(count).Append(count == 1 ? " server: " : " servers: ").Append(cause);
+    }
+
     /// <summary>
     /// Rolls the per-server Overview cards up into the fleet view-model. The band counts,
     /// servers-with-failures, and worst-first ranking reduce the <paramref name="summaries"/> using #1426's
     /// card banding (no new bands); the blocking / deadlock totals come from the cross-server
     /// <paramref name="totals"/> SQL read. <paramref name="worstCount"/> caps the "Needs attention" list.
+    ///
+    /// <para><paramref name="totalServerCount"/> is the REGISTERED fleet size — the same count the sidebar
+    /// shows — and is what <see cref="TotalServers"/> reports. It defaults to <paramref name="summaries"/>'
+    /// own count for callers (tests, mainly) that only ever pass a fully-loaded set, but the real caller
+    /// MUST pass the registered count explicitly: <paramref name="summaries"/> is only the servers whose
+    /// per-server summary read succeeded THIS cycle (#2753 — a transient per-server read failure silently
+    /// drops that server from <paramref name="summaries"/>, so deriving the fleet total from its count made
+    /// the Overview's "Total Servers" wobble cycle to cycle while the sidebar, sourced from the registry,
+    /// never moved).</para>
     /// </summary>
-    public static FleetRollup Build(IReadOnlyList<ServerSummaryItem> summaries, FleetTotals totals, int worstCount = DefaultWorstCount)
+    public static FleetRollup Build(IReadOnlyList<ServerSummaryItem> summaries, FleetTotals totals, int worstCount = DefaultWorstCount, int? totalServerCount = null)
     {
+        var registeredTotal = totalServerCount ?? summaries.Count;
+        var unknown = Math.Max(0, registeredTotal - summaries.Count);
+
+        /* Reduced ONCE, above the early return, so the two exits cannot disagree about whether the deadlock
+           total carries a denominator — a coverage object left at its default on one path would report every
+           server uncovered on an empty fleet and nothing at all on a populated one. */
+        var deadlockCoverage = ReduceDeadlockCoverage(summaries, registeredTotal);
+
         if (summaries.Count == 0)
         {
             return new FleetRollup
             {
+                TotalServers = registeredTotal,
+                UnknownCount = unknown,
                 TotalBlockingEvents = totals.TotalBlockingEvents,
                 TotalDeadlocks = totals.TotalDeadlocks,
+                DeadlockCoverage = deadlockCoverage,
             };
         }
 
@@ -315,7 +526,8 @@ public sealed class FleetRollup
 
         return new FleetRollup
         {
-            TotalServers = summaries.Count,
+            TotalServers = registeredTotal,
+            UnknownCount = unknown,
             HealthyCount = healthy,
             WarningCount = warning,
             CriticalCount = critical,
@@ -323,8 +535,60 @@ public sealed class FleetRollup
             ServersWithCollectionFailures = failures,
             TotalBlockingEvents = totals.TotalBlockingEvents,
             TotalDeadlocks = totals.TotalDeadlocks,
+            DeadlockCoverage = deadlockCoverage,
             WorstServers = worst,
             AdditionalProblemCount = Math.Max(0, problems.Count - worst.Count),
+        };
+    }
+
+    /// <summary>
+    /// How much of the fleet <see cref="TotalDeadlocks"/> read a deadlock source for, reduced from the SAME
+    /// cards every other count here comes from, so the coverage and the total it qualifies reconcile by
+    /// construction rather than by two reads agreeing (#3029).
+    ///
+    /// <para><paramref name="registeredTotal"/> is the denominator, not <paramref name="summaries"/>' own
+    /// count. The SQL total is a cross-server COUNT over the whole store, so the population it covers is the
+    /// registered fleet; a denominator that shrank to whatever loaded this cycle would report a smaller
+    /// fleet than exists, which is a new wrong number in place of the old one rather than a fix.</para>
+    ///
+    /// <para><b>Only <see cref="FleetDeadlockSource.Read"/> counts as read</b> — every other arm, INCLUDING
+    /// an enum value a later build adds and this switch has never heard of, lands in the silent bucket. A
+    /// new source kind that inflated the read count would restore exactly the defect this exists to fix,
+    /// where one that lands in an uncovered bucket merely attributes a real gap imprecisely.</para>
+    ///
+    /// <para>The four causes therefore need not sum to <paramref name="registeredTotal"/>: a registered
+    /// server with no summary this cycle is classified by none of them, and that shortfall is
+    /// <see cref="UnknownCount"/> — stated in its own words by <see cref="UnknownStatusText"/> and by
+    /// <see cref="DeadlockUnreportedCause"/>, rather than attributed to a cause it was not measured to
+    /// have.</para>
+    /// </summary>
+    public static FleetDeadlockCoverage ReduceDeadlockCoverage(IReadOnlyList<ServerSummaryItem> summaries, int registeredTotal)
+    {
+        ArgumentNullException.ThrowIfNull(summaries);
+
+        var read = 0;
+        var postgres = 0;
+        var silent = 0;
+        var denied = 0;
+
+        foreach (var s in summaries)
+        {
+            switch (s.DeadlockSource)
+            {
+                case FleetDeadlockSource.Read: read++; break;
+                case FleetDeadlockSource.PostgresTarget: postgres++; break;
+                case FleetDeadlockSource.CollectorDenied: denied++; break;
+                default: silent++; break;
+            }
+        }
+
+        return new FleetDeadlockCoverage
+        {
+            ServersRead = read,
+            ServersTotal = registeredTotal,
+            PostgresServers = postgres,
+            ServersCollectorSilent = silent,
+            ServersCollectorDenied = denied,
         };
     }
 
@@ -332,7 +596,7 @@ public sealed class FleetRollup
     /// Collapses a card's health to one fleet band — REUSING #1426's banding, mirroring
     /// <see cref="ServerSummaryItem.CardBorderBrush"/>: offline collection → Offline; else the card's
     /// worst metric band (<see cref="ServerSummaryItem.OverallMetricSeverity"/>) maps Critical → Critical,
-    /// Warning → Warning, and a stale collection (<see cref="ServerSummaryItem.HasCollectorErrors"/>) is
+    /// Warning → Warning, and a stale collection (<see cref="ServerSummaryItem.CollectionStale"/>) is
     /// Warning too; otherwise Healthy. No new thresholds are introduced here.
     /// </summary>
     public static FleetHealthBand ClassifyBand(ServerSummaryItem s) =>
@@ -342,7 +606,7 @@ public sealed class FleetRollup
                whatever IsOnline says, so an online card carrying a stray marker banded Warning while the card
                said "Online" and had nothing to report — a third reading of the same pair. See ServerCollectionStatus. */
             s.CardStatus == ServerCollectionStatus.AwaitingFirstCollection,
-            s.HasCollectorErrors,
+            s.CollectionStale,
             s.OverallMetricSeverity);
 
     /// <summary>
@@ -402,7 +666,7 @@ public sealed class FleetRollup
         {
             parts.Add($"{s.FailedCollectorCount} collector{(s.FailedCollectorCount == 1 ? "" : "s")} failing");
         }
-        if (s.HasCollectorErrors)
+        if (s.CollectionStale)
         {
             parts.Add("collection stale");
         }

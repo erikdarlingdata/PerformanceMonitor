@@ -9,6 +9,7 @@
 using System;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -37,42 +38,214 @@ public sealed class CollectorHealthClassifierTests
 
     [Theory]
     /* NEVER_RUN wins first, whatever else is set (including on-load). */
-    [InlineData(0, 0, 0, 0, 999, OneMinute, false, CollectorHealthClassifier.NeverRun)]
-    [InlineData(0, 0, 0, 0, 0, OnLoadFreq, true, CollectorHealthClassifier.NeverRun)]
+    [InlineData(0, 0, 0, 0, 0, 0, 999, 999, OneMinute, false, CollectorHealthClassifier.NeverRun)]
+    [InlineData(0, 0, 0, 0, 0, 0, 0, 0, OnLoadFreq, true, CollectorHealthClassifier.NeverRun)]
 
-    /* NO_PERMISSIONS (only permission denials) is checked before the on-load branch. */
-    [InlineData(5, 0, 0, 5, 999, OneMinute, false, CollectorHealthClassifier.NoPermissions)]
-    [InlineData(5, 0, 0, 5, 999, OnLoadFreq, true, CollectorHealthClassifier.NoPermissions)]
+    /* NO_PERMISSIONS (only permission denials) is checked before the on-load branch and before STOPPED -
+       a collector whose every run this window was a denied grant is still actively RUNNING (hoursSinceLastRun
+       is small), so this is not a STOPPED case, but the precedence is worth pinning regardless. */
+    [InlineData(5, 0, 0, 5, 0, 0, 999, 2, OneMinute, false, CollectorHealthClassifier.NoPermissions)]
+    [InlineData(5, 0, 0, 5, 0, 0, 999, 2, OnLoadFreq, true, CollectorHealthClassifier.NoPermissions)]
 
-    /* On-load collectors are staleness-exempt: banded by failure rate only, never STALE/FAILING. */
-    [InlineData(10, 10, 0, 0, 500, OnLoadFreq, true, CollectorHealthClassifier.Healthy)]
-    [InlineData(10, 7, 3, 0, 500, OnLoadFreq, true, CollectorHealthClassifier.Warning)]   // 30% > 20%
+    /* ---- #3240: EXTENSION_MISSING — a PostgreSQL extension the collector declares is absent. -------
+       Same shape as NO_PERMISSIONS (every attempt a named skip, the collector still actively invoked)
+       and checked BEFORE it: a window straddling the upgrade that split this status out of PERMISSIONS
+       holds the same absent-extension fault under both names, and the newer name must win for the seven
+       days the old rows take to age out — NO_PERMISSIONS there keeps the wrong pg_monitor hint alive on
+       exactly the deployments the split is for. Any success or error makes the window's story bigger
+       than the skip, and the row falls through to the ordinary ladder. */
+    [InlineData(5, 0, 0, 0, 5, 0, 999, 2, OneMinute, false, CollectorHealthClassifier.ExtensionMissing)]
+    [InlineData(5, 0, 0, 0, 5, 0, 999, 2, OnLoadFreq, true, CollectorHealthClassifier.ExtensionMissing)]
+    /* The upgrade-transition window: old PERMISSIONS rows beside new EXTENSION_MISSING rows describe ONE
+       condition recorded under two vocabularies — the newer one wins. */
+    [InlineData(10, 0, 0, 5, 5, 0, 999, 2, OneMinute, false, CollectorHealthClassifier.ExtensionMissing)]
+    /* Installed mid-window: successes land and the ordinary ladder takes over — the old skips must not
+       keep banding a now-working collector. */
+    [InlineData(10, 5, 0, 0, 5, 0, 0.1, 0.1, OneMinute, false, CollectorHealthClassifier.Healthy)]
+    /* An ERROR beside the skips is a second, different problem, and it stays loud. */
+    [InlineData(10, 0, 5, 0, 5, 0, 999, 2, OneMinute, false, CollectorHealthClassifier.Failing)]
 
-    /* Frequent (1-min) collector - the floors mean these are IDENTICAL to the old flat thresholds. */
-    [InlineData(10, 10, 0, 0, 2, OneMinute, false, CollectorHealthClassifier.Healthy)]    // < 4h
-    [InlineData(10, 7, 3, 0, 2, OneMinute, false, CollectorHealthClassifier.Warning)]     // recent, 30% fail
-    [InlineData(10, 10, 0, 0, 5, OneMinute, false, CollectorHealthClassifier.Stale)]      // > 4h, < 24h
-    [InlineData(10, 10, 0, 0, 25, OneMinute, false, CollectorHealthClassifier.Failing)]   // > 24h
-    [InlineData(5, 0, 5, 0, 999, OneMinute, false, CollectorHealthClassifier.Failing)]    // ran, never a success (999 sentinel)
+    /* On-load collectors are staleness-exempt: banded by failure rate only, never STOPPED/STALE/FAILING. */
+    [InlineData(10, 10, 0, 0, 0, 0, 500, 500, OnLoadFreq, true, CollectorHealthClassifier.Healthy)]
+    [InlineData(10, 7, 3, 0, 0, 0, 500, 500, OnLoadFreq, true, CollectorHealthClassifier.Warning)]   // 30% > 20%
+
+    /* Frequent (1-min) collector - the floors mean these are IDENTICAL to the old flat thresholds for the
+       cases where hoursSinceLastRun stays recent. */
+    [InlineData(10, 10, 0, 0, 0, 0, 2, 2, OneMinute, false, CollectorHealthClassifier.Healthy)]    // < 4h
+    [InlineData(10, 7, 3, 0, 0, 0, 2, 2, OneMinute, false, CollectorHealthClassifier.Warning)]     // recent, 30% fail
+    [InlineData(10, 10, 0, 0, 0, 0, 5, 5, OneMinute, false, CollectorHealthClassifier.Stale)]      // > 4h, < 24h
+
+    /* STOPPED vs FAILING is the whole point of this pair: same hoursSinceLastSuccess (30h, past the 24h
+       cutoff), but one collector is STILL BEING INVOKED (a recent failed attempt, hoursSinceLastRun=2) and
+       the other has gone completely dark (hoursSinceLastRun=30, nothing attempted since that old success). */
+    [InlineData(20, 15, 5, 0, 0, 0, 30, 2, OneMinute, false, CollectorHealthClassifier.Failing)]   // recent failure -> still trying
+    [InlineData(10, 10, 0, 0, 0, 0, 25, 25, OneMinute, false, CollectorHealthClassifier.Stopped)]  // nothing since -> gone dark
+
+    /* Ran, never a success (999 sentinel on hoursSinceLastSuccess) - but the collector is still being
+       invoked (hoursSinceLastRun=1), so this correctly stays FAILING rather than reading STOPPED. This is
+       the exact interaction #1573's original 999-sentinel comment described, now proven against STOPPED too. */
+    [InlineData(5, 0, 5, 0, 0, 0, 999, 1, OneMinute, false, CollectorHealthClassifier.Failing)]
 
     /* Hourly (60-min) collector - 1.5h/2h are both under the 4h/24h floors, so still floor-bound. */
-    [InlineData(10, 10, 0, 0, 5, Hourly, false, CollectorHealthClassifier.Stale)]         // > 4h floor
-    [InlineData(10, 10, 0, 0, 25, Hourly, false, CollectorHealthClassifier.Failing)]      // > 24h floor
+    [InlineData(10, 10, 0, 0, 0, 0, 5, 5, Hourly, false, CollectorHealthClassifier.Stale)]         // > 4h floor
+    [InlineData(10, 10, 0, 0, 0, 0, 25, 25, Hourly, false, CollectorHealthClassifier.Stopped)]     // > 24h floor, dark since
 
-    /* Daily (1440-min) collector - the FIX. STALE line 36h, FAILING line 48h. */
-    [InlineData(30, 30, 0, 0, 27, Daily, false, CollectorHealthClassifier.Healthy)]       // THE BUG: was FAILING, now HEALTHY
-    [InlineData(30, 30, 0, 0, 35, Daily, false, CollectorHealthClassifier.Healthy)]       // still under the 36h stale line
-    [InlineData(30, 30, 0, 0, 37, Daily, false, CollectorHealthClassifier.Stale)]         // > 36h, < 48h
-    [InlineData(30, 30, 0, 0, 47, Daily, false, CollectorHealthClassifier.Stale)]         // still stale, not failing
-    [InlineData(30, 30, 0, 0, 49, Daily, false, CollectorHealthClassifier.Failing)]       // > 48h
-    [InlineData(10, 7, 3, 0, 1, Daily, false, CollectorHealthClassifier.Warning)]         // recent, 30% fail -> WARNING not STALE
+    /* Daily (1440-min) collector - the FIX. STALE line 36h, FAILING/STOPPED line 48h. */
+    [InlineData(30, 30, 0, 0, 0, 0, 27, 27, Daily, false, CollectorHealthClassifier.Healthy)]      // THE #1573 BUG: was FAILING, now HEALTHY
+    [InlineData(30, 30, 0, 0, 0, 0, 35, 35, Daily, false, CollectorHealthClassifier.Healthy)]      // still under the 36h stale line
+    [InlineData(30, 30, 0, 0, 0, 0, 37, 37, Daily, false, CollectorHealthClassifier.Stale)]        // > 36h, < 48h
+    [InlineData(30, 30, 0, 0, 0, 0, 47, 47, Daily, false, CollectorHealthClassifier.Stale)]        // still stale, not failing
+    [InlineData(30, 30, 0, 0, 0, 0, 49, 49, Daily, false, CollectorHealthClassifier.Stopped)]      // > 48h, dark since (was FAILING)
+    [InlineData(10, 7, 3, 0, 0, 0, 1, 1, Daily, false, CollectorHealthClassifier.Warning)]         // recent, 30% fail -> WARNING not STALE
+
+    /* ---- #2804: ABANDONED cycles. ------------------------------------------------------------------
+       An abandoned run is the #2673 whole-server wall-clock budget giving up: it stores nothing and
+       advances no watermark. Before this it incremented total_runs and NOTHING else, so it grew the
+       failure-rate DENOMINATOR while contributing nothing to the numerator, and never touched the success
+       clock. TOTAL abandonment still reaches FAILING through staleness, because no success lands at all;
+       the gap these rows close is the PARTIAL case, where the collector keeps succeeding often enough to
+       stay fresh and so reads HEALTHY forever while losing cycles.
+
+       The threshold (0.5%) is positioned by the fleet, not by taste: over 24h across 1,639
+       (server, collector) pairs and 520,455 runs, only FOUR pairs abandoned anything at all and the
+       per-pair rate distribution is p50 = p75 = p90 = p95 = p99 = 0.000% with a max of 2.157%. 0.5 sits
+       below that observed floor (0.60%) and above the 99th percentile. */
+
+    /* THE BUG, at the exact shape measured in production: 24 abandoned of 1,226 runs (1.96%), zero
+       errors, and a success recent enough that neither STALE nor FAILING can fire. Read HEALTHY before
+       this change. The sibling row is the same server's query_stats at 14 of 1,226 (1.14%). */
+    [InlineData(1226, 1202, 0, 0, 0, 24, 1, 1, OneMinute, false, CollectorHealthClassifier.Warning)]
+    [InlineData(1226, 1212, 0, 0, 0, 14, 1, 1, OneMinute, false, CollectorHealthClassifier.Warning)]
+
+    /* The boundary, either side of 0.5% of 1,226 runs (= 6.13 runs). Six abandoned is 0.489% and stays
+       quiet; seven is 0.571% and bands. This is what keeps a single isolated abandonment from flapping a
+       collector in any window under ~400 runs - "one in a thousand is noise, twenty-four is a finding". */
+    [InlineData(1226, 1220, 0, 0, 0, 6, 1, 1, OneMinute, false, CollectorHealthClassifier.Healthy)]
+    [InlineData(1226, 1219, 0, 0, 0, 7, 1, 1, OneMinute, false, CollectorHealthClassifier.Warning)]
+
+    /* One abandonment in a small window stays HEALTHY (1 of 500 = 0.2%), and the fleet's own resting
+       state - zero abandoned - is untouched. */
+    [InlineData(500, 499, 0, 0, 0, 1, 1, 1, OneMinute, false, CollectorHealthClassifier.Healthy)]
+    [InlineData(1226, 1226, 0, 0, 0, 0, 1, 1, OneMinute, false, CollectorHealthClassifier.Healthy)]
+
+    /* On-load collectors are staleness-exempt and banded by rate ONLY, so abandonment has to be asked on
+       that branch too - otherwise the one class of collector that cannot reach the staleness safety net
+       would be the one class where abandonment stays invisible. */
+    [InlineData(1000, 980, 0, 0, 0, 20, 1, 1, OnLoadFreq, true, CollectorHealthClassifier.Warning)]
+    [InlineData(1000, 998, 0, 0, 0, 2, 1, 1, OnLoadFreq, true, CollectorHealthClassifier.Healthy)]
+
+    /* Precedence: abandonment sits at the WARNING tier, so the louder facts still win. A collector that
+       has not succeeded in 30h is FAILING whatever its abandon rate, and one that has gone dark entirely
+       is STOPPED - abandonment never downgrades either, and NEVER_RUN's outright win is already the
+       table's first row (an abandoned cycle increments total_runs, so no distinct NEVER_RUN-with-
+       abandonment shape exists). */
+    [InlineData(1226, 1000, 0, 0, 0, 226, 30, 2, OneMinute, false, CollectorHealthClassifier.Failing)]
+    [InlineData(1226, 1000, 0, 0, 0, 226, 30, 30, OneMinute, false, CollectorHealthClassifier.Stopped)]
+    [InlineData(1226, 1200, 0, 0, 0, 26, 5, 5, OneMinute, false, CollectorHealthClassifier.Stale)]
+
+    /* A collector abandoning EVERY cycle already had a band - it lands no successes, so the success clock
+       runs out and staleness carries it to FAILING. Pinned so the new rate cannot be mistaken for the only
+       thing standing between total abandonment and a green row. */
+    [InlineData(100, 0, 0, 0, 0, 100, 999, 1, OneMinute, false, CollectorHealthClassifier.Failing)]
     public void Classify_BandsTheDecisionTable(
-        long totalRuns, long successCount, long errorCount, long permissionDeniedCount,
-        double hoursSinceLastSuccess, int frequencyMinutes, bool isOnLoad, string expected)
+        long totalRuns, long successCount, long errorCount, long permissionDeniedCount, long extensionMissingCount,
+        long abandonedCount, double hoursSinceLastSuccess, double hoursSinceLastRun, int frequencyMinutes,
+        bool isOnLoad, string expected)
     {
         Assert.Equal(expected, CollectorHealthClassifier.Classify(
-            totalRuns, successCount, errorCount, permissionDeniedCount,
-            hoursSinceLastSuccess, frequencyMinutes, isOnLoad));
+            totalRuns, successCount, errorCount, permissionDeniedCount, extensionMissingCount, abandonedCount,
+            hoursSinceLastSuccess, hoursSinceLastRun, frequencyMinutes, isOnLoad));
+    }
+
+    /// <summary>
+    /// The field shape this band exists for: a collector whose gate flipped off for a target (agent_status
+    /// and running_jobs on an RDS SQL Server instance where SQL Agent job data is not reachable) simply
+    /// stops being invoked. Its last historical success sits well inside the health window and ages past
+    /// the FAILING cutoff exactly like a genuinely broken collector would - the field symptom this whole
+    /// band exists to stop misreporting.
+    /// </summary>
+    [Fact]
+    public void Classify_LongDormantCollector_WithNoRecentActivityOfAnyKind_IsStoppedNotFailing()
+    {
+        Assert.Equal(CollectorHealthClassifier.Stopped, CollectorHealthClassifier.Classify(
+            totalRuns: 882, successCount: 882, errorCount: 0, permissionDeniedCount: 0, extensionMissingCount: 0,
+            abandonedCount: 0, hoursSinceLastSuccess: 120, hoursSinceLastRun: 120, frequencyMinutes: 5, isOnLoad: false));
+    }
+
+
+    /// <summary>
+    /// #2804's invariant, not its instance. Every read that builds a banding row and then asks it for
+    /// <c>HealthStatus</c> must feed the classifier the SAME inputs, or one surface silently disagrees
+    /// with the others — and it disagrees while COMPILING, because an unset count defaults to 0.
+    ///
+    /// <para>That is exactly what happened here: the fleet rollup constructs its own
+    /// <c>CollectorHealth</c> from <c>FleetCollectionHealthSql</c> and would have kept calling a
+    /// partially-abandoning collector HEALTHY while the per-server grid called it WARNING. Nothing failed
+    /// to build. It is the #2779/#2784 shape — one surface fixed, its sibling quietly left behind — so
+    /// this asserts over ALL FOUR banding reads by name rather than over the one that was broken.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("DarlingDataReader.CollectionHealthSql")]
+    [InlineData("DarlingFleetReader.FleetCollectionHealthSql")]
+    [InlineData("ViewerDataService.CollectionHealthSql")]
+    [InlineData("ViewerDataService.FleetCollectionHealthSql")]
+    public void EveryBandingRead_SelectsTheAbandonedCount_SoNoSurfaceBandsOnADefaultedZero(string which)
+    {
+        var sql = which switch
+        {
+            "DarlingDataReader.CollectionHealthSql" => DarlingDataReader.CollectionHealthSql,
+            "DarlingFleetReader.FleetCollectionHealthSql" => DarlingFleetReader.FleetCollectionHealthSql,
+            "ViewerDataService.CollectionHealthSql" => ViewerDataService.CollectionHealthSql,
+            "ViewerDataService.FleetCollectionHealthSql" => ViewerDataService.FleetCollectionHealthSql,
+            _ => throw new ArgumentOutOfRangeException(nameof(which), which, "unmapped banding read"),
+        };
+
+        Assert.Contains("status = 'ABANDONED'", sql, StringComparison.Ordinal);
+        Assert.Contains("AS abandoned_count", sql, StringComparison.Ordinal);
+
+        /* #2926, and why the status alone is not the key: collection_log is append-only, so a window can
+           still hold cycles abandoned BEFORE #2803 gave abandonment its own status - SUCCESS on disk,
+           nothing stored, the budget note. Counted by status alone this read 0 for them AND counted them
+           as successes, so the collector banded HEALTHY while losing cycles. The five reads INTERPOLATE
+           the shared constant, so a retyped copy cannot drift - but nothing in the compiler says a read
+           has to USE it, and a surface left behind reports the window clean while its siblings report
+           WARNING. Asserted over all four Darling reads by name; Lite.Tests holds the fifth. */
+        Assert.Contains(EnumeratedCollectorDriver.AbandonedRunPredicateSql, sql, StringComparison.Ordinal);
+        Assert.Contains("AND NOT " + EnumeratedCollectorDriver.AbandonedByNotePredicateSql, sql, StringComparison.Ordinal);
+
+        /* The status-only form is GONE, not merely joined by an OR somewhere else in the string. The
+           assertion below it is the POSITIVE CONTROL for this negative: the identical Contains form over
+           the sibling bucket every one of these reads demonstrably carries, so a DoesNotContain that
+           passed by matching nothing at all cannot hide here. */
+        Assert.DoesNotContain("SUM(CASE WHEN status = 'ABANDONED' THEN 1 ELSE 0 END)", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END)", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3240's instance of the same #2804 invariant: every read that builds a banding row must select
+    /// the extension-missing count, because an unselected count defaults to 0, COMPILES, and the surface
+    /// left behind bands an all-extension-missing collector FAILING (no success, staleness path) while
+    /// its siblings say EXTENSION_MISSING. Asserted over all four Darling banding reads by name;
+    /// Lite.Tests holds the fifth.
+    /// </summary>
+    [Theory]
+    [InlineData("DarlingDataReader.CollectionHealthSql")]
+    [InlineData("DarlingFleetReader.FleetCollectionHealthSql")]
+    [InlineData("ViewerDataService.CollectionHealthSql")]
+    [InlineData("ViewerDataService.FleetCollectionHealthSql")]
+    public void EveryBandingRead_SelectsTheExtensionMissingCount_SoNoSurfaceBandsOnADefaultedZero(string which)
+    {
+        var sql = which switch
+        {
+            "DarlingDataReader.CollectionHealthSql" => DarlingDataReader.CollectionHealthSql,
+            "DarlingFleetReader.FleetCollectionHealthSql" => DarlingFleetReader.FleetCollectionHealthSql,
+            "ViewerDataService.CollectionHealthSql" => ViewerDataService.CollectionHealthSql,
+            "ViewerDataService.FleetCollectionHealthSql" => ViewerDataService.FleetCollectionHealthSql,
+            _ => throw new ArgumentOutOfRangeException(nameof(which), which, "unmapped banding read"),
+        };
+
+        Assert.Contains("SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END)", sql, StringComparison.Ordinal);
+        Assert.Contains("AS extension_missing_count", sql, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -153,8 +326,12 @@ public sealed class CollectorHealthClassifierTests
     }
 
     [Fact]
-    public void CollectorHealthRow_IndexObjectStats_At49Hours_IsFailing()
+    public void CollectorHealthRow_IndexObjectStats_At49Hours_IsStoppedNotFailing()
     {
+        /* This row never sets LastRunTime, so HoursSinceLastRun falls back to HoursSinceLastSuccess (49h) -
+           a 100%-success collector whose last success was 49h ago has, by definition, attempted NOTHING
+           since (no later success, no failure either), which is the STOPPED signature, not FAILING's
+           "still running and erroring". Reclassified from FAILING now that the two clocks are distinguished. */
         var row = new CollectorHealthRow
         {
             CollectorName = "index_object_stats",
@@ -162,14 +339,51 @@ public sealed class CollectorHealthClassifierTests
             SuccessCount = 7,
             LastSuccessTime = DateTime.UtcNow.AddHours(-49),
         };
-        Assert.Equal("FAILING", row.HealthStatus);
+        Assert.Equal("STOPPED", row.HealthStatus);
+    }
+
+    /// <summary>
+    /// #3240, proven through the rows the surfaces actually construct rather than the classifier alone:
+    /// the extension-missing count reaches <c>HealthStatus</c> on both the viewer's row and the service's
+    /// (the input an unwired surface silently defaults to 0 — the #2804 failure shape). The field case is
+    /// the issue's own: a stock PostgreSQL target without optional extensions, five collectors skipping
+    /// every cycle, previously banded NO_PERMISSIONS under a pg_monitor hint.
+    /// </summary>
+    [Fact]
+    public void AnAllExtensionMissingCollector_BandsExtensionMissing_OnBothRowTypes()
+    {
+        var viewerRow = new CollectorHealthRow
+        {
+            CollectorName = "pg_buffer_usage",
+            TotalRuns = 57,
+            ExtensionMissingCount = 57,
+            LastRunTime = DateTime.UtcNow.AddMinutes(-1),
+        };
+        Assert.Equal("EXTENSION_MISSING", viewerRow.HealthStatus);
+
+        var serviceRow = new CollectorHealth
+        {
+            CollectorName = "pg_buffer_usage",
+            TotalRuns = 57,
+            ExtensionMissingCount = 57,
+            LastRunTime = DateTime.UtcNow.AddMinutes(-1),
+        };
+        Assert.Equal("EXTENSION_MISSING", serviceRow.HealthStatus);
+
+        /* And the MCP row's zero-output finding stays silent for it: both of that formatter's readings
+           ("being refused NOW" / "read and found nothing") are false of a window that skipped every
+           attempt, and the band plus last_error already carry the story with the extension named. */
+        Assert.Null(serviceRow.OutputFinding);
     }
 
     [Fact]
-    public void CollectorHealthRow_FrequentCollector_BandsUnchanged()
+    public void CollectorHealthRow_FrequentCollector_GoneDarkFor30Hours_IsStoppedNotFailing()
     {
-        /* A 1-min collector is unaffected by the relative thresholds (the floors dominate): 30h -> FAILING,
-           exactly as before the #1573 change. */
+        /* A 1-min collector unaffected by the relative thresholds (the floors dominate): 30h past its last
+           (and, since 100% success, its ONLY recent) activity now reads STOPPED - it has gone completely
+           dark, which is a different fact from "it keeps running and erroring" (FAILING, proven by the
+           direct decision-table cases above). Reclassified from FAILING for the same reason as the
+           index_object_stats case: no LastRunTime set, so it falls back to HoursSinceLastSuccess. */
         var row = new CollectorHealthRow
         {
             CollectorName = "wait_stats",
@@ -177,6 +391,6 @@ public sealed class CollectorHealthClassifierTests
             SuccessCount = 100,
             LastSuccessTime = DateTime.UtcNow.AddHours(-30),
         };
-        Assert.Equal("FAILING", row.HealthStatus);
+        Assert.Equal("STOPPED", row.HealthStatus);
     }
 }

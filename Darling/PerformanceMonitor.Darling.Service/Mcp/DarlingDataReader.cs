@@ -89,7 +89,81 @@ internal static class DarlingDataReader
         double? StoreDurationMs,
         long? RowsCollected,
         string? Status,
-        string? ErrorMessage);
+        string? ErrorMessage,
+        double? SqlOpenMs = null,
+        double? SqlDrainMs = null,
+        double? WatermarkMs = null,
+        long? DrainRowsRead = null,
+        long? DrainBytesRead = null,
+        double? DrainLastReadMs = null,
+        int? TargetSessionId = null,
+        double? SweepPeerMaxMs = null,
+        /* V110 (#2860): the per-database fetch split, SUMMED across the run's fan-out. Nullable per HALF -
+           a run that fetched text but no plans has the five text figures and NULL plans. NULL means no
+           fetch ran (see V110's doc comment for why that is the honest reading here and why it cannot be
+           told apart from a sub-millisecond fetch). Never populated on the same row as SqlOpenMs above:
+           these come from the ENUMERATED path, which never sets V108's measured flag, and those come from
+           the server-scoped one, which performs no deferred fetch. The two are complementary, not
+           alternatives. */
+        double? PlanFetchProbeMs = null,
+        double? PlanFetchTargetMs = null,
+        double? PlanFetchWriteMs = null,
+        long? PlanFetchIdsAttempted = null,
+        long? PlanFetchProbeIds = null,
+        double? TextFetchProbeMs = null,
+        double? TextFetchTargetMs = null,
+        double? TextFetchWriteMs = null,
+        long? TextFetchIdsAttempted = null,
+        long? TextFetchProbeIds = null)
+    {
+        /* The residual, derived rather than read (V108 stores no other_ms column on purpose): open + drain
+           + this SUM to SqlDurationMs by construction, so a large value here is a real finding - cost in
+           our own code between the phases, in neither database - and never a stale copy. NULL when the run
+           recorded no split, so "not measured" stays distinct from "measured zero". Clamped at zero: the
+           phases run on separate stopwatches and tiny skew must not surface as a negative. */
+        public double? SqlOtherMs =>
+            SqlDurationMs is null || SqlOpenMs is null || SqlDrainMs is null
+                ? null
+                : Math.Max(0, SqlDurationMs.Value - SqlOpenMs.Value - SqlDrainMs.Value);
+
+        /// <summary>
+        /// The milliseconds inside <see cref="SqlDurationMs"/> that were spent against the monitoring
+        /// STORE rather than the monitored target (#3192). NULL when this run performed no deferred fetch,
+        /// which is every collector but the plan/text-fetching ones and most runs of even those.
+        ///
+        /// <para><b>Why a target-side column contains store time at all.</b> On the ENUMERATED path the
+        /// driver's per-item stopwatch wraps the whole <c>readItem</c> closure
+        /// (<c>EnumeratedCollectorDriver.RunAsync</c>), and for <c>query_store</c> that closure calls
+        /// <c>FetchAndStorePlansAsync</c> / <c>FetchAndStoreQueryTextAsync</c> — each of which round-trips
+        /// the store to learn what content is already held and then writes back what came off the target.
+        /// Two of those three steps are Postgres, and all three are billed to <c>sql_duration_ms</c>. The
+        /// store probe is the largest single term in both: 55.4% of <c>plan_fetch</c> and 80.6% of
+        /// <c>text_fetch</c> measured over 38.2 h on 42 members (V110), and on one production run 107,334 ms
+        /// of a 124,972 ms "target-side" figure — 86% — against a plan-plus-text target time of 6,494 ms.</para>
+        ///
+        /// <para><b>Probe and write, not target.</b> <c>*FetchTargetMs</c> is genuinely the monitored
+        /// server's work and belongs where it is; only the probe round trip and the write-back are ours.</para>
+        ///
+        /// <para><b>Derived, never stored</b> — the <see cref="SqlOtherMs"/> and #2859 rule: a persisted copy
+        /// could drift from the parent it decomposes, and deriving it means it applies RETROACTIVELY to every
+        /// row written since V110 rather than only to rows written after this change. Nothing about
+        /// <c>sql_duration_ms</c> moves, so the 90-day <c>collector_cost</c> series and the rows already in
+        /// the store stay comparable with each other and with what follows.</para>
+        ///
+        /// <para><b>A FLOOR on the store share, not the whole of it, and the gap is named rather than
+        /// implied.</b> The enumerated path's per-item watermark refresh is also inside the same stopwatch and
+        /// is also a store read — plus a store WRITE on the catch-up/adaptive path
+        /// (<c>CollectorContext.PerItemWatermarkMs</c>) — but that path never sets V108's measured flag, so
+        /// <c>watermark_ms</c> is NULL on precisely the rows this property is non-null on and the component is
+        /// recorded nowhere. So <c>SqlDurationMs - SqlStoreMs</c> is an UPPER bound on target-side time, not
+        /// the target-side time.</para>
+        /// </summary>
+        public double? SqlStoreMs =>
+            PlanFetchProbeMs is null && TextFetchProbeMs is null
+                ? null
+                : (PlanFetchProbeMs ?? 0) + (PlanFetchWriteMs ?? 0)
+                    + (TextFetchProbeMs ?? 0) + (TextFetchWriteMs ?? 0);
+    }
 
     /// <summary>One database file's latest I/O snapshot; avg latency is computed by the tool.</summary>
     public sealed record FileIoRow(
@@ -147,8 +221,18 @@ internal static class DarlingDataReader
         string? ReplicaRole);
 
     /// <summary>One server-list entry — the registry row plus its newest collection instant (drives the
-    /// freshness-derived status the tool assigns; the viewer has no live ping either).</summary>
-    public sealed record ServerListRow(int ServerId, string ServerName, string? DisplayName, int? SqlMajorVersion, DateTime? LastCollection);
+    /// freshness-derived status the tool assigns; the viewer has no live ping either).
+    /// <para><c>EngineKind</c> and <c>PostgresMajorVersion</c> ride along because the row's version label is
+    /// engine-aware (#3145): without the discriminator this read fed <c>SqlMajorVersion</c> — <c>0</c> at
+    /// every PostgreSQL target — through a SQL-Server-only table and published "SQL Server v0".</para></summary>
+    public sealed record ServerListRow(
+        int ServerId,
+        string ServerName,
+        string? DisplayName,
+        int? SqlMajorVersion,
+        DateTime? LastCollection,
+        string? EngineKind = null,
+        int? PostgresMajorVersion = null);
 
     /// <summary>The latest server_properties snapshot (Lite's <c>ServerPropertiesRow</c>).</summary>
     public sealed record ServerPropertiesReadRow(
@@ -187,6 +271,7 @@ internal static class DarlingDataReader
     {
         var samples = new List<CpuSample>();
         await using var command = postgres.CreateCommand(CpuUtilizationSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
@@ -226,6 +311,7 @@ internal static class DarlingDataReader
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(CpuWindowAggregateSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
@@ -271,6 +357,7 @@ internal static class DarlingDataReader
     {
         var rows = new List<WaitStatRow>();
         await using var command = postgres.CreateCommand(WaitStatsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -304,6 +391,7 @@ internal static class DarlingDataReader
     {
         var items = new List<string>();
         await using var command = postgres.CreateCommand(DistinctWaitTypesSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -334,6 +422,7 @@ internal static class DarlingDataReader
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(HasAnyWaitStatSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }
@@ -371,6 +460,7 @@ internal static class DarlingDataReader
     {
         var items = new List<WaitTrendPoint>();
         await using var command = postgres.CreateCommand(WaitTrendSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddText(command, waitType);
         AddTimestamp(command, startUtc);
@@ -416,6 +506,7 @@ internal static class DarlingDataReader
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(LatestMemoryStatsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -454,6 +545,7 @@ internal static class DarlingDataReader
     {
         var rows = new List<MemoryClerkRow>();
         await using var command = postgres.CreateCommand(LatestMemoryClerksSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -497,6 +589,7 @@ internal static class DarlingDataReader
     {
         var rows = new List<FileIoRow>();
         await using var command = postgres.CreateCommand(LatestFileIoStatsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -548,6 +641,7 @@ internal static class DarlingDataReader
     {
         var samples = new List<TempDbSample>();
         await using var command = postgres.CreateCommand(TempDbTrendSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
@@ -592,6 +686,7 @@ internal static class DarlingDataReader
     {
         var rows = new List<PerfmonRow>();
         await using var command = postgres.CreateCommand(LatestPerfmonStatsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -823,6 +918,7 @@ internal static class DarlingDataReader
         var rows = new List<TopQueryRow>();
         /* #2235: same parameters, same columns, different GROUP BY — see TopQueriesByHostObjectSql. */
         await using var command = postgres.CreateCommand(rollUpByHostObject ? TopQueriesByHostObjectSql : TopQueriesSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
         AddNullableText(command, databaseName);
@@ -902,6 +998,7 @@ internal static class DarlingDataReader
     {
         var rows = new List<TopProcedureRow>();
         await using var command = postgres.CreateCommand(TopProceduresSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
         AddNullableText(command, databaseName);
@@ -961,6 +1058,7 @@ internal static class DarlingDataReader
         CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(QueryStoreWindowFloorSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddTimestamp(command, startUtc);
         DarlingMcpReadParameters.AddTimestamp(command, endUtc);
@@ -1083,6 +1181,7 @@ internal static class DarlingDataReader
     {
         var rows = new List<QueryStoreRow>();
         await using var command = postgres.CreateCommand(QueryStoreTopSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
         AddNullableText(command, databaseName);
@@ -1124,7 +1223,9 @@ internal static class DarlingDataReader
             s.server_name,
             s.display_name,
             s.sql_major_version,
-            (SELECT MAX(cl.collection_time) FROM v_collection_log cl WHERE cl.server_id = s.server_id) AS last_collection
+            (SELECT MAX(cl.collection_time) FROM v_collection_log cl WHERE cl.server_id = s.server_id) AS last_collection,
+            s.engine_kind,
+            s.postgres_major_version
         FROM servers s
         WHERE s.is_enabled
         ORDER BY s.server_name
@@ -1135,6 +1236,7 @@ internal static class DarlingDataReader
     {
         var rows = new List<ServerListRow>();
         await using var command = postgres.CreateCommand(ServerListSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -1143,7 +1245,9 @@ internal static class DarlingDataReader
                 reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetString(2),
                 reader.IsDBNull(3) ? null : reader.GetInt32(3),
-                reader.IsDBNull(4) ? null : reader.GetDateTime(4)));
+                reader.IsDBNull(4) ? null : reader.GetDateTime(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetInt32(6)));
         }
 
         return rows;
@@ -1155,16 +1259,24 @@ internal static class DarlingDataReader
     /// success/run/error timestamps, and the permission-denied count for the banding. SKIPPED counts as
     /// a healthy run. $1 server_id, $2 window start (naive UTC — the trailing 7 days).
     ///
-    /// <para>16 columns since #2460, and no longer column-identical to the WPF viewer's own
+    /// <para>24 columns since #3017 (16 at #2460, plus #2472's four fan-out columns, #2804's
+    /// abandoned_count, #3010's last_denied_time and #3017's rows_stored/runs_with_rows) — every addition APPENDED, never inserted, because both MCP surfaces read
+    /// this result set positionally. No longer column-identical to the WPF viewer's own
     /// <c>CollectionHealthSql</c>: the two duration statistics feed the MCP tool's sweep-pressure
     /// arithmetic, which the viewer's health grid does not serve. Lite's DuckDB read carries them at
     /// the SAME ordinals, which is the parity that matters here — both MCP surfaces read positionally.</para>
     /// </summary>
-    public const string CollectionHealthSql = """
+    public const string CollectionHealthSql = $"""
         SELECT
             collector_name,
             COUNT(*) AS total_runs,
-            SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS success_count,
+            -- #2926: SUCCESS excludes an abandonment that predates #2803, so the Success column beside
+            -- Abandoned cannot count the same run twice. Post-#2803 rows need no exclusion - ABANDONED
+            -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
+            -- the shared predicate is for: NULL under this NOT would have dropped it.
+            SUM(CASE WHEN status = 'SUCCESS'
+                      AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+                     THEN 1 ELSE 0 END) AS success_count,
             SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
             AVG(duration_ms) AS avg_duration_ms,
             -- #2460: the mean above describes a collector whose runs all cost about the same, and
@@ -1191,10 +1303,12 @@ internal static class DarlingDataReader
             -- one. The status re-check is load-bearing rather than belt-and-braces: when no failing run
             -- in the window carried text, error_rank = 1 falls through to the newest row of ANY class,
             -- and without it a SUCCESS row's note could surface here as a fake last error.
-            MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error,
+            -- #3240: EXTENSION_MISSING is in the exemplar set because its stored sentence IS the remedy
+            -- (it names the extension and the database to create it in).
+            MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) AS last_error,
             -- The newest failure OUTRIGHT, text or not — "when did this last fail" means the run, not
             -- the message.
-            MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN collection_time END) AS last_error_time,
+            MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN collection_time END) AS last_error_time,
             SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
             SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count,
             -- #1837: the note a SUCCEEDING run can leave behind (an enumeration that yielded 0 items,
@@ -1213,7 +1327,10 @@ internal static class DarlingDataReader
             -- sys.master_files, so it still sees databases the monitoring login cannot ENTER — exactly
             -- the case being diagnosed. database_id > 4 excludes the system databases, tempdb
             -- included: the size collector takes every ONLINE database, so a bare row check
-            -- would be true on every server alive.
+            -- would be true on every server alive. A NULL database_id is an Azure sibling row
+            -- (#2643/#3262): sys.resource_stats carries no id, and it bills only USER databases,
+            -- so those rows are inventory too — without the IS NULL arm a master-connected Azure
+            -- target with fifty user databases would read as having none.
             --
             -- The inventory window is the health read's OWN ($2) — no second parameter, and an
             -- inventory that aged out says nothing rather than something stale. Uncorrelated, so both
@@ -1227,7 +1344,7 @@ internal static class DarlingDataReader
                          FROM v_database_size_stats
                          WHERE server_id = $1
                          AND   collection_time >= $2
-                         AND   database_id > 4
+                         AND   (database_id > 4 OR database_id IS NULL)
                      )
                 THEN 1
                 ELSE 0
@@ -1245,7 +1362,68 @@ internal static class DarlingDataReader
             MAX(CASE WHEN slowest_rank = 1 THEN fanout_item_count END) AS fanout_items,
             MAX(CASE WHEN slowest_rank = 1 THEN slowest_item END) AS slowest_item,
             MAX(CASE WHEN slowest_rank = 1 THEN slowest_item_ms END) AS slowest_item_ms,
-            MAX(CASE WHEN slowest_rank = 1 THEN duration_ms END) AS slowest_run_duration_ms
+            MAX(CASE WHEN slowest_rank = 1 THEN duration_ms END) AS slowest_run_duration_ms,
+            -- #2804: runs the #2673 wall-clock budget abandoned. Appended LAST rather than placed beside
+            -- yield_count, which is where it belongs by meaning: both MCP surfaces read this result set
+            -- POSITIONALLY and Lite's DuckDB read mirrors these ordinals, so inserting mid-list would
+            -- silently re-map every column after it in whichever surface was not edited in the same
+            -- breath. An ABANDONED run was previously counted by total_runs and by nothing else, so it
+            -- grew the failure-rate denominator while contributing nothing to the numerator.
+            --
+            -- #2926: keyed on the ROW, not on the status alone. collection_log is append-only, so a
+            -- window can still hold cycles written before #2803 gave abandonment its own status:
+            -- status = 'SUCCESS' beside rows_collected = 0 and the budget note. Counted by status
+            -- alone this read 0 for them, and the collector banded HEALTHY while losing cycles - a
+            -- filter correct against current writes and silently wrong against older ones, failing in
+            -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
+            -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
+            -- for query_store), so equality against one rendered sentence matches one collector.
+            SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
+                     THEN 1 ELSE 0 END) AS abandoned_count,
+            -- #3010: the newest DENIAL on its own, which is what dates the last_error slot above.
+            -- last_error_time cannot stand in for it: that column is a MAX over ERROR and PERMISSIONS
+            -- together, so on a collector carrying both it hands a reader an error's instant and lets
+            -- them call it a denial. Compared against last_success_time this separates a collector
+            -- still being refused from one whose refusals all predate a later success -- the exact
+            -- distinction pg_deadlocks needed and no surface could make.
+            --
+            -- Appended LAST, like abandoned_count before it: both MCP surfaces read this result set
+            -- POSITIONALLY and Lite's DuckDB read mirrors these ordinals, so a mid-list insert would
+            -- silently re-map every column after it in whichever surface was not edited in the same
+            -- breath.
+            MAX(CASE WHEN status = 'PERMISSIONS' THEN collection_time END) AS last_denied_time,
+            -- #3017: what the spend BOUGHT. Every other statistic on a health row describes cost --
+            -- total_runs, the three durations, and the sweep-pressure roll-up built from them -- and the
+            -- rows figure lived on get_collector_cost, a different tool over a different (hourly, fleet-
+            -- wide) series. Correlating spend against output was a join a reader had to know to make.
+            -- Measured: pg_deadlocks was the dearest collector on a managed store, 49,258,335 ms over
+            -- 79,333 runs in seven days, and stored zero rows.
+            --
+            -- Read from THIS query's own window so cost and output cannot describe different runs. That
+            -- is the same reason #3010's two instants come out of one aggregate: a rows figure taken
+            -- from one window beside a duration taken from another composes into a ratio describing no
+            -- collector that ever ran.
+            --
+            -- COALESCE so a zero is unambiguous at the STORE. Without it a collector whose every
+            -- rows_collected is NULL returns NULL here, which a reader would have to guess between "this
+            -- read did not measure output" and "it stored nothing" -- and the whole point of the column
+            -- is that the second of those becomes a fact rather than an absence.
+            COALESCE(SUM(rows_collected), 0) AS rows_stored,
+            -- The DENOMINATOR's partner, and the honest half of a cost/output pair: 12 rows over 3 of
+            -- 79,333 runs is a different collector from 12 rows over all of them. get_pg_blocking already
+            -- reports captures_with_blocking beside captures_total for exactly this reason, off this same
+            -- rows_collected > 0 test. total_runs above is the denominator; this is the numerator.
+            --
+            -- APPENDED, like every column since #2472: both MCP surfaces read this result set
+            -- POSITIONALLY and Lite's DuckDB read mirrors these ordinals, so a mid-list insert would
+            -- silently re-map every column after it in whichever surface was not edited in the same
+            -- breath.
+            SUM(CASE WHEN rows_collected > 0 THEN 1 ELSE 0 END) AS runs_with_rows,
+            -- #3240: runs skipped because a PostgreSQL extension the collector DECLARES is not installed
+            -- — the EXTENSION_MISSING status the fault mapper split out of PERMISSIONS, counted apart so
+            -- the banding stops calling an uninstalled optional extension NO_PERMISSIONS. APPENDED, like
+            -- every column since #2472, because this result set is read positionally.
+            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -1261,6 +1439,10 @@ internal static class DarlingDataReader
                 duration_ms,
                 status,
                 error_message,
+                -- #2926: the abandonment predicate above reads it. Projected here for the same reason
+                -- #2472's three columns are: this subquery ENUMERATES its columns, so an aggregate
+                -- outside naming one it does not carry fails at the STORE and nowhere earlier.
+                rows_collected,
                 -- #2472: projected here because this subquery enumerates its columns rather than
                 -- SELECT *-ing them, so an aggregate outside that names a column the inner query does
                 -- not carry fails at the STORE and nowhere earlier — no compiler, no text assertion and
@@ -1278,7 +1460,7 @@ internal static class DarlingDataReader
                 ROW_NUMBER() OVER
                 (
                     PARTITION BY collector_name
-                    ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) IS NULL,
+                    ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) IS NULL,
                              collection_time DESC,
                              error_message DESC
                 ) AS error_rank,
@@ -1306,6 +1488,7 @@ internal static class DarlingDataReader
     {
         var rows = new List<CollectorHealth>();
         await using var command = postgres.CreateCommand(CollectionHealthSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, windowStartUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1334,6 +1517,15 @@ internal static class DarlingDataReader
                 SlowestItem = reader.IsDBNull(17) ? null : reader.GetString(17),
                 SlowestItemMs = reader.IsDBNull(18) ? null : Convert.ToInt32(reader.GetValue(18)),
                 SlowestRunDurationMs = reader.IsDBNull(19) ? null : Convert.ToInt32(reader.GetValue(19)),
+                /* Appended (#2804), for the same reason the four above were. */
+                AbandonedCount = reader.IsDBNull(20) ? 0 : Convert.ToInt64(reader.GetValue(20)),
+                /* Appended (#3010), for the same reason every column before it was. */
+                LastDeniedTime = reader.IsDBNull(21) ? null : reader.GetDateTime(21),
+                /* Appended (#3017), for the same reason every column before it was. */
+                RowsStored = reader.IsDBNull(22) ? 0 : Convert.ToInt64(reader.GetValue(22)),
+                RunsWithRows = reader.IsDBNull(23) ? 0 : Convert.ToInt64(reader.GetValue(23)),
+                /* Appended (#3240), for the same reason every column before it was. */
+                ExtensionMissingCount = reader.IsDBNull(24) ? 0 : Convert.ToInt64(reader.GetValue(24)),
             });
         }
 
@@ -1372,6 +1564,7 @@ internal static class DarlingDataReader
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(LatestServerPropertiesSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -1424,7 +1617,25 @@ internal static class DarlingDataReader
             duckdb_duration_ms,
             rows_collected,
             status,
-            error_message
+            error_message,
+            sql_open_ms,
+            sql_drain_ms,
+            watermark_ms,
+            drain_rows_read,
+            drain_bytes_read,
+            drain_last_read_ms,
+            target_session_id,
+            sweep_peer_max_ms,
+            plan_fetch_probe_ms,
+            plan_fetch_target_ms,
+            plan_fetch_write_ms,
+            plan_fetch_ids_attempted,
+            plan_fetch_probe_ids,
+            text_fetch_probe_ms,
+            text_fetch_target_ms,
+            text_fetch_write_ms,
+            text_fetch_ids_attempted,
+            text_fetch_probe_ids
         FROM v_collection_log
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -1452,6 +1663,7 @@ internal static class DarlingDataReader
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(HasAnyCollectionLogSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }
@@ -1467,6 +1679,7 @@ internal static class DarlingDataReader
     {
         var rows = new List<CollectionLogEntry>();
         await using var command = postgres.CreateCommand(CollectionLogSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, windowStartUtc);
         AddTimestamp(command, windowEndUtc);
@@ -1482,7 +1695,39 @@ internal static class DarlingDataReader
                 reader.IsDBNull(4) ? null : Convert.ToDouble(reader.GetValue(4)),
                 reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5)),
                 reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.IsDBNull(7) ? null : reader.GetString(7)));
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                /* NULL on every row written before V108, and on every run whose path emits no split -
+                   both genuinely "not recorded", which is why these stay nullable rather than defaulting
+                   to zero. A zero here would claim a measured instant open. */
+                reader.IsDBNull(8) ? null : Convert.ToDouble(reader.GetValue(8)),
+                reader.IsDBNull(9) ? null : Convert.ToDouble(reader.GetValue(9)),
+                reader.IsDBNull(10) ? null : Convert.ToDouble(reader.GetValue(10)),
+                /* V109 (#2864). NULL means NOT RECORDED and no more: a row written before the rung, a path
+                   that emits no forensics (every per-database ENUMERATED collector - query_store, the
+                   Pg*Stats family - never sets the measured flag), or an abandon that fired before the
+                   counting reader was constructed. Do NOT read a NULL as 'old row'. DrainLastReadMs beside
+                   a 0 DrainRowsRead does mean nothing arrived; that pairing is the one safe inference. */
+                reader.IsDBNull(11) ? null : Convert.ToInt64(reader.GetValue(11)),
+                reader.IsDBNull(12) ? null : Convert.ToInt64(reader.GetValue(12)),
+                reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
+                reader.IsDBNull(14) ? null : Convert.ToInt32(reader.GetValue(14)),
+                reader.IsDBNull(15) ? null : Convert.ToDouble(reader.GetValue(15)),
+                /* V110 (#2860). NULL means the run performed no deferred fetch - which is every collector
+                   but the plan/text-fetching ones, and ~78% of even those runs, since a fetch only runs when
+                   the probe finds something missing. Read raw rather than pre-divided into ms-per-id: the
+                   rate is the interesting number (31.65 ms/id measured on production's cold plans against
+                   ~1.6 on #2806's hot ones), but there are three useful rates over these five figures and
+                   blessing one in the record would hide the others. The consumer divides. */
+                reader.IsDBNull(16) ? null : Convert.ToDouble(reader.GetValue(16)),
+                reader.IsDBNull(17) ? null : Convert.ToDouble(reader.GetValue(17)),
+                reader.IsDBNull(18) ? null : Convert.ToDouble(reader.GetValue(18)),
+                reader.IsDBNull(19) ? null : Convert.ToInt64(reader.GetValue(19)),
+                reader.IsDBNull(20) ? null : Convert.ToInt64(reader.GetValue(20)),
+                reader.IsDBNull(21) ? null : Convert.ToDouble(reader.GetValue(21)),
+                reader.IsDBNull(22) ? null : Convert.ToDouble(reader.GetValue(22)),
+                reader.IsDBNull(23) ? null : Convert.ToDouble(reader.GetValue(23)),
+                reader.IsDBNull(24) ? null : Convert.ToInt64(reader.GetValue(24)),
+                reader.IsDBNull(25) ? null : Convert.ToInt64(reader.GetValue(25))));
         }
 
         return rows;
@@ -1528,6 +1773,7 @@ internal static class DarlingDataReader
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(HasAnyWaitingTaskSampleSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }
@@ -1539,6 +1785,7 @@ internal static class DarlingDataReader
     {
         var rows = new List<WaitingTaskTrendRow>();
         await using var command = postgres.CreateCommand(WaitingTaskTrendSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
@@ -1589,6 +1836,7 @@ internal static class DarlingDataReader
     {
         var rows = new List<BlockedSessionTrendRow>();
         await using var command = postgres.CreateCommand(BlockedSessionTrendSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
@@ -1671,6 +1919,7 @@ internal static class DarlingDataReader
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(HasAnyBlockingCaptureSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }
@@ -1682,6 +1931,7 @@ internal static class DarlingDataReader
     {
         var rows = new List<BlockingDurationStatsRow>();
         await using var command = postgres.CreateCommand(BlockingDurationStatsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
@@ -1723,6 +1973,7 @@ internal static class DarlingDataReader
     {
         var rows = new List<(DateTime? DeadlockTime, string? Xml)>();
         await using var command = postgres.CreateCommand(DeadlockSeverityGraphsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
@@ -1794,8 +2045,35 @@ internal sealed class CollectorHealth
     public string? LastError { get; set; }
     public DateTime? LastErrorTime { get; set; }
     public long PermissionDeniedCount { get; set; }
+
+    /// <summary>
+    /// The newest PERMISSIONS instant in the window (#3010) — what dates <see cref="LastError"/>.
+    /// Distinct from <see cref="LastErrorTime"/>, a MAX over ERROR and PERMISSIONS together, which
+    /// therefore cannot answer whether the last thing that happened here was a refusal. Null when the
+    /// window holds no denial.
+    /// </summary>
+    public DateTime? LastDeniedTime { get; set; }
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }
+
+    /// <summary>
+    /// Runs skipped because a PostgreSQL extension the collector declares is not installed (#3240) — the
+    /// <c>EXTENSION_MISSING</c> status split out of PERMISSIONS so an uninstalled optional extension bands
+    /// apart from a grant problem. Deliberately NOT part of <see cref="PermissionDeniedCount"/> or
+    /// <see cref="LastDeniedTime"/>: those feed <see cref="DeniedSinceLastSuccess"/>, whose sentence is
+    /// about grants, and folding these in would resurrect the exact conflation the status split ends.
+    /// Always 0 for SQL Server collectors.
+    /// </summary>
+    public long ExtensionMissingCount { get; set; }
+
+    /// <summary>
+    /// Runs the #2673 whole-server wall-clock budget gave up on (#2804). Counted apart from errors for the
+    /// same reason <see cref="YieldCount"/> is — a guard firing is not a fault — but unlike a yield it is
+    /// data LOSS: the cycle stored nothing and advanced no watermark. Feeds
+    /// <see cref="CollectorHealthClassifier.WarningAbandonRatePercent"/>, and reaches the surface as its own
+    /// number so a WARNING can always be attributed to abandonment rather than to errors.
+    /// </summary>
+    public long AbandonedCount { get; set; }
 
     /// <summary>
     /// The note a non-failing run left behind (#1837): an enumeration that yielded 0 items, items whose
@@ -1860,9 +2138,89 @@ internal sealed class CollectorHealth
 
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
 
+    /// <summary>
+    /// Whether <see cref="LastError"/> describes the collector's CURRENT state or a fault from a code
+    /// path it no longer takes (#3010). Its own member rather than an expression at the call site so
+    /// both SKUs' tools derive it from the one shared predicate instead of each writing the comparison
+    /// out. Reported, never banded: <see cref="HealthStatus"/> does not read it.
+    /// </summary>
+    public bool DeniedSinceLastSuccess => CollectorHealthClassifier.DeniedSinceLastSuccess(
+        PermissionDeniedCount, ErrorCount, LastSuccessTime, LastDeniedTime);
+
+    /* ── What the spend bought (#3017) ──────────────────────────────────────────────────────────────
+       Populated by the per-server health read ALONE. The fleet rollup builds its own CollectorHealth
+       from FleetCollectionHealthSql to band it, and deliberately leaves these at their default 0 —
+       which is why nothing but get_collection_health's own tool row is allowed to render them. A
+       defaulted zero reaching a surface as "stored nothing" is the #2804 hazard exactly. */
+
+    /// <summary>
+    /// Rows the window's runs stored (<c>rows_stored</c>) — the output half of the cost/output pair, over
+    /// the SAME window as <see cref="TotalRuns"/> and the durations beside it. Never
+    /// <c>get_collector_cost</c>'s <c>total_rows</c>, which is Darling's own separate hourly series over
+    /// that caller's window and across every server: see
+    /// <see cref="CollectorHealthClassifier.OutputWindowNote"/> for what this figure is and is not.
+    /// </summary>
+    public long RowsStored { get; set; }
+
+    /// <summary>
+    /// How many of <see cref="TotalRuns"/> stored anything (<c>runs_with_rows</c>) — the numerator whose
+    /// denominator is <see cref="TotalRuns"/>, on <c>get_pg_blocking</c>'s
+    /// <c>captures_with_blocking</c>/<c>captures_total</c> pattern: a rows total with no run count behind
+    /// it cannot tell a collector that is productive occasionally from one that is productive throughout.
+    /// </summary>
+    public long RunsWithRows { get; set; }
+
+    /// <summary>Share of runs that stored anything. 0 with a large <see cref="TotalRuns"/> is the reading
+    /// #3017 exists to surface; 0 runs gives 0 rather than a divide, matching every sibling rate here.</summary>
+    public double ProductiveRunPercent => TotalRuns > 0 ? (double)RunsWithRows / TotalRuns * 100 : 0;
+
+    /// <summary>
+    /// The sentence a collector that spent and stored NOTHING gets, or null when it stored something
+    /// (#3017). Its own member rather than an expression at the call site for the reason
+    /// <see cref="DeniedSinceLastSuccess"/> is one: both SKUs' tools compose it from the one shared
+    /// formatter instead of each writing the branch out, so the two cannot answer differently.
+    ///
+    /// <para>This is where <see cref="DeniedSinceLastSuccess"/> becomes the third term and
+    /// <see cref="NoteCount"/> the fourth. Zero output with a current denial is a collector that could not
+    /// read; zero output whose runs recorded a note is one that already said why, and the finding defers to
+    /// <see cref="LastNote"/> rather than asserting the event-collector reading over it (#3160); zero output
+    /// with neither is the event collector at rest. Both predicates are READ here and still not banded —
+    /// <c>HealthStatus</c> does not call this, and this returns display text.</para>
+    /// </summary>
+    public string? OutputFinding =>
+        /* #3240: an all-extension-missing window read NOTHING, so both of the formatter's zero-output
+           readings would be false for it — "being refused NOW" points at a grant, and "read and found
+           nothing" claims a read that never happened. The band plus the last_error sentence already
+           carry the whole story, extension named. */
+        string.Equals(HealthStatus, CollectorHealthClassifier.ExtensionMissing, StringComparison.Ordinal)
+            ? null
+            : CollectorHealthClassifier.FormatOutputFinding(RowsStored, TotalRuns, DeniedSinceLastSuccess, NoteCount)
+                is { Length: > 0 } finding
+                ? finding
+                : null;
+
+    /// <summary>
+    /// Share of runs the #2673 budget abandoned (#2804). Its own rate rather than part of
+    /// <see cref="FailureRatePercent"/>: the two carry very different thresholds (0.5 against 20) because
+    /// they mean different things, and merging them would report a 2%-abandoning collector as a
+    /// 2%-erroring one — a rate no run of this collector actually produced.
+    /// </summary>
+    public double AbandonRatePercent => TotalRuns > 0 ? (double)AbandonedCount / TotalRuns * 100 : 0;
+
     public double HoursSinceLastSuccess => LastSuccessTime.HasValue
         ? (DateTime.UtcNow - LastSuccessTime.Value).TotalHours
         : 999;
+
+    /// <summary>Hours since the newest run of ANY status — the input <see cref="CollectorHealthClassifier"/>'s
+    /// STOPPED band reads. Distinct from <see cref="HoursSinceLastSuccess"/>: a collector that keeps being
+    /// invoked and keeps failing has a small value here even while its success clock runs out; a collector
+    /// whose gate flipped off and stopped being invoked entirely has a large value here too, which is what
+    /// tells the two apart. Falls back to <see cref="HoursSinceLastSuccess"/> rather than the bare 999
+    /// sentinel when the column is unset: a run can never be MORE certain than a known success, so absent
+    /// better information this must not read more dormant than the success clock alone already says.</summary>
+    public double HoursSinceLastRun => LastRunTime.HasValue
+        ? (DateTime.UtcNow - LastRunTime.Value).TotalHours
+        : HoursSinceLastSuccess;
 
     /// <summary>The collector's default cadence from the shared <see cref="CollectorScheduleDefaults"/>
     /// (0 for an on-load or unknown collector — both fall to the floor thresholds). The banding uses the
@@ -1873,6 +2231,6 @@ internal sealed class CollectorHealth
         CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
 
     public string HealthStatus => CollectorHealthClassifier.Classify(
-        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount,
-        HoursSinceLastSuccess, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
+        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
+        HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
 }

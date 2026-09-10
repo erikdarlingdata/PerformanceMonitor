@@ -270,6 +270,14 @@ OUTER APPLY
     /// <summary>Azure SQL DB scopes dm_exec_query_stats to the connected database.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;
 
+    /// <summary>
+    /// #2673: bound the per-server wall-clock (execute + DRAIN) so this collector can't run minutes on a
+    /// monitored server (measured tail 168s on one prod box, avg 1.9s) — the 60s command timeout bounds only
+    /// execution, not the drain of a large dm_exec_query_stats result. Server-scoped on on-prem/RDS, per
+    /// database on Azure SQL DB; a cycle that blows the budget ships nothing and retries next cycle.
+    /// </summary>
+    public override TimeSpan? PerItemWallClockBudget => TimeSpan.FromSeconds(120);
+
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         var planSelect = context.CapturePlanXml ? PlanSelectFragment : "";

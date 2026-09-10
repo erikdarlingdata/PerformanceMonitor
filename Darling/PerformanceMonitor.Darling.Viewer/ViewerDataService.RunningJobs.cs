@@ -72,6 +72,7 @@ public sealed partial class ViewerDataService
         var items = new List<RunningJobRow>();
 
         await using var command = _dataSource.CreateCommand(RunningJobsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -102,6 +103,7 @@ public sealed partial class ViewerDataService
     public async Task<string?> GetLatestRunningJobsCollectorStatusAsync(int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(RunningJobsCollectorStatusSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return result as string;
@@ -111,10 +113,16 @@ public sealed partial class ViewerDataService
 /// <summary>
 /// One row of the Running Jobs grid — a currently-running SQL Agent job with its historical duration
 /// comparison. Copied VERBATIM from Lite's <c>RunningJobRow</c> (LocalDataService.RunningJobs.cs): the
-/// duration/percent/running-long display columns are all collector-side computations, and
-/// <see cref="StartTimeLocal"/> routes the store's naive-UTC start_time through
-/// <see cref="ViewerTimeHelper.ForDisplay"/> — the viewer's mode-aware Server/Local/UTC conversion every
-/// other Darling timestamp also uses.
+/// duration/percent/running-long display columns are all collector-side computations.
+///
+/// <para><see cref="StartTimeLocal"/> and <see cref="CollectionTime"/> are in DIFFERENT frames.
+/// <c>running_jobs.start_time</c> is <c>ja.start_execution_date</c> — msdb Agent's own local clock,
+/// which <c>RunningJobsCollector</c> confirms by taking the running duration as
+/// <c>DATEDIFF(SECOND, ja.start_execution_date, GETDATE())</c>, a local-vs-local subtraction — so it
+/// converts through <see cref="ViewerDataService.FormatServerClock"/>. <c>collection_time</c> is
+/// naive UTC and converts through <see cref="ViewerTimeHelper.ForDisplay"/>. Sending the start time
+/// through that conversion applies the collected offset a second time and shows a job that started
+/// seconds ago as a four-hour runner on the fleet's measured -240.</para>
 /// </summary>
 public class RunningJobRow
 {
@@ -130,7 +138,7 @@ public class RunningJobRow
     public bool IsRunningLong { get; set; }
     public decimal? PercentOfAverage { get; set; }
 
-    public string StartTimeLocal => ViewerTimeHelper.ForDisplay(StartTime).ToString("yyyy-MM-dd HH:mm:ss");
+    public string StartTimeLocal => ViewerDataService.FormatServerClock(StartTime);
 
     public string CurrentDurationFormatted => FormatDuration(CurrentDurationSeconds);
     public string AvgDurationFormatted => FormatDuration(AvgDurationSeconds);

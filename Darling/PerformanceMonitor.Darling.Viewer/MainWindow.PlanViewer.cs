@@ -75,7 +75,8 @@ public partial class MainWindow
         MainWindowPlanViewerTab.IsSelected = true;
 
         var subTab = PlanViewerController.AddNewEmptyPlanSubTab();
-        PlanViewerController.LoadPlanIntoSubTab(subTab, planXml, label, queryText);
+        // Fire-and-forget (FinOps view-plan, not paste): discard the Task (CS4014 is an error here).
+        _ = PlanViewerController.LoadPlanIntoSubTab(subTab, planXml, label, queryText);
     }
 
     private void MainWindowPlanViewerClose_Click(object sender, RoutedEventArgs e)

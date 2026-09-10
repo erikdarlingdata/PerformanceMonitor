@@ -172,7 +172,7 @@ public sealed class SettingsSampleTests
             var settings = SettingsFileGuard.Read(Path.Combine(configDirectory, "settings.json"));
             if (root.TryGetProperty("old_shape_key", out var a)) A = a.GetBoolean();
             if (read.TryGetProperty("new_shape_key", out var b)) B = b.Bool(B);
-            if (read.TryGetProperty("undocumented_key", out var c)) C = c.Int(C);
+            if (read.TryGetProperty("undocumented_key", out var c)) C = c.WholeNumber(C);
             """;
 
         var found = new Dictionary<string, string>(StringComparer.Ordinal);

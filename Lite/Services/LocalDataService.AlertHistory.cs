@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
@@ -28,7 +29,7 @@ public partial class LocalDataService
         /* Both edges, not just the lower one: the row cap is applied by the database, so trimming
            after the read would spend the whole LIMIT on rows newer than an as_of anchor and hand back an
            empty window that looks exactly like a quiet one. */
-        var (cutoff, until) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var (cutoff, until) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
 
         if (serverId.HasValue)
         {
@@ -454,15 +455,14 @@ public class AlertHistoryRow
     public string CurrentValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, CurrentValue);
     public string ThresholdValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, ThresholdValue);
 
-    public string StatusDisplay
-    {
-        get
-        {
-            if (NotificationType == "email")
-                return AlertSent ? "Sent" : (!string.IsNullOrEmpty(SendError) ? "Failed" : "Not sent");
-            return AlertSent ? "Delivered" : "Shown";
-        }
-    }
+    /// <summary>
+    /// The operator-facing delivery status, from the one shared renderer both SKUs use. Lite passes
+    /// <c>trayChannelPresent: true</c> because <c>LiteAlertDeliverer.DeliverAsync</c> really does show a
+    /// styled balloon for every non-muted alert, so a stored <c>tray</c> is a truthful "Shown" here. The
+    /// Darling Viewer passes false; see <see cref="AlertDeliveryStatus.Describe"/>.
+    /// </summary>
+    public string StatusDisplay =>
+        AlertDeliveryStatus.Describe(AlertSent, NotificationType, SendError, producerHadTrayChannel: true);
 
     public bool IsResolved => AlertMetricClassifier.IsResolution(MetricName);
     public bool IsCritical => AlertMetricClassifier.IsCritical(MetricName);

@@ -57,9 +57,17 @@ function svg(tag, attrs) {
  *   onZoom     — optional brush-zoom callback (#1606): a pointer drag across ≥8px of plot selects a time
  *                range and calls onZoom(fromMs, toMs) so the caller can RE-RUN the panel on that window
  *                (server-side re-run keeps bucket resolution + tier routing + the partial-window notice honest).
+ *   windowStart— optional x-axis DOMAIN start, windowEnd its end, both UTC-epoch ms (#2802). When both are given
+ *   windowEnd    and windowEnd > windowStart, the axis spans [windowStart, windowEnd] — the REQUESTED time window
+ *                — instead of the data's own first/last-point extent, so a sparse discrete-event series (blocking,
+ *                deadlocks: rows only inside a short burst) plots at its true position across a "last N hours"
+ *                chart rather than the renderer zooming to the burst AND dropping the calendar date. windowEnd is
+ *                the caller's query-time "now", NEVER the last data point — anchoring to the last point would slide
+ *                an old burst to the right edge and read as current. Absent/degenerate ⇒ the original data-extent
+ *                domain, byte-for-byte. Data times stay naive-UTC-parsed and tick labels stay browser-local.
  */
 export function renderLineChart(spec) {
-  const { points, xKey, series, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2 = null, onZoom = null } = spec;
+  const { points, xKey, series, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2 = null, onZoom = null, windowStart = null, windowEnd = null } = spec;
   const stacked = mode === "stacked";
   const stackedBar = mode === "stacked-bar";
   /* Both stacked modes share the cumulative pre-pass, the sum-based y-domain, and the hover-at-stack-top dots. */
@@ -72,12 +80,28 @@ export function renderLineChart(spec) {
     .filter((p) => p.t)
     .sort((a, b) => a.t - b.t);
 
-  if (rows.length < 2) {
+  if (rows.length === 0) {
     return el("div", { class: "chart" }, [emptyStrip("Not enough data points to chart yet.")]);
   }
+  /* ONE collected bucket is data, not a warming-up absence. A single point has no segment to stroke, so the
+     branches below draw it as a marker (a polyline needs two); zero rows took the strip above. Without this a
+     panel whose series reached one bucket showed "not enough data points" beside siblings that had reached two
+     — the same tab reading as half-broken while it warmed up. The single-point geometry (a centered x, one
+     tick, a dot per series) is guarded on spanMs === 0 / linePts.length === 1 throughout. */
 
-  const tMin = rows[0].t.getTime();
-  const tMax = rows[rows.length - 1].t.getTime();
+  /* The x DOMAIN. Default: the data's own first/last-point extent. #2802: when the caller passes the window it
+     fetched over (windowStart/windowEnd, UTC-epoch ms, windowEnd = the query-time now), the axis spans THAT window
+     instead, so a sparse series (blocking/deadlocks — rows only inside a short burst) plots at its true position
+     across a "last N hours" chart rather than the renderer zooming to the burst and dropping the date. A degenerate
+     window (non-number, non-finite, or end <= start) is ignored so a bad input can never collapse the axis; with no
+     window passed the data-extent domain below is byte-for-byte the original. */
+  const dataTMin = rows[0].t.getTime();
+  const dataTMax = rows[rows.length - 1].t.getTime();
+  const hasWindow =
+    typeof windowStart === "number" && typeof windowEnd === "number" &&
+    isFinite(windowStart) && isFinite(windowEnd) && windowEnd > windowStart;
+  const tMin = hasWindow ? windowStart : dataTMin;
+  const tMax = hasWindow ? windowEnd : dataTMax;
   const spanMs = tMax - tMin;
 
   /* A dual-axis overlay reserves a right gutter for its own tick labels + unit caption (#1606); without
@@ -128,7 +152,9 @@ export function renderLineChart(spec) {
   const yMin = scale.min;
   const yMax = scale.max;
 
-  const scaleX = (t) => M.l + ((t - tMin) / (spanMs || 1)) * plotW;
+  /* A single bucket spans no time (spanMs === 0), so every point shares tMin; center it rather than pinning
+     it to the left axis, where a lone dot reads as a glitch. */
+  const scaleX = (t) => (spanMs === 0 ? M.l + plotW / 2 : M.l + ((t - tMin) / spanMs) * plotW);
   const scaleY = (v) => M.t + (1 - (v - yMin) / (yMax - yMin)) * PLOT_H;
   /* Plotted points clamp into the plot box so a value above a clamped (pct) domain can't draw outside it. */
   const plotY = (v) => Math.max(M.t, Math.min(M.t + PLOT_H, scaleY(v)));
@@ -157,16 +183,23 @@ export function renderLineChart(spec) {
 
   /* Vertical gridlines + x labels (6 ticks). The label widens to include the calendar date when the domain
      spans more than one day, so a window crossing midnight is unambiguous even if it is under 24h wide. */
-  const crossesDay = rows[0].t.toDateString() !== rows[rows.length - 1].t.toDateString();
+  /* #2802: derived from the DOMAIN bounds, not the data's first/last point — a same-day burst inside a 24h window
+     that crosses midnight must still carry the calendar date. Byte-for-byte the old value with no window passed
+     (the domain bounds ARE the first/last data point then). */
+  const crossesDay = new Date(tMin).toDateString() !== new Date(tMax).toDateString();
   const X_TICKS = 5;
-  for (let i = 0; i <= X_TICKS; i++) {
-    const t = tMin + (spanMs * i) / X_TICKS;
+  /* One bucket spans no time, so the evenly-spaced loop would stack X_TICKS identical labels on the centered
+     point. Draw a single centered gridline + time label instead. */
+  const xTickTimes = spanMs === 0 ? [tMin] : Array.from({ length: X_TICKS + 1 }, (_, i) => tMin + (spanMs * i) / X_TICKS);
+  for (let i = 0; i < xTickTimes.length; i++) {
+    const t = xTickTimes[i];
     const x = scaleX(t);
     axis.appendChild(svg("line", { class: "grid-line", x1: x, y1: M.t, x2: x, y2: M.t + PLOT_H }));
+    const anchor = xTickTimes.length === 1 ? "middle" : i === 0 ? "start" : i === xTickTimes.length - 1 ? "end" : "middle";
     const label = svg("text", {
       x: Math.min(Math.max(x, M.l + 2), plotRight - 2),
       y: H - 8,
-      "text-anchor": i === 0 ? "start" : i === X_TICKS ? "end" : "middle",
+      "text-anchor": anchor,
     });
     label.textContent = axisTime(new Date(t), crossesDay);
     axis.appendChild(label);
@@ -212,7 +245,21 @@ export function renderLineChart(spec) {
     /* Time-series stacked BAR: one vertical bar per bucket, segmented bottom-up by series using the same cumulative
        tops as the stacked area. Bar width is a fraction of the per-bucket spacing, centered on the bucket and clamped
        into the plot; a sub-pixel segment is dropped so a dense window degrades cleanly toward a filled band. */
-    const barW = Math.max(1, (plotW / rows.length) * 0.7);
+    /* Bar width = one bucket's on-screen width. With no window the buckets tile the axis, so plotW/rows.length IS
+       the bucket width (byte-for-byte the original). With a #2802 window the buckets can be sparse — plotW/rows.length
+       would then draw each bar far wider than a bucket and overlap its neighbours — so measure the tightest adjacent
+       gap (one bucket) and use that; fall back to the tiling width when there is only one bar to place. */
+    let barW;
+    if (hasWindow && xs.length > 1) {
+      let minGap = Infinity;
+      for (let i = 1; i < xs.length; i++) {
+        const g = xs[i] - xs[i - 1];
+        if (g > 0 && g < minGap) minGap = g;
+      }
+      barW = Math.max(1, (isFinite(minGap) ? minGap : plotW / rows.length) * 0.7);
+    } else {
+      barW = Math.max(1, (plotW / rows.length) * 0.7);
+    }
     for (let i = 0; i < rows.length; i++) {
       const bx = Math.max(M.l, Math.min(M.l + plotW - barW, xs[i] - barW / 2));
       for (let k = 0; k < series.length; k++) {
@@ -226,24 +273,34 @@ export function renderLineChart(spec) {
       }
     }
   } else if (stacked) {
-    /* Filled bands drawn top series first so lower bands paint over the seams; each band is bounded above by its
-       own cumulative top and below by the previous series' cumulative top (the x-axis for series 0). */
-    for (let k = series.length - 1; k >= 0; k--) {
-      const top = [];
-      const bottom = [];
-      for (let i = 0; i < rows.length; i++) {
-        top.push(xs[i] + "," + plotY(stackTops[i][k]));
-        bottom.push(xs[i] + "," + plotY(k === 0 ? 0 : stackTops[i][k - 1]));
+    if (rows.length === 1) {
+      /* A single bucket has no horizontal extent, so each band's polygon collapses to a zero-area sliver that
+         paints nothing (.series-area has no stroke). Draw a dot at each series' cumulative stack top instead —
+         the position the hover dots already use in stacked mode — so a warming-up stacked panel shows its one
+         reading rather than a blank grid. */
+      for (let k = 0; k < series.length; k++) {
+        root.appendChild(svg("circle", { class: "series-dot", cx: xs[0], cy: plotY(stackTops[0][k]), r: 4, fill: normalizeColor(series[k].color) }));
       }
-      bottom.reverse();
-      root.appendChild(
-        svg("polygon", {
-          class: "series-area",
-          points: top.concat(bottom).join(" "),
-          fill: normalizeColor(series[k].color),
-          "fill-opacity": "0.72",
-        })
-      );
+    } else {
+      /* Filled bands drawn top series first so lower bands paint over the seams; each band is bounded above by its
+         own cumulative top and below by the previous series' cumulative top (the x-axis for series 0). */
+      for (let k = series.length - 1; k >= 0; k--) {
+        const top = [];
+        const bottom = [];
+        for (let i = 0; i < rows.length; i++) {
+          top.push(xs[i] + "," + plotY(stackTops[i][k]));
+          bottom.push(xs[i] + "," + plotY(k === 0 ? 0 : stackTops[i][k - 1]));
+        }
+        bottom.reverse();
+        root.appendChild(
+          svg("polygon", {
+            class: "series-area",
+            points: top.concat(bottom).join(" "),
+            fill: normalizeColor(series[k].color),
+            "fill-opacity": "0.72",
+          })
+        );
+      }
     }
   } else {
     /* Area fill (each series to the baseline) then the line on top; or just the line. Nulls drop the gap. */
@@ -253,6 +310,13 @@ export function renderLineChart(spec) {
         const v = readVal(rows[i].r, s.key);
         if (v == null) continue;
         linePts.push(xs[i] + "," + plotY(v));
+      }
+      /* A lone plottable point has no segment to stroke, so draw it as a dot — one bucket still shows its
+         reading. (Its resting marker matches the hover dot; static class so it does not vanish on mouseout.) */
+      if (linePts.length === 1) {
+        const [cx, cy] = linePts[0].split(",");
+        root.appendChild(svg("circle", { class: "series-dot", cx, cy, r: 4, fill: normalizeColor(s.color) }));
+        continue;
       }
       if (linePts.length < 2) continue;
       if (filled) {
@@ -281,7 +345,12 @@ export function renderLineChart(spec) {
       const y2 = Math.max(M.t, Math.min(M.t + PLOT_H, scaleY2(Number(v))));
       pts2.push(xs[i] + "," + y2);
     }
-    if (pts2.length >= 2) {
+    if (pts2.length === 1) {
+      /* Same single-bucket rule as the primary series: a lone overlay reading draws as a dot, not a dropped
+         series, so "a dot per series" holds for the right axis too. */
+      const [cx, cy] = pts2[0].split(",");
+      root.appendChild(svg("circle", { class: "series-dot", cx, cy, r: 4, fill: normalizeColor(series2.color) }));
+    } else if (pts2.length >= 2) {
       root.appendChild(svg("polyline", { class: "series-line series-line-overlay", points: pts2.join(" "), stroke: normalizeColor(series2.color) }));
     }
   }

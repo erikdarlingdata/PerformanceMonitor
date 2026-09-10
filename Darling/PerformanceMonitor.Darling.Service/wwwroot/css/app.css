@@ -141,8 +141,25 @@ a:hover { text-decoration: underline; }
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  /* auto-FIT, not auto-fill (#2772): with fewer cards than the viewport has 260px tracks, auto-fill keeps the
+     empty tracks and the cards shrink into their track — so a WIDER window made the cards NARROWER until the
+     inner .stats tiles clipped. auto-fit collapses the empty tracks so the cards stretch to fill the row, the
+     same fix .stats already uses one screen down. */
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 1rem;
+}
+
+/* #2772 follow-up: the SERVER-CARD grids (fleet flat + tag-group) cap each track instead of stretching to 1fr.
+   auto-fit already stopped the empty-track SHRINK; without a max the surviving cards then stretched the other
+   way — two servers on an ultrawide gave two ~1000px cards, a lone server one full-width card, all whitespace
+   past what six small stat tiles want. A bounded max track (260-460px, ~the width the issue measured as reading
+   "correctly") keeps cards at a comfortable size, so the grid adds columns as it widens rather than fattening a
+   few cards. The flat grid centres the leftover space; the indented tag-group grid overrides that to start
+   (below) so grouped cards stay left-aligned under their header. Scoped to .server-grid, NOT .grid, because
+   .grid is shared with the triage page, whose span-2 cards and notice strips want the full width. */
+.server-grid {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 460px));
+  justify-content: center;
 }
 
 /* #2020: grouped (tag-tree) fleet view — collapsible tag headers, each with its card grid indented beneath.
@@ -162,7 +179,9 @@ a:hover { text-decoration: underline; }
 .tag-group-header:focus-visible { outline: 2px solid var(--muted); outline-offset: 1px; }
 .tag-group-chevron { width: 0.9rem; flex: 0 0 auto; color: var(--muted); font-size: 0.7rem; }
 .tag-group-count { color: var(--muted); font-weight: 400; font-size: 0.85rem; }
-.tag-group-grid { margin: 0.5rem 0 0.2rem; }
+/* #2772: keep .server-grid's width cap but override its centring — an indented group's cards left-align under
+   their (left-aligned) header rather than floating toward the middle of the indented box. */
+.tag-group-grid { margin: 0.5rem 0 0.2rem; justify-content: start; }
 .group-control { display: flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; color: var(--muted); cursor: pointer; }
 .group-control input { cursor: pointer; }
 
@@ -324,6 +343,11 @@ a:hover { text-decoration: underline; }
 }
 .rollup .tile .num { font-size: 1.5rem; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
 .rollup .tile .lbl { font-size: 0.72rem; color: var(--muted); letter-spacing: 0.3px; }
+/* #3017: the deadlock total's coverage denominator, under its label. Smaller than .lbl so it reads as a
+   qualifier on the number rather than as a second label, and styled on its OWN state rather than inheriting
+   the tile's severity — full coverage under a red count is good news about a bad number. */
+.rollup .tile .sub { font-size: 0.68rem; color: var(--muted); letter-spacing: 0.2px; margin-top: 0.15rem; }
+.rollup .tile .sub.partial { color: var(--warn); }
 .rollup .tile.healthy .num { color: var(--ok); }
 .rollup .tile.warning .num { color: var(--warn); }
 .rollup .tile.critical .num { color: var(--err); }
@@ -417,6 +441,7 @@ table.data td.sev-Healthy { color: var(--ok); }
 .chart .scatter-dot.drillable:hover { fill-opacity: 1; }
 .chart .hover-line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
 .chart .hover-dot { stroke: var(--bg-dark); stroke-width: 1.5; }
+.chart .series-dot { stroke: var(--bg-dark); stroke-width: 1.5; } /* a single-bucket series' resting marker (no segment to stroke) */
 
 .chart-legend {
   display: flex;
@@ -845,6 +870,37 @@ pre.code {
 
 /* A notebook entry in the sidebar view list gets a small document glyph so it reads apart from a dashboard view. */
 .view-item.is-notebook::before { content: "▤ "; color: var(--muted); }
+
+/* The pinned-window pill on a panel cell carrying its own `range` (#2735) — amber, because it marks a place
+   where the scope bar's TIME range deliberately does not apply (the server scope still does). Sits in the
+   panel card's h3 beside the title; no text-transform, the window text is data. */
+.pin-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0.5rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  background: rgba(255, 213, 79, 0.12);
+  color: var(--warn);
+  border: 1px solid rgba(255, 213, 79, 0.35);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+/* The notebook EDITOR's pin strip (#2735): the pin badge + what it means + the Unpin affordance, shown on a
+   panel cell that carries a pinned window (there is no authoring UI for a pin yet — MCP/import create them). */
+.cell-pin-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.4rem 0 0.5rem;
+  font-size: 0.78rem;
+}
+.cell-pin-strip .pin-badge { margin-left: 0; }
 
 /* ─────────────────────────── availability groups (#991) ─────────────────────────── */
 

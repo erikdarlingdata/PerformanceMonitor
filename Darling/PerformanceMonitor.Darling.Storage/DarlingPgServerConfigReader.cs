@@ -161,6 +161,7 @@ public static class DarlingPgServerConfigReader
     {
         var rows = new List<PgConfigRow>();
         await using var command = postgres.CreateCommand(CurrentConfigSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(limit);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -191,6 +192,7 @@ public static class DarlingPgServerConfigReader
     {
         var rows = new List<PgConfigChangeRow>();
         await using var command = postgres.CreateCommand(ConfigChangesSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* Kind-Unspecified at the BIND, per the store's naive-UTC discipline: a Kind=Utc DateTime makes
            Npgsql infer timestamptz, and PostgreSQL then converts these naive columns at the store session's

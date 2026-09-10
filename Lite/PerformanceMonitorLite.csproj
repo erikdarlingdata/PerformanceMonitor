@@ -18,13 +18,6 @@
     <AssemblyName>PerformanceMonitorLite</AssemblyName>
     <RootNamespace>PerformanceMonitorLite</RootNamespace>
     <Product>SQL Server Performance Monitor Lite</Product>
-    <Version>3.6.0</Version>
-    <!-- #2113: <Version> is the ONE hand-set version. AssemblyVersion / FileVersion /
-         InformationalVersion derive from it at build time - the 3.4.0 release bumped only
-         <Version> and shipped binaries still STAMPED 3.3.0.0, because four hand-maintained
-         copies of one fact is a release-day trap. The suffix suppression keeps
-         InformationalVersion a clean semver instead of gaining a +sha under CI SourceLink. -->
-    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Company>Darling Data, LLC</Company>
     <Copyright>Copyright © 2026 Darling Data, LLC</Copyright>
     <Description>Lightweight SQL Server performance monitoring - no installation required on target servers</Description>

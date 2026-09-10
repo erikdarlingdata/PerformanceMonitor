@@ -119,6 +119,7 @@ public partial class ViewerServerTab : IDisposable
         var (startUtc, endUtc) = GetWindowUtc();
 
         /* Both reads run concurrently — NpgsqlDataSource pools a connection for each. */
+        using var readFanOut = ViewerReadFanOut.Of(2);
         var trendTask = _dataService.GetTempDbTrendAsync(_server.ServerId, startUtc);
         var fileIoTask = _dataService.GetTempDbFileIoTrendAsync(_server.ServerId, startUtc);
         var trend = await trendTask;

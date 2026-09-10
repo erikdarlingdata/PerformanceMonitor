@@ -44,7 +44,7 @@ WHERE d.name = @database_name;", connection);
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -95,7 +95,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
 
         command.CommandText = @"
@@ -407,7 +407,7 @@ FULL OUTER JOIN baseline_period b
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -537,7 +537,7 @@ ORDER BY collection_time";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -788,7 +788,7 @@ AND   tqp.query_plan IS NOT NULL
 ORDER BY
     qs.last_execution_time DESC
 OPTION(RECOMPILE);',
-    N'@h varbinary(64), @stmt_start int, @stmt_end int',
+    N'@h varbinary(64), @stmt_start integer, @stmt_end integer',
     @h, @stmt_start, @stmt_end;";
 
         using var command = new SqlCommand(query, connection) { CommandTimeout = 30 };
@@ -826,7 +826,7 @@ OPTION(RECOMPILE);',
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -876,7 +876,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
 
         command.CommandText = @"
@@ -1113,7 +1113,7 @@ LEFT JOIN LATERAL (
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -1190,7 +1190,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -1243,7 +1243,7 @@ ORDER BY collection_time";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -1337,7 +1337,7 @@ ORDER BY collection_time";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
         var metricExpr = GetMetricColumn(metric);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
@@ -1476,8 +1476,8 @@ public class QueryStatsRow
     public string QueryHash { get; set; } = "";
     public DateTime? LastExecutionTime { get; set; }
     public DateTime? CreationTime { get; set; }
-    public string LastExecutionTimeLocal => Services.ServerTimeHelper.FormatServerTime(LastExecutionTime);
-    public string CreationTimeLocal => Services.ServerTimeHelper.FormatServerTime(CreationTime);
+    public string LastExecutionTimeLocal => Services.ServerTimeHelper.FormatServerClock(LastExecutionTime);
+    public string CreationTimeLocal => Services.ServerTimeHelper.FormatServerClock(CreationTime);
     public long TotalExecutions { get; set; }
     public long TotalCpuUs { get; set; }
     public long TotalElapsedUs { get; set; }
@@ -1599,8 +1599,8 @@ public class ProcedureStatsRow
     public double MaxCpuMs => MaxWorkerTimeUs / 1000.0;
     public double MinElapsedMs => MinElapsedTimeUs / 1000.0;
     public double MaxElapsedMs => MaxElapsedTimeUs / 1000.0;
-    public string CachedTimeFormatted => Services.ServerTimeHelper.FormatServerTime(CachedTime);
-    public string LastExecutionTimeLocal => Services.ServerTimeHelper.FormatServerTime(LastExecutionTime);
+    public string CachedTimeFormatted => Services.ServerTimeHelper.FormatServerClock(CachedTime);
+    public string LastExecutionTimeLocal => Services.ServerTimeHelper.FormatServerClock(LastExecutionTime);
 }
 
 public class QueryStatsHistoryRow
@@ -1668,8 +1668,8 @@ public class QueryStatsHistoryRow
     public double TotalCpuMs => TotalCpuUs / 1000.0;
     public double TotalElapsedMs => TotalElapsedUs / 1000.0;
     public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
-    public string CreationTimeLocal => ServerTimeHelper.FormatServerTime(CreationTime);
-    public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerTime(LastExecutionTime);
+    public string CreationTimeLocal => ServerTimeHelper.FormatServerClock(CreationTime);
+    public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerClock(LastExecutionTime);
 }
 
 public class ProcedureStatsHistoryRow
@@ -1722,6 +1722,6 @@ public class ProcedureStatsHistoryRow
     public double TotalCpuMs => TotalCpuUs / 1000.0;
     public double TotalElapsedMs => TotalElapsedUs / 1000.0;
     public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
-    public string CachedTimeLocal => ServerTimeHelper.FormatServerTime(CachedTime);
-    public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerTime(LastExecutionTime);
+    public string CachedTimeLocal => ServerTimeHelper.FormatServerClock(CachedTime);
+    public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerClock(LastExecutionTime);
 }

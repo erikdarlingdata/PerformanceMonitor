@@ -13,6 +13,7 @@ multi-file-open
 open-file-button
 open-file-dialog
 paste-button
+reentrancy-defer-add
 render-loadplan
 shared-plan-viewer-control
 unique-sub-tab-label

@@ -23,8 +23,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para>• QUERY STORE (query_store_stats): its measures are not deltas, so each maps to a specific reshaped
 /// column — <c>qs_executions</c> (Delta over execution_count) → <c>execution_count_sum</c> (Sum) or that over
 /// <c>sample_count</c> (Avg); the peak gauges (<c>max_duration_us</c>/<c>max_cpu_time_us</c>) → their <c>_max</c>
-/// column, MAX only; and the execution-weighted average ratios → the pre-multiplied weighted sum over
-/// <c>execution_count_sum</c> (the correct weighted mean, not an avg-of-avgs). Aggregates the reshaped CAGG did not
+/// column, MAX only; the execution-weighted average ratios → the pre-multiplied weighted sum over
+/// <c>execution_count_sum</c> (the correct weighted mean, not an avg-of-avgs); and the <c>qs_total_*</c>
+/// WeightedSum measures (#2732) → the pre-multiplied weighted sum alone. Aggregates the reshaped CAGG did not
 /// keep a column for (MIN/MAX of executions, AVG/MIN of the peaks) return false from <see cref="CanRemap"/> and
 /// fall back to raw.</para>
 /// </summary>
@@ -75,8 +76,9 @@ public static class ComposeCaggValueMapper
     {
         if (measure.Kind == MeasureKind.Ratio)
         {
-            /* qs_avg_* — the execution-weighted mean, reconstructable from the reshaped weighted sums. */
-            return measure.RatioMode == MeasureRatioMode.Weighted;
+            /* qs_avg_* — the execution-weighted mean, reconstructable from the reshaped weighted sums — and
+               qs_total_* (#2732) — the weighted sum ITSELF, which the reshaped CAGG materializes directly. */
+            return measure.RatioMode is MeasureRatioMode.Weighted or MeasureRatioMode.WeightedSum;
         }
 
         return measure.Archetype switch
@@ -132,6 +134,13 @@ public static class ComposeCaggValueMapper
 
         if (measure.Kind == MeasureKind.Ratio)
         {
+            /* qs_total_* (#2732): SUM(avg * execution_count) with no denominator — the reshaped CAGG stores
+               exactly this product-sum, so the total re-aggregates additively across buckets. */
+            if (measure.RatioMode == MeasureRatioMode.WeightedSum)
+            {
+                return $"CAST(SUM({F}.{QsWeightedSumColumn(measure.WeightedValueColumn!)}) AS double precision)";
+            }
+
             /* SUM(avg * execution_count) / SUM(execution_count) — the reshaped CAGG stores the numerator's
                product-sum directly, and execution_count_sum is the denominator. */
             return $"(CAST(SUM({F}.{QsWeightedSumColumn(measure.WeightedValueColumn!)}) AS double precision) " +

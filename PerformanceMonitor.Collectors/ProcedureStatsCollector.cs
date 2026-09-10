@@ -306,6 +306,16 @@ OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handl
     /// </summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;
 
+    /// <summary>
+    /// #2673: bound the per-server wall-clock (execute + DRAIN), so a large procedure cache can't make this
+    /// collector run minutes on a monitored server — the profile that makes us stick out in that server's
+    /// own monitoring. The 60s per-command timeout covers only execution, not the drain. Measured tail
+    /// before the bound: 176s on one prod server (avg 6s). On on-prem/RDS the whole collection is one
+    /// server-scoped item; on Azure SQL DB it applies per database. A cycle that blows the budget ships
+    /// nothing and retries next — eventual consistency, the same tolerance the query_store fetch relies on.
+    /// </summary>
+    public override TimeSpan? PerItemWallClockBudget => TimeSpan.FromSeconds(120);
+
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         var planSelect = context.CapturePlanXml ? PlanSelectFragment : "";

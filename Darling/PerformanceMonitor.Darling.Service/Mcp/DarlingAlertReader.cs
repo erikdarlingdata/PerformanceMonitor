@@ -90,6 +90,7 @@ LIMIT $3";
         var rows = new List<AlertHistoryReadRow>();
 
         await using var command = postgres.CreateCommand(serverId.HasValue ? AlertHistorySql : AlertHistoryAllServersSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddTimestamp(command, sinceUtc);
         DarlingMcpReadParameters.AddTimestamp(command, untilUtc);
         if (serverId.HasValue)
@@ -191,6 +192,7 @@ WHERE id = 1";
         NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(AlertSettingsSelectSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {

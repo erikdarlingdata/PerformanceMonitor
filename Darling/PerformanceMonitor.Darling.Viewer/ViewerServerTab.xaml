@@ -3474,6 +3474,9 @@
                                 <DataGridTextColumn Binding="{Binding YieldCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="YieldCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Yields" FontWeight="Bold" VerticalAlignment="Center" ToolTip="Deliberate 1-second lock-timeout yields: the snapshot collector stepped aside instead of joining a blocking chain. A signal about lock contention on the monitored server, not a collection failure."/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding AbandonedCount, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="90">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="AbandonedCount" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Abandoned" FontWeight="Bold" VerticalAlignment="Center" ToolTip="Cycles the 120-second whole-server wall-clock budget gave up on. Unlike a yield, which retries, an abandoned cycle stored nothing and advanced no watermark - it is collected data you do not have. A sustained rate above 0.5% bands the collector WARNING."/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding FailureRatePercent, StringFormat=N1}" ElementStyle="{StaticResource NumericCell}" Width="85">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="FailureRatePercent" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Fail %" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
@@ -3516,6 +3519,18 @@
                                 <DataGridTextColumn Binding="{Binding DurationFormatted}" Width="90" SortMemberPath="DurationMs">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Duration" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
+                                <!-- #3192: "SQL (ms)" names the PHASE and deliberately not the side. On a collector
+                                     that fetches plan XML or statement text the driver's SQL slice contains the
+                                     monitoring store's own probe and write-back, so a header naming the monitored
+                                     server would be false here - which is why the web grid's "On Server" was
+                                     renamed rather than annotated. The web grid also carries a "Store (in SQL)"
+                                     breakout; this grid does NOT, and the reason is the row type rather than an
+                                     oversight: CollectionLogRow and both backing queries are verbatim copies of
+                                     Lite's, Lite runs no deferred fetch, and Lite's store has no V110 columns - so
+                                     the breakout would either fork a deliberately-verbatim type or add
+                                     permanently-NULL DuckDB columns, which is the outcome the two-store parity
+                                     rule prevents (V110 declined a Lite twin on the same ground).
+                                     get_collection_log's sql_store_ms is the attribution. -->
                                 <DataGridTextColumn Binding="{Binding SqlDurationFormatted}" Width="90" SortMemberPath="SqlDurationMs">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SqlDurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="SQL (ms)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
@@ -3654,6 +3669,8 @@
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" x:Name="PgEngineBanner" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,4" TextWrapping="Wrap"/>
                 <TextBlock Grid.Row="1" x:Name="PgOverviewNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
@@ -3743,6 +3760,20 @@
                         <DataGridTextColumn Header="Description" Binding="{Binding ShortDescription}" Width="*"/>
                     </DataGrid.Columns>
                 </DataGrid>
+
+                <!-- #2719 instance-level CPU, beneath configuration because it is the same kind of fact one
+                     layer further in: extensions say what this server CAN do, settings say what it was told
+                     to do, this says what it is doing right now. Sourced from AWS Performance Insights
+                     rather than a database connection. -->
+                <TextBlock Grid.Row="7" x:Name="PgCpuNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="8" x:Name="PgCpuGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Time" Binding="{Binding Time}" Width="160"/>
+                        <DataGridTextColumn Header="CPU %" Binding="{Binding CpuPercent, StringFormat=N1}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                    </DataGrid.Columns>
+                </DataGrid>
             </Grid>
         </TabItem>
 
@@ -3761,6 +3792,8 @@
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" x:Name="PgBlockingNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
@@ -3813,6 +3846,34 @@
                                     </DataGrid.Columns>
                                 </DataGrid>
                             </Expander>
+                            <!-- #2661 deadlocks, last on the Blocking sub-tab because a deadlock is blocking at its
+                                 limit: a chain the server had to break by cancelling somebody. Below the chains grid and
+                                 the cycles expander because blocking is the far more common finding and this grid is
+                                 usually empty.
+
+                                 Bounded at 220 like the cycles grid beside it, and for the same reason: it shares an Auto
+                                 row and must not take height from the chains it is a consequence of.
+
+                                 LoadPgActivityAsync is the only caller of LoadPgDeadlocksAsync, so this panel is filled
+                                 by the load that fills the panels above it. -->
+                            <TextBlock Grid.Row="3" x:Name="PgDeadlocksNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <DataGrid Grid.Row="4" x:Name="PgDeadlocksGrid" Style="{StaticResource DarkGrid}" MaxHeight="220"
+                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="When" Binding="{Binding OccurredAtUtc, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="150"/>
+                                    <!-- The session the server cancelled. It is the end whose application saw an error,
+                                         which is usually the only end anybody noticed. -->
+                                    <DataGridTextColumn Header="Victim PID" Binding="{Binding VictimPid}" Width="90"/>
+                                    <DataGridTextColumn Header="Sessions" Binding="{Binding ParticipantCount}" Width="80"/>
+                                    <DataGridTextColumn Header="Lock Modes" Binding="{Binding LockModes}" Width="150"/>
+                                    <DataGridTextColumn Header="Resources" Binding="{Binding Resources}" Width="220"/>
+                                    <DataGridTextColumn Header="Victim Statement" Binding="{Binding VictimStatement}" Width="*"/>
+                                    <!-- Re-reads of the SAME report, not repeats: the collector re-reads an overlapping
+                                         log tail on purpose, and a genuinely repeated deadlock is its own row. -->
+                                    <DataGridTextColumn Header="Sightings" Binding="{Binding TimesSeen}" Width="80"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
                         </Grid>
                     </TabItem>
                     <!-- #2544 locks. A SIBLING of Blocking rather than part of it, because they answer
@@ -3852,6 +3913,11 @@
                     <TabItem Header="Query Shapes">
                         <Grid Margin="0,8,0,0">
                             <Grid.RowDefinitions>
+                                <!-- Each section under the statement grid is a triple - a bold header, its note, then its
+                                     grid - and takes three rows: Auto, Auto, star. A panel added here needs all three. Two
+                                     leaves the last grid on a row nobody declared, which WPF clamps into the row above it
+                                     rather than throwing, so the note and the grid land in one cell and the build stays
+                                     green. XamlGridRowRangeTests is what catches that now (#3049). -->
                                 <RowDefinition Height="Auto"/>
                                 <!-- The statement grid is the primary panel and gets twice the height: the
                                      per-database counters below it are the follow-up question (did this
@@ -3860,9 +3926,10 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
-                                                            <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
-                                                            <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
@@ -3998,8 +4065,6 @@
                                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" x:Name="PgVacuumNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
@@ -4169,27 +4234,6 @@
                     </DataGrid.Columns>
                 </DataGrid>
 
-                <!-- #2661 deadlocks, last on Activity because they are blocking at its limit: a chain the
-                     server had to break by cancelling somebody. Below the blocking panels because blocking
-                     is the far more common finding, and a deadlock grid is usually empty. -->
-                <TextBlock Grid.Row="16" x:Name="PgDeadlocksNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                <DataGrid Grid.Row="17" x:Name="PgDeadlocksGrid" Style="{StaticResource DarkGrid}"
-                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
-                    <DataGrid.Columns>
-                        <DataGridTextColumn Header="When" Binding="{Binding OccurredAtUtc, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="150"/>
-                        <!-- The session the server cancelled. It is the end whose application saw an error,
-                             which is usually the only end anybody noticed. -->
-                        <DataGridTextColumn Header="Victim PID" Binding="{Binding VictimPid}" Width="90"/>
-                        <DataGridTextColumn Header="Sessions" Binding="{Binding ParticipantCount}" Width="80"/>
-                        <DataGridTextColumn Header="Lock Modes" Binding="{Binding LockModes}" Width="150"/>
-                        <DataGridTextColumn Header="Resources" Binding="{Binding Resources}" Width="220"/>
-                        <DataGridTextColumn Header="Victim Statement" Binding="{Binding VictimStatement}" Width="*"/>
-                        <!-- Re-reads of the SAME report, not repeats: the collector re-reads an overlapping
-                             log tail on purpose, and a genuinely repeated deadlock is its own row. -->
-                        <DataGridTextColumn Header="Sightings" Binding="{Binding TimesSeen}" Width="80"/>
-                    </DataGrid.Columns>
-                </DataGrid>
             </Grid>
         </TabItem>
 
@@ -4423,7 +4467,7 @@
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
-                                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
@@ -4522,14 +4566,79 @@
                         <DataGridTextColumn Header="Captured" Binding="{Binding CaptureTime}" Width="*"/>
                     </DataGrid.Columns>
                 </DataGrid>
+
+                <!-- Index bloat, ESTIMATED from catalog statistics since #3234 with no page read. Sits
+                     under index usage because the two are halves of one question: is this index earning
+                     its keep, and is it wasting space doing it. Ranked by reclaimable BYTES, never by a
+                     percentage. The Exact Measurement column carries the pgstatindex call this panel used
+                     to be built on. -->
+                <TextBlock Grid.Row="7" x:Name="PgIndexBloatNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <DataGrid Grid.Row="8" x:Name="PgIndexBloatGrid" Style="{StaticResource DarkGrid}"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="150"/>
+                        <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="110"/>
+                        <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="160"/>
+                        <DataGridTextColumn Header="Index" Binding="{Binding IndexName}" Width="190"/>
+                        <!-- PROVENANCE, and it comes before the numbers on purpose. 'estimated' rows are
+                             modelled from catalog statistics and no page was read; 'measured' rows are
+                             older pgstatindex walks still inside retention. A blank Leaf Density means
+                             "never walked" on the first and "the walk found no leaf pages" on the second,
+                             and those two readings lead to opposite conclusions. -->
+                        <DataGridTextColumn Header="Kind" Binding="{Binding MeasurementKind}" Width="90"/>
+                        <DataGridTextColumn Header="Size (bytes)" Binding="{Binding IndexBytes}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Reclaimable (est.)" Binding="{Binding EstimatedReclaimableBytes}" ElementStyle="{StaticResource NumericCell}" Width="150"/>
+                        <!-- A page-count comparison, never derived from a density. Blank whenever the
+                             reason column is populated, so a suppressed estimate cannot read as zero. -->
+                        <DataGridTextColumn Header="Bloat % (est.)" Binding="{Binding EstBloatPct}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                        <!-- The server's RAW figure. A healthy index sits near 90, so this is NOT
+                             100-minus-bloat and the header deliberately does not imply it is. -->
+                        <DataGridTextColumn Header="Leaf Density %" Binding="{Binding AvgLeafDensity}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
+                        <DataGridTextColumn Header="Fragmentation %" Binding="{Binding LeafFragmentation}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
+                        <DataGridTextColumn Header="Empty Pages" Binding="{Binding EmptyPages}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
+                        <!-- WHEN this index was measured, which under rotation (#3153) is not the last
+                             cycle: the collector measures a slice per cycle, so a density here can be
+                             most of a pass old. A density shown without its age is a claim about now
+                             that it is not making, so the column travels with it. Empty on a row the
+                             window holds no measurement of - the reason column says why. -->
+                        <DataGridTextColumn Header="Measured" Binding="{Binding MeasuredAt}" Width="150"/>
+                        <!-- The counterpart. Exactly one of Measured / Estimated carries a time on a row
+                             that has an answer, and neither does on a row that carries a reason, so an
+                             estimate's timestamp is never shown in a column headed "Measured". -->
+                        <DataGridTextColumn Header="Estimated" Binding="{Binding EstimatedAt}" Width="150"/>
+                        <!-- The escalation path, per row: the exact pgstatindex call for this index. It
+                             walks every page, so it is a deliberate one-index action rather than something
+                             to schedule. It is also the ONLY route to a partial or deduplicated index,
+                             which no statistics model can reach. -->
+                        <DataGridTemplateColumn Header="Exact Measurement" Width="260">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding ExactMeasurementCommand}" TextTrimming="CharacterEllipsis" ToolTip="{Binding ExactMeasurementCommand}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTemplateColumn Header="Not Measured Because" Width="*">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding SkippedReason}" TextTrimming="CharacterEllipsis" ToolTip="{Binding SkippedReason}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+
                 <!-- #2603 qualstats. The other half of the index question: the grids above record
                      indexes that were USED, this records predicates that were EVALUATED - including the
                      ones with no index behind them, which nothing else here can see because nothing
-                     records a scan that had no index to record. -->
-                <TextBlock Grid.Row="7" Text="Predicates and planner estimate error - index candidates, and columns the planner misjudges" FontWeight="SemiBold" Margin="0,10,0,2"/>
-                <TextBlock Grid.Row="8" x:Name="PgPredicateStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
+                     records a scan that had no index to record.
+
+                     LAST on the tab, in rows 9-11: it is the only block here that needs three rows
+                     rather than two, and every grid above it is evidence it builds on. -->
+                <TextBlock Grid.Row="9" Text="Predicates and planner estimate error - index candidates, and columns the planner misjudges" FontWeight="SemiBold" Margin="0,10,0,2"/>
+                <TextBlock Grid.Row="10" x:Name="PgPredicateStatsNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                <DataGrid Grid.Row="9" x:Name="PgPredicateStatsGrid" Style="{StaticResource DarkGrid}"
+                <DataGrid Grid.Row="11" x:Name="PgPredicateStatsGrid" Style="{StaticResource DarkGrid}"
                           ContextMenu="{StaticResource PredicateStatsContextMenu}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
@@ -4548,35 +4657,6 @@
                              are a sample and the panel has to say so. -->
                         <DataGridTextColumn Header="Sample Rate" Binding="{Binding SampleRate}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                         <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="*"/>
-                    </DataGrid.Columns>
-                </DataGrid>
-
-                <!-- #2561 index bloat, MEASURED via pgstatindex rather than estimated. Sits under index
-                     usage because the two are halves of one question: is this index earning its keep, and
-                     is it wasting space doing it. Ranked by reclaimable BYTES, never by density. -->
-                <TextBlock Grid.Row="7" x:Name="PgIndexBloatNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                <DataGrid Grid.Row="8" x:Name="PgIndexBloatGrid" Style="{StaticResource DarkGrid}"
-                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
-                    <DataGrid.Columns>
-                        <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="150"/>
-                        <DataGridTextColumn Header="Schema" Binding="{Binding SchemaName}" Width="110"/>
-                        <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="160"/>
-                        <DataGridTextColumn Header="Index" Binding="{Binding IndexName}" Width="190"/>
-                        <DataGridTextColumn Header="Size (bytes)" Binding="{Binding IndexBytes}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
-                        <DataGridTextColumn Header="Reclaimable (est.)" Binding="{Binding EstimatedReclaimableBytes}" ElementStyle="{StaticResource NumericCell}" Width="150"/>
-                        <!-- The server's RAW figure. A healthy index sits near 90, so this is NOT
-                             100-minus-bloat and the header deliberately does not imply it is. -->
-                        <DataGridTextColumn Header="Leaf Density %" Binding="{Binding AvgLeafDensity}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
-                        <DataGridTextColumn Header="Fragmentation %" Binding="{Binding LeafFragmentation}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
-                        <DataGridTextColumn Header="Empty Pages" Binding="{Binding EmptyPages}" ElementStyle="{StaticResource NumericCell}" Width="120"/>
-                        <DataGridTemplateColumn Header="Not Measured Because" Width="*">
-                            <DataGridTemplateColumn.CellTemplate>
-                                <DataTemplate>
-                                    <TextBlock Text="{Binding SkippedReason}" TextTrimming="CharacterEllipsis" ToolTip="{Binding SkippedReason}"/>
-                                </DataTemplate>
-                            </DataGridTemplateColumn.CellTemplate>
-                        </DataGridTemplateColumn>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>

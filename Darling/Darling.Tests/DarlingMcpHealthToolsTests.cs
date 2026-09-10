@@ -99,7 +99,9 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
     public void ServerSummarySql_LatestCpuMemory_HourWindowBlockingDeadlock()
     {
         Assert.Contains("FROM v_cpu_utilization_stats", Reader.ServerSummaryCpuSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY sample_time DESC", Reader.ServerSummaryCpuSql, StringComparison.Ordinal);
+        /* Partition column first, sample_time as the tiebreak — LatestCpuReadShapeSqlTests carries the
+           reasoning and the tree-wide guard. */
+        Assert.Contains("ORDER BY collection_time DESC, sample_time DESC", Reader.ServerSummaryCpuSql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 1", Reader.ServerSummaryCpuSql, StringComparison.Ordinal);
 
         Assert.Contains("total_server_memory_mb", Reader.ServerSummaryMemorySql, StringComparison.Ordinal);

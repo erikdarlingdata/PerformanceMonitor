@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -125,5 +126,141 @@ public class DarlingMcpPgPlanToolsTests
 
         Assert.Equal(JsonValueKind.String, plan.ValueKind);
         Assert.Equal("{not valid json", plan.GetString());
+    }
+
+    /* ── get_pg_plan_capture_readiness (#3070) ── */
+
+    /// <summary>
+    /// The facets as the shared reader hands them over: causal order, one unsatisfied facet in the middle
+    /// of the sequence and two at the end, so a projection that sorted by satisfaction would show.
+    ///
+    /// <para>All six the collector emits, <c>message_locale</c> (#3061) included, because it is the one that
+    /// reaches past plan capture — it reports whether the target writes its log in English, which every
+    /// target-side log read matches — and it is last in the causal order rather than absent from it.</para>
+    /// </summary>
+    private static List<DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessRow> Facets() => new()
+    {
+        new(Facet: "extension_available", IsSatisfied: true, Observed: "(loaded, and therefore available)",
+            Detail: "auto_explain is available on this server.", CaptureTime: new DateTime(2026, 8, 25, 12, 0, 0, DateTimeKind.Utc)),
+        new(Facet: "library_loaded", IsSatisfied: true, Observed: "auto_explain",
+            Detail: "auto_explain must be listed in shared_preload_libraries.", CaptureTime: new DateTime(2026, 8, 25, 12, 0, 0, DateTimeKind.Utc)),
+        new(Facet: "capture_threshold", IsSatisfied: false, Observed: "-1",
+            Detail: "auto_explain IS loaded but log_min_duration is -1, so it captures NOTHING.", CaptureTime: new DateTime(2026, 8, 25, 12, 0, 0, DateTimeKind.Utc)),
+        new(Facet: "plan_text_setting", IsSatisfied: true, Observed: "json",
+            Detail: "The format auto_explain writes plans in.", CaptureTime: new DateTime(2026, 8, 25, 12, 0, 0, DateTimeKind.Utc)),
+        new(Facet: "plan_attribution", IsSatisfied: false, Observed: "%m [%p] ",
+            Detail: "log_line_prefix does NOT carry %Q, so every captured plan is an orphan.", CaptureTime: new DateTime(2026, 8, 25, 12, 0, 0, DateTimeKind.Utc)),
+        new(Facet: "message_locale", IsSatisfied: false, Observed: "de_DE.UTF-8",
+            Detail: "PostgreSQL writes its own messages in this locale, severity label included.", CaptureTime: new DateTime(2026, 8, 25, 12, 0, 0, DateTimeKind.Utc)),
+    };
+
+    /// <summary>
+    /// <b><c>detail</c> reaches the wire on every row.</b> It is the per-facet remedy and the reason this
+    /// read exists: before #3070 its only reader was the WPF tab, so on a Linux host and to every agent the
+    /// remedy did not exist. A projection that carried facet and observed only would look complete.
+    ///
+    /// <para>The satisfied facets are asserted present for the same reason. The other path to these rows,
+    /// <c>UnsatisfiedFacetsAsync</c>, filters to <c>is_satisfied IS NOT TRUE</c> and cannot answer "what is
+    /// the state of this server's plan capture" at all — which is the question somebody has when the plans
+    /// are missing, and the gap this tool closes rather than duplicating.</para>
+    ///
+    /// <para>And the ORDER is the reader's, not re-sorted here: the facets have a causal sequence
+    /// (<c>library_loaded</c> gates <c>capture_threshold</c>) and the remedies only make sense read in it.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void EveryReadinessFacet_CarriesItsRemedy_InTheReadersCausalOrder()
+    {
+        using var doc = JsonDocument.Parse(DarlingMcpPgPlanTools.BuildReadinessJson("srv", 24, Facets(), 25));
+        var root = doc.RootElement;
+
+        Assert.Equal(6, root.GetProperty("facet_count").GetInt32());
+        Assert.False(root.GetProperty("truncated").GetBoolean());
+
+        var names = new List<string>();
+        foreach (var facet in root.GetProperty("facets").EnumerateArray())
+        {
+            names.Add(facet.GetProperty("facet").GetString()!);
+            Assert.False(string.IsNullOrWhiteSpace(facet.GetProperty("detail").GetString()));
+            Assert.False(string.IsNullOrWhiteSpace(facet.GetProperty("observed").GetString()));
+            Assert.True(facet.TryGetProperty("is_satisfied", out _));
+            Assert.True(facet.TryGetProperty("last_observed", out _));
+        }
+
+        Assert.Equal(
+            new[] { "extension_available", "library_loaded", "capture_threshold", "plan_text_setting", "plan_attribution", "message_locale" },
+            names);
+    }
+
+    /// <summary>
+    /// The unsatisfied facets are NAMED rather than reduced to a verdict. There is deliberately no
+    /// ready/not-ready boolean: an unmet <c>plan_attribution</c> still captures plans and merely orphans
+    /// them, and <c>message_locale</c> is about every target-side log read rather than about capture, so one
+    /// flag would have to pick a meaning and be wrong under the other — the exact collapse the collector
+    /// splits its rows to avoid.
+    /// </summary>
+    [Fact]
+    public void TheUnsatisfiedFacetsAreNamed_AndThereIsNoSingleVerdict()
+    {
+        using var doc = JsonDocument.Parse(DarlingMcpPgPlanTools.BuildReadinessJson("srv", 24, Facets(), 25));
+        var root = doc.RootElement;
+
+        var unmet = root.GetProperty("unsatisfied_facets");
+        Assert.Equal(JsonValueKind.Array, unmet.ValueKind);
+        Assert.Equal(new[] { "capture_threshold", "plan_attribution", "message_locale" },
+            unmet.EnumerateArray().Select(f => f.GetString()).ToArray());
+
+        Assert.False(root.TryGetProperty("ready", out _));
+        Assert.False(root.TryGetProperty("is_ready", out _));
+    }
+
+    /// <summary>
+    /// <c>detail</c> travels VERBATIM — not summarised, not truncated, not reflowed.
+    ///
+    /// <para>The facet details are long on purpose and the load-bearing parts are at the far end of them.
+    /// <c>message_locale</c>'s satisfied arm spends its last clause stating its own limit — <c>lc_messages</c>
+    /// is overridable per role and per database, so an override aimed at the monitoring login makes the row
+    /// agree with itself and not with the server — and its unset arm exists to say that empty is UNKNOWN
+    /// rather than safe. A projection that shortened these for readability would drop exactly the caveats
+    /// that stop a reader over-trusting a satisfied row, so the assertion is character-for-character
+    /// equality against a string with everything awkward in it: quotes, uppercase emphasis, an
+    /// <c>lc_messages = 'C'</c> remedy, and a tail sentence past any plausible truncation point.</para>
+    /// </summary>
+    [Fact]
+    public void TheDetailTravelsVerbatim_BecauseItsCaveatsAreAtTheEndOfIt()
+    {
+        const string Long =
+            "lc_messages is EMPTY, so PostgreSQL takes its message language from the server process's "
+            + "environment - which no SQL read can see. That makes this UNKNOWN, not wrong. Set "
+            + "lc_messages = 'C' to make it knowable; it is a dynamic parameter and needs a reload, not a "
+            + "restart. One honest caveat: a PostgreSQL compiled without NLS support writes English "
+            + "whatever this is set to, and SQL cannot see that.";
+
+        var rows = new List<DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessRow>
+        {
+            Facets()[^1] with { Detail = Long },
+        };
+
+        using var doc = JsonDocument.Parse(DarlingMcpPgPlanTools.BuildReadinessJson("srv", 24, rows, 25));
+
+        Assert.Equal(Long, doc.RootElement.GetProperty("facets")[0].GetProperty("detail").GetString());
+    }
+
+    /// <summary>
+    /// #2629's lesson, on a read whose row count makes it look unnecessary: a summary taken over a CAPPED
+    /// result describes the page and reads as a fact about the server. <c>limit</c> is the caller's, so the
+    /// unsatisfied summary is withheld with a sentence saying why rather than computed over what arrived.
+    /// </summary>
+    [Fact]
+    public void ACappedResult_WithholdsTheUnsatisfiedSummary_RatherThanDescribingThePage()
+    {
+        var firstTwo = Facets().GetRange(0, 2);
+
+        using var doc = JsonDocument.Parse(DarlingMcpPgPlanTools.BuildReadinessJson("srv", 24, firstTwo, 2));
+        var root = doc.RootElement;
+
+        Assert.True(root.GetProperty("truncated").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("unsatisfied_facets").ValueKind);
+        Assert.Contains("TRUNCATED", root.GetProperty("note").GetString(), StringComparison.Ordinal);
     }
 }

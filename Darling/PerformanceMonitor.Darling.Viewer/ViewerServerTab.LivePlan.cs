@@ -156,7 +156,7 @@ public partial class ViewerServerTab
             var result = await _dataService.FetchLivePlanAsync(_server.ServerId, argsJson, _planLoadCts!.Token);
             if (result.Status == LivePlanFetchStatus.Fetched)
             {
-                OpenPlanTab(result.PlanXml!, label, queryText); /* HidePlanLoading runs inside OpenPlanTab */
+                _ = OpenPlanTab(result.PlanXml!, label, queryText); /* HidePlanLoading runs inside OpenPlanTab */
             }
             else
             {
@@ -208,7 +208,7 @@ public partial class ViewerServerTab
 
                 if (result.Status == LivePlanFetchStatus.Fetched)
                 {
-                    OpenPlanTab(result.PlanXml!, label, queryText); /* HidePlanLoading runs inside OpenPlanTab */
+                    _ = OpenPlanTab(result.PlanXml!, label, queryText); /* HidePlanLoading runs inside OpenPlanTab */
                     return;
                 }
 

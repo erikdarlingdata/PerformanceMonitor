@@ -63,7 +63,9 @@ public interface IAlertSettings
     /// <c>{{threshold}}</c>, <c>{{severity}}</c>, <c>{{context}}</c> and <c>{{timestamp}}</c>
     /// placeholders substituted per alert, plus the #2302 automation tokens:
     /// <c>{{context_json}}</c> / <c>{{incidents_json}}</c> (raw JSON values, substituted unquoted)
-    /// and <c>{{dedup_key}}</c> (the PagerDuty-shape correlation key). Empty falls back to
+    /// and <c>{{dedup_key}}</c> (the PagerDuty-shape correlation key), the #2710 tag tokens
+    /// <c>{{resource_name}}</c> / <c>{{database}}</c>, and <c>{{triage_url}}</c> (the computed triage-page
+    /// link, empty when <see cref="TriageBaseUrl"/> is unset). Empty falls back to
     /// <see cref="WebhookAlertService.DefaultGenericBodyTemplate"/>.
     /// </summary>
     string GenericWebhookBodyTemplate { get; }
@@ -87,4 +89,16 @@ public interface IAlertSettings
     /* Scheduled-analysis notifications */
     double AnalysisNotifySeverity { get; }
     int    AnalysisNotifyCooldownMinutes { get; }
+
+    /// <summary>
+    /// The externally reachable base URL of the app's own web dashboard (#2710) — e.g.
+    /// <c>http://10.0.0.5:5153</c> — used ONLY to build the per-alert triage-page link every webhook channel
+    /// carries (<see cref="TriageLink.Build"/>). Empty means "no link" and every payload renders exactly as it
+    /// did before the link existed; alerts must never fail because this is unset. The service cannot discover
+    /// this itself (its bind address is not necessarily the address recipients can reach), so it is
+    /// configuration: Darling reads <c>web.publicBaseUrl</c> from darling.json (file-authoritative, beside the
+    /// web host's own binding config — deployment plumbing, not an alert-tuning knob, so it is deliberately
+    /// NOT a store column and survives store config reloads); Lite serves no web page and always returns empty.
+    /// </summary>
+    string TriageBaseUrl { get; }
 }

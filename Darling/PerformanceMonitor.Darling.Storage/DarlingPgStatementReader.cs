@@ -159,6 +159,7 @@ public static class DarlingPgStatementReader
     {
         var rows = new List<PgStatementRow>();
         await using var command = postgres.CreateCommand(PgTopQueriesSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* Kind-Unspecified at the BIND, per the store's naive-UTC discipline: a Kind=Utc DateTime makes
            Npgsql infer timestamptz, and PostgreSQL then resolves the comparison against these naive

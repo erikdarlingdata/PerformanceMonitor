@@ -245,7 +245,7 @@ SELECT
     ///
     /// <para>The estimate is CALIBRATED from what the rollup has already materialized (bytes per bucket, scaled
     /// by the buckets to add) whenever there is a sample — which on the stores this exists for there always is,
-    /// since their refresh policies have been materializing a trailing 3-day window all along. With no sample at
+    /// since their refresh policies have been materializing a trailing start-offset window all along. With no sample at
     /// all it falls back to a fraction of raw's own bytes over the same span and says so, so an operator can
     /// tell a measured number from a bounding one.</para>
     /// </summary>
@@ -416,7 +416,8 @@ SELECT
     /// <summary>
     /// TimescaleDB serializes refreshes of the same aggregate and raises <see cref="ConcurrentRefreshSqlState"/>
     /// (<c>55P03 lock_not_available</c>) rather than waiting. This verb runs while the SERVICE IS UP, so the
-    /// aggregate's own refresh policy — which fires roughly hourly over a trailing 3-day window — will
+    /// aggregate's own refresh policy — which fires roughly hourly over a trailing
+    /// <see cref="TimescaleSupport.HourlyRefreshStartOffset"/> window — will
     /// eventually land on top of a slice. Caught live on the gated PostgreSQL 18.4 / TimescaleDB 2.28.1 leg:
     /// <c>EnsureContinuousAggregatesAsync</c> attaches the policy, the policy runs immediately, and the very
     /// next slice failed.

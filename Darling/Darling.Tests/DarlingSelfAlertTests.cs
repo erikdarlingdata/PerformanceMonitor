@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Globalization;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -120,7 +121,7 @@ public sealed class DarlingSelfAlertTests
         public Task<DateTime?> GetLastWebhookSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
 
-        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName) =>
+        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
     }
 
@@ -173,8 +174,15 @@ public sealed class DarlingSelfAlertTests
         /// <summary>#1696 (V37): AG disconnect re-fire minutes. Default 0 = off, the shipped behavior.</summary>
         public int AgDisconnectRefireMinutes { get; set; }
 
-        /// <summary>#2136 (V57): the Store Job Over Cadence warning percent. Default is the shipped 25.</summary>
-        public int StoreJobCadenceWarnPercent { get; set; } = 25;
+        /// <summary>#2136 (V57): the Store Job Over Cadence warning percent. Default is the shipped one,
+        /// taken from the product rather than restated — a literal here would let the harness agree with a
+        /// frozen default and hide exactly the drift #3060's pins exist to catch.</summary>
+        public int StoreJobCadenceWarnPercent { get; set; } = TimescaleSupport.RefreshSlotPercentOfHourlyCadence;
+
+        /// <summary>#3060: set false to build the evaluator with the knob seam UNSUPPLIED, so the
+        /// constructor's own fallback is what judges. Otherwise that fallback is a product default no test
+        /// ever reaches — the shape a stale literal survives in.</summary>
+        public bool WireCadenceKnob { get; set; } = true;
 
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
@@ -193,7 +201,7 @@ public sealed class DarlingSelfAlertTests
             agLagAlertSeconds: () => AgLagAlertSeconds,
             agRedoQueueAlertKb: () => AgRedoQueueAlertKb,
             agDisconnectRefireMinutes: () => AgDisconnectRefireMinutes,
-            storeJobCadenceWarnPercent: () => StoreJobCadenceWarnPercent);
+            storeJobCadenceWarnPercent: WireCadenceKnob ? () => StoreJobCadenceWarnPercent : null);
     }
 
     /* ---------------- #991 Availability Group fixtures ---------------- */
@@ -325,8 +333,9 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyCollectionStoppedAsync(ServerId, Name, stopped: false, "", Ct);
         var resumed = Assert.Single(h.History.Records);
         Assert.Equal("Collection Resumed", resumed.MetricName);
-        Assert.True(resumed.AlertSent);
-        Assert.Equal("tray", resumed.NotificationType);
+        /* #3169: a resolution has no send channel, and says so rather than claiming a delivery. */
+        Assert.False(resumed.AlertSent);
+        Assert.Equal(AlertDelivery.ChannelNotApplicable, resumed.NotificationType);
         Assert.Single(h.Deliverer.Outcomes); /* only the original fire went to the deliverer */
 
         /* Still healthy on the next sweep — no duplicate resumed row (resolution is edge-triggered too). */
@@ -422,8 +431,8 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyAgentNotRunningAsync(ServerId, Name, agentRunningFresh: true, agentEverSeenRunning: true, Ct);
         var restarted = Assert.Single(h.History.Records);
         Assert.Equal("Agent Restarted", restarted.MetricName);
-        Assert.True(restarted.AlertSent);
-        Assert.Equal("tray", restarted.NotificationType);
+        Assert.False(restarted.AlertSent);
+        Assert.Equal(AlertDelivery.ChannelNotApplicable, restarted.NotificationType);
         Assert.Single(h.Deliverer.Outcomes);
 
         /* Still running on the next sweep — no duplicate resolution (edge-triggered). */
@@ -894,8 +903,8 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyDiskPressureAsync(50 * Gib, 100 * Gib, null, Ct);
         var resolved = Assert.Single(h.History.Records);
         Assert.Equal("Store Disk Pressure Resolved", resolved.MetricName);
-        Assert.True(resolved.AlertSent);
-        Assert.Equal("tray", resolved.NotificationType);
+        Assert.False(resolved.AlertSent);
+        Assert.Equal(AlertDelivery.ChannelNotApplicable, resolved.NotificationType);
         Assert.Single(h.Deliverer.Outcomes);   /* only the original fire went to the deliverer */
 
         /* Still healthy on the next sweep — no duplicate resolved row (resolution is edge-triggered too). */
@@ -1197,7 +1206,7 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyCompressionJobsStuckAsync(Stuck(), rearm.Delegate, Ct);
         var resolved = Assert.Single(h.History.Records);
         Assert.Equal("Compression Job Recovered", resolved.MetricName);
-        Assert.True(resolved.AlertSent);
+        Assert.False(resolved.AlertSent); /* #3169: a resolution has no send channel to have used */
         Assert.Contains("running on schedule again", resolved.DetailText, StringComparison.Ordinal);
 
         /* Still healthy next check — no duplicate resolution (edge-triggered), and a re-stuck job would be a
@@ -1982,8 +1991,8 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(Name, record.ServerName);
         Assert.Equal("CPU Resolved", record.MetricName);           /* the "…Resolved/Cleared" title, Dashboard shape */
         Assert.Equal($"{Name}: Total CPU back to 12%", record.DetailText);
-        Assert.True(record.AlertSent);
-        Assert.Equal("tray", record.NotificationType);
+        Assert.False(record.AlertSent);
+        Assert.Equal(AlertDelivery.ChannelNotApplicable, record.NotificationType);
         Assert.Null(record.SendError);
         Assert.False(record.Muted);
     }
@@ -2017,7 +2026,7 @@ public sealed class DarlingSelfAlertTests
         await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 10, 10, false, false), Ct);
         var resolved = Assert.Single(history.Records);
         Assert.Equal("CPU Resolved", resolved.MetricName);
-        Assert.Equal("tray", resolved.NotificationType);
+        Assert.Equal(AlertDelivery.ChannelNotApplicable, resolved.NotificationType);
     }
 
     private sealed class StubReadAdapter : IAlertReadAdapter
@@ -2358,27 +2367,307 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         Assert.Contains(warnings, x => x.Message.Contains("[muted]", StringComparison.Ordinal));
     }
 
-    /* ---------------- #2136 Store Job Over Cadence ---------------- */
+    /* ---------------- #2813 Retention Held ---------------- */
 
-    private static StoreJobCadenceReading CadenceJob(
-        long id = 1028, long? durMs = 900_000, long schedMs = 3_600_000,
-        string name = "policy_compression query_store_stats") =>
-        new(id, name, durMs, schedMs);
+    /* The production shape this comes from: query_store_stats held 18 days under a 4-day policy across 19
+       chunks — 4.52x its horizon, held for 16 days, and invisible in every stored metric because a paused
+       job is not a failing one. Defaults reproduce that reading; each test varies the one axis it names. */
+    private static RetentionHoldReading HeldPolicy(
+        long id = 1072, bool armed = false, long spanSeconds = 1_561_449, long? horizonSeconds = 345_600,
+        long chunks = 19, string hypertable = "query_store_stats", string dropAfter = "4 days") =>
+        new(id, hypertable, armed, dropAfter, chunks, spanSeconds, horizonSeconds);
 
     [Fact]
-    public async Task JobOverCadence_WarningTier_FiresAtTheKnobPercent()
+    public async Task RetentionHeld_HeldPastTheWarnRatio_Fires()
     {
         var h = new Harness();
         var e = h.Build();
 
-        /* 900s of 3600s = exactly 25%, the shipped default — the boundary is inclusive. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.RetentionHoldMetric, fired.MetricName);
+        Assert.Equal("retentionhold:1072", fired.ServerKey);  /* prefixed so it never parses as a server_id */
+        Assert.Contains("held at 4.5x", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RetentionHeld_TheProductionIncident_ReadsCritical()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* 4.52x — the real reading. It must land CRITICAL, not Warning: at four times its intended depth the
+           tier is the dominant and still-compounding contributor to store size. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+
+        Assert.Equal(AlertSeverityLevel.Critical, Assert.Single(h.Deliverer.Outcomes).Severity);
+    }
+
+    [Fact]
+    public async Task RetentionHeld_ArmedPolicy_StaysSilentEvenWhenTheTierIsDeep()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* The SAME 4.52x depth, but armed. Over-horizon alone is not the signal — retention drops whole
+           chunks and a tier can legitimately sit past its horizon while purging normally. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy(armed: true) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task RetentionHeld_FreshlyCreatedPausedPolicy_StaysSilent()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* EnsureRetentionPoliciesAsync creates EVERY policy paused — there is no window in which TimescaleDB
+           would not run a new policy's first check immediately. So held-alone must never fire, or every fresh
+           store alerts on every start. One hour of history under a 4-day horizon is 0.01x. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy(spanSeconds: 3_600) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task RetentionHeld_WholeChunkGranularity_StaysSilent()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Retention drops whole CHUNKS, so a 4-day policy with 1-day chunks legitimately holds ~5 days
+           (1.25x) while working perfectly. The warn ratio sits clear of that floor with margin. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy(spanSeconds: 5 * 86_400) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task RetentionHeld_WithNoMeasurableRatio_StaysSilent()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* No chunks yet, and no readable horizon. Unmeasured is not innocent, but it is not evidence either
+           — the agent-status discipline: no signal, no alert, and no touching the standing state. */
+        await e.ApplyRetentionHoldsAsync(
+            new[] { HeldPolicy(id: 1, spanSeconds: 0, chunks: 0), HeldPolicy(id: 2, horizonSeconds: null) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task RetentionHeld_WhenThePolicyArms_RecordsOneResolution()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The backfill landed and the gate released it. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy(armed: true) }, Ct);
+
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal("Retention Hold Cleared", resolution.MetricName);
+        Assert.Contains("armed again", resolution.DetailText!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RetentionHeld_QuietStore_WritesNoResolutionRows()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Nothing was ever standing, so clearing must be a no-op. Otherwise every hourly sweep on a healthy
+           store writes a resolution row for every armed policy. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy(armed: true), HeldPolicy(id: 1073, armed: true) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public void RetentionHeld_TheWarnRatioClearsChunkGranularityAndCatchesTheIncident()
+    {
+        /* Both bounds asserted, not just described. Below: whole-chunk granularity on the shipped raw tier
+           (4-day horizon, 1-day chunks) tops out at 1.25x, which must stay under the warn ratio. Above: the
+           motivating incident sat at 4.52x and must reach CRITICAL. */
+        Assert.True(DarlingSelfAlertEvaluator.RetentionHoldWarnRatio > 1.25);
+        Assert.True(DarlingSelfAlertEvaluator.RetentionHoldCriticalRatio > DarlingSelfAlertEvaluator.RetentionHoldWarnRatio);
+        Assert.True(4.52 >= DarlingSelfAlertEvaluator.RetentionHoldCriticalRatio);
+    }
+
+    [Fact]
+    public void RetentionHoldReadSql_IsScopedToThisProductsOwnRetentionPolicies()
+    {
+        /* Review catch, and it is a CORRECTNESS pin rather than a tidiness one. This reading feeds an alert
+           that asserts the rollup-coverage gate is the cause and tells the reader NOT to arm the policy by
+           hand. For a retention policy this product never created - one an operator paused deliberately on
+           their own hypertable in the same instance - that attribution is false and the advice is wrong.
+           The mutating siblings scope the same way; verified red by removing the predicate, which let a
+           third-party paused policy through. */
+        Assert.Contains("j.proc_name = 'policy_retention'", TimescaleSupport.RetentionHoldReadSql, StringComparison.Ordinal);
+        Assert.Contains("j.hypertable_schema = 'collect'", TimescaleSupport.RetentionHoldReadSql, StringComparison.Ordinal);
+
+        /* The span must be normalized, not read raw: chunks.range_start is declared timestamptz even for the
+           naive-timestamp partitioning column every collector table uses. Proven session-independent under
+           UTC, UTC+14 and UTC-7. */
+        Assert.Contains("AT TIME ZONE 'UTC'", TimescaleSupport.RetentionHoldReadSql, StringComparison.Ordinal);
+
+        /* Catalog metadata only - never a scan of a multi-hundred-GB hypertable. */
+        Assert.Contains("timescaledb_information.chunks", TimescaleSupport.RetentionHoldReadSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RetentionHoldRead_UsesASteadyStateDeadlineNotTheBulkSetupBudget()
+    {
+        /* Review catch. SetupTimeoutSeconds (300s) is documented for one-time BULK SETUP; this read runs
+           hourly, sequentially in a sweep tick shared with three sibling checks, so reusing that budget
+           would let one stalled catalog read stall the tick for five minutes - the exact shape #2810 and
+           #2871 removed from the analysis pass in this same release. */
+        Assert.Equal(30, TimescaleSupport.JobCatalogReadTimeoutSeconds);
+        Assert.True(TimescaleSupport.JobCatalogReadTimeoutSeconds < 300);  /* the SetupTimeoutSeconds bulk-setup budget */
+    }
+
+    [Fact]
+    public void RetentionHoldReading_RatioIsNullRatherThanZeroWhenUnmeasurable()
+    {
+        /* A ratio over an unmeasurable denominator is not a number. Returning 0 would read as "perfectly
+           retained", which is the false-reassurance shape this whole issue is about. */
+        Assert.Null(new RetentionHoldReading(1, "t", false, "4 days", 0, null, 345_600).OverHorizonRatio);
+        Assert.Null(new RetentionHoldReading(1, "t", false, "", 19, 1_561_449, null).OverHorizonRatio);
+        Assert.Null(new RetentionHoldReading(1, "t", false, "0", 19, 1_561_449, 0).OverHorizonRatio);
+        Assert.Equal(4.52, new RetentionHoldReading(1, "t", false, "4 days", 19, 1_561_449, 345_600).OverHorizonRatio!.Value, 2);
+    }
+
+    /* ---------------- #2136 Store Job Over Cadence ---------------- */
+
+    /* The cadence every hourly store policy has, and the denominator the warning knob is a share of. */
+    private const long HourlyCadenceMs = 3_600_000;
+
+    /* The shipped knob's own threshold in ms, derived from the knob rather than written down. #3060 derived
+       it from the grid — one refresh slot, 3,600,000 divided by the slot count — and #3174 broke that
+       derivation, because a non-uniform grid has no single slot and V57's applied column default means the
+       percent cannot move (TimescaleSupport.RefreshSlotPercentOfHourlyCadence). So the boundary cases below
+       move with the KNOB, which is the thing the alert actually compares against. The grid-side ordering that
+       used to be implied here is asserted where it lives, in TimescaleSupportTests and
+       TimescaleContinuousAggregateTests. */
+    private const long KnobThresholdMs =
+        HourlyCadenceMs * TimescaleSupport.RefreshSlotPercentOfHourlyCadence / 100;
+
+    /* One second under whatever the shipped knob resolves to. */
+    private const long JustUnderTheKnobMs = KnobThresholdMs - 1_000;
+
+    private static StoreJobCadenceReading CadenceJob(
+        long id = 1028, long? durMs = KnobThresholdMs, long schedMs = HourlyCadenceMs,
+        string name = "policy_compression query_store_stats") =>
+        new(id, name, durMs, schedMs);
+
+    /* A refresh policy's label, in the shape JobCadenceReadSql builds it: proc_name first, then the
+       hypertable. Whether the remedy text may say "extend schedule_interval" turns on this. */
+    private static StoreJobCadenceReading RefreshCadenceJob(long? durMs = KnobThresholdMs) =>
+        CadenceJob(id: 1054, durMs: durMs,
+            name: TimescaleSupport.RefreshPolicyProcName + " query_store_stats_interval_hourly");
+
+    [Fact]
+    public async Task JobOverCadence_WarningTier_FiresAtOneRefreshSlot_TheShippedDefault()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* A run of exactly the shipped default's threshold. The boundary is inclusive, and BOTH sides derive
+           from the same knob — so a moved knob moves the reading and the threshold together and this stays
+           the boundary case rather than falling silently to one side of a frozen literal. */
         await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal(DarlingSelfAlertEvaluator.JobCadenceMetric, fired.MetricName);
         Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
         Assert.Equal("storejob:1028", fired.ServerKey);  /* prefixed so it never parses as a server_id */
-        Assert.Contains("25% of its schedule interval", fired.ShortMessage, StringComparison.Ordinal);
+
+        /* The threshold the alert reports is the derived default, not a coincident 25. */
+        Assert.Equal(
+            $"{TimescaleSupport.RefreshSlotPercentOfHourlyCadence}%", fired.ThresholdValue);
+
+        var renderedPercent = (100.0 * KnobThresholdMs / HourlyCadenceMs).ToString("F0", CultureInfo.InvariantCulture);
+        Assert.Contains($"{renderedPercent}% of its schedule interval", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3060: the shipped default fires no later than the window the compression grid assumes a refresh fits
+    /// inside, and that ORDERING is what survived #3174 breaking the derivation behind it.
+    ///
+    /// <para><b>The tightness half is gone and is not replaced.</b> It was
+    /// <c>(percent + 1) * RefreshPhaseSlots &gt; 100</c> — "the latest value that still clears one slot" —
+    /// and it needed a uniform slot count to be expressible. A non-uniform grid has nothing for it to be
+    /// tight against, and the knob cannot move to regain tightness because V57's column default is already
+    /// applied on every live store. So the knob fires EARLIER than it strictly has to, which is the safe
+    /// direction, and the V57 pin below is what stops the seed drifting from the rung.</para>
+    /// </summary>
+    [Fact]
+    public void JobCadenceDefault_IsOneRefreshSlot_AndFiresNoLaterThanOne()
+    {
+        /* The product's own seed, so the harness above cannot agree with a stale product default. */
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotPercentOfHourlyCadence,
+            new AlertsConfig().StoreJobCadenceWarnPercent);
+
+        /* Fires at or BEFORE the heaviest refresh's window. This is the guarantee the issue was filed on — a
+           knob unrelated to the grid fires AFTER the point it exists to precede. Asserted in SECONDS,
+           because that is the only unit the two sides still share. */
+        Assert.True(
+            HourlyCadenceMs * TimescaleSupport.RefreshSlotPercentOfHourlyCadence / 100
+            <= TimescaleSupport.RefreshPhaseSlotSeconds * 1_000L,
+            $"a default of {TimescaleSupport.RefreshSlotPercentOfHourlyCadence}% of an hourly cadence fires at "
+            + $"{HourlyCadenceMs * TimescaleSupport.RefreshSlotPercentOfHourlyCadence / 100 / 1_000}s against a "
+            + $"{TimescaleSupport.RefreshPhaseSlotSeconds}s window — after the compression grid's stated "
+            + "precondition is already false, which is the failure #3060 is about. The knob cannot move "
+            + "without a rung (V57), so the repair is the grid (#3174)");
+
+        /* The seed must survive its own clamp, asserted through the REAL clamp rather than a copy of its
+           bounds — a step fine enough to drive the derived default below the floor would have the clamp
+           silently raise it back above one slot, which is the same defect in a new place. */
+        var config = new DarlingConfig();
+        config.Alerts.StoreJobCadenceWarnPercent = TimescaleSupport.RefreshSlotPercentOfHourlyCadence;
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotPercentOfHourlyCadence,
+            new DarlingAlertSettings(config).StoreJobCadenceWarnPercent);
+
+        /* V57's column default is the already-applied twin of the C# seed and cannot move without a rung;
+           the store column wins on a fresh store, so a derived seed that drifts from it would ship a default
+           nobody chose. */
+        var v57 = PgMigrations.Scripts.Single(m => m.Version == 57);
+        Assert.Contains(
+            $"store_job_cadence_warn_percent integer NOT NULL DEFAULT {TimescaleSupport.RefreshSlotPercentOfHourlyCadence}",
+            v57.Sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3060: the constructor's fallback for an unsupplied knob seam is the same derived slot, exercised
+    /// through the fallback rather than asserted about it. It is the copy of this number that no wired test
+    /// reaches, so it is the one a stale literal would have survived in.
+    /// </summary>
+    [Fact]
+    public async Task JobOverCadence_WithTheKnobSeamUnsupplied_StillJudgesAtOneRefreshSlot()
+    {
+        var h = new Harness { WireCadenceKnob = false };
+        var e = h.Build();
+
+        await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal($"{TimescaleSupport.RefreshSlotPercentOfHourlyCadence}%", fired.ThresholdValue);
+
+        /* And a second under that same fallback's threshold stays silent, so the assertion above is a
+           threshold and not merely "it fires on anything". Derived from the threshold rather than from the
+           slot: the two coincide only while the step divides 100. */
+        var quiet = new Harness { WireCadenceKnob = false };
+        var e2 = quiet.Build();
+        await e2.ApplyStoreJobCadenceAsync(new[] { CadenceJob(durMs: JustUnderTheKnobMs) }, Ct);
+        Assert.Empty(quiet.Deliverer.Outcomes);
     }
 
     [Fact]
@@ -2387,11 +2676,91 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         var h = new Harness();
         var e = h.Build();
 
-        /* 249s of 3600s ≈ 7% — the production store's worst job today. Must not fire at the default 25. */
+        /* 249s of 3600s ≈ 6.9% — inside the body of the measured distribution on both production stores
+           (p99 is 6.1% on the busier one, #3060), so it must not fire at the shipped default. */
         await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob(durMs: 249_000) }, Ct);
 
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>
+    /// #3060, the user-facing half: the remedy an operator reads must not tell them to widen an interval
+    /// that doubles as an <c>end_offset</c>. Asserted on BOTH arms in one test, because the claim is a
+    /// difference — a test that only checked the refresh arm would pass just as well if the advice had been
+    /// softened for every job, which is the outcome that was rejected.
+    /// </summary>
+    [Fact]
+    public async Task JobOverCadence_RemedyOmitsTheIntervalOnlyForRefreshPolicies()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreJobCadenceAsync(new[] { RefreshCadenceJob() }, Ct);
+        var refresh = Assert.Single(h.Deliverer.Outcomes);
+
+        Assert.DoesNotContain("extend the job's schedule_interval", refresh.DetailText, StringComparison.Ordinal);
+        Assert.Contains("Do NOT widen this job's schedule_interval", refresh.DetailText, StringComparison.Ordinal);
+        Assert.Contains("end_offset", refresh.DetailText, StringComparison.Ordinal);
+        /* Naming the lever that does work is the point; "don't do that" alone leaves the operator nowhere. */
+        Assert.Contains("Narrow the refresh window", refresh.DetailText, StringComparison.Ordinal);
+
+        /* A compression policy has no end_offset, so it keeps the concrete advice unhedged. */
+        var h2 = new Harness();
+        var e2 = h2.Build();
+        await e2.ApplyStoreJobCadenceAsync(new[] { CadenceJob() }, Ct);
+        var compression = Assert.Single(h2.Deliverer.Outcomes);
+
+        Assert.Contains("extend the job's schedule_interval deliberately", compression.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("end_offset", compression.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The predicate behind that branch, and the fact it reports. Both refresh tiers pass the SAME constant
+    /// as <c>end_offset</c> and <c>schedule_interval</c>, read out of the emitted statement rather than
+    /// restated — so the predicate cannot outlive the equality, and a policy builder changed to pass
+    /// different values goes red here instead of shipping advice that has quietly become correct.
+    /// </summary>
+    [Fact]
+    public void RefreshPolicies_PassTheScheduleIntervalAsTheEndOffsetToo_WhichThePredicateReports()
+    {
+        foreach (var view in TimescaleSupport.HourlyRefreshPhaseOrder)
+        {
+            AssertEndOffsetEqualsScheduleInterval(TimescaleSupport.AddHourlyRefreshPolicySql(view));
+        }
+
+        AssertEndOffsetEqualsScheduleInterval(
+            TimescaleSupport.AddDailyRefreshPolicySql("query_store_stats_daily"));
+
+        /* The label the read builds is proc_name FIRST, which is the whole basis of the match. */
+        Assert.Contains("j.proc_name || coalesce(' ' || j.hypertable_name, '')",
+            TimescaleSupport.JobCadenceReadSql, StringComparison.Ordinal);
+
+        Assert.True(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset(
+            TimescaleSupport.RefreshPolicyProcName + " query_store_stats_interval_hourly"));
+        /* The telemetry label carries a [job_id] suffix; same leading token, same answer. */
+        Assert.True(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset(
+            TimescaleSupport.RefreshPolicyProcName + " query_store_stats_interval_hourly [1054]"));
+        /* A hypertable-less job is the bare proc name. */
+        Assert.True(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset(TimescaleSupport.RefreshPolicyProcName));
+
+        Assert.False(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset("policy_compression query_store_stats"));
+        Assert.False(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset("policy_retention query_store_stats"));
+        Assert.False(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset("policy_telemetry"));
+        Assert.False(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset(null));
+        Assert.False(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset(""));
+        /* Prefix, not substring: a hypertable named after the policy must not borrow its answer. */
+        Assert.False(TimescaleSupport.ScheduleIntervalDoublesAsEndOffset(
+            "policy_compression " + TimescaleSupport.RefreshPolicyProcName));
+    }
+
+    private static void AssertEndOffsetEqualsScheduleInterval(string policySql)
+    {
+        var endOffset = Regex.Match(policySql, @"end_offset => INTERVAL '([^']+)'");
+        var schedule = Regex.Match(policySql, @"schedule_interval => INTERVAL '([^']+)'");
+
+        Assert.True(endOffset.Success && schedule.Success, $"could not read both intervals out of: {policySql}");
+        Assert.Equal(endOffset.Groups[1].Value, schedule.Groups[1].Value);
     }
 
     [Fact]
@@ -2460,5 +2829,83 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         await e.ApplyStoreJobCadenceAsync(new[] { CadenceJob(durMs: 200_000) }, Ct);
         var recovered = Assert.Single(h.History.Records);
         Assert.Equal("Store Job Cadence Recovered", recovered.MetricName);
+    }
+    /* ---------------- #2674 collector-cost regression self-alert ---------------- */
+
+    private static readonly DateTime DefaultRegressionMetricTime = new(2026, 7, 1, 11, 0, 0, DateTimeKind.Utc);
+
+    /* #2846: the predicate compares cost PER RUN, so the factory carries per-run values too. Defaults keep the
+       4x shape the pre-existing cases assert on (80 ms/run against a 20 ms/run baseline), matching the 8000 vs
+       2000 totals above at 100 runs. */
+    private static PerformanceMonitor.Darling.Service.Mcp.DarlingCollectorCostReader.CostRegression Regression(
+        long latestMs = 8000, double baselineMs = 2000.0, int serverId = 7, string collector = "query_store",
+        DateTime? latestMetricTime = null, long latestRuns = 100,
+        double latestMsPerRun = 80.0, double baselineMsPerRun = 20.0) =>
+        new(serverId, "prod-multi-19", collector, latestMs, baselineMs,
+            latestMetricTime ?? DefaultRegressionMetricTime, latestRuns, latestMsPerRun, baselineMsPerRun);
+
+    [Fact]
+    public async Task CollectorCostRegression_FiresOnEntry_SuppressedWithinCooldown_ResolvesWhenGone()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* 1) fires once on entry. */
+        await e.ApplyCostRegressionsAsync(new[] { Regression() }, Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Collector Cost Regression", fired.MetricName);
+
+        /* 2) still regressing on the next tick, inside the cooldown -> no new notification. */
+        await e.ApplyCostRegressionsAsync(new[] { Regression() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* 3) no longer regressing -> exactly one resolution history row, nothing new to the deliverer. */
+        await e.ApplyCostRegressionsAsync(
+            System.Array.Empty<PerformanceMonitor.Darling.Service.Mcp.DarlingCollectorCostReader.CostRegression>(), Ct);
+        var cleared = Assert.Single(h.History.Records);
+        Assert.Equal("Cost Regression Cleared", cleared.MetricName);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task CollectorCostRegression_DistinctCollectors_FireIndependently()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCostRegressionsAsync(new[]
+        {
+            Regression(collector: "query_store"),
+            Regression(collector: "procedure_stats")
+        }, Ct);
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    /// <summary>#2707: a cooldown-elapsed re-ask against the SAME collect.collector_cost row (unchanged
+    /// LatestMetricTime) must not re-fire — the exact shape of #2704's Poison Wait bug, here caused by the
+    /// hourly flush lagging the evaluator's own cooldown instead of a collector lagging an alert loop. A
+    /// genuinely new hourly row (LatestMetricTime advanced), still regressed, must still fire.</summary>
+    [Fact]
+    public async Task CollectorCostRegression_DoesNotRefire_OnTheSameMetricTime_EvenAfterCooldownElapses()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* 1) fires once on entry. */
+        await e.ApplyCostRegressionsAsync(new[] { Regression() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* 2) cooldown elapses, but the reader hands back the SAME underlying hourly row (LatestMetricTime
+           unchanged) — the flush hasn't landed a new one yet. Must not re-fire. */
+        h.Now = h.Now.AddMinutes(10);
+        await e.ApplyCostRegressionsAsync(new[] { Regression() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* 3) a genuinely new hourly row lands (LatestMetricTime advanced), still regressed -> fires again. */
+        h.Now = h.Now.AddMinutes(10);
+        await e.ApplyCostRegressionsAsync(
+            new[] { Regression(latestMetricTime: DefaultRegressionMetricTime.AddHours(1)) }, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }
 }

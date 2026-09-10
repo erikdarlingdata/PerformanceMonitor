@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -20,6 +21,10 @@ namespace PerformanceMonitorLite.Services;
 /// </summary>
 public sealed partial class LocalDataService
 {
+    /// <summary>How far back <see cref="ForcePlanFailuresSql"/> looks for a plan's two most recent
+    /// collections. Bound as a parameter rather than written into the SQL — see that query's remarks.</summary>
+    internal static readonly TimeSpan ForcePlanFailureWindow = TimeSpan.FromHours(2);
+
     /// <summary>
     /// Forced plans whose failure counter ROSE between the two most recent collections that carried the
     /// plan. $1 server_id.
@@ -32,6 +37,13 @@ public sealed partial class LocalDataService
     ///
     /// <para>The <c>&gt;</c> is what makes this a delta read — equal counters are silence, and a LOWER
     /// counter (an unforce/re-force reset) is silence rather than a negative delta.</para>
+    ///
+    /// <para>The window's lower bound is BOUND as <c>$2</c>, not written <c>now() - INTERVAL '2 hours'</c>.
+    /// <c>collection_time</c> is a naive-UTC <c>TIMESTAMP</c> and <c>now()</c> is <c>TIMESTAMP WITH TIME
+    /// ZONE</c>, so the mixed comparison resolves the naive side in the session's TimeZone — which DuckDB
+    /// takes from the host — and the window silently widens west of UTC and narrows to nothing east of it.
+    /// Darling's twin carries the same bound for the same reason; keeping the two shape-for-shape is what
+    /// stops the apps disagreeing about what counts as a new failure.</para>
     /// </summary>
     public const string ForcePlanFailuresSql = @"
 WITH per_collection AS (
@@ -46,7 +58,7 @@ WITH per_collection AS (
         MAX(COALESCE(qs.last_force_failure_reason, '')) AS reason
     FROM v_query_store_stats AS qs
     WHERE qs.server_id = $1
-    AND   qs.collection_time > now() - INTERVAL '2 hours'
+    AND   qs.collection_time > $2
     GROUP BY qs.database_name, qs.query_id, qs.plan_id, qs.collection_time
 ),
 ranked AS (
@@ -81,6 +93,7 @@ ORDER BY n.database_name, n.query_id, n.plan_id";
         using var command = connection.CreateCommand();
         command.CommandText = ForcePlanFailuresSql;
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow - ForcePlanFailureWindow });
 
         var items = new List<ForcePlanFailureInfo>();
         using var reader = await command.ExecuteReaderAsync();

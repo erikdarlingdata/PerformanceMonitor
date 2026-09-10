@@ -138,6 +138,16 @@ public sealed class ViewerSettings
     private const string ViewerCredentialFileName = "pg-viewer-credential.dpapi";
     private const string ManagedSearchPath = "collect,config,public";
 
+    /// <summary>
+    /// The viewer seat's connection-pool ceiling (#1566), named rather than left a literal in the
+    /// builder below because it is not only a resource bound: it is the DIVISOR in the interactive read
+    /// deadline (<see cref="ViewerCommandDeadlines.FanOutReadSeconds"/>, #3004). A read issued as one of
+    /// many concurrent reads can only contend with as many siblings as there are permits, so the pool
+    /// size is what caps the contention a deadline has to cover. Referenced rather than copied so the
+    /// two cannot drift apart, which is the mistake the deadline it feeds was itself fixing.
+    /// </summary>
+    public const int ManagedMaxPoolSize = 10;
+
     /* #2197: the same sliver rule again, for the files that answer "has a bootstrap already been TRIED
        against this store?" — the store's own credential (written immediately before initdb), the mcp role
        credential, and pg_ctl's server log. Pinned against the service's constants by ViewerDataServiceTests. */
@@ -351,7 +361,7 @@ public sealed class ViewerSettings
                #1559, but this string was built independently and rode Npgsql's default of 100). Every
                pooled connection is a live postgres.exe on Windows; a read-only UI seat polling on 30/60s
                timers needs a handful, not a hundred. */
-            MaxPoolSize = 10,
+            MaxPoolSize = ManagedMaxPoolSize,
         };
         return builder.ConnectionString;
     }

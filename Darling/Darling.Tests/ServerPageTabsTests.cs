@@ -10,11 +10,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -47,16 +47,16 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ServerPageTabsTests
 {
-    private static string ServerTabsJs => ReadRepoFile(Path.Combine(
+    private static string ServerTabsJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
 
-    private static string ServerJs => ReadRepoFile(Path.Combine(
+    private static string ServerJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server.js"));
 
-    private static string AppJs => ReadRepoFile(Path.Combine(
+    private static string AppJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "app.js"));
 
-    private static string EditorJs => ReadRepoFile(Path.Combine(
+    private static string EditorJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "editor.js"));
 
     /// <summary>
@@ -73,6 +73,7 @@ public sealed class ServerPageTabsTests
     private static readonly Dictionary<string, string> CollectorForRead = new(StringComparer.Ordinal)
     {
             ["get_pg_wait_stats"] = "pg_wait_stats",
+            ["get_pg_cpu_utilization"] = "pg_cpu_utilization",
             ["get_pg_wait_sampling"] = "pg_wait_sampling",
             ["get_pg_kernel_stats"] = "pg_kernel_stats",
         ["get_pg_predicate_stats"] = "pg_predicate_stats",
@@ -93,6 +94,7 @@ public sealed class ServerPageTabsTests
         ["get_pg_replication_stats"] = "pg_replication_stats",
             ["get_pg_top_queries"] = "pg_statement_stats",
             ["get_pg_plans"] = "pg_plan_capture",
+            ["get_pg_plan_capture_readiness"] = "pg_plan_capture_readiness",
             ["get_pg_blocking"] = "pg_blocking",
             ["get_pg_io_stats"] = "pg_io_stats",
             ["get_pg_autovacuum_health"] = "pg_autovacuum_stats",
@@ -149,9 +151,21 @@ public sealed class ServerPageTabsTests
     /// list, because listing the nine would need editing every time one is closed and the edit is where a
     /// tenth quietly joins.</para>
     ///
-    /// <para>It is deliberately not "every collector must have a read". Some genuinely should not: a
-    /// collector whose whole output is one row of configuration state is a panel, not a question anyone asks
-    /// an agent. The ratchet lets that stand while making a NEW one impossible.</para>
+    /// <para>It is deliberately not "every collector must have a read", and it still is not, even though the
+    /// count has reached zero. The shape it tolerates is a collector that genuinely answers no question an
+    /// agent would ask; the shape it refuses is that claim being made by omission. So an exemption is
+    /// possible and is a deliberate act — raise the constant, and write down beside it which collector and
+    /// why — while a collector that quietly acquires no read cannot happen.</para>
+    ///
+    /// <para><b>The one exemption that was taken did not survive examination</b> (#3070), which is the
+    /// evidence worth carrying forward. <c>pg_plan_capture_readiness</c> was exempted as "a single row of
+    /// configuration state"; it emits SIX rows, one per FACET, each with its own remedy in its own column,
+    /// that column had no reader outside the Windows Viewer, and two separate remedy strings elsewhere in
+    /// the service already pointed at a <c>get_pg_plan_capture_readiness</c> tool that did not exist. One
+    /// of those facets, <c>message_locale</c> (#3061), is a precondition for <c>get_pg_deadlocks</c>, whose
+    /// empty result is the HEALTHY state - so the exemption was hiding the one fact that tells a quiet
+    /// server from a read that cannot see anything. Treat a future exemption request with that in mind
+    /// rather than as a formality.</para>
     /// </summary>
     [Fact]
     public void ThePostgresCollectorsWithNoServedRead_OnlyEverShrink()
@@ -175,11 +189,22 @@ public sealed class ServerPageTabsTests
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
 
-        /* Eleven, then nine, now ONE. The one left is pg_plan_capture_readiness, which is the legitimate
-           case this ratchet was built to tolerate: its output is a single row of configuration state, a
-           panel rather than a question anyone asks an agent. Every other PostgreSQL collector is now
-           served. It must never be raised. */
-        const int KnownUnreadable = 1;
+        /* Eleven, then nine, then one, now NONE. Every PostgreSQL collector has a served read.
+
+           The last exemption was pg_plan_capture_readiness, and it is worth recording why it went rather
+           than only that it did (#3070). It was held to be the case this ratchet was built to tolerate — a
+           single row of configuration state, a panel rather than a question anyone asks an agent — and none
+           of that survived contact. It is not one row but one per FACET - SIX of them - each carrying a
+           different remedy in its own detail column; that detail is the most useful thing the collector
+           produces and had no reader outside the Windows Viewer at all; and the prose reached for a
+           get_pg_plan_capture_readiness tool twice, in two different remedy strings, while no such tool
+           existed - #3061 then corrected the prose to stop pointing at it rather than the tool being
+           written, which is what this read finally answers.
+
+           So the exemption clause above is now unused, and that is the state to keep it in. A collector
+           whose whole output is genuinely a panel is still allowed to exist — raise the constant and say why
+           here — but nothing currently claims to be one, and the last thing that did was wrong about it. */
+        const int KnownUnreadable = 0;
 
         Assert.True(
             unreadable.Length <= KnownUnreadable,
@@ -188,6 +213,10 @@ public sealed class ServerPageTabsTests
             "agent. Add the read, or if this one genuinely answers no question worth asking, say so here and " +
             "raise the constant deliberately: " + string.Join(", ", unreadable));
 
+        /* At zero this says nothing the assertion above does not, and it is kept rather than deleted: the
+           two halves are what make this a ratchet rather than a cap, and the moment somebody raises the
+           constant for a new exemption they must also lower it again when the read lands. Deleting the
+           lower-it half at the bottom of the ratchet is how the ground stops being held. */
         Assert.True(
             unreadable.Length == KnownUnreadable,
             $"Only {unreadable.Length} PostgreSQL collectors now lack a served read, down from {KnownUnreadable}. " +
@@ -401,12 +430,73 @@ public sealed class ServerPageTabsTests
 
         /* And the registry in panels.js is that same vocabulary — the C# validator and the browser renderer
            agreeing is what lets a stored view and a built-in page share one seam. */
-        var panels = ReadRepoFile(Path.Combine(
+        var panels = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js"));
         foreach (var v in vocabulary)
         {
             Assert.Contains("  " + v + ": viz", panels, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// Dogfood web-polish pins (#2780, #2781), including their PARITY: each fix touches every surface that shares
+    /// the behaviour, not just the one where it was spotted (a divergence here is exactly the drift these pins
+    /// guard).
+    ///
+    /// <para>#2780: the "window too wide" degrade lives in ONE shared helper (<c>readErrorStrip</c>) that both the
+    /// descriptor loader (panels.js) and the hand-built server-tab composites route read errors through — so a tab
+    /// cannot show a friendly notice on one panel and the raw API string on its neighbour. The JS regex is pinned
+    /// to the ACTUAL backend message (<c>McpHelpers.ValidateHoursBack</c>): the cross-language seam that would
+    /// otherwise break silently if either side were reworded, which the earlier literal-only pin missed.</para>
+    ///
+    /// <para>#2781: the surface-less "tray" channel is dropped on BOTH surfaces that render the alert-history
+    /// status cell — the Alert History page and the triage deep-link page it mirrors. Pinned as source (no JS/DOM
+    /// runner); all verified live.</para>
+    /// </summary>
+    [Fact]
+    public void WebDashboard_DegradesOverRangeGracefully_AndDropsTheTrayChannel()
+    {
+        /* One shared helper carries the over-range degrade. */
+        var util = ReadRepoFileLf(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js"));
+        Assert.Contains("export function readErrorStrip(message)", util, StringComparison.Ordinal);
+        Assert.Contains("exceeds maximum of (\\d+) hours", util, StringComparison.Ordinal);
+        Assert.Contains("noticeStrip(", util, StringComparison.Ordinal);
+
+        /* The JS regex must match the message the backend actually emits — pin the seam, not just the literal. */
+        var backendMessage = PerformanceMonitor.Common.McpHelpers.ValidateHoursBack(
+            PerformanceMonitor.Common.McpHelpers.MaxHoursBack + 1);
+        Assert.NotNull(backendMessage);
+        Assert.Matches("exceeds maximum of (\\d+) hours", backendMessage!);
+
+        /* Parity: both the loader and the composites route read errors through the helper — no read-error site
+           left on the raw path, or the tab mixes friendly notices with raw API strings. */
+        var panels = ReadRepoFileLf(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js"));
+        Assert.Contains("readErrorStrip(res.message)", panels, StringComparison.Ordinal);
+        var serverTabs = ReadRepoFileLf(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        Assert.Contains("readErrorStrip(res.message)", serverTabs, StringComparison.Ordinal);
+        Assert.Contains("readErrorStrip(trend.message)", serverTabs, StringComparison.Ordinal);
+        Assert.DoesNotContain("errorStrip(res.message)", serverTabs, StringComparison.Ordinal);
+        Assert.DoesNotContain("errorStrip(trend.message)", serverTabs, StringComparison.Ordinal);
+
+        /* #2781 on BOTH surfaces that render the status cell, in the generalized form #3169 gave it: the
+           surface-less channel is no longer just "tray" but every value that carries a STATE rather than
+           naming a channel, and both pages route through the one shared lookup in util.js instead of each
+           testing a literal. Asserted as the claim rather than as the old `!== "tray"` text, because that
+           text is now absent while the behaviour it stood for is strictly wider. What the values ARE, and
+           that they agree with the desktop surfaces' constants, is Darling.Tests.AlertTrayStatusLoggedTests. */
+        var alerts = ReadRepoFileLf(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "alerts.js"));
+        Assert.Contains("!STATE_ONLY_CHANNELS.has(a.notification_type)", alerts, StringComparison.Ordinal);
+        Assert.Contains(
+            PerformanceMonitor.Notifications.AlertDelivery.ChannelTray,
+            PerformanceMonitor.Notifications.AlertDelivery.StateCarryingChannels);
+
+        var triage = ReadRepoFileLf(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "triage.js"));
+        Assert.Contains("alertDeliveryState(a)", triage, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -614,7 +704,7 @@ public sealed class ServerPageTabsTests
            recognised token, and the RAW TOKEN for one this build has never heard of — because the describer's
            "an unrecognised engine" is a mid-sentence fragment and reads as the wrong part of speech beside
            "SQL Server". */
-        var reader = ReadRepoFile(Path.Combine(
+        var reader = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingFleetReader.cs"));
         Assert.Contains("string.IsNullOrWhiteSpace(EngineKind) ? null", reader, StringComparison.Ordinal);
         Assert.Contains(
@@ -708,9 +798,10 @@ public sealed class ServerPageTabsTests
     ///
     /// <para>Both helpers THROW without a sentence, and every tab is built during the DOM-shim run, so a panel
     /// that forgot one cannot reach a browser. The zero-versus-one distinction was verified against the shipped
-    /// vizLine: zero points with an emptyText renders the descriptor's sentence, one point still renders the
-    /// chart's own (which is the true statement there), and zero points WITHOUT one still falls through — so a
-    /// stored view authored before this existed is unchanged.</para>
+    /// vizLine: zero points with an emptyText renders the descriptor's sentence; one point falls through to
+    /// renderLineChart, which draws that lone bucket as a marker (a single reading is data, not a warming-up
+    /// absence); and zero points WITHOUT an emptyText still falls through — so a stored view authored before
+    /// this existed is unchanged.</para>
     /// </summary>
     [Fact]
     public void EveryDataPanel_ExplainsItsOwnEmptyState()
@@ -734,9 +825,9 @@ public sealed class ServerPageTabsTests
             StringComparison.Ordinal);
 
         /* And renderPanel is what renders both, from the descriptor field the helpers set. The line guard fires
-           at EXACTLY zero rows: at one row the chart's own sentence is the true one, and a descriptor that never
-           had an emptyText (every stored view authored before this) still falls through unchanged. */
-        var panels = ReadRepoFile(Path.Combine(
+           at EXACTLY zero rows: at one row renderLineChart draws the lone bucket as a marker, and a descriptor
+           that never had an emptyText (every stored view authored before this) still falls through unchanged. */
+        var panels = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js"));
         Assert.Contains("desc.emptyText || \"No rows in this window.\"", panels, StringComparison.Ordinal);
         Assert.Contains("if (!points.length && desc.emptyText) return emptyStrip(desc.emptyText);", panels, StringComparison.Ordinal);
@@ -753,6 +844,43 @@ public sealed class ServerPageTabsTests
             panels,
             StringComparison.Ordinal);
         Assert.Contains("function stat(title, read, params, stats, subtitle, span = 1, emptyText) {", js, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A single collected bucket renders as a marker, not the "not enough data points" strip.
+    ///
+    /// <para>renderLineChart's warming-up strip is right at ZERO rows and wrong at one: a series that reached a
+    /// single time bucket has a real reading in hand. On a warming-up tab siblings reach two buckets at
+    /// different rates — deadlocks and waits sample every cycle, blocking snapshots are sparser — so the
+    /// one-bucket panels showed "not enough data points" beside charts that plotted the same window, and the
+    /// tab read as half-broken while it warmed up. The whole-chart gate now fires only at zero rows; one point
+    /// falls through to a centered dot per series (a polyline needs two). Pinned as source because there is no
+    /// JS execution harness for the chart module — a regression here is invisible until a cold server is on
+    /// camera, which is exactly when it is seen.</para>
+    /// </summary>
+    [Fact]
+    public void SingleBucketSeries_RendersAsAMarker_NotTheWarmingUpStrip()
+    {
+        var charts = ReadRepoFileLf(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "charts.js"));
+
+        /* The whole-chart gate is zero-only now; a single row is data and proceeds to the geometry below. */
+        Assert.Contains("if (rows.length === 0) {", charts, StringComparison.Ordinal);
+        Assert.DoesNotContain("if (rows.length < 2) {", charts, StringComparison.Ordinal);
+
+        /* A lone plottable point has no segment to stroke, so it draws as a dot instead of being skipped. */
+        Assert.Contains("if (linePts.length === 1) {", charts, StringComparison.Ordinal);
+        Assert.Contains("class: \"series-dot\"", charts, StringComparison.Ordinal);
+
+        /* A single bucket spans no time (spanMs === 0); its x centers rather than pinning to the left axis. */
+        Assert.Contains("spanMs === 0 ? M.l + plotW / 2", charts, StringComparison.Ordinal);
+
+        /* Stacked-area collapses to a zero-area polygon at one bucket, so it draws a dot at each series' stack
+           top rather than a blank grid — the mode this fix would otherwise have regressed (its polygon paints
+           nothing, .series-area has no stroke). The dual-axis overlay's lone reading draws a dot too, so the
+           "a dot per series" rule holds for every chart mode and both axes, not just the plain line. */
+        Assert.Contains("cy: plotY(stackTops[0][k])", charts, StringComparison.Ordinal);
+        Assert.Contains("if (pts2.length === 1) {", charts, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -883,19 +1011,5 @@ public sealed class ServerPageTabsTests
                 .ToArray();
             yield return (m.Groups[1].Value, keys);
         }
-    }
-
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
-        {
-            var candidate = Path.Combine(dir.FullName, relative);
-            if (File.Exists(candidate))
-            {
-                return File.ReadAllText(candidate).Replace("\r\n", "\n", StringComparison.Ordinal);
-            }
-        }
-
-        throw new FileNotFoundException($"Could not locate {relative} walking up from {thisFile}");
     }
 }

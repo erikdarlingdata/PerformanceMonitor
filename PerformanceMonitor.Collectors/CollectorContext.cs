@@ -26,6 +26,15 @@ public sealed class CollectorContext
     public static readonly IReadOnlyDictionary<string, string> NoState =
         new Dictionary<string, string>(StringComparer.Ordinal);
 
+    /// <summary>
+    /// The empty <see cref="Measurements"/> — what a host passes for a run that never reached a
+    /// definition's read at all (the <c>AppliesTo</c> early-out, an enumeration that listed nothing, a
+    /// cycle the wall-clock budget abandoned). Named rather than an inline empty array so those sites read
+    /// as a deliberate "this run measured nothing" instead of a value somebody forgot.
+    /// </summary>
+    public static readonly IReadOnlyList<CollectorMeasurement> NoMeasurements =
+        Array.Empty<CollectorMeasurement>();
+
     public required int ServerId { get; init; }
 
     public required string ServerName { get; init; }
@@ -106,6 +115,80 @@ public sealed class CollectorContext
     /// <see cref="CatchupClampApplied"/>).
     /// </summary>
     public Dictionary<string, string> PendingState { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The labelled COUNTS this definition measured on the target during the round trip it had already
+    /// made, rendered onto this run's <c>collection_log.error_message</c> by whichever host is running it
+    /// (#3161). Empty for every collector that measures nothing, which leaves the column NULL exactly as
+    /// before. Written through <see cref="Measure"/>; the other context members a definition writes back to
+    /// the host are <see cref="PendingState"/>, <see cref="PerItemTextBudgetExceeded"/> and
+    /// <see cref="CatchupClampApplied"/>.
+    ///
+    /// <para><b>What this is for.</b> A definition previously had NO channel into that column - every value
+    /// <c>CollectorRunResult.Note</c> took was runner-authored - so a collector that could work out why it
+    /// returned nothing had nowhere to put it, and the run recorded SUCCESS with a NULL note. Five issues in
+    /// a row were that shape (#3030, #3109, #3114, #3153, #3154) and each had to be repaired at READ time,
+    /// because read time was the only seam that existed.</para>
+    ///
+    /// <para><b>Counts, never verdicts</b> - see <see cref="CollectorMeasurement"/> for why the value's type
+    /// is what enforces that rather than a convention. A stored conclusion is a stale gate the moment an
+    /// operator acts on it, which is the failure <c>CollectorRuntimePrecondition</c> (#2546) exists to
+    /// prevent; a stored count stays true and lets the read derive the verdict fresh on every call.</para>
+    /// </summary>
+    public IReadOnlyList<CollectorMeasurement> Measurements => _measurements;
+
+    private readonly List<CollectorMeasurement> _measurements = new();
+
+    /// <summary>
+    /// Records that this definition measured <paramref name="value"/> of <paramref name="label"/> - the only
+    /// supported way to add to <see cref="Measurements"/>.
+    ///
+    /// <para><b>A repeated label ACCUMULATES rather than appending a second entry</b>, because these are
+    /// counts and one context serves the whole cycle: the per-database and per-item loops call
+    /// <c>ReadAsync</c>/<c>ReadItemAsync</c> once each against this same object, so a definition measures
+    /// its own slice and the cycle reports the sum without every collector remembering to hold its own
+    /// totals. Appending instead would render <c>events_read=3 events_read=0 events_read=11</c>, which is
+    /// not a count of anything.</para>
+    ///
+    /// <para>Throws on a label <see cref="CollectorMeasurementNote.IsValidLabel"/> rejects. Labels are
+    /// first-party constants in definition source, so that is a build-and-test-time failure rather than
+    /// anything a monitored server can cause - and <c>CollectorMeasurementSeamTests.EveryMeasurementLabelInTheCollectorsIsLegal</c> walks the source
+    /// so it cannot reach a release either. The renderer counts rejects instead of throwing, for a list some
+    /// caller assembled by hand.</para>
+    /// </summary>
+    /// <exception cref="ArgumentException">The label is not a legal count name.</exception>
+    public void Measure(string label, long value)
+    {
+        if (!CollectorMeasurementNote.IsValidLabel(label))
+        {
+            throw new ArgumentException(
+                "Measurement label '" + label + "' is not lowercase snake_case within "
+                + CollectorMeasurementNote.MaxLabelLength.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + " characters. Measurements carry counts, so a label must be a count NAME and never "
+                + "a sentence - see CollectorMeasurement.",
+                nameof(label));
+        }
+
+        if (string.Equals(label, CollectorMeasurementNote.RejectedLabelCount, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Measurement label '" + label + "' is reserved for the renderer's own count of labels it "
+                + "rejected. A note carrying it twice, once as a collector's count and once as that "
+                + "counter, is not readable by anything.",
+                nameof(label));
+        }
+
+        for (var i = 0; i < _measurements.Count; i++)
+        {
+            if (string.Equals(_measurements[i].Label, label, StringComparison.Ordinal))
+            {
+                _measurements[i] = new CollectorMeasurement(label, _measurements[i].Value + value);
+                return;
+            }
+        }
+
+        _measurements.Add(new CollectorMeasurement(label, value));
+    }
 
     /// <summary>Wait types excluded from collection (Lite: ignored_wait_types.json — #1240).</summary>
     public IReadOnlySet<string> IgnoredWaitTypes { get; init; } = s_emptySet;
@@ -237,6 +320,178 @@ public sealed class CollectorContext
     public long PerItemOpenMs { get; set; }
 
     /// <summary>
+    /// True once the host has measured this item's phases (#2854) — the enumerated twin of the
+    /// server-scoped <c>ServerPhasesMeasured</c> flag, and set from the same <c>finally</c> that stamps
+    /// <see cref="PerItemOpenMs"/> so a faulting open still declares itself measured.
+    ///
+    /// <para>Exists because the log site previously gated on <c>PerItemOpenMs &gt; 0</c>, which conflates
+    /// two opposite states: an open that was genuinely instant, and one that never ran. Both read as zero,
+    /// so the split line — the only per-database attribution there is — was suppressed in exactly the case
+    /// worth reading. A host that measures nothing leaves this false and prints nothing, which is the
+    /// honest answer; a host that measures an instant open prints <c>open:0ms</c>, which is a measurement.</para>
+    /// </summary>
+    public bool PerItemPhasesMeasured { get; set; }
+
+    /// <summary>
+    /// Milliseconds the SERVER-SCOPED read's <c>ExecuteReaderAsync</c> took (#2851) — the twin of
+    /// <see cref="PerItemOpenMs"/> for the path that collects a whole server in one query rather than
+    /// enumerating databases. Separate from <see cref="PerItemOpenMs"/> rather than reusing it because the
+    /// enumerated log site gates on <c>PerItemOpenMs &gt; 0</c>: sharing the field would make a server-scoped
+    /// run start printing a per-database line it has no database name for.
+    ///
+    /// <para>Exists because the largest collector on the fleet could not be attributed at all. procedure_stats
+    /// runs 4,900ms p50 on use1 while the same query, run from the same box against the same target, takes
+    /// 247ms — an 18.8x gap with the box at 4% CPU, and no way to tell whether it was the execute, the drain,
+    /// or neither. Zero when the host does not measure it, so a zero must never be read as "instant" — see
+    /// the ServerPhasesMeasured flag that gates the log line.</para>
+    /// </summary>
+    public long ServerScopeOpenMs { get; set; }
+
+    /// <summary>
+    /// Milliseconds the server-scoped <c>ReadAsync</c> took (#2851) — row streaming. Measured on its own
+    /// stopwatch rather than inferred as the residual, so that the residual means something: on the
+    /// enumerated path drain IS the residual (see <see cref="DrainMsFrom"/>) and therefore silently absorbs
+    /// query building, command construction and the supplemental query. Here those are separated out, so a
+    /// large residual is a finding about our own code rather than an artifact of the definition.
+    /// </summary>
+    public long ServerScopeDrainMs { get; set; }
+
+    /// <summary>
+    /// Rows the server-scoped drain actually delivered (#2864), counted by
+    /// <see cref="DrainCountingDataReader"/> rather than by the collector's own loop.
+    ///
+    /// <para>Distinct from the run's stored row count, and that distinction is the point: an abandoned cycle
+    /// ships nothing, so <c>rows_collected</c> is 0 whether the target sent no rows at all or sent 149 and
+    /// then went quiet. Those two are a stalled target and a stalled stream, and they want different fixes.
+    /// -1 means the host did not wrap the reader — a value no real count can take, so "not measured" cannot
+    /// be misread as "delivered nothing".</para>
+    /// </summary>
+    public long ServerScopeRowsRead { get; set; } = -1;
+
+    /// <summary>
+    /// UTF-16 payload bytes the server-scoped drain delivered (#2864) — the string and binary getters only,
+    /// NOT the wire size, which no <c>DbDataReader</c> exposes. Honest scope and the useful one: the
+    /// collectors this exists for are dominated by a single large text column, so string bytes are the
+    /// payload to within a rounding error. -1 when unmeasured, for the reason above.
+    /// </summary>
+    public long ServerScopeBytesRead { get; set; } = -1;
+
+    /// <summary>
+    /// The drain stopwatch's reading at the LAST successful read (#2864). Subtract it from
+    /// <see cref="ServerScopeDrainMs"/> and you have how long the reader sat with nothing arriving, which is
+    /// the figure that separates a slow stream from a stalled one — both of which otherwise end at the
+    /// wall-clock budget with a positive row count. -1 when no row ever arrived OR when unmeasured; the row
+    /// count above disambiguates those two, and 0 is left free because "row 1 arrived instantly" is a real
+    /// answer that must not collide with a sentinel.
+    /// </summary>
+    public long ServerScopeLastReadMs { get; set; } = -1;
+
+    /// <summary>
+    /// The monitored target's own session identifier for this run (#2864) — SQL Server's SPID, PostgreSQL's
+    /// backend pid. Null when the provider does not expose one.
+    ///
+    /// <para>Read from the open connection as a property, NOT by issuing <c>SELECT @@SPID</c>: a round trip
+    /// per collector per server per cycle is ~25,000 extra queries an hour against the fleet to record a
+    /// number the client already has. The value is what makes a stalled run joinable to everything else the
+    /// tool collects — <c>waiting_tasks</c>, <c>dmv_blocking_snapshot</c> and <c>query_snapshots</c> all
+    /// carry a session id, so without it a retrospective "what was OUR session waiting on" cannot be asked
+    /// even where the snapshot that would answer it was captured.</para>
+    /// </summary>
+    public int? TargetSessionId { get; set; }
+
+    /* #2855: the AZURE PER-DATABASE split — a THIRD decomposition, not a rename of either one above, and the
+       prefix is the whole reason it is separate. This branch opens a connection PER DATABASE, which neither
+       other path does: the enumerated path reuses one target connection across every item, and the
+       server-scoped path opens one for the whole server. So `connect:` is a phase here and nowhere else, and
+       on Azure SQL DB it is a real recurring cost — a fresh login per database, per cycle.
+
+       Why not reuse PerItem*: the enumerated log site gates on PerItemPhasesMeasured and prints an item
+       name it takes from the enumeration, so sharing those fields would make an Azure run print as an
+       enumerated one. That is exactly the collision ServerScopeOpenMs's own comment records as the reason
+       the server-scoped path got its own prefix instead of reusing PerItemOpenMs; this follows that
+       precedent rather than re-litigating it.
+
+       NOT persisted, deliberately. The server-scoped split is 1:1 with a collection_log row, so V108 could
+       store it in columns; this one is N:1 — many databases per run — and how to shape that is an open
+       decision tracked as #2860. This is emit-and-log only, and the schema is untouched at V109. */
+
+    /// <summary>
+    /// Milliseconds <c>OpenDatabaseConnectionAsync</c> took for the database just read (#2855) — the phase
+    /// that exists only on this path. Its own term rather than part of the open, because the two have
+    /// different fixes and different owners: a slow connect is login, TLS handshake and Azure gateway
+    /// redirect, which pooling and connection reuse address, while a slow
+    /// <see cref="PerDatabaseOpenMs"/> is server-side work before the first row, which they do not touch.
+    ///
+    /// <para>Zero when the host does not measure it (Lite today), so a zero must never be read as
+    /// "instant" — see <see cref="PerDatabasePhasesMeasured"/>, which is what separates those.</para>
+    /// </summary>
+    public long PerDatabaseConnectMs { get; set; }
+
+    /// <summary>
+    /// Milliseconds the per-database <c>ExecuteReaderAsync</c> took (#2855) — the same contract as
+    /// <see cref="PerItemOpenMs"/> and <see cref="ServerScopeOpenMs"/> on their own paths: the reader
+    /// returns only when the first rowset is available, so this spans every preceding non-rowset statement
+    /// plus time-to-first-row, and no client-side byte budget can shorten it.
+    /// </summary>
+    public long PerDatabaseOpenMs { get; set; }
+
+    /// <summary>
+    /// Milliseconds the per-database <c>ReadAsync</c> took (#2855) — row streaming, which the read loop and
+    /// the byte budget do govern. Measured on its own stopwatch rather than inferred as the residual, the
+    /// <see cref="ServerScopeDrainMs"/> discipline: if drain were the residual it would silently absorb
+    /// query building, command construction and the trailing probe-failure rowset, and then a large residual
+    /// would say nothing about our own code.
+    /// </summary>
+    public long PerDatabaseDrainMs { get; set; }
+
+    /// <summary>
+    /// True once the host has measured this database's phases (#2855) — the per-database twin of
+    /// <see cref="PerItemPhasesMeasured"/> and <c>ServerPhasesMeasured</c>, set from the same
+    /// <c>finally</c> that stamps <see cref="PerDatabaseConnectMs"/> so a faulting connect still declares
+    /// itself measured and still reports what it burned.
+    ///
+    /// <para>A flag rather than a <c>SomeMs &gt; 0</c> test, for the #2854 reason those two carry: a
+    /// genuinely instant phase and a host that measured nothing both read as zero, and gating on the value
+    /// suppresses the split for the first — the case most worth reading, because a connect that cost nothing
+    /// is what makes the rest of the line interpretable. A host that measures nothing leaves this false and
+    /// prints nothing, which is the honest answer; a host that measures a pooled connect prints
+    /// <c>connect:0ms</c>, which is a measurement.</para>
+    /// </summary>
+    public bool PerDatabasePhasesMeasured { get; set; }
+
+    /// <summary>
+    /// The part of the database's blended <c>sql:</c> total that is none of the three phases: command
+    /// construction, the trailing probe-failure rowset the payload contract may carry, and the TEARDOWN of
+    /// the reader, command and connection — the last of which is named because it is not incidental here.
+    /// One connection per database means one close per database, and the host's stopwatch is still running
+    /// when it happens. The watermark read and <c>BuildQuery</c> are NOT in it: on this path they run before
+    /// the stopwatch starts, so they are outside the parent as well as outside the phases.
+    ///
+    /// <para>Lives here rather than at the log site so the subtraction has one definition and a test can pin
+    /// the shipped arithmetic instead of a copy, the <see cref="DrainMsFrom"/> discipline. Clamped at zero:
+    /// three separate stopwatches can overshoot the parent by a millisecond or two, and that must print as
+    /// zero rather than as a negative term that makes the whole line look broken.</para>
+    /// </summary>
+    public long PerDatabaseOtherMsFrom(long databaseSqlMs) =>
+        Math.Max(0, databaseSqlMs - PerDatabaseConnectMs - PerDatabaseOpenMs - PerDatabaseDrainMs);
+
+    /// <summary>
+    /// The database's split as one value, or NULL when this host did not measure it (#2855) — the
+    /// expression the log site gates on, so "no split" and "no line" are the same decision made once.
+    ///
+    /// <para>Gated on <see cref="PerDatabasePhasesMeasured"/> and never on a figure being non-zero, and
+    /// returned as ONE value rather than four loose numbers for the <c>ServerPhases</c>/<c>FanoutCost</c>
+    /// reason: a caller that can take three of the four terms can print a decomposition that does not add
+    /// up. Because the residual is defined against the parent, the parent is a parameter rather than
+    /// another field — there is no stored copy that can drift from the total it completes.</para>
+    /// </summary>
+    public PerDatabasePhaseSplit? PerDatabasePhasesFrom(long databaseSqlMs) =>
+        PerDatabasePhasesMeasured
+            ? new PerDatabasePhaseSplit(
+                PerDatabaseConnectMs, PerDatabaseOpenMs, PerDatabaseDrainMs, PerDatabaseOtherMsFrom(databaseSqlMs))
+            : null;
+
+    /// <summary>
     /// Milliseconds the item's watermark refresh took (#2164), set by the host when it runs one. This is NOT
     /// server think-time or streaming — for query_store it is a STORE read (and on the catch-up/adaptive
     /// path a store write too), yet the driver's <c>sql:</c> stopwatch starts before it. Measured so it can
@@ -250,7 +505,7 @@ public sealed class CollectorContext
     /// runs one (Darling; Lite has no separate fetch and leaves it zero). The fetch is INSIDE the driver's
     /// per-item <c>sql:</c> stopwatch but is neither open nor drain — it is its own query against
     /// <c>sys.query_store_plan</c>, and on a database with a huge Query Store catalog it can dominate the
-    /// whole item (ayr-01: a 0-row closed-only cycle still cost 298s, and the blended number could not say
+    /// whole item (omega-01: a 0-row closed-only cycle still cost 298s, and the blended number could not say
     /// where). Measured so drain stops absorbing it, exactly the #2164 argument one seam further down.
     /// </summary>
     public long PerItemPlanFetchMs { get; set; }
@@ -261,6 +516,100 @@ public sealed class CollectorContext
     /// zero when the host runs no separate fetch.
     /// </summary>
     public long PerItemTextFetchMs { get; set; }
+
+    /* #2811: the fetch phases above are each a whole METHOD, not a query. FetchAndStorePlansAsync
+       round-trips the store to learn what is already held, issues at most two target statements, and writes
+       the results back — two of those three steps are Postgres. A 189,562ms plan_fetch on a production
+       database was read as SQL Server query time for a full day and tuned on that premise; the tuning was
+       measured at 0.508s in isolation and moved production nothing, because nobody could see which step held
+       the time. These sub-phases exist so that question is answered by the log rather than by argument. Same
+       zero-means-unmeasured contract as their parent.
+
+       #2819 removed a fourth step this comment used to open with. The method acquired its own store
+       connection, and that acquisition — not the query — was the phase: the probe SQL measured 0.39ms while
+       the phase measured 673-6,663ms, and a zero-id cycle issuing no SQL at all still cost 673ms. Both
+       fetches now borrow the connection the collector body already holds, so no acquisition happens here and
+       probe: below is the round trip alone. Kept in the record rather than edited away, because the reason
+       these fields exist is that a phase whose documentation outlived what it measures is how the cost was
+       misread in the first place. */
+
+    /// <summary>
+    /// Milliseconds of <see cref="PerItemPlanFetchMs"/> spent on the touch/probe round trip that decides
+    /// which plans are still owed — the STORE half that runs before any target query is issued.
+    /// <para>Round trip ONLY since #2819: the fetch borrows the collector body's connection rather than
+    /// opening one, so this no longer carries a connection acquisition. It used to, and that acquisition was
+    /// the overwhelming majority of it — treat any pre-#2819 reading of this field as mostly pool wait.</para>
+    /// </summary>
+    public long PerItemPlanProbeMs { get; set; }
+
+    /// <summary>
+    /// Milliseconds of <see cref="PerItemPlanFetchMs"/> spent in the TARGET statements only, summed across
+    /// chunks: <c>ExecuteReaderAsync</c> plus the row-read loop against <c>sys.query_store_plan</c>. This is
+    /// the number a hint on that query can move, and the only one comparable to a benchmark of the statement.
+    /// </summary>
+    public long PerItemPlanTargetMs { get; set; }
+
+    /// <summary>
+    /// Milliseconds of <see cref="PerItemPlanFetchMs"/> spent writing the fetched plans back to the store.
+    /// </summary>
+    public long PerItemPlanWriteMs { get; set; }
+
+    /// <summary>Target statements issued for the plan fetch (chunk count) — 0, 1 or 2 at today's cap.</summary>
+    public int PerItemPlanChunks { get; set; }
+
+    /// <summary>
+    /// Plan ids the fetch attempted this pass. Paired with <see cref="PerItemPlanTargetMs"/> it gives a
+    /// per-id cost, which is the only honest way to compare a cold production pass against a benchmark run
+    /// over hot recently-executed plans — the two differ by orders of magnitude and the totals alone hide it.
+    /// </summary>
+    public int PerItemPlanIdsAttempted { get; set; }
+
+    /// <summary>
+    /// Plan references handed to the touch/probe round trip this pass — the probe's INPUT size, which is
+    /// what <see cref="PerItemPlanProbeMs"/> actually scales with (measured ~0.61ms per reference, dead
+    /// linear across 78/272/847-reference passes). Deliberately separate from
+    /// <see cref="PerItemPlanIdsAttempted"/>, which counts only the ids that came back MISSING and were
+    /// then fetched from the target: the two differ by orders of magnitude on a healthy database, and a
+    /// pass that probes 847 references and finds nothing owed logs zero attempted ids while doing half a
+    /// second of store work. #2819 and #2822 both divided probe cost by the attempted-id count and drew a
+    /// phantom "140x gap" from it (#2823); this field is the honest denominator.
+    /// </summary>
+    public int PerItemPlanProbeIds { get; set; }
+
+    /// <summary>Store-half of <see cref="PerItemTextFetchMs"/> — the touch/probe round trip. Same contract as
+    /// <see cref="PerItemPlanProbeMs"/>, including borrowing the body's connection rather than opening one (#2819).</summary>
+    public long PerItemTextProbeMs { get; set; }
+
+    /// <summary>Target-half of <see cref="PerItemTextFetchMs"/>. Same contract as <see cref="PerItemPlanTargetMs"/>.</summary>
+    public long PerItemTextTargetMs { get; set; }
+
+    /// <summary>Store-write half of <see cref="PerItemTextFetchMs"/>. Same contract as <see cref="PerItemPlanWriteMs"/>.</summary>
+    public long PerItemTextWriteMs { get; set; }
+
+    /// <summary>Target statements issued for the text fetch (chunk count).</summary>
+    public int PerItemTextChunks { get; set; }
+
+    /// <summary>Query ids the text fetch attempted this pass. Same purpose as <see cref="PerItemPlanIdsAttempted"/>.</summary>
+    public int PerItemTextIdsAttempted { get; set; }
+
+    /// <summary>Query references handed to the text touch/probe round trip. Same purpose and same reason
+    /// for existing separately as <see cref="PerItemPlanProbeIds"/>.</summary>
+    public int PerItemTextProbeIds { get; set; }
+
+    /// <summary>
+    /// The part of <see cref="PerItemPlanFetchMs"/> that is neither probe, target, nor write — the method's
+    /// own bookkeeping (candidate capping, the size estimator, the carry-over set maths). Exists so the
+    /// sub-split SUMS to its parent by construction rather than approximately: a residual that has to be
+    /// inferred by subtracting printed terms is exactly the ambiguity this whole change exists to remove, and
+    /// a large value here is itself the finding (the cost would be in our own code, not in either database).
+    /// Clamped at zero for the same stopwatch-skew reason as <see cref="DrainMsFrom"/>.
+    /// </summary>
+    public long PlanFetchOtherMs =>
+        Math.Max(0, PerItemPlanFetchMs - PerItemPlanProbeMs - PerItemPlanTargetMs - PerItemPlanWriteMs);
+
+    /// <summary>Text-fetch twin of <see cref="PlanFetchOtherMs"/>.</summary>
+    public long TextFetchOtherMs =>
+        Math.Max(0, PerItemTextFetchMs - PerItemTextProbeMs - PerItemTextTargetMs - PerItemTextWriteMs);
 
     /// <summary>
     /// The item's row-STREAMING time: the driver's blended per-item total minus the phases that are not
@@ -300,4 +649,39 @@ public sealed class CollectorContext
     /// host reads it right after building that database's query.
     /// </summary>
     public bool CatchupClampApplied { get; set; }
+
+    /// <summary>
+    /// How many of this cycle's store writes stored their rows only on a second attempt (#3099). Set by the
+    /// host, never by a definition, like the phase and drain fields above.
+    ///
+    /// <para>A COUNT rather than a flag because the fan-out paths write once per database or per enumerated
+    /// item: "one batch of thirty re-attempted" and "every batch re-attempted" are a momentary blip and a
+    /// store in trouble, and a bool cannot tell them apart. Zero — the default, and what an ordinary cycle
+    /// leaves it at — is the honest reading of "no write needed a second attempt", not "unmeasured", because
+    /// the host increments unconditionally on the one path that can.</para>
+    ///
+    /// <para>Read once per cycle, after the writes, to compose the collection_log note. The count is what
+    /// keeps the re-attempt visible in the store: a write that fails and then succeeds writes a SUCCESS row,
+    /// and without this the row is indistinguishable from a write that never faulted at all.</para>
+    /// </summary>
+    public int StoreWriteReattempts { get; set; }
 }
+
+/// <summary>
+/// One database's phase split on the Azure per-database path (#2855): the connect, the open, the drain, and
+/// the residual against that database's blended <c>sql:</c> total. Produced only by
+/// <see cref="CollectorContext.PerDatabasePhasesFrom"/>, which returns null when the host measured nothing,
+/// so a log site cannot print half a split or print one for a path that emits none.
+///
+/// <para><b>Log-only, and that is a decision rather than an omission.</b> Its server-scoped sibling
+/// <c>ServerPhaseCost</c> is persisted, because that split is 1:1 with a <c>collection_log</c> row. This one
+/// is N:1 — a run visits every database on the server — so it has no row to land on. #2860 already holds that
+/// question open for the per-database FETCH split, and whatever it settles governs this one too: the obstacle
+/// is the cardinality, not which phases are being stored. Nothing here reaches the store, and the schema
+/// stays at V109 until it is decided.</para>
+///
+/// <para><paramref name="OtherMs"/> is carried rather than left to the caller so the four printed terms sum
+/// to the parent by construction. A large value is itself the finding: it would mean the cost sits between
+/// the phases, in our own code, rather than in the target.</para>
+/// </summary>
+public readonly record struct PerDatabasePhaseSplit(long ConnectMs, long OpenMs, long DrainMs, long OtherMs);

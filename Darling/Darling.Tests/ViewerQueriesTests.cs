@@ -379,17 +379,28 @@ public sealed class ViewerQueriesSqlTests
     };
 }
 
-/// <summary>The Queries row models' pure display helpers: raw server-clock formatting, FullName, totals.</summary>
+/// <summary>The Queries row models' pure display helpers: raw server-clock formatting, the Query Store
+/// row's stored-UTC execution stamps, FullName, totals.</summary>
 public sealed class ViewerQueriesDisplayTests
 {
+    /// <summary>
+    /// <c>query_stats</c>' and <c>procedure_stats</c>' execution and cache stamps are the SQL server's
+    /// own wall clock, shown raw — NOT run through the naive-UTC conversion the <c>collection_time</c>
+    /// columns get. <c>query_store_stats</c>' stamps are not in this family: the collector normalises
+    /// them to UTC, so they take <c>ViewerTimeHelper.ForDisplay</c> instead (#3207).
+    ///
+    /// <para>Only the NULL contract is asserted here, and deliberately: both renderers honour the display
+    /// mode, so a pinned rendered value depends on the process-wide
+    /// <c>ViewerTimeHelper.CurrentDisplayMode</c>, which this class does not serialize — xUnit runs classes
+    /// in parallel and three others flip it. The values are asserted in
+    /// <c>ViewerTimeHelperTests.FormatServerClock_HonoursTheDisplayMode_AtTheFleetOffset</c>, which is in
+    /// the <c>viewer-time-statics</c> collection. Empty-for-null is the same in every mode.</para>
+    /// </summary>
     [Fact]
-    public void FormatServerClock_ShowsRawServerWallClock_EmptyForNull()
+    public void TheTwoClockRenderers_RenderEmptyForNull()
     {
-        /* last_execution_time / creation_time are the SQL server's local wall clock — shown raw, NOT run
-           through the naive-UTC-to-local conversion the collection_time columns get. */
-        var t = new DateTime(2026, 7, 1, 13, 45, 7);
-        Assert.Equal("2026-07-01 13:45:07", ViewerDataService.FormatServerClock(t));
         Assert.Equal("", ViewerDataService.FormatServerClock(null));
+        Assert.Equal("", ViewerDataService.FormatStoredUtc(null));
     }
 
     [Fact]
@@ -449,6 +460,23 @@ public sealed class ViewerQueriesDisplayTests
     }
 
     [Fact]
+    public void QueryStoreRow_ExecutionTimesLocal_ConvertStoredNaiveUtc_EmptyForNull()
+    {
+        /* query_store_stats' execution stamps are naive UTC in the store (QueryStoreCollector normalises
+           Query Store's datetimeoffset), so the row renders both through the stored-UTC conversion (#3207),
+           not the raw server-clock family the dm_exec_* stamps use. Expected is derived through the same
+           ForDisplay the renderer uses — a pinned literal only holds where the conversion is the identity
+           (a UTC machine). Distinct inputs, so First wired to Last (or the reverse) fails. */
+        var firstUtc = new DateTime(2026, 7, 1, 9, 30, 15, DateTimeKind.Unspecified);
+        var lastUtc = new DateTime(2026, 7, 2, 21, 5, 59, DateTimeKind.Unspecified);
+        var row = new ViewerQueryStoreRow { FirstExecutionTime = firstUtc, LastExecutionTime = lastUtc };
+        Assert.Equal(ViewerTimeHelper.ForDisplay(firstUtc).ToString("yyyy-MM-dd HH:mm:ss"), row.FirstExecutionTimeLocal);
+        Assert.Equal(ViewerTimeHelper.ForDisplay(lastUtc).ToString("yyyy-MM-dd HH:mm:ss"), row.LastExecutionTimeLocal);
+        Assert.Equal("", new ViewerQueryStoreRow().FirstExecutionTimeLocal);
+        Assert.Equal("", new ViewerQueryStoreRow().LastExecutionTimeLocal);
+    }
+
+    [Fact]
     public void ComparisonItems_AreTheSharedUiTypes()
     {
         /* The three comparison reads return the shared .Ui derivatives the collapsed grids bind. */
@@ -464,7 +492,8 @@ public sealed class ViewerQueriesDisplayTests
 /// to Postgres): the baseline-before-window vs. recent-in-window split ON <c>collection_time</c> (not the
 /// TVF's <c>server_last_execution_time</c>), the CPU-regression &gt; 25% gate, the added-duration ranking +
 /// TOP (50) cap, the duration-driven severity bands, the summed/counted CASTs, and the #1319 database
-/// filter — plus the row model's raw-server-clock display. String + pure-logic pins only (no live Postgres).
+/// filter — plus the row model's stored-UTC display conversion. String + pure-logic pins only (no live
+/// Postgres).
 /// </summary>
 public sealed class ViewerQueryStoreRegressionsTests
 {
@@ -521,10 +550,15 @@ public sealed class ViewerQueryStoreRegressionsTests
     }
 
     [Fact]
-    public void RegressionRow_LastExecutionLocal_ShowsRawServerClock_EmptyForNull()
+    public void RegressionRow_LastExecutionLocal_ConvertsStoredNaiveUtc_EmptyForNull()
     {
-        var row = new ViewerQueryStoreRegressionRow { LastExecutionTime = new DateTime(2026, 7, 1, 9, 30, 15) };
-        Assert.Equal("2026-07-01 09:30:15", row.LastExecutionTimeLocal);
+        /* query_store_stats' last-exec stamp is naive UTC in the store (QueryStoreCollector normalises
+           Query Store's datetimeoffset), so the row renders it through the stored-UTC conversion (#3207),
+           not the raw server-clock family. Expected is derived through the same ForDisplay the renderer
+           uses — a pinned literal only holds where the conversion is the identity (a UTC machine). */
+        var utc = new DateTime(2026, 7, 1, 9, 30, 15, DateTimeKind.Unspecified);
+        var expected = ViewerTimeHelper.ForDisplay(utc).ToString("yyyy-MM-dd HH:mm:ss");
+        Assert.Equal(expected, new ViewerQueryStoreRegressionRow { LastExecutionTime = utc }.LastExecutionTimeLocal);
         Assert.Equal("", new ViewerQueryStoreRegressionRow { LastExecutionTime = null }.LastExecutionTimeLocal);
     }
 }

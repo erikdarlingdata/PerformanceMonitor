@@ -97,6 +97,7 @@ WHERE server_id = $1";
         CancellationToken cancellationToken)
     {
         await using var command = postgres.CreateCommand(ServerEngineSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
@@ -110,47 +111,62 @@ WHERE server_id = $1";
         return (edition, kind);
     }
 
-    /// <summary>The registry's PostgreSQL major for one server (V100, #2653). $1 server_id.</summary>
-    public const string PostgresMajorVersionSql = @"
-SELECT postgres_major_version
+    /// <summary>
+    /// The registry's two PostgreSQL facts for one server (the major from V100 #2653, the kind from V82
+    /// #2530). $1 server_id.
+    ///
+    /// <para>ONE round trip for both, for the reason <see cref="ServerEngineSql"/> gives one axis over: they
+    /// are read together by every caller that has a NULL column to explain, and two reads would make it
+    /// possible to answer the VERSION axis from this server's row and the FLAVOUR axis from a stale copy —
+    /// which is how an explanation ends up naming a major belonging to one server and an engine belonging to
+    /// another. Exposed as a const so the tests can pin the shape without a live store.</para>
+    /// </summary>
+    public const string PostgresTargetFactsSql = @"
+SELECT postgres_major_version, engine_kind
 FROM servers
 WHERE server_id = $1";
 
     /// <summary>
-    /// The target's probed PostgreSQL major, or <c>null</c> when the registry makes no claim — no row, a
-    /// server no connect has stamped since V100 landed, or a SQL Server target, where it is not a fact about
-    /// that server at all.
+    /// The target's probed PostgreSQL major and its engine KIND token, each <c>null</c> when the registry
+    /// makes no claim about that fact — no row, a server no connect has stamped since the rung adding the
+    /// column landed, or a SQL Server target, where the major is not a fact about that server at all.
+    /// Decode the token through <see cref="MonitoredEngineKind"/> rather than comparing strings.
     ///
-    /// <para><b>Null is not an error and must not be rendered as a version.</b> Callers use this to decide
-    /// whether they may state that a column is absent on this server's version; with no claim they say
-    /// nothing about the version instead of guessing, because a wrong version in an explanation is worse
-    /// than an unexplained NULL.</para>
+    /// <para><b>Neither null is an error.</b> A null major must not be rendered as a version, and a null
+    /// kind must not be read as "not Aurora". Callers use these to decide whether they may state that a
+    /// column is structurally absent on this server's version or on its flavour; with no claim they say
+    /// nothing rather than guessing, because a wrong version or a wrong engine inside an explanation is
+    /// worse than an unexplained NULL. <see cref="MonitoredEngineKind.IsAurora"/> already answers false for
+    /// null, which is the direction that stays honest.</para>
     ///
-    /// <para>A registry read that FAILS answers null for the same reason
+    /// <para>A registry read that FAILS answers both nulls, for the reason
     /// <see cref="NotCollectedStatusAsync"/> does: this runs on a path that already has its data, and a
     /// capability probe must never turn a good answer into a read error.</para>
     /// </summary>
-    public static async Task<int?> PostgresMajorVersionAsync(
+    public static async Task<(int? PostgresMajorVersion, string? EngineKind)> PostgresTargetFactsAsync(
         NpgsqlDataSource postgres,
         int serverId,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            await using var command = postgres.CreateCommand(PostgresMajorVersionSql);
+            await using var command = postgres.CreateCommand(PostgresTargetFactsSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
-            if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0))
+            if (!await reader.ReadAsync(cancellationToken))
             {
-                return null;
+                return (null, null);
             }
 
-            return reader.GetInt32(0);
+            return (
+                reader.IsDBNull(0) ? null : reader.GetInt32(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1));
         }
         catch (Exception)
         {
-            return null;
+            return (null, null);
         }
     }
 }

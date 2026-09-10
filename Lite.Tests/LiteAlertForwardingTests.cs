@@ -706,8 +706,8 @@ public class LiteAlertForwardingTests : IDisposable
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
-        Assert.Equal("91% used (910 MB)", fired.CurrentValue);  /* :448 */
-        Assert.Equal("tempdb 91% used", fired.ShortMessage);    /* :435 toast body */
+        Assert.Equal("91% reserved (910 MB)", fired.CurrentValue);  /* :448 */
+        Assert.Equal("tempdb 91% reserved", fired.ShortMessage);    /* :435 toast body */
     }
 
     /// <summary>
@@ -735,8 +735,8 @@ public class LiteAlertForwardingTests : IDisposable
         withoutCeiling.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 59.75, UnallocatedMb = 2.69 };
         await withoutCeiling.Build().EvaluateServerAsync(Harness.Snapshot());
         var fired = Assert.Single(withoutCeiling.Deliverer.Outcomes);
-        Assert.Equal("96% used (60 MB)", fired.CurrentValue);
-        Assert.Equal("tempdb 96% used", fired.ShortMessage);
+        Assert.Equal("96% reserved (60 MB)", fired.CurrentValue);
+        Assert.Equal("tempdb 96% reserved", fired.ShortMessage);
     }
 
     [Fact]

@@ -18,6 +18,36 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- #3134: LocalDataService.OpenWriteConnectionAsync bounds its write-lock wait so a WPF dispatcher
+         cannot freeze behind an archival. There is no dispatcher in this host, and the lock on
+         DuckDbInitializer is process-wide - so a store test waits behind every other class in the suite,
+         including the test methods that take the exclusive lock deliberately and hold it for seconds
+         while they assert on timing. A budget sized for a dispatcher, expiring inside a hold taken by a
+         neighbour, is a failure with no user behind it; so this host states a budget orders of magnitude
+         larger and the acquisition waits the hold out. Short of forever on purpose - a wedged lock still
+         fails, with the same message, rather than hanging the suite. The shipped app declares nothing
+         here and keeps LocalDataService.DefaultWriteLockBudget.
+
+         This comment carries no apostrophe, deliberately. CrossAppGuardCiGateTests reads this file with
+         a regex that treats one as an attribute delimiter, so an unbalanced pair swallows the quoted
+         attribute values after it - including the linked cross-app Compile below, whose absence the
+         guard reports as a moved blind spot rather than as a comment. -->
+    <RuntimeHostConfigurationOption Include="PerformanceMonitorLite.WriteLockBudgetSeconds" Value="120" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The shared C# source walk (#2913), compiled into this assembly rather than copied into it. Lite.Tests
+         cannot ProjectReference Darling.Tests - both are xunit executables and CI would discover the Darling
+         suite twice - and a second COPY is the exact thing #2913 removed: five pins each carried their own
+         walk, they drifted, and only one of them had grown the newline stop that bounds a mis-read literal.
+         One file, one authority, no parity pin needed because there is nothing to keep in parity. It brings
+         its Darling.Tests namespace with it, which is why the two adopters here carry a `using Darling.Tests`.
+         Its own coverage stays in Darling.Tests/CSharpSourceWalkerTests.cs - the implementation Lite compiles
+         is byte-identical to the one those tests exercise. -->
+    <Compile Include="..\Darling\Darling.Tests\CSharpSourceWalker.cs" Link="CSharpSourceWalker.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Lite\PerformanceMonitorLite.csproj" />
     <ProjectReference Include="..\PerformanceMonitor.Notifications\PerformanceMonitor.Notifications.csproj" />
   </ItemGroup>

@@ -38,6 +38,56 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
 {
+    /// <summary>
+    /// The explicit command deadline for EVERY read in the alert evaluation pass (#2874).
+    ///
+    /// <para>All forty-five commands across the six alert-pass types ran with no
+    /// <c>CommandTimeout</c>, so every one inherited Npgsql's undocumented 30 s default. Nobody chose
+    /// 30 s; it was simply what happened. On 2026-09-04 the forced-plan read failed five times on the
+    /// production store, each time surfacing as "Exception while reading from stream" — which is how
+    /// Npgsql renders its OWN deadline, and which read literally says the network broke (the same
+    /// misdiagnosis #2826 exists to prevent).</para>
+    ///
+    /// <para><b>Why this pass needed its own number rather than the 60 s #2810 and #2871 chose.</b>
+    /// Those two sit under <c>DarlingWorker.s_analysisTimeout</c>, a 120 s <c>CancelAfter</c> that
+    /// bounds the whole pass however long an individual command runs. <b>This pass has no enclosing
+    /// budget at all</b> — <c>EvaluateAlertsAsync</c> is called with the plain stopping token — so the
+    /// per-command deadline IS the pass budget, multiplied by however many reads run in sequence.
+    /// At the inherited 30 s that is 45 x 30 s of worst-case exposure while the body holds one of only
+    /// <see cref="DarlingWorker.MaxConcurrentServerSweeps"/> fleet permits, and the sweep skips
+    /// relaunch for that server the whole time. Copying 60 s here would have doubled it.</para>
+    ///
+    /// <para><b>Bounded below</b> by measurement: the shipped queries were timed against the
+    /// production store on its three busiest servers, cold and warm. The whole pass is dominated by
+    /// one read — the forced-plan check at <b>1,744.9 ms</b> cold, scanning ~6.0 GB of
+    /// <c>query_store_stats</c>; every other read in the family lands under 3 ms. Ten seconds is 5.7x
+    /// that worst case, so it absorbs a substantial stall rather than only the happy path.</para>
+    ///
+    /// <para><b>Bounded above</b> by the cadence this pass runs on: <c>s_alertSweepInterval</c> is
+    /// 30 s, so one stalled read must still leave the pass able to finish inside the interval that
+    /// will start it again. Ten seconds keeps a single stall well inside that, and caps the unbudgeted
+    /// worst case at 45 x 10 s instead of 45 x 30 s.</para>
+    ///
+    /// <para><b>The asymmetry is why erring SHORT is right here, and it is the reverse of #2810.</b>
+    /// A read that exceeds this deadline skips one alert check and logs it; the next pass runs 30 s
+    /// later, so the cost is one cycle of delay on one alert. A read that runs long holds a fleet
+    /// sweep permit and delays collection for every other server queued behind it. The recoverable
+    /// failure is strictly cheaper than the unrecoverable one, so this is the first value in the
+    /// family set BELOW what it inherited rather than above it.</para>
+    ///
+    /// <para><b>What the data cannot say.</b> Every observed failure was killed AT the 30 s ceiling,
+    /// so the record is right-censored: nothing here establishes whether a stalled read wanted 35 s or
+    /// 300 s. Ten seconds is chosen from the measured cost and the cadence above, NOT fitted to the
+    /// failure distribution — a number claiming to fit that data would be invented.</para>
+    ///
+    /// <para><b>What this does NOT cover.</b> <c>PgPlanForceActionStore</c> sits beside these
+    /// types and is not one of them: its only caller is <c>PlanForceBot.RunAfterAnalysisAsync</c>,
+    /// dispatched as the analysis pass's post-pass hook over the plain stopping token. It shares
+    /// the unbudgeted shape but runs on the analysis interval, not this pass's 30 s cadence, so the
+    /// upper bound derived above does not apply to it and it is left for its own group (#2874).</para>
+    /// </summary>
+    internal const int AlertPassCommandTimeoutSeconds = 10;
+
     private readonly NpgsqlDataSource _postgres;
     private readonly Func<int, int>? _runningJobsCadenceMinutes;
     private readonly Func<int, int>? _blockingSnapshotCadenceMinutes;
@@ -121,7 +171,7 @@ LIMIT 200";
 
         await using (var connection = await _postgres.OpenConnectionAsync(cancellationToken))
         {
-            using (var command = new NpgsqlCommand(BlockedProcessReportsSql, connection))
+            using (var command = new NpgsqlCommand(BlockedProcessReportsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
             {
                 command.Parameters.AddWithValue(serverId);
                 command.Parameters.AddWithValue(startTime);
@@ -146,7 +196,7 @@ LIMIT 200";
                 }
             }
 
-            using (var command = new NpgsqlCommand(DmvBlockingSnapshotsSql, connection))
+            using (var command = new NpgsqlCommand(DmvBlockingSnapshotsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
             {
                 command.Parameters.AddWithValue(serverId);
                 command.Parameters.AddWithValue(startTime);
@@ -213,7 +263,7 @@ GROUP BY collection_time";
         var serverId = ParseServerKey(serverKey);
 
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(CurrentBlockingWaitSql, connection);
+        using var command = new NpgsqlCommand(CurrentBlockingWaitSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -259,7 +309,7 @@ LIMIT 50";
 
         var items = new List<DeadlockAlertRow>();
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(DeadlocksSql, connection);
+        using var command = new NpgsqlCommand(DeadlocksSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(startTime);
         command.Parameters.AddWithValue(endTime);
@@ -292,7 +342,8 @@ SELECT
     delta_waiting_tasks AS delta_tasks,
     CASE WHEN delta_waiting_tasks > 0
     THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / delta_waiting_tasks
-    ELSE 0 END AS avg_ms_per_wait
+    ELSE 0 END AS avg_ms_per_wait,
+    collection_time
 FROM wait_stats
 WHERE server_id = $1
 AND wait_type IN ('THREADPOOL', 'RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE')
@@ -308,7 +359,7 @@ LIMIT 3";
 
         var items = new List<PoisonWaitDelta>();
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(PoisonWaitsSql, connection);
+        using var command = new NpgsqlCommand(PoisonWaitsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(NaiveUtcNow().AddMinutes(-10));
 
@@ -321,7 +372,8 @@ LIMIT 3";
                     WaitType = reader.GetString(0),
                     DeltaMs = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                     DeltaTasks = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                    AvgMsPerWait = reader.IsDBNull(3) ? 0 : reader.GetDouble(3)
+                    AvgMsPerWait = reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
+                    CollectionTime = reader.GetDateTime(4)
                 });
             }
         }
@@ -404,7 +456,7 @@ LIMIT $3";
 
         var items = new List<LongRunningQueryInfo>();
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(sql, connection);
+        using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(thresholdMs);
         command.Parameters.AddWithValue(maxResults);
@@ -510,7 +562,7 @@ ORDER BY c.database_name, c.file_name";
 
         var items = new List<DatabaseFileGrowthInfo>();
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(DatabaseFileGrowthSql, connection);
+        using var command = new NpgsqlCommand(DatabaseFileGrowthSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(windowStart);
 
@@ -566,7 +618,7 @@ ORDER BY MIN(volume_free_mb) / MAX(volume_total_mb)";
 
         var items = new List<VolumeFreeSpaceInfo>();
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(VolumeFreeSpaceSql, connection);
+        using var command = new NpgsqlCommand(VolumeFreeSpaceSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -621,7 +673,7 @@ ORDER BY
 
         var items = new List<PvsPressureInfo>();
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(PvsPressureSql, connection);
+        using var command = new NpgsqlCommand(PvsPressureSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -667,7 +719,7 @@ LIMIT 1";
         var serverId = ParseServerKey(serverKey);
 
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(TempDbSpaceSql, connection);
+        using var command = new NpgsqlCommand(TempDbSpaceSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -729,7 +781,7 @@ LIMIT 5";
            per-run cooldown key expires each pass, so a stale snapshot re-fires the same historical run
            every cooldown, forever. Same rule as Lite's adapter; parity is the point. */
         using (var snapshotProbe = new NpgsqlCommand(
-            "SELECT MAX(collection_time) FROM running_jobs WHERE server_id = $1", connection))
+            "SELECT MAX(collection_time) FROM running_jobs WHERE server_id = $1", connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
         {
             snapshotProbe.Parameters.AddWithValue(serverId);
             var snapshot = await snapshotProbe.ExecuteScalarAsync(cancellationToken);
@@ -741,7 +793,7 @@ LIMIT 5";
             }
         }
 
-        using var command = new NpgsqlCommand(AnomalousJobsSql, connection);
+        using var command = new NpgsqlCommand(AnomalousJobsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(thresholdPercent);
 
@@ -944,7 +996,7 @@ ORDER BY l.database_name";
         var items = new List<DatabaseStateInfo>();
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-        using (var seed = new NpgsqlCommand(SeedDatabaseStateExpectedSql, connection))
+        using (var seed = new NpgsqlCommand(SeedDatabaseStateExpectedSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
         {
             seed.Parameters.AddWithValue(serverId);
             await seed.ExecuteNonQueryAsync(cancellationToken);
@@ -954,13 +1006,13 @@ ORDER BY l.database_name";
            for a database that has none, this un-learns one the database has since outgrown. Both run before
            the read, so a poisoned expectation is corrected on the cycle that notices it rather than firing
            once more first. */
-        using (var heal = new NpgsqlCommand(HealDatabaseStateBaselineToOnlineSql, connection))
+        using (var heal = new NpgsqlCommand(HealDatabaseStateBaselineToOnlineSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
         {
             heal.Parameters.AddWithValue(serverId);
             await heal.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        using (var prune = new NpgsqlCommand(PruneDatabaseStateExpectedSql, connection))
+        using (var prune = new NpgsqlCommand(PruneDatabaseStateExpectedSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
         {
             prune.Parameters.AddWithValue(serverId);
             await prune.ExecuteNonQueryAsync(cancellationToken);
@@ -970,13 +1022,13 @@ ORDER BY l.database_name";
            one carried over from a restart (#2166). A database cleared here is one that is back at its
            expected state, so it cannot appear in the deviation read below either way — the ordering matters
            for the NEXT deviation, not this one. */
-        using (var clearRecovered = new NpgsqlCommand(ClearRecoveredDatabaseStateAlertsSql, connection))
+        using (var clearRecovered = new NpgsqlCommand(ClearRecoveredDatabaseStateAlertsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
         {
             clearRecovered.Parameters.AddWithValue(serverId);
             await clearRecovered.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        using (var command = new NpgsqlCommand(DatabaseStateDeviationsSql, connection))
+        using (var command = new NpgsqlCommand(DatabaseStateDeviationsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
         {
             command.Parameters.AddWithValue(serverId);
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -995,6 +1047,10 @@ ORDER BY l.database_name";
         return items;
     }
 
+    /// <summary>How far back <see cref="ForcePlanFailuresSql"/> looks for a plan's two most recent
+    /// collections. Bound as a parameter rather than written into the SQL — see that query's remarks.</summary>
+    internal static readonly TimeSpan ForcePlanFailureWindow = TimeSpan.FromHours(2);
+
     /// <summary>
     /// Forced plans whose failure counter ROSE between the two most recent collections that carried the
     /// plan (#2157). $1 server_id.
@@ -1004,6 +1060,17 @@ ORDER BY l.database_name";
     /// (plan, collection_time) to one value with MAX before any comparison. The two-hour window bounds
     /// the hypertable scan; a plan not collected within it is by definition not failing right now, and
     /// Query Store's own flush cadence (900s) means an active plan appears several times inside it.</para>
+    ///
+    /// <para>The window's lower bound is BOUND as <c>$2</c> from <see cref="NaiveUtcNow"/>, never spelled
+    /// <c>now() - interval '2 hours'</c> in the SQL. <c>collection_time</c> is
+    /// <c>timestamp without time zone</c> holding naive UTC and <c>now()</c> is <c>timestamptz</c>, so the
+    /// mixed comparison makes PostgreSQL convert the naive side at the store SESSION's TimeZone — which
+    /// initdb takes from the host OS, and which BuildConfAppend does not pin. Measured on
+    /// timescaledb:latest-pg17 seeded one row per 52s, a one-hour window returned 70 rows under
+    /// <c>TimeZone='UTC'</c> and 347 under <c>'America/New_York'</c>: the same predicate silently spanning
+    /// five hours. East of UTC it narrows instead: at <c>'Pacific/Kiritimati'</c> this read returns NOTHING,
+    /// so the forced-plan-failure alert never fires there at all. The bound is the service clock's, which is also the clock that
+    /// stamped <c>collection_time</c>, so the two cannot disagree about what "two hours ago" means.</para>
     ///
     /// <para>The <c>&gt;</c> comparison is what makes this a delta read: equal counters are silence, and a
     /// LOWER counter (unforce/re-force reset) is silence too rather than a negative delta.</para>
@@ -1021,7 +1088,7 @@ WITH per_collection AS (
         MAX(COALESCE(qs.last_force_failure_reason, '')) AS reason
     FROM query_store_stats AS qs
     WHERE qs.server_id = $1
-    AND   qs.collection_time > now() - interval '2 hours'
+    AND   qs.collection_time > $2
     GROUP BY qs.database_name, qs.query_id, qs.plan_id, qs.collection_time
 ),
 ranked AS (
@@ -1056,8 +1123,9 @@ ORDER BY n.database_name, n.query_id, n.plan_id";
 
         var items = new List<ForcePlanFailureInfo>();
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-        using var command = new NpgsqlCommand(ForcePlanFailuresSql, connection);
+        using var command = new NpgsqlCommand(ForcePlanFailuresSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(NaiveUtcNow() - ForcePlanFailureWindow);
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

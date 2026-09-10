@@ -120,6 +120,7 @@ internal static class DarlingStoredPlanReader
         }
 
         await using var command = postgres.CreateCommand(QueryStatsPlanXmlByHashSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = queryHash });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)databaseName ?? DBNull.Value });
@@ -140,6 +141,7 @@ internal static class DarlingStoredPlanReader
         }
 
         await using var command = postgres.CreateCommand(ProcedurePlanXmlBySqlHandleSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = sqlHandle });
         return await ReadPlanTextOrGzipAsync(command, cancellationToken);
@@ -154,6 +156,7 @@ internal static class DarlingStoredPlanReader
         CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(QueryStorePlanTextSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = queryId });

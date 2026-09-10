@@ -146,6 +146,18 @@ public class PgBaselineProvider
     /// cancelled; a <see cref="TimeoutException"/> anywhere in the chain is Npgsql's own deadline. Everything
     /// else stays "failed", because labelling a genuine connection fault a timeout is the same defect aimed
     /// the other way.</para>
+    ///
+    /// <para><b>Three call sites cite that as "the house discipline", so its SCOPE belongs here: it is
+    /// about what a failure MEANS, not about every question one can be asked.</b> This predicate's question
+    /// is whether the statement ran out of time, and structure answers it — every producer of <c>57014</c>
+    /// ran out of time, so the code is sufficient and the transport's prose is worse than useless. WHOSE
+    /// clock ran out is a different question and structure cannot answer it at all: PostgreSQL raises
+    /// <c>57014</c> for the target's <c>statement_timeout</c>, for <c>pg_cancel_backend()</c> and for the
+    /// CancelRequest Npgsql sends on its own deadline, so the code is shared and the message is the only
+    /// field that differs. <c>CollectorFaultCancelOrigin</c> in the service reads it for exactly that, and
+    /// treats every wording it does not recognise as unproven. Reading text where structure suffices is the
+    /// defect this discipline names; refusing to read it where structure is provably silent is the same
+    /// defect wearing the rule as a costume (#3118).</para>
     /// </summary>
     internal static bool IsCommandTimeout(Exception ex) =>
         ex is PostgresException { SqlState: "57014" }
@@ -165,7 +177,7 @@ public class PgBaselineProvider
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-            using var cmd = new NpgsqlCommand(query, connection);
+            using var cmd = new NpgsqlCommand(query, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);
             /* Window bounds arrive as bound naive-UTC parameters (Kind-Unspecified so Npgsql
                maps them to `timestamp`, matching the naive-UTC columns) — never bare now(). */
@@ -257,6 +269,22 @@ public class PgBaselineProvider
     /// flat tier), then median of |v − tier median| per tier. Sentinel tiers also fix the flat
     /// tier's DistinctDays, which the pooled synthesis could only approximate with a MAX proxy.
     /// </summary>
+    /*
+       #2820: the tier expansion is written as an explicit UNION ALL feeding an EQUI-join, not as the
+       obvious `ON (t.hour_of_day = -1 OR t.hour_of_day = k.hh) AND (t.day_of_week = -1 OR ...)`.
+       Both express "every row joins each tier it belongs to" and both return byte-identical rows —
+       the OR form was the original, and it is the reason io_latency spent a week timing out on the
+       dogfood box. Postgres cannot hash an OR'd non-equi predicate, so it degrades to a join whose
+       planner estimate reached cost 596,208,924 for a 193-row result and which spilled to temp;
+       measured on use2, one server, 476,431 rows in the 30-day window: 23.7s OR-join vs 4.2s
+       expanded, same 193 rows and the same checksum. DuckDB never needed this because it has a
+       native mad() aggregate (Lite computes the same answer single-pass, no join at all); this
+       scaffold is the Postgres emulation of that, so it has to earn its join shape explicitly.
+
+       Expanding rows before an equi-join is deliberately the cheaper side of the trade: the fanout
+       is identical either way (each row belongs to exactly three tiers), so this buys the hash join
+       without adding a single row to the percentile sorts.
+    */
     internal const string RobustTierScaffold = @"
 keyed AS (
     SELECT v,
@@ -276,13 +304,18 @@ tier_stats AS (
     FROM keyed
     GROUP BY GROUPING SETS ((hh, dw), (hh), ())
 ),
+keyed_tiers AS (
+    SELECT v, hh AS hour_of_day, dw AS day_of_week FROM keyed
+    UNION ALL SELECT v, hh, -1 FROM keyed
+    UNION ALL SELECT v, -1, -1 FROM keyed
+),
 tier_mads AS (
     SELECT t.hour_of_day, t.day_of_week,
            percentile_cont(0.5) WITHIN GROUP (ORDER BY ABS(k.v - t.median_val)) AS mad_val
-    FROM keyed AS k
+    FROM keyed_tiers AS k
     JOIN tier_stats AS t
-      ON (t.hour_of_day = -1 OR t.hour_of_day = k.hh)
-     AND (t.day_of_week = -1 OR t.day_of_week = k.dw)
+      ON t.hour_of_day = k.hour_of_day
+     AND t.day_of_week = k.day_of_week
     GROUP BY t.hour_of_day, t.day_of_week
 )
 SELECT t.hour_of_day, t.day_of_week, t.mean_val, t.stddev_val, t.sample_count, t.distinct_days,

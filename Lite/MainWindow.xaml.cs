@@ -29,6 +29,7 @@ using PerformanceMonitor.Ui;
 /* Type alias (not a namespace import) so PerformanceMonitor.Alerting's CpuAlertMode enum can never
    collide with this app's own CpuAlertMode. */
 using AlertEngine = PerformanceMonitor.Alerting.AlertEngine;
+using AlertReadFailureCounter = PerformanceMonitor.Alerting.AlertReadFailureCounter;
 
 namespace PerformanceMonitorLite;
 
@@ -190,7 +191,20 @@ public partial class MainWindow : Window
                it holding wrong numbers permanently (v39 / #1832 precedent). */
             var sliceRepair = new QueryStoreSliceRepairService(
                 _databaseInitializer, App.ArchiveDirectory, new AppLoggerAdapter<QueryStoreSliceRepairService>());
-            _ = Task.Run(() => sliceRepair.RepairOnStartupAsync());
+
+            /* #2761: hand the repair the app-lifetime token instead of leaving it on CancellationToken.None.
+               That default is not merely untidy — DuckDbInitializer.AcquireReadLock BRANCHES on it, taking the
+               uninterruptible EnterReadLock() path for a token that cannot be cancelled and the pollable,
+               abandonable one otherwise. So every carefully-forwarded token inside this service stopped at the
+               door, and a survey queued behind a long archival could not be interrupted by anything: not a
+               shutdown, not the operator closing the window. The service is already written to be abandoned
+               at every one of those points (#2465) — the marker is withheld and the next launch redoes the
+               work — so what was missing was only a token that can actually fire.
+
+               The CTS is created here rather than at its old site a few lines below purely so this call can
+               have it; it is still the same single app-lifetime source, cancelled once in MainWindow_Closing. */
+            _backgroundCts = new CancellationTokenSource();
+            _ = Task.Run(() => sliceRepair.RepairOnStartupAsync(_backgroundCts.Token));
 
             // Routes high-severity analysis findings to email/Slack/Teams; the background
             // service runs scheduled analysis and hands findings to it.
@@ -211,7 +225,8 @@ public partial class MainWindow : Window
             // SynchronizationContext, so StartAsync and every subsequent continuation stay off-UI.
             // Safe: the pipeline only touches DuckDB + the email/webhook notification service; the
             // UI reads data by polling DuckDB on its own timers, fully decoupled.
-            _backgroundCts = new CancellationTokenSource();
+            /* #2761 moved the CTS construction above the slice-repair launch so that call can take the same
+               app-lifetime token; this stays the only place the background service is started with it. */
             _ = Task.Run(() => _backgroundService.StartAsync(_backgroundCts.Token));
 
             // Initialize system tray
@@ -248,7 +263,14 @@ public partial class MainWindow : Window
                 _muteRuleService.IsAlertMuted,
                 failedJobsFetcher: FetchFailedJobsForAlertAsync,
                 resolutionCallback: ShowAlertResolutionToastAsync,
-                logger: new AppLoggerAdapter<AlertEngine>());
+                logger: new AppLoggerAdapter<AlertEngine>(),
+                /* #3013: the process counter every swallowed condition read is tallied on, which
+                   get_collection_health's alert_read_health block reads back. Lite's alert reads hit the
+                   local DuckDB store rather than a Postgres one, so the deadline mechanism #3013 measured
+                   does not apply here — but the SURFACE gap does: a swallowed read reached no health read
+                   on this SKU either. Passed explicitly rather than defaulted inside the engine so a test
+                   constructs its own and cannot pollute this one. */
+                readFailures: AlertReadFailureCounter.Shared);
 
             // Load mute rules from database
             await _muteRuleService.LoadAsync();

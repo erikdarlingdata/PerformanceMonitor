@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -452,8 +453,19 @@ public sealed class DarlingMcpTrendTools
         try
         {
             var now = windowEnd;
+            var startUtc = now.AddHours(-hours_back);
+
+            /*
+                #2736: route through the corrected rollup where the store has one. The raw read ranks the
+                whole Query Store slab per call, which exceeds the mcp role's statement_timeout at ANY
+                window width on a large store — so the materialized window portion is served from
+                query_store_stats_corrected_hourly and only the unmaterialized tail is ranked raw. The
+                payload discloses the routing (grain and boundary) rather than presenting the two regions
+                as one estimator.
+            */
+            var route = await QueryStoreTrendRouting.ResolveAsync(postgres);
             var points = await DarlingTrendReader.GetQueryStoreDurationTrendAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, startUtc, now, route);
 
             if (points.Count == 0)
             {
@@ -468,13 +480,26 @@ public sealed class DarlingMcpTrendTools
                     return gated;
                 }
 
+                /*
+                    A window that ends before the rollup has materialized anything is a coverage gap, not a
+                    quiet server: the work may well be in raw rows this read deliberately no longer ranks
+                    (that rank IS the #2736 timeout), or in history only a backfill can materialize. Saying
+                    "widen hours_back" here would send the caller in the wrong direction.
+                */
+                if (route.UseRollup && route.RollupFloorUtc is DateTime floor && now < floor)
+                {
+                    return McpHelpers.Status(
+                        "empty",
+                        $"The requested window ends before {floor:o}, the oldest hour the corrected Query Store rollup has materialized. This read serves history from query_store_stats_corrected_hourly rather than ranking the raw Query Store slab (#2736), so windows before that floor come back empty even when rows were collected — run --backfill-rollups to materialize deeper history.");
+                }
+
                 return await EmptyTrendAsync(
                     DarlingTrendReader.HasAnyQueryStoreStatAsync(postgres, resolved.ServerId),
                     resolved.ServerName, hours_back, "Query Store",
                     "Query Store may be OFF on this server's databases — that, not an absence of slow queries, is the usual cause. Check QUERY_STORE = ON per database, then that collection is running for this server.");
             }
 
-            return SerializeTrend(resolved.ServerName, hours_back, points);
+            return SerializeTrend(resolved.ServerName, hours_back, points, DescribeQueryStoreRoute(route, startUtc));
         }
         catch (Exception ex)
         {
@@ -491,19 +516,64 @@ public sealed class DarlingMcpTrendTools
     /// does not break; read <c>executions_per_second</c>.</para>
     /// </summary>
     private static string SerializeTrend(
-        string serverName, int hours_back, List<DarlingTrendReader.QueryDurationTrendPoint> points) =>
-        JsonSerializer.Serialize(new
+        string serverName, int hours_back, List<DarlingTrendReader.QueryDurationTrendPoint> points,
+        object? source = null)
+    {
+        var trend = points.Select(p => new
         {
-            server = serverName,
-            hours_back,
-            trend = points.Select(p => new
-            {
-                time = p.CollectionTime.ToString("o"),
-                value = p.Value,
-                execution_count = p.ExecutionCount,
-                executions_per_second = p.ExecutionsPerSecond,
-            }),
-        }, McpHelpers.JsonOptions);
+            time = p.CollectionTime.ToString("o"),
+            value = p.Value,
+            execution_count = p.ExecutionCount,
+            executions_per_second = p.ExecutionsPerSecond,
+        });
+
+        /* `source` is additive and only the Query Store sibling sends one (#2736) — the shared trend field
+           set stays identical across the three siblings, which is this helper's whole job. */
+        return source is null
+            ? JsonSerializer.Serialize(new { server = serverName, hours_back, trend }, McpHelpers.JsonOptions)
+            : JsonSerializer.Serialize(new { server = serverName, hours_back, source, trend }, McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
+    /// The routing disclosure get_query_store_duration_trend attaches when the corrected rollup served part
+    /// of the window (#2736) — which relation served which region, at which grain, and (when the requested
+    /// window reaches below the rollup's materialized floor) what was NOT served and why. A degraded or
+    /// partial answer must label itself; the raw-only route attaches nothing because it is the original
+    /// single-estimator read.
+    /// </summary>
+    private static Dictionary<string, object>? DescribeQueryStoreRoute(
+        QueryStoreTrendRouting.QueryStoreTrendRoute route, DateTime windowStartUtc)
+    {
+        if (!route.UseRollup)
+        {
+            return null;
+        }
+
+        var source = new Dictionary<string, object>
+        {
+            ["tier"] = "rollup+raw",
+            ["rollup"] = TimescaleSupport.QueryStoreStatsCorrectedHourlyView,
+            ["raw_from"] = route.RawStartUtc.ToString("o"),
+            ["note"] =
+                "Points before raw_from are 1-hour buckets from the corrected Query Store rollup (#1849): " +
+                "bucketed on the COLLECTION hour, deduped at interval grain, with an interval whose " +
+                "snapshots straddle an hour boundary contributing to both adjacent buckets. Points at or " +
+                "after raw_from are raw Query Store intervals deduped to their final snapshot and placed " +
+                "at interval_start_time_utc.",
+        };
+
+        if (route.RollupFloorUtc is DateTime floor && floor > windowStartUtc)
+        {
+            source["unserved_before"] = floor.ToString("o");
+            source["unserved_note"] =
+                "The rollup has not materialized history before unserved_before, and this read no longer " +
+                "falls back to ranking the raw slab for it (that rank is the #2736 timeout) — points " +
+                "before that instant are missing, not zero. Run --backfill-rollups to materialize deeper " +
+                "history.";
+        }
+
+        return source;
+    }
 
     /// <summary>
     /// The two-branch empty answer the two new Performance-Trends siblings share (#2484), phrased to match

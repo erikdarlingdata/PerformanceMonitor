@@ -53,7 +53,7 @@ SELECT watermark
 FROM config_edge_trigger_watermarks
 WHERE server_id = $1
 AND   metric_name = $2
-AND   watermark_time IS NULL", connection);
+AND   watermark_time IS NULL", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
             command.Parameters.AddWithValue(ParseServerKey(serverKey));
             command.Parameters.AddWithValue(metricName);
 
@@ -85,7 +85,7 @@ VALUES ($1, $2, $3, NULL, $4)
 ON CONFLICT (server_id, metric_name) DO UPDATE SET
     watermark = EXCLUDED.watermark,
     watermark_time = NULL,
-    updated_at = EXCLUDED.updated_at", connection);
+    updated_at = EXCLUDED.updated_at", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
             command.Parameters.AddWithValue(ParseServerKey(serverKey));
             command.Parameters.AddWithValue(metricName);
             command.Parameters.AddWithValue(watermark);
@@ -109,7 +109,7 @@ SELECT watermark_time
 FROM config_edge_trigger_watermarks
 WHERE server_id = $1
 AND   metric_name = $2
-AND   watermark_time IS NOT NULL", connection);
+AND   watermark_time IS NOT NULL", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
             command.Parameters.AddWithValue(ParseServerKey(serverKey));
             command.Parameters.AddWithValue(FailedJobWatermarkMetric);
 
@@ -150,7 +150,7 @@ VALUES ($1, $2, 0, $3, $4)
 ON CONFLICT (server_id, metric_name) DO UPDATE SET
     watermark = 0,
     watermark_time = EXCLUDED.watermark_time,
-    updated_at = EXCLUDED.updated_at", connection);
+    updated_at = EXCLUDED.updated_at", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
             command.Parameters.AddWithValue(ParseServerKey(serverKey));
             command.Parameters.AddWithValue(FailedJobWatermarkMetric);
             command.Parameters.AddWithValue(DateTime.SpecifyKind(watermark, DateTimeKind.Unspecified));
@@ -190,7 +190,7 @@ UPDATE config.database_state_expected
 SET last_alerted_state = $3,
     last_alerted_at = (now() AT TIME ZONE 'UTC')
 WHERE server_id = $1
-AND   database_name = $2", connection);
+AND   database_name = $2", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
             command.Parameters.AddWithValue(ParseServerKey(serverKey));
             command.Parameters.AddWithValue(databaseName);
             command.Parameters.AddWithValue(effectiveState);
@@ -221,7 +221,7 @@ UPDATE config.database_state_expected
 SET last_alerted_state = NULL,
     last_alerted_at = NULL
 WHERE server_id = $1
-AND   database_name = $2", connection);
+AND   database_name = $2", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
             command.Parameters.AddWithValue(ParseServerKey(serverKey));
             command.Parameters.AddWithValue(databaseName);
             await command.ExecuteNonQueryAsync();
@@ -257,7 +257,7 @@ AND   database_name = $2", connection);
 SELECT dedup_key, total_occurrences, observed_window_count, incident_started_at, last_observed_at
 FROM config.incident_occurrences
 WHERE server_id = $1
-AND   metric_name = $2", connection);
+AND   metric_name = $2", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
             command.Parameters.AddWithValue(ParseServerKey(serverKey));
             command.Parameters.AddWithValue(metricName);
 
@@ -338,7 +338,7 @@ AND   metric_name = $2", connection);
 DELETE FROM config.incident_occurrences
 WHERE server_id = $1
 AND   metric_name = $2
-AND   dedup_key <> ALL($3::text[])", connection, transaction))
+AND   dedup_key <> ALL($3::text[])", connection, transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds })
             {
                 prune.Parameters.AddWithValue(serverId);
                 prune.Parameters.AddWithValue(metricName);
@@ -358,7 +358,7 @@ ON CONFLICT (server_id, metric_name, dedup_key) DO UPDATE SET
     total_occurrences = EXCLUDED.total_occurrences,
     observed_window_count = EXCLUDED.observed_window_count,
     incident_started_at = EXCLUDED.incident_started_at,
-    last_observed_at = EXCLUDED.last_observed_at", connection, transaction);
+    last_observed_at = EXCLUDED.last_observed_at", connection, transaction) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
                 upsert.Parameters.AddWithValue(serverId);
                 upsert.Parameters.AddWithValue(metricName);
                 upsert.Parameters.AddWithValue(dedupKeys);

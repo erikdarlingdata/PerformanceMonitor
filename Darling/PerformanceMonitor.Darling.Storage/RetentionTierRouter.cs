@@ -159,8 +159,10 @@ public static class RetentionTierRouter
     /// slip through, both known and both accepted:</para>
     ///
     /// <para><i>A mid-window HOLE is invisible.</i> Coverage is one number — the oldest materialized bucket —
-    /// so it cannot see a gap ABOVE itself. A service down longer than the refresh policy's 3-day
-    /// <c>start_offset</c> resumes at now-3d and never backfills the skipped interval, while
+    /// so it cannot see a gap ABOVE itself. A service down longer than the refresh policy's
+    /// <c>start_offset</c> (<see cref="TimescaleSupport.HourlyRefreshStartOffset"/> since #3012 narrowed it,
+    /// so this exposure is WIDER than it was) resumes at now minus that offset and never backfills the
+    /// skipped interval, while
     /// <c>min(bucket)</c> goes on reporting the original deep floor. The window then routes to the tier and is
     /// served as complete with the gap silently inside it.</para>
     ///

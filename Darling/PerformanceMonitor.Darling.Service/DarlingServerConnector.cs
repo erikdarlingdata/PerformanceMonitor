@@ -95,7 +95,7 @@ SELECT
     CONVERT(integer, SERVERPROPERTY('EngineEdition')) AS engine_edition,
     CASE WHEN DB_ID('rdsadmin') IS NOT NULL THEN 1 ELSE 0 END AS is_aws_rds,
     HAS_DBACCESS(N'msdb') AS has_msdb_access,
-    -- #2228: which database this connection actually landed in. Appended; see the comment above.
+    /* #2228: which database this connection actually landed in. Appended; see the comment above. */
     DB_NAME() AS connected_database";
 
     /// <summary>
@@ -179,7 +179,58 @@ SELECT
             }
         }
 
+        WarnIfRemediationCredentialIsInert(config, logger);
+
         return MonitoredServerConnection.BuildConnectionString(config, password);
+    }
+
+    /// <summary>
+    /// Says out loud that an armed remediation credential does nothing in this build (#2138 phase 1).
+    ///
+    /// <para><b>Why this exists.</b> V113 accepts a per-server remediation credential and nothing in this
+    /// build consumes it — the write path is its own change. An operator who has entered one believes the
+    /// server is armed, and the failure mode of a knob that silently does nothing is at its worst when what
+    /// it claims to gate is a write to a production server. So the same discipline #2745 applied to its
+    /// all-gates-open force (journal it as WITHHELD rather than quietly downgrading it) applies here: the
+    /// credential is accepted, stored, resolvable, and announced as inert.</para>
+    ///
+    /// <para>Once per connect rather than once per sweep: connects are rare, so this cannot become the
+    /// every-60-seconds log line #2255 was about. A one-sided credential is reported separately, because
+    /// "you configured half of one" and "this build cannot use it yet" send an operator to different
+    /// places — the first is a mistake to fix now, the second is a wait.</para>
+    /// </summary>
+    private static void WarnIfRemediationCredentialIsInert(MonitoredServer config, ILogger? logger)
+    {
+        var username = !string.IsNullOrWhiteSpace(config.RemediationUsername);
+        var secret = !string.IsNullOrWhiteSpace(config.RemediationEncryptedPassword);
+
+        if (username ^ secret)
+        {
+            logger?.LogWarning(
+                "Server '{Server}' has only one half of a remediation credential ({Half} is set, the other is not), so it counts as unarmed. Both remediationUsername and remediationEncryptedPassword are required.",
+                config.DisplayName,
+                username ? "remediationUsername" : "remediationEncryptedPassword");
+            return;
+        }
+
+        if (username && secret)
+        {
+            /* "yet" is only true where the capability is coming. BuildRemediationConnectionString
+               throws for a PostgreSQL target, and plan-force remediation is a Query Store concept,
+               so on Postgres this credential is inert PERMANENTLY rather than pending. One message
+               for both would promise an operator a future that engine does not have. */
+            if (config.IsPostgres)
+            {
+                logger?.LogWarning(
+                    "Server '{Server}' has a remediation credential, but plan-force remediation is SQL Server-only (it forces a Query Store plan), so nothing on a PostgreSQL target will ever use it. Remove it, or move it to the SQL Server registration it was meant for.",
+                    config.DisplayName);
+                return;
+            }
+
+            logger?.LogInformation(
+                "Server '{Server}' has a remediation credential, but this build ships no remediation write path (#2138 phase 1 is the credential seam, the journal's actor and the decision logic). Nothing will use it yet, and the monitoring credential remains read-only.",
+                config.DisplayName);
+        }
     }
 
     /* The PostgreSQL detection query. Deliberately built only from surfaces a pg_monitor-grade login
@@ -451,7 +502,10 @@ SELECT
     /// PASS line (<c>DarlingCliCommands.FormatProbeLine</c>) and the <c>add_servers</c> MCP tool's detail
     /// text, which previously each formatted their own and could drift.
     /// <para>The engine decides what is worth saying. A SQL Server target reports version, edition and
-    /// msdb access, because msdb access gates three collectors. A PostgreSQL target has none of those,
+    /// msdb access, because msdb access gates three collectors — except Azure SQL Database, which has no
+    /// SQL Agent and no real msdb surface, so either msdb clause would claim a capability the platform
+    /// cannot have. Edition 5 reports the Agent surface as not applicable instead, matching the dispatch
+    /// gate that already keeps the Agent family off those targets (#3237). A PostgreSQL target has none of those,
     /// so it reports version, writer-vs-reader, Aurora-vs-not — and then the number that actually
     /// answers "will this target give me what I expect", which is how many of the PostgreSQL collectors
     /// clear the gate. A stock-PostgreSQL reader clears three of seven, and finding that out at
@@ -466,8 +520,12 @@ SELECT
             var edition = string.IsNullOrEmpty(probe.EngineEditionDescription)
                 ? DescribeEngineEdition(probe.EngineEdition)
                 : probe.EngineEditionDescription;
-            var msdb = probe.HasMsdbAccess ? "msdb access: yes" : "msdb access: NO (failed-job alerts unavailable)";
-            return $"SQL major version {probe.MajorVersion}, {edition}, {msdb}";
+            var agentClause = probe.IsAzureSqlDb
+                ? "Agent surface: not applicable (Azure SQL Database)"
+                : probe.HasMsdbAccess
+                    ? "msdb access: yes"
+                    : "msdb access: NO (failed-job alerts unavailable)";
+            return $"SQL major version {probe.MajorVersion}, {edition}, {agentClause}";
         }
 
         var target = probe.ToTargetInfo();

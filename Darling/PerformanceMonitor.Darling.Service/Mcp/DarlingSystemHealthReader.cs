@@ -78,6 +78,7 @@ internal static class DarlingSystemHealthReader
     {
         var xmls = new List<string>();
         await using var command = postgres.CreateCommand(SystemHealthEventsByTypeSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddTimestamp(command, startUtc);
         DarlingMcpReadParameters.AddTimestamp(command, endUtc);
@@ -117,6 +118,7 @@ internal static class DarlingSystemHealthReader
         NpgsqlDataSource postgres, int serverId, string eventType, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(HasAnyEventOfTypeSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddText(command, eventType);
         return await command.ExecuteScalarAsync(cancellationToken) is not null;
@@ -128,6 +130,7 @@ internal static class DarlingSystemHealthReader
     {
         var map = new Dictionary<int, string>();
         await using var command = postgres.CreateCommand(DatabaseNameMapSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

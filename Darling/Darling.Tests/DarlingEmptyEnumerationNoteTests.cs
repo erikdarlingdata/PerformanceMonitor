@@ -8,13 +8,13 @@
 
 using System;
 using System.IO;
-using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -46,13 +46,13 @@ public sealed class DarlingEmptyEnumerationNoteTests
     public void An_Ordinary_Run_Result_Carries_No_Note()
     {
         /* The default keeps every other collector's row exactly as it was — message column null. */
-        Assert.Null(new CollectorRunResult(12, 34, 56).Note);
+        Assert.Null(new CollectorRunResult(12, 34, 56, CollectorContext.NoMeasurements).Note);
     }
 
     [Fact]
     public void A_Run_Result_Round_Trips_The_Note()
     {
-        var result = new CollectorRunResult(0, 5, 0, EnumeratedCollectorDriver.EmptyEnumerationMessage);
+        var result = new CollectorRunResult(0, 5, 0, CollectorContext.NoMeasurements, EnumeratedCollectorDriver.EmptyEnumerationMessage);
 
         Assert.Equal(EnumeratedCollectorDriver.EmptyEnumerationMessage, result.Note);
         Assert.Equal(0, result.Rows);
@@ -70,7 +70,7 @@ public sealed class DarlingEmptyEnumerationNoteTests
            note — through the shared driver does, because there is then no host-side text at all. Lite's
            twin pin asserts the identical routing on its runner. */
         Assert.Contains("EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken)", source);
-        Assert.Contains("new CollectorRunResult(0, sqlMs, 0, enumeration.Note)", source);
+        Assert.Contains("new CollectorRunResult(0, sqlMs, 0, CollectorContext.NoMeasurements, enumeration.Note)", source);
 
         /* Via the shared driver, never a copy of the text — a literal here is exactly the drift this
            fix exists to prevent. */
@@ -89,23 +89,47 @@ public sealed class DarlingEmptyEnumerationNoteTests
 
         Assert.Contains("collectionNote = enumeration.Note;", source);
 
-        /* The success return gained the fan-out rollup at #2472 and this literal moved with it rather than
+        /* The success return gained the fan-out rollup at #2472, the server-scoped phase split at #2851 and
+           the summed per-database fetch split at #2860, and this pin moved with each of them rather than
            being loosened to a substring. Naming the whole argument list is the point: it is what makes an
            argument DROPPED from this call — the note included — fail here instead of silently reaching the
-           store as a null. */
+           store as a null.
+
+           #3161 added the definition-supplied Measurements as a REQUIRED parameter, so a site that drops it
+           now fails to COMPILE rather than failing here — but the argument's POSITION and the fact that the
+           success return is the one site passing the live `context.Measurements` rather than
+           CollectorContext.NoMeasurements are still only pinned here.
+
+           #2851 wrapped the call across lines, which broke the single-line literal this used to be. Collapsing
+           runs of whitespace before matching makes the pin survive REFORMATTING while still failing on a
+           dropped argument, which is the property it exists for — the previous form conflated the two, so a
+           pure line-wrap failed it exactly as loudly as a real regression would have. */
+        var collapsed = Regex.Replace(source, @"\s+", " ");
+
         Assert.Contains(
-            "return new CollectorRunResult(rowsWritten, sqlMs, storageMs, collectionNote, fanout.Result);",
-            source);
+            "return new CollectorRunResult( rowsWritten, sqlMs, storageMs, context.Measurements, "
+            + "collectionNote, fanout.Result, " +
+            "ServerPhasesMeasured: serverPhasesMeasured, ServerOpenMs: context.ServerScopeOpenMs, " +
+            "ServerDrainMs: context.ServerScopeDrainMs, ServerWatermarkMs: serverWatermarkMs, " +
+            "ServerRowsRead: context.ServerScopeRowsRead, ServerBytesRead: context.ServerScopeBytesRead, " +
+            "ServerLastReadMs: context.ServerScopeLastReadMs, TargetSessionId: context.TargetSessionId, " +
+            "FetchPhases: fetchPhases.Result);",
+            collapsed);
     }
 
     [Fact]
     public void Worker_Passes_The_Note_To_The_Collection_Log_Write()
     {
-        /* The note reaches error_message through LogCollectionAsync's message parameter, on the SUCCESS
-           write only — the status argument on that same call must stay "SUCCESS". */
+        /* The note reaches error_message through LogCollectionAsync's message parameter, on the write for
+           a run that RETURNED rather than threw. That write's status was a hardcoded "SUCCESS" until #2801,
+           which is how a cycle abandoned by the #2673 wall-clock budget — storing nothing, advancing no
+           watermark — inherited a success status. Pinned as the shared classifier rather than a literal so
+           it cannot quietly go back to one; the note still rides this same write, which is the original
+           claim and is unchanged. */
         var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
 
-        Assert.Contains("\"SUCCESS\", result.Rows, result.SqlMs, result.StorageMs, result.Note", source);
+        Assert.Contains("status, result.Rows, result.SqlMs, result.StorageMs, result.Note", source);
+        Assert.Contains("EnumeratedCollectorDriver.ClassifyReturnedRun(result.Abandoned)", source);
     }
 
     [Fact]
@@ -127,7 +151,11 @@ public sealed class DarlingEmptyEnumerationNoteTests
         })
         {
             var source = ReadRepoFile(relative);
-            Assert.Contains("MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error", source);
+            /* EXTENSION_MISSING joined the failing-status set with #3240: its stored sentence IS the
+               remedy (the extension, named), so keeping it out would band a collector EXTENSION_MISSING
+               beside a blank Last Error. Still a STATUS gate — the broadening this pin refuses is to
+               message PRESENCE, and that refusal is unchanged. */
+            Assert.Contains("MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) AS last_error", source);
             Assert.DoesNotContain("error_message IS NOT NULL", source);
         }
     }
@@ -325,16 +353,23 @@ public sealed class DarlingEmptyEnumerationNoteTests
             row.NoteFormatted);
     }
 
-    /* Locate the repo from this file — the DarlingLockTimeoutYieldTests idiom; no build-output copying. */
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
+    /// <summary>
+    /// #2801: the Darling half of the abandonment wiring. The runner must MARK the budget-expiry return
+    /// as abandoned, because the worker classifies from that flag rather than from the note text -- the
+    /// two are separately editable, and a note reworded while the flag went unset would put the status
+    /// silently back to SUCCESS with nothing failing.
+    ///
+    /// <para>Source-text pinned, matching every other pin in this class: the abandonment sits inside a
+    /// catch filter on a live provider cancellation deep in RunOneAsync, which no unit test here can
+    /// reach. Lite.Tests covers the same path end-to-end and pins ClassifyReturnedRun as a pure
+    /// function; this asserts the one thing neither of those can see, that THIS host sets the flag.</para>
+    /// </summary>
+    [Fact]
+    public void Runner_Marks_The_BudgetExpiry_Return_As_Abandoned()
     {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
+        var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
 
-        Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relative));
+        Assert.Contains("Abandoned: true", source, StringComparison.Ordinal);
+        Assert.Contains("EnumeratedCollectorDriver.WholeCycleBudgetNote(budgetSeconds)", source, StringComparison.Ordinal);
     }
 }

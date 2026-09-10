@@ -42,7 +42,7 @@ public partial class RemoteCollectorService
         var telemetry = TelemetryFor(serverId);
         telemetry.SqlMs = 0;
         telemetry.StorageMs = 0;
-        telemetry.Note = null;
+        telemetry.ResetNote();
         telemetry.Fanout = null;
 
         /* The per-database rollup (#2472), fed by both fan-out shapes — the Azure per-database connection
@@ -484,7 +484,7 @@ public partial class RemoteCollectorService
             /* #1875: ONE note for the cycle and ONE capped log burst, composed from every database's
                failures together. Assigned unconditionally — a cycle where nothing failed composes null,
                which is exactly what this path carried before. */
-            telemetry.Note = EnumeratedCollectorDriver.MergeNotes(
+            telemetry.HostNote = EnumeratedCollectorDriver.MergeNotes(
                 cycleProbeFailures.Note,
                 EnumeratedCollectorDriver.BuildPartialFailureNote(
                     failed, attempted, failedDatabases, firstFailure?.Message));
@@ -531,7 +531,7 @@ public partial class RemoteCollectorService
                 /* Null on the ordinary path; the empty-enumeration breadcrumb, the probe-failure summary,
                    or both otherwise. Assigned BEFORE the zero-item early return so that cycle — the one
                    that used to log a bare SUCCESS indistinguishable from healthy — carries it too. */
-                telemetry.Note = enumeration.Note;
+                telemetry.HostNote = enumeration.Note;
                 LogEnumerationProbeFailures(definition, server, enumeration.ProbeFailures);
 
                 if (items.Count == 0)
@@ -703,10 +703,16 @@ public partial class RemoteCollectorService
 
                         /* Per-DATABASE line for non-empty batches (#1565): the per-server summary blends
                            every database into one number, hiding a single busy database's burst behind
-                           quiet siblings. Quiet databases (0 rows) stay silent. */
+                           quiet siblings. Quiet databases (0 rows) stay silent.
+
+                           At Debug, matching Darling's twin timing lines (#3102) and this file's own
+                           per-collector summary: it is per-database-per-cycle accounting of a run that
+                           SUCCEEDED, so there is no error beside it that it could be decomposing, and it
+                           crowds out the collection failures the log is opened for. The sample is not lost
+                           — raise log_minimum_level to Debug and every one of them is back, unchanged. */
                         if (batchCount > 0)
                         {
-                            _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms, duckdb:{DuckMs}ms)",
+                            _logger?.LogDebug("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms, duckdb:{DuckMs}ms)",
                                 server.DisplayName, definition.Name, item, batchCount, itemSqlMs, itemStorageMs);
                         }
 
@@ -745,16 +751,26 @@ public partial class RemoteCollectorService
             }
             else
             {
-                /* Plain single-query path — unchanged: read all rows, then write them in one batch
+                /* Plain single-query path (server-scoped): read all rows, then write them in one batch
                    (supplemental never runs for per-database collectors). Routed through WriteBatch so
-                   all three paths share one writer. */
+                   all three paths share one writer.
+
+                   #2673: the primary read + DRAIN is bounded by the collector's PerItemWallClockBudget (one
+                   item = the whole server). The 60s per-command timeout covers only execution, not the drain
+                   of a large result set, so a heavy server-scoped collector (procedure_stats, query_stats)
+                   could occupy the monitored server for minutes. Bites hardest on Lite, whose live collectors
+                   run strictly one after another. Null budget = itemToken IS cancellationToken and this block
+                   is byte-for-byte what it was. */
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;
-                using (var command = CreateCollectorCommand(plan, sqlConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds))
-                using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+                using var itemBudget = EnumeratedCollectorDriver.StartItemBudget(definition.PerItemWallClockBudget, cancellationToken);
+                var itemToken = itemBudget?.Token ?? cancellationToken;
+                try
                 {
-                    rows = await definition.ReadAsync(reader, context, cancellationToken);
+                    using var command = CreateCollectorCommand(plan, sqlConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds);
+                    using var reader = await command.ExecuteReaderAsync(itemToken);
+                    rows = await definition.ReadAsync(reader, context, itemToken);
 
                     /* #1851: a definition that declares it may hand back an OPTIONAL trailing
                        (item_name, error_text) result set naming items its own server-side cursor
@@ -767,10 +783,26 @@ public partial class RemoteCollectorService
                        exactly what they were. */
                     if (definition.EmitsProbeFailures)
                     {
-                        var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, cancellationToken);
-                        telemetry.Note = probes.Note;
+                        var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, itemToken);
+                        telemetry.HostNote = probes.Note;
                         LogEnumerationProbeFailures(definition, server, probes.ProbeFailures);
                     }
+                }
+                catch (Exception ex) when (EnumeratedCollectorDriver.ItemBudgetExpired(itemBudget, cancellationToken))
+                {
+                    /* #2673: this server-scoped collector blew its wall-clock budget mid read/drain. Abandon
+                       the cycle WITHOUT advancing any watermark — ship nothing, retry next — so no single
+                       collector runs minutes on a monitored server. Returning skips the storage phase and the
+                       state-persistence at the method tail, which is what keeps the watermark from moving. */
+                    _ = ex;
+                    var budgetSeconds = (int)definition.PerItemWallClockBudget!.Value.TotalSeconds;
+                    telemetry.SqlMs = sqlSlice.ElapsedMilliseconds;
+                    telemetry.HostNote = EnumeratedCollectorDriver.WholeCycleBudgetNote(budgetSeconds);
+                    telemetry.Abandoned = true;
+                    _logger?.LogWarning(
+                        "{Collector} on '{Server}' reached its {Budget}s wall-clock budget mid-collection — abandoned this cycle, will retry next (#2673).",
+                        definition.Name, context.ServerName, budgetSeconds);
+                    return 0;
                 }
 
                 /* Optional best-effort second query on the same connection (e.g. server_properties'
@@ -838,6 +870,15 @@ public partial class RemoteCollectorService
         telemetry.SqlMs = sqlMs;
         telemetry.StorageMs = storageMs;
         telemetry.Fanout = fanout.Result;
+
+        /* #3161: the counts the DEFINITION measured on the target, onto this run's collection_log row. The
+           only site that copies them — the early returns above are runs that never reached a definition's
+           read (an AppliesTo miss, an enumeration that listed nothing) or that threw their read away (the
+           wall-clock abandonment), and an empty list is their correct answer. Darling's twin is the single
+           `context.Measurements` argument on DarlingCollectorRunner's success return; the argument there is
+           REQUIRED so the compiler names every sibling site, and this assignment is the reason Note is a
+           computed property here rather than a settable one. */
+        telemetry.Measurements.AddRange(context.Measurements);
 
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'", rowsWritten, definition.Name, server.DisplayName);
         return rowsWritten;

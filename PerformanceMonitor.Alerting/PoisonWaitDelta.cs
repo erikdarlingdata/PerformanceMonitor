@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+
 namespace PerformanceMonitor.Alerting;
 
 /// <summary>
@@ -19,4 +21,14 @@ public class PoisonWaitDelta
     public long DeltaMs { get; set; }
     public long DeltaTasks { get; set; }
     public double AvgMsPerWait { get; set; }
+
+    /// <summary>
+    /// The wait_stats row's own collection_time — the collector's cadence, not the alert engine's.
+    /// AlertEngine keys its re-fire decision on this because the alert cooldown and the collector's
+    /// delivered cadence are independent clocks: at fleet load the collector can lag the cooldown,
+    /// and re-reading the SAME still-uncollected row is not a new observation of a standing
+    /// condition (unlike CPU, which is resampled every sweep) — it is the identical delta
+    /// computation surfacing twice.
+    /// </summary>
+    public DateTime CollectionTime { get; set; }
 }

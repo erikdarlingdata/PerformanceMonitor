@@ -24,7 +24,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// One row of the servers table, as the viewer's server list shows it. Was a positional record; it is now
 /// a class because the ported Lite server-row chrome needs mutable, change-notifying runtime state on each
 /// row — the favorite star (<see cref="IsFavorite"/>, matched from the viewer's registry) and the
-/// collection-freshness status dot (<see cref="IsOnline"/> / <see cref="HasCollectorErrors"/> /
+/// collection-freshness status dot (<see cref="IsOnline"/> / <see cref="CollectionStale"/> /
 /// <see cref="AwaitingFirstCollection"/> → <see cref="CardStatus"/> → <see cref="DotStatus"/>) update in
 /// place on the refresh timers without resetting the list's selection.
 /// The Postgres-sourced fields stay immutable (get-only); only the sidebar overlay state is settable.
@@ -45,6 +45,11 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// PostgreSQL target's edition is 0, which the edition axis correctly reads as "no claim". Passing 0
     /// here for a server whose edition has not been read is exactly that same silence.
     /// </param>
+    /// <param name="postgresMajorVersion">
+    /// <c>servers.postgres_major_version</c> (V100). Defaulted like the two above so the test fakes that
+    /// construct a SQL Server row keep compiling, and so the two reader call sites stay the only places that
+    /// have to know the column exists.
+    /// </param>
     public DarlingServer(
         int serverId,
         string serverName,
@@ -53,7 +58,8 @@ public sealed class DarlingServer : INotifyPropertyChanged
         int? sqlMajorVersion,
         decimal monthlyCostUsd = 0,
         string? engineKind = null,
-        int engineEdition = CollectorEngineCapability.UnknownEngineEdition)
+        int engineEdition = CollectorEngineCapability.UnknownEngineEdition,
+        int? postgresMajorVersion = null)
     {
         ServerId = serverId;
         ServerName = serverName;
@@ -63,6 +69,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
         MonthlyCostUsd = monthlyCostUsd;
         EngineKind = engineKind;
         EngineEdition = engineEdition;
+        PostgresMajorVersion = postgresMajorVersion;
     }
 
     public int ServerId { get; }
@@ -90,6 +97,14 @@ public sealed class DarlingServer : INotifyPropertyChanged
     public bool IsPostgres => MonitoredEngineKind.IsPostgres(EngineKind);
 
     /// <summary>
+    /// True only when the store says this target is Amazon Aurora PostgreSQL specifically. Same asymmetry as
+    /// <see cref="IsPostgres"/>. Read for the Overview card's CPU row (#3267): instance CPU comes from
+    /// Performance Insights, which <c>PgCpuUtilizationCollector.AppliesTo</c> gates to Aurora, so this is
+    /// what separates "no reading yet" from "this build collects no instance CPU here at all".
+    /// </summary>
+    public bool IsAurora => MonitoredEngineKind.IsAurora(EngineKind);
+
+    /// <summary>
     /// How the engine reads in the per-server header, or null when the store makes no claim - in which case
     /// the header shows NO engine label rather than "SQL Server", because the tabs such a server gets are a
     /// default rather than a finding. An unrecognised token renders as the raw token: the describer's
@@ -101,8 +116,23 @@ public sealed class DarlingServer : INotifyPropertyChanged
             ? (string.IsNullOrWhiteSpace(EngineKind) ? null : EngineKind.Trim())
             : MonitoredEngineKind.DescribeEngineKind(EngineKind);
 
-    /// <summary>"SQL Server 2022"-style label for the server list; empty when the version is unknown.</summary>
-    public string VersionLabel => ViewerDataService.SqlVersionLabel(SqlMajorVersion);
+    /// <summary><c>servers.postgres_major_version</c> (V100, #2653) — the probed PostgreSQL major, or null
+    /// on a SQL Server target (where it is not a fact about the server) and on a PostgreSQL target that has
+    /// not reconnected since that rung. Read here so <see cref="VersionLabel"/> has the PostgreSQL
+    /// vocabulary's own number to render instead of the SQL Server one.</summary>
+    public int? PostgresMajorVersion { get; }
+
+    /// <summary>
+    /// "SQL Server 2022" / "PostgreSQL 18"-style label for the server list; empty when no version is known.
+    ///
+    /// <para>Engine-aware (#3145): it asks <see cref="EngineKind"/> which version vocabulary this row's
+    /// numbers belong to. Before that it fed <see cref="SqlMajorVersion"/> through a SQL-Server-only table,
+    /// and a PostgreSQL target — whose <c>sql_major_version</c> is <c>0</c> — rendered "SQL Server v0" in the
+    /// fleet sidebar while this very object's <see cref="IsPostgres"/> and <see cref="EngineDescription"/>
+    /// already knew better.</para>
+    /// </summary>
+    public string VersionLabel =>
+        MonitoredEngineVersion.DescribeEngineVersion(EngineKind, SqlMajorVersion, PostgresMajorVersion);
 
     // ── Runtime-only sidebar state (not from Postgres; drives the ported Lite server-row chrome) ──
 
@@ -139,18 +169,20 @@ public sealed class DarlingServer : INotifyPropertyChanged
         }
     }
 
-    private bool _hasCollectorErrors;
+    private bool _collectionStale;
 
-    /// <summary>Warning (amber) state — in the viewer this means the collection has gone stale.</summary>
-    public bool HasCollectorErrors
+    /// <summary>Warning (amber) state: the newest collection has lagged past
+    /// <see cref="ServerHealthThresholds.StaleThreshold"/>. Freshness only, and named for it — a collector that
+    /// is failing is a different axis, reported by the Collection Health tab (#3098).</summary>
+    public bool CollectionStale
     {
-        get => _hasCollectorErrors;
+        get => _collectionStale;
         set
         {
-            if (_hasCollectorErrors != value)
+            if (_collectionStale != value)
             {
-                _hasCollectorErrors = value;
-                OnPropertyChanged(nameof(HasCollectorErrors));
+                _collectionStale = value;
+                OnPropertyChanged(nameof(CollectionStale));
                 RaiseDotChanged();
             }
         }
@@ -187,7 +219,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// with one discriminant there is no flag combination left for the renderings to disagree about.
     /// </summary>
     public ServerCollectionStatus CardStatus =>
-        ServerCollectionStatusRules.Classify(IsOnline, HasCollectorErrors, AwaitingFirstCollection);
+        ServerCollectionStatusRules.Classify(IsOnline, CollectionStale, AwaitingFirstCollection);
 
     /// <summary>
     /// Sidebar status-dot vocabulary — the SAME words the Overview card's <c>StatusDisplay</c> shows, because
@@ -246,7 +278,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
         var flags = ServerCollectionStatusRules.FlagsFor(
             ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, nowUtc));
         IsOnline = flags.IsOnline;
-        HasCollectorErrors = flags.HasCollectorErrors;
+        CollectionStale = flags.CollectionStale;
         AwaitingFirstCollection = flags.AwaitingFirstCollection;
     }
 
@@ -356,9 +388,14 @@ public sealed partial class ViewerDataService : IAsyncDisposable
     /// <c>ViewerDataService.MonitoredServers.cs</c>'s <c>ManagedServersSql</c>: that one is what the sidebar
     /// actually uses on a seeded store, so a discriminator added to only this query would have left every
     /// real deployment on the SQL Server tab set.
+    ///
+    /// <para><c>postgres_major_version</c> (V100) rides along for the same reason and with the same
+    /// both-queries requirement (#3145): it is the PostgreSQL vocabulary's own major, and without it the
+    /// sidebar's version label has nothing but <c>sql_major_version</c> — which is <c>0</c> on every
+    /// PostgreSQL target — to describe the row with.</para>
     /// </summary>
     public const string ServersSql =
-        "SELECT server_id, server_name, display_name, is_enabled, sql_major_version, COALESCE(monthly_cost_usd, 0), engine_kind, COALESCE(sql_engine_edition, 0) FROM servers ORDER BY display_name";
+        "SELECT server_id, server_name, display_name, is_enabled, sql_major_version, COALESCE(monthly_cost_usd, 0), engine_kind, COALESCE(sql_engine_edition, 0), postgres_major_version FROM servers ORDER BY display_name";
 
     /// <summary>
     /// The authoritative read-only probe (V8 security hardening): does the connected role hold INSERT
@@ -386,6 +423,14 @@ public sealed partial class ViewerDataService : IAsyncDisposable
         var effectiveConnectionString = connectionTimeoutSeconds is int seconds
             ? ApplyConnectionTimeout(connectionString, seconds)
             : connectionString;
+
+        /* #3016: the read-deadline family and the fan-out bound both need the pool size this seat really
+           gets, and the managed constant is only one of the two strings the viewer can be handed. Published
+           from the EFFECTIVE string, here, because this is the line that decides how many permits exist —
+           a call site could be added later that forgets, and there is nowhere else the two can be kept
+           from disagreeing. */
+        ViewerStorePool.Publish(effectiveConnectionString);
+
         _dataSource = NpgsqlDataSource.Create(effectiveConnectionString);
         StoreIsOnThisMachine = StoreHostIsLoopback(connectionString);
     }
@@ -504,6 +549,7 @@ public sealed partial class ViewerDataService : IAsyncDisposable
         try
         {
             await using var command = _dataSource.CreateCommand(ReadOnlyProbeSql);
+            command.CommandTimeout = ViewerCommandDeadlines.ConnectGateSeconds;
             var canInsert = await command.ExecuteScalarAsync(cancellationToken);
             IsReadOnly = canInsert is not true;
         }
@@ -680,7 +726,22 @@ SELECT
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_io_stats' AND column_name = 'read_bytes'),
     EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_server_config'),
     EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_deadlocks'),
-    EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_pg_deadlocks_identity')";
+    EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_pg_deadlocks_identity'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'collector_cost'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'pg_cpu_utilization'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'plan_force_actions'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'collection_log' AND column_name = 'sql_drain_ms'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'collection_log' AND column_name = 'drain_last_read_ms'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'collection_log' AND column_name = 'plan_fetch_target_ms'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'store_log_events'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'collector_stall_probes'),
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'plan_force_actions' AND column_name = 'actor'),
+    /* V114 probes a COLUMN for V95's reason: collect.pg_index_bloat has existed since V94, so table
+       existence cannot separate the rungs. est_reclaimable_bytes is the sentinel rather than one of the
+       other seven added columns because it is the one the read ranks on - if it is absent the panel has
+       nothing to order by, which is the failure this probe exists to prevent. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_index_bloat'
+                                                     AND   column_name = 'est_reclaimable_bytes')";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>
@@ -698,10 +759,11 @@ SELECT
         try
         {
             await using var command = _dataSource.CreateCommand(StoreSchemaProbeSql);
+            command.CommandTimeout = ViewerCommandDeadlines.ConnectGateSeconds;
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
-                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54), reader.GetBoolean(55), reader.GetBoolean(56), reader.GetBoolean(57), reader.GetBoolean(58), reader.GetBoolean(59), reader.GetBoolean(60), reader.GetBoolean(61), reader.GetBoolean(62), reader.GetBoolean(63), reader.GetBoolean(64), reader.GetBoolean(65), reader.GetBoolean(66), reader.GetBoolean(67), reader.GetBoolean(68), reader.GetBoolean(69), reader.GetBoolean(70), reader.GetBoolean(71), reader.GetBoolean(72), reader.GetBoolean(73), reader.GetBoolean(74), reader.GetBoolean(75), reader.GetBoolean(76), reader.GetBoolean(77), reader.GetBoolean(78), reader.GetBoolean(79));
+                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54), reader.GetBoolean(55), reader.GetBoolean(56), reader.GetBoolean(57), reader.GetBoolean(58), reader.GetBoolean(59), reader.GetBoolean(60), reader.GetBoolean(61), reader.GetBoolean(62), reader.GetBoolean(63), reader.GetBoolean(64), reader.GetBoolean(65), reader.GetBoolean(66), reader.GetBoolean(67), reader.GetBoolean(68), reader.GetBoolean(69), reader.GetBoolean(70), reader.GetBoolean(71), reader.GetBoolean(72), reader.GetBoolean(73), reader.GetBoolean(74), reader.GetBoolean(75), reader.GetBoolean(76), reader.GetBoolean(77), reader.GetBoolean(78), reader.GetBoolean(79), reader.GetBoolean(80), reader.GetBoolean(81), reader.GetBoolean(82), reader.GetBoolean(83), reader.GetBoolean(84), reader.GetBoolean(85), reader.GetBoolean(86), reader.GetBoolean(87), reader.GetBoolean(88), reader.GetBoolean(89));
             }
 
             return null;
@@ -726,7 +788,7 @@ SELECT
     /// is unit-tested without a live store; any schema bump past the newest arm trips the pinning test that keeps
     /// this in step with <see cref="StorageVersion.SchemaVersion"/>.
     /// </summary>
-    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false, bool hasCollectionLogFanoutRollup = false, bool hasTempDbMaxSize = false, bool hasServerEngineKind = false, bool hasPgDatabaseStats = false, bool hasPgIndexUsageStats = false, bool hasPgTableBloatStats = false, bool hasPgSessionStates = false, bool hasPgPlanCaptureReadiness = false, bool hasPgWriteStats = false, bool hasPgExtensionAvailability = false, bool hasPgLockStats = false, bool hasPgColumnStats = false, bool hasPgReplicationStats = false, bool hasPgBufferUsage = false, bool hasPgIndexBloat = false, bool hasPgPerDatabaseAttribution = false, bool hasPgWaitSampling = false, bool hasPgKernelStats = false, bool hasPgPredicateStats = false, bool hasPgPlanCapture = false, bool hasPgMajorVersion = false, bool hasPg18IoBytes = false, bool hasPgServerConfig = false, bool hasPgDeadlocks = false, bool hasPgDeadlockIdentity = false)
+    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false, bool hasCollectionLogFanoutRollup = false, bool hasTempDbMaxSize = false, bool hasServerEngineKind = false, bool hasPgDatabaseStats = false, bool hasPgIndexUsageStats = false, bool hasPgTableBloatStats = false, bool hasPgSessionStates = false, bool hasPgPlanCaptureReadiness = false, bool hasPgWriteStats = false, bool hasPgExtensionAvailability = false, bool hasPgLockStats = false, bool hasPgColumnStats = false, bool hasPgReplicationStats = false, bool hasPgBufferUsage = false, bool hasPgIndexBloat = false, bool hasPgPerDatabaseAttribution = false, bool hasPgWaitSampling = false, bool hasPgKernelStats = false, bool hasPgPredicateStats = false, bool hasPgPlanCapture = false, bool hasPgMajorVersion = false, bool hasPg18IoBytes = false, bool hasPgServerConfig = false, bool hasPgDeadlocks = false, bool hasPgDeadlockIdentity = false, bool hasCollectorCost = false, bool hasPgCpuUtilization = false, bool hasPlanForceActions = false, bool hasCollectionLogPhaseSplit = false, bool hasCollectionLogDrainForensics = false, bool hasCollectionLogFetchPhaseSums = false, bool hasStoreLogSelfMonitoring = false, bool hasCollectorStallProbes = false, bool hasRemediationCredentialAndActor = false, bool hasPgIndexBloatEstimate = false)
     {
         /* V71 (the PostgreSQL blocking-edges rung): a table-existence sentinel and now the newest-first arm.
            A collector table would ordinarily get no arm at all — see the V63-V69 note below — but the TOP
@@ -813,11 +875,126 @@ SELECT
            (#2530 → V82, #2539 → V83, #2542 → V85). They had drifted upward as each new rung inserted its
            own block above them, which is how a comment ends up explaining an arm two rungs away from the
            one it was written for. Keep the block with its arm. */
+        /* V109 (#2864): collect.collection_log gains drain_rows_read / drain_bytes_read /
+           drain_last_read_ms / target_session_id / sweep_peer_max_ms, so an abandoned cycle records what it
+           was DOING rather than only that it stopped. COLUMN-existence sentinel on drain_last_read_ms
+           specifically - the table has existed since V1, only the columns are new, and that column is the
+           one the rung exists to expose (subtracted from sql_drain_ms it gives the time the reader spent
+           with nothing arriving, which is what separates a slow stream from a stalled one). The TOP rung
+           now, so it must map EXACTLY or the connect-time gate refuses a store that is perfectly current.
+           Nothing in the viewer reads these columns yet - the read is on the MCP surface - so this arm is
+           the don't-under-report guard, the V44/V53 reasoning. */
+        /* V110 (#2860): collect.collection_log gains the per-database plan/text fetch split summed across a
+           run's fan-out - plan_fetch_probe_ms / _target_ms / _write_ms / _ids_attempted / _probe_ids and the
+           five text twins - so #2811's sub-split can be aggregated and trended instead of living only in an
+           app-log line scraped per server over SSM. COLUMN-existence sentinel on plan_fetch_target_ms: the
+           table has existed since V1 so only columns can separate the rungs, and TARGET is the one the
+           choice of shape turned on. A slowest-database rollup would have named the right winning phase
+           92.8% of the time, but its residual error ran ~6.5 : 1 toward reading a store probe as a target
+           cost - the precise misreading this instrumentation family exists to end - so the sums are stored
+           and this column is where that bias would have shown. The TOP rung now, so it must map EXACTLY or
+           the connect-time gate refuses a store that is perfectly current. Nothing in the viewer reads these
+           columns - the read is on the MCP surface - so this arm is the don't-under-report guard, the
+           V44/V53 reasoning that V108 and V109 both restated. */
+        /* V111 (#3021): the store's own server log becomes a self-monitoring source - a per-class census
+           (store_log_events), the capture denominator that qualifies it (store_log_captures), and the
+           per-file resume marker (config.store_log_read_marker). TABLE-existence sentinel on the census
+           table: all three objects are new at this rung, and the census is the one every read of this
+           feature goes through, so its absence is the honest "this store predates the rung". The TOP rung
+           now, so it must map EXACTLY or the connect-time gate refuses a store that is perfectly current.
+           Nothing in the viewer reads these tables - the read is on the MCP surface (get_store_log) - so
+           this arm is the don't-under-report guard, the V44/V53 reasoning that V108, V109 and V110 all
+           restated. */
+        /* V112 (#2880): the out-of-band server-wide wait sample taken during a collector stall lands in its
+           own table, because a probe folded onto the stalled run's log row would have to be awaited by that
+           run. TABLE-existence sentinel — the table is the only object the rung creates, so its absence is
+           the honest "this store predates the rung". The TOP rung now, so it must map EXACTLY or the
+           connect-time gate refuses a store that is perfectly current. Nothing in the viewer reads it - the
+           read is on the MCP surface - so this arm is the don't-under-report guard, the V44/V53 reasoning
+           that V108 through V111 all restated. The table is named only in the probe line above and NOT in
+           this prose, per the V71 finding: the coverage ratchet strips information_schema lines but cannot
+           strip a comment. */
+        /* V113 (#2138 phase 1): config.config_monitored_servers gains the per-server remediation
+           credential and collect.plan_force_actions gains the journal's actor. COLUMN-existence sentinel on
+           the actor column: both objects the rung touches already exist (the registry since V17, the
+           journal since V107), so table existence cannot separate the rungs, and the actor is the one the
+           own-forces-only invariant turns on - a store without it cannot tell an operator's force from the
+           bot's, which is the property the rung exists to establish. Deliberately not a credential column:
+           those are the secret and non-secret halves of one optional feature, and a probe line naming one
+           reads as though the viewer needed to see it. The TOP rung now, so it must map EXACTLY or the
+           connect-time gate refuses a store that is perfectly current. Nothing in the viewer reads the
+           actor column yet - the own-forces-only filter is service-side - so this arm is the
+           don't-under-report guard, the V44/V53 reasoning that V108 through V112 all restated. */
+        if (hasPgIndexBloatEstimate)
+        {
+            return 114;
+        }
+
+        if (hasRemediationCredentialAndActor)
+        {
+            return 113;
+        }
+
+        if (hasCollectorStallProbes)
+        {
+            return 112;
+        }
+
+        if (hasStoreLogSelfMonitoring)
+        {
+            return 111;
+        }
+
+        if (hasCollectionLogFetchPhaseSums)
+        {
+            return 110;
+        }
+
+        if (hasCollectionLogDrainForensics)
+        {
+            return 109;
+        }
+
+        /* V108 (#2851 made queryable): collect.collection_log gains sql_open_ms / sql_drain_ms /
+           watermark_ms, so the server-scoped phase split can be aggregated and trended instead of living
+           only in an app-log line. COLUMN-existence sentinel on sql_drain_ms, because the table itself has
+           existed since V1 and only the columns are new; drain is the phase the rung exists to expose. The
+           TOP rung now, so it must map EXACTLY or the connect-time gate refuses a store that is perfectly
+           current. Nothing in the viewer reads these columns yet - the read is on the MCP surface - so this
+           arm is the don't-under-report guard, the V44/V53 reasoning. */
+        if (hasCollectionLogPhaseSplit)
+        {
+            return 108;
+        }
+
+        /* V107 (#2138): collect.plan_force_actions, the auto force-plan bot's journal (plus the per-server
+           opt-in column on the registry, which the same rung adds). Table-existence sentinel. The TOP rung
+           now, so it must map exactly or the connect-time gate refuses a store that is perfectly current.
+           The viewer itself reads nothing from the table yet — the read is on the MCP/web surface — so this
+           arm is the don't-under-report guard, the V44/V53 reasoning. */
+        if (hasPlanForceActions)
+        {
+            return 107;
+        }
+
+        /* V106 (#2719): collect.pg_cpu_utilization, instance-level CPU for a managed PostgreSQL/Aurora
+           target via AWS Performance Insights. Table-existence sentinel. Was the TOP rung until V107. */
+        if (hasPgCpuUtilization)
+        {
+            return 106;
+        }
+
+        /* V105 (#2674): collect.collector_cost, the tool's own per-collector cost self-metric. Table-existence
+           sentinel. Was the TOP rung until V106. */
+        if (hasCollectorCost)
+        {
+            return 105;
+        }
+
         /* V104 (#2661): the deadlock lookup index. An INDEX sentinel rather than a table one, because
            V103 created the table and V104 only indexes it — a store stopped between the two has the table
            and not the index, which is a real interrupted-upgrade state and exactly what these arms exist to
-           distinguish. The TOP rung, so it must map exactly or the connect-time gate refuses a store that
-           is perfectly current. */
+           distinguish. Was the top rung until V105. */
         if (hasPgDeadlockIdentity)
         {
             return 104;
@@ -1472,6 +1649,7 @@ SELECT
         var servers = new List<DarlingServer>();
 
         await using var command = _dataSource.CreateCommand(ServersSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -1484,28 +1662,12 @@ SELECT
                 reader.IsDBNull(4) ? null : reader.GetInt32(4),
                 reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
                 reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.IsDBNull(7) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(7)));
+                reader.IsDBNull(7) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(7),
+                reader.IsDBNull(8) ? null : reader.GetInt32(8)));
         }
 
         return servers;
     }
-
-    /// <summary>
-    /// Product-name label for a sql_major_version (2016+ is what the product supports; older or
-    /// unknown majors fall back to a bare version tag, null to empty).
-    /// </summary>
-    public static string SqlVersionLabel(int? sqlMajorVersion) => sqlMajorVersion switch
-    {
-        null => "",
-        11 => "SQL Server 2012",
-        12 => "SQL Server 2014",
-        13 => "SQL Server 2016",
-        14 => "SQL Server 2017",
-        15 => "SQL Server 2019",
-        16 => "SQL Server 2022",
-        17 => "SQL Server 2025",
-        _ => $"SQL Server v{sqlMajorVersion}",
-    };
 
     /// <summary>
     /// The active server's UTC offset in minutes from its most recent <c>server_properties</c> row — the
@@ -1527,6 +1689,7 @@ LIMIT 1";
     public async Task<int?> GetServerUtcOffsetMinutesAsync(int serverId, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(ServerUtcOffsetSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return result is null or DBNull

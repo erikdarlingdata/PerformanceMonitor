@@ -75,6 +75,30 @@ public static class ViewerTimeHelper
     };
 
     /// <summary>
+    /// Converts a stored SERVER-CLOCK timestamp — one already in the monitored server's own frame, which
+    /// is what the <c>sys.dm_exec_*</c> family, <c>plan_correction</c>'s action stamps, msdb Agent's job
+    /// start time and the blocked-process report's attributes hold — to the current display mode.
+    ///
+    /// <para>It composes out of <see cref="ConvertToDisplay"/>'s existing arms rather than adding new
+    /// ones: the naive-UTC twin of a server-clock value is <c>serverLocal - offset</c>, so subtracting
+    /// the offset first is the whole difference between the two conversions. Nothing is re-derived — the
+    /// Local arm in particular is the same one <see cref="ForDisplay"/> uses, reached with a corrected
+    /// input.</para>
+    ///
+    /// <para>This is the mirror of Lite's pair, which starts from the other frame:
+    /// <c>ServerTimeHelper.ConvertForDisplay</c> takes the server's clock and its naive-UTC renderer
+    /// ADDS the offset first. Either way there is exactly one offset step between the two frames, and
+    /// applying it twice or not at all is the whole of #3207.</para>
+    /// </summary>
+    public static DateTime ForServerClockDisplay(DateTime serverLocal) =>
+        ConvertServerClockToDisplay(serverLocal, CurrentDisplayMode, _utcOffsetMinutes);
+
+    /// <summary>Pure (static-free) server-clock → display conversion for an explicit mode + offset. The
+    /// testable core of <see cref="ForServerClockDisplay"/>.</summary>
+    public static DateTime ConvertServerClockToDisplay(DateTime serverLocal, TimeDisplayMode mode, int utcOffsetMinutes) =>
+        ConvertToDisplay(serverLocal.AddMinutes(-utcOffsetMinutes), mode, utcOffsetMinutes);
+
+    /// <summary>
     /// Inverse of <see cref="ForDisplay"/> for the custom-range pickers: a wall-clock value the user typed
     /// IN THE CURRENT display mode, back to the store's naive-UTC window bound.
     /// </summary>

@@ -85,6 +85,21 @@ public partial class ServerTab : UserControl
         };
     }
 
+    /* #2933: CompareToCombo_SelectionChanged sets no in-flight flag, so two Compare changes overlap and
+       the LATER-STARTING read can land first, leaving the grid showing the baseline the operator moved
+       off. The grids are on screen while that happens, so no visibility change comes along to repaint
+       them. A scope re-verify cannot separate Yesterday -> Last week -> Yesterday: the third read's
+       range equals the first's, so the first still compares current and lands last. Each comparison
+       grid gets its own generation instead, which compares identity rather than range.
+
+       Only the comparison loaders take this. ServerTab's main-tab Refresh*Async loaders are deliberately
+       NOT here: their races all route through the bail-only _isRefreshing, where the user-visible half is
+       the DROPPED trigger (a time-range change mid-pass leaves the charts on the old window while the
+       combo shows the new one), and a generation cannot fix a load that never started. That wants the
+       viewer's coalescing replay, which needs _isRefreshing split from the event-suppression duty it also
+       serves in TimeDisplayMode_SelectionChanged, ServerTab.DrillDown.cs and ServerTab.Grids.cs. */
+    private readonly PerformanceMonitor.Ui.ScopedLoadGenerations _loads = new();
+
     private bool IsQueryStatsComparisonActive => GetComparisonRange() != null;
 
     private void SetQueryStatsComparisonMode(bool active, (DateTime From, DateTime To)? baselineRange = null)
@@ -103,6 +118,7 @@ public partial class ServerTab : UserControl
 
     private async System.Threading.Tasks.Task RefreshQueryStatsComparisonAsync(DateTime currentStart, DateTime currentEnd)
     {
+        var gen = _loads.Claim(nameof(RefreshQueryStatsComparisonAsync));
         var baselineRange = GetComparisonRange();
         if (baselineRange == null)
         {
@@ -115,6 +131,7 @@ public partial class ServerTab : UserControl
         var items = await Task.Run(() => _dataService.GetQueryStatsComparisonAsync(
             _serverId, currentStart, currentEnd,
             baselineRange.Value.From, baselineRange.Value.To, SelectedDatabaseFilter));
+        if (_loads.Superseded(nameof(RefreshQueryStatsComparisonAsync), gen)) return;
 
         // Sort: NEW first, then by duration delta descending, GONE last
         var sorted = items
@@ -141,6 +158,7 @@ public partial class ServerTab : UserControl
 
     private async System.Threading.Tasks.Task RefreshProcStatsComparisonAsync(DateTime currentStart, DateTime currentEnd)
     {
+        var gen = _loads.Claim(nameof(RefreshProcStatsComparisonAsync));
         var baselineRange = GetComparisonRange();
         if (baselineRange == null)
         {
@@ -153,6 +171,7 @@ public partial class ServerTab : UserControl
         var items = await Task.Run(() => _dataService.GetProcedureStatsComparisonAsync(
             _serverId, currentStart, currentEnd,
             baselineRange.Value.From, baselineRange.Value.To, SelectedDatabaseFilter));
+        if (_loads.Superseded(nameof(RefreshProcStatsComparisonAsync), gen)) return;
 
         var sorted = items
             .OrderBy(x => x.SortGroup)
@@ -178,6 +197,7 @@ public partial class ServerTab : UserControl
 
     private async System.Threading.Tasks.Task RefreshQueryStoreComparisonAsync(DateTime currentStart, DateTime currentEnd)
     {
+        var gen = _loads.Claim(nameof(RefreshQueryStoreComparisonAsync));
         var baselineRange = GetComparisonRange();
         if (baselineRange == null)
         {
@@ -190,6 +210,7 @@ public partial class ServerTab : UserControl
         var items = await Task.Run(() => _dataService.GetQueryStoreComparisonAsync(
             _serverId, currentStart, currentEnd,
             baselineRange.Value.From, baselineRange.Value.To, SelectedDatabaseFilter));
+        if (_loads.Superseded(nameof(RefreshQueryStoreComparisonAsync), gen)) return;
 
         var sorted = items
             .OrderBy(x => x.SortGroup)

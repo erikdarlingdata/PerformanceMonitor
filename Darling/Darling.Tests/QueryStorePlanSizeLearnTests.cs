@@ -117,4 +117,28 @@ public sealed class QueryStorePlanSizeLearnTests
         Assert.Equal(0, estimate.AvgBytes);
         Assert.False(estimate.CatchUpInProgress);
     }
+
+    /// <summary>
+    /// #2683/#2685 tried an adaptive runaway detector here (a streak of clamped passes armed a reduced
+    /// ceiling, with hysteresis to survive oscillation) and it failed at the moment it mattered: the
+    /// 2026-08-29 peak verification on OMEGA showed zero clamped passes and zero runaway arms while
+    /// plan_fetch still ran 38-73s across twelve straight passes, because the learned average happened to
+    /// keep "wanted" just under the ceiling. MaxCandidatePlans is now a flat 512 instead, so the throttle
+    /// applies unconditionally and cannot fail to engage. This pins that the ceiling used by
+    /// <see cref="QueryStorePlanXmlState.CandidatePlanCount(long?, long, bool, out bool)"/> really is flat —
+    /// a would-be-runaway-shaped pass (small trusted average, large budget) still lands at MaxCandidatePlans,
+    /// with no second, lower tier to fall into or fail to reach.
+    /// </summary>
+    [Fact]
+    public void TheCandidateCeilingIsFlat_NoRunawayTierToEngageOrMiss()
+    {
+        // ~15 KB plans (trusted, not catching up), 32 MB budget -> wants ~3277, well past the ceiling.
+        long avg = 15 * 1024, budget = 32L * 1024 * 1024;
+
+        var k = QueryStorePlanXmlState.CandidatePlanCount(avg, budget, catchUpInProgress: false, out var clamped);
+
+        Assert.Equal(QueryStorePlanXmlState.MaxCandidatePlans, k);
+        Assert.Equal(512, k);
+        Assert.True(clamped);
+    }
 }

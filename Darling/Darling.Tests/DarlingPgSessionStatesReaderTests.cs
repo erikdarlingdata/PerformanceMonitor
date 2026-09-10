@@ -34,6 +34,78 @@ public class DarlingPgSessionStatesReaderTests
 
     private static string CountsSql => DarlingPgSessionStatesReader.PgSessionStatesCaptureCountsSql;
 
+    private static string LongRunningSql => DarlingPgSessionStatesReader.CurrentLongRunningSessionsSql;
+
+    // ── #2711 Long-Running Query — the live-state read ──────────────────────────────────────────────
+
+    [Fact]
+    public void LongRunningSql_ScopesToOneServerOneThresholdAndOneRecencyFloor()
+    {
+        Assert.Contains("server_id = $1", LongRunningSql, StringComparison.Ordinal);
+        Assert.Contains("query_duration_ms >= $2", LongRunningSql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $3", LongRunningSql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $4", LongRunningSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The mechanism this whole read exists for: "most recent" is computed via <c>max(collection_time)</c>
+    /// over the recency-bounded set and then JOINED back, rather than just filtering rows to
+    /// <c>collection_time >= $3</c> directly. Without the join, a session whose peak crossed the threshold in
+    /// an OLDER capture inside the recency window — but has since finished, so it is absent from the truly
+    /// latest capture — would still be reported as currently running. Verified against a real local
+    /// PostgreSQL 17 with exactly this shape (a superseded older-but-in-window row correctly excluded, a
+    /// short same-cycle row correctly excluded, only the genuinely-latest over-threshold row returned) before
+    /// this test was written; this pins the SQL shape that made that hold.
+    /// </summary>
+    [Fact]
+    public void LongRunningSql_FiltersToTheSingleLatestCapture_ViaMaxJoin_NotAWindowFilterAlone()
+    {
+        Assert.Contains("max(collection_time)", LongRunningSql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("s.collection_time = r.latest_capture", LongRunningSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LongRunningSql_TheRowLimitIsParameterisedRatherThanBakedIn()
+    {
+        Assert.DoesNotMatch(new Regex(@"LIMIT\s+\d+"), LongRunningSql);
+    }
+
+    [Fact]
+    public void LongRunningSql_ReadsOnlyItsOwnTable()
+    {
+        Assert.Contains("FROM pg_session_states", LongRunningSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_blocking_edges", LongRunningSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_deadlocks", LongRunningSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>No query text projected — the collector deliberately stores none (see its class remarks), so
+    /// a read that tried to select one would be selecting a column that does not exist. Word-boundary regex
+    /// rather than a plain substring check: a naive "s.query" substring search self-matches the legitimate
+    /// "s.query_duration_ms" projection (caught by this exact test failing red the first time it was
+    /// written), since "query" is a literal prefix of that identifier.</summary>
+    [Fact]
+    public void LongRunningSql_ProjectsNoQueryText()
+    {
+        Assert.DoesNotContain("query_text", LongRunningSql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotMatch(new Regex(@"\bquery\b", RegexOptions.IgnoreCase), LongRunningSql);
+    }
+
+    /// <summary>
+    /// Excludes idle-in-transaction sessions. Per PostgreSQL's own semantics, <c>query_duration_ms</c> for a
+    /// session sitting idle-in-transaction measures how long ago its LAST query started, not how long a query
+    /// has actually been running — that query already finished. Without this filter a session that ran a 5ms
+    /// UPDATE and has sat idle-in-transaction for 40 minutes since would read identically to one whose UPDATE
+    /// has genuinely been running for 40 minutes, which is a different, differently-actioned incident (an app
+    /// connection-pool bug vs. a slow statement). Matches the SQL Server equivalent
+    /// (<c>AlertEngine.CheckLongRunningQueriesAsync</c>), which reads <c>sys.dm_exec_requests</c> — a table of
+    /// requests actually executing, where an idle session has no row at all.
+    /// </summary>
+    [Fact]
+    public void LongRunningSql_ExcludesIdleInTransactionSessions()
+    {
+        Assert.Contains("s.is_idle_in_transaction = false", LongRunningSql, StringComparison.Ordinal);
+    }
+
     // ── Scoping and parameterisation ─────────────────────────────────────────────────────────────
 
     [Fact]

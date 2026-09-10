@@ -334,7 +334,11 @@ public sealed class StorageGrowthRow
     public decimal GrowthPct30d { get; set; }
 }
 
-/// <summary>Database with zero query executions over the window (Optimization sub-tab). LastExecutionTime localized in read.</summary>
+/// <summary>Database with zero query executions over the window (Optimization sub-tab).
+/// <see cref="LastExecutionTime"/> is <c>query_stats.last_execution_time</c>, the monitored server's own
+/// wall clock, and <c>GetIdleDatabasesAsync</c> reads it VERBATIM — see that read's own comment for why,
+/// and for the contrast with the collection_time-derived timestamps in the same port. The grid binds it
+/// directly with a XAML <c>StringFormat</c>, so no renderer sees it in either SKU.</summary>
 public sealed class IdleDatabaseRow
 {
     public string DatabaseName { get; set; } = "";
@@ -542,7 +546,10 @@ public sealed class ObjectSizeGrowthRow
     public decimal GrowthPct30d { get; set; }
 }
 
-/// <summary>Per-index usage with unused/write-only classification (Storage Growth index drill). LastUserAccess localized in read.</summary>
+/// <summary>Per-index usage with unused/write-only classification (Storage Growth index drill).
+/// <see cref="LastUserAccess"/> is a <c>GREATEST</c> over <c>index_object_stats</c>' four
+/// <c>last_user_*</c> columns, all of them the monitored server's own wall clock, and the read takes it
+/// VERBATIM — see that read's own comment.</summary>
 public sealed class IndexUsageRow
 {
     public string DatabaseName { get; set; } = "";

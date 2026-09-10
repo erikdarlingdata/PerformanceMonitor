@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>SliceRepairRepro</RootNamespace>
+    <AssemblyName>SliceRepairRepro</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!-- No VersionOverride, deliberately, and unlike tools/CompactionRepro. That tool pins 1.5.3 because it
+       must keep reproducing against its ORIGINAL DuckDB; this one must track whatever Lite ships, since the
+       whole point is exercising the repair against the version and memory budget users actually run. An
+       override equal to the central version would look harmless and silently stop tracking on the next
+       DuckDB bump. -->
+  <ItemGroup>
+    <PackageReference Include="DuckDB.NET.Data" />
+    <PackageReference Include="DuckDB.NET.Bindings.Full" />
+  </ItemGroup>
+
+  <!-- Link the real collapse logic so the reproducer exercises the EXACT expressions production
+       builds. Do NOT restate them here - tools/CompactionRepro exists because a repro that
+       reimplements what it reproduces drifts from production and quietly stops proving anything. -->
+  <ItemGroup>
+    <Compile Include="..\..\Lite\Services\QueryStoreSliceRepairService.Collapse.cs" Link="QueryStoreSliceRepairService.Collapse.cs" />
+  </ItemGroup>
+</Project>

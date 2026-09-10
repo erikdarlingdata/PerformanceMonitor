@@ -8,6 +8,7 @@
 
 using System.Collections.Generic;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 /* Alias to keep the app's own persisted CpuAlertMode enum (Total/SqlOnly) visually distinct from
    the engine's (TotalServer/SqlProcess) — the two are mapped, never mixed. */
 using EngineCpuAlertMode = PerformanceMonitor.Alerting.CpuAlertMode;
@@ -79,7 +80,7 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public int DiskCriticalFreePercent => App.AlertDiskCriticalFreePercent;
     public int DiskCriticalFreeGb => App.AlertDiskCriticalFreeGb;
     public int SelfDiskFreeWarnPercent => 10;
-    public int CollectionStaleMinutes => 30;
+    public int CollectionStaleMinutes => ServerHealthThresholds.CollectionStoppedMinutesDefault;
     public int CollectionFailureThreshold => 10;
     public int PvsThresholdPercent => App.AlertPvsThresholdPercent;
     public int PvsFloorGb => App.AlertPvsFloorGb;

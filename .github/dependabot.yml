@@ -1,6 +1,53 @@
 # Dependabot version updates (routine dependency bumps).
 # Security updates are enabled separately at the repo level and are not affected by this file.
-# NuGet projects use lockfiles (packages.lock.json); Dependabot regenerates them as part of each PR.
+#
+# NuGet projects commit packages.lock.json, and Dependabot does NOT regenerate them. It edits the one
+# PackageVersion line in Directory.Packages.props and leaves every lock file pinned to the old version, so
+# CI's locked-mode restore fails NU1004 before a test runs — measured on two consecutive pull requests, a
+# grouped patch-and-minor and a major (#3143). Every NuGet pull request from here therefore needs one command
+# before it can go green:
+#
+#     dotnet restore PerformanceMonitor.sln --force-evaluate
+#
+# then a commit of every packages.lock.json it rewrites. On a checkout with CRLF line endings that is only the
+# files whose CONTENT moved; a restore run on Linux or macOS also rewrites the rest with LF, and git
+# normalises those back on add.
+#
+# This is a step the updater does not perform, not a workaround for something misconfigured here, and the
+# lock files are worth the step: they are the only pin on the TRANSITIVE closure, which no props diff shows
+# moving. Reconciling #3143's AWSSDK.PI 4.0.100.11 -> .12 also moved AWSSDK.Core 4.0.102.1 -> .3, which the
+# one-line props change never mentioned.
+#
+# Not automated. A workflow committing to a Dependabot branch needs a write-scoped credential this repository
+# does not issue, and a push made with GITHUB_TOKEN triggers no workflow run — so the healed commit would
+# carry no checks at all, which is a worse place to be than one red check that names its own remedy (#3143).
+#
+# ── Reviewing a Microsoft.Data.SqlClient or Azure.Identity bump ────────────────────────────────────────
+#
+# Read this before approving one. Lite's EntraDefaultCredential mode is broker-free only because
+# Azure.Identity.Broker is absent from the dependency graph: DefaultAzureCredential's chain DOES contain a
+# broker link (ExcludeBrokerCredential defaults to false, and SqlClient sets only
+# ExcludeInteractiveBrowserCredential), and that link is inert solely because it resolves its options by
+# reflection and gives up when the separate package is not referenced.
+#
+# Azure.Identity is not pinned in Directory.Packages.props. It arrives transitively through
+# Microsoft.Data.SqlClient.Extensions.Azure's version range, at one resolved version across the seven lock
+# files that carry it — so a SqlClient bump can move it without a props diff mentioning it, which is the
+# same transitive-closure blind spot the --force-evaluate step above exists for.
+#
+# Two pins in Lite.Tests/EntraDefaultCredentialTests.cs assert that absence, each with a positive control,
+# and BOTH of them assert the absence of that PACKAGE — today's mechanism, not the outcome. So check, by
+# hand, whether the bump changed either of:
+#
+#   * ExcludeBrokerCredential's default, or which exclusions SqlClient sets when it builds the options.
+#     A default flipping to true, or SqlClient starting to set it, would make the pins redundant rather
+#     than wrong — worth knowing, and worth deleting them for.
+#   * the broker's PACKAGING. If a future Azure.Identity carries the broker options type itself, or
+#     resolves them from somewhere other than an Azure.Identity.Broker assembly, both pins stay green and
+#     the guarantee is gone with nothing to notice it.
+#
+# Deliberately prose and not a check. Nothing in the graph can be asserted about a mechanism that does not
+# exist yet, and a test asserting today's shape harder is what is already there.
 version: 2
 updates:
   # .NET packages across the solution (PerformanceMonitor.sln discovers all projects).

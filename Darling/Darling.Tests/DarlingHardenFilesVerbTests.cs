@@ -8,9 +8,9 @@
 
 using System;
 using System.IO;
-using System.Runtime.CompilerServices;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -211,19 +211,5 @@ public class DarlingHardenFilesVerbTests
         Assert.Contains("ObjectName", body, StringComparison.Ordinal);
         Assert.Contains("LocalSystem", body, StringComparison.Ordinal);
         Assert.Contains("WellKnownSidType.LocalSystemSid", body, StringComparison.Ordinal);
-    }
-
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
-        {
-            var candidate = Path.Combine(dir.FullName, relative);
-            if (File.Exists(candidate))
-            {
-                return File.ReadAllText(candidate);
-            }
-        }
-
-        throw new FileNotFoundException($"Could not locate {relative} walking up from {thisFile}");
     }
 }

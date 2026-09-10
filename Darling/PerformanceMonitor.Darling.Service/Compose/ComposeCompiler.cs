@@ -64,7 +64,9 @@ public sealed record ComposeCompiled(string Sql, IReadOnlyList<NpgsqlParameter> 
 /// MIN/MAX on the gauge/per-event column; <c>percentile_cont</c> only on per-event); a ratio is
 /// <c>SUM(a)::float / NULLIF(SUM(b), 0)</c>.</item>
 /// <item>The #1568 <c>object_name</c> module join is bounded by the same window (the DoS fix over the
-/// viewer's currently-unbounded stitch).</item>
+/// viewer's currently-unbounded stitch), and its NULL misses are folded at <see cref="ColumnRef"/>
+/// (#2737) so ad-hoc rows are labeled and filterable rather than a null-named blob that
+/// <c>&lt;&gt; ALL</c> silently drops.</item>
 /// </list>
 /// The compiler assumes its input is a <see cref="PanelPlan"/> that <see cref="ComposeSpec.TryParsePanel"/>
 /// already validated; the only failure it can still surface is the window×resolution ceiling (which needs
@@ -86,6 +88,19 @@ public static class ComposeCompiler
 
     /// <summary>The one source table whose RAW rows need a per-interval dedup before aggregation (#1841).</summary>
     private const string QueryStoreTable = "query_store_stats";
+
+    /// <summary>The residual series label a <see cref="PanelMode.RankedTimeSeries"/> panel emits when the
+    /// spec sets <c>includeOther</c> (#2734). Parenthesized-lowercase matches the product's sentinel family
+    /// (<see cref="MeasureCatalog.AdHocLabel"/>, "(unknown)", "(none)") — distinct from every member of it —
+    /// and is a value no engine-constant dimension (wait types, clerk types, lock modes, event names, hex
+    /// hashes) can ever carry. An identifier dimension COULD in principle hold a database/object literally
+    /// named "(other)" — that member's own series would then merge with the residual, a visible labeling
+    /// ambiguity whose per-bucket arithmetic still sums to the window total — accepted over inventing an
+    /// escaping scheme for one pathological name.</summary>
+    public const string OtherSeriesLabel = "(other)";
+
+    /// <summary>The rank CTE's name in a <see cref="PanelMode.RankedTimeSeries"/> statement (#2734).</summary>
+    private const string RankCte = "topn";
 
     /// <summary>
     /// The relation the panel aggregates: the routed CAGG, or the raw source table — except
@@ -203,7 +218,7 @@ public static class ComposeCompiler
         /* Auto resolves to a concrete grain from the window before anything downstream (ceiling + date_trunc);
            a non-Auto bucket passes through unchanged, so existing panels are byte-for-byte identical. */
         var effectiveBucket = plan.TimeBucket;
-        if (plan.Mode == PanelMode.TimeSeries)
+        if (plan.Mode is PanelMode.TimeSeries or PanelMode.RankedTimeSeries)
         {
             var windowSeconds = (context.EndUtc - context.StartUtc).TotalSeconds;
             effectiveBucket = MeasureCatalog.ResolveBucket(plan.TimeBucket, windowSeconds);
@@ -236,8 +251,59 @@ public static class ComposeCompiler
         var hasServerScope = context.Servers is { Count: > 0 };
         var serverScopeParam = hasServerScope ? p.AddTextArray(context.Servers!) : null;
 
+        /* Filter predicates are built — and their values BOUND — once, in filter order, so the parameter
+           order is identical for every mode (window, scope, filters, then topN). RankedTimeSeries (#2734)
+           reuses the same clause TEXT in both its rank CTE and its series query, which reuses the same $n
+           placeholders rather than double-binding each value. */
+        var filterClauses = new List<string>(plan.Filters.Count);
+        foreach (var filter in plan.Filters)
+        {
+            filterClauses.Add(BuildFilterClause(filter, context, p));
+        }
+
         var timeColumn = route.IsCagg ? ComposeRoute.CaggTimeColumn : s_timeColumnByTable[plan.Measure.SourceTable];
         var sql = new StringBuilder();
+
+        /* The fact FROM + (optional) module join + WHERE window/scope/filters — one emitter because the
+           RankedTimeSeries rank CTE and the outer query must aggregate the SAME fact rows; two hand-kept
+           copies would drift into ranking one population and charting another. `indent` nests the text
+           inside the CTE without changing the outer query's byte-for-byte shape. */
+        void AppendFactBody(string indent)
+        {
+            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam))
+                .Append(" AS ").Append(FactAlias).Append('\n');
+
+            if (plan.UsesModuleJoin)
+            {
+                /* Raw joins the window-bounded CTE (m); a CAGG route joins the retained collect.module_map directly
+                   (its raw procedure_stats is gone at 4d, but the CAGG carries sql_handle). Same alias + join keys, so
+                   object_name resolves as m.object_name either way. */
+                if (route.IsCagg)
+                {
+                    sql.Append(indent).Append("LEFT JOIN ").Append(PgSchemaGenerator.CollectSchema).Append(".module_map AS ").Append(ModuleAlias)
+                        .Append(" ON ").Append(ModuleAlias).Append(".sql_handle = ").Append(FactAlias).Append(".sql_handle AND ")
+                        .Append(ModuleAlias).Append(".server_name = ").Append(FactAlias).Append(".server_name\n");
+                }
+                else
+                {
+                    sql.Append(indent).Append("LEFT JOIN ").Append(ModuleAlias).Append(" ON ").Append(ModuleAlias)
+                        .Append(".sql_handle = ").Append(FactAlias).Append(".sql_handle AND ").Append(ModuleAlias)
+                        .Append(".server_name = ").Append(FactAlias).Append(".server_name\n");
+                }
+            }
+
+            sql.Append(indent).Append("WHERE ").Append(FactAlias).Append('.').Append(timeColumn).Append(" >= ").Append(startParam).Append('\n');
+            sql.Append(indent).Append("  AND ").Append(FactAlias).Append('.').Append(timeColumn).Append(" <= ").Append(endParam).Append('\n');
+            if (hasServerScope)
+            {
+                sql.Append(indent).Append("  AND ").Append(FactAlias).Append(".server_name = ANY(").Append(serverScopeParam).Append(")\n");
+            }
+
+            foreach (var clause in filterClauses)
+            {
+                sql.Append(indent).Append("  AND ").Append(clause).Append('\n');
+            }
+        }
 
         /* The #1568 module CTE (window-bounded from procedure_stats) — only on the RAW path. A CAGG route joins the
            retained module_map instead (procedure_stats raw is dropped at 4d, so the CTE can't cover old windows). */
@@ -265,16 +331,56 @@ public static class ComposeCompiler
             sql.Append(")\n");
         }
 
-        /* Where the CTE (if any) ends and the real statement begins. A capped time-series query is wrapped
+        /* The #2734 rank pass: RankedTimeSeries prepends a CTE that IS the Ranked query minus the time
+           column — the same fact rows, filters, and value expression, grouped by the dims alone, ordered
+           by the window-total aggregate, LIMIT topN. The outer query then buckets ONLY those members.
+           Ranking by the WINDOW TOTAL is the decided semantic (#2734 option 1): membership is stable
+           across the window, so the chart reads as N lines. Per-bucket re-ranking is a non-goal — see the
+           PanelMode doc. */
+        if (plan.Mode == PanelMode.RankedTimeSeries)
+        {
+            sql.Append(sql.Length == 0 ? "WITH " : ", ").Append(RankCte).Append(" AS (\n");
+            var rankSelects = new List<string>();
+            foreach (var dim in plan.GroupBy)
+            {
+                rankSelects.Add(ColumnRef(dim) + " AS " + dim.Name);
+            }
+
+            rankSelects.Add(BuildValueExpr(plan.Measure, plan.Aggregate, plan.Unit, route) + " AS value");
+            sql.Append("    SELECT ").Append(string.Join(", ", rankSelects)).Append('\n');
+            AppendFactBody("    ");
+            sql.Append("    GROUP BY ").Append(string.Join(", ", plan.GroupBy.Select(ColumnRef))).Append('\n');
+            /* NULLS LAST, because Postgres's DESC default is NULLS FIRST: a group whose aggregate is NULL
+               (every in-window row's delta column NULL — a counter's first-ever collection, say) would
+               otherwise outrank every REAL winner and silently occupy a series slot. Worse here than in
+               the plain Ranked arm below (where the NULL row is at least visible): this ordering decides
+               MEMBERSHIP for the whole chart. */
+            sql.Append("    ORDER BY value DESC NULLS LAST\n");
+            sql.Append("    LIMIT ").Append(p.AddInt(plan.TopN)).Append('\n');
+            sql.Append(")\n");
+        }
+
+        /* Where the CTEs (if any) end and the real statement begins. A capped time-series query is wrapped
            in a subquery below, and the wrapper has to open HERE so the WITH stays at the top level rather
            than being swallowed into the subquery. */
         var bodyStart = sql.Length;
+
+        /* Whether one fact row's group key is in the rank CTE. IS NOT DISTINCT FROM, not '=': a NULL
+           dimension value is a real, rankable group (GROUP BY collects it), and '=' would knock it out of
+           its own series the moment it won a top-N slot. The CTE is referenced more than once under
+           includeOther, so Postgres materializes it — the rank runs once, the probes hit <= topN rows. */
+        string? memberOfTopN = null;
+        if (plan.Mode == PanelMode.RankedTimeSeries)
+        {
+            var comparisons = plan.GroupBy.Select(d => $"t.{d.Name} IS NOT DISTINCT FROM {ColumnRef(d)}");
+            memberOfTopN = $"EXISTS (SELECT 1 FROM {RankCte} AS t WHERE {string.Join(" AND ", comparisons)})";
+        }
 
         /* SELECT list + the matching GROUP BY expressions. */
         var selectExprs = new List<string>();
         var groupExprs = new List<string>();
 
-        if (plan.Mode == PanelMode.TimeSeries)
+        if (plan.Mode is PanelMode.TimeSeries or PanelMode.RankedTimeSeries)
         {
             var bucketExpr = $"date_trunc('{MeasureCatalog.DateTruncField(effectiveBucket)}', {FactAlias}.{timeColumn})";
             selectExprs.Add(bucketExpr + " AS bucket");
@@ -283,7 +389,12 @@ public static class ComposeCompiler
 
         foreach (var dim in plan.GroupBy)
         {
-            var expr = ColumnRef(dim);
+            /* includeOther (#2734): the residual fold. Every non-top-N row keeps contributing, relabeled
+               into the one "(other)" series (all its dim columns take the label), so the chart's buckets
+               still sum to the window total. Without it, non-members are filtered out below instead. */
+            var expr = plan.Mode == PanelMode.RankedTimeSeries && plan.IncludeOther
+                ? $"CASE WHEN {memberOfTopN} THEN {ColumnRef(dim)} ELSE '{OtherSeriesLabel}' END"
+                : ColumnRef(dim);
             selectExprs.Add(expr + " AS " + dim.Name);
             groupExprs.Add(expr);
         }
@@ -297,38 +408,13 @@ public static class ComposeCompiler
         }
 
         sql.Append("SELECT ").Append(string.Join(", ", selectExprs)).Append('\n');
-        sql.Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam))
-            .Append(" AS ").Append(FactAlias).Append('\n');
+        AppendFactBody(string.Empty);
 
-        if (plan.UsesModuleJoin)
+        if (plan.Mode == PanelMode.RankedTimeSeries && !plan.IncludeOther)
         {
-            /* Raw joins the window-bounded CTE (m); a CAGG route joins the retained collect.module_map directly
-               (its raw procedure_stats is gone at 4d, but the CAGG carries sql_handle). Same alias + join keys, so
-               object_name resolves as m.object_name either way. */
-            if (route.IsCagg)
-            {
-                sql.Append("LEFT JOIN ").Append(PgSchemaGenerator.CollectSchema).Append(".module_map AS ").Append(ModuleAlias)
-                    .Append(" ON ").Append(ModuleAlias).Append(".sql_handle = ").Append(FactAlias).Append(".sql_handle AND ")
-                    .Append(ModuleAlias).Append(".server_name = ").Append(FactAlias).Append(".server_name\n");
-            }
-            else
-            {
-                sql.Append("LEFT JOIN ").Append(ModuleAlias).Append(" ON ").Append(ModuleAlias)
-                    .Append(".sql_handle = ").Append(FactAlias).Append(".sql_handle AND ").Append(ModuleAlias)
-                    .Append(".server_name = ").Append(FactAlias).Append(".server_name\n");
-            }
-        }
-
-        sql.Append("WHERE ").Append(FactAlias).Append('.').Append(timeColumn).Append(" >= ").Append(startParam).Append('\n');
-        sql.Append("  AND ").Append(FactAlias).Append('.').Append(timeColumn).Append(" <= ").Append(endParam).Append('\n');
-        if (hasServerScope)
-        {
-            sql.Append("  AND ").Append(FactAlias).Append(".server_name = ANY(").Append(serverScopeParam).Append(")\n");
-        }
-
-        foreach (var filter in plan.Filters)
-        {
-            sql.Append("  AND ").Append(BuildFilterClause(filter, context, p)).Append('\n');
+            /* No residual requested: non-top-N rows are filtered out entirely (the chart under-reports the
+               window total by exactly what they did — the includeOther fold is the honest-total option). */
+            sql.Append("  AND ").Append(memberOfTopN).Append('\n');
         }
 
         if (groupExprs.Count > 0)
@@ -339,6 +425,7 @@ public static class ComposeCompiler
         switch (plan.Mode)
         {
             case PanelMode.TimeSeries:
+            case PanelMode.RankedTimeSeries:
                 /* The cap keeps the NEWEST buckets, not the oldest (#1687). A plain
                    "ORDER BY bucket LIMIT n" silently returns the EARLIEST n rows, so a grouped
                    minute-grain panel over 24h rendered its first ~87 minutes as though that were the
@@ -347,8 +434,9 @@ public static class ComposeCompiler
                    subquery and the survivors re-sorted ascending for the renderer, which consumes
                    buckets in order.
 
-                   No parameter-ordering hazard: this LIMIT is a literal (only the Ranked arm binds a
-                   LIMIT parameter), and the wrapper only brackets text whose parameters were already
+                   No parameter-ordering hazard: this LIMIT is a literal (only the Ranked arm and the
+                   RankedTimeSeries rank CTE bind a LIMIT parameter, and the CTE's is appended before the
+                   wrapper exists), and the wrapper only brackets text whose parameters were already
                    appended in the same order, so $n positions are untouched. */
                 sql.Insert(bodyStart, "SELECT * FROM (\n");
                 sql.Append("ORDER BY bucket DESC\n");
@@ -357,7 +445,10 @@ public static class ComposeCompiler
                 sql.Append("ORDER BY bucket");
                 break;
             case PanelMode.Ranked:
-                sql.Append("ORDER BY value DESC\n");
+                /* NULLS LAST for the same reason as the rank CTE above: DESC's default NULLS FIRST put a
+                   NULL-aggregate group at the TOP of the ranking, ahead of every real value — and under
+                   the LIMIT it evicted a legitimate member. */
+                sql.Append("ORDER BY value DESC NULLS LAST\n");
                 sql.Append("LIMIT ").Append(p.AddInt(plan.TopN));
                 break;
             default: /* Scalar — a single aggregate row. */
@@ -403,10 +494,43 @@ public static class ComposeCompiler
         return results;
     }
 
+    /// <summary>The per-server latest collected UTC offset, joined in for a
+    /// <see cref="AnnotationClockFrame.ServerLocal"/> annotation source. Keyed on <c>server_name</c> because
+    /// that is the column an annotation query already scopes on, and <c>DISTINCT ON</c> because each server
+    /// carries its own offset — one panel routinely overlays several servers at once, so a single scalar
+    /// would de-skew all of them by whichever server answered first. Every identifier is a compiler
+    /// constant, and the join adds no parameter of its own.
+    ///
+    /// <para><c>server_properties</c> is indexed <c>(server_id, collection_time)</c> and NOT on
+    /// <c>server_name</c>, so this subquery's <c>DISTINCT ON</c> sort has no index to ride. When the panel
+    /// names its servers, the SAME bound array the outer query filters on scopes the subquery too, which
+    /// bounds the sort by the requested servers instead of the whole fleet's retained offset history. That
+    /// is safe rather than merely cheaper: every <c>f</c> row surviving the outer predicate already has a
+    /// <c>server_name</c> in that array, so restricting the right side of the LEFT JOIN to it cannot change
+    /// which offset any surviving row matches. A fleet-wide panel supplies no array and needs the whole
+    /// relation, so it keeps the unscoped form.</para></summary>
+    private static string ServerOffsetJoin(string? serverScopeParam) =>
+        "LEFT JOIN (\n"
+        + "        SELECT DISTINCT ON (server_name) server_name, utc_offset_minutes\n"
+        + "        FROM " + PgSchemaGenerator.CollectSchema + ".server_properties\n"
+        + "        WHERE utc_offset_minutes IS NOT NULL\n"
+        + (serverScopeParam is null ? "" : "        AND   server_name = ANY(" + serverScopeParam + ")\n")
+        + "        ORDER BY server_name, collection_time DESC\n"
+        + "      ) AS o ON o.server_name = f.server_name\n";
+
     /// <summary>Compiles one annotation source into its bounded, catalog-only, schema-qualified event query:
-    /// <c>SELECT f.&lt;timeCol&gt; AS ts, f.&lt;labelCol&gt; AS label FROM collect.&lt;table&gt; AS f WHERE
-    /// f.&lt;timeCol&gt; BETWEEN $1 AND $2 [AND f.server_name = ANY($3)] ORDER BY ts LIMIT
-    /// &lt;MaxAnnotationEvents&gt;</c>. Every identifier is a catalog constant; every value is bound.</summary>
+    /// <c>SELECT &lt;ts&gt; AS ts, f.&lt;labelCol&gt; AS label FROM collect.&lt;table&gt; AS f WHERE
+    /// &lt;ts&gt; BETWEEN $1 AND $2 [AND f.server_name = ANY($3)] ORDER BY ts LIMIT
+    /// &lt;MaxAnnotationEvents&gt;</c>. Every identifier is a catalog constant; every value is bound.
+    ///
+    /// <para><c>&lt;ts&gt;</c> is the bare <c>f.&lt;timeCol&gt;</c> for a UTC source and the de-skewed
+    /// <c>f.&lt;timeCol&gt; - make_interval(mins =&gt; COALESCE(o.utc_offset_minutes, 0))</c> for a
+    /// <see cref="AnnotationClockFrame.ServerLocal"/> one, and the SAME expression both returns and bounds —
+    /// the measure query it decorates buckets on naive-UTC <c>collection_time</c>, so a server-local marker
+    /// would be selected from the wrong slice and drawn at the wrong x-position. <c>LEFT JOIN</c> with
+    /// <c>COALESCE(..., 0)</c> keeps a server whose <c>server_properties</c> has not been collected yet:
+    /// treating its clock as UTC is the same fallback the reader-side de-skews take, and it beats dropping
+    /// the server's markers with no explanation.</para></summary>
     private static ComposeCompiled CompileAnnotation(ComposeAnnotationSource source, ComposeRunContext context)
     {
         var p = new ParamList();
@@ -414,14 +538,24 @@ public static class ComposeCompiler
         var endParam = p.AddTimestamp(context.EndUtc);
         var hasServerScope = context.Servers is { Count: > 0 };
         var serverScopeParam = hasServerScope ? p.AddTextArray(context.Servers!) : null;
+        var serverLocal = source.Frame == AnnotationClockFrame.ServerLocal;
+
+        var ts = serverLocal
+            ? $"{FactAlias}.{source.TimeColumn} - make_interval(mins => COALESCE(o.utc_offset_minutes, 0))"
+            : $"{FactAlias}.{source.TimeColumn}";
 
         var sql = new StringBuilder();
-        sql.Append("SELECT ").Append(FactAlias).Append('.').Append(source.TimeColumn).Append(" AS ts, ")
+        sql.Append("SELECT ").Append(ts).Append(" AS ts, ")
             .Append(FactAlias).Append('.').Append(source.LabelColumn).Append(" AS label\n");
         sql.Append("FROM ").Append(PgSchemaGenerator.CollectSchema).Append('.').Append(source.SourceTable)
             .Append(" AS ").Append(FactAlias).Append('\n');
-        sql.Append("WHERE ").Append(FactAlias).Append('.').Append(source.TimeColumn).Append(" >= ").Append(startParam).Append('\n');
-        sql.Append("  AND ").Append(FactAlias).Append('.').Append(source.TimeColumn).Append(" <= ").Append(endParam).Append('\n');
+        if (serverLocal)
+        {
+            sql.Append("      ").Append(ServerOffsetJoin(serverScopeParam));
+        }
+
+        sql.Append("WHERE ").Append(ts).Append(" >= ").Append(startParam).Append('\n');
+        sql.Append("  AND ").Append(ts).Append(" <= ").Append(endParam).Append('\n');
         if (hasServerScope)
         {
             sql.Append("  AND ").Append(FactAlias).Append(".server_name = ANY(").Append(serverScopeParam).Append(")\n");
@@ -433,10 +567,33 @@ public static class ComposeCompiler
         return new ComposeCompiled(sql.ToString(), p.Parameters, ComposeRoute.Raw);
     }
 
-    /// <summary>The qualified reference for a dimension column: <c>m.</c> for a module-join dimension,
-    /// <c>f.</c> for a fact column.</summary>
-    private static string ColumnRef(ComposeDimension dimension) =>
-        (dimension.ViaModuleJoin ? ModuleAlias : FactAlias) + "." + dimension.Column;
+    /// <summary>The qualified reference for a dimension column: <c>f.</c> for a fact column; for a
+    /// module-join dimension, the <c>m.</c> column with its NULL misses FOLDED (#2737) — never the bare
+    /// joined column.
+    ///
+    /// <para>The module LEFT JOIN misses every ad-hoc statement, and a bare <c>m.object_name</c> made
+    /// those NULLs the dimension's value: <c>GROUP BY</c> collapsed all ad-hoc SQL into one null-named
+    /// row, <c>neq</c> (<c>&lt;&gt; ALL</c>) silently excluded the whole ad-hoc population, and nothing
+    /// could filter TO it. Folding here — the ONE place both the grouped expression and every filter
+    /// compile through — gives the dimension a never-NULL value with ordinary text semantics for every
+    /// operator: <c>neq 'X'</c> now INCLUDES ad-hoc rows ("everything except X" means the rest of the
+    /// workload, not "every other procedure"), <c>eq/neq AdHocLabel</c> select/exclude the bucket
+    /// explicitly, and LIKE patterns match the label like any other value. The fallback is the
+    /// dimension's own <c>FallbackColumn</c> when declared (<c>statement</c> → per-hash identity), else
+    /// the AdHocLabel sentinel — a compile-time catalog constant emitted as a literal, never a caller
+    /// string.</para></summary>
+    private static string ColumnRef(ComposeDimension dimension)
+    {
+        if (!dimension.ViaModuleJoin)
+        {
+            return FactAlias + "." + dimension.Column;
+        }
+
+        var fallback = dimension.FallbackColumn is not null
+            ? FactAlias + "." + dimension.FallbackColumn
+            : "'" + MeasureCatalog.AdHocLabel + "'";
+        return $"COALESCE({ModuleAlias}.{dimension.Column}, {fallback})";
+    }
 
     /// <summary>The coarser of two buckets (None &lt; Minute &lt; Hour &lt; Day) — clamps a display grain up to a
     /// CAGG tier's own grain, since a rollup can never be rendered finer than it was materialized.</summary>
@@ -469,6 +626,13 @@ public static class ComposeCompiler
                    columns, not numerator/denominator measures. */
                 native = $"(CAST(SUM({FactAlias}.{measure.WeightedValueColumn} * {FactAlias}.{measure.WeightColumn}) AS double precision) " +
                          $"/ NULLIF(SUM({FactAlias}.{measure.WeightColumn}), 0))";
+            }
+            else if (measure.RatioMode == MeasureRatioMode.WeightedSum)
+            {
+                /* WeightedSum (#2732): the Weighted numerator with no denominator — SUM(value * weight) is the
+                   window TOTAL, because avg * execution_count is each interval's total consumption. No NULLIF:
+                   there is no division, and SUM over zero rows is already NULL. */
+                native = $"CAST(SUM({FactAlias}.{measure.WeightedValueColumn} * {FactAlias}.{measure.WeightColumn}) AS double precision)";
             }
             else
             {

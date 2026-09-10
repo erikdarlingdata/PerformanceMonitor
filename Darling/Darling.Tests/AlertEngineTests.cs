@@ -10,12 +10,12 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -290,6 +290,11 @@ public sealed class AlertEngineTests
         public bool Muted { get; set; }
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
+        /* #3013: the swallowed-read counter is an OPTIONAL harness input, defaulting to null, so every
+           pin above builds an engine that counts nothing and no test can leak into another's totals or
+           into the process-wide AlertReadFailureCounter.Shared. */
+        public AlertReadFailureCounter? ReadFailures { get; set; }
+
         public AlertEngine Build(bool withFailedJobsFetcher = false) => new(
             Settings, Adapter, StateStore, Deliverer,
             isAlertMuted: _ => Muted,
@@ -298,7 +303,8 @@ public sealed class AlertEngineTests
                 : null,
             resolutionCallback: (r, _) => { Resolutions.Add(r); return Task.CompletedTask; },
             logger: null,
-            utcNow: () => Now);
+            utcNow: () => Now,
+            readFailures: ReadFailures);
 
         public static AlertServerSnapshot Snapshot(
             double? sqlCpu = null, double? totalCpu = null,
@@ -1007,6 +1013,52 @@ public sealed class AlertEngineTests
         Assert.Equal("SRV-A: Poison wait avg below threshold", resolution.Message); /* :330 */
     }
 
+    [Fact]
+    public async Task PoisonWait_DoesNotRefire_OnTheSameCollectionTime_EvenAfterCooldownElapses()
+    {
+        /* The read adapter's own "newest row within 10 minutes" window can hand back the SAME
+           wait_stats row across multiple sweeps when the collector's delivered cadence lags the
+           alert cooldown — observed live as byte-identical "Poison Wait" alerts ~5-7 minutes
+           apart on the same server. Cooldown elapsing is not proof a fresh observation exists;
+           re-firing on an unrefreshed collection_time reports the same event twice. */
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        var engine = h.Build();
+
+        var firstCollection = new DateTime(2026, 8, 31, 6, 0, 0, DateTimeKind.Utc);
+        h.Adapter.PoisonWaits.Add(new PoisonWaitDelta
+        {
+            WaitType = "RESOURCE_SEMAPHORE_QUERY_COMPILE",
+            DeltaMs = 113997,
+            DeltaTasks = 134,
+            AvgMsPerWait = 850.7,
+            CollectionTime = firstCollection
+        });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Cooldown (5 min default) elapses, but the collector has not produced a new row yet —
+           the adapter still hands back the identical collection_time. Must NOT re-fire. */
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* A genuinely new collection — even with the identical wait-type/value shape — is a
+           fresh observation of the condition and must fire. */
+        h.Now = h.Now.AddMinutes(6);
+        h.Adapter.PoisonWaits.Clear();
+        h.Adapter.PoisonWaits.Add(new PoisonWaitDelta
+        {
+            WaitType = "RESOURCE_SEMAPHORE_QUERY_COMPILE",
+            DeltaMs = 113997,
+            DeltaTasks = 134,
+            AvgMsPerWait = 850.7,
+            CollectionTime = firstCollection.AddMinutes(7)
+        });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
     /* ---------------- long-running queries ---------------- */
 
     [Fact]
@@ -1058,18 +1110,18 @@ public sealed class AlertEngineTests
            would have to move, and the fact that it does not is the guarantee that no existing on-prem or RDS
            target with an unlimited (or uncollected) tempdb sees its number change. The capped case gets its
            own test below rather than being folded in here. */
-        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 800, UnallocatedMb = 200 }; /* 80% used */
+        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 800, UnallocatedMb = 200 }; /* 80% reserved */
         await engine.EvaluateServerAsync(Harness.Snapshot());
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("tempdb Space", fired.MetricName);
-        Assert.Equal("80% used (800 MB)", fired.CurrentValue);                /* :446 */
+        Assert.Equal("80% reserved (800 MB)", fired.CurrentValue);                /* :446 */
         Assert.Equal(80d, fired.NumericCurrentValue!.Value, precision: 3);    /* :450 */
 
-        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 200, UnallocatedMb = 800 }; /* 20% used */
+        h.Adapter.TempDb = new TempDbSpaceInfo { TotalReservedMb = 200, UnallocatedMb = 800 }; /* 20% reserved */
         await engine.EvaluateServerAsync(Harness.Snapshot());
         var resolution = Assert.Single(h.Resolutions);
         Assert.Equal("tempdb Space Resolved", resolution.Title);              /* :463 */
-        Assert.Equal("SRV-A: tempdb usage back to 20%", resolution.Message);  /* :461,:464 */
+        Assert.Equal("SRV-A: tempdb reserved space back to 20%", resolution.Message);  /* :461,:464 */
     }
 
     /// <summary>
@@ -1099,7 +1151,7 @@ public sealed class AlertEngineTests
         await engine.EvaluateServerAsync(Harness.Snapshot());
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("tempdb Space", fired.MetricName);
-        Assert.Equal("96% used (60 MB)", fired.CurrentValue);
+        Assert.Equal("96% reserved (60 MB)", fired.CurrentValue);
     }
 
     /* ---------------- low disk ---------------- */
@@ -1374,6 +1426,167 @@ public sealed class AlertEngineTests
         Assert.Single(h.StateStore.SavedFailedJob);
     }
 
+    /* ---------------- #3013: swallowed condition reads reach a counter ---------------- */
+
+    [Fact]
+    public async Task EverySwallowedConditionRead_LandsOnTheCounter_UnderTheServerItBelongsTo()
+    {
+        /* #3013's whole defect is that these skips reached no surface. The log-and-skip posture itself is
+           correct and is pinned by AdapterFailure_SkipsThatCheck_WithoutDisturbingItsState below; what this
+           pin adds is that the skip is now COUNTED, per server, with the failing read named.
+
+           Three checks enabled rather than all of them, because the exact total over an all-enabled sweep
+           depends on gates this pin is not about (Azure-ness, the wait-seconds opt-in, whether a fetcher was
+           supplied). Three is enough to prove the count is per-read and not per-pass. */
+        var counter = new AlertReadFailureCounter(() => new DateTime(2026, 9, 5, 8, 0, 0, DateTimeKind.Utc));
+        var h = new Harness { ReadFailures = counter };
+        h.Settings.BlockingEnabled = true;
+        h.Settings.DeadlockEnabled = true;
+        h.Settings.DatabaseStateEnabled = true;
+        h.Settings.ForcePlanFailureEnabled = true;
+
+        var engine = new AlertEngine(
+            h.Settings, new ThrowingAdapter(), h.StateStore, h.Deliverer, _ => false,
+            utcNow: () => h.Now, readFailures: counter);
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var reading = counter.ReadFor(Key);
+
+        /* Blocking, deadlocks, database state and forced plans all threw. The watermark seed reads the same
+           throwing adapter and is counted too, which is deliberate: a failed seed means the edge triggers
+           start from nothing for that server, which is exactly the kind of silent degradation #3013 is
+           about. Bounded rather than exact so the pin does not have to be rewritten every time a check is
+           added, with the LOWER bound the part that carries the claim. */
+        Assert.True(
+            reading.ServerReadFailures >= 4,
+            $"expected at least the four enabled condition reads to be counted, got {reading.ServerReadFailures}");
+
+        /* The denominator, and the reason this is not just a count: one pass. */
+        Assert.Equal(1, reading.ServerAlertPasses);
+
+        /* Nothing leaked to another server or to the fleet bucket: the instance total is this server's. */
+        Assert.Equal(reading.ServerReadFailures, reading.InstanceReadFailures);
+        Assert.Equal(0, counter.ReadFor("999").ServerReadFailures);
+
+        /* The currency stamp and the named read — the two things a bare count cannot say. */
+        Assert.Equal(new DateTime(2026, 9, 5, 8, 0, 0, DateTimeKind.Utc), reading.LastFailureAtUtc);
+        Assert.False(string.IsNullOrWhiteSpace(reading.LastFailureRead));
+
+        /* The finding names the read rather than restating the number. */
+        var finding = AlertReadFailureCounter.FormatFinding(reading);
+        Assert.NotNull(finding);
+        Assert.Contains(reading.LastFailureRead!, finding, StringComparison.Ordinal);
+
+        /* And every one of those swallowed reads recorded how long it ran. Not a value here — the reads
+           fault immediately against a throwing adapter, so the assertion is only that the measurement
+           EXISTS; the falsifier below is what shows it is a measurement. */
+        Assert.NotNull(reading.LastFailureElapsedMs);
+    }
+
+    /// <summary>
+    /// #3099: the elapsed the counter receives is a measurement OF THE READ, not a value in the slot.
+    ///
+    /// <para><b>Why a source scan is not enough, and this is the discriminating falsifier.</b>
+    /// <c>AlertReadFailureSurfaceTests</c> proves from source that every counted site starts a
+    /// <see cref="System.Diagnostics.Stopwatch"/> before its <c>try</c> and hands
+    /// <c>ElapsedMilliseconds</c> to the counter and its log line. It cannot prove the number that arrives
+    /// came from that clock — a site could measure and then record something else, and every structural
+    /// check would still pass. So this drives the REAL engine over a read that takes a known minimum time
+    /// and asserts the recorded figure reflects it.</para>
+    ///
+    /// <para>Asserted as a FLOOR with a tolerance, never a ceiling: a timing test with an upper bound is a
+    /// flake on a loaded runner, and the failure mode this guards is a constant — almost certainly zero —
+    /// so the floor is the whole claim. And the count is asserted at one, so the elapsed cannot belong to
+    /// some other check that failed later in the pass.</para>
+    /// </summary>
+    [Fact]
+    public async Task TheRecordedElapsed_MeasuresTheReadRatherThanBeingAConstant()
+    {
+        const int delayMs = 120;
+
+        /* Only the forced-plan check is enabled, so exactly one read happens and exactly one fails —
+           which is what makes the single elapsed unambiguously that read's. */
+        var adapter = new ThrowingAdapter { ForcePlanDelay = TimeSpan.FromMilliseconds(delayMs) };
+        var counter = new AlertReadFailureCounter();
+        var h = new Harness { ReadFailures = counter };
+        h.Settings.ForcePlanFailureEnabled = true;
+
+        var engine = new AlertEngine(
+            h.Settings, adapter, h.StateStore, h.Deliverer, _ => false,
+            utcNow: () => h.Now, readFailures: counter);
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var reading = counter.ReadFor(Key);
+
+        Assert.Equal(1, reading.ServerReadFailures);
+        Assert.Equal("forced-plan failures", reading.LastFailureRead);
+        Assert.NotNull(reading.LastFailureElapsedMs);
+
+        /* A generous tolerance under the delay, because Task.Delay may fire slightly early on a coarse
+           timer and this test must not be the flaky one. Even so it is two orders of magnitude above the
+           zero a constant would report. */
+        Assert.True(
+            reading.LastFailureElapsedMs >= delayMs - 30,
+            $"a read that took at least {delayMs} ms recorded {reading.LastFailureElapsedMs} ms, which is "
+            + "what a constant in the slot would look like");
+    }
+
+    [Fact]
+    public async Task AHealthyPass_CountsItselfAndLeavesTheFailureCountAtZero()
+    {
+        /* The control, and the half that decides whether the counter can be read as reassurance: a pass over
+           an adapter that answers normally must move the DENOMINATOR and nothing else. Without this, a
+           counter wired to increment on every pass would look identical to a working one on the test above.
+
+           The control also has to exercise the case worth worrying about — a pass that actually RAN its
+           checks — so the same four checks are enabled here as in the failing pin, against the harness's
+           own answering adapter rather than the throwing one. */
+        var counter = new AlertReadFailureCounter();
+        var h = new Harness { ReadFailures = counter };
+        h.Settings.BlockingEnabled = true;
+        h.Settings.DeadlockEnabled = true;
+        h.Settings.DatabaseStateEnabled = true;
+        h.Settings.ForcePlanFailureEnabled = true;
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var reading = counter.ReadFor(Key);
+        Assert.Equal(2, reading.ServerAlertPasses);
+        Assert.Equal(0, reading.ServerReadFailures);
+        Assert.Equal(0, reading.InstanceReadFailures);
+        Assert.Null(reading.LastFailureAtUtc);
+        Assert.Null(reading.LastFailureRead);
+        Assert.Null(reading.LastFailureElapsedMs);
+
+        /* A clean reading carries no sentence at all, rather than a sentence saying it is clean — the
+           #3017 discipline: a finding that always renders trains a reader to skip it. */
+        Assert.Null(AlertReadFailureCounter.FormatFinding(reading));
+
+        /* And the checks really did run against the adapter, so the zero above is a zero from a pass that
+           looked rather than one that was gated off. */
+        Assert.True(h.Adapter.ForcePlanFetches > 0, "the control pass performed no reads, so its zero proves nothing");
+    }
+
+    [Fact]
+    public async Task TheMasterSwitchOffPass_IsNotInTheDenominator()
+    {
+        /* A pass that never looked at the store must not dilute the denominator — otherwise a fleet with
+           alerts switched off accumulates passes forever and three failures over "50,000 passes" reads as
+           negligible when the real denominator is three. */
+        var counter = new AlertReadFailureCounter();
+        var h = new Harness { ReadFailures = counter };
+        h.Settings.AlertsEnabled = false;
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(0, counter.ReadFor(Key).ServerAlertPasses);
+    }
+
     /* ---------------- engine hygiene ---------------- */
 
     [Fact]
@@ -1428,8 +1641,23 @@ public sealed class AlertEngineTests
         public Task<List<DatabaseStateInfo>> GetDatabaseStatesAsync(string serverKey, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
 
-        public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(string serverKey, CancellationToken cancellationToken = default) =>
+        /// <summary>
+        /// How long this ONE read spends before it faults. Exists so a test can prove the elapsed reaching
+        /// the counter is a measurement of the read rather than a value in the slot: a source scan can show
+        /// a clock is started before the try and read in the catch, and cannot show that the number the
+        /// counter receives came from it.
+        /// </summary>
+        public TimeSpan ForcePlanDelay { get; set; } = TimeSpan.Zero;
+
+        public async Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(string serverKey, CancellationToken cancellationToken = default)
+        {
+            if (ForcePlanDelay > TimeSpan.Zero)
+            {
+                await Task.Delay(ForcePlanDelay, cancellationToken);
+            }
+
             throw new InvalidOperationException("store down");
+        }
     }
 
     [Fact]
@@ -1835,19 +2063,6 @@ public sealed class AlertEngineTests
 
     private static string ReadStateStoreSource() =>
         ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "PgAlertStateStore.cs"));
-
-    /// <summary>Reads a repo-relative source file, walking up from this test file to find the repo root.</summary>
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relative));
-    }
 
     [Fact]
     public async Task DatabaseState_Disabled_DoesNotFetch()

@@ -24,6 +24,12 @@
   <ItemGroup>
     <ProjectReference Include="..\..\PerformanceMonitor.Analysis\PerformanceMonitor.Analysis.csproj" />
     <ProjectReference Include="..\..\PerformanceMonitor.Collectors\PerformanceMonitor.Collectors.csproj" />
+    <!-- AnalysisRetentionDefaults: the findings-retention horizon the cleanup defaults below the
+         worker's call site are declared at. Referenced DIRECTLY rather than inherited through
+         PlanAnalysis, which is the only other path to Common from here — a PrivateAssets="all" added
+         to that reference would break this project's compile for a reason nobody would connect to a
+         retention constant. -->
+    <ProjectReference Include="..\..\PerformanceMonitor.Common\PerformanceMonitor.Common.csproj" />
     <!-- AlertContextSerializer: the finding store persists/reads remediation_action_json through the
          SAME serializer both apps use, so a Darling finding's action round-trips byte-identically. -->
     <ProjectReference Include="..\..\PerformanceMonitor.Notifications\PerformanceMonitor.Notifications.csproj" />

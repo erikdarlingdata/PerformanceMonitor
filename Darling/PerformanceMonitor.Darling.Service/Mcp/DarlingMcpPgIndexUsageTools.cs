@@ -208,8 +208,13 @@ public sealed class DarlingMcpPgIndexUsageTools
         + "replica identity, partial, expression, invalid - and the tool refuses to recommend dropping "
         + "anything those facts do not support, including an index it has not watched for at least two "
         + "samples. Ranked by the bytes of an index nothing scanned, largest first, with invalid indexes on "
-        + "top. Collected hourly per database on writers only - a replica reports its own scan counts, not "
-        + "the writer's, so calling an index unused from a replica would be confidently wrong.")]
+        + "top. Collected DAILY per database on writers only - a replica reports its own scan counts, not "
+        + "the writer's, so calling an index unused from a replica would be confidently wrong. This census "
+        + "reports only indexes of at least 64 kB, plus any INVALID index at any size, so it counts FEWER "
+        + "indexes than get_pg_index_bloat, which is the complete btree census with no size floor - 1,517 "
+        + "against 2,500 on one measured target, a difference that is entirely that floor. Neither is "
+        + "missing objects, and for indexes too large for get_pg_index_bloat to measure this is the only "
+        + "collector carrying their size over time.")]
     public static async Task<string> GetPgIndexUsage(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -327,7 +332,9 @@ public sealed class DarlingMcpPgIndexUsageTools
                      + "without ever registering a scan; a query that runs less often than "
                      + $"{hours_back} hour(s) looks identical to a dead index; and a rare query may only be "
                      + "acceptable because this index exists. Counts are cumulative since each database's "
-                     + "statistics were last reset, which is reported per index."
+                     + "statistics were last reset, which is reported per index. Indexes under 64 kB are "
+                     + "deliberately not reported here, so this count is LOWER than get_pg_index_bloat's "
+                     + "complete btree census — the difference is that floor, not a missing read."
                      + (resetSeen
                          ? " At least one index's database had its statistics RESET inside this window, so "
                          + "its windowed scan count is clamped at zero rather than negative and is a lower "

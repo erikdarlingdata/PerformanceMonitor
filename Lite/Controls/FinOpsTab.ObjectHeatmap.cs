@@ -137,10 +137,14 @@ public partial class FinOpsTab : UserControl
     private async Task LoadObjectGrowthAsync(int serverId, string databaseName)
     {
         if (_dataService == null) return;
+
+        var gen = _loads.Claim(nameof(LoadObjectGrowthAsync));
+
         try
         {
             var days = GetObjectHeatmapDaysBack();
             var (objects, samples) = await Task.Run(() => _dataService.GetObjectGrowthHeatmapDataAsync(serverId, databaseName, days));
+            if (_loads.Superseded(nameof(LoadObjectGrowthAsync), gen)) return;
 
             // One canonical, deterministic top-of-chart-first ranking drives BOTH the companion grid and
             // the heatmap rows, so they can never disagree (and stay identical across Dashboard/Lite).
@@ -174,9 +178,13 @@ public partial class FinOpsTab : UserControl
     private async Task LoadObjectIndexDetailAsync(int serverId, string databaseName, string schemaName, string tableName)
     {
         if (_dataService == null) return;
+
+        var gen = _loads.Claim(nameof(LoadObjectIndexDetailAsync));
+
         try
         {
             var data = await Task.Run(() => _dataService.GetObjectIndexDetailAsync(serverId, databaseName, schemaName, tableName));
+            if (_loads.Superseded(nameof(LoadObjectIndexDetailAsync), gen)) return;
             ObjectIndexDetailGrid.ItemsSource = data;
             StorageGrowthCountIndicator.Text = data.Count > 0 ? $"{data.Count} index(es)" : "";
             ObjectIndexNoDataMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;

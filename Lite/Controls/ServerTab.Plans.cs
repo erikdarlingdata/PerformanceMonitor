@@ -198,10 +198,13 @@ public partial class ServerTab : UserControl
         if (sender is not Button btn || btn.DataContext is not QueryStoreRow row) return;
         if (string.IsNullOrEmpty(row.QueryPlanText)) return;
 
-        OpenPlanTab(row.QueryPlanText, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
+        _ = OpenPlanTab(row.QueryPlanText, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
     }
 
-    private async void OpenPlanTab(string planXml, string label, string? queryText = null)
+    // Returns a Task (not async void) so the Ctrl+V paste handler can await it inside its _pasteInProgress
+    // guard -- the guard must span the off-thread parse in LoadPlan, not just the clipboard read (#2870).
+    // Non-paste "View Plan" callers discard the Task (_ = OpenPlanTab(...)); CS4014 is an error in this project.
+    private async Task OpenPlanTab(string planXml, string label, string? queryText = null)
     {
         HidePlanLoading();
         var viewer = new PlanViewerControl();
@@ -351,7 +354,7 @@ public partial class ServerTab : UserControl
 
         if (!string.IsNullOrEmpty(planXml))
         {
-            OpenPlanTab(planXml, label, queryText);
+            _ = OpenPlanTab(planXml, label, queryText);
             PlanViewerTabItem.IsSelected = true;
         }
         else
@@ -478,7 +481,7 @@ public partial class ServerTab : UserControl
 
             if (!string.IsNullOrEmpty(actualPlanXml))
             {
-                OpenPlanTab(actualPlanXml, label, queryText);
+                _ = OpenPlanTab(actualPlanXml, label, queryText);
                 PlanViewerTabItem.IsSelected = true;
             }
             else
@@ -574,7 +577,7 @@ public partial class ServerTab : UserControl
 
         if (!string.IsNullOrEmpty(planXml))
         {
-            OpenPlanTab(planXml, label, queryText);
+            _ = OpenPlanTab(planXml, label, queryText);
             PlanViewerTabItem.IsSelected = true;
         }
         else
@@ -666,7 +669,7 @@ public partial class ServerTab : UserControl
 
         if (!string.IsNullOrEmpty(planXml))
         {
-            OpenPlanTab(planXml, label, row.SqlText);
+            _ = OpenPlanTab(planXml, label, row.SqlText);
             PlanViewerTabItem.IsSelected = true;
         }
         else

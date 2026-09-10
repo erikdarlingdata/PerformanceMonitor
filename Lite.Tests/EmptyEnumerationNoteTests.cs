@@ -58,7 +58,7 @@ public class EmptyEnumerationNoteTests
            the whole enumeration read — items, probe failures, and the composed note — through the shared
            driver does, because there is then no host-side text at all. */
         Assert.Contains("EnumeratedCollectorDriver.ReadEnumerationAsync(enumerationReader, cancellationToken)", source);
-        Assert.Contains("telemetry.Note = enumeration.Note;", source);
+        Assert.Contains("telemetry.HostNote = enumeration.Note;", source);
 
         /* Via the shared driver, never a copy of the text — a literal here is exactly the drift this
            fix exists to prevent. */
@@ -75,7 +75,7 @@ public class EmptyEnumerationNoteTests
         var source = File.ReadAllText(FindRepoFile(
             Path.Combine("Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs")));
 
-        var assignment = source.IndexOf("telemetry.Note = enumeration.Note;", StringComparison.Ordinal);
+        var assignment = source.IndexOf("telemetry.HostNote = enumeration.Note;", StringComparison.Ordinal);
         var earlyReturn = source.IndexOf("if (items.Count == 0)", StringComparison.Ordinal);
 
         Assert.True(assignment >= 0 && earlyReturn >= 0, "both the note assignment and the zero-item branch must exist");
@@ -92,7 +92,7 @@ public class EmptyEnumerationNoteTests
         var source = File.ReadAllText(FindRepoFile(
             Path.Combine("Lite", "Services", "RemoteCollectorService.DefinitionRunner.cs")));
 
-        Assert.Contains("telemetry.Note = null;", source);
+        Assert.Contains("telemetry.ResetNote();", source);
 
         var service = File.ReadAllText(FindRepoFile(
             Path.Combine("Lite", "Services", "RemoteCollectorService.cs")));
@@ -113,11 +113,11 @@ public class EmptyEnumerationNoteTests
         var serverB = service.TelemetryFor(2);
         Assert.NotSame(serverA, serverB);
 
-        serverA.Note = EnumeratedCollectorDriver.EmptyEnumerationMessage;
+        serverA.HostNote = EnumeratedCollectorDriver.EmptyEnumerationMessage;
         serverA.SqlMs = 1234;
 
         /* Server B starting its own run resets ITS slot — the shape RunCollectorAsync uses. */
-        serverB.Note = null;
+        serverB.ResetNote();
         serverB.SqlMs = 0;
 
         Assert.Equal(EnumeratedCollectorDriver.EmptyEnumerationMessage, serverA.Note);
@@ -187,7 +187,10 @@ public class EmptyEnumerationNoteTests
            re-check on the rank-1 row. It is the SAME claim: the column can only ever be filled from a
            failing run. Without the re-check the rank falls through to the newest row of any class when
            no failure carried text, and a SUCCESS row's note would land here. */
-        Assert.Contains("MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error", source);
+        /* EXTENSION_MISSING joined the failing-status set with #3240 for twin-parity with Darling's
+           reads (Lite's SQL Server collectors never write it, so the branch is inert on this SKU).
+           Still a STATUS gate — the broadening this pin refuses is to message PRESENCE. */
+        Assert.Contains("MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) AS last_error", source);
         Assert.DoesNotContain("error_message IS NOT NULL", source);
     }
 

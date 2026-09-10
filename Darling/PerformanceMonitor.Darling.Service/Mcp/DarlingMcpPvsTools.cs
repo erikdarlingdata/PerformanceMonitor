@@ -31,7 +31,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpPvsTools
 {
     [McpServerTool(Name = "get_pvs_stats"), Description(
-        "Gets the Accelerated Database Recovery (ADR) persistent version store state per database: PVS size and percent-of-database, online-index version store size, aborted transaction count, version-cleaner run state (a start time without an end time means the cleaner is mid-run), and the oldest active/aborted transaction ids. Use when a database's size is growing without table growth, when ADR cleanup looks stuck, or alongside the PVS pressure alert. A large PVS is pinned by long-running or aborted transactions; the id gap shows how far cleanup is behind. Optionally returns the size trend for the top-5 databases over a window.")]
+        "Gets the Accelerated Database Recovery (ADR) persistent version store state per database: PVS size and percent-of-database, online-index version store size, aborted transaction count, version-cleaner run state (a start time without an end time means the cleaner is mid-run), and the oldest active/aborted transaction ids. Use when a database's size is growing without table growth, when ADR cleanup looks stuck, or alongside the PVS pressure alert. A large PVS is pinned by long-running or aborted transactions; the id gap shows how far cleanup is behind. Optionally returns the size trend for the top-5 databases over a window. Every timestamp here is UTC, the four cleaner times included - the DMV reports those in the monitored server's local clock and this read de-skews them - so a cleaner time compares directly against as_of.")]
     public static async Task<string> GetPvsStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -69,11 +69,15 @@ public sealed class DarlingMcpPvsTools
                 online_index_version_store_mb = r.OnlineIndexVersionStoreMb,
                 database_data_size_mb = r.DatabaseDataSizeMb,
                 aborted_transaction_count = r.AbortedTransactionCount,
-                /* Cleaner state, Microsoft's shape: a start without an end means mid-run. Presented raw. */
-                aborted_version_cleaner_start_time = r.AbortedCleanerStartTime?.ToString("o"),
-                aborted_version_cleaner_end_time = r.AbortedCleanerEndTime?.ToString("o"),
-                offrow_version_cleaner_start_time = r.OffrowCleanerStartTime?.ToString("o"),
-                offrow_version_cleaner_end_time = r.OffrowCleanerEndTime?.ToString("o"),
+                /* Cleaner state, Microsoft's shape: a start without an end means mid-run. The PAIRING is
+                   presented as the DMV reports it; the FRAME is not. These four are server-local in the store
+                   and the read de-skews them, so they compare directly against as_of above instead of reading
+                   one whole UTC offset stale — 4 hours on the production fleet, on a value that is usually
+                   seconds old, for the one question this tool exists to answer. */
+                aborted_version_cleaner_start_time = r.AbortedCleanerStartTimeUtc?.ToString("o"),
+                aborted_version_cleaner_end_time = r.AbortedCleanerEndTimeUtc?.ToString("o"),
+                offrow_version_cleaner_start_time = r.OffrowCleanerStartTimeUtc?.ToString("o"),
+                offrow_version_cleaner_end_time = r.OffrowCleanerEndTimeUtc?.ToString("o"),
                 /* The lag between these ids is how far cleanup is behind — the gap itself, never a verdict. */
                 oldest_active_transaction_id = r.OldestActiveTransactionId,
                 oldest_aborted_transaction_id = r.OldestAbortedTransactionId,

@@ -23,16 +23,37 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// database's recommendation rows, and a database with nothing to recommend lands a single enablement-only
 /// row whose <c>recommendation_name</c> is NULL. The recommendations read drops those rows; the tuning-state
 /// read keeps exactly one per database.
+///
+/// <para><b>The four recommendation lifecycle times are de-skewed to naive UTC at this boundary.</b>
+/// <c>PlanCorrectionCollector</c> ships <c>valid_since</c>, <c>last_refresh</c>,
+/// <c>execute_action_initiated_time</c> and <c>revert_action_initiated_time</c> verbatim off
+/// <c>sys.dm_db_tuning_recommendations</c>, so the stored values are the monitored server's LOCAL wall
+/// clock, while the <c>collection_time</c> on the same row and the tuning read's <c>as_of</c> are naive UTC.
+/// Left raw they are early by the server's offset — 4 hours on the production fleet — which is enough to
+/// place a recommendation's <c>valid_since</c> before the collection that first observed it, and to make a
+/// forced plan look as though it was forced hours before the regression that prompted it. The window and
+/// the ordering stay on <c>collection_time</c>, so no row SELECTION changes. The tuning-state read needs
+/// nothing: its only timestamp is <c>collection_time</c>.</para>
 /// </summary>
 internal static class DarlingPlanCorrectionReader
 {
     /// <summary>
     /// The engine's automatic plan correction recommendations for one server over the window, newest first.
     /// <c>recommendation_name IS NOT NULL</c> drops the enablement-only rows. LIMIT 200 mirrors the Viewer's
-    /// grid read; the tool applies its own smaller take on top. $1 server_id, $2 window start, $3 window end
-    /// (naive UTC).
+    /// grid read; the tool applies its own smaller take on top. The four lifecycle times are de-skewed from
+    /// the server's local clock to naive UTC (see the class remarks). $1 server_id, $2 window start, $3 window
+    /// end (naive UTC).
     /// </summary>
     public const string PlanCorrectionsSql = @"
+WITH svr AS (
+    SELECT COALESCE((
+        SELECT sp.utc_offset_minutes
+        FROM server_properties AS sp
+        WHERE sp.server_id = $1
+        AND   sp.utc_offset_minutes IS NOT NULL
+        ORDER BY sp.collection_time DESC
+        LIMIT 1), 0) AS offset_minutes
+)
 SELECT
     collection_time,
     database_name,
@@ -52,13 +73,13 @@ SELECT
     regressed_plan_cpu_time_average_ms,
     last_good_plan_execution_count,
     last_good_plan_cpu_time_average_ms,
-    valid_since,
-    last_refresh,
+    valid_since - make_interval(mins => svr.offset_minutes) AS valid_since,
+    last_refresh - make_interval(mins => svr.offset_minutes) AS last_refresh,
     execute_action_initiated_by,
-    execute_action_initiated_time,
+    execute_action_initiated_time - make_interval(mins => svr.offset_minutes) AS execute_action_initiated_time,
     revert_action_initiated_by,
-    revert_action_initiated_time
-FROM plan_correction
+    revert_action_initiated_time - make_interval(mins => svr.offset_minutes) AS revert_action_initiated_time
+FROM plan_correction, svr
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -103,12 +124,12 @@ ORDER BY database_name";
         double? RegressedPlanCpuTimeAverageMs,
         long? LastGoodPlanExecutionCount,
         double? LastGoodPlanCpuTimeAverageMs,
-        DateTime? ValidSince,
-        DateTime? LastRefresh,
+        DateTime? ValidSinceUtc,
+        DateTime? LastRefreshUtc,
         string? ExecuteActionInitiatedBy,
-        DateTime? ExecuteActionInitiatedTime,
+        DateTime? ExecuteActionInitiatedTimeUtc,
         string? RevertActionInitiatedBy,
-        DateTime? RevertActionInitiatedTime);
+        DateTime? RevertActionInitiatedTimeUtc);
 
     /// <summary>One database's FORCE_LAST_GOOD_PLAN enablement state at the newest capture.</summary>
     public sealed record AutomaticTuningRow(
@@ -123,6 +144,7 @@ ORDER BY database_name";
     {
         var rows = new List<PlanCorrectionRow>();
         await using var command = postgres.CreateCommand(PlanCorrectionsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
@@ -165,6 +187,7 @@ ORDER BY database_name";
     {
         var rows = new List<AutomaticTuningRow>();
         await using var command = postgres.CreateCommand(AutomaticTuningSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(serverId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

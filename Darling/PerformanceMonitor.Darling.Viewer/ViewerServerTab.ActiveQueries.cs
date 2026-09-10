@@ -232,14 +232,14 @@ public partial class ViewerServerTab
     private void OpenSnapshotEstimatedPlan(ViewerQuerySnapshotRow row)
     {
         if (string.IsNullOrEmpty(row.QueryPlan)) return;
-        OpenPlanTab(row.QueryPlan, $"Estimated Plan — Session {row.SessionId}", row.QueryText);
+        _ = OpenPlanTab(row.QueryPlan, $"Estimated Plan — Session {row.SessionId}", row.QueryText);
     }
 
     /// <summary>Opens the snapshot row's stored actual plan (shared by the button + context-menu handlers).</summary>
     private void OpenSnapshotActualPlan(ViewerQuerySnapshotRow row)
     {
         if (string.IsNullOrEmpty(row.LiveQueryPlan)) return;
-        OpenPlanTab(row.LiveQueryPlan, $"Live Plan — Session {row.SessionId}", row.QueryText);
+        _ = OpenPlanTab(row.LiveQueryPlan, $"Live Plan — Session {row.SessionId}", row.QueryText);
     }
 
     /// <summary>

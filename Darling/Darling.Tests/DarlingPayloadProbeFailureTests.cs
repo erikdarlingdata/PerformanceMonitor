@@ -304,7 +304,10 @@ public sealed class DarlingPayloadProbeFailureTests
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs")));
         var plainPath = source[source.IndexOf("Plain single-query path", StringComparison.Ordinal)..];
 
-        var read = plainPath.IndexOf("definition.ReadAsync(reader", StringComparison.Ordinal);
+        /* #2864: the payload is read through the counting decorator rather than the provider reader
+           directly, so the anchor is the wrapper. The ORDERING this test exists to pin is unchanged -
+           only the argument name moved. */
+        var read = plainPath.IndexOf("definition.ReadAsync(counting", StringComparison.Ordinal);
         var probes = plainPath.IndexOf("ReadPayloadProbeFailuresAsync", StringComparison.Ordinal);
         var write = plainPath.IndexOf("WriteBatchAsync(pgConnection", StringComparison.Ordinal);
 

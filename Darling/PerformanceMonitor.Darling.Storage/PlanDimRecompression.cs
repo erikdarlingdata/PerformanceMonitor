@@ -113,6 +113,14 @@ public static class PlanDimRecompression
     public const string VacuumFullSql = "VACUUM FULL query_plan_dim";
 
     /// <summary>
+    /// One bound for every non-VACUUM statement in this maintenance pass (#2874). Same value the
+    /// estimate already chose deliberately; hoisted so the survey, fetch and update loops cannot
+    /// silently fall back to Npgsql's inherited 30 s default. VACUUM FULL keeps its explicit
+    /// <c>CommandTimeout = 0</c> — unlimited is the deliberate choice there, not an omission.
+    /// </summary>
+    private const int MaintenanceStatementTimeoutSeconds = 300;
+
+    /// <summary>
     /// A fast estimate of the compacted relation's size, for the disk preflight: heap + indexes copy
     /// as-is, and the TOAST rebuilds to roughly row-count × the SAMPLED average gzip size. Sampled
     /// (<see cref="DryRunSampleSize"/> rows) because summing octet_length over the whole dimension detoasts
@@ -144,7 +152,7 @@ public static class PlanDimRecompression
     {
         ArgumentNullException.ThrowIfNull(connection);
 
-        await using var command = new NpgsqlCommand(EstimateCompactedSql, connection) { CommandTimeout = 300 };
+        await using var command = new NpgsqlCommand(EstimateCompactedSql, connection) { CommandTimeout = MaintenanceStatementTimeoutSeconds };
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return result is long bytes ? bytes : Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
     }
@@ -169,7 +177,7 @@ public static class PlanDimRecompression
     {
         ArgumentNullException.ThrowIfNull(connection);
 
-        await using var command = new NpgsqlCommand(SurveySql, connection);
+        await using var command = new NpgsqlCommand(SurveySql, connection) { CommandTimeout = MaintenanceStatementTimeoutSeconds };
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -223,7 +231,7 @@ public static class PlanDimRecompression
             if (good.Length > 0)
             {
                 await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-                await using var update = new NpgsqlCommand(UpdateBatchSql, connection, transaction);
+                await using var update = new NpgsqlCommand(UpdateBatchSql, connection, transaction) { CommandTimeout = MaintenanceStatementTimeoutSeconds };
                 update.Parameters.Add(new NpgsqlParameter
                 {
                     NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea,
@@ -260,7 +268,7 @@ public static class PlanDimRecompression
         NpgsqlConnection connection, int limit, CancellationToken cancellationToken)
     {
         var batch = new List<(byte[], string)>(limit);
-        await using var fetch = new NpgsqlCommand(FetchBatchSql, connection);
+        await using var fetch = new NpgsqlCommand(FetchBatchSql, connection) { CommandTimeout = MaintenanceStatementTimeoutSeconds };
         fetch.Parameters.Add(new NpgsqlParameter<int> { TypedValue = limit });
         await using var reader = await fetch.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

@@ -44,7 +44,10 @@ public sealed class TempDbCeilingStoreTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public void TheSchemaVersionMovedWithTheColumn()
     {
-        Assert.Equal(56, DuckDbInitializer.CurrentSchemaVersion);
+        /* At LEAST 56, not exactly: pinning the current version makes every later migration fail
+           this test for a column it never touched. What matters here is that the version moved
+           past the rung that adds the column, so an existing database cannot sit below it. */
+        Assert.True(DuckDbInitializer.CurrentSchemaVersion >= 56);
 
         var ddl = DuckDbSchemaGenerator.CreateTable(PerformanceMonitor.Collectors.TempDbStatsCollector.Instance);
         Assert.Contains("max_size_mb DECIMAL(18,2)", ddl, System.StringComparison.Ordinal);
@@ -70,8 +73,8 @@ public sealed class TempDbCeilingStoreTests : IClassFixture<SharedDuckDbFixture>
 
         Assert.NotNull(info);
         Assert.Equal(65_536d, info!.MaxSizeMb, precision: 2);
-        Assert.Equal(0.0912, info.UsedPercent, precision: 4);
-        Assert.True(info.UsedPercent < 80, "62 MB allocated against a 65,536 MB cap must not clear the 80% default.");
+        Assert.Equal(0.0912, info.ReservedPercent, precision: 4);
+        Assert.True(info.ReservedPercent < 80, "62 MB allocated against a 65,536 MB cap must not clear the 80% default.");
     }
 
     /// <summary>
@@ -89,7 +92,7 @@ public sealed class TempDbCeilingStoreTests : IClassFixture<SharedDuckDbFixture>
         var info = await new LocalDataService(_duckDb).GetLatestTempDbSpaceAsync(TestDataSeeder.TestServerId);
 
         Assert.Equal(-1d, info!.MaxSizeMb, precision: 2);
-        Assert.Equal(80d, info.UsedPercent, precision: 3);
+        Assert.Equal(80d, info.ReservedPercent, precision: 3);
     }
 
     /// <summary>
@@ -108,7 +111,7 @@ public sealed class TempDbCeilingStoreTests : IClassFixture<SharedDuckDbFixture>
         var info = await new LocalDataService(_duckDb).GetLatestTempDbSpaceAsync(TestDataSeeder.TestServerId);
 
         Assert.Equal(0d, info!.MaxSizeMb, precision: 2);
-        Assert.Equal(80d, info.UsedPercent, precision: 3);
+        Assert.Equal(80d, info.ReservedPercent, precision: 3);
     }
 
     /// <summary>

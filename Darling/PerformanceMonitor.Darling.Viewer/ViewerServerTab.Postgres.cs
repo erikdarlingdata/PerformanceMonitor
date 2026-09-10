@@ -157,6 +157,32 @@ public partial class ViewerServerTab
 
         await LoadPgExtensionsAsync(startUtc, endUtc);
         await LoadPgServerConfigAsync();
+        await LoadPgCpuUtilizationAsync(startUtc, endUtc);
+    }
+
+    /// <summary>
+    /// The instance-level CPU gauge (#2719), beneath configuration because it is the same kind of fact one
+    /// layer further in: extensions say what this server CAN do, settings say what it was told to do, and
+    /// this says what it is doing right now. Read via AWS Performance Insights rather than a database
+    /// connection — an empty grid here means the ingestor hasn't run yet, not that the collector is gated
+    /// off for this engine, though <see cref="PgCollectorIsGatedOff"/> is still consulted first for
+    /// consistency with every other panel on this tab.
+    /// </summary>
+    private async Task LoadPgCpuUtilizationAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_cpu_utilization"))
+        {
+            PgCpuGrid.ItemsSource = null;
+            PgCpuNote.Text = PanelNote("pg_cpu_utilization", 0, string.Empty);
+            return;
+        }
+
+        var rows = await _dataService.GetPgCpuUtilizationHistoryAsync(_server.ServerId, startUtc, endUtc);
+
+        PgCpuGrid.ItemsSource = rows;
+        PgCpuNote.Text = PanelNote("pg_cpu_utilization", rows.Count,
+            "This collector samples AWS Performance Insights on a 5-minute cadence, so a server added "
+            + "recently may have nothing here yet.");
     }
 
     /// <summary>
@@ -254,6 +280,8 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
+        using var readFanOut = ViewerReadFanOut.Of(5);
+
         var countsTask = _dataService.GetPgBlockingCaptureCountsAsync(_server.ServerId, startUtc, endUtc);
         var chainsTask = _dataService.GetPgBlockingChainsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
         var cyclesTask = _dataService.GetPgBlockingCyclesAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
@@ -269,6 +297,10 @@ public partial class ViewerServerTab
         var databasesTask = _dataService.GetPgDatabaseStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
         await Task.WhenAll(countsTask, chainsTask, cyclesTask, statementsTask, databasesTask);
+
+        /* Released here rather than at the closing brace: the four sub-tab loads at the end of this method
+           run after these five have finished, so they do not contend with them. */
+        readFanOut.Release();
 
         var counts = countsTask.Result;
         var chains = chainsTask.Result;
@@ -300,9 +332,7 @@ public partial class ViewerServerTab
             "No database counter moved in this window.");
 
         await LoadPgLockStatsAsync(startUtc, endUtc);
-        await LoadPgWaitSamplingAsync(startUtc, endUtc);
         await LoadPgKernelStatsAsync(startUtc, endUtc);
-        await LoadPgPredicateStatsAsync(startUtc, endUtc);
         await LoadPgPlanCaptureAsync(startUtc, endUtc);
         await LoadPgDeadlocksAsync(startUtc, endUtc);
     }
@@ -505,15 +535,20 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
-    /// Deadlocks reported in the window (#2661), last on this tab because they are blocking at its limit: a
-    /// chain the server had to break by cancelling somebody.
+    /// Deadlocks reported in the window (#2661), last on the Activity tab's Blocking sub-tab because they
+    /// are blocking at its limit: a chain the server had to break by cancelling somebody.
     ///
-    /// <para><b>An empty grid is the healthy answer AND the shape of an unreadable log</b>, which is why the
-    /// note names the other check rather than leaving it. Deadlock reports need nothing configured on the
-    /// target — unlike plan capture there is no setting that suppresses them — so the only precondition is
-    /// being able to read the server log, which the plan-capture panel above already reports on because it
-    /// reads the same file. pg_stat_database's cumulative deadlock counter is the independent test: if that
-    /// moved and this is empty, the log is the problem rather than the server.</para>
+    /// <para><b>An empty grid is the healthy answer AND the shape of a log that cannot be read or cannot be
+    /// parsed</b>, which is why the note names the other checks rather than leaving them. Deadlock reports
+    /// need nothing ENABLED on the target, unlike plan capture, but they are not unsuppressable. THREE
+    /// things have to hold: the log must be readable, which the Vacuum tab's plan-capture readiness panel
+    /// reports on because it reads the same file; it must carry DETAIL, which <c>log_error_verbosity = terse</c>
+    /// strips along with the whole graph; and it must be written in ENGLISH, because the parser matches
+    /// PostgreSQL's own message text and PostgreSQL translates it — severity label included — under any
+    /// other <c>lc_messages</c> (#3061, reported as the readiness panel's <c>message_locale</c> facet).
+    /// pg_stat_database's cumulative deadlock counter is the independent test for all three: if that moved
+    /// and this is empty, the log is the problem — unreadable, too terse, or not in a language this reads —
+    /// rather than the server (#3030).</para>
     /// </summary>
     private async Task LoadPgDeadlocksAsync(DateTime startUtc, DateTime endUtc)
     {
@@ -530,8 +565,10 @@ public partial class ViewerServerTab
 
         PgDeadlocksNote.Text = PanelNote("pg_deadlocks", rows.Count,
             "No deadlock was reported in this window. That is the healthy answer, and it is also what an "
-            + "unreadable server log looks like — the plan-capture panel above reads the same file and says "
-            + "which it is.")
+            + "unreadable server log looks like — or one PostgreSQL wrote in another language, since this "
+            + "grid is filled by matching English message text. The Vacuum tab's plan-capture readiness "
+            + "panel reads the same file and reports both: whether it can be read, and whether "
+            + "lc_messages leaves the messages in English.")
             + (rows.Count == 0
                 ? string.Empty
                 : "  Sightings counts how often the collector saw the SAME report while it stayed inside "
@@ -550,6 +587,8 @@ public partial class ViewerServerTab
     private async Task LoadPgVacuumAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
+
+        using var readFanOut = ViewerReadFanOut.Of(5);
 
         var sessionsTask = _dataService.GetPgSessionStatesAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
         var xminTask = _dataService.GetPgXminHorizonAsync(_server.ServerId, startUtc, endUtc);
@@ -631,14 +670,31 @@ public partial class ViewerServerTab
                     : "At least one precondition is unmet, so either no execution plans are being captured "
                       + "by auto_explain here or the ones that are cannot be attributed. Read the rows in "
                       + "order — extension_available, library_loaded, capture_threshold, plan_text_setting, "
-                      + "plan_attribution — each names the specific step and, on Aurora/RDS, whether it "
-                      + "needs a parameter-group change and a reboot rather than a SET. plan_attribution is "
-                      + "the one that is easy to miss: auto_explain puts no query id in the plan itself, so "
-                      + "without %Q in log_line_prefix every captured plan is an orphan.";
+                      + "plan_attribution, message_locale — each names the specific step and, on Aurora/RDS, "
+                      + "whether it needs a parameter-group change and a reboot rather than a SET. "
+                      + "plan_attribution is the one that is easy to miss: auto_explain puts no query id in "
+                      + "the plan itself, so without %Q in log_line_prefix every captured plan is an orphan. "
+                      + "message_locale is the one that reaches further than this panel: it reports whether "
+                      + "the target writes its log messages in English, which every log read here matches, "
+                      + "so an unmet one also means the Blocking sub-tab's deadlock grid cannot be trusted "
+                      + "to be empty for the healthy reason.";
     }
 
-    /// <summary>Waits — Aurora's cumulative wait counters. Shown on stock PostgreSQL too, where the panel
-    /// carries the capability sentence rather than a blank rectangle; see the type header.</summary>
+    /// <summary>
+    /// Waits — the two wait instruments, side by side. <c>pg_wait_stats</c> is Aurora's cumulative
+    /// counters and exists only there; <c>pg_wait_sampling</c> attributes each wait to the query that
+    /// waited and runs on any PostgreSQL that loads the module. Both panels are shown on either
+    /// engine: where a collector does not apply the panel carries the capability sentence rather
+    /// than a blank rectangle; see the type header.
+    ///
+    /// <para>Both are loaded here because the tab is read by COMPARING them: on most servers exactly
+    /// one of the two has rows, and which one it is says which instrument the server offers. A panel
+    /// filled by some other tab's load path cannot carry that reading — it is blank on arrival, and a
+    /// blank instrument reads as an absent one (#3050).</para>
+    ///
+    /// <para>Sequential rather than a declared fan-out: the sampling read is issued after this one has
+    /// returned, so neither contends with the other and each keeps the single-read deadline.</para>
+    /// </summary>
     private async Task LoadPgWaitsAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
@@ -650,6 +706,8 @@ public partial class ViewerServerTab
         PgWaitStatsGrid.ItemsSource = rows.Select(PgDisplay.Wait).ToList();
         PgWaitsNote.Text = PanelNote("pg_wait_stats", rows.Count,
             "No wait time was recorded for this server in this window.");
+
+        await LoadPgWaitSamplingAsync(startUtc, endUtc);
     }
 
     /// <summary>I/O — <c>pg_stat_io</c>, differenced over the window.</summary>
@@ -806,15 +864,25 @@ public partial class ViewerServerTab
     /// Storage - the per-table bloat estimate and per-index usage. Both reads fire together: they are one
     /// tab answering one question (where the space went, and whether it is earning its keep), so moving
     /// between the two grids needs no second round trip.
+    ///
+    /// <para>The predicate panel loads here too, on the tab that renders it: it is the other half of the
+    /// index question the grids above ask, it is where the hypothetical-index experiment (#2612) is driven
+    /// from, and an index candidate nobody can see until some other tab has been visited is not a candidate
+    /// anybody acts on (#3050).</para>
     /// </summary>
     private async Task LoadPgStorageAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
+        using var readFanOut = ViewerReadFanOut.Of(2);
+
         var bloatTask = _dataService.GetPgTableBloatAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
         var indexTask = _dataService.GetPgIndexUsageAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
         await Task.WhenAll(bloatTask, indexTask);
+
+        /* Released here — the three sub-tab loads at the end of this method do not contend with these two. */
+        readFanOut.Release();
 
         var bloat = bloatTask.Result;
         var indexes = indexTask.Result;
@@ -854,19 +922,27 @@ public partial class ViewerServerTab
                 : "Scans are cumulative since each database's statistics were last reset. An index with no "
                   + "scans is a CANDIDATE, never a conclusion: check the Can It Go? column, and widen the "
                   + "window past the slowest scheduled job you have before acting - a monthly report looks "
-                  + "exactly like a dead index over seven days.";
+                  + "exactly like a dead index over seven days. This panel floors at 64 KB, so it lists "
+                  + "FEWER indexes than the measured-bloat panel below, which floors at nothing - that is "
+                  + "the whole of the difference between the two counts.";
 
         await LoadPgColumnStatsAsync(startUtc, endUtc);
         await LoadPgIndexBloatAsync(startUtc, endUtc);
+        await LoadPgPredicateStatsAsync(startUtc, endUtc);
     }
 
     /// <summary>
-    /// Measured index bloat (#2561), under index usage — the two are halves of one question.
+    /// Estimated index bloat (#3234), under index usage — the two are halves of one question.
     ///
-    /// <para>The note leads with RECLAIMABLE BYTES rather than a worst-density figure, because density
-    /// alone ranks the wrong thing: a tiny index at 20% looks alarming and is worth kilobytes. It also has
-    /// to say that a healthy index measures near 90 rather than 100, or the first person to read the density
-    /// column concludes every index in the fleet is 10% bloated.</para>
+    /// <para>The note leads with RECLAIMABLE BYTES rather than a worst-percentage figure, because a
+    /// percentage ranks the wrong thing: a tiny index at 20% looks alarming and is worth kilobytes. It also
+    /// has to state the accuracy, because the estimate is close enough to choose which index to act on and
+    /// not close enough to justify a REINDEX on its own — the Exact Measurement column is for that.</para>
+    ///
+    /// <para>The density caveat is still carried, but only for the rows that have one: a healthy index
+    /// measures near 90 rather than 100, so the first person to read that column would otherwise conclude
+    /// every index in the fleet is 10% bloated. Since #3234 those are the older exact rows still inside
+    /// retention, which is why the note distinguishes them rather than describing one kind of row.</para>
     /// </summary>
     private async Task LoadPgIndexBloatAsync(DateTime startUtc, DateTime endUtc)
     {
@@ -889,20 +965,34 @@ public partial class ViewerServerTab
 
         var skipped = rows.Count(r => r.SkippedReason is not null);
 
+        var estimated = rows.Count(r => r.SkippedReason is null && r.IsEstimate);
+        var exactly = rows.Count(r => r.SkippedReason is null && !r.IsEstimate);
+
         PgIndexBloatNote.Text = rows.Count == 0
-            ? "Nothing recorded. This panel needs the pgstattuple extension — without it the collector "
-              + "reports the function as missing rather than failing, and the Overview tab's extension panel "
-              + "says whether it is available on this server and one CREATE EXTENSION away. Only B-TREE "
-              + "indexes are measured; pgstatindex raises on GIN, BRIN and hash."
-            : $"MEASURED, not estimated from column statistics — every page of each index was read. About "
-              + $"{reclaimable:N0} bytes look reclaimable across {rows.Count:N0} index(es), and that is what "
-              + "the grid is ranked by: density alone ranks the wrong thing, since a tiny index at 20% is "
-              + "worth kilobytes next to a large one at 70%. **Leaf density is the server's raw figure and "
-              + "is not 100-minus-bloat** — a freshly built index measures around 90, so the reclaimable "
-              + "estimate is computed against that floor rather than against a full page."
+            ? "Nothing recorded. This panel needs the pg_stats column widths, which pg_monitor alone does "
+              + "not confer - see the runbook step under \u201cThe one grant pg_monitor does not cover\u201d. "
+              + "Only B-TREE indexes are covered. When it does record, it records EVERY btree at any size, "
+              + "which is why its index count exceeds the usage panel's."
+            : $"ESTIMATED from catalog statistics - no index page is read. About {reclaimable:N0} bytes "
+              + $"look reclaimable across {rows.Count:N0} index(es), and that is what the grid is ranked "
+              + "by: a percentage ranks the wrong thing, since a tiny index at 20% is worth kilobytes next "
+              + "to a large one at 70%. Measured against pgstatindex ground truth, median absolute error "
+              + "is 2.79 percentage points and p90 is 6.63 - close enough to choose WHICH index to act on, "
+              + "not close enough to justify a REINDEX on its own. The Exact Measurement column carries the "
+              + "pgstatindex call for that; it walks every page, so run it on the one index concerned "
+              + "rather than on a schedule."
+              + (exactly > 0
+                  ? $"  {exactly:N0} row(s) are older EXACT measurements still inside retention rather "
+                    + "than estimates - the Kind column says which, and Leaf Density is populated only on "
+                    + "those. A blank density on an estimated row means the index was never walked, which "
+                    + "is not the same as a walk that found no leaf pages."
+                  : string.Empty)
               + (skipped > 0
-                  ? $"  {skipped:N0} index(es) were too large to read and are listed FIRST with their reason: "
-                    + "their bloat is unknown rather than zero, and they are the likeliest big win."
+                  ? $"  {skipped:N0} index(es) have NO answer in this window and are listed FIRST with "
+                    + "their reason: their bloat is unknown rather than zero. Read the reason - a "
+                    + "never-analyzed parent needs an ANALYZE and invisible column widths need the "
+                    + "pg_read_all_data grant, while a PARTIAL or DEDUPLICATED index cannot be modelled at "
+                    + "any grant or statistics freshness and needs the exact command instead."
                   : string.Empty);
     }
 
@@ -910,11 +1000,16 @@ public partial class ViewerServerTab
     /// The column-statistics panel (#2543) — the planner inputs that explain WHY a plan was chosen, and the
     /// same statistics the bloat estimate above is computed from.
     ///
-    /// <para><b>Zero rows has two causes and the note must not collapse them.</b> <c>pg_stats</c> filters on
-    /// <c>has_column_privilege</c>, so a monitoring login without SELECT on a table sees nothing for it —
-    /// measured: a <c>pg_monitor</c>-only role gets zero rows where a superuser gets all of them. Row-level
-    /// security empties it the same way. Neither is an absence of problems, and reporting "no statistics" as
-    /// though the data were clean is the exact claim the miss vocabulary exists to prevent.</para>
+    /// <para><b>Zero rows has several causes and the note names WHICH, rather than listing them.</b> Listing
+    /// them is what this panel used to do: <c>pg_stats</c> filters on <c>has_column_privilege</c> so a
+    /// monitoring login without SELECT sees nothing, and a server with no table above the collector's floor
+    /// has nothing to read — and an operator reading both in one sentence learns which two things it might
+    /// be and not which one it is. <see cref="PgColumnStatsCoverage"/> selects the arm from what
+    /// <c>pg_table_bloat_stats</c> already measured, and this panel prints it (#3154).</para>
+    ///
+    /// <para><b>Printed on the POPULATED path as well.</b> A partial view is the same defect one degree
+    /// weaker — the grid ranks what it was given and cannot show what was withheld — so the coverage
+    /// sentence rides both branches rather than being an empty-state message.</para>
     /// </summary>
     private async Task LoadPgColumnStatsAsync(DateTime startUtc, DateTime endUtc)
     {
@@ -931,17 +1026,25 @@ public partial class ViewerServerTab
 
         var skewed = rows.Count(r => r.TopValueFrequency >= 0.25);
 
+        /* The SAME classifier the MCP tool calls, deliberately (#3154). The panel and the tool answering
+           the same question differently is how a defect gets fixed in one surface and left in the other,
+           and the arm selection is the whole content of the answer here - so neither surface authors it. */
+        var coverage = await _dataService.GetPgColumnStatsCoverageAsync(
+            _server.ServerId, endUtc, rows.Count);
+
         PgColumnStatsNote.Text = rows.Count == 0
-            ? "No column statistics were collected. That is NOT the same as clean statistics, and it has two "
-              + "causes worth telling apart: pg_stats is filtered by SELECT privilege, so a monitoring login "
-              + "without it on a table sees nothing for that table (row-level security empties the view the "
-              + "same way) — or the server genuinely has no table above the 1 MB floor this collects at."
+            ? "No column statistics were collected. That is NOT the same as clean statistics. "
+              + coverage.Message
             : $"Ranked by suspicion, not alphabetically. {skewed:N0} column(s) have a single value covering "
               + "a quarter or more of the table, which is the PostgreSQL analogue of parameter sniffing: a "
               + "plan that suits most values is catastrophic for that one. Low correlation on a wide column "
               + "is the other shape, and it is why an index scan was rejected on a column that obviously "
               + "has an index. Distinct is NEGATIVE when it is a ratio of row count — -1 means nearly every "
               + "row is unique, not minus one value. Most-common VALUES and histogram bounds are "
-              + "deliberately not collected: they hold raw column data.";
+              + "deliberately not collected: they hold raw column data. "
+              /* On the POPULATED path too. A grid that ranks the columns of four tables while sixteen more
+                 are withheld by the privilege filter reads as a ranking of the server, and the operator has
+                 no way to see the difference from the grid itself. */
+              + coverage.Message;
     }
 }

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
@@ -45,7 +46,7 @@ namespace PerformanceMonitor.Darling.Service;
 ///   Dashboard's #1086 "Capture Down", <c>NocHealth.GetMissingCaptureSessionsAsync</c>).</item>
 /// <item><b>Store Disk Pressure</b> — the volume hosting the Darling store is nearly full. Unlike the
 ///   other three (per monitored server), this is a FLEET-level condition polled once per sweep from the
-///   store itself (<c>pg_database_size</c> for context) and the store volume's free space: when a headless
+///   store itself (its last recorded size, for context) and the store volume's free space: when a headless
 ///   service's disk fills, collection and every write stop for the WHOLE fleet, and nobody is watching. The
 ///   flagship-appropriate maintenance backstop the daily time-based purge otherwise lacks — deliberately
 ///   NOT Lite's 512MB archive-then-reset (Postgres has no single-file INSERT cliff, and a blanket reset
@@ -77,8 +78,11 @@ internal sealed class DarlingSelfAlertEvaluator
        stopped — matches the Dashboard's CollectionStaleThresholdMinutes (NocHealth.cs). The frequent
        Darling collectors run every ~1 minute, so 30 minutes of no success is unambiguously dead; the
        connection-lost alert covers the fast path for an unreachable server, and the consecutive-failure
-       check below covers the fast path for a server that is connected but erroring every collector. */
-    internal static readonly TimeSpan StaleWindow = TimeSpan.FromMinutes(30);
+       check below covers the fast path for a server that is connected but erroring every collector.
+       Derived from the shared default so the display's Offline band and this alert describe the SAME
+       condition (#2794) — CollectionStoppedThresholdAgreementTests pins the agreement. */
+    internal static readonly TimeSpan StaleWindow =
+        TimeSpan.FromMinutes(ServerHealthThresholds.CollectionStoppedMinutesDefault);
 
     /* The last N logged runs all failing (no SUCCESS/SKIPPED among them) fires "Collection Stopped"
        faster than the staleness backstop when a connected server's collectors are erroring on every
@@ -161,8 +165,74 @@ internal sealed class DarlingSelfAlertEvaluator
     /// </summary>
     private readonly ConcurrentDictionary<string, double> _lastAlertedDiskPressurePercent = new();
 
+    /* #2674: the tool's OWN collectors regressing in cost on a monitored server. Keyed cost:{serverId}:{collector};
+       value is the server name so a resolution has it without a second read. Same active-flag + CooldownElapsed
+       idiom as the per-server conditions above. Thresholds are hardcoded conservative defaults (this class's
+       stated posture): a collector must have cost at least CostRegressionBaselineFloorMs/day on average over at
+       least three prior days, and its latest day's cost PER RUN must exceed its run-weighted baseline per run by
+       CostRegressionFactor, before it alerts — so a cheap collector, or a new one, cannot trip it.
+       #2846: the comparison is per RUN, not per day. Daily totals are runs x cost-per-run, so a cadence
+       recovery — more of the same work, each unit cheaper — used to read as a regression. It fired 3,259 times
+       over 612 pairs in one day, 53% of them on collectors whose per-run cost had FALLEN. The floor stays on
+       the daily TOTAL so a cheap-but-frequent collector still cannot trip on a per-run doubling. */
+    private readonly ConcurrentDictionary<string, string> _activeCostRegression = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastCostRegressionAlert = new();
+
+    /// <summary>#2707: the <c>collect.collector_cost</c> row this key last fired on, keyed the same as
+    /// <see cref="_lastCostRegressionAlert"/>. This evaluator is meant to run once per hourly store-metrics
+    /// tick, but if that tick's cadence ever outpaces the cooldown — or the hourly flush itself lags a tick —
+    /// re-asking <see cref="Mcp.DarlingCollectorCostReader.GetCostRegressionsAsync"/> hands back the exact
+    /// same <c>latest_ms</c> computed from the exact same underlying hourly rows, and a cooldown-elapsed check
+    /// alone cannot tell that answer from a genuinely new one. Mirrors #2704's
+    /// <c>PoisonWaitDelta.CollectionTime</c> fix for the identical shape of bug.</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _lastCostRegressionDataPoint = new();
+    /// <summary>
+    /// #3192: the figure this condition fires on is <c>collect.collector_cost.total_sql_ms</c>, which is the
+    /// driver's SQL slice — and on the enumerated path that slice contains the per-item watermark refresh and
+    /// the deferred plan/text fetches, all of which touch the monitoring STORE. So a <c>query_store</c>
+    /// regression here can be the store getting slower rather than the target, and the alert used to say
+    /// flatly that it was "cost on the target". Appended rather than folded into the sentence above so the
+    /// text stays one substitution away from being re-worded, and stated on the alert itself because that is
+    /// where the reader is when the inference gets made.
+    /// </summary>
+    private const string CostIsNotAllTargetSide =
+        "NOTE: on collectors that fetch plan XML or statement text (query_store), part of this figure is the "
+        + "monitoring STORE's own probe and write rather than the monitored server - they run inside the same "
+        + "per-item stopwatch. get_collection_log's sql_store_ms attributes it per run; this series carries no "
+        + "phase split.";
+
+    private const double CostRegressionFactor = 2.0;
+    private const long CostRegressionBaselineFloorMs = 1000;
+    private static readonly TimeSpan CostRegressionBaselineWindow = TimeSpan.FromDays(14);
+
     /// <summary>The fixed key for the fleet-level Store Disk Pressure edge (not a real server).</summary>
     private const string DiskKey = "store";
+
+    /// <summary>The alert metric name the fleet-level Store Disk Pressure edge fires under. A WEBHOOK
+    /// AUTOMATION KEY like its siblings, and the triage map (#2768) keys on it too, so it is a const and
+    /// must stay stable across releases.</summary>
+    internal const string DiskPressureMetric = "Store Disk Pressure";
+
+    /// <summary>The resolution title the Store Disk Pressure recovery edge records into
+    /// <c>config_alert_log.metric_name</c>. The triage map (#2768) aliases it back to
+    /// <see cref="DiskPressureMetric"/>, so it is a const for the same reason.</summary>
+    internal const string DiskPressureResolvedMetric = "Store Disk Pressure Resolved";
+
+    /// <summary>
+    /// The synthetic server label every FLEET-LEVEL store self-alert fires under — Store Disk Pressure,
+    /// Store Runtime Upgrade, Store Job Over Cadence and Compression Job Stuck, plus each one's resolution
+    /// edge. The monitoring store is not a SQL Server instance and is not in the monitored-server registry,
+    /// so this string deliberately resolves to NOTHING: <c>DarlingServerResolver</c> cannot match it, and the
+    /// deliverer's #1236 int.TryParse override no-ops on it exactly like the non-numeric <see cref="DiskKey"/>.
+    ///
+    /// <para>A CONST rather than twelve repeated literals since #2768: the triage endpoint has to recognise
+    /// this exact label to know an alert is fleet-level and serve store reads instead of per-server ones.
+    /// While it was a bare literal that page ran <c>get_server_summary</c> / <c>get_collection_health</c> /
+    /// <c>get_collection_log</c> against an unresolvable server and rendered three resolver errors on every
+    /// store alert. Renaming it must stay in step with <c>DarlingTriageEndpoint.IsFleetLevelStoreServer</c>,
+    /// which is why both sides now read one symbol.</para>
+    /// </summary>
+    internal const string StoreServerLabel = "Monitor Store";
 
     /* Compression-job self-heal edge state (#1581). FLEET-level like disk pressure (one shared store), but
        MULTI-keyed by job_id (a store has many compression policy jobs). The state is the re-arm-once/escalate
@@ -179,7 +249,7 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>The alert metric name every compression-job self-alert fires under (first-detection + escalation
     /// re-fires share it, so the deliverer's per-metric cooldown and the recovery resolution correlate cleanly;
     /// escalation is distinguished by the message, not a second metric name).</summary>
-    private const string CompressionJobMetric = "Compression Job Stuck";
+    internal const string CompressionJobMetric = "Compression Job Stuck";
 
     /// <summary>Prefixes the fleet-level compression-job alert serverKey so it never parses as a server_id.</summary>
     private const string CompressionKeyPrefix = "compressjob:";
@@ -197,6 +267,41 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /// <summary>Prefixes the fleet-level cadence alert serverKey so it never parses as a server_id.</summary>
     private const string JobCadenceKeyPrefix = "storejob:";
+
+    /* Retention Held edge state (#2813). FLEET-level, MULTI-keyed by retention job_id, STANDING like the
+       cadence condition: active flag + cooldown re-fire while the gate keeps a policy paused past its
+       horizon, one "Retention Hold Cleared" resolution when it arms or comes back under. */
+    private readonly ConcurrentDictionary<string, bool> _activeRetentionHold = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastRetentionHoldAlert = new(StringComparer.Ordinal);
+
+    /// <summary>The #2813 alert metric name — Warning and Critical share it (severity carries the tier), so
+    /// the deliverer's per-metric cooldown and the resolution correlate cleanly.</summary>
+    internal const string RetentionHoldMetric = "Retention Held";
+
+    /// <summary>Prefixes the fleet-level retention-hold alert serverKey so it never parses as a server_id.</summary>
+    private const string RetentionHoldKeyPrefix = "retentionhold:";
+
+    /// <summary>
+    /// #2813 WARNING tier: how many times its own configured horizon a HELD tier must be holding before the
+    /// hold has cost enough to say so.
+    ///
+    /// <para>Bounded on BOTH sides rather than picked. <b>Below</b>, retention drops whole CHUNKS, so a
+    /// 4-day policy with 1-day chunks legitimately holds ~5 days (1.25x) while working perfectly; 2.0x sits
+    /// clear of that floor with margin, so normal chunk granularity can never reach it. <b>Above</b>, the
+    /// production incident this comes from sat at 4.5x (18 days under a 4-day policy) after 16 days — 2.0x
+    /// on that tier is ~8 days, so the alert arrives about a week in, while the cost is still recoverable
+    /// and long before the 16 days it actually went unnoticed.</para>
+    ///
+    /// <para>A compile-time constant rather than a store-backed knob like its #2136 sibling
+    /// (<c>config_alert_settings</c>, V57) only because that would need a migration rung this change is
+    /// deliberately not taking. It belongs in the control plane the next time a rung is going in anyway.</para>
+    /// </summary>
+    internal const double RetentionHoldWarnRatio = 2.0;
+
+    /// <summary>#2813 CRITICAL tier: double the warning ratio. A tier at four times its intended depth is
+    /// no longer drifting, it is the dominant and still-compounding contributor to store size — the
+    /// motivating incident (4.5x) reads CRITICAL, which is the point.</summary>
+    internal const double RetentionHoldCriticalRatio = 4.0;
 
     /// <summary>#2136: the Warning tier's percent-of-cadence threshold, read live through the same
     /// by-reference settings seam as the AG thresholds (the clamp lives on DarlingAlertSettings).
@@ -270,7 +375,8 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<int>? agLagAlertSeconds = null,
         Func<long>? agRedoQueueAlertKb = null,
         Func<int>? agDisconnectRefireMinutes = null,
-        Func<int>? storeJobCadenceWarnPercent = null)
+        Func<int>? storeJobCadenceWarnPercent = null,
+        AlertReadFailureCounter? readFailures = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
@@ -287,10 +393,22 @@ internal sealed class DarlingSelfAlertEvaluator
         _agLagAlertSeconds = agLagAlertSeconds ?? (() => 300);
         _agRedoQueueAlertKb = agRedoQueueAlertKb ?? (() => 0);
         _agDisconnectRefireMinutes = agDisconnectRefireMinutes ?? (() => 0);
-        /* Unsupplied falls back to the V57 DDL default, so an evaluator built without the seam behaves
-           like a store at its shipped defaults (the AG-seam discipline). */
-        _storeJobCadenceWarnPercent = storeJobCadenceWarnPercent ?? (() => 25);
+        /* Unsupplied falls back to the shipped default, so an evaluator built without the seam behaves
+           like a store at its shipped defaults (the AG-seam discipline). Taken from the constant rather
+           than restated (#3060): a literal here is a third copy of the same number that a moved refresh
+           grid would leave behind, and this one would fire past the slot silently. */
+        _storeJobCadenceWarnPercent =
+            storeJobCadenceWarnPercent ?? (() => TimescaleSupport.RefreshSlotPercentOfHourlyCadence);
+        _readFailures = readFailures;
     }
+
+    /// <summary>
+    /// Where a SWALLOWED self-alert store read is counted (#3013), or null when nothing is counting.
+    /// Only the conditions that READ the store here increment it; the fleet-scoped conditions are handed
+    /// their evidence as parameters, so their reads are counted at their own sites in
+    /// <c>DarlingWorker</c> — see the exemption notes at each catch.
+    /// </summary>
+    private readonly AlertReadFailureCounter? _readFailures;
 
     private enum ConnectionState
     {
@@ -319,17 +437,23 @@ internal sealed class DarlingSelfAlertEvaluator
             return;
         }
 
+        /* #3013: this server's second alert pass of the sweep, counted after the master-switch return so a
+           pass that never looked at the store is not in the denominator. */
+        _readFailures?.RecordPass(Key(serverId));
+
         /* Only judge collection-stopped once the service has actually collected from this server this run
            (see _hasBeenOnline) — otherwise pre-restart / pre-re-add stale rows would false-alarm before the
            first fresh collection lands. */
         if (_hasBeenOnline.ContainsKey(Key(serverId)))
         {
+            var collectionReadClock = Stopwatch.StartNew();
             try
             {
                 /* #2107: store-backed window/threshold (clamped on read); the constants remain
                    only as the shipped defaults. */
                 var (lastSuccess, recentRuns, recentSuccess) =
                     await ReadCollectionSignalsAsync(postgres, serverId, _settings.CollectionFailureThreshold, cancellationToken);
+                collectionReadClock.Restart();
                 bool stopped = IsCollectionStopped(
                     lastSuccess, recentRuns, recentSuccess, _utcNow(),
                     SettingsStaleWindow, _settings.CollectionFailureThreshold, out var reason);
@@ -341,7 +465,8 @@ internal sealed class DarlingSelfAlertEvaluator
             }
             catch (Exception ex)
             {
-                _logger?.LogError("[{Server}] Collection-health self-alert failed: {Message}", serverName, ex.Message);
+                _logger?.LogError("[{Server}] Collection-health self-alert failed after {ElapsedMs} ms: {Message}", serverName, collectionReadClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(Key(serverId), "collection-health self-alert", collectionReadClock.ElapsedMilliseconds);
             }
         }
 
@@ -350,9 +475,11 @@ internal sealed class DarlingSelfAlertEvaluator
             return;
         }
 
+        var captureReadClock = Stopwatch.StartNew();
         try
         {
             var missing = await ReadMissingCaptureSessionsAsync(postgres, serverId, cancellationToken);
+            captureReadClock.Restart();
             await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -361,15 +488,18 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
-            _logger?.LogError("[{Server}] Capture-down self-alert failed: {Message}", serverName, ex.Message);
+            _logger?.LogError("[{Server}] Capture-down self-alert failed after {ElapsedMs} ms: {Message}", serverName, captureReadClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(Key(serverId), "capture-down self-alert", captureReadClock.ElapsedMilliseconds);
         }
 
+        var agentReadClock = Stopwatch.StartNew();
         try
         {
             /* Agent Not Running (#1433 Phase 2): the collected agent_status snapshot says the target's SQL
                Agent service is stopped. Only a FRESH reading judges — a stale row (collection lagging) yields
                null, so the collection-stopped alert owns staleness and this never false-alarms on old data. */
             var (agentCollectionTimeUtc, agentRunning) = await ReadLatestAgentStatusAsync(postgres, serverId, cancellationToken);
+            agentReadClock.Restart();
             bool? freshRunning = agentRunning.HasValue
                 && agentCollectionTimeUtc.HasValue
                 && _utcNow() - agentCollectionTimeUtc.Value < SettingsStaleWindow
@@ -388,6 +518,7 @@ internal sealed class DarlingSelfAlertEvaluator
             if (!_agentEverSeenRunning.TryGetValue(agentKey, out var everRan) || !everRan)
             {
                 everRan = await HasAgentEverBeenSeenRunningAsync(postgres, serverId, cancellationToken);
+                agentReadClock.Restart();
                 if (everRan)
                 {
                     _agentEverSeenRunning[agentKey] = true;
@@ -402,7 +533,8 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
-            _logger?.LogError("[{Server}] Agent-not-running self-alert failed: {Message}", serverName, ex.Message);
+            _logger?.LogError("[{Server}] Agent-not-running self-alert failed after {ElapsedMs} ms: {Message}", serverName, agentReadClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(Key(serverId), "agent-not-running self-alert", agentReadClock.ElapsedMilliseconds);
         }
 
         /* Availability Group health (#991). Skipped entirely when the master AG switch is off, so a fleet that
@@ -412,6 +544,7 @@ internal sealed class DarlingSelfAlertEvaluator
            signal, and the collection-stopped alert owns staleness. */
         if (_notifyAgHealth())
         {
+            var agReadClock = Stopwatch.StartNew();
             try
             {
                 /* Each grain is gated on its OWN snapshot time: the two AG collectors are scheduled
@@ -419,13 +552,16 @@ internal sealed class DarlingSelfAlertEvaluator
                    vouch for its stale rows. */
                 var (replicaTimeUtc, replicas) =
                     await ReadLatestAgReplicaStatesAsync(postgres, serverId, cancellationToken);
+                agReadClock.Restart();
                 if (IsFresh(replicaTimeUtc))
                 {
                     await ApplyAgReplicaHealthAsync(serverId, serverName, replicas, cancellationToken);
+                    agReadClock.Restart();
                 }
 
                 var (databaseTimeUtc, databases) =
                     await ReadLatestAgDatabaseReplicaStatesAsync(postgres, serverId, cancellationToken);
+                agReadClock.Restart();
                 if (IsFresh(databaseTimeUtc))
                 {
                     await ApplyAgDatabaseHealthAsync(serverId, serverName, databases, cancellationToken);
@@ -437,7 +573,8 @@ internal sealed class DarlingSelfAlertEvaluator
             }
             catch (Exception ex)
             {
-                _logger?.LogError("[{Server}] Availability-Group self-alert failed: {Message}", serverName, ex.Message);
+                _logger?.LogError("[{Server}] Availability-Group self-alert failed after {ElapsedMs} ms: {Message}", serverName, agReadClock.ElapsedMilliseconds, ex.Message);
+                _readFailures?.RecordReadFailure(Key(serverId), "Availability-Group self-alert", agReadClock.ElapsedMilliseconds);
             }
         }
 
@@ -568,6 +705,106 @@ internal sealed class DarlingSelfAlertEvaluator
             await RecordResolutionAsync(new AlertResolution(
                 key, serverName, "Capture Down",
                 "Capture Restored", $"{serverName}: Blocking/deadlock capture is running again"), cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// FLEET-level (not per-server): the tool's OWN collectors regressing in cost ON the monitored servers
+    /// (#2674) — the self-monitoring that makes a collector "sticking out" on a target page us instead of
+    /// hiding in a log. Reads <c>collect.collector_cost</c> for per-(server, collector) pairs whose latest
+    /// day's query time exceeds their own baseline (see the thresholds above), fires once per pair
+    /// on entry, re-fires on the cooldown while it stays regressed, and resolves the moment it drops back.
+    ///
+    /// <para>"ON the monitored servers" is the series' intent and not always what it measures (#3192): the
+    /// figure rolls up the driver's SQL slice, which on the enumerated path contains the store's own
+    /// plan/text probe and write-back. So a <c>query_store</c> regression here can be the STORE getting
+    /// slower rather than the target, and the fired alert says so — see
+    /// <see cref="CostIsNotAllTargetSide"/>, which exists because this doc and that text have to agree.</para>
+    /// Called once per cycle from the worker's hourly store-metrics tick, AFTER the flush that writes the
+    /// latest hour. Testable directly with a recording deliverer + a controllable clock.
+    /// </summary>
+    public async Task EvaluateCollectorCostAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        List<Mcp.DarlingCollectorCostReader.CostRegression> regressions;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            regressions = await Mcp.DarlingCollectorCostReader.GetCostRegressionsAsync(
+                postgres, _utcNow() - CostRegressionBaselineWindow,
+                CostRegressionBaselineFloorMs, CostRegressionFactor, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A self-alert read that fails must not take the loop down — it is best-effort telemetry. */
+            _logger?.LogDebug(ex, "collector-cost regression evaluation failed after {ElapsedMs} ms", readClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "collector-cost regression self-alert", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        await ApplyCostRegressionsAsync(regressions, cancellationToken);
+    }
+
+    /// <summary>The apply half of <see cref="EvaluateCollectorCostAsync"/>, split out so the fire-once /
+    /// re-fire / resolve lifecycle is unit-testable with a recording deliverer and a controllable clock,
+    /// with the regression set fabricated rather than read from a store.</summary>
+    internal async Task ApplyCostRegressionsAsync(
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CostRegression> regressions, CancellationToken cancellationToken)
+    {
+        var now = _utcNow();
+        var current = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var regression in regressions)
+        {
+            var key = $"cost:{regression.ServerId}:{regression.CollectorName}";
+            current.Add(key);
+            _activeCostRegression[key] = regression.ServerName;
+
+            /* #2707: the reader's own latest_metric_time is the newest collect.collector_cost row folded
+               into LatestMs — a cooldown-elapsed re-ask against a hourly flush that hasn't landed a new row
+               yet must wait for that row rather than re-fire on a total it already reported. Same shape as
+               #2704's collection-time gate on Poison Wait. */
+            bool hasFreshDataPoint = !_lastCostRegressionDataPoint.TryGetValue(key, out var lastDataPoint)
+                || regression.LatestMetricTime > lastDataPoint;
+
+            if (hasFreshDataPoint && CooldownElapsed(_lastCostRegressionAlert, key, now))
+            {
+                _lastCostRegressionAlert[key] = now;
+                _lastCostRegressionDataPoint[key] = regression.LatestMetricTime;
+                var ratio = regression.BaselineMsPerRun > 0
+                    ? regression.LatestMsPerRun / regression.BaselineMsPerRun
+                    : 0;
+                await FireAsync(
+                    key, regression.ServerName, "Collector Cost Regression",
+                    currentValue: $"{regression.LatestMsPerRun:N1} ms/run",
+                    thresholdValue: $"{regression.BaselineMsPerRun:N1} ms/run baseline x {CostRegressionFactor:N1}",
+                    detail: $"The '{regression.CollectorName}' collector's OWN query time on {regression.ServerName} rose to " +
+                        $"{regression.LatestMsPerRun:N1} ms per run, {ratio:N1}x its {CostRegressionBaselineWindow.TotalDays:N0}-day " +
+                        $"baseline of {regression.BaselineMsPerRun:N1} ms per run ({regression.LatestRuns:N0} runs totalling " +
+                        $"{regression.LatestMs:N0} ms so far today). This is the MONITORING TOOL's own cost, not the " +
+                        $"server's workload - each individual run is costing more than it used to. Measured PER RUN (#2846) so " +
+                        $"a cadence change cannot read as a cost change. get_collector_cost with " +
+                        $"collector_name={regression.CollectorName} shows the trend. {CostIsNotAllTargetSide}",
+                    severity: AlertSeverityLevel.Warning,
+                    shortMessage: $"{regression.CollectorName} collection cost on {regression.ServerName} is {ratio:N1}x its per-run baseline",
+                    numericCurrentValue: regression.LatestMsPerRun,
+                    numericThresholdValue: regression.BaselineMsPerRun * CostRegressionFactor,
+                    cancellationToken);
+            }
+        }
+
+        /* Resolve any pair that was regressing and no longer is (edge recovery, one history row). */
+        foreach (var key in _activeCostRegression.Keys.ToArray())
+        {
+            if (!current.Contains(key) && _activeCostRegression.TryRemove(key, out var serverName))
+            {
+                _lastCostRegressionAlert.TryRemove(key, out _);
+                _lastCostRegressionDataPoint.TryRemove(key, out _);
+                var parts = key.Split(':', 3);
+                var collector = parts.Length == 3 ? parts[2] : key;
+                await RecordResolutionAsync(new AlertResolution(
+                    key, serverName, "Collector Cost Regression",
+                    "Cost Regression Cleared", $"{serverName}: {collector} collection cost is back within its baseline"), cancellationToken);
+            }
         }
     }
 
@@ -761,6 +998,7 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter: the DELIVERY path, not a condition read. */
             _logger?.LogError("[{Server}] Connection-change self-alert delivery failed: {Message}", serverName, ex.Message);
         }
     }
@@ -1178,6 +1416,9 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter: this method is handed its evidence as parameters and
+               performs no store read — the catch covers the apply/deliver half. The reads that FEED it are counted
+               at their own sites in DarlingWorker. */
             _logger?.LogError("Store disk-pressure self-alert failed: {Message}", ex.Message);
         }
     }
@@ -1188,8 +1429,10 @@ internal sealed class DarlingSelfAlertEvaluator
     /// Resolved" history row on recovery (mirrors the per-server conditions' edge shape). Gated on the master
     /// alerts switch. NO-OPS when free/total are null — a remote BYO store whose volume the service can't see —
     /// so it never false-alarms; the managed store's own volume is what it exists to protect.
-    /// <paramref name="storeSizeBytes"/> (pg_database_size) is context for the alert text only, never the
-    /// trigger. Internal (tested directly, like the sibling Apply methods); the worker calls the isolating
+    /// <paramref name="storeSizeBytes"/> is the last size the hourly self-metrics sweep recorded — context
+    /// for the alert text only, never the trigger, which is why the sentence it renders names the sample
+    /// rather than claiming the current byte count (#3199).
+    /// Internal (tested directly, like the sibling Apply methods); the worker calls the isolating
     /// <see cref="EvaluateDiskPressureAsync"/>. Testable directly with a recording deliverer + a controllable clock.
     /// </summary>
     internal async Task ApplyDiskPressureAsync(
@@ -1232,9 +1475,18 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 _lastDiskPressureAlert[DiskKey] = now;
                 _lastAlertedDiskPressurePercent[DiskKey] = percentFree;
-                var storeText = storeSizeBytes is long size ? $" The store currently holds {FormatGb(size)}." : "";
+                /* Names the sample rather than claiming currency: the size is the self-metrics series'
+                   newest whole-store row, not a live measurement (#3199 — measuring it live cost a
+                   filesystem walk on the collection loop's serial thread every five minutes, 3,177 ms of
+                   a 5 s bound on a 225 GiB store). "currently" would be a claim this value cannot make.
+                   The word "hourly" is deliberately absent too: that is the sweep's CADENCE, and measured
+                   gaps in the series run past it, so naming it here would imply an age the row does not
+                   carry. */
+                var storeText = storeSizeBytes is long size
+                    ? $" The store measured {FormatGb(size)} at its last self-metrics sample."
+                    : "";
                 await FireAsync(
-                    DiskKey, "Monitor Store", "Store Disk Pressure", reason,
+                    DiskKey, StoreServerLabel, DiskPressureMetric, reason,
                     $"{warnPercent.ToString("0.#", CultureInfo.InvariantCulture)}% free",
                     detail: reason + storeText + " When the store volume fills, collection and every write stop " +
                         "for the WHOLE fleet, and a headless service has no dashboard to warn you. Free space on the " +
@@ -1257,8 +1509,8 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             _lastAlertedDiskPressurePercent.TryRemove(DiskKey, out _);
             await RecordResolutionAsync(new AlertResolution(
-                DiskKey, "Monitor Store", "Store Disk Pressure",
-                "Store Disk Pressure Resolved", "Monitor store volume free space recovered"), cancellationToken);
+                DiskKey, StoreServerLabel, DiskPressureMetric,
+                DiskPressureResolvedMetric, "Monitor store volume free space recovered"), cancellationToken);
         }
     }
 
@@ -1333,7 +1585,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         : " The pre-upgrade data directory is kept as a rollback copy for the next couple of service starts, then deleted automatically.";
 
                 await FireAsync(
-                    StoreUpgradeKey, "Monitor Store", StoreUpgradeMetric,
+                    StoreUpgradeKey, StoreServerLabel, StoreUpgradeMetric,
                     degraded ? $"PostgreSQL {report.ToMajor} (cleanup incomplete)" : $"PostgreSQL {report.ToMajor}",
                     $"PostgreSQL {report.FromMajor}",
                     detail: $"The monitor's own store was upgraded in place from PostgreSQL {report.FromMajor} to {report.ToMajor}.{timescale} " +
@@ -1358,7 +1610,7 @@ internal sealed class DarlingSelfAlertEvaluator
             }
 
             await FireAsync(
-                StoreUpgradeKey, "Monitor Store", StoreUpgradeMetric,
+                StoreUpgradeKey, StoreServerLabel, StoreUpgradeMetric,
                 $"PostgreSQL {report.FromMajor} (upgrade failed)", $"PostgreSQL {report.ToMajor}",
                 detail: $"The monitor's own store FAILED to upgrade from PostgreSQL {report.FromMajor} to {report.ToMajor}, at step '{report.FailedStep}': {report.FailureMessage} " +
                     $"The store reverted to PostgreSQL {report.FromMajor} and is collecting normally — no data was lost, because the pre-upgrade data directory is never modified until the upgrade succeeds. " +
@@ -1376,6 +1628,7 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter: the report is a parameter; no store read happens here. */
             _logger?.LogError("Store runtime upgrade self-alert failed: {Message}", ex.Message);
         }
     }
@@ -1402,6 +1655,8 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter: the stuck-job list is a parameter; the read that
+               produces it is counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
             _logger?.LogError("Compression-job health self-alert failed: {Message}", ex.Message);
         }
     }
@@ -1424,6 +1679,8 @@ internal sealed class DarlingSelfAlertEvaluator
         }
         catch (Exception ex)
         {
+            /* NOT counted by #3013's swallowed-read counter: the readings are a parameter; the read that produces
+               them is counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
             _logger?.LogError("Store-job cadence self-alert failed: {Message}", ex.Message);
         }
     }
@@ -1441,6 +1698,15 @@ internal sealed class DarlingSelfAlertEvaluator
     /// threshold. A job with no schedule interval or no completed run yet has no cadence to breach and is
     /// skipped without touching its standing state (no signal, the agent-status discipline). Gated on the
     /// master alerts switch. Internal so it pins directly with a recording deliverer + controllable clock.
+    ///
+    /// <para><b>The remedy names one exception, and does not hedge for everyone else (#3060).</b> "Extend
+    /// the job's schedule_interval" is right for a compression or retention policy and actively wrong for a
+    /// continuous-aggregate refresh, whose interval is also its <c>end_offset</c> — an operator following it
+    /// there alters what the store materializes in order to quiet an alert. The branch is
+    /// <see cref="TimescaleSupport.ScheduleIntervalDoublesAsEndOffset"/>, keyed on the policy proc, so the
+    /// one family that cannot take the advice is told the lever that does work while the other three keep
+    /// the concrete sentence. Softening it for all four instead would have made every alert vaguer to fix
+    /// one of them.</para>
     /// </summary>
     internal async Task ApplyStoreJobCadenceAsync(
         IReadOnlyList<StoreJobCadenceReading> jobs, CancellationToken cancellationToken)
@@ -1472,7 +1738,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     _lastJobOverCadenceAlert[key] = now;
                     bool critical = percent >= 100.0;
                     await FireAsync(
-                        JobCadenceKeyPrefix + key, "Monitor Store", JobCadenceMetric,
+                        JobCadenceKeyPrefix + key, StoreServerLabel, JobCadenceMetric,
                         $"{percent:F0}% of schedule interval", $"{warnPercent}%",
                         detail: $"Store background {label} last ran for {durationMs / 1000.0:F0}s against a " +
                             $"{job.ScheduleIntervalMs / 1000.0:F0}s schedule interval ({percent:F0}%). " +
@@ -1483,8 +1749,16 @@ internal sealed class DarlingSelfAlertEvaluator
                                 : "These runtimes scale with raw data volume, so this is the early warning that the " +
                                   "store is outgrowing its job schedule — an onboarding wave moves this number first. ") +
                             "Compare the job's duration series in collect.store_metrics (object_kind = " +
-                            "'background_job') to see the trend, and either reduce raw volume, extend the job's " +
-                            "schedule_interval deliberately, or scale the store host.",
+                            "'background_job') to see the trend, and " +
+                            (TimescaleSupport.ScheduleIntervalDoublesAsEndOffset(job.JobName)
+                                ? "either reduce raw volume or scale the store host. Do NOT widen this job's " +
+                                  "schedule_interval: on a continuous-aggregate refresh policy it is also the " +
+                                  "aggregate's end_offset, so widening it changes what the refresh " +
+                                  "materializes — a wider still-filling tail is left unmaterialized, and on " +
+                                  "the hourly tier the Query Store backfill horizon derived from it shortens " +
+                                  "too. Narrow the refresh window or re-phase the grid instead."
+                                : "either reduce raw volume, extend the job's schedule_interval deliberately, " +
+                                  "or scale the store host."),
                         severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
                         shortMessage: $"{label} ran {percent:F0}% of its schedule interval",
                         numericCurrentValue: Math.Round(percent, 1),
@@ -1495,11 +1769,162 @@ internal sealed class DarlingSelfAlertEvaluator
             else if (_activeJobOverCadence.TryRemove(key, out var was) && was)
             {
                 await RecordResolutionAsync(new AlertResolution(
-                    JobCadenceKeyPrefix + key, "Monitor Store", JobCadenceMetric,
+                    JobCadenceKeyPrefix + key, StoreServerLabel, JobCadenceMetric,
                     "Store Job Cadence Recovered",
                     $"Monitor Store: {label} is back under {warnPercent}% of its schedule interval"), cancellationToken);
             }
         }
+    }
+
+    /// <summary>
+    /// The isolating entry point for the #2813 Retention Held check — rides the worker's hourly
+    /// compression-job health sweep (same connection, same Timescale gate) like its #2136 sibling. Same
+    /// failure isolation as <see cref="EvaluateStoreJobCadenceAsync"/>; cancellation still propagates.
+    /// </summary>
+    public async Task EvaluateRetentionHoldsAsync(
+        IReadOnlyList<RetentionHoldReading> policies, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyRetentionHoldsAsync(policies, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the policies are a parameter; the read that produces
+               them is counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
+            _logger?.LogError("Retention-held self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Applies the fleet-level Retention Held condition (#2813): a retention policy the #1680/#1877 coverage
+    /// gate has PAUSED, whose tier has as a result grown past its own configured horizon by
+    /// <see cref="RetentionHoldWarnRatio"/> or more.
+    ///
+    /// <para><b>Both halves are required, and that is the whole design.</b> Paused alone is normal —
+    /// <see cref="TimescaleSupport.EnsureRetentionPoliciesAsync"/> deliberately creates every policy paused
+    /// (there is no window in which TimescaleDB would not run a new policy's first check immediately), so
+    /// alerting on the flag would fire on every fresh store at every start. Over-horizon alone is normal
+    /// too: retention drops whole CHUNKS, so a 4-day policy with 1-day chunks legitimately holds ~5 days.
+    /// It is the CONJUNCTION that is unambiguous — the gate is holding this policy AND the tier has already
+    /// grown well past what it was meant to keep.</para>
+    ///
+    /// <para><b>Why a ratio and not a hold duration.</b> Nothing records when a policy was paused, so the
+    /// duration is not knowable without persisting state. The ratio measures the same thing from the
+    /// consequence end and is strictly more useful: it is the number an operator checks by hand, it is what
+    /// makes the cost legible, and it self-scales with the horizon so one threshold serves a 4-day raw tier
+    /// and a 35-day baseline tier alike.</para>
+    ///
+    /// <para>Tiers: WARNING at <see cref="RetentionHoldWarnRatio"/>, CRITICAL at
+    /// <see cref="RetentionHoldCriticalRatio"/> — the production incident that motivated this sat at 4.5x
+    /// (18 days held under a 4-day policy for 16 days) and would have read CRITICAL. A STANDING condition
+    /// like Store Job Over Cadence: fire once on breach, re-fire only on the alert cooldown while it
+    /// persists, one "Retention Hold Cleared" resolution when the policy arms or the tier comes back under
+    /// the warning ratio. A policy with no chunks, no measurable horizon, or an unreadable span has no
+    /// ratio and is skipped without touching its standing state — no signal, the agent-status discipline.
+    /// Gated on the master alerts switch. Internal so it pins directly with a recording deliverer and a
+    /// controllable clock.</para>
+    ///
+    /// <para><b>This check never acts.</b> It cannot arm a policy, and deliberately so: arming a held
+    /// policy drops the only copy of history no rollup has materialized, which is exactly what the gate
+    /// exists to prevent. The release is a backfill, which is an operator decision; this makes the need for
+    /// one visible instead of silent.</para>
+    /// </summary>
+    internal async Task ApplyRetentionHoldsAsync(
+        IReadOnlyList<RetentionHoldReading> policies, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+
+        foreach (var policy in policies)
+        {
+            var key = policy.JobId.ToString(CultureInfo.InvariantCulture);
+
+            /* No ratio = no signal. An armed policy is the healthy case; a policy with no chunks, no
+               horizon, or an unreadable span is unmeasured, not innocent — either way it must not touch
+               the standing state, or an unreadable probe would silently "resolve" a real hold. */
+            if (policy.OverHorizonRatio is not double ratio)
+            {
+                if (policy.Armed)
+                {
+                    await ClearRetentionHoldAsync(key, policy, cancellationToken);
+                }
+
+                continue;
+            }
+
+            var label = string.IsNullOrEmpty(policy.HypertableName)
+                ? $"retention job {key}"
+                : $"{policy.HypertableName} retention [{key}]";
+
+            if (!policy.Armed && ratio >= RetentionHoldWarnRatio)
+            {
+                _activeRetentionHold[key] = true;
+                if (CooldownElapsed(_lastRetentionHoldAlert, key, now))
+                {
+                    _lastRetentionHoldAlert[key] = now;
+                    bool critical = ratio >= RetentionHoldCriticalRatio;
+                    double spanDays = (policy.SpanSeconds ?? 0) / 86400.0;
+                    await FireAsync(
+                        RetentionHoldKeyPrefix + key, StoreServerLabel, RetentionHoldMetric,
+                        $"{ratio:F1}x its {policy.DropAfter} horizon", $"{RetentionHoldWarnRatio:F1}x",
+                        detail: $"Store {label} is HELD PAUSED by the rollup-coverage gate, and the tier now " +
+                            $"holds {spanDays:F1} days across {policy.ChunkCount} chunk(s) against a configured " +
+                            $"{policy.DropAfter} horizon ({ratio:F1}x). " +
+                            (critical
+                                ? "The tier is now several times its intended depth and still growing, so this " +
+                                  "is the dominant and still-compounding contributor to store size. "
+                                : "The gate is working as designed - it will not let retention drop history a " +
+                                  "rollup has never materialized - but the hold has lasted long enough to cost " +
+                                  "real disk. ") +
+                            "The policy arms ITSELF once its consumer covers everything raw holds; what is " +
+                            "missing is the backfill, which is the --backfill-rollups operator action. Do NOT " +
+                            "arm the policy by hand: the history it holds exists nowhere else, so arming drops " +
+                            "the only copy, which is precisely what the gate prevents. Check the service log at " +
+                            "startup for the 'HELD PAUSED' line naming which consumer is short.",
+                        severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+                        shortMessage: $"{label} held at {ratio:F1}x its {policy.DropAfter} horizon",
+                        numericCurrentValue: Math.Round(ratio, 2),
+                        numericThresholdValue: critical ? RetentionHoldCriticalRatio : RetentionHoldWarnRatio,
+                        cancellationToken);
+                }
+            }
+            else
+            {
+                await ClearRetentionHoldAsync(key, policy, cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>Drops one retention hold's standing state and records the resolution, but only if it was
+    /// actually standing — so a store where nothing is held writes no resolution rows at all.</summary>
+    private async Task ClearRetentionHoldAsync(
+        string key, RetentionHoldReading policy, CancellationToken cancellationToken)
+    {
+        if (!_activeRetentionHold.TryRemove(key, out var was) || !was)
+        {
+            return;
+        }
+
+        var label = string.IsNullOrEmpty(policy.HypertableName)
+            ? $"retention job {key}"
+            : $"{policy.HypertableName} retention [{key}]";
+        var why = policy.Armed
+            ? "is armed again - its consumer now covers everything the tier holds"
+            : $"is back under {RetentionHoldWarnRatio:F1}x its {policy.DropAfter} horizon";
+
+        await RecordResolutionAsync(new AlertResolution(
+            RetentionHoldKeyPrefix + key, StoreServerLabel, RetentionHoldMetric,
+            "Retention Hold Cleared",
+            $"Monitor Store: {label} {why}"), cancellationToken);
     }
 
     /// <summary>
@@ -1551,7 +1976,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 {
                     _compressionJobState[key] = CompressionJobHealth.ReArmed;
                     await FireAsync(
-                        CompressionKeyPrefix + key, "Monitor Store", CompressionJobMetric,
+                        CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} was stuck ({job.Reason}) and has been automatically re-armed " +
                             "(alter_job next_start => now). A stuck compression policy halts the store's archival tier, so " +
@@ -1573,7 +1998,7 @@ internal sealed class DarlingSelfAlertEvaluator
                        never loop alter_job on it, and page: a human must re-arm it (or grant ownership). */
                     _compressionJobState[key] = CompressionJobHealth.Escalated;
                     await FireAsync(
-                        CompressionKeyPrefix + key, "Monitor Store", CompressionJobMetric,
+                        CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} is stuck ({job.Reason}) and the service could NOT re-arm it — " +
                             "alter_job failed, usually because the store login does not own the job. Compression is halted, " +
@@ -1592,7 +2017,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 _compressionJobState[key] = CompressionJobHealth.Escalated;
                 _lastCompressionJobAlert[key] = now;
                 await FireAsync(
-                    CompressionKeyPrefix + key, "Monitor Store", CompressionJobMetric,
+                    CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
                     job.Reason, "running on schedule",
                     detail: $"TimescaleDB {label} is STILL stuck ({job.Reason}) after an automatic re-arm last cycle — it " +
                         "re-hung, so the service has STOPPED auto-re-arming it. This is a product-bug signal: the compression " +
@@ -1610,7 +2035,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 {
                     _lastCompressionJobAlert[key] = now;
                     await FireAsync(
-                        CompressionKeyPrefix + key, "Monitor Store", CompressionJobMetric,
+                        CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} remains stuck ({job.Reason}) after escalation — still not compressing. " +
                             "Manual intervention is required; the service will not auto-re-arm it.",
@@ -1635,7 +2060,7 @@ internal sealed class DarlingSelfAlertEvaluator
             _compressionJobState.TryRemove(key, out _);
             _lastCompressionJobAlert.TryRemove(key, out _);
             await RecordResolutionAsync(new AlertResolution(
-                CompressionKeyPrefix + key, "Monitor Store", CompressionJobMetric,
+                CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
                 "Compression Job Recovered",
                 $"TimescaleDB compression job {key} is running on schedule again"), cancellationToken);
         }
@@ -1696,7 +2121,7 @@ SELECT
      FROM (SELECT log_id FROM collection_log WHERE server_id = $1 ORDER BY log_id DESC LIMIT $2) r) AS recent_runs,
     (SELECT COUNT(*)
      FROM (SELECT status FROM collection_log WHERE server_id = $1 ORDER BY log_id DESC LIMIT $2) r
-     WHERE r.status IN ('SUCCESS', 'SKIPPED'))                                       AS recent_success", connection);
+     WHERE r.status IN ('SUCCESS', 'SKIPPED'))                                       AS recent_success", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(recentWindow);
 
@@ -1740,7 +2165,7 @@ FROM
 ) AS x
 WHERE x.n = 1
 AND   x.status = 'SESSION_MISSING'
-ORDER BY x.collector_name", connection);
+ORDER BY x.collector_name", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1777,7 +2202,7 @@ SELECT EXISTS
     FROM agent_status
     WHERE server_id = $1
     AND   agent_running
-)", connection);
+)", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         return (bool)(await command.ExecuteScalarAsync(cancellationToken))!;
     }
@@ -1798,7 +2223,7 @@ SELECT agent_running, collection_time
 FROM agent_status
 WHERE server_id = $1
 ORDER BY collection_time DESC
-LIMIT 1", connection);
+LIMIT 1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1845,7 +2270,7 @@ SELECT ag_name, replica_server_name, role_desc, connected_state_desc, is_local, 
 FROM ag_replica_states
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM ag_replica_states WHERE server_id = $1)
-ORDER BY ag_name, replica_server_name", connection);
+ORDER BY ag_name, replica_server_name", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1889,7 +2314,7 @@ SELECT ag_name, database_name, replica_server_name, secondary_lag_seconds, redo_
 FROM ag_database_replica_states
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM ag_database_replica_states WHERE server_id = $1)
-ORDER BY ag_name, database_name, replica_server_name", connection);
+ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1933,14 +2358,21 @@ ORDER BY ag_name, database_name, replica_server_name", connection);
     /// Dashboard's explicit "…Cleared/Resolved/Restored" <c>RecordAlert</c> rows. Used by BOTH this
     /// evaluator's self-alert recoveries (Collection Resumed / Capture Restored) and the shared alert
     /// engine's resolution callback (CPU Resolved, Blocking Cleared, …) so an operator reviewing alert
-    /// history sees the paired "Detected" then "Cleared" entries. Never email/webhook (a resolution has no
-    /// send channel — the deliverer's fire path is untouched): recorded as a delivered tray/history row.
+    /// history sees the paired "Detected" then "Cleared" entries. Never email/webhook: a resolution has no
+    /// send channel, and the deliverer's fire path is untouched.
+    ///
+    /// <para>That "no send channel" is stated by <see cref="AlertDelivery.NoChannelApplies"/> rather than
+    /// spelled as a delivered row. Saying it with <c>AlertSent: true</c> made <c>alert_sent</c> mean
+    /// "delivered" on a fired row and "no channel applies" here, so a reader could not tell the two senses
+    /// apart and no aggregate over the column meant anything — the delivered fraction rose with the number
+    /// of resolutions. The pairing this method exists for is unaffected: the row is still written, still
+    /// carries the resolution title, and still reads as resolved.</para>
     /// </summary>
     public static AlertHistoryRecord BuildResolutionRecord(AlertResolution resolution) => new(
         resolution.ServerKey, resolution.ServerName, resolution.Title,
         CurrentValueText: "resolved", ThresholdValueText: "",
         NumericCurrentValue: null, NumericThresholdValue: null,
-        AlertSent: true, NotificationType: "tray", SendError: null,
+        Delivery: AlertDelivery.NoChannelApplies(),
         Muted: false, DetailText: resolution.Message, ContextJson: null);
 
     /// <summary>
@@ -2020,6 +2452,7 @@ ORDER BY ag_name, database_name, replica_server_name", connection);
         {
             /* An audit-row write must never break the loop (RecordAlertAsync is already failure-isolated;
                this is belt-and-suspenders for any other IAlertHistoryStore). */
+            /* NOT counted by #3013's swallowed-read counter: an audit-row WRITE, not a condition read. */
             _logger?.LogError("Failed to record resolution '{Title}': {Message}", resolution.Title, ex.Message);
         }
     }

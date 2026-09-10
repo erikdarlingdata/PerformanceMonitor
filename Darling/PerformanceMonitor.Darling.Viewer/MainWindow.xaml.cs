@@ -507,7 +507,12 @@ public partial class MainWindow : Window
         _refreshTimer.Start();
 
         /* The Overview keeps its own timer so it refreshes when it is the visible tab and the aggregate timer
-           skips it (they never double-refresh the same grid); both run at the one configurable fleet interval. */
+           skips it; both run at the one configurable fleet interval.
+
+           "They never double-refresh the same GRID" is the whole of the claim, and it is worth stating that
+           narrowly: the aggregate timer's Overview early-return is what guarantees it, and that return sits
+           BELOW its freshness fan-out. So the grid was never double-refreshed while the freshness reads were,
+           on every Overview cycle, until OnOverviewTimerTick stopped duplicating them. */
         _overviewTimer = new DispatcherTimer { Interval = _refreshInterval };
         _overviewTimer.Tick += OnOverviewTimerTick;
         _overviewTimer.Start();
@@ -551,8 +556,29 @@ public partial class MainWindow : Window
 
     private async void OnRefreshTimerTick(object? sender, EventArgs e)
     {
-        /* Refresh the sidebar status dots + the status bar every cycle regardless of the visible tab (a
-           cheap pair of single-query reads), so freshness stays current even while a per-server tab is up. */
+        /* Refresh the sidebar status dots + the status bar every cycle regardless of the visible tab, so
+           freshness stays current even while a per-server tab is up.
+
+           NOT the "cheap pair of single-query reads" this comment used to claim, which is why all three of
+           these are single-flight: RefreshServerStatusAsync is a pair BY ITSELF (the freshness query, then
+           UpdateCollectorHealthTextAsync's collector-health read) and PollAlertsAsync is another (history,
+           then UpdateServerSilencedAsync's mute rules), so this fan-out is FIVE store reads before
+           RefreshVisibleAsync starts — six on the fleets that ship with the AG tab hidden, which is most of
+           them. They run TOGETHER, so each one's deadline has to cover contending with the other five for
+           the ten-connection pool rather than a solo read's — hence the declared width, on an interval an
+           operator can set to 10s. The deadline bounds how long one of them holds a permit and the guards are
+           what stop ticks from stacking.
+
+           This is a fan-out without a Task.WhenAll: nothing joins these, they are simply all in flight at
+           once. ViewerCommandTimeoutTests can only scan the WhenAll shape, so this site and the connect-path
+           pair below are the two the width is declared on by hand.
+
+           The scope deliberately runs to the end of the tick rather than closing after the three starts: the
+           visible-tab load below begins while these are still in flight, so it really is contending with
+           them, and a tab load that declares its own fan-out nests to the pool ceiling — which is the width
+           the concurrent measurement actually covers. */
+        using var readFanOut = ViewerReadFanOut.Of(6);
+
         _ = RefreshServerStatusAsync();
         _ = RefreshStoreSizeAsync();
 
@@ -594,8 +620,16 @@ public partial class MainWindow : Window
     {
         if (ReferenceEquals(MainTabs.SelectedItem, OverviewTab))
         {
-            /* Refresh the sidebar dots on the Overview cadence too, so they track the cards. */
-            _ = RefreshServerStatusAsync();
+            /* The sidebar dots are deliberately NOT refreshed here, even though they read the same freshness
+               signal the Overview cards do. OnRefreshTimerTick already fans them out unconditionally, at this
+               same interval, and its Overview early-return happens AFTER that fan-out — so firing them here
+               too issued two concurrent freshness read-pairs per cycle whenever the Overview was the visible
+               tab, which is the one tab that ships selected. The dots still track the cards: both timers are
+               started back-to-back at the one interval, so the aggregate timer's fan-out lands in the same
+               cycle this tick does. Re-adding the call would now be worse than redundant rather than merely
+               wasteful — RefreshServerStatusAsync is single-flight, so a periodic caller's second call can
+               only be dropped, and one that asked to replay would guarantee the extra pass the guard exists
+               to prevent. */
             await RefreshVisibleAsync();
         }
     }
@@ -999,8 +1033,19 @@ public partial class MainWindow : Window
             }
 
             /* Seed the sidebar status dots + the status bar's collector-health / collection / database-size
-               fields (each a single lightweight store read). */
-            _ = RefreshServerStatusAsync();
+               fields.
+
+               replayIfBusy, because this is the one caller whose request a timer's in-flight read cannot
+               answer: this path runs on connect and after every add/edit/remove, and a freshness dictionary
+               fetched before a server was registered has no entry for it — the row it paints after the fleet
+               rebuild reads as never-collected. Dropping that would leave a just-added server's dot wrong for
+               a whole interval. The store-size read takes no scope, so it drops like any other caller.
+
+               Three reads in flight together — the freshness pair plus the store size — so the width is
+               declared for the same reason the fleet timer's is. */
+            using var readFanOut = ViewerReadFanOut.Of(3);
+
+            _ = RefreshServerStatusAsync(replayIfBusy: true);
             _ = RefreshStoreSizeAsync();
         }
         catch (Exception ex)
@@ -1379,23 +1424,51 @@ public partial class MainWindow : Window
 
         var service = _dataService;
         var nowUtc = DateTime.UtcNow;
-        var summaries = await Task.WhenAll(list.Select(async server =>
+        /* #3016: pool-many lanes, not fleet-many reads — see the inventory overlay in FinOpsTab.Loaders.
+           A fleet wider than the pool used to render SHORT here rather than slowly: the per-server catch
+           below turned each pool-exhaustion failure into an absent card, so the panel a fleet is watched
+           from silently dropped every server past the permits whenever the store was slow enough for the
+           first ten to hold their slots for ConnectionTimeoutSeconds. Lanes are contiguous, so
+           concatenating them in lane order restores the fleet order this used to read in. */
+        var lanes = ViewerReadFanOut.Lanes(list);
+        using var readFanOut = ViewerReadFanOut.Of(lanes.Count);
+
+        var perLane = await Task.WhenAll(lanes.Select(async lane =>
         {
-            try
+            var found = new List<ServerSummaryItem>(lane.Count);
+
+            foreach (var server in lane)
             {
-                var summary = await service.GetServerSummaryAsync(server.ServerId, server.DisplayName);
-                summary.ServerName = server.ServerName;
-                summary.ApplyFreshness(nowUtc);
-                return summary;
+                try
+                {
+                    var summary = await service.GetServerSummaryAsync(server.ServerId, server.DisplayName);
+                    summary.ServerName = server.ServerName;
+                    /* #3029: the engine discriminator comes from the REGISTRY row, which already carries it
+                       (servers.engine_kind, via ManagedServersSql / ServersSql) — the per-server summary
+                       reads have no engine column and need none. It is what tells the fleet deadlock total's
+                       coverage apart from a quiet SQL Server fleet: v_deadlocks holds the SQL Server
+                       extended-event capture and nothing else. */
+                    summary.IsPostgres = server.IsPostgres;
+                    /* #3267: and the Aurora half of the same discriminator, for the CPU row. Both are
+                       stamped from the one registry row, so a card cannot end up claiming Aurora-ness the
+                       engine token does not support. */
+                    summary.IsAurora = server.IsAurora;
+                    summary.ApplyFreshness(nowUtc);
+                    found.Add(summary);
+                }
+                catch
+                {
+                    /* A per-server read failure shouldn't blank the whole grid (Lite logs + continues). */
+                }
             }
-            catch
-            {
-                /* A per-server read failure shouldn't blank the whole grid (Lite logs + continues). */
-                return null;
-            }
+
+            return found;
         }));
 
-        var built = summaries.OfType<ServerSummaryItem>().ToList();
+        /* The per-server reads are done; the fleet-totals read below does not contend with them. */
+        readFanOut.Release();
+
+        var built = perLane.SelectMany(lane => lane).ToList();
         StampTagPills(built);
 
         var cards = ServerOverviewSort.Order(
@@ -1423,7 +1496,10 @@ public partial class MainWindow : Window
             totals = new FleetTotals();
         }
 
-        ApplyFleetRollup(FleetRollup.Build(cards, totals));
+        /* #2753: TotalServers must be the registered fleet size (list.Count, the same source the sidebar's
+           "Servers: N" reads), not cards.Count — cards silently drops any server whose per-server summary
+           read failed this cycle, which made the Overview's total wobble against the stable sidebar count. */
+        ApplyFleetRollup(FleetRollup.Build(cards, totals, totalServerCount: list.Count));
 
         StatusText.Text = $"overview — refreshed {DateTime.Now:HH:mm:ss}";
     }
@@ -1442,7 +1518,11 @@ public partial class MainWindow : Window
         FleetWorstServersList.Visibility = rollup.HasProblems ? Visibility.Visible : Visibility.Collapsed;
         FleetAdditionalProblems.Visibility =
             rollup.AdditionalProblemCount > 0 ? Visibility.Visible : Visibility.Collapsed;
-        FleetAllHealthyText.Visibility = rollup.HasProblems ? Visibility.Collapsed : Visibility.Visible;
+        /* #2753 review: the all-clear line must not claim "All N healthy" while some of those N have no
+           summary this cycle at all (IsAllClear, not HasProblems, is the gate) — and that gap gets its own
+           line rather than being silently absorbed into either the healthy or the all-clear text. */
+        FleetUnknownStatusText.Visibility = rollup.UnknownCount > 0 ? Visibility.Visible : Visibility.Collapsed;
+        FleetAllHealthyText.Visibility = rollup.IsAllClear ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>Empties the Overview: no cards, no roll-up, and no stale authority left behind for the filter
@@ -1798,10 +1878,19 @@ public partial class MainWindow : Window
     /// Opens the viewer's full Settings window (the faithful port of Lite's SettingsWindow). It self-persists
     /// the application settings (MCP, alerts, notifications, SMTP, webhooks, analysis) to
     /// <see cref="_appSettingsStore"/> and secrets to Windows Credential Manager; the folded-in viewer
-    /// preferences (default time range + auto-refresh) come back via <see cref="SettingsWindow.Result"/> on a
-    /// successful Save, so we save them and update the in-memory copy that seeds newly-opened server tabs.
-    /// Already-open tabs keep their own toolbar state (the simple, predictable rule). The store connection is
-    /// passed through for "Manage Mute Rules" (null before the store is connected disables that button).
+    /// preferences (default time range + auto-refresh) come back via <see cref="SettingsWindow.Result"/>, so we
+    /// save them and update the in-memory copy that seeds newly-opened server tabs. Already-open tabs keep
+    /// their own toolbar state (the simple, predictable rule). The store connection is passed through for
+    /// "Manage Mute Rules" (null before the store is connected disables that button).
+    ///
+    /// <para>#2715: persisting <see cref="SettingsWindow.Result"/> depends ONLY on whether Save produced one
+    /// (<see cref="ShouldPersistViewerPreferences"/>), never on <c>ShowDialog()</c>'s own return value. Default
+    /// Time Range and Auto-refresh interval are purely local, per-user preferences with no relationship to the
+    /// shared Postgres/TimescaleDB control-plane store the SAME Save click also writes; gating their local file
+    /// write on that unrelated write's outcome meant a read-only seat's <see cref="ViewerReadOnlyException"/>
+    /// (or any other store-write failure) silently discarded a local preference change it had nothing to do
+    /// with. <see cref="SettingsWindow.Result"/> is captured before the store write is even attempted, so this
+    /// is safe unconditionally.</para>
     /// </summary>
     private void SettingsButton_Click(object sender, RoutedEventArgs e)
     {
@@ -1809,9 +1898,10 @@ public partial class MainWindow : Window
         /* The schedule editor edits CONFIG, so it must see every server — a filtered sidebar must never
            mean you cannot edit the schedule of a server it happens to be hiding. */
         var settings = new SettingsWindow(_preferences, _appSettingsStore, _dataService, _fleet.All) { Owner = this };
-        if (settings.ShowDialog() == true && settings.Result is not null)
+        settings.ShowDialog();
+        if (ShouldPersistViewerPreferences(settings.Result))
         {
-            _preferences = settings.Result;
+            _preferences = settings.Result!;
             if (!_preferencesStore.Save(_preferences))
             {
                 WarnSettingNotSaved("default time range and auto-refresh", _preferencesStore.FilePath);
@@ -1830,6 +1920,9 @@ public partial class MainWindow : Window
            _minimizeToTray live). Minimize-to-tray is viewer-local (the reloaded file); the alerts-master +
            "Tray notification cooldown" the window just wrote to the STORE are re-read from there. */
         _minimizeToTray = reloaded.MinimizeToTray;
+        /* The toast-settings read and the display-mode tab reload below are both fired unawaited, so they
+           are in flight together whenever the mode changed. */
+        using var readFanOut = ViewerReadFanOut.Of(2);
         _ = RefreshAlertToastSettingsFromStoreAsync();
         /* Re-apply the fleet refresh interval to the live shell timers so a change takes effect immediately
            (the connection timeout is a connect-time setting and applies on the next viewer launch). */
@@ -1850,6 +1943,22 @@ public partial class MainWindow : Window
             _ = LoadVisibleTabAsync();
         }
     }
+
+    /// <summary>
+    /// Whether a <see cref="SettingsWindow"/> session's <see cref="SettingsWindow.Result"/> should be written
+    /// to the viewer's local <see cref="ViewerPreferencesStore"/> (#2715). <see cref="SettingsWindow.Result"/>
+    /// (Default Time Range + Auto-refresh interval) is a purely local, per-user preference — a small JSON file
+    /// in the viewer's own app-data folder — entirely unrelated to the shared Postgres/TimescaleDB control-plane
+    /// store the SAME Settings-window Save also writes (alert engine, notifications, service flags). The window
+    /// builds <see cref="SettingsWindow.Result"/> BEFORE attempting that unrelated store write, so whether it is
+    /// non-null depends only on the operator having clicked Save and it getting past the (unrelated) cleartext-
+    /// webhook confirmation — never on whether the store write succeeded, and never on read-only status. Pure,
+    /// so it is unit-testable without an STA window: the fix for #2715 is exactly this predicate replacing the
+    /// old <c>ShowDialog() == true &amp;&amp; Result is not null</c> gate, whose <c>ShowDialog() == true</c> half
+    /// tied a local-only preference's persistence to a read-only seat's <see cref="ViewerReadOnlyException"/> on
+    /// the store write for completely unrelated settings.
+    /// </summary>
+    internal static bool ShouldPersistViewerPreferences(ViewerPreferences? result) => result is not null;
 
     // ── About ────────────────────────────────────────────────────────────────────────
 

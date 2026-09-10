@@ -47,7 +47,10 @@ namespace PerformanceMonitorDashboard
             PerformanceTab.CancelActualPlan();
         }
 
-        private async void OpenPlanTab(string planXml, string label, string? queryText = null)
+        // Returns a Task (not async void) so the Ctrl+V paste handler can await it inside its _pasteInProgress
+        // guard -- the guard must span the off-thread parse in LoadPlan, not just the clipboard read (#2870).
+        // Non-paste "View Plan" callers discard the Task (_ = OpenPlanTab(...)); CS4014 is an error in this project.
+        private async Task OpenPlanTab(string planXml, string label, string? queryText = null)
         {
             HidePlanLoading();
             var viewer = new PlanViewerControl();
@@ -333,7 +336,7 @@ namespace PerformanceMonitorDashboard
                     var label = frames.Count > 1
                         ? $"Est Plan - {sideLabel} SPID {row.Spid} ({i + 1}/{frames.Count})"
                         : $"Est Plan - {sideLabel} SPID {row.Spid}";
-                    OpenPlanTab(planXml, label, row.QueryText);
+                    _ = OpenPlanTab(planXml, label, row.QueryText);
                     opened++;
                 }
             }
@@ -435,7 +438,7 @@ namespace PerformanceMonitorDashboard
 
             if (!string.IsNullOrEmpty(planXml))
             {
-                OpenPlanTab(planXml, label, row.Query);
+                _ = OpenPlanTab(planXml, label, row.Query);
                 PlanViewerTabItem.IsSelected = true;
             }
             else

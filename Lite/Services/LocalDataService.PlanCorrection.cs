@@ -28,7 +28,7 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -203,10 +203,14 @@ public class PlanCorrectionRow
     public string ImplementationScript { get; set; } = "";
 
     public string CollectionTimeLocal => ServerTimeHelper.FormatServerTime(CollectionTime);
-    public string ValidSinceLocal => ServerTimeHelper.FormatServerTime(ValidSince);
-    public string LastRefreshLocal => ServerTimeHelper.FormatServerTime(LastRefresh);
-    public string ExecuteActionInitiatedTimeLocal => ServerTimeHelper.FormatServerTime(ExecuteActionInitiatedTime);
-    public string RevertActionInitiatedTimeLocal => ServerTimeHelper.FormatServerTime(RevertActionInitiatedTime);
+
+    /* sys.dm_db_tuning_recommendations reports these four in the instance's own clock, so they take
+       the server-clock renderer while CollectionTime above, which the collector stamps in UTC, takes
+       the UTC one. Four of the six timestamps in this row are in the other frame from the first. */
+    public string ValidSinceLocal => ServerTimeHelper.FormatServerClock(ValidSince);
+    public string LastRefreshLocal => ServerTimeHelper.FormatServerClock(LastRefresh);
+    public string ExecuteActionInitiatedTimeLocal => ServerTimeHelper.FormatServerClock(ExecuteActionInitiatedTime);
+    public string RevertActionInitiatedTimeLocal => ServerTimeHelper.FormatServerClock(RevertActionInitiatedTime);
 
     /* Tri-state: the flags are NULL when Query Store aged the plan out, which is not the same as "No". */
     public string ForcedDisplay => YesNo(LastGoodPlanIsForced);

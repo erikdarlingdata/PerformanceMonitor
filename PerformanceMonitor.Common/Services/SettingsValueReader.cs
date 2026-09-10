@@ -104,8 +104,8 @@ public sealed class SettingsReader
 /// <para>The clamps live here rather than at the eighty-seven call sites that used to repeat
 /// <c>Math.Clamp(v.GetInt64(), …)</c> inline. That collapses the read AND makes one latent bug unreachable:
 /// the old <c>(int)Math.Max(0, v.GetInt64())</c> form casts an out-of-range Int64 into an <c>int</c>, which
-/// wraps — so a hand-typed 5000000000 became a negative threshold. <see cref="Int(int,int,int)"/> clamps
-/// before it narrows, so the worst a huge number can do is land on the bound.</para>
+/// wraps — so a hand-typed 5000000000 became a negative threshold. <see cref="WholeNumber(int,int,int)"/>
+/// clamps before it narrows, so the worst a huge number can do is land on the bound.</para>
 /// </summary>
 public readonly struct SettingsValue
 {
@@ -137,7 +137,7 @@ public readonly struct SettingsValue
     /// nothing, and is reported. A number that IS exact is still taken however it was written, so
     /// <c>30.0</c> reads as 30 the same way it does everywhere else in this type.</para>
     /// </summary>
-    public int Int(int fallback) =>
+    public int WholeNumber(int fallback) =>
         Element.ValueKind != JsonValueKind.Number ? Reject(fallback, "a whole number")
         : Element.TryGetInt32(out var number) ? number
         : Wide(out var wide) && wide == Math.Floor(wide) && wide >= int.MinValue && wide <= int.MaxValue
@@ -159,23 +159,23 @@ public readonly struct SettingsValue
     /// <c>analysis_timeout_seconds: 30.0</c> into 600 — a value the user never asked for, never saw flagged,
     /// and could not have found, which is the failure #2444 exists to end rather than to relocate.</para>
     /// </summary>
-    public int Int(int fallback, int min, int max) =>
+    public int WholeNumber(int fallback, int min, int max) =>
         Element.ValueKind != JsonValueKind.Number ? Reject(fallback, "a whole number")
         : Element.TryGetInt64(out var number) ? (int)Math.Clamp(number, min, max)
         : Wide(out var wide) ? (wide >= max ? max : wide <= min ? min : (int)wide)
         : RejectAsUnusableNumber(fallback);
 
     /// <summary>The value as a long, clamped into <paramref name="min"/>..<paramref name="max"/>. Same three
-    /// cases as <see cref="Int(int,int,int)"/>, compared rather than clamped because a bound near
+    /// cases as <see cref="WholeNumber(int,int,int)"/>, compared rather than clamped because a bound near
     /// <c>long.MaxValue</c> does not survive a round trip through a <see cref="double"/>.</summary>
-    public long Long(long fallback, long min, long max) =>
+    public long BigWholeNumber(long fallback, long min, long max) =>
         Element.ValueKind != JsonValueKind.Number ? Reject(fallback, "a whole number")
         : Element.TryGetInt64(out var number) ? Math.Clamp(number, min, max)
         : Wide(out var wide) ? (wide >= max ? max : wide <= min ? min : (long)wide)
         : RejectAsUnusableNumber(fallback);
 
     /// <summary>The value as a double, clamped into <paramref name="min"/>..<paramref name="max"/>.</summary>
-    public double Double(double fallback, double min, double max) =>
+    public double Number(double fallback, double min, double max) =>
         Element.ValueKind != JsonValueKind.Number ? Reject(fallback, "a number")
         : Wide(out var number) ? Math.Clamp(number, min, max)
         : RejectAsUnusableNumber(fallback);

@@ -565,6 +565,14 @@ public sealed class DarlingMcpHostService : BackgroundService
                    size + enabled-server count) for capacity forecasting. Darling-only: a single-server
                    edition has no central store to measure, so no Lite twin. */
                 .WithGeminiCompatibleTools<DarlingMcpStoreMetricsTools>()
+                /* #3021 get_store_log — the store's OWN server-log census, the second self-monitoring
+                   surface beside get_store_metrics. */
+                .WithGeminiCompatibleTools<DarlingMcpStoreLogTools>()
+                .WithGeminiCompatibleTools<DarlingMcpCollectorCostTools>()
+                /* #2880 get_collector_stall_probes - the out-of-band server-wide wait samples taken
+                   while one of OUR collectors was stalled mid-read. Darling-only: the arm is installed by
+                   DarlingCollectorRunner's server-scoped path, which Lite's runner does not have. */
+                .WithGeminiCompatibleTools<DarlingMcpStallProbeTools>()
                 /* #1496 get_long_query_completions — the opt-in long-query completion trace (rpc/batch over
                    the duration threshold + attentions), over Darling's Postgres store (STORED read). */
                 .WithGeminiCompatibleTools<DarlingMcpLongQueryTools>()
@@ -587,13 +595,20 @@ public sealed class DarlingMcpHostService : BackgroundService
                    concept, reported in microseconds, so the two engines cannot share a result shape
                    without lying about a unit or emitting mostly-null columns. */
                 .WithGeminiCompatibleTools<DarlingMcpPgWaitTools>()
+                /* get_pg_cpu_utilization — instance-level CPU for a PostgreSQL/Aurora target (#2719),
+                   paired with the pg_cpu_utilization collector. Sourced from AWS Performance Insights
+                   rather than a database connection, so it sits beside the wait tools rather than the
+                   activity ones: a gauge over time, like SQL Server's own CPU read, not a ranked list. */
+                .WithGeminiCompatibleTools<DarlingMcpPgCpuUtilizationTools>()
                 /* get_pg_top_queries — PostgreSQL query shapes by total time, paired with the
                    pg_statement_stats collector. Carries Aurora's I/O source split and per-statement
                    peak memory, neither of which the SQL Server tools have an equivalent for. */
                 .WithGeminiCompatibleTools<DarlingMcpPgStatementTools>()
                 /* get_pg_plans — the plan itself, not a pointer to one (#2567). Registered beside the
                    statement tools because that is the join: a plan is read alongside the statement it
-                   belongs to, on query_id. */
+                   belongs to, on query_id. Carries get_pg_plan_capture_readiness too (#3070): whether the
+                   target can capture a plan at all, facet by facet with the remedy for each, which is the
+                   read somebody needs the moment the plans one comes back empty. */
                 .WithGeminiCompatibleTools<DarlingMcpPgPlanTools>()
                 /* get_pg_wraparound_risk — XID/MultiXact freeze headroom, the highest-consequence
                    PostgreSQL signal and one with no SQL Server counterpart. Not Aurora-gated. */

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -17,9 +18,10 @@ namespace Lite.Tests;
 
 /// <summary>
 /// PIN B (parity board §05 D3, round 2): the MCP tool-INVENTORY pin. Nothing pins Lite's and Darling's MCP
-/// tool sets together — <c>McpSchemaCompatTests</c> guards the Gemini schema SHAPE, not the tool set — so the
-/// 55-vs-73 drift is invisible to CI. This enumerates every <c>[McpServerTool(Name="…")]</c> in both apps' MCP
-/// servers and asserts Darling's set is a SUPERSET of Lite's, with two allow-lists:
+/// tool sets together — <c>McpSchemaCompatTests</c> guards the Gemini schema SHAPE, not the tool set — so a
+/// tool present in one app and absent from the other is invisible to CI. This enumerates every
+/// <c>[McpServerTool(Name="…")]</c> in both apps' MCP servers and asserts Darling's set is a SUPERSET of
+/// Lite's, with two allow-lists:
 /// <list type="bullet">
 /// <item><see cref="KnownLiteMissingMcpTools"/> — a RATCHET of the Darling-only tools Lite hasn't ported yet;
 /// it only ever shrinks, and a NEW Darling tool with no Lite twin must be either ported or added here;</item>
@@ -62,6 +64,10 @@ public sealed class CrossAppMcpToolInventoryPinTests
            nothing for a Lite twin to read. If Lite ever gains a PostgreSQL target, port these and delete
            them from here; the ratchet only shrinks. */
         "get_pg_wait_stats",
+        /* #2719: instance CPU via AWS Performance Insights. Same reason again, and doubly so — this reads
+           the AWS RDS/Aurora SDK directly rather than a database connection at all, which Lite (a
+           standalone desktop app with no AWS credentials of its own) has no route to regardless of target. */
+        "get_pg_cpu_utilization",
         /* #2629: the stock-PostgreSQL counterparts. Same entry, same reason — Lite has no PostgreSQL
            target at all, so these are a SKU boundary rather than a porting to-do. */
         "get_pg_wait_sampling",
@@ -84,6 +90,18 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "get_pg_replication_stats",
         "get_pg_top_queries",
         "get_pg_plans",
+
+        /* get_pg_plan_capture_readiness (#3070) - whether a PostgreSQL target can capture plans at all,
+           facet by facet, with the remedy for each step that is not in place. Same architectural reason as
+           every entry around it rather than a porting backlog: Lite has no PostgreSQL target and cannot
+           acquire one, DuckDbSchemaGenerator.StoredCollectors filters pg_plan_capture_readiness out, and
+           Lite passes engineKind: null explicitly - so there is no Lite twin for this to be missing FROM.
+
+           No near-twin to warn about either, and that is worth saying: the facets are auto_explain
+           preconditions and a log-message locale, none of which has a SQL Server counterpart. Query Store
+           is the closest thing conceptually and it is not close - it is a database-scoped feature with its
+           own health read (get_query_store_health) rather than a set of preload-only server GUCs. */
+        "get_pg_plan_capture_readiness",
         "get_pg_wraparound_risk",
         "get_pg_xmin_horizon",
         "get_pg_replication_slots",
@@ -133,6 +151,28 @@ public sealed class CrossAppMcpToolInventoryPinTests
            single-instance app over local DuckDB with no central store to measure, no hypertables, and no
            payload dimensions, so there is no Lite twin to port. */
         "get_store_metrics",
+
+        /* #3021: the store-log census read (get_store_log) over collect.store_log_events - the central
+           Postgres store reading its OWN server log, classified into a per-class census. Darling-ONLY by
+           architecture and for a harder reason than get_store_metrics above: Lite's store is DuckDB, which
+           is an embedded file format with no server and therefore no server log. There is no file for a Lite
+           twin to point at, so this is a SKU boundary rather than a porting to-do. */
+        "get_store_log",
+
+        /* #2674: the collector-cost read (get_collector_cost) over collect.collector_cost — the tool measuring
+           its OWN per-collector cost on the monitored servers. Darling-ONLY by architecture, the same as
+           get_store_metrics: it is an internal self-metric over the central store, which Lite has no twin of. */
+        "get_collector_cost",
+
+        /* #2880: the out-of-band stall-probe read (get_collector_stall_probes) over
+           collect.collector_stall_probes — the server-wide wait samples taken while one of OUR collectors was
+           stalled mid-read. Darling-ONLY by architecture rather than a porting to-do, and specifically because
+           the SOURCE is Darling-only: the arm that decides to spend a probe is installed by
+           DarlingCollectorRunner's server-scoped path, beside the V108/V109 drain instrumentation it reads, and
+           Lite's RemoteCollectorService.DefinitionRunner has neither the counting reader nor the phase split.
+           A Lite twin would read an always-empty DuckDB table. If Lite's runner ever gains the drain
+           forensics, port this and delete the entry; the ratchet only shrinks. */
+        "get_collector_stall_probes",
 
         /* #1562: the pre-banded fleet-overview read born from the web dashboard's DarlingFleetReader.
            Lite twin = a DuckDB fleet reader over the SAME shared ServerHealthClassifier (Common) — tracked
@@ -266,6 +306,43 @@ public sealed class CrossAppMcpToolInventoryPinTests
         Assert.Equal(darling.Count, int.Parse(census.Groups[1].Value));
         Assert.Equal(shared, int.Parse(census.Groups[2].Value));
         Assert.Equal(darling.Count - shared, int.Parse(census.Groups[3].Value));
+    }
+
+    /// <summary>
+    /// The root <c>README.md</c>'s Lite tool census must match the real inventory (#3072). Same reasoning as
+    /// <see cref="DarlingInstructionsCensus_MatchesTheScannedInventory"/> one level out: it is prose a reader
+    /// plans against, and nothing pinned it — which is how it sat at "77 tools" while <c>Lite/Mcp</c> exposed
+    /// eighty-seven. It is stated TWICE (the edition-comparison table and the MCP section), and both are
+    /// asserted, because the ordinary way these drift is one of them being updated alone.
+    ///
+    /// <para>The Dashboard's figure in the same two sentences is deliberately NOT pinned: <c>deprecated/</c> is
+    /// frozen, so that number cannot move, and a pin over it could only ever be noise.</para>
+    /// </summary>
+    [Fact]
+    public void RootReadmeLiteToolCensus_MatchesTheScannedInventory()
+    {
+        var lite = ExtractToolNames(LiteMcpDir);
+        var readme = ParitySource.ReadFile("README.md");
+
+        /* Both sentences, named separately so a failure says WHICH one to edit. */
+        var sites = new (string Where, Regex Pattern)[]
+        {
+            ("the edition-comparison table", new Regex(@"MCP server \(LLM integration\) \| Built-in \((\d+) tools\)")),
+            ("the Available Tools paragraph", new Regex(@"\*\*Lite\*\* exposes (\d+) tools")),
+        };
+
+        foreach (var (where, pattern) in sites)
+        {
+            var match = pattern.Match(readme);
+            Assert.True(match.Success,
+                $"README.md no longer states the Lite tool count in {where} in the pinned shape ({pattern}). "
+                + "Keep it parseable so this pin can hold it to the real inventory — or delete the number, which "
+                + "is the other sanctioned outcome (#3072) and needs this site removed from the list above.");
+
+            Assert.True(lite.Count == int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture),
+                $"README.md's Lite tool count in {where} reads {match.Groups[1].Value} but Lite/Mcp exposes "
+                + $"{lite.Count}. Update the sentence.");
+        }
     }
 
     private static string Format(IEnumerable<string> names) =>

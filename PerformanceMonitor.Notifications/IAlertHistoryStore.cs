@@ -65,18 +65,40 @@ public interface IAlertHistoryStore
     /// <summary>
     /// MAX(alert_time) UNFILTERED (any channel/result) — seeds the analysis
     /// per-finding cooldown across restart. Stamped unconditionally upstream.
+    /// <para>
+    /// When <paramref name="dedupKey"/> is non-null (#1154 per-fingerprint cooldown, reused by #2716 to
+    /// seed Darling's Postgres Tier-0-predictor cooldowns), the result is additionally restricted to rows
+    /// whose persisted <c>ContextJson</c> carries that #1140 dedup fingerprint. Null = the metric-level
+    /// seed (the pre-#1154 behavior, used by the non-fingerprinted fallback).
+    /// </para>
     /// </summary>
-    Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName);
+    Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null);
 }
 
 /// <summary>
 /// One alert event to persist. Carries both the display strings (Dashboard
 /// persists these verbatim) and the optional resolved numerics (Lite persists
 /// these into DOUBLE columns, falling back to parsing the display text).
+///
+/// <para>The delivery disposition arrives as one <see cref="AlertDelivery"/> rather than as a loose
+/// <c>bool</c> + two strings. A producer cannot then state a send outcome without stating the channel it
+/// belongs to, cannot transpose the two strings past the compiler, and — because
+/// <see cref="AlertDelivery"/> has no public constructor — cannot hand-write a delivered row at all. The
+/// three column-shaped members below are projections for the store writers, which are unchanged.</para>
 /// </summary>
 public sealed record AlertHistoryRecord(
     string  ServerId, string ServerName, string MetricName,
     string  CurrentValueText, string ThresholdValueText,    // Dashboard persists these
     double? NumericCurrentValue, double? NumericThresholdValue, // Lite persists these
-    bool    AlertSent, string NotificationType, string? SendError,
-    bool    Muted, string? DetailText, string? ContextJson);
+    AlertDelivery Delivery,
+    bool    Muted, string? DetailText, string? ContextJson)
+{
+    /// <summary>The <c>alert_sent</c> column. A delivery measurement on every row.</summary>
+    public bool AlertSent => Delivery.Sent;
+
+    /// <summary>The <c>notification_type</c> column — which channel the row is about.</summary>
+    public string NotificationType => Delivery.Channel;
+
+    /// <summary>The <c>send_error</c> column.</summary>
+    public string? SendError => Delivery.SendError;
+}

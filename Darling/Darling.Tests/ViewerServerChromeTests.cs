@@ -37,7 +37,7 @@ public sealed class ViewerServerChromeTests
         server.ApplyFreshness(now.AddSeconds(-30), now);
 
         Assert.True(server.IsOnline);
-        Assert.False(server.HasCollectorErrors);
+        Assert.False(server.CollectionStale);
         Assert.Equal("Online", server.DotStatus);
     }
 
@@ -51,7 +51,7 @@ public sealed class ViewerServerChromeTests
         server.ApplyFreshness(now.AddMinutes(-5), now);
 
         Assert.True(server.IsOnline);
-        Assert.True(server.HasCollectorErrors);
+        Assert.True(server.CollectionStale);
         Assert.Equal("Warning", server.DotStatus);
     }
 
@@ -61,7 +61,8 @@ public sealed class ViewerServerChromeTests
         var now = DateTime.UtcNow;
         var server = Server();
 
-        server.ApplyFreshness(now.AddMinutes(-30), now);
+        /* -31: exactly 30 minutes is the shared collection-stopped boundary and bands Stale (strict >, #2794). */
+        server.ApplyFreshness(now.AddMinutes(-31), now);
 
         Assert.False(server.IsOnline);
         Assert.Equal("Offline", server.DotStatus);

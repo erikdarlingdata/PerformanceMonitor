@@ -38,6 +38,14 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// overlapping window produces the same shapes rather than duplicates — the same property the
 /// <c>pg_read_file</c> route already relies on. Persisting the marker would buy nothing and add a schema
 /// rung that could disagree with reality after a log rotation.</para>
+///
+/// <para><b>The marker only moves when the caller says so</b> (<see cref="CommitResume"/>), because that
+/// re-read tolerance is the whole reason it is safe to prefer a repeat over a loss. The transport is
+/// consume-once — <c>DownloadDBLogFilePortion</c> will not hand the same bytes out twice — so a marker that
+/// advanced inside the fetch turned any later failure into permanent data loss, while a marker that
+/// advances after the write can at worst re-store a window the store already tolerates. That is the same
+/// trade the in-memory choice above already makes across a restart; this makes the in-process behaviour
+/// match it instead of being strictly worse than it.</para>
 /// </summary>
 public sealed class RdsLogSource
 {
@@ -59,7 +67,46 @@ public sealed class RdsLogSource
     /// <param name="Text">Raw log text, to be handed to <c>PgPlanLogParser.Extract</c> unchanged.</param>
     /// <param name="MoreAvailable">RDS had more than one call's worth. The caller decides whether to keep
     /// pulling; this type does not loop, so one cycle cannot spend unbounded time on one target.</param>
-    public readonly record struct LogChunk(string Text, bool MoreAvailable);
+    /// <param name="Resume">Where the NEXT read should start, once <see cref="Text"/> has actually reached
+    /// the store. Handed back rather than recorded on the way out — see
+    /// <see cref="CommitResume"/>.</param>
+    public readonly record struct LogChunk(string Text, bool MoreAvailable, ResumeMarker Resume);
+
+    /// <summary>
+    /// A position this source can resume from, and the file it belongs to. Opaque to the caller: the
+    /// marker is a service token, not an offset, so there is nothing to compute with — a caller's only
+    /// move is to hand it back once the chunk it came with is durable.
+    /// </summary>
+    /// <param name="Key">The (instance, file) this marker belongs to.</param>
+    /// <param name="Marker">RDS's own resume token, or null when the response carried none.</param>
+    public readonly record struct ResumeMarker(string? Key, string? Marker);
+
+    /// <summary>
+    /// Advance this source past a chunk whose rows are in the store.
+    ///
+    /// <para><b>This is separate from the read on purpose, and it is the whole point of the type.</b> The
+    /// marker used to be recorded inside <see cref="ReadNewestAsync"/>, before the caller had done anything
+    /// with the text. On a consume-once transport that made every failure between the fetch and a committed
+    /// COPY a permanent loss: <c>DownloadDBLogFilePortion</c> does not hand the same bytes out twice, the
+    /// marker lives in this process, and the next call resumed past a chunk nobody stored. A parse fault, a
+    /// COPY that tripped its deadline, a dropped store connection and a cancelled cycle all lost every
+    /// report in that window with no error naming the loss.</para>
+    ///
+    /// <para>Doing nothing on an unset marker is deliberate rather than defensive: it lets a caller commit
+    /// unconditionally on its success path without first asking whether the read produced a token, which is
+    /// the shape that keeps the commit next to the write it depends on.</para>
+    /// </summary>
+    public void CommitResume(ResumeMarker resume)
+    {
+        if (string.IsNullOrEmpty(resume.Key) || string.IsNullOrEmpty(resume.Marker))
+        {
+            return;
+        }
+
+        /* Keyed by FILE as well as instance, so a log rotation starts a fresh marker instead of resuming a
+           new file at an old file's offset. */
+        _markers[resume.Key] = resume.Marker;
+    }
 
     /// <summary>
     /// The newest PostgreSQL log file's unread portion, or null when this target is not RDS at all.
@@ -98,11 +145,6 @@ public sealed class RdsLogSource
 
         var newest = await NewestLogFileAsync(client, instanceId, cancellationToken);
 
-        if (newest is null)
-        {
-            return new LogChunk(string.Empty, false);
-        }
-
         var key = instanceId + "|" + newest;
         _markers.TryGetValue(key, out var marker);
 
@@ -119,31 +161,43 @@ public sealed class RdsLogSource
             },
             cancellationToken);
 
-        if (!string.IsNullOrEmpty(response.Marker))
-        {
-            /* Keyed by FILE as well as instance, so a log rotation starts a fresh marker instead of
-               resuming a new file at an old file's offset. */
-            _markers[key] = response.Marker;
-        }
+        /* The marker is RETURNED, not recorded. Recording it here would advance this source past text the
+           caller has not looked at yet, and on a consume-once transport that is a permanent loss rather
+           than a repeated read — see CommitResume. */
 
         /* AdditionalDataPending is bool? in the SDK. Treated as false when null: claiming more is
-               pending when the API did not say so would make a caller loop for data that is not there. */
-            return new LogChunk(response.LogFileData ?? string.Empty, response.AdditionalDataPending == true);
+           pending when the API did not say so would make a caller loop for data that is not there. */
+        return new LogChunk(
+            response.LogFileData ?? string.Empty,
+            response.AdditionalDataPending == true,
+            new ResumeMarker(key, response.Marker));
     }
 
+    /* An AWS SDK response collection is NULL when the service omitted it, not an empty list, so the two
+       null tests below are the ordinary path rather than defence: DescribeDBClusters answers with no
+       DBClusters element when it matched nothing, and DBClusterMembers is absent on a cluster reporting no
+       members. LINQ over either raises ArgumentNullException, whose entire message is "Value cannot be
+       null. (Parameter 'source')" — seven words naming neither the call nor the branch, and it lands in
+       collection_log as a raw ERROR.
+
+       Each null is therefore routed into the message that already says what THAT branch means, rather than
+       coalesced to an empty sequence: "this cluster does not exist" is a target pointed somewhere wrong and
+       "this cluster has no writer" is a failover in progress, and the two have opposite responses. */
     private static async Task<string> ResolveWriterAsync(
         IAmazonRDS client, string clusterId, CancellationToken cancellationToken)
     {
         var clusters = await client.DescribeDBClustersAsync(
             new DescribeDBClustersRequest { DBClusterIdentifier = clusterId }, cancellationToken);
 
-        var cluster = clusters.DBClusters.FirstOrDefault()
-            ?? throw new InvalidOperationException($"Aurora cluster '{clusterId}' was not found.");
-
-        var writer = cluster.DBClusterMembers.FirstOrDefault(m => m.IsClusterWriter == true)
+        var cluster = clusters.DBClusters?.FirstOrDefault()
             ?? throw new InvalidOperationException(
-                $"Aurora cluster '{clusterId}' reports no writer. That is a real state during a failover, "
-                + "so this is worth retrying rather than treating as a configuration error.");
+                $"Aurora cluster '{clusterId}' was not found: DescribeDBClusters returned no cluster for it.");
+
+        var writer = cluster.DBClusterMembers?.FirstOrDefault(m => m.IsClusterWriter == true)
+            ?? throw new InvalidOperationException(
+                $"Aurora cluster '{clusterId}' reports no writer among its members. That is a real state "
+                + "during a failover, so this is worth retrying rather than treating as a configuration "
+                + "error.");
 
         return writer.DBInstanceIdentifier;
     }
@@ -152,8 +206,23 @@ public sealed class RdsLogSource
     /// The newest PostgreSQL log file. Filtered by name because an instance's log list also carries
     /// upgrade and other logs, and sorted by last-written rather than by name — the filename embeds a
     /// timestamp, but sorting text would order 2026-08-9 after 2026-08-10.
+    ///
+    /// <para><b>An instance with no openable PostgreSQL log file raises rather than answering
+    /// "nothing".</b> A caller can act on two outcomes — the log was opened and held nothing new, or no log
+    /// was opened — and only the first licenses the "no new … in the RDS log window" note the runner stamps
+    /// on a zero-row cycle, which is a claim about the log's CONTENTS. Answering with a silent empty read
+    /// is the #2633 confusion arriving by a second route. A stopped instance, one still being created, and
+    /// one whose logs have just rotated all answer this way and clear on the first cycle that finds a
+    /// log, and the message says so rather than sending anyone to look for a grant. It stays a loud
+    /// ERROR either way — the store's rule for an unclassified failure, and the band a target nobody
+    /// can read should carry, because the alternative on this fleet is the quiet blindness #2994 is
+    /// about.</para>
+    ///
+    /// <para>Total, therefore, rather than nullable: an empty list, an omitted one, and a newest entry
+    /// carrying no filename are one fact — there is nothing here to open — and a null return would have the
+    /// caller decide that again, which is where the silent empty read came from.</para>
     /// </summary>
-    private static async Task<string?> NewestLogFileAsync(
+    private static async Task<string> NewestLogFileAsync(
         IAmazonRDS client, string instanceId, CancellationToken cancellationToken)
     {
         var files = await client.DescribeDBLogFilesAsync(
@@ -164,9 +233,22 @@ public sealed class RdsLogSource
             },
             cancellationToken);
 
-        return files.DescribeDBLogFiles
+        /* The null-conditional is load bearing, as in ResolveWriterAsync above: the SDK omits the
+           collection entirely on an answer that carried no file, so ordering a null raises
+           ArgumentNullException and buries this branch behind "Value cannot be null. (Parameter
+           'source')". It short-circuits the whole chain, so absent and empty both arrive as null and reach
+           the one message below. */
+        return files.DescribeDBLogFiles?
             .OrderByDescending(f => f.LastWritten)
             .Select(f => f.LogFileName)
-            .FirstOrDefault();
+            .FirstOrDefault(name => !string.IsNullOrEmpty(name))
+            ?? throw new InvalidOperationException(
+                $"RDS listed no PostgreSQL server log file for instance '{instanceId}': DescribeDBLogFiles "
+                + "filtered on 'postgresql' returned nothing it could name. NO LOG WAS OPENED this cycle, "
+                + "so this is not an empty log — whatever this window held is unread. This records as a "
+                + "collection ERROR and not as a permissions skip, because no grant fixes it: an instance "
+                + "that is stopped, still being created, or has just rotated its logs answers this way and "
+                + "clears itself on the first cycle that finds a log, while one that keeps answering this "
+                + "way is a target nobody can read and wants a decision rather than silence.");
     }
 }

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
@@ -113,8 +114,15 @@ public sealed class TimescaleSupportTests
         Assert.Equal(
             "ALTER TABLE wait_stats SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')",
             TimescaleSupport.EnableCompressionSql(byName["wait_stats"]));
+        /* #3035: initial_start is named too, which is what puts the job on a FIXED schedule. The minute
+           is interpolated from the grid rather than restated so this pin cannot disagree with it; the
+           grid itself is pinned literally, and wait_stats' own minute too, by the #3035 tests below —
+           so a moved grid is loud there rather than silently agreed with here. */
+        Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor("wait_stats", out var waitStatsPhase));
         Assert.Equal(
-            "SELECT add_compression_policy('wait_stats', compress_after => INTERVAL '1 days', schedule_interval => INTERVAL '1 hour', if_not_exists => true)",
+            "SELECT add_compression_policy('wait_stats', compress_after => INTERVAL '1 days', schedule_interval => INTERVAL '1 hour', if_not_exists => true, "
+            + "initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + INTERVAL '"
+            + waitStatsPhase.ToString(CultureInfo.InvariantCulture) + " minutes')",
             TimescaleSupport.AddCompressionPolicySql(byName["wait_stats"]));
 
         /* 1 day matches the 1-day chunk interval so chunks become compressible quickly, keeping the
@@ -140,8 +148,11 @@ public sealed class TimescaleSupportTests
         Assert.Equal(
             "ALTER TABLE collection_log SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')",
             TimescaleSupport.EnableCompressionSql(TimescaleSupport.CollectionLogTable));
+        Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor(TimescaleSupport.CollectionLogTable, out var logPhase));
         Assert.Equal(
-            "SELECT add_compression_policy('collection_log', compress_after => INTERVAL '1 days', schedule_interval => INTERVAL '1 hour', if_not_exists => true)",
+            "SELECT add_compression_policy('collection_log', compress_after => INTERVAL '1 days', schedule_interval => INTERVAL '1 hour', if_not_exists => true, "
+            + "initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + INTERVAL '"
+            + logPhase.ToString(CultureInfo.InvariantCulture) + " minutes')",
             TimescaleSupport.AddCompressionPolicySql(TimescaleSupport.CollectionLogTable));
     }
 
@@ -481,7 +492,7 @@ WHERE hypertable_name = 'wait_stats'
     [Fact]
     public void CompressionScheduleConverge_ScopesToCompressionJobs_AndCastsJobIdToInteger()
     {
-        var probe = TimescaleSupport.StaleCompressionScheduleSql;
+        var probe = TimescaleSupport.CompressionPolicyStateSql;
 
         /* The same tolerant proc_name scoping the stuck-job reader uses — 'policy_compression' plus the 2.18+
            columnstore rebrand — and NOTHING else. */
@@ -489,9 +500,12 @@ WHERE hypertable_name = 'wait_stats'
         Assert.Contains("proc_name LIKE '%columnstore%'", probe, StringComparison.Ordinal);
         Assert.DoesNotContain("policy_retention", probe, StringComparison.Ordinal);
 
-        /* Compared as a typed INTERVAL by PostgreSQL, not as text in C#: '01:00:00' and '1 hour' are the same
-           interval and must not be seen as a difference to converge on every single start. */
-        Assert.Contains($"IS DISTINCT FROM INTERVAL '{TimescaleSupport.CompressScheduleInterval}'", probe, StringComparison.Ordinal);
+        /* Compared as SECONDS rather than as text: '01:00:00' and '1 hour' are the same interval and must
+           not be seen as a difference to converge on every single start. The comparison itself moved out
+           of the WHERE clause in #3035 — the wanted MINUTE is per hypertable, so a job stale only on its
+           phase would be filtered out before the caller ever saw it — which is why this pin is on the
+           emitted seconds and not on a predicate. */
+        Assert.Contains("EXTRACT(EPOCH FROM j.schedule_interval)::bigint", probe, StringComparison.Ordinal);
 
         /* #1586: alter_job takes job_id INTEGER and PostgreSQL will not down-cast a bigint bind during function
            resolution — an un-cast parameter fails 42883 at runtime while every string pin still passes. */
@@ -1042,6 +1056,246 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
         }
     }
 
+    /// <summary>
+    /// THE REFRESH-WINDOW PIN (#3012), live — the half that reaches already-deployed stores, which is the
+    /// only population the incident was reported from.
+    ///
+    /// <para><b>What it would mean for this test not to exist.</b>
+    /// <c>add_continuous_aggregate_policy(if_not_exists =&gt; true)</c> returns -1 against a policy the store
+    /// already has and changes nothing about it, so a store still on the 3-day window keeps re-materializing
+    /// three days every hour and the fix is INERT while the whole suite stays green. That failure direction is
+    /// worse than a red one, not milder: an inert fix with a passing suite is a fix nobody looks at again.
+    /// String-shape assertions on the SQL cannot see it, because they never run the statement.</para>
+    ///
+    /// <para><b>It found two defects on its first two runs, which is the argument for its existence.</b> The
+    /// join was written on <c>materialization_hypertable_schema/name</c>, because that is the id the
+    /// underlying <c>bgw_job</c> row carries — and <c>timescaledb_information.jobs</c> resolves a
+    /// continuous-aggregate job back to its USER VIEW, so the read found nothing at all and the converge would
+    /// have reported a tidy zero on every store. Then, with the join fixed:
+    /// <c>add_continuous_aggregate_policy(if_not_exists =&gt; true)</c> does NOT skip an existing policy
+    /// quietly the way its compression and retention siblings do — against a differing window it raises
+    /// <c>22023</c>, which makes the converge/ensure ORDER a correctness requirement rather than a
+    /// preference. Neither is visible to a string assertion on the SQL, because a string assertion never runs
+    /// the statement.</para>
+    ///
+    /// <para><b>The remaining assumptions this settles</b>, all named as unverified when the change was
+    /// written: that <c>alter_job</c> takes <c>fixed_schedule</c> and <c>initial_start</c> together on this
+    /// runtime; that <c>jsonb_set</c> produces a <c>start_offset</c> TimescaleDB then honours; and that a
+    /// policy CREATED with <c>initial_start</c> comes back <c>fixed_schedule = true</c> — on which the
+    /// converge's own no-op-ness rests, because a fresh store whose jobs read <c>false</c> would be re-altered
+    /// on every start forever.</para>
+    ///
+    /// <para><b>The fixed schedule is not a refinement.</b> Measured on the production store roughly two hours
+    /// after the offsets were applied by hand: every job read <c>fixed_schedule = f</c> and only one of six
+    /// hourly refreshes was still on the minute it was set to. TimescaleDB computes the next start from the
+    /// previous FINISH when <c>initial_start</c> is absent, so a hand-applied stagger decays back into
+    /// coincidence within hours — correct at apply time and gone by the afternoon. A stagger that drifts is not
+    /// a stagger, which is why <c>fixed_schedule</c> is asserted here rather than only the minute.</para>
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_HourlyRefreshWindow_ConvergesAThreeDayFinishToStartPolicy_AndLeavesTheDailyTierAlone_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live refresh-window converge test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        /* Two REAL views, because the converge is scoped by membership of HourlyRefreshPhaseOrder and a
+           throwaway name would be skipped — which is a property worth having, and is asserted at the end. */
+        const string Hourly = TimescaleSupport.QueryStatsHourlyView;
+        const string Daily = TimescaleSupport.QueryStatsDailyView;
+
+        /* This test MUTATES the shared fixture's shape (creating the hourly/daily CAGGs changes compose's tier
+           routing), so it restores it: snapshot what already exists and drop only what it creates. */
+        var preexistingCaggs = await ExistingCaggsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* The settled baseline: everything created with the shipped values, so every policy matches and
+               the count is what a healthy store reports. Held so step (4) can show the ensure UNDER-reporting
+               by exactly one when a single policy is left stale. */
+            var createLog = new CapturingTestLogger();
+            var readyAll = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, createLog, ct);
+            Assert.True(readyAll > 0, $"the fixture did not build the aggregates; {createLog.Joined}");
+
+            /* ---- (1) A policy as an OLDER BUILD left it: 3-day window, no initial_start. ---- */
+            await ExecAsync(connection, $"SELECT remove_continuous_aggregate_policy('collect.{Hourly}', if_exists => true)", ct);
+            await ExecAsync(connection,
+                $"SELECT add_continuous_aggregate_policy('collect.{Hourly}', start_offset => INTERVAL '3 days', end_offset => INTERVAL '1 hour', schedule_interval => INTERVAL '1 hour', if_not_exists => true)", ct);
+
+            /* Counted a SECOND way, on nothing but proc_name, before the view-keyed read is trusted. The
+               view-keyed read and the shipped converge share a join, so a wrong join makes both of them find
+               nothing and a bare Assert.NotNull below would report "no policy" for a store that has one. That
+               is not hypothetical: the materialization-hypertable-only join shipped first and did exactly
+               this, and this counter is what tells the two apart. */
+            Assert.True(await RefreshPolicyCountAsync(connection, ct) > 0,
+                "no continuous-aggregate refresh job exists at all — the fixture did not build the aggregates");
+
+            var legacy = await RefreshPolicyStateAsync(connection, Hourly, ct);
+            Assert.NotNull(legacy);
+            Assert.Equal(TimeSpan.FromDays(3).TotalSeconds, legacy!.StartOffsetSeconds);
+
+            /* MEASURED, not assumed: omitting initial_start is what leaves a job on finish-to-start
+               scheduling, which is the mechanism by which the production store's hand-set offsets drifted. */
+            Assert.False(legacy.FixedSchedule,
+                "a policy created without initial_start is expected to be finish-to-start on this runtime");
+
+            /* ---- (2) The CREATE statement alone cannot fix it, and NOT for the reason the sibling
+                    converges taught. add_compression_policy and add_retention_policy skip an existing policy
+                    quietly and return -1. add_continuous_aggregate_policy does that only when the window
+                    MATCHES: against one whose window DIFFERS it RAISES. So the create path is not merely
+                    unable to move a deployed store, it cannot even run before the converge has. ---- */
+            var overlap = await Assert.ThrowsAsync<PostgresException>(
+                async () => await ExecAsync(connection, TimescaleSupport.AddHourlyRefreshPolicySql(Hourly), ct));
+            Assert.Equal("22023", overlap.SqlState);
+
+            var afterCreate = await RefreshPolicyStateAsync(connection, Hourly, ct);
+            Assert.Equal(TimeSpan.FromDays(3).TotalSeconds, afterCreate!.StartOffsetSeconds);
+            Assert.False(afterCreate.FixedSchedule);
+
+            /* ---- (3) THE ORDERING CONTRACT, functionally. Run in the wrong order the ensure meets that
+                    raise, swallows it in its per-aggregate catch, and comes back one short — reporting the
+                    aggregate as unready when only its refresh window was stale. Pinned as a COUNT rather than
+                    a log substring so it fails on the behaviour and not on the wording. ---- */
+            var wrongOrderLog = new CapturingTestLogger();
+            Assert.Equal(readyAll - 1, await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, wrongOrderLog, ct));
+            Assert.Contains(Hourly, wrongOrderLog.Joined, StringComparison.Ordinal);
+
+            /* ---- (4) THE ASSERTION THE WHOLE CHANGE COMES DOWN TO: the deployed store converges. ---- */
+            var convergeLog = new CapturingTestLogger();
+            var converged = await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, convergeLog, ct);
+            Assert.True(converged >= 1,
+                $"expected the 3-day finish-to-start policy on {Hourly} to be moved; {convergeLog.Joined}");
+
+            var moved = await RefreshPolicyStateAsync(connection, Hourly, ct);
+            Assert.NotNull(moved);
+            Assert.Equal(TimescaleSupport.HourlyRefreshStartSpan.TotalSeconds, moved!.StartOffsetSeconds);
+            Assert.True(moved.FixedSchedule,
+                $"the converge must pin the schedule, or the phase drifts back to coincidence within hours; {convergeLog.Joined}");
+            Assert.Equal(TimescaleSupport.RefreshPhaseMinutesFor(Hourly), moved.PhaseMinutes);
+
+            /* end_offset must survive untouched — the converge writes start_offset with jsonb_set against the
+               job's OWN config, so losing a sibling key here would mean it replaced the config wholesale. */
+            Assert.Equal(TimeSpan.FromHours(1), moved.EndOffset);
+
+            /* The rendered line names the view and the window it is on now, because that line IS the
+               operator's evidence the store changed. A structured-logging placeholder/argument mismatch would
+               render it wrong with no error anywhere — the one defect asserting on the return value cannot see. */
+            Assert.Contains($"moved {Hourly}'s refresh policy to a {TimescaleSupport.HourlyRefreshStartOffset} window",
+                convergeLog.Joined, StringComparison.Ordinal);
+
+            /* ---- (5) And NOW the ensure is whole again — the shipped order, on the store state that
+                    exposed the requirement. This is the assertion that would go red if the two calls in
+                    DarlingWorker were ever swapped back. ---- */
+            var rightOrderLog = new CapturingTestLogger();
+            Assert.Equal(readyAll, await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, rightOrderLog, ct));
+
+            /* ---- (6) Idempotent: a converged store finds nothing, so this never churns alter_job. ---- */
+            Assert.Equal(0, await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct));
+
+            /* ---- (7) The CREATE path on a store with no policy yet: both halves from the start. ---- */
+            await ExecAsync(connection, $"SELECT remove_continuous_aggregate_policy('collect.{Hourly}', if_exists => true)", ct);
+            await ExecAsync(connection, TimescaleSupport.AddHourlyRefreshPolicySql(Hourly), ct);
+
+            var fresh = await RefreshPolicyStateAsync(connection, Hourly, ct);
+            Assert.NotNull(fresh);
+            Assert.Equal(TimescaleSupport.HourlyRefreshStartSpan.TotalSeconds, fresh!.StartOffsetSeconds);
+            Assert.True(fresh.FixedSchedule,
+                "passing initial_start is expected to put the job on a fixed schedule; if it does not, the converge re-alters every hourly policy on every start");
+            Assert.Equal(TimescaleSupport.RefreshPhaseMinutesFor(Hourly), fresh.PhaseMinutes);
+
+            /* And therefore the converge is a no-op against a FRESH store too, not only a settled one. */
+            Assert.Equal(0, await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct));
+
+            /* ---- (8) SCOPE: the DAILY tier keeps its 3-day window and its finish-to-start schedule. ---- */
+            var daily = await RefreshPolicyStateAsync(connection, Daily, ct);
+            Assert.NotNull(daily);
+            Assert.Equal(TimeSpan.FromDays(3).TotalSeconds, daily!.StartOffsetSeconds);
+            Assert.False(daily.FixedSchedule, "the daily tier is deliberately left on finish-to-start scheduling");
+
+            /* Deliberately AFTER a converge has run and reported 0: "the daily policy is still on 3 days" is
+               trivially true if the converge never looked at anything, so the check has to follow a pass that
+               did look at the hourly policies and chose not to touch this one. */
+            await ExecAsync(connection,
+                $@"SELECT alter_job(j.job_id, config => jsonb_set(j.config, '{{start_offset}}', to_jsonb('3 days'::text)))
+FROM timescaledb_information.jobs AS j
+JOIN timescaledb_information.continuous_aggregates AS ca
+  ON  (ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name)
+  OR  (ca.materialization_hypertable_schema = j.hypertable_schema AND ca.materialization_hypertable_name = j.hypertable_name)
+WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
+AND   ca.view_schema = 'collect'
+AND   ca.view_name = '{Daily}'", ct);
+
+            Assert.Equal(TimeSpan.FromDays(3).TotalSeconds,
+                (await RefreshPolicyStateAsync(connection, Daily, ct))!.StartOffsetSeconds);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await new LiveCleanupBatch(cleanup).DropContinuousAggregatesAsync(
+                    (await ExistingCaggsAsync(cleanup, cleanupCt)).Except(preexistingCaggs, StringComparer.Ordinal), cleanupCt));
+        }
+    }
+
+    /// <summary>One continuous aggregate's live refresh-policy state, read the same way
+    /// <see cref="TimescaleSupport.ContinuousAggregateRefreshStateSql"/> reads it — by VIEW NAME, recovered
+    /// through the materialization-hypertable join, never by job id.</summary>
+    private sealed record RefreshPolicyState(double StartOffsetSeconds, bool FixedSchedule, int? PhaseMinutes, TimeSpan? EndOffset);
+
+    /// <summary>How many continuous-aggregate refresh jobs the store has, keyed on nothing but
+    /// <c>proc_name</c> — deliberately sharing no join with the read under test, so "the policy is missing"
+    /// and "the read cannot find the policy" are distinguishable.</summary>
+    private static async Task<long> RefreshPolicyCountAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(
+            "SELECT COUNT(*) FROM timescaledb_information.jobs WHERE proc_name = 'policy_refresh_continuous_aggregate'", connection);
+        return (long)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    private static async Task<RefreshPolicyState?> RefreshPolicyStateAsync(
+        NpgsqlConnection connection, string view, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand($@"
+SELECT
+    EXTRACT(EPOCH FROM (j.config->>'start_offset')::interval)::double precision,
+    j.fixed_schedule,
+    CASE
+        WHEN j.initial_start IS NULL THEN NULL
+        ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int
+    END,
+    (j.config->>'end_offset')::interval
+FROM timescaledb_information.jobs AS j
+JOIN timescaledb_information.continuous_aggregates AS ca
+  ON  (ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name)
+  OR  (ca.materialization_hypertable_schema = j.hypertable_schema AND ca.materialization_hypertable_name = j.hypertable_name)
+WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
+AND   ca.view_schema = 'collect'
+AND   ca.view_name = '{view}'", connection);
+
+        using var reader = await command.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+        {
+            return null;
+        }
+
+        return new RefreshPolicyState(
+            reader.GetDouble(0),
+            !reader.IsDBNull(1) && reader.GetBoolean(1),
+            reader.IsDBNull(2) ? null : reader.GetInt32(2),
+            reader.IsDBNull(3) ? null : reader.GetFieldValue<TimeSpan>(3));
+    }
+
     /* ---- #1778 live-test helpers: throwaway hypertables shaped like a collector table ---- */
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, System.Threading.CancellationToken ct)
@@ -1220,15 +1474,28 @@ AND   is_compressed = {(compressed ? "true" : "false")}", connection);
         {
             /* Retention targets the hourly CAGGs as well as the raw tables, so the aggregates must exist first —
                the same ordering EnsureRetentionPoliciesAsync documents. */
-            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+            /* #2818: capture, don't discard. Every failure inside EnsureRetentionPoliciesAsync lands in a
+               per-relation catch that logs a warning and moves on — the right behaviour for the service, but
+               with a null logger the only surviving evidence is the count, and "expected 17, got 0" cannot be
+               triaged (that exact failure was written off as a flake once already). Same repair as #1564's
+               purge E2Es: pass the capturing logger and fold Joined into every count assertion, so the next
+               failure names the actual Postgres error in the CI log. */
+            var retentionLog = new CapturingTestLogger();
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, retentionLog, ct);
 
             /* THE assertion: every policy applied. A 42883 would be caught per-policy and counted as 0. */
-            var applied = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
+            var applied = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, retentionLog, ct);
             Assert.True(applied == RetentionPolicyCount,
-                $"expected all {RetentionPolicyCount} retention policies to apply, got {applied} — a swallowed error means the policy SQL is invalid on this TimescaleDB");
+                $"expected all {RetentionPolicyCount} retention policies to apply, got {applied} — a swallowed error means the policy SQL is invalid on this TimescaleDB; {retentionLog.Joined}");
 
-            /* Idempotent: the second pass hits if_not_exists (job_id -1) and must not throw on alter_job(-1). */
-            Assert.Equal(RetentionPolicyCount, await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct));
+            /* Idempotent: the second pass hits if_not_exists (job_id -1) and must not throw on alter_job(-1).
+               Fresh logger — CapturingTestLogger has no reset, and EnsureRetentionPoliciesAsync always logs an
+               Information summary even on success, so reusing retentionLog would bury this pass's own evidence
+               under the first pass's already-explained noise (review finding on #2887). */
+            var reapplyLog = new CapturingTestLogger();
+            var reapplied = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, reapplyLog, ct);
+            Assert.True(reapplied == RetentionPolicyCount,
+                $"the idempotent second pass should count all {RetentionPolicyCount} policies, got {reapplied}; {reapplyLog.Joined}");
 
             using var job = new NpgsqlCommand(@"
 SELECT COUNT(*)
@@ -1297,6 +1564,15 @@ AND   ((SELECT min(bucket) FROM collect.query_stats_hourly) IS NULL
     /// while HELD comes back at 90 still held, and one demoted while ARMED comes back at 90 still armed with
     /// its <c>next_start</c> unmoved — converging a horizon must never trigger an immediate purge (#1680's
     /// never-expose-an-armed-window discipline, held through an update rather than only at creation).
+    ///
+    /// <para>The <c>next_start</c> half is asserted through <see cref="AssertConvergenceLeftNextStartAlone"/>
+    /// rather than as raw equality, because the policy under test is deliberately ARMED and an armed
+    /// TimescaleDB job is one its background scheduler may run at any moment — see that helper for the two
+    /// events being separated and for what the separation cannot see (#2937).</para>
+    ///
+    /// <para>The settled third sweep additionally asserts the convergence reported moving NOTHING, because
+    /// that is the only observable difference between the no-op the <c>IS DISTINCT FROM</c> guard promises and
+    /// a redundant re-apply of every horizon - see <see cref="HorizonMovesReported"/>.</para>
     /// </summary>
     [Fact]
     public async Task EnsureRetentionPolicies_ConvergesAnOldHorizon_PreservingScheduledStateAndNextStart_AgainstDevPostgres()
@@ -1339,8 +1615,18 @@ VALUES (1, $1, 9137, 'converge-1937', 'TestDb', decode(md5('converge'), 'hex'), 
                 await seed.ExecuteNonQueryAsync(ct);
             }
 
-            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
-            Assert.Equal(RetentionPolicyCount, await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct));
+            /* #2818: the nightly's one "expected 17, got 0" on this exact line was untriageable because every
+               per-relation warning went to a null logger. Capture instead, and carry the evidence in the
+               assertion message — see the EndToEnd test above for the full reasoning. A FRESH logger per pass
+               below: this fixture keeps query_stats HELD for the whole test (see the comment above), so every
+               pass logs a benign "... HELD PAUSED ..." warning for it plus EnsureRetentionPoliciesAsync's own
+               Information summary — sharing one CapturingTestLogger (which has no reset) would bury whichever
+               pass actually fails under the earlier passes' expected noise (review finding on #2887). */
+            var createLog = new CapturingTestLogger();
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, createLog, ct);
+            var created17 = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, createLog, ct);
+            Assert.True(created17 == RetentionPolicyCount,
+                $"the creation pass should apply all {RetentionPolicyCount} retention policies, got {created17}; {createLog.Joined}");
 
             /* The gate's own verdicts, asserted as preconditions: short coverage holds, empty coverage arms. */
             var created = new
@@ -1374,8 +1660,22 @@ AND   j.hypertable_name = '" + ArmedRelation + "'", connection))
             Assert.Equal(("21 days", false), (before.Held.DropAfter, before.Held.Scheduled));
             Assert.Equal(("21 days", true), (before.Armed.DropAfter, before.Armed.Scheduled));
 
-            /* THE measured claim: the sweep converges both onto the constant, preserving everything else. */
-            Assert.Equal(RetentionPolicyCount, await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct));
+            /* THE measured claim: the sweep converges both onto the constant, preserving everything else.
+               Fresh logger — see the fixture-level #2818 comment above. */
+            var convergeLog = new CapturingTestLogger();
+            var converged = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, convergeLog, ct);
+            Assert.True(converged == RetentionPolicyCount,
+                $"the convergence pass should count all {RetentionPolicyCount} policies, got {converged}; {convergeLog.Joined}");
+
+            /* ... and it reports moving exactly the two horizons that drifted, read off the LOG rather than
+               the catalog. This is the POSITIVE CONTROL for the settled sweep's zero further down: a reading
+               that matched nothing would make that zero a claim about nothing, so the same reading has to fire
+               here, on the pass that really does move something. */
+            var convergeMoves = HorizonMovesReported(convergeLog);
+            Assert.True(convergeMoves == 2,
+                $"the convergence pass should report moving exactly the two demoted horizons, got {convergeMoves}; {convergeLog.Joined}");
+            Assert.Contains($"Retention policy for {HeldRelation} moved to a 4 days horizon", convergeLog.Joined, StringComparison.Ordinal);
+            Assert.Contains($"Retention policy for {ArmedRelation} moved to a 90 days horizon", convergeLog.Joined, StringComparison.Ordinal);
 
             var after = new
             {
@@ -1388,12 +1688,33 @@ AND   j.hypertable_name = '" + ArmedRelation + "'", connection))
             Assert.False(after.Held.Scheduled, "a HELD policy must stay held across a horizon convergence");
             Assert.Equal("90 days", after.Armed.DropAfter);
             Assert.True(after.Armed.Scheduled, "an ARMED policy must stay armed across a horizon convergence");
-            Assert.Equal(before.Armed.NextStart, after.Armed.NextStart);
+            AssertConvergenceLeftNextStartAlone(before.Armed, after.Armed, "the convergence sweep");
 
-            /* Idempotence: a third sweep finds nothing distinct from the constants and moves nothing. */
-            Assert.Equal(RetentionPolicyCount, await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct));
+            /* Idempotence: a third sweep finds nothing distinct from the constants and moves nothing.
+               Fresh logger — see the fixture-level #2818 comment above. */
+            var settledLog = new CapturingTestLogger();
+            var settled17 = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, settledLog, ct);
+            Assert.True(settled17 == RetentionPolicyCount,
+                $"the idempotent third sweep should count all {RetentionPolicyCount} policies, got {settled17}; {settledLog.Joined}");
+
+            /* THE guard's claim, and the one thing the state reads below cannot see. Every value they compare
+               is identical whether this sweep was a no-op or re-applied all 17 horizons on top of themselves,
+               because a returned row is the convergence's ONLY effect beyond the horizon itself - it is what
+               increments the sweep's converged count and logs the per-relation line. So idempotence has to be
+               asserted as "moved nothing", not as "ended up the same".
+
+               Measured with the IS DISTINCT FROM guard deleted from ConvergeRetentionHorizonSql, on
+               TimescaleDB 2.29.2 / PostgreSQL 17.11: the statement then returns a row for all 17 relations on
+               EVERY start, a fresh store's first one included, and this is the only assertion in the test that
+               notices - state, counts and next_start all still match. An operator would be told 17 tiers had
+               just been migrated off an earlier default when none had, on every restart, forever. #1958's
+               defect class exactly: a log line that did not survive being checked. */
+            var settledMoves = HorizonMovesReported(settledLog);
+            Assert.True(settledMoves == 0,
+                $"the settled sweep must report moving NO horizon - the IS DISTINCT FROM guard makes the convergence a no-op once every policy is on its constant - got {settledMoves}; {settledLog.Joined}");
             var settled = await PolicyStateAsync(connection, ArmedRelation, ct);
-            Assert.Equal(("90 days", true, after.Armed.NextStart), (settled.DropAfter, settled.Scheduled, settled.NextStart));
+            Assert.Equal(("90 days", true), (settled.DropAfter, settled.Scheduled));
+            AssertConvergenceLeftNextStartAlone(after.Armed, settled, "the idempotent third sweep");
             Assert.Equal("4 days", (await PolicyStateAsync(connection, HeldRelation, ct)).DropAfter);
 
             bodySucceeded = true;
@@ -1419,6 +1740,36 @@ AND   j.hypertable_name = '" + ArmedRelation + "'", connection))
         }
     }
 
+    /// <summary>
+    /// How many relations a sweep REPORTED moving onto a new horizon, counted off the captured log rather than
+    /// out of the catalog. <c>ConvergeRetentionHorizonSql</c> ends in an <c>IS DISTINCT FROM</c> comparison
+    /// whose entire purpose is to return NO row for a policy already sitting on its constant, and a returned
+    /// row is the only thing that statement does beyond the horizon itself: it is what increments
+    /// <see cref="TimescaleSupport.EnsureRetentionPoliciesAsync"/>'s converged count and logs one line per
+    /// relation. The resulting job state therefore cannot tell a no-op from a redundant re-apply of the value
+    /// already there - the log is the only place that difference exists at all.
+    ///
+    /// <para>Counted by phrase, and the phrase is deliberately a fragment: the sweep's own end-of-run summary
+    /// says "moved ONTO a new horizon", so it cannot be miscounted here. The fragment is pinned in BOTH
+    /// directions by the two callers - the convergence pass requires a positive count AND the exact
+    /// per-relation text, so a reword that stopped matching fails loudly there rather than quietly turning the
+    /// settled pass's expected zero into a tautology.</para>
+    /// </summary>
+    private static int HorizonMovesReported(CapturingTestLogger log)
+    {
+        const string Moved = "moved to a";
+
+        var captured = log.Joined;
+        var reported = 0;
+        for (var at = captured.IndexOf(Moved, StringComparison.Ordinal); at >= 0;
+             at = captured.IndexOf(Moved, at + Moved.Length, StringComparison.Ordinal))
+        {
+            reported++;
+        }
+
+        return reported;
+    }
+
     /// <summary>Sets a retention policy's <c>drop_after</c> directly, standing in for a store created under an
     /// older default. Named <c>config</c> only, like the convergence itself, so the demotion cannot arm.</summary>
     private static async Task DemoteHorizonAsync(NpgsqlConnection connection, string relation, string horizon, System.Threading.CancellationToken ct)
@@ -1433,24 +1784,129 @@ AND   j.hypertable_name = '" + relation + "'", connection);
         await demote.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>One policy's observable state: the horizon it would drop at, whether it is armed, and when it
-    /// would next run.</summary>
-    private static async Task<(string DropAfter, bool Scheduled, DateTime? NextStart)> PolicyStateAsync(
+    /// <summary>One policy's observable state: the horizon it would drop at, whether it is armed, when it
+    /// would next run, and — since #2937 — the scheduler's own run bookkeeping for the same job, which is what
+    /// makes a <c>next_start</c> that moved attributable. See
+    /// <see cref="AssertConvergenceLeftNextStartAlone"/>.</summary>
+    private sealed record RetentionPolicyState(
+        string DropAfter,
+        bool Scheduled,
+        DateTime? NextStart,
+        long Runs,
+        DateTime? LastRunStartedAt,
+        string? JobStatus);
+
+    private static async Task<RetentionPolicyState> PolicyStateAsync(
         NpgsqlConnection connection, string relation, System.Threading.CancellationToken ct)
     {
+        /* Joined on job_id, NEVER on the hypertable name: timescaledb_information.jobs resolves a continuous
+           aggregate's policy to the USER VIEW (collect.procedure_stats_hourly, via
+           COALESCE(ca.user_view_schema, ...)), while job_stats reports the same job against the internal
+           materialization hypertable (_timescaledb_internal._materialized_hypertable_N). Measured on 2.29.2 -
+           filtering job_stats by this relation name matches nothing, which would read as "never run" and make
+           the gate below permanently blind. */
         using var read = new NpgsqlCommand(@"
-SELECT j.config->>'drop_after', j.scheduled, j.next_start
+SELECT j.config->>'drop_after', j.scheduled, j.next_start,
+       coalesce(s.total_runs, 0), s.last_run_started_at, s.job_status
 FROM timescaledb_information.jobs AS j
+LEFT JOIN timescaledb_information.job_stats AS s
+  ON s.job_id = j.job_id
 WHERE j.proc_name = 'policy_retention'
 AND   j.hypertable_schema = 'collect'
-AND   j.hypertable_name = '" + relation + "'", connection);
+AND   j.hypertable_name = '" + relation + "'", connection) { CommandTimeout = PolicyReadTimeoutSeconds };
         using var reader = await read.ExecuteReaderAsync(ct);
         Assert.True(await reader.ReadAsync(ct), $"no policy_retention job found for collect.{relation}");
 
         /* next_start is NULL for a HELD job - a paused policy has no next run (the same sentinel family as
            job_stats' -infinity). */
-        return (reader.GetString(0), reader.GetBoolean(1),
-            await reader.IsDBNullAsync(2, ct) ? null : reader.GetDateTime(2));
+        return new RetentionPolicyState(
+            reader.GetString(0),
+            reader.GetBoolean(1),
+            await reader.IsDBNullAsync(2, ct) ? null : reader.GetDateTime(2),
+            reader.GetInt64(3),
+            await reader.IsDBNullAsync(4, ct) ? null : reader.GetDateTime(4),
+            await reader.IsDBNullAsync(5, ct) ? null : reader.GetString(5));
+    }
+
+    /// <summary>Catalog read against the live fixture, explicit rather than on Npgsql's undocumented 30-second
+    /// default (#2874).</summary>
+    private const int PolicyReadTimeoutSeconds = 30;
+
+    /// <summary>
+    /// The <c>next_start</c>-unmoved claim, stated so that TimescaleDB's background scheduler cannot decide it
+    /// either way (#2937). The policy under test is deliberately ARMED — that is the state #1680 cares about —
+    /// and an armed job is one the scheduler may run at any moment, after which <c>next_start</c> LEGITIMATELY
+    /// advances. Raw equality conflated that with the defect this test exists for, so it went red on healthy
+    /// behaviour at whatever rate the sweep overlapped the job's schedule; three earlier flakes in this family
+    /// (#1889, #2143, #2818) were all a live test racing the same scheduler.
+    ///
+    /// <para><b>The two events, and what separates them.</b> Measured on TimescaleDB 2.29.2 / PostgreSQL 17:
+    /// none of the sweep's own statements touch <c>next_start</c> — not <c>alter_job(config =&gt; ...)</c> (the
+    /// convergence), not <c>alter_job(scheduled =&gt; true)</c> on an already-armed job, not a hold followed by
+    /// a re-arm. A scheduler RUN is the only thing that moves it, and a run is independently visible in the
+    /// same catalog row: <c>total_runs</c> increments when the run STARTS, leaving <c>next_start</c> at the
+    /// <c>-infinity</c> in-progress sentinel with <c>job_status = 'Running'</c>, and completion sets
+    /// <c>next_start = last_successful_finish + schedule_interval</c> — ~24 hours out for a retention policy,
+    /// which is the exact value the CI failure reported.</para>
+    ///
+    /// <para>So <b>no run and <c>next_start</c> moved is a defect</b>, and stays a hard failure asserted as
+    /// the same equality it always was: that is the branch a convergence which re-arms or re-times the policy
+    /// lands in. A run HAVING happened is the scheduler's own entitlement, and what still has to hold there is
+    /// that the resulting value is one a run produces — the in-progress sentinel, or a next run strictly later
+    /// than the run that explains it — rather than an immediate-purge window.</para>
+    ///
+    /// <para><b>What this cannot see</b>, named rather than papered over: a sweep that both re-timed the policy
+    /// AND had a scheduler run land in the same window takes the second branch and passes, because the pre-run
+    /// value is gone by then and nothing in the catalog attributes a run to a cause. The strict branch is where
+    /// the claim lives; the tolerant branch only declines to blame the sweep for what the scheduler is
+    /// documented to do.</para>
+    /// </summary>
+    private static void AssertConvergenceLeftNextStartAlone(
+        RetentionPolicyState before, RetentionPolicyState after, string sweep)
+    {
+        /* The evidence travels WITH the assertion - a bare "values differ" on this line was untriageable, and
+           #2818 was filed about exactly that on this test. */
+        var evidence =
+            $"next_start {Stamp(before.NextStart)} -> {Stamp(after.NextStart)}, "
+            + $"total_runs {before.Runs} -> {after.Runs}, "
+            + $"last_run_started_at {Stamp(before.LastRunStartedAt)} -> {Stamp(after.LastRunStartedAt)}, "
+            + $"job_status {before.JobStatus ?? "(null)"} -> {after.JobStatus ?? "(null)"}";
+
+        if (after.Runs == before.Runs && !RunInFlight(before))
+        {
+            /* No run intervened, so the sweep is the ONLY thing that could have moved next_start. */
+            Assert.True(after.NextStart == before.NextStart,
+                $"{sweep} moved an ARMED policy's next_start with no scheduler run to account for it - "
+                + $"converging a horizon must never re-time or re-arm the job (#1680); {evidence}");
+            return;
+        }
+
+        /* Either a new run started (total_runs increments at run START, not at completion) or one that was
+           ALREADY in flight at the earlier observation has since finished - and a completion moves next_start
+           with the run count static, so it has to reach this branch too or it would read as a sweep. */
+        Assert.True(after.Scheduled, $"a scheduler run must not leave the policy held; {evidence}");
+
+        if (RunInFlight(after))
+        {
+            /* Still executing. next_start is the -infinity sentinel, which Npgsql surfaces as
+               DateTime.MinValue; pin that rather than accepting whatever is there. */
+            Assert.True(after.NextStart == DateTime.MinValue,
+                $"a run in progress must leave next_start at the -infinity in-progress sentinel; {evidence}");
+            return;
+        }
+
+        Assert.True(after.LastRunStartedAt is not null && after.NextStart > after.LastRunStartedAt,
+            $"{sweep} left an ARMED policy's next run at or before the run that supposedly explains it, "
+            + $"which is an immediate-purge window and not a scheduled one (#1680); {evidence}");
+
+        static string Stamp(DateTime? value) => value?.ToString("O", CultureInfo.InvariantCulture) ?? "(null)";
+
+        /* A run TimescaleDB has started and not finished. job_status is the view's own word for it; the
+           -infinity next_start is the same state read off the row, kept as a second tell because it is the
+           value the assertions above actually compare and Npgsql surfaces it as DateTime.MinValue. */
+        static bool RunInFlight(RetentionPolicyState state)
+            => string.Equals(state.JobStatus, "Running", StringComparison.Ordinal)
+            || state.NextStart == DateTime.MinValue;
     }
 
     /// <summary>The continuous aggregates present in <c>collect</c> right now, so the retention test can drop
@@ -1806,4 +2262,1577 @@ LIMIT 1", connection))
             $"DELETE FROM wait_stats WHERE server_id = {TestServerId}; DELETE FROM collection_log WHERE server_id = {TestServerId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
+
+    /* ---------------- the compression PHASE grid (#3035) ---------------- */
+
+    /// <summary>
+    /// The grid's actual invariant: every minute a compression policy may start on is clear of the guard band
+    /// after each LIGHT refresh, and none of them is inside the heaviest refresh's window at all.
+    ///
+    /// <para><b>Not "different from the refresh minutes".</b> That weaker property is satisfied by the minute
+    /// straight after the heaviest refresh's start, and that minute sits squarely inside the 896 s it
+    /// occupies — a compression tick there is exactly the arrangement #3012's convoy formed on. What has to
+    /// hold is a DISTANCE from each refresh START, because the convoy needs compression's
+    /// <c>AccessExclusiveLock</c> request to arrive while a refresh already holds its shared lock.</para>
+    ///
+    /// <para><b>RE-DERIVED, not renumbered (#3174).</b> The old grid's minutes were the second half of each
+    /// uniform refresh slot, and there is no uniform slot to take a half of any more. The rule is unchanged;
+    /// its output is a contiguous band at the tail of the hour because the refresh bands are contiguous too.
+    /// Both the derived WIDTH and the whole minute list are pinned: a test that only re-derived the rule
+    /// would agree with any derivation, including a wrong one, and the width is what ties the band to the
+    /// catalog rather than to whatever the refreshes happened to leave.</para>
+    /// </summary>
+    [Fact]
+    public void CompressionPhaseGrid_ClearsEveryRefreshSlotsGuardBand_AndTheHeaviestRefreshsSlotWhole()
+    {
+        /* The two chosen inputs, as literals, and every derived width as an identity beside its literal —
+           a re-derivation-only assertion agrees with any derivation, including a frozen one. */
+        Assert.Equal(1, TimescaleSupport.LightRefreshStepMinutes);
+        Assert.Equal(3, TimescaleSupport.CompressionPhaseMaxPerMinute);
+
+        /* The guard's width is CHOSEN, so it is pinned as a literal and NOT as an identity against the
+           light-refresh ceiling (#3188). The identity that used to sit here was
+           `guard == ceil(OtherHourlyRefreshObservedCeilingSeconds / 60)`, and it is now false by design
+           while STILL PASSING, because 4 and ceil(226.8 / 60) are both 4 - an equality between a declared
+           width and a rounded measurement certifies a derivation the code does not have as soon as the two
+           coincide. What replaces it is the requirement the width actually has to meet, which is an
+           inequality no coincidence satisfies, plus the code-shape check in
+           RefreshCeilingProvenancePinTests.NoGuardWidth_IsDerivedFromAMeasurement. */
+        Assert.Equal(4, TimescaleSupport.CompressionPhaseGuardMinutes);
+        Assert.True(
+            TimescaleSupport.CompressionPhaseGuardMinutes
+                <= TimescaleSupport.WidestFeasibleCompressionPhaseGuardMinutes,
+            $"the declared {TimescaleSupport.CompressionPhaseGuardMinutes}-minute guard is wider than the "
+            + $"{TimescaleSupport.WidestFeasibleCompressionPhaseGuardMinutes} minutes the hour carries at the "
+            + "recorded heaviest ceiling, so the heaviest refresh's window no longer clears that ceiling with "
+            + "the watch line's lead intact - re-take the width against its own upper bound (#3188)");
+
+        Assert.Equal(24, TimescaleSupport.CompressionPhaseBandMinutes);
+        Assert.Equal(
+            (TimescaleSupport.HypertableCount + TimescaleSupport.CompressionPhaseMaxPerMinute - 1)
+            / TimescaleSupport.CompressionPhaseMaxPerMinute,
+            TimescaleSupport.CompressionPhaseBandMinutes);
+
+        Assert.Equal(15, TimescaleSupport.HeaviestRefreshStartMinute);
+        Assert.Equal(21, TimescaleSupport.HeaviestRefreshWindowMinutes);
+        Assert.Equal(
+            TimescaleSupport.MinutesInHourlyCadence
+            - TimescaleSupport.HeaviestRefreshStartMinute
+            - TimescaleSupport.CompressionPhaseBandMinutes,
+            TimescaleSupport.HeaviestRefreshWindowMinutes);
+
+        /* THE OPERATING ENVELOPE, as assertions rather than as prose. The whole grid rests on the heaviest
+           refresh finishing inside the window the hour can spare, with the watch line's lead time intact; a
+           downgrade whose condition is only written in a comment reads as unconditional to whoever finds it
+           next. A recorded ceiling that outgrew the window therefore has to FAIL here rather than be
+           renumbered through — and the window is a REMAINDER, so there is no wider one to give it. */
+        Assert.Equal(896, TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds);
+        Assert.Equal(226.8, TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds);
+        Assert.True(
+            TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds < TimescaleSupport.RefreshPhaseSlotSeconds,
+            $"the heaviest hourly refresh's recorded ceiling is {TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds}s "
+            + $"against a {TimescaleSupport.RefreshPhaseSlotSeconds}s window — it no longer fits inside the window the "
+            + "hour can spare, so excluding that window is no longer enough and the compression grid has to be re-derived");
+
+        /* THE TWO RELATIONSHIPS THE SHAPE RESTS ON, which replace the old "more than 4x" ratio (#3174).
+           The ratio was never what the geometry consumed, and at 896 s against 226.8 s it is 3.95x — so a
+           guard written as Other * 4 < Heaviest was red at every possible step while the geometry it was
+           supposed to protect was sound. What the geometry consumes is: a light refresh fits inside the
+           guard band, and the heaviest one does not. */
+        Assert.True(
+            TimescaleSupport.CompressionPhaseGuardMinutes * 60 >= TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds,
+            $"the {TimescaleSupport.CompressionPhaseGuardMinutes}-minute guard band is "
+            + $"{TimescaleSupport.CompressionPhaseGuardMinutes * 60}s against a "
+            + $"{TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds}s recorded ceiling for a non-heaviest hourly "
+            + "refresh — a compression policy can now start while a light refresh still holds AccessShareLock, "
+            + "which is #3012's mechanism");
+        Assert.True(
+            TimescaleSupport.CompressionPhaseGuardMinutes * 60 < TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds,
+            "the guard band now clears the heaviest refresh, so excluding its whole window is over-conservative "
+            + "and the grid should be widened deliberately rather than left as-is");
+
+        var refreshMinutes = TimescaleSupport.HourlyRefreshPhaseOrder
+            .Select(TimescaleSupport.RefreshPhaseMinutesFor)
+            .Distinct()
+            .OrderBy(m => m)
+            .ToArray();
+        Assert.Equal(new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 15 }, refreshMinutes);
+        Assert.Equal(TimescaleSupport.HourlyRefreshPhaseOrder.Count, refreshMinutes.Length);
+
+        var heaviestMinute = TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HeaviestHourlyRefreshView);
+
+        Assert.Equal(
+            new[] { 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59 },
+            TimescaleSupport.CompressionPhaseMinutes.ToArray());
+        Assert.Equal(TimescaleSupport.CompressionPhaseBandMinutes, TimescaleSupport.CompressionPhaseMinutes.Count);
+
+        static int MinutesPastStart(int minute, int start, int cadence) => (minute - start + cadence) % cadence;
+
+        foreach (var minute in TimescaleSupport.CompressionPhaseMinutes)
+        {
+            Assert.DoesNotContain(minute, refreshMinutes);
+
+            foreach (var view in TimescaleSupport.HourlyRefreshPhaseOrder)
+            {
+                var start = TimescaleSupport.RefreshPhaseMinutesFor(view);
+                var band = string.Equals(view, TimescaleSupport.HeaviestHourlyRefreshView, StringComparison.Ordinal)
+                    ? TimescaleSupport.HeaviestRefreshWindowMinutes
+                    : TimescaleSupport.CompressionPhaseGuardMinutes;
+
+                Assert.True(
+                    MinutesPastStart(minute, start, TimescaleSupport.MinutesInHourlyCadence) >= band,
+                    $":{minute.ToString("00", CultureInfo.InvariantCulture)} is only "
+                    + $"{MinutesPastStart(minute, start, TimescaleSupport.MinutesInHourlyCadence)} minute(s) past "
+                    + $"{view}'s :{start.ToString("00", CultureInfo.InvariantCulture)} start, inside its "
+                    + $"{band}-minute band");
+            }
+        }
+
+        /* THE CONTROL: both exclusions actually removed a population. Every assertion in the loop above
+           passes vacuously on an empty or already-clear list, so the excluded sets are named, shown
+           non-empty, shown disjoint from the grid, and shown to account for exactly the minutes missing
+           from it — which is the difference between "the filter matched what it was aimed at" and "the
+           filter produced output". */
+        var excludedByGuard = TimescaleSupport.HourlyRefreshPhaseOrder
+            .Where(v => !string.Equals(v, TimescaleSupport.HeaviestHourlyRefreshView, StringComparison.Ordinal))
+            .SelectMany(v => Enumerable
+                .Range(TimescaleSupport.RefreshPhaseMinutesFor(v), TimescaleSupport.CompressionPhaseGuardMinutes)
+                .Select(m => m % TimescaleSupport.MinutesInHourlyCadence))
+            .Distinct()
+            .ToArray();
+        var excludedByHeaviestWindow = Enumerable
+            .Range(heaviestMinute, TimescaleSupport.HeaviestRefreshWindowMinutes)
+            .Select(m => m % TimescaleSupport.MinutesInHourlyCadence)
+            .ToArray();
+
+        Assert.Equal(15, excludedByGuard.Length);
+        Assert.Equal(21, excludedByHeaviestWindow.Length);
+        Assert.Contains(heaviestMinute + 1, excludedByHeaviestWindow);
+        Assert.Empty(excludedByGuard.Intersect(TimescaleSupport.CompressionPhaseMinutes));
+        Assert.Empty(excludedByHeaviestWindow.Intersect(TimescaleSupport.CompressionPhaseMinutes));
+        Assert.Equal(
+            TimescaleSupport.MinutesInHourlyCadence
+            - excludedByGuard.Union(excludedByHeaviestWindow).Count(),
+            TimescaleSupport.CompressionPhaseMinutes.Count);
+    }
+
+    /// <summary>
+    /// The relationship the recorded ceiling exists to hold: NO compression minute starts while the heaviest
+    /// hourly refresh is still running. Measured in SECONDS from that refresh's own start, against the
+    /// constant, so the two things that could break it — the ceiling rising, or the grid moving a minute
+    /// closer — are both red here.
+    ///
+    /// <para><b>Why this is separate from the guard-band check above.</b> That one asks whether each
+    /// compression minute clears every refresh's own band, which is a statement about the bands. This asks
+    /// whether it clears the HEAVIEST refresh's measured RUNTIME, which is the only quantity that keeps the
+    /// recorded ceiling load-bearing: the window is a remainder of the hour and does not consult the
+    /// ceiling, so without this the ceiling could drift with nothing noticing.</para>
+    ///
+    /// <para><b>The discriminating case is asserted too.</b> A comparison over a grid that already clears the
+    /// refresh by a wide margin is satisfied by almost anything, so the minute that WOULD violate it is
+    /// computed and shown to violate it. Without that, a check that had stopped measuring the right quantity
+    /// would still be green.</para>
+    ///
+    /// <para><b>The watch-line half went RED on #3166's census and #3174's re-derived grid answered it.</b>
+    /// At a 896 s ceiling against the 750 s line a 15-minute slot produced, <c>ceiling &lt; watch</c> was
+    /// false — the sizing figure sat 146 s above the line, so the watch reported the grid's own sizing rather
+    /// than anything new. The answer was the geometry, not a re-typed band: against the window the hour can
+    /// spare the line is 1,050 s and the ceiling is 154 s below it. The gap literal moved with the two terms,
+    /// which is what it is for.</para>
+    /// </summary>
+    [Fact]
+    public void NoCompressionMinuteStartsWhileTheHeaviestRefreshIsStillRunning()
+    {
+        var heaviestSlot = TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HeaviestHourlyRefreshView);
+        var ceiling = TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds;
+        var cadence = TimescaleSupport.MinutesInHourlyCadence;
+
+        int SecondsPastStart(int minute, int start) => (minute - start + cadence) % cadence * 60;
+
+        Assert.NotEmpty(TimescaleSupport.CompressionPhaseMinutes);
+        foreach (var minute in TimescaleSupport.CompressionPhaseMinutes)
+        {
+            Assert.True(
+                SecondsPastStart(minute, heaviestSlot) >= ceiling,
+                $":{minute.ToString("00", CultureInfo.InvariantCulture)} starts "
+                + $"{SecondsPastStart(minute, heaviestSlot)}s after the heaviest refresh's "
+                + $":{heaviestSlot.ToString("00", CultureInfo.InvariantCulture)} start, which is inside the "
+                + $"{ceiling}s that refresh is recorded as taking — the compression grid is no longer clear of "
+                + "the refresh it is placed against (#3035/#3101)");
+        }
+
+        /* The comparison discriminates: the last minute still inside the refresh must fail it. Derived from
+           the ceiling rather than written down, so it moves with the constant. */
+        var lastMinuteInsideTheRefresh = (heaviestSlot + ((ceiling - 1) / 60)) % cadence;
+        Assert.True(SecondsPastStart(lastMinuteInsideTheRefresh, heaviestSlot) < ceiling);
+        Assert.DoesNotContain(lastMinuteInsideTheRefresh, TimescaleSupport.CompressionPhaseMinutes);
+
+        /* And the ceiling is strictly below the watch line, which is what makes a live reading in the warning
+           band news rather than a restatement of the grid's own sizing figure. The GAP is pinned too, since
+           RefreshSlotWarningSeconds states it as a percentage and a percentage in prose cannot notice that
+           its own two terms have moved. */
+        Assert.True(
+            ceiling < TimescaleSupport.RefreshSlotWarningSeconds,
+            $"the recorded ceiling is {ceiling}s against a {TimescaleSupport.RefreshSlotWarningSeconds}s watch "
+            + "line, so the figure the grid is sized against classifies as a warning and the watch reports the "
+            + "grid's own sizing rather than anything new");
+        Assert.Equal(17, (TimescaleSupport.RefreshSlotWarningSeconds - ceiling) * 100 / ceiling);
+    }
+
+    /* ─────────────────── #3044: the watch on the LIVE figure, not the constant ─────────────────── */
+
+    /// <summary>
+    /// The window and the watch line are DERIVED from
+    /// <see cref="TimescaleSupport.HeaviestRefreshWindowMinutes"/>, so a re-derived grid moves them.
+    ///
+    /// <para><b>Both forms, because either alone is passable by the wrong code.</b> The literals are what
+    /// make a moved line loud — a re-derivation-only test agrees with any derivation, including a hardcoded
+    /// one. The identities are what make it MOVE: a warning line frozen at a literal 1050 satisfies the
+    /// literal pin and fails <c>RefreshSlotWarningSeconds * 6 == RefreshPhaseSlotSeconds * 5</c> the moment
+    /// the window changes. That identity is stated as a cross-multiplication rather than a division so it is
+    /// exact at every width — <c>HeaviestRefreshWindowMinutes * 60</c> is divisible by 6 for any integer
+    /// number of minutes.</para>
+    /// </summary>
+    [Fact]
+    public void TheRefreshSlotWatchLines_AreDerivedFromTheWindow_NotWrittenDown()
+    {
+        Assert.Equal(1260, TimescaleSupport.RefreshPhaseSlotSeconds);
+        Assert.Equal(TimescaleSupport.HeaviestRefreshWindowMinutes * 60, TimescaleSupport.RefreshPhaseSlotSeconds);
+
+        Assert.Equal(1050, TimescaleSupport.RefreshSlotWarningSeconds);
+        Assert.Equal(
+            TimescaleSupport.RefreshPhaseSlotSeconds * 5 / 6,
+            TimescaleSupport.RefreshSlotWarningSeconds);
+        Assert.Equal(
+            TimescaleSupport.RefreshPhaseSlotSeconds * 5,
+            TimescaleSupport.RefreshSlotWarningSeconds * 6);
+
+        /* The slot the watch is against is the SAME expression the build-time envelope assertion bounds
+           the recorded ceiling with, so the two can never disagree about where the wall is. */
+        Assert.True(
+            TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds < TimescaleSupport.RefreshPhaseSlotSeconds,
+            "the recorded ceiling no longer fits the slot the runtime watch is against");
+
+        /* And the watch line is strictly inside the wall, with real lead time — the whole point of having
+           a second line rather than only the wall. */
+        Assert.True(
+            TimescaleSupport.RefreshSlotWarningSeconds < TimescaleSupport.RefreshPhaseSlotSeconds,
+            "the watch line is at or past the slot it is meant to give warning of");
+        Assert.Equal(210, TimescaleSupport.RefreshPhaseSlotSeconds - TimescaleSupport.RefreshSlotWarningSeconds);
+    }
+
+    /// <summary>
+    /// The classifier's bands, pinned on the numbers #3044 was filed on rather than on invented ones.
+    ///
+    /// <para><b>The load-bearing assertion is the one on the recorded ceiling.</b> It classifies as INSIDE,
+    /// and the watch line sits ABOVE it — so a live reading in the warning band is this job exceeding its own
+    /// recorded range rather than a restatement of the figure the compression grid is sized against. The five
+    /// readings taken during #3044's review all classify INSIDE too, which is the anti-crying-wolf half; the
+    /// largest of them, at 47.1% of the window, was the recorded ceiling when the record was sixteen runs
+    /// long.</para>
+    ///
+    /// <para><b>The ceiling assertion below went RED on #3166's census and #3174's re-derived grid answered
+    /// it.</b> Against the 750 s line a 15-minute slot produced, 896 s classified <c>ApproachingSlot</c> and
+    /// sat 146 s above the watch line, so the relationship this test is named for had inverted. It was
+    /// restored by moving the geometry — the window the hour can spare is 1,260 s, so the line is 1,050 s —
+    /// and not by re-typing the expected band, which would have hidden it while deciding nothing.</para>
+    ///
+    /// <para>Both boundaries are pinned inclusive on purpose: the wall matches the build-time assertion's
+    /// <c>&lt;</c>, so a value AT the window width fails both.</para>
+    /// </summary>
+    [Fact]
+    public void TheRefreshSlotClassifier_BandsTheLiveReadings_AndKeepsTheWatchLineAboveTheRecordedCeiling()
+    {
+        /* The five live readings from #3044's review, in the order they were taken. */
+        foreach (var seconds in new double[] { 335, 594, 465, 359, 293 })
+        {
+            Assert.Equal(
+                TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
+                TimescaleSupport.ClassifyRefreshSlotHeadroom(seconds));
+        }
+
+        /* THE RELATIONSHIP, as an assertion: the number the grid is sized against is INSIDE the slot and
+           below the watch line, so the warning band is reserved for readings the record has no instance of. */
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(
+                TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds));
+        Assert.True(
+            TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds < TimescaleSupport.RefreshSlotWarningSeconds,
+            "the recorded ceiling classifies as a warning again, so the watch line no longer reports anything "
+            + "the grid's own sizing figure does not already say");
+
+        /* Boundaries, inclusive both times. */
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(TimescaleSupport.RefreshSlotWarningSeconds - 1));
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(TimescaleSupport.RefreshSlotWarningSeconds));
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(TimescaleSupport.RefreshPhaseSlotSeconds - 1));
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.SlotExceeded,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(TimescaleSupport.RefreshPhaseSlotSeconds));
+
+        /* The pre-narrowing band (#3012's 3,301-6,330 s) is what invalidation looks like. */
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.SlotExceeded,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(3301));
+
+        /* An impossible catalog reading costs the line, never the sweep. */
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(-1));
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(double.NaN));
+    }
+
+    /// <summary>
+    /// The reason <see cref="TimescaleSupport.RefreshSlotWarningSeconds"/> rejects the alternative its doc
+    /// comment names — window less one <see cref="TimescaleSupport.CompressionPhaseGuardMinutes"/> band —
+    /// RE-TAKEN at #3174, because the reason it used to give stopped being true (#3107).
+    ///
+    /// <para><b>The old rejection was an ORDERING and the ordering is gone.</b> Under the uniform grid the
+    /// guard was half a slot, the alternative was 480 s, and 480 s sat BELOW the recorded ceiling: a line
+    /// under the ceiling warns on the very run the compression grid is sized against, which is the
+    /// crying-wolf failure the five-sixths choice exists to avoid. Re-deriving the guard from the light
+    /// refreshes' own ceiling shrank it from seven minutes to four, so the alternative rose to 1,020 s and
+    /// now sits ABOVE the ceiling. Both lines clear it, they are 30 s apart, and lead time argues mildly FOR
+    /// the lower one. The ordering therefore cannot carry the decision any more, and this test asserts that
+    /// it cannot — the inversion is pinned rather than papered over, because a rejection whose stated reason
+    /// has quietly reversed is worse than no rejection.</para>
+    ///
+    /// <para><b>What rejects it now is COUPLING, and that is asserted as the two derivations.</b> The
+    /// alternative is a function of <see cref="TimescaleSupport.CompressionPhaseGuardMinutes"/>, which is a
+    /// function of <see cref="TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds"/> — a measurement
+    /// of the TWELVE OTHER refresh policies. So the alternative would move the heaviest refresh's watch line
+    /// whenever a light refresh got slower, which is a dependency the watch line has no business having.
+    /// Five sixths of <see cref="TimescaleSupport.RefreshPhaseSlotSeconds"/> depends on the window this job
+    /// has to fit inside and on nothing else. Under the uniform grid both lines were functions of the same
+    /// step, which is exactly why the argument had to be about ordering then and can be about coupling
+    /// now.</para>
+    ///
+    /// <para><b>Coupling is a stable reason where a share of the readings is not.</b> How large a fraction of
+    /// any quoted population a threshold would fire on moves as that population grows while the threshold
+    /// and the decision behind it stand still. Which constants a line is a function of moves only when the
+    /// derivations move, and then the decision genuinely does have to be re-taken — as it just was.</para>
+    /// </summary>
+    [Fact]
+    public void TheRejectedWatchLineAlternative_NoLongerSitsBelowTheRecordedCeiling_SoTheRejectionIsCoupling()
+    {
+        /* Derived as the prose derives it, then held to the literal too — a re-derivation-only assertion
+           agrees with any derivation, including one frozen at 480. */
+        var alternative =
+            TimescaleSupport.RefreshPhaseSlotSeconds - (TimescaleSupport.CompressionPhaseGuardMinutes * 60);
+        Assert.Equal(1020, alternative);
+        Assert.True(
+            alternative < TimescaleSupport.RefreshSlotWarningSeconds,
+            "the alternative is no longer the LOWER of the two lines, so the paragraph rejecting it as the "
+            + "lower one is about something else now");
+
+        /* THE INVERSION, pinned: the alternative now clears the recorded ceiling, so the ordering the
+           rejection used to rest on no longer discriminates between the two lines. If this ever goes back to
+           false, the ordering argument is available again and the coupling one becomes the weaker of two
+           rather than the only one. */
+        var ceiling = TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds;
+        Assert.True(
+            ceiling < alternative,
+            $"the {alternative} s alternative sits at or below the {ceiling} s recorded ceiling again, so the "
+            + "ordering rejects it on its own and the coupling argument in the doc comment is no longer the "
+            + "load-bearing one — re-read #3107 rather than editing this assertion");
+
+        /* Both lines clear the ceiling, and the gap between them is one guard band less one sixth of the
+           window. Stated as the two verdicts the classifier actually produces, since a line is a
+           compile-time value and the classifier cannot be re-run against the alternative. */
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(ceiling));
+        Assert.True(
+            ceiling < TimescaleSupport.RefreshSlotWarningSeconds,
+            $"the chosen {TimescaleSupport.RefreshSlotWarningSeconds} s line no longer sits above the "
+            + $"{ceiling} s recorded ceiling");
+        Assert.Equal(30, TimescaleSupport.RefreshSlotWarningSeconds - alternative);
+
+        /* THE COUPLING, as the derivations rather than as prose. The alternative is the slot less one guard
+           band, so it moves with the light class's declared width; the chosen line tracks only the window.
+           What is asserted is the SECOND half, because that is the one a future change could break: a
+           warning line that started depending on the guard fails the cross-multiplication below.
+
+           The first half used to be asserted as `guard == ceil(OtherHourlyRefreshObservedCeilingSeconds/60)`,
+           which said the alternative tracked a MEASUREMENT. #3188 declared the width, so it now tracks a
+           scheduling choice instead - a narrower coupling and still a coupling, which is why the rejection
+           on RefreshSlotWarningSeconds stands. That identity is gone rather than restated: it is false by
+           design and it passed anyway, on 4 == ceil(226.8/60). */
+        Assert.Equal(
+            TimescaleSupport.RefreshPhaseSlotSeconds * 5,
+            TimescaleSupport.RefreshSlotWarningSeconds * 6);
+        Assert.Equal(
+            TimescaleSupport.HeaviestRefreshWindowMinutes * 60,
+            TimescaleSupport.RefreshPhaseSlotSeconds);
+
+        /* The rule the inequalities above are read through: at or past the line warns, one second
+           below it does not. Without this the ordering would be arithmetic with no stated consequence. */
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(TimescaleSupport.RefreshSlotWarningSeconds));
+        Assert.Equal(
+            TimescaleSupport.RefreshSlotHeadroom.InsideSlot,
+            TimescaleSupport.ClassifyRefreshSlotHeadroom(TimescaleSupport.RefreshSlotWarningSeconds - 1));
+
+        /* And the lead time each line leaves, as the two figures rather than as the inequality between them
+           — which is the same inequality asserted above and would add nothing on its own. The lower line
+           leaves the larger margin, so lead time argues FOR it and cannot be part of its rejection. */
+        Assert.Equal(240, TimescaleSupport.RefreshPhaseSlotSeconds - alternative);
+        Assert.Equal(210, TimescaleSupport.RefreshPhaseSlotSeconds - TimescaleSupport.RefreshSlotWarningSeconds);
+    }
+
+    /// <summary>
+    /// The reading carries the derived answers, so a caller cannot log the seconds and drop the verdict — and
+    /// the headroom goes NEGATIVE past the wall rather than clamping, because how far through the wall a run
+    /// went is what sizes the re-derivation.
+    ///
+    /// <para><b>The overrun case is DERIVED from the window, not written down (#3174).</b> It used to probe
+    /// with a literal 1200 s and assert <c>-300</c>. That is a bound expressed over the grid and written as
+    /// a value, and it fails in the worst way available: at a 20-minute geometry 1200 s IS the window, so
+    /// the reading's headroom becomes 0, <c>Assert.Equal(-300, ...)</c> would be the only thing to notice —
+    /// and had the expected figure been re-typed to match, the case would have stopped testing negative
+    /// headroom while staying green. Derived, the probe is past the wall at every window width, and the
+    /// overrun is asserted to be strictly positive so a degenerate geometry cannot make the case
+    /// vacuous.</para>
+    /// </summary>
+    [Fact]
+    public void TheRefreshSlotReading_CarriesItsOwnVerdict_AndReportsOverrunAsNegativeHeadroom()
+    {
+        var atTheCeiling = new HeaviestRefreshSlotReading(
+            TimescaleSupport.HeaviestHourlyRefreshView,
+            TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds);
+
+        /* The recorded ceiling: 71.1% of the window and 364 s clear, inside the routine band. That band
+           assertion went RED on #3166's census against a 15-minute slot and #3174 answered it with geometry
+           rather than with a renumbered band — see the classifier test for the ordering it restored. */
+        Assert.Equal(TimescaleSupport.RefreshSlotHeadroom.InsideSlot, atTheCeiling.Headroom);
+        Assert.Equal(364, atTheCeiling.ClearOfSlotSeconds);
+        Assert.Equal(71.1, atTheCeiling.PercentOfSlot, 1);
+
+        /* The watch line, which is where APPROACHING starts: 83.3% of the window, 210 s clear. */
+        var atTheWatchLine = new HeaviestRefreshSlotReading(
+            TimescaleSupport.HeaviestHourlyRefreshView, TimescaleSupport.RefreshSlotWarningSeconds);
+        Assert.Equal(TimescaleSupport.RefreshSlotHeadroom.ApproachingSlot, atTheWatchLine.Headroom);
+        Assert.Equal(210, atTheWatchLine.ClearOfSlotSeconds);
+        Assert.Equal(83.3, atTheWatchLine.PercentOfSlot, 1);
+
+        /* OVERRUN, derived: a run one sixth of the window past the wall. The sixth is the same fraction the
+           watch line is expressed over, so this needs no second chosen number, and it is asserted positive
+           first — a zero overrun would make every assertion below pass while testing nothing. */
+        var overrunBy = TimescaleSupport.RefreshPhaseSlotSeconds / 6;
+        Assert.True(
+            overrunBy > 0,
+            "the derived overrun is zero, so the negative-headroom case below is vacuous — the window has "
+            + "collapsed and the grid needs re-deriving (#3174)");
+
+        var through = new HeaviestRefreshSlotReading(
+            TimescaleSupport.HeaviestHourlyRefreshView, TimescaleSupport.RefreshPhaseSlotSeconds + overrunBy);
+        Assert.Equal(TimescaleSupport.RefreshSlotHeadroom.SlotExceeded, through.Headroom);
+        Assert.Equal(-overrunBy, through.ClearOfSlotSeconds);
+        Assert.True(
+            through.ClearOfSlotSeconds < 0,
+            "headroom past the wall is not negative, so the overrun clamps instead of reporting how far "
+            + "through the wall the run went");
+    }
+
+    /// <summary>
+    /// The log level is proportionate: Debug for the routine band (an hourly Information line about a healthy
+    /// job is how a signal gets buried), Warning while the grid's precondition still holds, Error once it is
+    /// false. A null reading — a fresh store, a plain-PostgreSQL store, a swallowed read — says NOTHING rather
+    /// than logging a zero, which would read as "finished instantly".
+    /// </summary>
+    [Fact]
+    public void TheRefreshSlotLogLine_IsLeveledByBand_AndSaysNothingWithoutAReading()
+    {
+        var quiet = new CapturingTestLogger();
+        TimescaleSupport.LogHeaviestRefreshSlotHeadroom(null, quiet);
+        Assert.Equal("(no log lines captured)", quiet.Joined);
+
+        /* THE ROUTINE-BAND CASE IS FED THE GRID'S OWN SIZING FIGURE, which is what makes asserting Debug
+           here worth anything. The recorded ceiling is 896 s, 71.1% of the 1,260 s slot and 154 s below the
+           1,050 s watch line — ceiling, slot and watch line are all #3178's — so
+           ClassifyRefreshSlotHeadroom bands it InsideSlot and the line comes out at Debug. A lower literal
+           would cover the level table just as well while dropping the claim this case exists to hold: that
+           the figure the grid is SIZED AROUND is a routine reading, not a warning. Because both sides are
+           read from TimescaleSupport rather than written as literals here, the two can only meet by a real
+           change — a census raising the ceiling (#3166) or a re-derivation narrowing the slot (#3174,
+           #3178) — and when they do, this case goes red instead of the product quietly calling its own
+           sizing figure a warning. */
+        var inside = new CapturingTestLogger();
+        TimescaleSupport.LogHeaviestRefreshSlotHeadroom(
+            new HeaviestRefreshSlotReading(
+                TimescaleSupport.HeaviestHourlyRefreshView,
+                TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds),
+            inside);
+        Assert.StartsWith("Debug:", inside.Joined, StringComparison.Ordinal);
+        Assert.Contains(TimescaleSupport.HeaviestHourlyRefreshView, inside.Joined, StringComparison.Ordinal);
+
+        var approaching = new CapturingTestLogger();
+        TimescaleSupport.LogHeaviestRefreshSlotHeadroom(
+            new HeaviestRefreshSlotReading(
+                TimescaleSupport.HeaviestHourlyRefreshView, TimescaleSupport.RefreshSlotWarningSeconds),
+            approaching);
+        Assert.StartsWith("Warning:", approaching.Joined, StringComparison.Ordinal);
+
+        /* #3119: the Warning line names the route that can answer a maximum question. The hourly
+           self-metrics series serves a last-snapshot-per-day point, so it cannot stand alone as the
+           per-run history an operator following this line goes looking for. */
+        Assert.Contains("timescaledb_information.job_history", approaching.Joined, StringComparison.Ordinal);
+
+        /* #3175: and the line says WHEN that route is empty, which is the half a pointer cannot carry on its
+           own. job_history only records executions where timescaledb.enable_job_execution_logging is on, it
+           is off by default, and the conf block that sets it cannot be healed onto an older cluster - so an
+           operator following this line on such a store gets zero rows and reads them as a quiet hour.
+           Pinned because the shape is a known one: get_store_metrics' description pin has required this same
+           route to be NAMED since #3119 and passed the whole time the route answered nothing there. A pin on
+           a pointer's presence cannot tell you the thing pointed at replies. */
+        Assert.Contains("enable_job_execution_logging", approaching.Joined, StringComparison.Ordinal);
+
+        var exceeded = new CapturingTestLogger();
+        TimescaleSupport.LogHeaviestRefreshSlotHeadroom(
+            new HeaviestRefreshSlotReading(
+                TimescaleSupport.HeaviestHourlyRefreshView, TimescaleSupport.RefreshPhaseSlotSeconds),
+            exceeded);
+        Assert.StartsWith("Error:", exceeded.Joined, StringComparison.Ordinal);
+
+        /* The breach line names the REMEDY the code's own envelope states — re-derive #3035's grid — and not
+           #2136's "extend the job's schedule_interval", which for this job changes what the aggregate
+           materializes (the hourly schedule interval is also its end_offset) and does nothing about the
+           slot. */
+        Assert.Contains("#3035", exceeded.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("schedule_interval", exceeded.Joined, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The runtime read is keyed on the VIEW, through
+    /// <see cref="TimescaleSupport.ContinuousAggregateRefreshStateSql"/>'s MEASURED OR-join.
+    ///
+    /// <para>Three properties, each of which was a live defect somewhere in this file's history. The
+    /// materialization-hypertable identity alone reads back nothing, so both arms have to be present. A job
+    /// id would name a different job on any other deployment, so the read must not be keyed on one. And a
+    /// failed run's duration is not an envelope reading, which is why #2136's <c>last_run_status</c> filter is
+    /// carried here too.</para>
+    /// </summary>
+    [Fact]
+    public void TheHeaviestRefreshRuntimeRead_IsKeyedOnTheView_ThroughTheMeasuredJoin()
+    {
+        var sql = TimescaleSupport.HeaviestRefreshRuntimeSql;
+
+        Assert.Contains("j.proc_name = 'policy_refresh_continuous_aggregate'", sql, StringComparison.Ordinal);
+        Assert.Contains(
+            $"ca.view_name = '{TimescaleSupport.HeaviestHourlyRefreshView}'", sql, StringComparison.Ordinal);
+        Assert.Contains("ca.view_schema = 'collect'", sql, StringComparison.Ordinal);
+
+        /* BOTH arms of the measured OR-join — the materialization-only form shipped once and found nothing. */
+        Assert.Contains(
+            "ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name",
+            sql, StringComparison.Ordinal);
+        Assert.Contains(
+            "ca.materialization_hypertable_schema = j.hypertable_schema AND ca.materialization_hypertable_name = j.hypertable_name",
+            sql, StringComparison.Ordinal);
+
+        /* The duration comes from job_stats and only from a SUCCESSFUL run. */
+        Assert.Contains("js.last_run_duration", sql, StringComparison.Ordinal);
+        Assert.Contains("js.last_run_status = 'Success'", sql, StringComparison.Ordinal);
+
+        /* Not keyed on a job id, which is per-deployment. */
+        Assert.DoesNotContain("job_id =", sql, StringComparison.Ordinal);
+
+        /* The live test corroborates the join by re-running this statement with ONLY its status filter
+           spliced out. That splice is string work on a verbatim literal in a CRLF file, so it is pinned HERE
+           rather than discovered against a live store: a splice that silently matched nothing would leave the
+           live test running the unmodified statement and passing for the wrong reason — the "test that agrees
+           with any derivation" failure, one layer down. */
+        var relaxed = sql
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace("\nAND   js.last_run_status = 'Success'", "", StringComparison.Ordinal);
+
+        Assert.DoesNotContain("last_run_status", relaxed, StringComparison.Ordinal);
+        Assert.Contains("ca.view_schema = 'collect'", relaxed, StringComparison.Ordinal);
+        Assert.Equal(
+            sql.Replace("\r\n", "\n", StringComparison.Ordinal).Length - "\nAND   js.last_run_status = 'Success'".Length,
+            relaxed.Length);
+    }
+
+    /// <summary>
+    /// The reason #3044 is a LOG LINE and not a second self-alert, pinned so the coincidence it rests on
+    /// cannot rot silently.
+    ///
+    /// <para>#2136's Store Job Over Cadence warns at a store-backed percent of a job's OWN schedule interval,
+    /// default 25. For an hourly job that is 900 s. So an alert at the same place would fire on the same job,
+    /// the same reading and the same hour as #2136 does, which is what rules the alert form out.</para>
+    ///
+    /// <para><b>The 900 s was exactly one refresh slot until #3174, and now it is not — which is why the
+    /// relationship this test pins is an ORDERING rather than an equality.</b> The knob was
+    /// <c>100 / RefreshPhaseSlots</c>; the re-derived grid has no uniform slot count, and V57's applied
+    /// column default means the figure cannot move without a rung
+    /// (<see cref="TimescaleSupport.RefreshSlotPercentOfHourlyCadence"/>). So the knob lands 360 s INSIDE
+    /// the window the compression grid assumes a refresh fits in, which is the safe direction: #2136 speaks
+    /// before the wall rather than after it. What is asserted is that ordering, plus the two ways it can
+    /// break — the knob's clamp letting an operator move the effective line past the wall, and a future
+    /// re-derivation shrinking the window below where the knob already fires.</para>
+    ///
+    /// <para><b>The knob is clamped [5, 100] with no relationship to the grid at all.</b> At the clamp's top
+    /// it lands at 3,600 s, well past the window, with the grid's precondition broken and nothing said —
+    /// which is the whole argument for a bound derived from the grid instead, and #3044's line is that
+    /// bound.</para>
+    /// </summary>
+    [Fact]
+    public void TheJobCadenceKnob_FiresInsideTheWindow_WhichIsWhyTheSlotWatchIsSeparate()
+    {
+        var hourlyCadenceSeconds = (int)TimescaleSupport.HourlyRefreshScheduleSpan.TotalSeconds;
+
+        Assert.Equal(3600, hourlyCadenceSeconds);
+
+        /* #2136's shipped default, and where it lands on an hourly job today. */
+        const int ShippedWarnPercent = 25;
+        Assert.Equal(
+            ShippedWarnPercent, new DarlingConfig().Alerts.StoreJobCadenceWarnPercent);
+        Assert.Equal(
+            ShippedWarnPercent, TimescaleSupport.RefreshSlotPercentOfHourlyCadence);
+        Assert.Equal(900, hourlyCadenceSeconds * ShippedWarnPercent / 100);
+
+        /* THE ORDERING, which is what survives the grid re-derivation: the knob fires strictly inside the
+           window, so it arrives before #3035's precondition is false rather than after. A window that shrank
+           below 900 s would put #2136 past the wall, and that is red here. */
+        Assert.True(
+            hourlyCadenceSeconds * ShippedWarnPercent / 100 < TimescaleSupport.RefreshPhaseSlotSeconds,
+            $"#2136's shipped default fires at {hourlyCadenceSeconds * ShippedWarnPercent / 100}s against a "
+            + $"{TimescaleSupport.RefreshPhaseSlotSeconds}s window — at or past the wall, so the cadence alert "
+            + "would arrive after #3035's precondition is already false. The knob cannot move without a rung "
+            + "(V57), so the repair is the grid");
+        Assert.Equal(360, TimescaleSupport.RefreshPhaseSlotSeconds - (hourlyCadenceSeconds * ShippedWarnPercent / 100));
+
+        /* And where the knob's own clamp lets an operator move it to — well past the wall, with the
+           grid's precondition broken and nothing said. */
+        Assert.True(
+            hourlyCadenceSeconds * 100 / 100 > TimescaleSupport.RefreshPhaseSlotSeconds,
+            "the knob's clamp can no longer be raised past the window, so the argument for a separate "
+            + "grid-derived line has changed");
+
+        /* THE ORDERING BETWEEN THE TWO SIGNALS INVERTED at #3174, and it is asserted in its new direction
+           rather than left to be discovered. #3044's watch used to fire at 750 s, BEFORE #2136's 900 s
+           default; the window the hour can spare puts it at 1,050 s, AFTER it. That is forced, not chosen:
+           the watch line has to clear the 896 s ceiling and the knob is frozen at 900 s by V57, and
+           896 < window * 50 < 900 has no integer solution — so no geometry restores the old order while the
+           ceiling stands where it does. The cost is real and belongs on the record: an operator now sees the
+           cadence alert first, and #2136's documented remedy ("extend the job's schedule_interval") is wrong
+           for this job, because the hourly schedule interval is also its end_offset. #3044's line still
+           carries the correct remedy, and it now arrives second. */
+        Assert.True(
+            TimescaleSupport.RefreshSlotWarningSeconds > hourlyCadenceSeconds * ShippedWarnPercent / 100,
+            "#3044's watch line fires at or before #2136's default cadence warning again, so the ordering "
+            + "this comment records has reverted — re-read it rather than editing the assertion");
+        Assert.True(
+            hourlyCadenceSeconds * ShippedWarnPercent / 100 < TimescaleSupport.RefreshSlotWarningSeconds
+            && TimescaleSupport.RefreshSlotWarningSeconds < TimescaleSupport.RefreshPhaseSlotSeconds,
+            "the three lines are no longer ordered knob, watch, wall");
+
+        /* And the evidence that #2136 does not know this job's size, as a number rather than as prose:
+           the recorded ceiling is 24.9% of the same cadence, while the clamp in DarlingAlertSettings is
+           justified on "the production worst runs ~7% of cadence" — 252 s, well under half of it. Pinned so
+           the doc comment's claim cannot quietly stop being true. */
+        Assert.Equal(
+            24.9,
+            100.0 * TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds / hourlyCadenceSeconds,
+            1);
+        Assert.True(
+            hourlyCadenceSeconds * 7 / 100 * 2 < TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds,
+            "the ~7%-of-cadence figure #2136's clamp is justified on is no longer under half the heaviest "
+            + "refresh's recorded ceiling, so the two calibrations may have been reconciled — re-read both");
+    }
+
+    /// <summary>
+    /// The #3044 read against a LIVE TimescaleDB catalog: it resolves, its join finds the heaviest refresh's
+    /// own policy, and with no completed run yet it returns an HONEST EMPTY rather than a swallowed error.
+    ///
+    /// <para><b>Why this is the shape rather than an end-to-end duration reading.</b> Driving a real
+    /// <c>last_run_duration</c> needs the actual scheduler — foreground <c>run_job</c> does NOT update that
+    /// accounting, which CI proved on <c>StoreSelfMetricsTests</c>' first version — so a duration assertion
+    /// here would mean arming, polling and parking a refresh policy for the sake of a column whose behaviour
+    /// that test already pins. What is unproven without a live store is everything else: that the three-way
+    /// join resolves, that <c>USING (job_id)</c> is unambiguous across it, that the column names and the
+    /// <c>EXTRACT ... ::double precision</c> cast exist on this runtime, and that the OR-join actually finds a
+    /// view — the exact defect that shipped once, when the materialization-only form read back nothing.</para>
+    ///
+    /// <para><b>The load-bearing assertion is that the logger stayed silent.</b>
+    /// <see cref="TimescaleSupport.ReadHeaviestRefreshRuntimeAsync"/> is failure-isolated to null, so a wrong
+    /// column, a broken join or a bad cast all return null too — indistinguishable from "no successful run
+    /// yet" by the return value alone. The Debug line it emits on failure is what separates them, so a silent
+    /// null is the proof and a null on its own would be worth nothing.</para>
+    ///
+    /// <para>And the join is corroborated INDEPENDENTLY, the way
+    /// <see cref="RefreshPolicyCountAsync"/> corroborates its sibling: the shipped statement is re-run with
+    /// only its <c>last_run_status</c> filter spliced out — the shipped text, not a retyped copy — and must
+    /// then find exactly the policy a proc_name-only count says exists. That is what tells "no Success run
+    /// yet" apart from "the read cannot find the job".</para>
+    /// </summary>
+    [Fact]
+    public async Task HeaviestRefreshRuntimeRead_ResolvesAndFindsThePolicy_AndIsHonestlyEmptyBeforeAnyRun_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live refresh-slot read test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        const string Heaviest = TimescaleSupport.HeaviestHourlyRefreshView;
+
+        /* Creating the aggregates changes compose's tier routing, so snapshot and restore. */
+        var preexistingCaggs = await ExistingCaggsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var createLog = new CapturingTestLogger();
+            Assert.True(await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, createLog, ct) > 0,
+                $"the fixture did not build the aggregates; {createLog.Joined}");
+
+            /* (1) The shipped statement RESOLVES on this runtime. Executed for its side effect of not
+                   throwing — the columns, the three-way join and the cast are all only checkable here. */
+            long rows;
+            using (var shipped = new NpgsqlCommand(TimescaleSupport.HeaviestRefreshRuntimeSql, connection))
+            {
+                rows = 0;
+                using var reader = await shipped.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    rows++;
+                }
+            }
+
+            Assert.True(rows <= 1, $"the read returned {rows} rows for one view; it must identify at most one policy");
+
+            /* (2) The independent corroboration, in two steps so a failure at (3) names ONE cause instead of
+                   a plausible-sounding guess. First: refresh jobs exist at all, counted on nothing this read
+                   joins on. Second: the heaviest view exists as a continuous aggregate, so "the fixture did
+                   not build THIS view" is separated from "the join cannot reach it". */
+            Assert.True(await RefreshPolicyCountAsync(connection, ct) > 0,
+                "no continuous-aggregate refresh job exists at all — the fixture did not build the aggregates");
+
+            Assert.Contains(Heaviest, await ExistingCaggsAsync(connection, ct), StringComparer.Ordinal);
+
+            /* (3) The join finds THAT policy. The shipped text with only its status filter spliced out, so
+                   this cannot pass against a statement the product does not ship. */
+            var relaxed = TimescaleSupport.HeaviestRefreshRuntimeSql
+                .Replace("\r\n", "\n", StringComparison.Ordinal)
+                .Replace("\nAND   js.last_run_status = 'Success'", "", StringComparison.Ordinal);
+            Assert.DoesNotContain("last_run_status", relaxed, StringComparison.Ordinal);
+
+            using (var probe = new NpgsqlCommand(relaxed, connection))
+            {
+                using var reader = await probe.ExecuteReaderAsync(ct);
+                /* The message states what was observed and offers the candidates as candidates — it must not
+                   assert a cause it has not established, the discipline this file's own converge catch is
+                   written to. The two checks above have already ruled out an empty store and a missing view. */
+                Assert.True(await reader.ReadAsync(ct),
+                    $"the OR-join found no refresh policy for {Heaviest}, though refresh jobs exist and the view "
+                    + "does too. Candidates, not a conclusion: this runtime reports a continuous-aggregate job's "
+                    + "identity under neither of the two names the join matches (the materialization-only form "
+                    + "shipped once and read back nothing this way), or the view has no refresh policy of its own "
+                    + "because EnsureContinuousAggregatesAsync's per-aggregate try swallowed a failure for it, or "
+                    + "a sibling test on this shared fixture removed it.");
+                Assert.Equal(Heaviest, reader.GetString(0));
+            }
+
+            /* (4) THE ASSERTION THIS TEST EXISTS FOR. No run has completed, so the reading is null — and the
+                   logger must be SILENT, because a swallowed failure returns null too. */
+            var readLog = new CapturingTestLogger();
+            var reading = await TimescaleSupport.ReadHeaviestRefreshRuntimeAsync(connection, readLog, ct);
+
+            Assert.Equal("(no log lines captured)", readLog.Joined);
+
+            /* Either state is legitimate on a shared fixture — what must never happen is a reading that
+               came back through the catch. If a Success run HAS happened, hold it to the real contract. */
+            if (reading is not null)
+            {
+                Assert.Equal(Heaviest, reading.View);
+                Assert.True(reading.LastRunSeconds >= 0, $"a duration of {reading.LastRunSeconds}s is not a duration");
+                Assert.Equal(TimescaleSupport.ClassifyRefreshSlotHeadroom(reading.LastRunSeconds), reading.Headroom);
+            }
+            else
+            {
+                Assert.Equal(0, rows);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await new LiveCleanupBatch(cleanup).DropContinuousAggregatesAsync(
+                    (await ExistingCaggsAsync(cleanup, cleanupCt)).Except(preexistingCaggs, StringComparer.Ordinal), cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// Every hypertable this product owns gets a minute on the grid, and they stay SPREAD across it.
+    ///
+    /// <para><b>The spread is a property, not an accident of the modulo.</b> All the compression policies
+    /// could share one minute as far as locks go — they compress different hypertables and so never contend
+    /// with each other — but <see cref="TimescaleSupport.CompressAfterDays"/> and
+    /// <see cref="TimescaleSupport.ChunkIntervalDays"/> are both 1 and TimescaleDB aligns 1-day chunks to the
+    /// epoch, so every hypertable's newest closed chunk becomes eligible at the same UTC midnight. The number
+    /// of policies sharing a minute is therefore the number of hypertables rewritten SIMULTANEOUSLY once a
+    /// day, and collapsing the grid onto one minute would be this change introducing a burst rather than
+    /// removing one. Pinned as a per-minute ceiling so that collapse is red.</para>
+    ///
+    /// <para>One assignment is pinned literally, on the catalog's FIRST entry, so appending a collector
+    /// cannot move it and the pin does not have to be re-touched for unrelated work.</para>
+    /// </summary>
+    [Fact]
+    public void EveryHypertableWeOwn_GetsACompressionMinuteOnTheGrid_AndTheyStaySpread()
+    {
+        Assert.Equal(TimescaleSupport.HypertableCount, TimescaleSupport.CompressionPhaseOrder.Count);
+        Assert.Equal(CollectorCatalog.All.Count + 1, TimescaleSupport.CompressionPhaseOrder.Count);
+        Assert.Equal(TimescaleSupport.CollectionLogTable, TimescaleSupport.CompressionPhaseOrder[^1]);
+
+        var byMinute = new Dictionary<int, List<string>>();
+        foreach (var table in TimescaleSupport.CompressionPhaseOrder)
+        {
+            Assert.True(
+                TimescaleSupport.TryCompressionPhaseMinutesFor(table, out var minute),
+                $"{table} carries a compression policy but no phase, so its policy would be created finish-to-start and drift");
+            Assert.Contains(minute, TimescaleSupport.CompressionPhaseMinutes);
+
+            if (!byMinute.TryGetValue(minute, out var tables))
+            {
+                byMinute[minute] = tables = new List<string>();
+            }
+
+            tables.Add(table);
+        }
+
+        Assert.Equal(TimescaleSupport.CompressionPhaseMinutes.Count, byMinute.Count);
+
+        /* The per-minute ceiling is the INPUT the band's width is derived from since #3174, so it is held to
+           the constant rather than to a literal read off whatever the refreshes left over. A catalog grown
+           past MaxPerMinute * BandMinutes reddens here, and the repair is a wider band — which the hour can
+           only pay for out of the heaviest refresh's window. */
+        var ceiling = (TimescaleSupport.CompressionPhaseOrder.Count + TimescaleSupport.CompressionPhaseMinutes.Count - 1)
+            / TimescaleSupport.CompressionPhaseMinutes.Count;
+        Assert.Equal(3, ceiling);
+        Assert.Equal(TimescaleSupport.CompressionPhaseMaxPerMinute, ceiling);
+        Assert.True(
+            TimescaleSupport.HypertableCount
+            <= TimescaleSupport.CompressionPhaseMaxPerMinute * TimescaleSupport.CompressionPhaseBandMinutes,
+            $"{TimescaleSupport.HypertableCount} hypertables cannot spread over "
+            + $"{TimescaleSupport.CompressionPhaseBandMinutes} minutes at "
+            + $"{TimescaleSupport.CompressionPhaseMaxPerMinute} per minute — the band has to widen, out of "
+            + "the heaviest refresh's window (#3174)");
+
+        var crowded = byMinute.Where(kv => kv.Value.Count > ceiling).ToArray();
+        Assert.True(crowded.Length == 0,
+            "compression policies are bunched onto one minute, which is one simultaneous chunk rewrite per hypertable once a day: "
+            + string.Join("; ", crowded.Select(kv => $":{kv.Key.ToString("00", CultureInfo.InvariantCulture)}={kv.Value.Count}")));
+
+        Assert.Equal("wait_stats", TimescaleSupport.CompressionPhaseOrder[0]);
+        Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor("wait_stats", out var waitStats));
+        Assert.Equal(36, waitStats);
+        Assert.Equal(TimescaleSupport.CompressionPhaseMinutes[0], waitStats);
+
+        /* A FOREIGN hypertable is left unphased rather than assigned a minute this code has no basis for
+           choosing — CompressionPhaseOrder is derived from the catalog, so an unrecognised name means "not
+           ours", never "forgotten". */
+        Assert.False(TimescaleSupport.TryCompressionPhaseMinutesFor("someone_elses_hypertable", out _));
+        Assert.False(TimescaleSupport.TryCompressionPhaseMinutesFor("", out _));
+
+        /* Bare or collect.-qualified resolve to the SAME minute: the product passes the bare TargetTable,
+           but the raw-name overload is reachable with a qualified one. */
+        Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor("collect.wait_stats", out var qualified));
+        Assert.Equal(waitStats, qualified);
+    }
+
+    /// <summary>
+    /// The converge statements: identity is the HYPERTABLE, the job id only ever reaches
+    /// <c>alter_job</c> as a bound <c>::integer</c>, and the phased form pins the schedule as well as the
+    /// minute.
+    ///
+    /// <para>#3012's evidence names TimescaleDB job ids. Those are assigned per deployment and would name
+    /// entirely different jobs on any other store, so a fix that encoded one would be correct on exactly one
+    /// box. Unlike a refresh job, a compression job reports its own hypertable directly, which is why this
+    /// read needs no catalog join to recover identity.</para>
+    /// </summary>
+    [Fact]
+    public void CompressionScheduleConverge_OwnsCadenceAndPhase_KeyedOnTheHypertable_NeverAJobId()
+    {
+        var read = TimescaleSupport.CompressionPolicyStateSql;
+
+        /* The same tolerant proc_name scoping the stuck-job reader uses, and NOTHING else: retuning a
+           retention job would re-cadence the armed/paused machinery #1680 depends on. */
+        Assert.Contains("proc_name LIKE '%compression%'", read, StringComparison.Ordinal);
+        Assert.Contains("proc_name LIKE '%columnstore%'", read, StringComparison.Ordinal);
+        Assert.DoesNotContain("policy_retention", read, StringComparison.Ordinal);
+        Assert.DoesNotContain("policy_refresh_continuous_aggregate", read, StringComparison.Ordinal);
+
+        Assert.Contains("j.hypertable_name", read, StringComparison.Ordinal);
+
+        /* Cadence as SECONDS so '01:00:00' and '1 hour' cannot read as a difference and re-alter the same
+           job on every start; phase as a minute already converted to UTC, because a bare EXTRACT would read
+           the SESSION time zone and skew the whole store on a quarter-hour zone. */
+        Assert.Contains("EXTRACT(EPOCH FROM j.schedule_interval)::bigint", read, StringComparison.Ordinal);
+        Assert.Contains("j.fixed_schedule", read, StringComparison.Ordinal);
+        Assert.Contains("EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int", read, StringComparison.Ordinal);
+
+        /* The staleness test is deliberately NOT in the WHERE clause, and it cannot be: the wanted minute
+           is per hypertable, so no single SQL literal stands for it and a job stale only on its phase would
+           be filtered out before the caller ever saw it. */
+        Assert.DoesNotContain("IS DISTINCT FROM", read, StringComparison.Ordinal);
+
+        /* THE ORDINAL CONTRACT. The reader positions its columns by index, and hypertable_schema was
+           APPENDED rather than inserted precisely so no existing index moved — an ordinal shift in a column
+           list is a defect only a live store can see, and it would silently read a phase out of a boolean.
+           So the schema is asserted to be the LAST of exactly seven selected columns, which is the property
+           the C# index depends on. */
+        var selected = SelectedColumns(read);
+
+        /* Control on the split itself: a CASE expression carries no top-level comma, so seven parts is the
+           column count and not an artifact of splitting inside one. */
+        Assert.Equal(7, selected.Length);
+        Assert.StartsWith("j.job_id", selected[0], StringComparison.Ordinal);
+        Assert.Equal("j.hypertable_schema", selected[6]);
+
+        /* And the phase is gated on it: CompressionPhaseOrder holds BARE names, so a foreign hypertable
+           called like one of ours must not inherit its minute. The cadence converge stays unscoped on
+           purpose — that is #1778's reach. */
+        Assert.Contains("j.hypertable_schema", read, StringComparison.Ordinal);
+        Assert.DoesNotContain("hypertable_schema = ", read, StringComparison.Ordinal);
+
+        /* THE FALLBACK'S SHAPE PARITY. fixed_schedule and initial_start are younger columns than
+           schedule_interval, so a store that lacks them takes the narrow read rather than losing #1778's
+           cadence converge along with a phase it cannot use. One reader serves both statements, so the
+           narrow one's columns must be the wide one's FIRST FOUR, in the same order — a divergence there
+           reads a phase out of the wrong column and only a live old-runtime store could see it. Raised by
+           review. */
+        var narrowSelected = SelectedColumns(TimescaleSupport.CompressionCadenceOnlyStateSql);
+
+        Assert.Equal(4, narrowSelected.Length);
+        Assert.Equal(selected[..4], narrowSelected);
+        Assert.DoesNotContain("fixed_schedule", TimescaleSupport.CompressionCadenceOnlyStateSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("initial_start", TimescaleSupport.CompressionCadenceOnlyStateSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("hypertable_schema", TimescaleSupport.CompressionCadenceOnlyStateSql, StringComparison.Ordinal);
+
+        /* Same scope as the wide read, so falling back cannot quietly change WHICH jobs get converged. */
+        Assert.Contains("proc_name LIKE '%compression%'", TimescaleSupport.CompressionCadenceOnlyStateSql, StringComparison.Ordinal);
+        Assert.Contains("proc_name LIKE '%columnstore%'", TimescaleSupport.CompressionCadenceOnlyStateSql, StringComparison.Ordinal);
+
+        var phased = TimescaleSupport.SetCompressionSchedulePhaseSql;
+
+        Assert.Contains("$1::integer", phased, StringComparison.Ordinal);
+        Assert.Contains($"schedule_interval => INTERVAL '{TimescaleSupport.CompressScheduleInterval}'", phased, StringComparison.Ordinal);
+        Assert.Contains("fixed_schedule => true", phased, StringComparison.Ordinal);
+        Assert.Contains("($2::int * INTERVAL '1 minute')", phased, StringComparison.Ordinal);
+
+        /* UTC, not the session time zone — a bare date_trunc('hour', now()) lands off-grid on the half-hour
+           and quarter-hour zones. */
+        Assert.Contains("now() AT TIME ZONE 'UTC'", phased, StringComparison.Ordinal);
+        Assert.DoesNotContain("date_trunc('hour', now())", phased, StringComparison.Ordinal);
+
+        /* Every un-named alter_job parameter means "leave unchanged", so the converge cannot arm a paused
+           job. Load-bearing rather than defensive: the fixture idiom for a deterministic compression test
+           is a policy created and parked at scheduled = false in one transaction (#1888). */
+        Assert.DoesNotContain("scheduled =>", phased, StringComparison.Ordinal);
+        Assert.DoesNotContain("next_start =>", phased, StringComparison.Ordinal);
+
+        /* The FOREIGN-hypertable form is #1778's statement, unchanged: cadence only, so this code never
+           decides when a hypertable it does not own compresses. */
+        Assert.Equal(
+            "SELECT alter_job($1::integer, schedule_interval => INTERVAL '1 hour')",
+            TimescaleSupport.SetCompressionScheduleSql);
+        Assert.DoesNotContain("fixed_schedule", TimescaleSupport.SetCompressionScheduleSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("initial_start", TimescaleSupport.SetCompressionScheduleSql, StringComparison.Ordinal);
+
+        /* THE TWIN CROSS-CHECK, and it has to PARSE the literal rather than pin both sides to their own
+           constant. Two independent literal pins force the edit on whichever side the editor happens to be
+           looking at and force nothing on the other: change the interval to "30 minutes", update the string
+           pin because it went red, and CompressScheduleSpan keeps an hour with its own pin still green. The
+           consequence is not cosmetic — `desiredSeconds` in ConvergeCompressionScheduleAsync comes off the
+           SPAN while the policy is created with the STRING, so a divergence makes `cadenceStale` true forever
+           and the converge re-alters every compression policy on every service start. That is the exact
+           "same interval read as a difference" failure the read's own doc comment is careful about,
+           reintroduced through the twin. Same mechanism as
+           TimescaleContinuousAggregateTests.EveryRetentionIntervalLiteral_EqualsItsTimeSpanTwin. Raised by
+           review. */
+        Assert.Equal("1 hour", TimescaleSupport.CompressScheduleInterval);
+        Assert.Equal(ParsePostgresInterval(TimescaleSupport.CompressScheduleInterval), TimescaleSupport.CompressScheduleSpan);
+
+        /* Control on the parser, in the identical form: it must return the value under test for the shipped
+           literal AND reject a shape it cannot read, or a parser that answered TimeSpan.Zero to everything
+           would make the assertion above vacuous the moment the literal changed. */
+        Assert.Equal(TimeSpan.FromHours(1), ParsePostgresInterval("1 hour"));
+        Assert.Equal(TimeSpan.FromDays(3), ParsePostgresInterval("3 days"));
+        Assert.Equal(TimeSpan.Zero, ParsePostgresInterval("30 minutes"));
+    }
+
+    /// <summary>"1 hour" / "4 days" -> a <see cref="TimeSpan"/>, so a string literal and its
+    /// <see cref="TimeSpan"/> twin can be compared against ONE representation instead of two hand-maintained
+    /// ones. Unreadable shapes come back <see cref="TimeSpan.Zero"/> rather than throwing, which fails the
+    /// comparison loudly instead of passing it quietly — deliberately the same shape as
+    /// TimescaleContinuousAggregateTests' own parser, so the two do not disagree about what a literal
+    /// means.</summary>
+    private static TimeSpan ParsePostgresInterval(string interval)
+    {
+        var parts = interval.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 2 || !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var count))
+        {
+            return TimeSpan.Zero;
+        }
+
+        return parts[1].StartsWith("day", StringComparison.OrdinalIgnoreCase)
+            ? TimeSpan.FromDays(count)
+            : parts[1].StartsWith("hour", StringComparison.OrdinalIgnoreCase)
+                ? TimeSpan.FromHours(count)
+                : TimeSpan.Zero;
+    }
+
+    /// <summary>
+    /// The refresh grid, minute by minute and view by view — and the compression grid's one input from it
+    /// pinned separately.
+    ///
+    /// <para><b>Why a compression change pins the refresh assignment.</b> The stagger pin asserts that the
+    /// phases are DISTINCT and on the right band, so a reordering that permutes which view gets which minute
+    /// passes it. The compression grid is built by excluding the window
+    /// <see cref="TimescaleSupport.HeaviestHourlyRefreshView"/> occupies, so a permutation that moved the
+    /// heaviest refresh out of that window is exactly the edit that could put a compression minute back
+    /// inside 896 s of refresh while every other pin in the tree stayed green. Both halves are asserted:
+    /// the full assignment, and the heaviest view's own minute.</para>
+    ///
+    /// <para><b>The table is the whole map, not a sample, and #3185 moved the light band's half of it.</b>
+    /// The heaviest refresh is answered by identity; the three unbounded-cardinality light views take every
+    /// fourth position from the first, and the nine deployment-bounded ones fill the positions those leave
+    /// in registry order. So this table is also the readable statement of what "thirteen distinct minutes"
+    /// resolves to on today's list — the one place a reader can see the grid without re-deriving it, and
+    /// the one place the interleaving is visible as minutes rather than as a rule.</para>
+    /// </summary>
+    [Fact]
+    public void TheRefreshGridIsUnchanged_AndTheCompressionGridsOneInputFromItIsPinned()
+    {
+        var expected = new (string View, int Minute)[]
+        {
+            (TimescaleSupport.QueryStatsHourlyView, 0),
+            (TimescaleSupport.ProcedureStatsHourlyView, 1),
+            (TimescaleSupport.QueryStoreStatsHourlyView, 4),
+            (TimescaleSupport.QueryStatsDbHourlyView, 2),
+            (TimescaleSupport.QueryStoreStatsIntervalHourlyView, 15),
+            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, 8),
+            (TimescaleSupport.PerfmonBaselineView, 3),
+            (TimescaleSupport.WaitStatsBaselineView, 5),
+            (TimescaleSupport.SessionStatsBaselineView, 6),
+            (TimescaleSupport.QueryStatsBaselineView, 7),
+            (TimescaleSupport.BlockedProcessBaselineView, 9),
+            (TimescaleSupport.DeadlockBaselineView, 10),
+            (TimescaleSupport.MemoryBaselineView, 11),
+        };
+
+        Assert.Equal(expected.Length, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
+        for (var index = 0; index < expected.Length; index++)
+        {
+            Assert.Equal(expected[index].View, TimescaleSupport.HourlyRefreshPhaseOrder[index]);
+            Assert.Equal(expected[index].Minute, TimescaleSupport.RefreshPhaseMinutesFor(expected[index].View));
+        }
+
+        Assert.Equal(TimescaleSupport.QueryStoreStatsIntervalHourlyView, TimescaleSupport.HeaviestHourlyRefreshView);
+        Assert.Equal(
+            TimescaleSupport.HeaviestRefreshStartMinute,
+            TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HeaviestHourlyRefreshView));
+
+        /* No compression minute falls inside the heaviest refresh's WINDOW — the property the permutation
+           above would break. Expressed as the window rather than as a slot index, because a slot index
+           needed a uniform step to exist. */
+        Assert.Empty(
+            Enumerable
+                .Range(
+                    TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.HeaviestHourlyRefreshView),
+                    TimescaleSupport.HeaviestRefreshWindowMinutes)
+                .Select(m => m % TimescaleSupport.MinutesInHourlyCadence)
+                .Intersect(TimescaleSupport.CompressionPhaseMinutes));
+
+        /* The daily refresh tier stays off the grid entirely, so nothing added here can drag one on. */
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.QueryStatsDailyView));
+
+        /* And the refresh STATEMENTS are untouched: still the refresh phase, still no compression in them. */
+        var refreshSql = TimescaleSupport.AddHourlyRefreshPolicySql(TimescaleSupport.ProcedureStatsHourlyView);
+        Assert.Contains("INTERVAL '1 minutes'", refreshSql, StringComparison.Ordinal);
+        Assert.Contains("add_continuous_aggregate_policy", refreshSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("compression", refreshSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("columnstore", refreshSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Compression has no DAILY tier to exempt, which is the whole answer to the question #3024's daily
+    /// carve-out raises here.
+    ///
+    /// <para>#3024 left the daily refresh policies at a 3-day window on finish-to-start scheduling because a
+    /// daily job's window is 3 days of scan against an 86,400-second cadence rather than a 3,600-second one,
+    /// and it never appeared in the convoy. There is no counterpart on the compression side: ONE cadence
+    /// constant exists, every policy is created with it, and the converge moves every policy to it — so the
+    /// decision is not "which tier follows the convention", it is that there is only one tier. Pinned so a
+    /// second cadence cannot be introduced without landing here, which is where the exemption question would
+    /// then have to be answered.</para>
+    /// </summary>
+    [Fact]
+    public void CompressionHasNoDailyTier_OneCadenceAndOnePhaseGridForEveryHypertable()
+    {
+        const string Anchor = "+ INTERVAL '1 hour' + INTERVAL '";
+
+        var statements = TimescaleSupport.CompressionPhaseOrder
+            .Select(t => TimescaleSupport.AddCompressionPolicySql(t))
+            .ToArray();
+
+        Assert.Equal(TimescaleSupport.HypertableCount, statements.Length);
+
+        foreach (var sql in statements)
+        {
+            Assert.Contains($"compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days'", sql, StringComparison.Ordinal);
+            Assert.Contains($"schedule_interval => INTERVAL '{TimescaleSupport.CompressScheduleInterval}'", sql, StringComparison.Ordinal);
+            Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
+            Assert.Contains("initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' " + Anchor, sql, StringComparison.Ordinal);
+        }
+
+        /* THE CONTROL on the loop above: the statements really do differ in their minute, so those
+           Assert.Contains calls were matching a per-table value and not one constant substring that happens
+           to appear in all seventy strings. Recovered from the shipped text, then checked to cover the whole
+           grid and nothing outside it. */
+        var minutes = statements
+            .Select(sql =>
+            {
+                var at = sql.IndexOf(Anchor, StringComparison.Ordinal) + Anchor.Length;
+                var end = sql.IndexOf(' ', at);
+                Assert.True(end > at, $"could not recover a phase from the shipped statement: {sql}");
+                return int.Parse(sql[at..end], CultureInfo.InvariantCulture);
+            })
+            .ToArray();
+
+        Assert.Equal(TimescaleSupport.CompressionPhaseMinutes.Count, minutes.Distinct().Count());
+        Assert.Empty(minutes.Except(TimescaleSupport.CompressionPhaseMinutes));
+
+        /* A foreign hypertable gets the statement with NO initial_start — the one shape that stays
+           finish-to-start, and deliberately so. */
+        var foreignSql = TimescaleSupport.AddCompressionPolicySql("collect.someone_elses_hypertable");
+        Assert.DoesNotContain("initial_start", foreignSql, StringComparison.Ordinal);
+        Assert.Contains($"schedule_interval => INTERVAL '{TimescaleSupport.CompressScheduleInterval}'", foreignSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The converge really references the phase-setting statement, read out of the IL — because a string pin
+    /// asserts what a statement SAYS and never that anything runs it.
+    ///
+    /// <para><b>What this catches, measured rather than assumed.</b> It goes red when the phased branch is
+    /// wired to the cadence-only statement — the phase computed, selected on, logged, and never written —
+    /// which is the shape where the whole feature is inert and every other pin in this file stays green.
+    /// That was proven by mutation.</para>
+    ///
+    /// <para><b>And what it does NOT catch, which matters more than what it does.</b> Making the branch
+    /// GUARD always false leaves this pin green: the call is still emitted into the unreachable branch, so
+    /// its presence in the IL says the statement is wired, not that the branch is taken. Reachability
+    /// through that guard is only covered by the live converge test, which runs in CI's PostgreSQL job
+    /// alone. Both of those were run; this comment records the boundary rather than implying there
+    /// isn't one.</para>
+    ///
+    /// <para>Scanned inside the compiler-generated state machine, because an async method's body lives there
+    /// after compilation and not in the source method. The cadence-only statement is the control: it has to
+    /// appear too, so a scan that resolved nothing cannot satisfy this by finding zero of everything — and
+    /// the state-machine name is asserted present first, for the same reason.</para>
+    /// </summary>
+    [Fact]
+    public void ConvergeCompressionSchedule_ReferencesThePhaseStatement_NotOnlyTheCadenceOne()
+    {
+        const string Machine = "<ConvergeCompressionScheduleAsync>d__";
+        const string Phase = "get_SetCompressionSchedulePhaseSql";
+        const string Cadence = "get_SetCompressionScheduleSql";
+
+        var assemblyPath = typeof(TimescaleSupport).Assembly.Location;
+        Assert.True(File.Exists(assemblyPath), $"Storage assembly not found at '{assemblyPath}'.");
+
+        var byMachine = IlCallSiteScanner.CountCallsByStateMachine(
+            assemblyPath,
+            [Machine],
+            [Phase, Cadence]);
+
+        Assert.True(byMachine.ContainsKey(Machine),
+            $"no state machine whose name starts with {Machine} in {assemblyPath} — a renamed or inlined machine "
+            + "would report zero calls to everything and satisfy this pin for the wrong reason");
+
+        var counts = byMachine[Machine];
+
+        Assert.True(counts[Phase] >= 1,
+            "the converge never reads the phase-setting statement, so a deployed store's compression policies would keep drifting while every string pin stayed green");
+        Assert.True(counts[Cadence] >= 1,
+            "the converge never reads the cadence-only statement, so #1778's reach onto a foreign hypertable is gone");
+    }
+
+    /// <summary>
+    /// THE PHASE PIN (#3035), live — the half that reaches already-deployed stores, and the only way to
+    /// settle whether <c>add_compression_policy</c> behaves like the refresh function it is being modelled
+    /// on.
+    ///
+    /// <para><b>The sibling question, answered by running it.</b>
+    /// <c>add_continuous_aggregate_policy(if_not_exists =&gt; true)</c> RAISES <c>22023</c> against a policy
+    /// whose window differs, which is what forced #3024's converge to run BEFORE its create.
+    /// <c>add_compression_policy</c> was assumed to do the opposite — key on the policy EXISTING and skip
+    /// quietly — and this test is what makes that an observation rather than an analogy. It matters twice
+    /// over: it is why the compression create can stay where it is, ahead of the converge, and it is why
+    /// the create path cannot move a deployed store at all.</para>
+    ///
+    /// <para><b>What it would mean for this test not to exist.</b> Every assertion the phase rests on is
+    /// invisible to a string pin, because a string pin never runs the statement: that a policy created with
+    /// <c>initial_start</c> comes back <c>fixed_schedule = true</c> (on which the converge's own no-op-ness
+    /// rests — a store whose jobs read <c>false</c> would be re-altered on every start forever), that
+    /// <c>alter_job</c> takes <c>schedule_interval</c>, <c>fixed_schedule</c> and <c>initial_start</c>
+    /// together on this runtime, and that the minute survives the round trip through
+    /// <c>timescaledb_information.jobs</c>.</para>
+    ///
+    /// <para><b>The #1581 interaction is checked too</b>, because a fixed schedule is the one thing that
+    /// could plausibly break the stuck-job self-heal: it re-arms a job with
+    /// <c>alter_job(next_start =&gt; now())</c>, which has to be accepted against a fixed-schedule job and
+    /// has to leave it on its slot afterwards. Under finish-to-start a re-arm re-phases the job
+    /// permanently, which is the drift this change removes.</para>
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_CompressionSchedule_PinsADriftingPolicyToItsPhase_AndLeavesForeignHypertablesUnphased_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live compression-phase converge test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        /* A REAL collector hypertable, because the phase is scoped by membership of CompressionPhaseOrder
+           and a throwaway name would be skipped — which is a property worth having, and is asserted below
+           against a planted foreign hypertable. */
+        const string Owned = "wait_stats";
+        const string Foreign = "tick3035_foreign";
+        const string Phased = "tick3035_phased";
+        const int PlantedPhase = 37;
+
+        Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor(Owned, out var ownedPhase));
+        Assert.False(TimescaleSupport.TryCompressionPhaseMinutesFor(Foreign, out _));
+        var ownedPhaseText = ownedPhase.ToString("00", CultureInfo.InvariantCulture);
+
+        /* Idempotent, and needed before add_compression_policy will accept the table at all — the product
+           runs this on every start. */
+        await ExecAsync(connection, TimescaleSupport.EnableCompressionSql($"collect.{Owned}"), ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DropTickTableAsync(connection, Foreign, ct);
+            await DropTickTableAsync(connection, Phased, ct);
+
+            /* ---- (1) A REAL hypertable's policy as an OLDER BUILD left it: no schedule_interval and no
+                    initial_start. Both halves MEASURED rather than assumed — the 12 hours is TimescaleDB's
+                    computed default, and the finish-to-start scheduling is the drift itself. ---- */
+            await ExecAsync(connection, $"SELECT remove_compression_policy('collect.{Owned}', if_exists => true)", ct);
+            await ExecAsync(connection,
+                $"SELECT add_compression_policy('collect.{Owned}', compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days', if_not_exists => true)", ct);
+
+            var legacy = await CompressionPolicyStateAsync(connection, Owned, ct);
+            Assert.NotNull(legacy);
+            Assert.Equal(TimeSpan.FromHours(12), legacy!.ScheduleInterval);
+            Assert.False(legacy.FixedSchedule,
+                "a compression policy created without initial_start is expected to be finish-to-start on this runtime — that is the drift #3035 is about");
+            Assert.Null(legacy.PhaseMinutes);
+
+            /* ---- (2) THE SIBLING BEHAVIOUR, settled. The shipped create statement carries BOTH the tick
+                    and the phase, runs cleanly against the existing policy, and changes NOTHING. Contrast
+                    the refresh side, where the same call raises 22023 against a differing window. ---- */
+            await ExecAsync(connection, TimescaleSupport.AddCompressionPolicySql($"collect.{Owned}"), ct);
+
+            var afterCreate = await CompressionPolicyStateAsync(connection, Owned, ct);
+            Assert.Equal(TimeSpan.FromHours(12), afterCreate!.ScheduleInterval);
+            Assert.False(afterCreate.FixedSchedule);
+            Assert.Null(afterCreate.PhaseMinutes);
+
+            /* ---- (3) A FOREIGN hypertable on the same store, planted so the scope check at (5) is not
+                    satisfied vacuously by a store that has none. ---- */
+            await CreateTickTableAsync(connection, Foreign, ct);
+            await ExecAsync(connection,
+                $"SELECT add_compression_policy('collect.{Foreign}', compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days', if_not_exists => true)", ct);
+            Assert.Equal(TimeSpan.FromHours(12), (await CompressionPolicyStateAsync(connection, Foreign, ct))!.ScheduleInterval);
+
+            /* ---- (4) THE ASSERTION THE WHOLE CHANGE COMES DOWN TO: the deployed store converges, on both
+                    properties, and the phase is the one the grid chose for THIS hypertable. ---- */
+            var convergeLog = new CapturingTestLogger();
+            var converged = await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, convergeLog, ct);
+            Assert.True(converged >= 2,
+                $"expected both the owned and the planted foreign policy to be converged; {convergeLog.Joined}");
+
+            var moved = await CompressionPolicyStateAsync(connection, Owned, ct);
+            Assert.NotNull(moved);
+            Assert.Equal(TimescaleSupport.CompressScheduleSpan, moved!.ScheduleInterval);
+            Assert.True(moved.FixedSchedule,
+                $"the converge must pin the schedule, or the minute slides off by the run's own duration every cycle; {convergeLog.Joined}");
+            Assert.Equal(ownedPhase, moved.PhaseMinutes);
+
+            /* The rendered line names the hypertable, the cadence it left and the minute it is on now,
+               because that line IS the operator's evidence the store changed — and a structured-logging
+               placeholder/argument mismatch would render it wrong with no error anywhere. */
+            Assert.Contains(
+                $"retuned {Owned}'s compression policy from a 12:00:00 tick to 1 hour on a fixed :{ownedPhaseText} schedule",
+                convergeLog.Joined, StringComparison.Ordinal);
+
+            /* ---- (5) SCOPE: the foreign hypertable gets #1778's cadence and NOT a phase, deliberately.
+                    Checked AFTER a converge that demonstrably moved things, so "it was left alone" cannot
+                    be a sweep that looked at nothing. ---- */
+            var foreignAfter = await CompressionPolicyStateAsync(connection, Foreign, ct);
+            Assert.Equal(TimescaleSupport.CompressScheduleSpan, foreignAfter!.ScheduleInterval);
+            Assert.False(foreignAfter.FixedSchedule,
+                "a hypertable this product does not own must keep its own scheduling — the grid is derived from the collector catalog");
+            Assert.False(foreignAfter.HasInitialStart);
+
+            /* ---- (6) Idempotent: nothing left stale, so a settled store never churns alter_job. This is
+                    also what fails if a policy created with initial_start does not come back
+                    fixed_schedule = true. ---- */
+            Assert.Equal(0, await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, null, ct));
+
+            /* ---- (7) The CREATE path on a hypertable with no policy yet: both halves from the start, which
+                    is the FRESH-store state — the mirror of the refresh converge, which sees an empty set on
+                    a fresh store because its aggregates do not exist yet. ---- */
+            await ExecAsync(connection, $"SELECT remove_compression_policy('collect.{Owned}', if_exists => true)", ct);
+            await ExecAsync(connection, TimescaleSupport.AddCompressionPolicySql(Owned), ct);
+
+            var fresh = await CompressionPolicyStateAsync(connection, Owned, ct);
+            Assert.NotNull(fresh);
+            Assert.Equal(TimescaleSupport.CompressScheduleSpan, fresh!.ScheduleInterval);
+            Assert.True(fresh.FixedSchedule,
+                "passing initial_start is expected to put the job on a fixed schedule; if it does not, the converge re-alters every compression policy on every start");
+            Assert.Equal(ownedPhase, fresh.PhaseMinutes);
+            Assert.Equal(0, await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, null, ct));
+
+            /* ---- (8) THE #1581 INTERACTION. Planted on a throwaway so the fixture's own policies are not
+                    made to run mid-suite, and pinned with the SHIPPED alter statement so the statement
+                    itself is exercised independently of the converge's selection logic. ---- */
+            await CreateTickTableAsync(connection, Phased, ct);
+            await ExecAsync(connection,
+                $"SELECT add_compression_policy('collect.{Phased}', compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days', if_not_exists => true)", ct);
+
+            int phasedJobId;
+            using (var probe = new NpgsqlCommand($@"
+SELECT job_id
+FROM timescaledb_information.jobs
+WHERE hypertable_schema = 'collect' AND hypertable_name = '{Phased}'
+AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", connection))
+            {
+                phasedJobId = Convert.ToInt32((await probe.ExecuteScalarAsync(ct))!, CultureInfo.InvariantCulture);
+            }
+
+            using (var pin = new NpgsqlCommand(TimescaleSupport.SetCompressionSchedulePhaseSql, connection))
+            {
+                pin.Parameters.AddWithValue(phasedJobId);
+                pin.Parameters.AddWithValue(PlantedPhase);
+                await pin.ExecuteNonQueryAsync(ct);
+            }
+
+            var pinned = await CompressionPolicyStateAsync(connection, Phased, ct);
+            Assert.NotNull(pinned);
+            Assert.Equal(TimescaleSupport.CompressScheduleSpan, pinned!.ScheduleInterval);
+            Assert.True(pinned.FixedSchedule);
+            Assert.Equal(PlantedPhase, pinned.PhaseMinutes);
+
+            using (var rearm = new NpgsqlCommand(TimescaleSupport.RearmJobSql, connection))
+            {
+                rearm.Parameters.AddWithValue(phasedJobId);
+                await rearm.ExecuteNonQueryAsync(ct);
+            }
+
+            var rearmed = await CompressionPolicyStateAsync(connection, Phased, ct);
+            Assert.NotNull(rearmed);
+            Assert.True(rearmed!.FixedSchedule,
+                "the #1581 self-heal must not knock a compression job off its fixed schedule, or one re-arm undoes the pinning for good");
+            Assert.Equal(PlantedPhase, rearmed.PhaseMinutes);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DropTickTableAsync(cleanup, Foreign, cleanupCt);
+                await DropTickTableAsync(cleanup, Phased, cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
+    /// THE DEGRADATION DIRECTION (#3035), live: a probe failure costs the PHASE and nothing else.
+    ///
+    /// <para><b>Why this is the assertion that makes the widened read safe.</b>
+    /// <see cref="TimescaleSupport.CompressionPolicyStateSql"/> names <c>fixed_schedule</c> and
+    /// <c>initial_start</c>, which entered <c>timescaledb_information.jobs</c> later than
+    /// <c>schedule_interval</c> did. Nothing in this product declares a TimescaleDB floor or checks
+    /// <c>extversion</c>, and the file's own comments state a 2.x compatibility target, handle a store where
+    /// <c>force</c> does not exist, and name "a TimescaleDB too old to expose <c>initial_start</c>" as a
+    /// state that reaches the continuous-aggregate converge's catch. So on a store inside the stated range the
+    /// wide read can throw — and if that returned 0, the store would silently lose #1778's cadence converge
+    /// as well, which had worked there before this change ever existed. A total regression wearing a
+    /// partial's clothes.</para>
+    ///
+    /// <para><b>Proven by inducing the failure rather than by reading the catch.</b> The fixture is 2.28.1 and
+    /// has the columns, so the only way to exercise the fallback is to hand the converge a wide statement that
+    /// fails — which is what <see cref="TimescaleSupport.ConvergeCompressionScheduleAsync(NpgsqlConnection, Microsoft.Extensions.Logging.ILogger, string, System.Threading.CancellationToken)"/>
+    /// exists for. The fallback statement itself is NOT injectable, so this cannot pass against a statement
+    /// the product does not ship.</para>
+    ///
+    /// <para>The planted hypertable is FOREIGN on purpose: it is the population #1778 exists for, and it also
+    /// makes the "phase not applied" half of the assertion unambiguous — a foreign hypertable would be left
+    /// unphased on the happy path too, so the pin that separates the two is that the CADENCE moved.</para>
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_CompressionSchedule_AProbeFailureCostsThePhaseAndKeepsTheCadenceConverge_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live compression-converge degradation test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+
+        const string Stale = "tick3035_degrade";
+
+        /* A wide read shaped exactly like the shipped one except for a column no job catalog has — so it
+           fails the same way a missing fixed_schedule/initial_start would, at the same point, and the SCOPE
+           it would have selected is identical. */
+        const string BrokenPhasedRead = @"
+SELECT
+    j.job_id,
+    j.hypertable_name,
+    j.schedule_interval::text,
+    EXTRACT(EPOCH FROM j.schedule_interval)::bigint AS schedule_interval_seconds,
+    j.fixed_schedule,
+    j.initial_start_column_that_does_not_exist,
+    j.hypertable_schema
+FROM timescaledb_information.jobs AS j
+WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
+
+        var bodySucceeded = false;
+        try
+        {
+            await DropTickTableAsync(connection, Stale, ct);
+            await CreateTickTableAsync(connection, Stale, ct);
+
+            /* A policy on the 12-hour default — the #1778 population, which must survive the degradation. */
+            await ExecAsync(connection,
+                $"SELECT add_compression_policy('collect.{Stale}', compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days', if_not_exists => true)", ct);
+            Assert.Equal(TimeSpan.FromHours(12), (await CompressionPolicyStateAsync(connection, Stale, ct))!.ScheduleInterval);
+
+            /* CONTROL, first: the broken read really does fail, and fails on its own rather than because
+               the store is unreachable. Without this the test could "prove" the fallback while the wide read
+               was quietly succeeding. */
+            var broken = await Assert.ThrowsAsync<PostgresException>(
+                async () => await ExecAsync(connection, BrokenPhasedRead, ct));
+            Assert.Equal("42703", broken.SqlState);
+
+            /* And the shipped wide read does NOT fail on this runtime — so the fallback below is being
+               reached by the induced failure and not by an ambient one. */
+            await ExecAsync(connection, TimescaleSupport.CompressionPolicyStateSql, ct);
+
+            /* ---- THE ASSERTION: the phase is lost, the cadence converge is not. ---- */
+            var log = new CapturingTestLogger();
+            var converged = await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, log, BrokenPhasedRead, ct);
+
+            Assert.True(converged >= 1,
+                $"a failed phase probe returned no conversions, so the store lost #1778's cadence converge along with the phase it could not have; {log.Joined}");
+
+            var after = await CompressionPolicyStateAsync(connection, Stale, ct);
+            Assert.NotNull(after);
+            Assert.Equal(TimescaleSupport.CompressScheduleSpan, after!.ScheduleInterval);
+
+            /* The phase half is genuinely absent, so this is a DEGRADATION and not a silent success. */
+            Assert.False(after.FixedSchedule);
+            Assert.False(after.HasInitialStart);
+
+            /* The operator is told which half was lost and which was kept — the line is the only signal a
+               store has silently dropped to cadence-only. */
+            Assert.Contains("retrying without it", log.Joined, StringComparison.Ordinal);
+            Assert.Contains("#1778", log.Joined, StringComparison.Ordinal);
+
+            /* Idempotent on the fallback path too: the cadence now matches, so a second degraded pass finds
+               nothing rather than re-altering the same job on every start. */
+            Assert.Equal(0, await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, null, BrokenPhasedRead, ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DropTickTableAsync(cleanup, Stale, cleanupCt));
+        }
+    }
+
+    /// <summary>The top-level items of a statement's SELECT list, trimmed and newline-flattened — used to
+    /// assert the ORDINAL contract the compression converge's reader depends on. Split on commas, which is
+    /// safe for these two statements specifically because neither carries a top-level comma inside an
+    /// expression; the caller asserts the resulting count, which is what would catch it if that ever stopped
+    /// being true.</summary>
+    private static string[] SelectedColumns(string sql)
+        => sql[(sql.IndexOf("SELECT", StringComparison.Ordinal) + "SELECT".Length)
+                ..sql.IndexOf("FROM timescaledb_information.jobs", StringComparison.Ordinal)]
+            .Split(',')
+            .Select(part => part.Trim().Replace("\r", string.Empty, StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal))
+            .Where(part => part.Length > 0)
+            .ToArray();
+
+    /// <summary>A compression policy's schedule as the store reports it: cadence, whether that cadence is a
+    /// FIXED schedule, and which minute of the hour it is anchored to (in UTC, for the same reason the shipped
+    /// read converts it there). <c>HasInitialStart</c> is carried separately so "no anchor at all" is
+    /// distinguishable from "anchored to minute zero".</summary>
+    private sealed record CompressionPolicyState(TimeSpan? ScheduleInterval, bool FixedSchedule, int? PhaseMinutes, bool HasInitialStart);
+
+    private static async Task<CompressionPolicyState?> CompressionPolicyStateAsync(
+        NpgsqlConnection connection, string table, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand($@"
+SELECT
+    j.schedule_interval,
+    j.fixed_schedule,
+    CASE
+        WHEN j.initial_start IS NULL THEN NULL
+        ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int
+    END,
+    (j.initial_start IS NOT NULL)
+FROM timescaledb_information.jobs AS j
+WHERE j.hypertable_schema = 'collect' AND j.hypertable_name = '{table}'
+AND   (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')", connection);
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+        {
+            return null;
+        }
+
+        return new CompressionPolicyState(
+            reader.IsDBNull(0) ? null : reader.GetFieldValue<TimeSpan>(0),
+            !reader.IsDBNull(1) && reader.GetBoolean(1),
+            reader.IsDBNull(2) ? null : reader.GetInt32(2),
+            !reader.IsDBNull(3) && reader.GetBoolean(3));
+    }
+
 }

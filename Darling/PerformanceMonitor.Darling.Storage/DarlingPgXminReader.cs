@@ -84,6 +84,7 @@ public static class DarlingPgXminReader
     {
         var rows = new List<PgXminRow>();
         await using var command = postgres.CreateCommand(PgXminHorizonSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* Kind-Unspecified at the BIND, per the store's naive-UTC discipline: a Kind=Utc DateTime makes
            Npgsql infer timestamptz, and PostgreSQL then resolves the comparison against these naive

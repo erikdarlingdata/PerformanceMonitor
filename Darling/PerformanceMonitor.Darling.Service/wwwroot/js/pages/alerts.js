@@ -15,8 +15,14 @@
  * "Story:/Severity:/Confidence:" findings render as labeled fields).
  */
 
-import { el, mount, readTool, loadingStrip, errorStrip, emptyStrip, disclosure } from "../util.js";
+import { el, mount, readTool, buildQuery, loadingStrip, errorStrip, emptyStrip, disclosure,
+         ALERT_STATE_LABELS, alertDeliveryState } from "../util.js";
 import { VIZ } from "../panels.js";
+
+/* #3169: the state-carrying notification_type values, derived from the one shared map rather than listed a
+   second time. The status label already carries each of them, so the channel chip beside it must not repeat
+   them - "No channel configured (unconfigured)" is the shape this prevents. */
+const STATE_ONLY_CHANNELS = new Set(Object.keys(ALERT_STATE_LABELS));
 
 const ALERT_COLUMNS = [
   { key: "alert_time", label: "Time", format: "time" },
@@ -26,11 +32,25 @@ const ALERT_COLUMNS = [
   { key: "threshold_value", label: "Threshold", format: "num1" },
   { key: "status", label: "Status", render: (a) => statusCell(a) },
   { key: "detail_text", label: "Detail", render: (a) => detailCell(a) },
+  { key: "triage", label: "Triage", render: (a) => triageCell(a) },
 ];
 
-/* Channel (always tray) + Sent + Muted + Delivery Error collapse into one glyph+text status cell (B2). */
+/* Deep-link into the #2710 triage page for this row — the SAME route the alert webhooks link to, anchored at
+ * this row's own firing instant, so the in-app path and the delivered link land on an identical page. */
+function triageCell(a) {
+  return el("a", {
+    href: "#/triage" + buildQuery({ server: a.server_name, metric: a.metric_name, at: a.alert_time }),
+    text: "Open",
+  });
+}
+
+/* Sent + Muted + Delivery Error collapse into one glyph+text status cell (B2). The channel is appended only
+   when it means something on THIS surface: the store records "tray" (the Lite/Dashboard system-tray toast),
+   which the headless web dashboard has no equivalent for, so a bare "tray" is dropped rather than shown as a
+   meaningless delivery channel (#2781). A real channel (email / webhook / email+webhook) still renders. */
 function statusCell(a) {
   let glyph, label, sev;
+  const stateLabel = alertDeliveryState(a);
   if (a.muted) {
     glyph = "⊘";
     label = "Muted";
@@ -39,9 +59,19 @@ function statusCell(a) {
     glyph = "✕";
     label = "Delivery failed";
     sev = "Critical";
+  } else if (stateLabel !== null) {
+    /* #3169: the row states a delivery STATE rather than naming a channel — no channel applies to it, none
+       is configured, it was muted, or a channel was consulted and nothing landed. One neutral glyph and
+       severity for all of them: whether an unconfigured deployment is a problem is the operator's call, not
+       this page's. The label and the legacy decode both live in util.js, shared with triage.js and pinned
+       against the WPF surfaces' constants. Extends #2781/#2814, which established the reading for the
+       headless "tray" row that #3169 then stopped the service writing. */
+    glyph = "•";
+    label = stateLabel;
+    sev = "Unknown";
   } else if (a.alert_sent) {
     glyph = "✓";
-    label = "Sent";
+    label = "Delivered";
     sev = "Healthy";
   } else {
     glyph = "•";
@@ -51,7 +81,10 @@ function statusCell(a) {
   return el("span", { class: "status-cell sev-" + sev, title: a.send_error || null }, [
     el("span", { class: "glyph", text: glyph }),
     el("span", { text: label }),
-    a.notification_type ? el("span", { class: "channel", text: a.notification_type }) : null,
+    /* The channel chip names a real channel only. The state-carrying values are already in the label
+       above, so repeating them would read as "No channel configured (unconfigured)". */
+    a.notification_type && !STATE_ONLY_CHANNELS.has(a.notification_type)
+      ? el("span", { class: "channel", text: a.notification_type }) : null,
   ]);
 }
 

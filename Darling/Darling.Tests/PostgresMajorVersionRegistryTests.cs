@@ -4,6 +4,7 @@
 using System;
 using System.Globalization;
 using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -116,18 +117,45 @@ public sealed class PostgresMajorVersionRegistryTests
     /* ---------------- what the reads may say ---------------- */
 
     /// <summary>
-    /// The lookup reads the registry column and nothing else. It must not fall back to
-    /// <c>sql_major_version</c>: 17 is a real major in both engines, so a reader joining them has no way to
-    /// tell which vocabulary a number belongs to.
+    /// The lookup reads the PostgreSQL major, and never falls back to <c>sql_major_version</c>: 17 is a real
+    /// major in both engines, so a reader joining them has no way to tell which vocabulary a number belongs
+    /// to.
     /// </summary>
     [Fact]
-    public void TheLookupReadsOnlyThePostgresColumn()
+    public void TheLookupReadsThePostgresColumn_AndNeverTheSqlServerOne()
     {
-        var sql = DarlingEngineCapability.PostgresMajorVersionSql;
+        var sql = DarlingEngineCapability.PostgresTargetFactsSql;
 
-        Assert.Contains("SELECT postgres_major_version", sql, StringComparison.Ordinal);
+        Assert.Contains("postgres_major_version", sql, StringComparison.Ordinal);
         Assert.Contains("FROM servers", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("sql_major_version", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The major and the engine kind come from ONE statement. Two reads would let the VERSION axis be
+    /// answered from this server's row and the FLAVOUR axis from a stale copy, so one explanation could name
+    /// a major belonging to one server and an engine belonging to another — the hazard
+    /// <c>ServerEngineSql</c> is a single statement for, one axis over.
+    ///
+    /// <para>Asserted as "one SELECT, one FROM, both columns, no statement separator" rather than by
+    /// counting round trips, which a text pin cannot observe. A second round trip from this const would
+    /// have to appear as a second statement, so that is what is denied.</para>
+    /// </summary>
+    [Fact]
+    public void TheMajorAndTheEngineKind_ComeFromOneStatement()
+    {
+        var sql = DarlingEngineCapability.PostgresTargetFactsSql;
+
+        Assert.Contains("postgres_major_version", sql, StringComparison.Ordinal);
+        Assert.Contains("engine_kind", sql, StringComparison.Ordinal);
+
+        /* Counts into locals first: Assert.Equal on a .Count expression is what xUnit2013 flags. */
+        var selects = Regex.Matches(sql, @"\bSELECT\b", RegexOptions.IgnoreCase).Count;
+        var froms = Regex.Matches(sql, @"\bFROM\b", RegexOptions.IgnoreCase).Count;
+
+        Assert.Equal(1, selects);
+        Assert.Equal(1, froms);
+        Assert.DoesNotContain(";", sql, StringComparison.Ordinal);
     }
 }

@@ -8,9 +8,9 @@
 
 using System;
 using System.IO;
-using System.Runtime.CompilerServices;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -117,19 +117,5 @@ public class QueryStoreTopWindowTests
 
         /* plan_id is the reason: it is a grouping key here and absent from every rollup. */
         Assert.Contains("plan_id", DarlingDataReader.QueryStoreTopSql, StringComparison.Ordinal);
-    }
-
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
-        {
-            var candidate = Path.Combine(dir.FullName, relative);
-            if (File.Exists(candidate))
-            {
-                return File.ReadAllText(candidate);
-            }
-        }
-
-        throw new FileNotFoundException($"Could not locate {relative} walking up from {thisFile}");
     }
 }

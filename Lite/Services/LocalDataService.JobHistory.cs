@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -233,6 +234,9 @@ public class JobHistoryRow
     /// <summary>run_datetime is the server's local wall clock; shown as-is (the time SSMS shows).</summary>
     public string RunTimeLocal => RunDateTime?.ToString("yyyy-MM-dd HH:mm:ss") ?? "";
 
+    /// <summary><see cref="LastSuccessfulRun"/> is <c>MAX(run_datetime)</c> over this job's successful
+    /// step-0 rows, so it is the same server-local wall clock as <see cref="RunTimeLocal"/> and is shown
+    /// the same way — as-is, not converted to the display mode.</summary>
     public string LastSuccessfulRunLocal => LastSuccessfulRun?.ToString("yyyy-MM-dd HH:mm:ss") ?? "Never";
 
     public string DurationFormatted => FormatDuration(RunDurationSeconds);
@@ -281,8 +285,10 @@ public class AgentStatusRow
     public bool EverSeenRunning { get; set; }
 
     /// <summary>A reading older than this is not presented as current. Mirrors the headless service's
-    /// <c>StaleWindow</c>, so both surfaces refuse to judge on the same age of data.</summary>
-    public static readonly TimeSpan StaleWindow = TimeSpan.FromMinutes(30);
+    /// <c>StaleWindow</c>, so both surfaces refuse to judge on the same age of data — now literally, via
+    /// the shared constant rather than a numerically-equal copy (#2794).</summary>
+    public static readonly TimeSpan StaleWindow =
+        TimeSpan.FromMinutes(ServerHealthThresholds.CollectionStoppedMinutesDefault);
 
     /// <summary>True when the newest snapshot is too old to describe the server right now — collection stopped,
     /// the server went away, or the collector is failing. A stale reading must never render as a current state.</summary>
@@ -307,5 +313,11 @@ public class AgentStatusRow
     /// server that runs one. Stale and never-present are neutral — they are absence of signal, not a problem.</summary>
     public bool IsAgentProblem => !IsStale && !AgentRunning && EverSeenRunning;
 
+    /// <summary><c>agent_status.next_scheduled_run</c> is the monitored server's own local wall clock, and
+    /// this shows it as-is — not converted to the selected display mode — matching
+    /// <see cref="JobHistoryRow.RunTimeLocal"/> in this file. Darling's read of the same column de-skews it
+    /// to UTC in SQL and then converts, so the two SKUs present this grid differently on purpose in
+    /// Darling's case and by inheritance here; the frame is stated at the property rather than only in the
+    /// class summary because that is where a reader checks it.</summary>
     public string NextScheduledRunLocal => NextScheduledRun?.ToString("yyyy-MM-dd HH:mm:ss") ?? "None scheduled";
 }

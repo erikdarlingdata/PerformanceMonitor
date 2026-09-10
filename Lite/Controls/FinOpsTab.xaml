@@ -555,14 +555,14 @@
                         <!-- Database Size Chart -->
                         <GroupBox Grid.Row="1" Header="Database Sizes — Allocated vs Used" Margin="10,8,10,10"
                                   Foreground="{DynamicResource ForegroundBrush}">
-                            <ItemsControl x:Name="DbSizeChart" Margin="8,4,8,4">
+                            <ItemsControl x:Name="DbSizeChart" Margin="8,4,8,4" Grid.IsSharedSizeScope="True">
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
                                         <Grid Margin="0,2" Height="22">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="160"/>
                                                 <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="90"/>
+                                                <ColumnDefinition Width="Auto" MinWidth="90" SharedSizeGroup="DbSizeLabel"/>
                                             </Grid.ColumnDefinitions>
                                             <!-- Database name -->
                                             <TextBlock Grid.Column="0" Text="{Binding DatabaseName}"
@@ -581,7 +581,7 @@
                                                 </Grid>
                                             </Grid>
                                             <!-- Size label -->
-                                            <TextBlock Grid.Column="2" VerticalAlignment="Center"
+                                            <TextBlock Grid.Column="2" Margin="0,0,4,0" VerticalAlignment="Center"
                                                        HorizontalAlignment="Right" FontSize="11.5"
                                                        Foreground="{DynamicResource ForegroundBrush}">
                                                 <TextBlock.Text>

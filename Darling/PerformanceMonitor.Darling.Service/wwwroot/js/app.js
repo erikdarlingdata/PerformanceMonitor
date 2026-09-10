@@ -34,6 +34,7 @@ import { renderAg } from "./pages/ag.js";
 import { renderServer } from "./pages/server.js";
 import { renderAlerts } from "./pages/alerts.js";
 import { renderViewList, renderView } from "./pages/views.js";
+import { renderTriage } from "./pages/triage.js";
 import { renderEditor } from "./editor.js";
 import { renderNotebookEditor } from "./notebook.js";
 import { getSession, listViews } from "./views-api.js";
@@ -51,6 +52,13 @@ function currentRoute() {
   const h = location.hash || "#/fleet";
   if (h.startsWith("#/server/")) return serverRoute(h.slice("#/server/".length));
   if (h === "#/ag" || h === "#/ag/") return { name: "ag" };
+  /* #/triage?server=...&metric=...&at=...&dedup=... (#2710) — the deep-link every alert webhook carries.
+     The query rides INSIDE the hash (a static SPA route), so it is split off here and parsed by the page.
+     Checked before #/alerts only for symmetry; the two prefixes cannot collide. */
+  if (h.startsWith("#/triage")) {
+    const q = h.indexOf("?");
+    return { name: "triage", query: q >= 0 ? h.slice(q + 1) : "" };
+  }
   if (h.startsWith("#/alerts")) return { name: "alerts" };
   /* #/views (list) is checked before the #/view/ forms; and the /edit form is tested before the bare /view/. */
   if (h === "#/views" || h === "#/views/") return { name: "views" };
@@ -92,6 +100,7 @@ function route() {
   if (r.name === "server") renderServer(main, r.param, r.tab);
   else if (r.name === "ag") renderAg(main);
   else if (r.name === "alerts") renderAlerts(main);
+  else if (r.name === "triage") renderTriage(main, r.query);
   else if (r.name === "views") renderViewList(main);
   else if (r.name === "view") renderView(main, r.id);
   else if (r.name === "editor") renderEditor(main, r.id);

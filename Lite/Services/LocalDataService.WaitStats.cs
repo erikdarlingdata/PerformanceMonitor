@@ -31,7 +31,7 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
         var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
         command.CommandText = $@"
@@ -105,7 +105,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
         var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
         command.CommandText = $@"
@@ -141,7 +141,7 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
         command.CommandText = @"
 WITH raw AS
@@ -201,7 +201,7 @@ ORDER BY collection_time";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
         var typeParams = string.Join(", ", waitTypes.Select((_, i) => "$" + (i + 4)));
 
         command.CommandText = $@"
@@ -266,7 +266,7 @@ ORDER BY wait_type, collection_time";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
 
         var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
         command.CommandText = $@"
@@ -323,7 +323,8 @@ SELECT
     delta_waiting_tasks AS delta_tasks,
     CASE WHEN delta_waiting_tasks > 0
     THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / delta_waiting_tasks
-    ELSE 0 END AS avg_ms_per_wait
+    ELSE 0 END AS avg_ms_per_wait,
+    collection_time
 FROM v_wait_stats
 WHERE server_id = $1
 AND wait_type IN ('THREADPOOL', 'RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE')
@@ -344,7 +345,8 @@ LIMIT 3";
                 WaitType = reader.GetString(0),
                 DeltaMs = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                 DeltaTasks = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                AvgMsPerWait = reader.IsDBNull(3) ? 0 : reader.GetDouble(3)
+                AvgMsPerWait = reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
+                CollectionTime = reader.GetDateTime(4)
             });
         }
 
@@ -362,7 +364,7 @@ LIMIT 3";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
 
         command.CommandText = @"
 WITH blocked_counts AS (
@@ -486,7 +488,7 @@ LIMIT 500";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
 
         command.CommandText = @"
 WITH blocked_counts AS (
@@ -597,6 +599,10 @@ LIMIT 2000";
         return items;
     }
 
+    /// <summary>How fresh the latest snapshot must be for its sessions to count as still running. Bound as
+    /// <c>$4</c> rather than written into the SQL — see the bind site.</summary>
+    private static readonly TimeSpan LatestSnapshotFreshness = TimeSpan.FromMinutes(10);
+
     /// <summary>
     /// Gets long-running queries from the latest collection snapshot.
     /// Returns sessions whose total elapsed time exceeds the given threshold.
@@ -650,7 +656,7 @@ LIMIT 2000";
                 FROM v_query_snapshots AS r
                 WHERE r.server_id = $1
                     AND r.collection_time = (SELECT MAX(vqs.collection_time) FROM v_query_snapshots AS vqs WHERE vqs.server_id = $1)
-                    AND r.collection_time >= NOW() - INTERVAL '10 MINUTES'
+                    AND r.collection_time >= $4
                     AND r.session_id > 50
                     {spServerDiagnosticsFilter}
                     {waitForFilter}
@@ -664,6 +670,11 @@ LIMIT 2000";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = thresholdMs });
         command.Parameters.Add(new DuckDBParameter { Value = maxResults });
+        /* $4 is the snapshot-freshness floor, bound rather than spelled `NOW() - INTERVAL '10 MINUTES'`:
+           collection_time is a naive-UTC TIMESTAMP, NOW() is TIMESTAMP WITH TIME ZONE, and the mixed
+           comparison resolves the naive side in the host's TimeZone. East of UTC the floor lands in the
+           future and this read returns nothing, so the long-running-query alert never fires at all. */
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow - LatestSnapshotFreshness });
 
         var items = new List<LongRunningQueryInfo>();
         using var reader = await command.ExecuteReaderAsync();

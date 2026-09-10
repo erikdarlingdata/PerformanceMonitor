@@ -68,11 +68,15 @@ public sealed class QueryStoreServerGate
     /// Takes the server's gate if it is free, returning a lease to release it — or <c>null</c> when the other
     /// loop holds it, which the caller must treat as "skip this server this cycle".
     ///
-    /// <para>Returns a disposable rather than exposing a bare release so the two cannot get out of step: every
-    /// acquisition site is a <c>using</c>, and an early <c>return</c> or a throw inside the guarded work
-    /// releases the gate on the way out. A leaked gate here would silently stop one server's Query Store
-    /// collection forever, which is a failure that looks like "that server has no Query Store data" rather than
-    /// like a bug.</para>
+    /// <para>Returns a disposable rather than exposing a bare release so the two cannot get out of step, and a
+    /// leaked lease here would silently stop one server's Query Store collection forever — a failure that looks
+    /// like "that server has no Query Store data" rather than like a bug. The tick's site is a <c>using</c>,
+    /// whose scope IS the collector run, so an early <c>return</c> or a throw releases the gate on the way out.
+    /// The backfill's site hands the lease to its <see cref="AbandonableStep"/> instead
+    /// (<c>holdUntilStepEnds</c>), because there a <c>using</c> is wrong: its scope is one loop iteration, and
+    /// abandonment ends the iteration while the slice is still executing on the server. The lease must outlive
+    /// the abandonment and expire with the step's in-flight guard, which is the only thing that knows when the
+    /// slice truly ended.</para>
     /// </summary>
     public IDisposable? TryAcquire() =>
         Interlocked.CompareExchange(ref _taken, 1, 0) == 0 ? new Lease(this) : null;

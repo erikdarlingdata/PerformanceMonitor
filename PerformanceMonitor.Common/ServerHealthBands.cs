@@ -87,11 +87,22 @@ namespace PerformanceMonitor.Common
     /// Returning them together is what makes dropping one a visible edit rather than an omission.
     /// </summary>
     /// <param name="IsOnline">Reachability: true = fresh or stale, false = offline, null = not reached yet.</param>
-    /// <param name="HasCollectorErrors">The amber warning flag — in Darling, a stale collection.</param>
+    /// <param name="CollectionStale">The amber warning flag: the newest collection has lagged past
+    /// <see cref="ServerHealthThresholds.StaleThreshold"/> but is not old enough to call the server dark. It is
+    /// <see cref="ServerFreshness.Stale"/> and nothing else — no error count, no <c>collection_log</c> read.
+    ///
+    /// <para><b>It is named for freshness because that is its whole population, and the name is load-bearing.</b>
+    /// Lite carries a flag of the same shape on its own card (<c>ServerCardStatusRules.Classify</c>) fed from
+    /// <c>ErroringCollectors &gt; 0</c> — collectors that are actually failing. Two agents made four wrong
+    /// inferences from this one in a day (#3098), every one of them a reasonable reading of a name that said
+    /// errors, and the reading each time was falsified by the store: cards flagged with every collector
+    /// <c>HEALTHY</c>, and cards clear with <c>ERROR</c> rows inside their own published window. Failure is
+    /// reported on the axis that measures it — <c>failed_collector_count</c> and
+    /// <see cref="ServerHealthClassifier.CollectorSeverity"/>.</para></param>
     /// <param name="AwaitingFirstCollection">No collection has EVER landed (a bootstrap state, not an outage).</param>
     public readonly record struct ServerCollectionFlags(
         bool? IsOnline,
-        bool HasCollectorErrors,
+        bool CollectionStale,
         bool AwaitingFirstCollection);
 
     /// <summary>
@@ -114,14 +125,14 @@ namespace PerformanceMonitor.Common
     public static class ServerCollectionStatusRules
     {
         /// <summary>
-        /// The (<c>IsOnline</c>, <c>HasCollectorErrors</c>, <c>AwaitingFirstCollection</c>) triple, resolved.
+        /// The (<c>IsOnline</c>, <c>CollectionStale</c>, <c>AwaitingFirstCollection</c>) triple, resolved.
         /// The order matters and is the #2429 reading: an online server's flags win over an awaiting marker,
         /// so a stale card cannot also claim to be awaiting its first collection.
         /// </summary>
-        public static ServerCollectionStatus Classify(bool? isOnline, bool hasCollectorErrors, bool awaitingFirstCollection) =>
+        public static ServerCollectionStatus Classify(bool? isOnline, bool collectionStale, bool awaitingFirstCollection) =>
             isOnline switch
             {
-                true when hasCollectorErrors => ServerCollectionStatus.Stale,
+                true when collectionStale => ServerCollectionStatus.Stale,
                 true => ServerCollectionStatus.Online,
                 false => ServerCollectionStatus.Offline,
                 _ => awaitingFirstCollection ? ServerCollectionStatus.AwaitingFirstCollection : ServerCollectionStatus.Unknown,
@@ -150,7 +161,7 @@ namespace PerformanceMonitor.Common
         public static ServerCollectionStatus FromFreshness(ServerFreshness freshness)
         {
             var flags = FlagsFor(freshness);
-            return Classify(flags.IsOnline, flags.HasCollectorErrors, flags.AwaitingFirstCollection);
+            return Classify(flags.IsOnline, flags.CollectionStale, flags.AwaitingFirstCollection);
         }
 
         /// <summary>The words a human reads. They are also the <c>DataTrigger</c> values the WPF sidebar keys
@@ -243,8 +254,29 @@ namespace PerformanceMonitor.Common
         /// <summary>Older than twice the cadence = the collection has visibly lagged (Warning).</summary>
         public static readonly TimeSpan StaleThreshold = TimeSpan.FromTicks(CollectorCadence.Ticks * 2);
 
-        /// <summary>Older than this (or no collection at all) = the server is treated as Offline.</summary>
-        public static readonly TimeSpan OfflineThreshold = TimeSpan.FromMinutes(15);
+        /// <summary>
+        /// The ONE default for "collection has stopped", shared by the display's Offline band and the alert
+        /// engine's Collection Stopped window (#2794). They used to disagree — display called a server dark at a
+        /// bare 15 minutes while <c>DarlingSelfAlertEvaluator.StaleWindow</c> deliberately waited 30 — so one
+        /// condition had two definitions, and the tighter one false-alarmed: a long <c>query_store</c> cycle
+        /// holds the whole sweep body (the sweep skips relaunch while a body runs), so a healthy server
+        /// legitimately goes quiet for 12–19 minutes with nothing failed anywhere. Measured on the production
+        /// fleet: the worst legitimate inter-collection gap in 24h was 12m12s across 42 servers (issue-day load
+        /// reached 19m18s), while genuine dark events run HOURS — so 30 minutes separates the two populations
+        /// with real margin on both sides, and it is the number the alert engine already committed to.
+        /// <c>AlertsConfig.CollectionStaleMinutes</c> can still widen the ALERT window per deployment; the
+        /// display band stays at this shared default (it has no live settings on every surface), which is the
+        /// conservative direction — the band can only be tighter than the alert, never looser.
+        /// </summary>
+        public const int CollectionStoppedMinutesDefault = 30;
+
+        /// <summary>
+        /// Older than this (or no collection at all) = the server is treated as Offline. Derived from
+        /// <see cref="CollectionStoppedMinutesDefault"/> so the display's "dark" and the alert engine's
+        /// "stopped" are the same claim (#2794); a server merely between stretched sweeps bands
+        /// <see cref="ServerFreshness.Stale"/>, which is the honest reading.
+        /// </summary>
+        public static readonly TimeSpan OfflineThreshold = TimeSpan.FromMinutes(CollectionStoppedMinutesDefault);
     }
 
     /// <summary>
@@ -259,17 +291,24 @@ namespace PerformanceMonitor.Common
         /// <summary>Total non-idle CPU the CPU band evaluates (SQL + other-process), or null with no snapshot.</summary>
         public double? CpuPercentForAlert { get; init; }
 
-        /// <summary>True when the resource semaphore shows grant waiters, timeouts, or forced grants.</summary>
-        public bool HasMemoryPressure { get; init; }
+        /// <summary>True when the resource semaphore shows grant waiters, timeouts, or forced grants;
+        /// <c>null</c> when this target has no resource-semaphore source at all (#3272 — every PostgreSQL
+        /// target). Nullable for the reason <see cref="TotalThreads"/> is: <c>false</c> is a MEASUREMENT
+        /// meaning the semaphore is calm, and a target with nothing to read must not be able to make
+        /// it.</summary>
+        public bool? HasMemoryPressure { get; init; }
 
-        /// <summary>Blocking events in the window.</summary>
-        public int BlockingCount { get; init; }
+        /// <summary>Blocking events in the window, or <c>null</c> when this target has no blocking source
+        /// the card reads (#3272). Same reasoning as <see cref="HasMemoryPressure"/>: <c>0</c> is a
+        /// measured quiet window.</summary>
+        public int? BlockingCount { get; init; }
 
         /// <summary>The worst blocking wait in the window, in seconds.</summary>
         public double MaxBlockedSeconds { get; init; }
 
-        /// <summary>Deadlocks in the window.</summary>
-        public int DeadlockCount { get; init; }
+        /// <summary>Deadlocks in the window, or <c>null</c> when this target has no deadlock source the
+        /// card reads (#3272). Same reasoning as <see cref="HasMemoryPressure"/>.</summary>
+        public int? DeadlockCount { get; init; }
 
         /// <summary>Worker-thread ceiling (max_workers_count), or null with no scheduler snapshot (e.g. Azure SQL DB).</summary>
         public int? TotalThreads { get; init; }
@@ -285,6 +324,42 @@ namespace PerformanceMonitor.Common
 
         /// <summary>Collectors whose 7-day band is FAILING (no success in over 24h).</summary>
         public int FailedCollectorCount { get; init; }
+    }
+
+    /// <summary>
+    /// Whether a card's SQL-Server-DMV-sourced metric readings are measurements at all, for this target's
+    /// engine (#3272) — the ONE place that decision is made, so the service's fleet card and the viewer's
+    /// Overview card cannot disagree about whether a zero means anything.
+    ///
+    /// <para><b>Why these three travel together.</b> The memory-pressure, blocking and deadlock rows on a
+    /// card come from <c>v_memory_grant_stats</c>, <c>v_blocked_process_reports</c> /
+    /// <c>v_dmv_blocking_snapshots</c> and <c>v_deadlocks</c> — all SQL Server captures, none of which a
+    /// PostgreSQL target has a single row in. The per-metric reads therefore hand the card zeros, and a zero
+    /// is indistinguishable from a genuinely calm SQL Server. Threads already escaped this because its
+    /// ceiling is nullable and CPU escaped it in #3267; these three had no way to say "not measured" at all.
+    /// </para>
+    ///
+    /// <para><b>It names the ENGINE, not the collector state.</b> A SQL Server whose deadlock collector is
+    /// permission-denied also reads zero, and that stays Healthy here on purpose: #3017 routed that case to
+    /// <c>failed_collector_count</c> / <see cref="ServerHealthClassifier.CollectorSeverity"/> and the fleet
+    /// coverage block, which is where a fixable gap belongs. This distinguishes only the structural case,
+    /// where no grant, collector run or upgrade of the monitored server produces the number.</para>
+    /// </summary>
+    public static class ServerMetricSources
+    {
+        /// <summary>
+        /// The reading as measured, or <c>null</c> when this target's engine has no source behind it.
+        /// Generic over the reading's own type because the three metrics are a <c>bool</c> and two
+        /// <c>int</c>s, and the DECISION is the same for all three — one function rather than three that
+        /// could drift.
+        /// </summary>
+        /// <param name="reading">What the SQL Server metric read produced (a zero, for a target with no rows).</param>
+        /// <param name="isPostgres">Whether the store SAYS this target is PostgreSQL. Absence of an engine
+        /// token is false, matching <c>MonitoredEngineKind.IsPostgres</c>'s asymmetry: a row no connect has
+        /// stamped keeps the SQL Server reading rather than being told its metrics do not exist.</param>
+        public static T? DmvSourced<T>(T reading, bool isPostgres)
+            where T : struct =>
+            isPostgres ? null : reading;
     }
 
     /// <summary>
@@ -321,7 +396,28 @@ namespace PerformanceMonitor.Common
             return ServerFreshness.Fresh;
         }
 
-        /// <summary>CPU band on total non-idle CPU: >= 95% Critical, >= 80% Warning; no snapshot Unknown.</summary>
+        /// <summary>
+        /// CPU band on total non-idle CPU: &gt;= 95% Critical, &gt;= 80% Warning; no snapshot Unknown.
+        ///
+        /// <para><b>The cutoffs are stated against a QUANTITY, not against a source</b> (#3267), because two
+        /// collectors now produce it. SQL Server's arm is <c>100 - SystemIdle</c> from the
+        /// <c>SCHEDULER_MONITOR</c> ring buffer; a PostgreSQL/Aurora target's is Performance Insights'
+        /// <c>os.cpuUtilization.total.avg</c>. What makes one ladder correct over both is that they are the
+        /// same measurement of the same thing: percent of the host's own CPU capacity that is not idle,
+        /// including processes outside the database engine, averaged over one minute
+        /// (<c>RdsCpuIngestor</c> asks PI for <c>PeriodInSeconds = 60</c>; the ring buffer publishes one
+        /// record a minute). Units, denominator, and averaging window all agree, so 80 means the same
+        /// "the host is approaching saturation" on both.</para>
+        ///
+        /// <para>Two things about the PI arm are deliberately recorded rather than assumed. It is the OS
+        /// counter and NOT CloudWatch's <c>CPUUtilization</c>, which reads capacity-relative and runs roomy
+        /// on Aurora Serverless v2 — measured on one instance over one window at 6.8% against PI's 16.8%
+        /// (see <c>PgCpuUtilizationCollector</c>); banding the CloudWatch figure on these cutoffs would
+        /// under-read badly. And on Serverless v2 the denominator is the CURRENT ACU allocation, which
+        /// scales: a high reading there is a true statement that the instance is saturated at its present
+        /// capacity, and the follow-up question is the cluster's max-ACU ceiling rather than the
+        /// workload.</para>
+        /// </summary>
         public static HealthSeverity CpuSeverity(double? cpuPercentForAlert)
         {
             if (!cpuPercentForAlert.HasValue)
@@ -342,13 +438,39 @@ namespace PerformanceMonitor.Common
             return HealthSeverity.Healthy;
         }
 
-        /// <summary>Memory band — Critical on any resource-semaphore pressure, else Healthy.</summary>
-        public static HealthSeverity MemorySeverity(bool hasMemoryPressure) =>
-            hasMemoryPressure ? HealthSeverity.Critical : HealthSeverity.Healthy;
-
-        /// <summary>Blocking band: >= 60s max wait or >= 5 events Critical; >= 10s max wait, >= 2 events, or any blocking Warning.</summary>
-        public static HealthSeverity BlockingSeverity(int blockingCount, double maxBlockedSeconds)
+        /// <summary>Memory band — Critical on any resource-semaphore pressure, else Healthy; no source
+        /// Unknown (#3272).
+        ///
+        /// <para><b>The Unknown arm is not cosmetic.</b> This band is read off
+        /// <c>v_memory_grant_stats</c>, a SQL Server DMV capture a PostgreSQL target has no row in, so the
+        /// zero counters such a card carried argued <c>false</c> and this returned <b>Healthy</b> — a
+        /// positive claim of health about a metric nothing measured, rendered as a green dot. That is worse
+        /// than the null it sat beside, and it is the same failure <see cref="CpuSeverity"/> and
+        /// <see cref="ThreadsSeverity"/> already avoid by taking a nullable input.</para></summary>
+        public static HealthSeverity MemorySeverity(bool? hasMemoryPressure)
         {
+            if (!hasMemoryPressure.HasValue)
+            {
+                return HealthSeverity.Unknown;
+            }
+
+            return hasMemoryPressure.Value ? HealthSeverity.Critical : HealthSeverity.Healthy;
+        }
+
+        /// <summary>Blocking band: >= 60s max wait or >= 5 events Critical; >= 10s max wait, >= 2 events, or any blocking Warning; no source Unknown (#3272).
+        ///
+        /// <para>The COUNT carries the measured/not-measured distinction on its own — there is no second
+        /// spelling of "unknown" to get wrong — because a max wait means nothing without a population to
+        /// have waited. See <see cref="MemorySeverity"/> for why the arm exists.</para></summary>
+        public static HealthSeverity BlockingSeverity(int? blockingCountOrNullWhenUnmeasured, double maxBlockedSeconds)
+        {
+            if (!blockingCountOrNullWhenUnmeasured.HasValue)
+            {
+                return HealthSeverity.Unknown;
+            }
+
+            var blockingCount = blockingCountOrNullWhenUnmeasured.Value;
+
             if (maxBlockedSeconds >= 60)
             {
                 return HealthSeverity.Critical;
@@ -377,9 +499,26 @@ namespace PerformanceMonitor.Common
             return HealthSeverity.Healthy;
         }
 
-        /// <summary>Deadlock band — any deadlock in the window is Critical.</summary>
-        public static HealthSeverity DeadlockSeverity(int deadlockCount) =>
-            deadlockCount > 0 ? HealthSeverity.Critical : HealthSeverity.Healthy;
+        /// <summary>Deadlock band — any deadlock in the window is Critical; no source Unknown (#3272).
+        ///
+        /// <para><b>This completes #3017 rather than reversing it.</b> That issue established that a
+        /// PostgreSQL target's zero is structural — <c>v_deadlocks</c> is the SQL Server extended-event
+        /// capture and nothing joins <c>pg_deadlocks</c> into it — and gave the CARD
+        /// <see cref="FleetDeadlockSource"/> plus the fleet total a coverage denominator to say so. It
+        /// deliberately added no band to the FLEET ROLLUP, so that a quiet, fully-covered SQL Server fleet
+        /// keeps reading healthy; that reasoning is untouched here. What it left behind was this
+        /// per-metric severity still answering <b>Healthy</b> for the same uncountable zero, so the card
+        /// disclosed the gap in <c>deadlock_source</c> and contradicted itself on the dot beside
+        /// it.</para></summary>
+        public static HealthSeverity DeadlockSeverity(int? deadlockCount)
+        {
+            if (!deadlockCount.HasValue)
+            {
+                return HealthSeverity.Unknown;
+            }
+
+            return deadlockCount.Value > 0 ? HealthSeverity.Critical : HealthSeverity.Healthy;
+        }
 
         /// <summary>
         /// Threads band: work-queue starvation Critical; >= 20 runnable-waiting or under 10% workers available
@@ -453,7 +592,7 @@ namespace PerformanceMonitor.Common
         /// a never-collected (queued-during-bootstrap) server -> Warning (attention-worthy but not the red overlay);
         /// else the card's worst metric band, with a stale collection also Warning.
         /// </summary>
-        public static FleetHealthBand ClassifyBand(bool? isOnline, bool awaitingFirstCollection, bool hasCollectorErrors, HealthSeverity overallMetricSeverity)
+        public static FleetHealthBand ClassifyBand(bool? isOnline, bool awaitingFirstCollection, bool collectionStale, HealthSeverity overallMetricSeverity)
         {
             if (isOnline == false)
             {
@@ -469,7 +608,7 @@ namespace PerformanceMonitor.Common
             {
                 HealthSeverity.Critical => FleetHealthBand.Critical,
                 HealthSeverity.Warning => FleetHealthBand.Warning,
-                _ => hasCollectorErrors ? FleetHealthBand.Warning : FleetHealthBand.Healthy,
+                _ => collectionStale ? FleetHealthBand.Warning : FleetHealthBand.Healthy,
             };
         }
 
@@ -504,7 +643,12 @@ namespace PerformanceMonitor.Common
             }
 
             long magnitude = (criticals * 100L) + (warnings * 10L);
-            long incidents = Math.Min(m.BlockingCount + m.DeadlockCount, 99);
+            /* An unmeasured count contributes nothing, which is what keeps the whole Unknown arm
+               rank-neutral: the magnitude terms above already skip Unknown exactly as they skip Healthy,
+               so a card that gained an Unknown where it used to claim Healthy scores identically and
+               cannot move in the worst-first ranking. Pinned by
+               UnmeasuredMetricsAreNotHealthyTests. */
+            long incidents = Math.Min((m.BlockingCount ?? 0) + (m.DeadlockCount ?? 0), 99);
             return bandRank + magnitude + incidents;
         }
 
@@ -540,13 +684,102 @@ namespace PerformanceMonitor.Common
         /* The band strings every surface's brush / display mapping already switches on — unchanged values. */
         public const string NeverRun = "NEVER_RUN";
         public const string NoPermissions = "NO_PERMISSIONS";
+
+        /// <summary>
+        /// Every attempt in the window was refused because a PostgreSQL extension the collector DECLARES
+        /// (<c>ICollectorSchemaInfo.RequiredPgExtensions</c>) is not installed on the target (#3240). Split
+        /// out of <see cref="NoPermissions"/> because the two bands demand opposite actions: NO_PERMISSIONS
+        /// sends an operator after a grant, and for these rows a grant fixes nothing — the stored message
+        /// names the extension and <c>CREATE EXTENSION</c> is the remedy, or leaving it uninstalled is a
+        /// legitimate resting state for an optional module. Matches the <c>EXTENSION_MISSING</c>
+        /// collection_log status the PostgreSQL fault mapper writes for exactly these runs.
+        /// </summary>
+        public const string ExtensionMissing = "EXTENSION_MISSING";
+        public const string Stopped = "STOPPED";
         public const string Failing = "FAILING";
         public const string Stale = "STALE";
         public const string Warning = "WARNING";
         public const string Healthy = "HEALTHY";
 
+        /// <summary>
+        /// The bands in which the collector read NOTHING over the whole window — so a surface reporting a
+        /// total assembled from that collector's rows covers none of the window for a server sitting in one
+        /// of them. Named as a set rather than compared band-by-band at each call site so a band added later
+        /// gets one decision here instead of N independent omissions, each of which fails silently by
+        /// counting an unread server as read.
+        ///
+        /// <para><b>NO_PERMISSIONS, EXTENSION_MISSING and STOPPED are the ones the field produces.</b>
+        /// NO_PERMISSIONS is every attempt refused by a grant; EXTENSION_MISSING is every attempt skipped
+        /// because the extension the collector declares is not installed (#3240) — a different remedy, the
+        /// same "nothing of this collector's is in any total". STOPPED is this classifier's own "attempted
+        /// nothing at all — no success, no error, nothing" past the FAILING cutoff, which an extended outage
+        /// or a stalled loop reaches while the server is still enabled.</para>
+        ///
+        /// <para><b>NEVER_RUN is in the set on MEANING, not on reachability.</b> It is <c>totalRuns == 0</c>,
+        /// which a <c>GROUP BY</c> over a run log cannot currently produce — no rows, no group — so today a
+        /// caller aggregating that way never sees it. That is a property of the QUERY, not of the band: a
+        /// later outer join against the collector catalog or the server registry (the natural way to make a
+        /// never-invoked collector visible at all) makes it reachable, and leaving it out would then count
+        /// the most completely unread server of all as covered. It cannot mean anything but "nothing was
+        /// read", so it belongs here whether or not a caller can reach it.</para>
+        ///
+        /// <para><b>FAILING, STALE and WARNING are deliberately NOT in the set.</b> Those collectors did
+        /// read on some cycles and their rows ARE in the total; excluding them would shrink the denominator
+        /// and read as a smaller fleet, which is a new wrong number in place of the old one rather than a
+        /// fix. HEALTHY is obviously not in it.</para>
+        /// </summary>
+        public static readonly IReadOnlySet<string> NothingReadBands =
+            new HashSet<string>(StringComparer.Ordinal) { NeverRun, NoPermissions, ExtensionMissing, Stopped };
+
+        /// <summary>
+        /// True when <paramref name="band"/> is one of <see cref="NothingReadBands"/> — the collector read
+        /// nothing in the window, so nothing of its is in any total built from its rows. A null or unknown
+        /// band answers FALSE: absence of a band is not a claim that nothing was read, and a caller with no
+        /// band at all has to decide that case for itself rather than have this predicate decide it silently.
+        /// </summary>
+        public static bool ReadNothing(string? band) =>
+            band is not null && NothingReadBands.Contains(band);
+
         /// <summary>A collector with runs whose error rate exceeds this percent bands WARNING (when not STALE/FAILING).</summary>
         public const double WarningFailureRatePercent = 20.0;
+
+        /// <summary>
+        /// A collector whose ABANDONED rate exceeds this percent bands WARNING (#2804). An abandoned cycle is
+        /// the #2673 whole-server wall-clock budget giving up: it stores nothing and advances no watermark, so
+        /// it is guaranteed data loss rather than a retryable fault.
+        ///
+        /// <para><b>Why abandonment needed its own threshold rather than joining the error rate.</b> An
+        /// ABANDONED run increments <c>total_runs</c> and NOTHING else — it is not a success, an error, a
+        /// permission denial or a yield. So it grew the failure-rate DENOMINATOR while contributing nothing to
+        /// the numerator, and never advanced <c>last_success_time</c>. Total abandonment does eventually trip
+        /// STALE then FAILING through the staleness path, because no success lands at all. The gap this closes
+        /// is the PARTIAL case: a collector abandoning some cycles while its other cycles still succeed keeps a
+        /// fresh last-success, so staleness never fires, its error rate is exactly 0, and it reads HEALTHY
+        /// indefinitely while losing cycles.</para>
+        ///
+        /// <para><b>Why 0.5, from the fleet rather than from taste.</b> Measured across a production store over
+        /// 24 hours — 1,639 (server, collector) pairs, 520,455 runs — abandonment is not a continuous rate
+        /// phenomenon. Only FOUR pairs abandoned anything at all, 28 runs in total (0.005% fleet-wide), and the
+        /// per-pair rate distribution is p50 = p75 = p90 = p95 = <b>p99 = 0.000%</b> with a maximum of 2.157%.
+        /// The real population is therefore an empty body and a four-point tail spanning 0.60%–2.16%. 0.5 sits
+        /// strictly BELOW that observed floor, so it catches every genuinely-degraded collector on the fleet,
+        /// and strictly ABOVE the 99th percentile, so it fires on nobody who is not abandoning. It also keeps a
+        /// single isolated abandonment quiet in any window of fewer than ~400 runs, which is the "one in a
+        /// thousand is noise, twenty-four is a finding" line. Deliberately far below
+        /// <see cref="WarningFailureRatePercent"/>: an error may be transient and is retried, where the 120 s
+        /// budget is itself generous (#2673 chose it after measuring a 176 s tail), so reaching it at all means
+        /// exceeding a bound already set well above normal.</para>
+        ///
+        /// <para><b>Why WARNING rather than a new band.</b> WARNING is already the rate-based "degrading but
+        /// still running" verdict, which is exactly what partial abandonment is — and a guard firing is not an
+        /// ERROR. A new band string would have to be learned by four independent display mappings, and the two
+        /// that do not switch on it fail in opposite directions: the web's <c>statusToSev</c> defaults to
+        /// "Unknown", while the deprecated Dashboard's brush converter defaults to <c>Transparent</c> — the
+        /// same brush it gives HEALTHY. Attribution is not lost by sharing the band, because the ABANDONED
+        /// count now sits in the same row as the error count, so a reader can always tell which cause produced
+        /// the WARNING.</para>
+        /// </summary>
+        public const double WarningAbandonRatePercent = 0.5;
 
         /* Staleness cutoffs are max(floor, multiplier x the collector's own cadence in hours). The floors are
            the original flat thresholds, so a collector with a cadence at/under the floor is unchanged; only a
@@ -638,6 +871,69 @@ namespace PerformanceMonitor.Common
         /// </summary>
         public const string HasUserDatabasesQualifier = "target has user databases";
 
+        /// <summary>
+        /// Whether a collector's newest DENIAL postdates its newest SUCCESS — the answer to the only
+        /// question a reader of <c>last_error</c> actually has: is this the collector's current state, or a
+        /// fault from a code path it no longer takes (#3010)?
+        ///
+        /// <para><b>The field this exists for cannot be read correctly without it.</b> <c>last_error</c> is
+        /// a single retained slot holding the newest ERROR/PERMISSIONS message in a seven-day window, and
+        /// both MCP <c>get_collection_health</c> tools served it with no timestamp at all. So a message
+        /// from six days ago, recorded on a route the collector has since stopped taking, read exactly like
+        /// one from the last cycle — and nothing on the surface could contradict the assumption.</para>
+        ///
+        /// <para><b>Measured, and it produced a filed issue.</b> <c>pg_deadlocks</c> moved from the
+        /// in-database <c>pg_read_file</c> route to the RDS log API. Its 15,885 PERMISSIONS runs stop dead
+        /// at the cutover; all 50 targets have returned SUCCESS every day since. Six days later
+        /// <c>get_collection_health</c> still showed HEALTHY, <c>errors 0</c>, a reassuring note, AND the
+        /// stale 42501 — every element individually true, together describing a server being refused right
+        /// now, which was false. #2994 was filed on that reading and closed as not-a-defect.</para>
+        ///
+        /// <para><b>Why a comparison of instants and not a rate.</b> A denial RATE would read 15.9% on
+        /// that collector today and call it denied — sending an operator to issue a grant for a route the
+        /// collector does not use. Two stored instants out of one aggregate over one window answer the
+        /// currency question directly, and the answer flips the moment a success lands.</para>
+        ///
+        /// <para><b>Deliberately NOT an input to <see cref="Classify"/>.</b> This reports; it does not
+        /// band. The banding chain is untouched by #3010, and widening a band on this predicate is a
+        /// separate question with its own evidence bar — one nothing measured here clears.</para>
+        /// </summary>
+        /// <param name="permissionDeniedCount">PERMISSIONS runs in the window (<c>permission_denied_count</c>).</param>
+        /// <param name="errorCount">
+        /// ERROR runs in the window; any at all makes this false. The precondition lives WITH the
+        /// derivation rather than at each caller so relaxing one cannot silently widen the other: with an
+        /// ERROR present, "denied since the last success" is no longer the whole story of what went wrong.
+        /// </param>
+        /// <param name="lastSuccessTimeUtc">
+        /// The newest SUCCESS/SKIPPED instant (<c>last_success_time</c>), or null when the window holds no
+        /// success — in which case a denial is trivially the newest outcome.
+        /// </param>
+        /// <param name="lastDeniedTimeUtc">
+        /// The newest PERMISSIONS instant (<c>last_denied_time</c>). Null says nothing was denied inside
+        /// the window, whatever the count claims, so this returns false.
+        /// </param>
+        public static bool DeniedSinceLastSuccess(
+            long permissionDeniedCount,
+            long errorCount,
+            DateTime? lastSuccessTimeUtc,
+            DateTime? lastDeniedTimeUtc)
+        {
+            if (permissionDeniedCount <= 0 || errorCount > 0 || lastDeniedTimeUtc is null)
+            {
+                return false;
+            }
+
+            /* Both instants come from ONE aggregate over ONE window, so this compares two stored values
+               rather than two clock reads — which is why the decision takes timestamps instead of two
+               independently-computed elapsed-hours doubles. Two DateTime.UtcNow subtractions taken
+               microseconds apart can order equal instants either way, and this answer has to be stable.
+
+               Strictly greater: equal instants are NOT "denied since". A tie is a window whose newest
+               success and newest denial landed in the same cycle, where "which came last" is not a fact
+               the store holds, and claiming currency on a coin flip is the defect this reports on. */
+            return lastSuccessTimeUtc is null || lastDeniedTimeUtc.Value > lastSuccessTimeUtc.Value;
+        }
+
         /// <summary>The FAILING cutoff (hours since last success) for a collector of the given cadence.</summary>
         public static double FailingThresholdHours(int frequencyMinutes) =>
             Math.Max(FailingFloorHours, FailingCadenceMultiplier * (frequencyMinutes / 60.0));
@@ -648,26 +944,54 @@ namespace PerformanceMonitor.Common
 
         /// <summary>
         /// Band one collector's trailing-window roll-up. Order is fixed: NEVER_RUN (no runs at all) ->
-        /// NO_PERMISSIONS (only permission denials) -> on-load (failure-rate only, never STALE/FAILING) ->
-        /// FAILING -> STALE -> WARNING (failure rate over the threshold) -> HEALTHY.
+        /// EXTENSION_MISSING (a declared extension absent, #3240) -> NO_PERMISSIONS (only permission
+        /// denials) -> on-load (failure-rate only, never STOPPED/STALE/FAILING) -> STOPPED (no attempt of
+        /// ANY kind recently, despite a history of runs) -> FAILING -> STALE -> WARNING (failure rate OR
+        /// abandon rate over its own threshold) -> HEALTHY.
+        /// <paramref name="extensionMissingCount"/> is runs recorded <c>EXTENSION_MISSING</c> — the
+        /// PostgreSQL fault mapper's named skip for a source whose DECLARED extension is not installed
+        /// (#3240); like the permission count, any success or error makes the window's story bigger than
+        /// the skip and the row falls through to the ordinary ladder.
+        /// <paramref name="abandonedCount"/> is runs the #2673 wall-clock budget gave up on; see
+        /// <see cref="WarningAbandonRatePercent"/> for why it bands WARNING on its own much lower rate and
+        /// why it needed a band at all when a partially-abandoning collector reaches neither STALE nor FAILING.
         /// <paramref name="hoursSinceLastSuccess"/> is the caller's elapsed-hours value — its 999 sentinel
         /// for "ran but never a success" flows straight through to FAILING, exactly as before.
-        /// <paramref name="frequencyMinutes"/> is the collector's cadence (callers resolve it from
-        /// <c>CollectorScheduleDefaults</c>; 0 for on-load or an unknown collector, which yields the floor
-        /// thresholds = the old flat behavior). <paramref name="isOnLoad"/> is <see cref="IsOnLoadCollector"/>.
+        /// <paramref name="hoursSinceLastRun"/> is hours since the newest run of ANY status (success,
+        /// error, or permissions) — see <see cref="Stopped"/> below for why this is a separate input from
+        /// <paramref name="hoursSinceLastSuccess"/>. <paramref name="frequencyMinutes"/> is the collector's
+        /// cadence (callers resolve it from <c>CollectorScheduleDefaults</c>; 0 for on-load or an unknown
+        /// collector, which yields the floor thresholds = the old flat behavior). <paramref name="isOnLoad"/>
+        /// is <see cref="IsOnLoadCollector"/>.
         /// </summary>
         public static string Classify(
             long totalRuns,
             long successCount,
             long errorCount,
             long permissionDeniedCount,
+            long extensionMissingCount,
+            long abandonedCount,
             double hoursSinceLastSuccess,
+            double hoursSinceLastRun,
             int frequencyMinutes,
             bool isOnLoad)
         {
             if (totalRuns == 0)
             {
                 return NeverRun;
+            }
+
+            /* #3240, and BEFORE the permission arm on purpose. The only population that carries both
+               counts with no success and no error is one condition recorded under two vocabularies: a
+               window straddling the upgrade that split this status out of PERMISSIONS holds the same
+               absent-extension fault under both names, and banding it NO_PERMISSIONS for the seven days
+               the old rows take to age out would keep the wrong hint alive for exactly the deployments
+               the split is for. The two SQLSTATEs describe the same read, so one collector cannot be
+               grant-refused and extension-absent in the same cycle; a target that moved between the two
+               states lands successes or newer rows that resolve the tie as the window slides. */
+            if (extensionMissingCount > 0 && errorCount == 0 && successCount == 0)
+            {
+                return ExtensionMissing;
             }
 
             if (permissionDeniedCount > 0 && errorCount == 0 && successCount == 0)
@@ -677,9 +1001,40 @@ namespace PerformanceMonitor.Common
 
             var failureRatePercent = totalRuns > 0 ? (double)errorCount / totalRuns * 100 : 0;
 
+            /* #2804. Kept as its own rate rather than folded into failureRatePercent: the two have very
+               different thresholds (0.5 against 20) precisely because they mean different things, and adding
+               abandonment to the error numerator would have made a 2%-abandoning collector read as a 2%-erroring
+               one — a number no run actually produced. Both counts reach the surface, so the reader can always
+               attribute the band. */
+            var abandonRatePercent = totalRuns > 0 ? (double)abandonedCount / totalRuns * 100 : 0;
+
             if (isOnLoad)
             {
-                return failureRatePercent > WarningFailureRatePercent ? Warning : Healthy;
+                /* On-load collectors are staleness-exempt and banded by rate only, so abandonment has to be
+                   asked here too — otherwise the one class of collector that CANNOT reach the staleness safety
+                   net below would be the one class where abandonment stays invisible. */
+                return failureRatePercent > WarningFailureRatePercent || abandonRatePercent > WarningAbandonRatePercent
+                    ? Warning
+                    : Healthy;
+            }
+
+            /* STOPPED: a collector whose LAST ATTEMPT OF ANY KIND — success, error, or
+               permissions, not just success — is older than the FAILING cutoff has not been invoked at
+               all, which is a different fact from "it runs and keeps failing". A collector that is still
+               being invoked and erroring every cycle has a RECENT hoursSinceLastRun (the failure itself
+               is a run), so it falls through to FAILING below exactly as before; this branch only catches
+               genuine silence. hoursSinceLastRun can never exceed hoursSinceLastSuccess (every success is
+               a run), so this is strictly a subset of what would otherwise read FAILING — it recategorizes
+               rather than suppresses. The house case: a collector whose AppliesTo gate flipped off for a
+               target (an RDS instance where SQL Agent job/status collection is not applicable) stops being
+               invoked entirely; its last historical success sits inside the health window and ages past
+               the FAILING cutoff, reading as an alarming "this keeps failing" when nothing has been
+               attempted in either direction. Reusing FailingThresholdHours rather than a new constant: the
+               question here is the same one FAILING already asks ("has this collector gone dark for too
+               long"), just asked of attempts instead of successes. */
+            if (hoursSinceLastRun > FailingThresholdHours(frequencyMinutes))
+            {
+                return Stopped;
             }
 
             if (hoursSinceLastSuccess > FailingThresholdHours(frequencyMinutes))
@@ -692,7 +1047,10 @@ namespace PerformanceMonitor.Common
                 return Stale;
             }
 
-            if (failureRatePercent > WarningFailureRatePercent)
+            /* Below STALE/FAILING deliberately. A collector that has not succeeded in far too long is the
+               louder fact and keeps its band; abandonment is the one that would otherwise have NO band at all,
+               because a partially-abandoning collector still lands successes and so never ages into either. */
+            if (failureRatePercent > WarningFailureRatePercent || abandonRatePercent > WarningAbandonRatePercent)
             {
                 return Warning;
             }
@@ -778,6 +1136,160 @@ namespace PerformanceMonitor.Common
             return qualified
                 ? string.Format(CultureInfo.InvariantCulture, "{0} (all {1} runs, {2})", lastNote, totalRuns, HasUserDatabasesQualifier)
                 : string.Format(CultureInfo.InvariantCulture, "{0} (all {1} runs)", lastNote, totalRuns);
+        }
+
+        /// <summary>
+        /// What <c>get_collection_health</c>'s output figures are measured over, and — the load-bearing
+        /// half — what they are NOT (#3017).
+        ///
+        /// <para><b>Both windows named, because only one of them was read here.</b> <c>rows_stored</c> and
+        /// <c>runs_with_rows</c> come out of the SAME aggregate over the SAME fixed trailing seven days as
+        /// <c>total_runs</c> and the duration statistics beside them, so cost and output on one row always
+        /// describe one set of runs. <c>get_collector_cost</c>'s <c>total_rows</c> is a different
+        /// measurement entirely — a separate hourly series, summed over the caller's own <c>days_back</c>,
+        /// across every server at once — and this note disclaims it outright rather than letting a reader
+        /// assume the two reconcile. That is #3027's discipline one level down: a surface must not assert a
+        /// scope it did not measure.</para>
+        ///
+        /// <para><b>The disclaimed tool is attributed to Darling on purpose.</b> One note serves both SKUs
+        /// (the whole reason it lives here), but <c>get_collector_cost</c> is Darling-ONLY by architecture —
+        /// it reads the central store's own hourly self-metric, which a single-instance Lite install has no
+        /// twin of. Unattributed, the sentence would point a Lite caller at a tool that SKU does not expose.
+        /// Naming the SKU keeps one string honest on both rather than splitting it per SKU, which is the
+        /// drift this class lives in Common to prevent.</para>
+        ///
+        /// <para><b>And the third thing it is not.</b> <c>rows_stored</c> counts what a run STORED. Nothing on
+        /// this surface reads what the monitored engine COUNTED, so a zero here cannot separate a
+        /// genuinely quiet source from a reader that is capturing nothing off a busy one. Engine-counter
+        /// against rows-stored is a YIELD instrument and a different piece of work; saying so is what
+        /// stops this figure being read as one.</para>
+        /// </summary>
+        public const string OutputWindowNote =
+            "rows_stored and runs_with_rows are counted over the SAME fixed trailing seven days as total_runs "
+            + "and the duration statistics beside them - one aggregate over one window, so cost and output on "
+            + "a collector row always describe the same runs. They are NOT the hourly per-collector series "
+            + "Darling's get_collector_cost reports as total_rows, which is summed over that caller's own "
+            + "days_back and across every server at once; these figures make no claim about it. rows_stored "
+            + "is also what a run STORED, never what the monitored engine counted - so a zero cannot tell a "
+            + "genuinely quiet source apart from a reader capturing nothing off a busy one, and nothing on "
+            + "this surface measures that.";
+
+        /// <summary>
+        /// The closing sentence every ZERO-OUTPUT reading ends on. One copy, because the branches differ in
+        /// what they claim about the row and agree only here — and a sentence that exists twice is the one
+        /// that gets reworded once, which is why <see cref="OutputWindowNote"/> is a constant too.
+        /// </summary>
+        private const string ZeroOutputCaveat =
+            "What this cannot tell you is whether the source really was empty: it counts rows stored, never "
+            + "what the monitored engine counted.";
+
+        /// <summary>
+        /// The sentence a collector that SPENT and STORED NOTHING gets, and the readings it has to keep
+        /// apart (#3017, #3160).
+        ///
+        /// <para><b>Why this is a sentence and not a band.</b> <c>pg_deadlocks</c> was the dearest collector
+        /// on a managed store — 49,258,335 ms over 79,333 runs in seven days — and stored zero rows. That
+        /// zero was CORRECT: the reader was working on all 50 targets and there were no deadlocks to find.
+        /// A verdict keyed on cost-plus-zero-rows fires on the healthy quiet install, which is the
+        /// cry-wolf failure <see cref="HasUserDatabasesQualifier"/> (#1852) exists to prevent. So this puts
+        /// the fact beside the cost and names what would tell the two apart, exactly as #1852 states a fact
+        /// about the TARGET beside a persistently empty enumeration instead of banding it.</para>
+        ///
+        /// <para><b>The third term, and the one thing it must not become.</b> Zero output WITH a current
+        /// denial is a collector that could not read; zero output alone is one that read and found nothing.
+        /// <see cref="DeniedSinceLastSuccess"/> is what separates them, and it is READ here in exactly the
+        /// way its own doc comment permits — reported, never banded. This method returns display text and
+        /// <see cref="Classify"/> never calls it, so consuming the predicate here cannot widen a band.</para>
+        ///
+        /// <para><b>Empty on the productive case, deliberately.</b> Like
+        /// <see cref="SweepPressureClassifier.FormatPeakCycleNote"/>: a note that fires when nothing is
+        /// wrong is how a signal teaches people to ignore it. The numbers on the row already say
+        /// "expensive and productive" when <paramref name="rowsStored"/> is positive.</para>
+        ///
+        /// <para><b>Scoped to zero output, also deliberately.</b> A collector that stored rows earlier in
+        /// the window and is being denied right now gets no finding from here — that is
+        /// <c>denied_since_last_success</c>'s own job on the same row, and firing a second time for it
+        /// would make this a duplicate denial alarm rather than a cost/output instrument.</para>
+        ///
+        /// <para><b>The fourth term, and why it is a COUNT rather than a collector name (#3160).</b> The
+        /// event-collector reading is the right one for <c>deadlocks</c> and <c>blocked_process_report</c>
+        /// and wrong for <c>query_store</c>, which is not an event collector and stored zero rows on 11,728
+        /// consecutive runs on a read-replica fleet — every one of them carrying an empty-enumeration note.
+        /// Asserting the category there reaches the right conclusion by a rationale that does not hold, and
+        /// the identical sentence over a <c>query_store</c> that had genuinely stopped would read as
+        /// reassurance. <paramref name="noteCount"/> answers it from the row: runs that recorded what they
+        /// found get a finding that DEFERS to the note, and runs that recorded nothing keep the category
+        /// reading with its precondition stated out loud.</para>
+        ///
+        /// <para>A name list was the other option and it is the one #2511 exists to refuse — it would go
+        /// stale in the direction that makes it pass, because the next periodic collector to break gets the
+        /// event-collector sentence until somebody remembers to add it. The property being kept is that a
+        /// deliberate zero and a broken zero stay DISTINGUISHABLE, and neither branch is quieter than the
+        /// text it replaces: the "SUCCESS with zero rows" sweep that surfaced #3030, #3109 and #3154 reads
+        /// <c>rows_stored</c>, which nothing here touches.</para>
+        /// </summary>
+        /// <param name="rowsStored">Rows the window's runs stored (<c>rows_stored</c>). Positive = silent.</param>
+        /// <param name="totalRuns">Runs in the window (<c>total_runs</c>) — the spend this qualifies.</param>
+        /// <param name="deniedSinceLastSuccess">
+        /// <see cref="DeniedSinceLastSuccess"/> for the same row. The third term: it is what turns "stored
+        /// nothing" from an ambiguity into a named reading.
+        /// </param>
+        /// <param name="noteCount">
+        /// <c>note_count</c> for the same row — how many of these runs recorded a note about what the run
+        /// itself found. The FOURTH term, and the one that stops the event-collector reading being asserted
+        /// over a collector that already said why (#3160).
+        /// </param>
+        public static string FormatOutputFinding(
+            long rowsStored,
+            long totalRuns,
+            bool deniedSinceLastSuccess,
+            long noteCount)
+        {
+            if (rowsStored > 0 || totalRuns <= 0)
+            {
+                return string.Empty;
+            }
+
+            if (deniedSinceLastSuccess)
+            {
+                return string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Stored 0 rows across {0:N0} runs, and denied_since_last_success is true - the newest "
+                    + "denial postdates the newest success, so this collector is being refused NOW and the "
+                    + "spend bought nothing because nothing could be read. That is a grant, not a collector "
+                    + "repair.",
+                    totalRuns);
+            }
+
+            /* #3160: the runs accounted for themselves, so this defers instead of categorising. It reports
+               the COUNT and names where the reason is; it does not restate the note, which
+               FormatCollectionNote already renders and which would then exist twice. */
+            if (noteCount > 0)
+            {
+                return string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Stored 0 rows across {0:N0} runs with no current denial (denied_since_last_success is "
+                    + "false), so this collector read rather than being unable to read. {1:N0} of those runs "
+                    + "recorded a note about what the run itself found - last_note carries what they said, "
+                    + "and note_count against total_runs says how many. Read that note for why this zero "
+                    + "happened. It is deliberately NOT claimed here that this is a collector storing a row "
+                    + "only when an event occurs, which is the reading that applies only when no run "
+                    + "recorded anything. "
+                    + ZeroOutputCaveat,
+                    totalRuns,
+                    noteCount);
+            }
+
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "Stored 0 rows across {0:N0} runs with no current denial (denied_since_last_success is "
+                + "false), so this collector read and found nothing rather than being unable to read. "
+                + "For one that stores a row only when an event occurs - a deadlock, a blocked-process "
+                + "report, a blocking chain, a held xmin - zero is the correct resting state on a "
+                + "well-behaved target and needs no action. No run recorded a note, which is what that "
+                + "reading rests on. "
+                + ZeroOutputCaveat,
+                totalRuns);
         }
     }
 

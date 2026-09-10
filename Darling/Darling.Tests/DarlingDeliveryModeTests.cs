@@ -99,7 +99,8 @@ public sealed class DarlingDeliveryModeTests
         /* One combined summary row, carrying the server-level numerics. */
         var record = Assert.Single(history.Records);
         Assert.Equal("Deadlocks Detected", record.MetricName);
-        Assert.Equal("tray", record.NotificationType); // no channel configured
+        /* #3169: says "no channel configured" instead of leaving it to this comment. */
+        Assert.Equal(AlertDelivery.ChannelNoneConfigured, record.NotificationType);
         Assert.Equal(3, record.NumericCurrentValue);
     }
 
@@ -297,7 +298,7 @@ public sealed class DarlingDeliveryModeTests
         public Task<DateTime?> GetLastWebhookSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
 
-        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName) =>
+        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
     }
 }

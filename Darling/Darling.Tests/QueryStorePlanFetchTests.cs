@@ -115,10 +115,18 @@ public class QueryStorePlanFetchTests
 
         Assert.Contains("b.running_bytes - b.plan_bytes < 12582912", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("b.running_bytes <= ", sql, StringComparison.Ordinal);
-        Assert.Contains("COALESCE(DATALENGTH(c.query_plan_text), 0)", sql, StringComparison.Ordinal);
+        Assert.Contains("COALESCE(DATALENGTH(p.query_plan_text), 0)", sql, StringComparison.Ordinal);
         Assert.Contains("ROWS UNBOUNDED PRECEDING", sql, StringComparison.Ordinal);
         Assert.Contains("query_plan_text = CONVERT(nvarchar(max), qsp.query_plan)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("JOIN sys.query_store_plan", sql, StringComparison.Ordinal);
+
+        /* #2675: the plan is decompressed EXACTLY ONCE. query_plan is materialised to #plan_fetch, and the
+           budget/emit run over that column - so CONVERT(nvarchar(max), qsp.query_plan), the decompression,
+           appears once, not the three references the prior inline CTE re-ran (~4.5x CPU on the rig). A revert
+           to the inline form trips this. */
+        Assert.Contains("INTO #plan_fetch", sql, StringComparison.Ordinal);
+        Assert.Equal(1, CountOf(sql, "CONVERT(nvarchar(max), qsp.query_plan)"));
+        Assert.Contains("SET NOCOUNT ON;", sql, StringComparison.Ordinal);
 
         /* The hash rides along without decompressing anything, rendered the way the runtime payload
            renders it — TouchAndProbeSql compares the two, so the formats must agree byte-for-byte. */
@@ -174,6 +182,12 @@ public class QueryStorePlanFetchTests
         Assert.Contains("b.running_bytes - b.text_bytes < 12582912", sql, StringComparison.Ordinal);
         Assert.Contains("ROWS UNBOUNDED PRECEDING", sql, StringComparison.Ordinal);
 
+        /* #2675: text is read once - materialised to #text_fetch, then budgeted/emitted from there, the same
+           single-read shape as the plan fetch. */
+        Assert.Contains("INTO #text_fetch", sql, StringComparison.Ordinal);
+        Assert.Equal(1, CountOf(sql, "query_sql_text = qst.query_sql_text"));
+        Assert.Contains("SET NOCOUNT ON;", sql, StringComparison.Ordinal);
+
         /* query_id is only unique until a Query Store reset renumbers it; the stored hash is how the probe
            sees that id 5 now names a DIFFERENT statement. Same rendering as the runtime payload. */
         Assert.Contains("query_hash = CONVERT(varchar(64), qsq.query_hash, 1)", sql, StringComparison.Ordinal);
@@ -204,11 +218,13 @@ public class QueryStorePlanFetchTests
     {
         var sql = QueryStorePlanMap.TouchAndProbeSql;
 
-        /* The liveness half (Finding 3): map and dim last_seen stamped by the same pass, hourly-guarded,
-           and the dim update skips the NULL-digest content-less markers — there is no dim row to touch. */
+        /* The liveness half (Finding 3): map and dim last_seen stamped by the same pass, both guarded at the
+           same width, and the dim update skips the NULL-digest content-less markers — there is no dim row to
+           touch. The width itself belongs to QueryStoreTouchGuardSingleSourceTests: counting a literal here
+           would be a third copy of it, and this pin's job is the statement's SHAPE. */
         Assert.Contains("UPDATE collect.query_store_plan_map", sql, StringComparison.Ordinal);
         Assert.Contains("UPDATE collect.query_plan_dim", sql, StringComparison.Ordinal);
-        Assert.Equal(2, CountOf(sql, "interval '1 hour'"));
+        Assert.Equal(2, CountOf(sql, QueryStoreLivenessTouchGuard.GuardInterval));
         Assert.Contains("FROM map_touch WHERE digest IS NOT NULL", sql, StringComparison.Ordinal);
 
         /* Hash adoption: legacy rows (stored hash NULL) take the batch's live hash on first touch — never
@@ -233,7 +249,7 @@ public class QueryStorePlanFetchTests
         var sql = QueryStoreTextStore.TouchAndProbeSql;
 
         Assert.Contains("UPDATE collect.query_store_text", sql, StringComparison.Ordinal);
-        Assert.Contains("interval '1 hour'", sql, StringComparison.Ordinal);
+        Assert.Contains(QueryStoreLivenessTouchGuard.GuardInterval, sql, StringComparison.Ordinal);
         Assert.Contains("query_hash = COALESCE(t.query_hash, x.live_hash)", sql, StringComparison.Ordinal);
         Assert.Contains("(t.query_id IS NOT NULL) AS resolved", sql, StringComparison.Ordinal);
         Assert.Contains("t.query_hash IS NOT NULL AND batch.query_hash IS NOT NULL", sql, StringComparison.Ordinal);
@@ -272,16 +288,15 @@ public class QueryStorePlanFetchTests
     /* ---------- sizing: unchanged arithmetic, still load-bearing (it caps decompression) ---------- */
 
     /// <summary>
-    /// The candidate cap sits just past what the budget can actually ship, at every plan size the fleet
-    /// ACTUALLY exhibits — per-quartile averages of 162 / 80 / 39 / 15 KB measured across 2,166 budget-cut
-    /// passes. The point of the pin is that none of these clamp: if a real fleet plan size hit a bound, the
-    /// bound would be doing the sizing instead of the measurement.
+    /// The candidate cap sits just past what the budget can actually ship, at the three LARGER quartiles of
+    /// measured fleet plan size (162 / 80 / 39 KB, across 2,166 budget-cut passes) — none of these clamp: if
+    /// a real fleet plan size hit a bound, the bound would be doing the sizing instead of the measurement.
+    /// The smallest quartile (15 KB) is pinned separately below, because it DOES now hit the flat ceiling.
     /// </summary>
     [Theory]
     [InlineData(162, 114)]
     [InlineData(80, 231)]
     [InlineData(39, 473)]
-    [InlineData(15, 1229)]
     public void CandidatePlanCount_SitsJustPastTheBudget_AtEveryMeasuredFleetPlanSize(int avgKb, int expected)
     {
         var k = QueryStorePlanXmlState.CandidatePlanCount(avgKb * 1024L, 12L * 1024 * 1024, out var clamped);
@@ -291,6 +306,24 @@ public class QueryStorePlanFetchTests
 
         var actuallyFit = (12L * 1024 * 1024) / (avgKb * 1024L);
         Assert.InRange(k / (double)actuallyFit, 1.4, 1.6);
+    }
+
+    /// <summary>
+    /// The smallest measured fleet quartile (15 KB) wants ~1229 plans at a 12 MB budget — past the flat
+    /// 512 ceiling (#2683/#2685's adaptive runaway detector was retired in favor of this: it failed to
+    /// engage during the 2026-08-29 OMEGA peak precisely because "wanted" stayed just under the old 2048
+    /// ceiling, so the throttle never armed). A flat ceiling applies unconditionally, so this database-shape
+    /// now converges over more cycles instead of fewer — the accepted trade for query_store, which serves
+    /// historical analysis rather than in-the-moment troubleshooting.
+    /// </summary>
+    [Fact]
+    public void CandidatePlanCount_AtTheSmallestFleetQuartile_HitsTheFlatCeiling()
+    {
+        var k = QueryStorePlanXmlState.CandidatePlanCount(15 * 1024L, 12L * 1024 * 1024, out var clamped);
+
+        Assert.Equal(QueryStorePlanXmlState.MaxCandidatePlans, k);
+        Assert.Equal(512, k);
+        Assert.True(clamped, "the flat ceiling now binds at the fleet's smallest measured plan-size quartile");
     }
 
     /// <summary>
@@ -310,7 +343,7 @@ public class QueryStorePlanFetchTests
 
     [Theory]
     [InlineData(10L * 1024 * 1024, 12L * 1024 * 1024, 32)]
-    [InlineData(1, 12L * 1024 * 1024, 2048)]
+    [InlineData(1, 12L * 1024 * 1024, 512)]
     public void CandidatePlanCount_ClampsAndSaysSo(long avgBytes, long budget, int expected)
     {
         var k = QueryStorePlanXmlState.CandidatePlanCount(avgBytes, budget, out var clamped);
@@ -404,6 +437,52 @@ public class QueryStorePlanFetchTests
 
     private static string LiveSql(CollectorContext context) =>
         QueryStoreCollector.Instance.BuildPerItemQuery(Db, context).Text;
+
+    /* ---------------------------------------------------------------------------------------------
+       #2791: the fetch statements read TVF-backed Query Store views, for which the optimizer has no
+       statistics and uses a fixed guess (1,000 estimated against 14,633 actual on OMEGA, 1,463% off).
+       That guess put QUERY_STORE_PLAN_IN_MEM on the INNER side of a Nested Loops join, re-executed
+       once per candidate id up to MaxCandidatePlans = 512, at 55,000-61,000ms CPU per fetch. The
+       query-level hint is the only lever - the joins live inside the view definition.
+       --------------------------------------------------------------------------------------------- */
+
+    [Fact]
+    public void PlanFetch_ForcesHashJoin_OnTheStatementThatReadsTheCatalogView()
+    {
+        var text = QueryStoreCollector.Instance
+            .BuildPlanFetchByIdsQuery("db", Context(capturePlanXml: true), new long[] { 1, 2, 3 }, 12_582_912).Text;
+
+        Assert.Contains("OPTION(RECOMPILE, HASH JOIN)", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TextFetch_ForcesHashJoin_ForTheSameReason()
+    {
+        var text = QueryStoreCollector.Instance
+            .BuildTextFetchByIdsQuery("db", Context(capturePlanXml: true, fetchTextSeparately: true), new long[] { 1, 2, 3 }, 12_582_912).Text;
+
+        Assert.Contains("OPTION(RECOMPILE, HASH JOIN)", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The hint belongs ONLY on the statement that joins. The second statement of each builder reads the
+    /// #temp and joins nothing, so forcing a strategy there would be cargo-cult - and a query-level hint on
+    /// a joinless statement is the kind of thing that gets copied forward and later defended as load-bearing.
+    /// Exactly one hinted statement, exactly one plain RECOMPILE, in both builders.
+    /// </summary>
+    [Fact]
+    public void TheBudgetStatementsKeepPlainRecompile_BecauseTheyJoinNothing()
+    {
+        var plan = QueryStoreCollector.Instance
+            .BuildPlanFetchByIdsQuery("db", Context(capturePlanXml: true), new long[] { 1 }, 12_582_912).Text;
+        var text = QueryStoreCollector.Instance
+            .BuildTextFetchByIdsQuery("db", Context(capturePlanXml: true, fetchTextSeparately: true), new long[] { 1 }, 12_582_912).Text;
+
+        Assert.Equal(1, plan.Split("HASH JOIN").Length - 1);
+        Assert.Equal(1, plan.Split("OPTION(RECOMPILE);").Length - 1);
+        Assert.Equal(1, text.Split("HASH JOIN").Length - 1);
+        Assert.Equal(1, text.Split("OPTION(RECOMPILE);").Length - 1);
+    }
 
     private static CollectorContext Context(bool capturePlanXml, bool fetchTextSeparately = false)
     {

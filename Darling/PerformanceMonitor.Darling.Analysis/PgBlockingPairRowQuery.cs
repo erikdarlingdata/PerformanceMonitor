@@ -131,6 +131,19 @@ LIMIT 5000";
     /// them are on the analysis pass; a default would have let either keep passing nothing while the
     /// signature claimed the read was abandonable. The viewer's call is the one that legitimately has
     /// no pass to abandon, and it says so at its own call site rather than here.</para>
+    ///
+    /// <para><b>#2874: <paramref name="createCommand"/> MUST return a command that already carries a
+    /// <c>CommandTimeout</c>.</b> This method sets only <c>CommandText</c>, so whatever the factory
+    /// hands back is the command that runs - and all three callers originally passed a bare
+    /// <c>connection.CreateCommand</c> method group, which inherits Npgsql's undocumented 30 s
+    /// default. The deadline is deliberately NOT set here and NOT taken as a parameter: the three
+    /// callers sit in three different budget regimes (60 s under the analysis pass, 30 s under the
+    /// drill-down, the viewer's interactive read deadline), so there is no one value to apply, and a
+    /// "floor if unset" cannot work because Npgsql's default IS 30 and the drill-down's deliberate
+    /// choice is also 30 - indistinguishable from here. Keeping it at the call sites also keeps the
+    /// deadline where the assembly's own pin can see it: the <c>createCommand()</c> invocation below
+    /// matches neither census regex, so a deadline set here would be the one line in this pass that
+    /// nothing guards.</para>
     /// </summary>
     internal static async Task AppendDmvSnapshotRowsAsync(
         Func<NpgsqlCommand> createCommand, List<BlockingPairRow> rows, int serverId, DateTime start, DateTime end,

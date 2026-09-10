@@ -12,13 +12,15 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
 /// One Alerts-tab row over <c>config_alert_log</c>, mirroring Lite's <c>AlertHistoryRow</c>
 /// (Lite/Services/LocalDataService.AlertHistory.cs): the same metric-keyed value formatting
-/// (#1134), the same email-vs-tray <see cref="StatusDisplay"/>, and the shared
+/// (#1134), the same shared <see cref="AlertDeliveryStatus.Describe"/> behind
+/// <see cref="StatusDisplay"/> (differing only in the tray answer each SKU gives it), and the shared
 /// <see cref="AlertMetricClassifier"/> for critical/warning/resolved row emphasis. Carries
 /// <see cref="ServerId"/> + <see cref="ServerName"/> so the all-servers Alert History surface (W2a)
 /// can show a Server column and key the dismiss write on (alert_time, server_id, metric_name).
@@ -61,19 +63,19 @@ public sealed class ViewerAlertRow
 
     public string ThresholdValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, ThresholdValue);
 
-    /// <summary>Email rows show send outcome; tray/other rows show shown-vs-delivered (Lite's mapping).</summary>
-    public string StatusDisplay
-    {
-        get
-        {
-            if (NotificationType == "email")
-            {
-                return AlertSent ? "Sent" : (!string.IsNullOrEmpty(SendError) ? "Failed" : "Not sent");
-            }
-
-            return AlertSent ? "Delivered" : "Shown";
-        }
-    }
+    /// <summary>
+    /// The operator-facing delivery status, from the one shared renderer both SKUs use.
+    /// <c>producerHadTrayChannel: false</c>: this store is written by the HEADLESS service, which has no
+    /// tray and no toast code, so a stored <c>tray</c> asserts nothing that happened and must not read as
+    /// "Shown". The copy this replaces did read it that way, and with no SMTP configured its email arm
+    /// never ran — so every fired alert showed as "Shown" and every resolution as "Delivered", neither of
+    /// which had occurred.
+    ///
+    /// <para>The answer is about the PRODUCER, not this app: the viewer has its own
+    /// <c>AlertToastCoordinator</c> and does raise toasts, but it did not write these rows.</para>
+    /// </summary>
+    public string StatusDisplay =>
+        AlertDeliveryStatus.Describe(AlertSent, NotificationType, SendError, producerHadTrayChannel: false);
 
     public bool IsResolved => AlertMetricClassifier.IsResolution(MetricName);
 
@@ -135,6 +137,7 @@ LIMIT $2";
         var rows = new List<ViewerAlertRow>();
 
         await using var command = _dataSource.CreateCommand(serverId.HasValue ? AlertHistorySql : AlertHistoryAllServersSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
             TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified),
@@ -232,6 +235,7 @@ AND    dismissed = FALSE";
         }
 
         await using var command = _dataSource.CreateCommand(DismissAlertsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter { Value = times });
         command.Parameters.Add(new NpgsqlParameter { Value = ids });
         command.Parameters.Add(new NpgsqlParameter { Value = metrics });
@@ -249,6 +253,7 @@ AND    dismissed = FALSE";
     {
         await using var command = _dataSource.CreateCommand(
             serverId.HasValue ? DismissAllAlertsForServerSql : DismissAllAlertsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
             TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified),

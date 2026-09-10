@@ -10,11 +10,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Text.Json;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -43,7 +43,7 @@ public sealed class FleetPageAttentionFilterTests
 {
     /// <summary>The shipped module, newlines normalised so a multi-line anchor holds whether the checkout gave
     /// this file CRLF (.gitattributes says it does) or LF.</summary>
-    private static string FleetJs => ReadRepoFile(Path.Combine(
+    private static string FleetJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "fleet.js"));
 
     /// <summary>
@@ -136,7 +136,7 @@ public sealed class FleetPageAttentionFilterTests
         Assert.Contains("\"all \" + total + \" matching servers are healthy\"", FleetJs, StringComparison.Ordinal);
         Assert.Contains("attentionCountText(shown, total, term !== \"\")", FleetJs, StringComparison.Ordinal);
 
-        var viewer = ReadRepoFile(Path.Combine(
+        var viewer = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.Fleet.cs"));
         Assert.Contains("$\"showing {shown} of {total}\"", viewer, StringComparison.Ordinal);
         Assert.Contains("$\"all {total} servers are healthy\"", viewer, StringComparison.Ordinal);
@@ -164,7 +164,7 @@ public sealed class FleetPageAttentionFilterTests
            util.js's noticeStrip idiom for the same kind of non-fatal live notice. Also raised in review. */
         Assert.Contains("role: \"status\"", FleetJs, StringComparison.Ordinal);
 
-        var css = ReadRepoFile(Path.Combine(
+        var css = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css"));
         Assert.Contains(".attention-note.warn", css, StringComparison.Ordinal);
         Assert.Contains(".attention-note.ok", css, StringComparison.Ordinal);
@@ -175,6 +175,87 @@ public sealed class FleetPageAttentionFilterTests
         Assert.Contains(".attention-link", css, StringComparison.Ordinal);
         Assert.Contains(".attention-control", css, StringComparison.Ordinal);
         Assert.Contains(".attention-link:focus-visible", css, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2772: the fleet card grid stretches its cards to fill the row, rather than shrinking them as the window
+    /// widens.
+    ///
+    /// <para>`.grid` (the fleet server cards, and the Custom Views list's `.view-cards`) sized its tracks with
+    /// <c>auto-fill</c>, which creates as many 260px tracks as the viewport holds whether or not there are cards
+    /// for them. With fewer cards than tracks, the cards occupied the first tracks and shrank into them while the
+    /// rest sat empty — so a WIDER window made the cards NARROWER, until a card fell below what its inner
+    /// three-tile <c>.stats</c> row needs and the third tile clipped mid-text (<c>BP 4.0 G</c>, <c>0 fai</c>).
+    /// <c>auto-fit</c> collapses the empty tracks so the cards fill the row instead, the fix <c>.stats</c> itself
+    /// already used one screen down for the identical reason. The bug is invisible at fleet scale — every track
+    /// occupied — and obvious at two servers, so a silent revert to <c>auto-fill</c> would pass every eye and
+    /// every large-fleet demo. Pinned as source because the repo carries no CSS/DOM test runner (the FleetJs
+    /// scan pattern above); the fix was also verified live at a two-card width, before and after.</para>
+    /// </summary>
+    [Fact]
+    public void FleetAndViewCardGrids_StretchWithAutoFit_NotAutoFill()
+    {
+        var app = ReadRepoFileLf(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css"));
+        /* .grid keeps its 1fr max (shared with triage); .server-grid also has a 260px min now, but its max is
+           460px, so this 1fr-specific string still pins .grid alone. */
+        Assert.Contains("repeat(auto-fit, minmax(260px, 1fr))", app, StringComparison.Ordinal);
+        /* No grid track in app.css uses auto-fill (the .stats comment says the word but not "repeat(auto-fill"). */
+        Assert.DoesNotContain("repeat(auto-fill", app, StringComparison.Ordinal);
+
+        var editor = ReadRepoFileLf(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "editor.css"));
+        Assert.Contains("repeat(auto-fit, minmax(260px, 1fr))", editor, StringComparison.Ordinal);
+        Assert.DoesNotContain("repeat(auto-fill", editor, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2772 follow-up: the server-card grids cap their track width so a wide screen adds COLUMNS rather than
+    /// fattening a few cards.
+    ///
+    /// <para>auto-fit stopped the empty-track shrink, but with a `1fr` max the surviving cards then stretched
+    /// the other way — two servers on an ultrawide became two ~1000px cards, a lone server one full-width card,
+    /// all whitespace past what six small stat tiles want. The fleet grids (flat and tag-group, both rendering
+    /// serverCards) now carry a `server-grid` class bounding the track to 260-460px (~the width the issue
+    /// measured as reading "correctly") and centring the leftover space. Scoped to `.server-grid`, NOT `.grid`,
+    /// because `.grid` is shared with the triage page, whose span-2 cards and notice strips want the full row —
+    /// so the class must ride BOTH fleet grids and the cap must live only under it. Verified live at two-card and
+    /// five-card widths; pinned as source (no CSS/DOM runner).</para>
+    /// </summary>
+    [Fact]
+    public void FleetServerCardGrids_CapTrackWidth_AndKeepTheScopeOffTriage()
+    {
+        var app = ReadRepoFileLf(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css"));
+        Assert.Contains(".server-grid {", app, StringComparison.Ordinal);
+        /* Cap + centre asserted as a contiguous block, so the centring is pinned to .server-grid rather than
+           merely present somewhere (ReadRepoFile has already normalised CRLF to \n). */
+        Assert.Contains(
+            "repeat(auto-fit, minmax(260px, 460px));\n  justify-content: center;",
+            app,
+            StringComparison.Ordinal);
+
+        /* The cap only wins because .server-grid follows .grid in source order (equal specificity, later wins).
+           A refactor moving it above .grid would silently restore 1fr and lose the cap, so pin the order. */
+        Assert.True(
+            app.IndexOf(".grid {", StringComparison.Ordinal) < app.IndexOf(".server-grid {", StringComparison.Ordinal),
+            ".server-grid must follow .grid in app.css or its width cap loses the cascade");
+
+        /* The indented tag-group grid overrides the centring back to start — a centred grouped grid detaches its
+           cards from their left-aligned header (review-caught). It keeps the cap; only justify-content differs. */
+        Assert.Contains(".tag-group-grid { margin: 0.5rem 0 0.2rem; justify-content: start; }", app, StringComparison.Ordinal);
+
+        /* Both server-card grids (flat + tag-group) must carry the class, or the cap misses one view. */
+        var fleet = ReadRepoFileLf(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "fleet.js"));
+        Assert.Contains("class: \"grid server-grid\"", fleet, StringComparison.Ordinal);
+        Assert.Contains("class: \"grid server-grid tag-group-grid\"", fleet, StringComparison.Ordinal);
+
+        /* Scope guard: the triage grid stays bare .grid (full-width span-2 cards + notice strips), so a global
+           cap must not have leaked onto it — the reason the cap is a class, not a change to .grid. */
+        var triage = ReadRepoFileLf(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "triage.js"));
+        Assert.DoesNotContain("server-grid", triage, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -265,6 +346,37 @@ public sealed class FleetPageAttentionFilterTests
         return fleet;
     }
 
+    /// <summary>
+    /// #2779: an offline server's Collectors chip reads "Stale", not a green "OK".
+    ///
+    /// <para><c>collector_severity</c> keys only on the FAILING count, and a stale collector is counted as
+    /// neither healthy nor failing (the fleet reader's per-status tally drops STALE), so a server that stopped
+    /// collecting kept a green "Collectors OK · N healthy · 0 failing" while its own header said "no recent
+    /// collection" and its Collection Health tab showed every row STALE. Rather than a new stale-count
+    /// threshold, <c>metricBands</c> reuses the reachability signal already on the card — <c>is_online</c>, the
+    /// same one that bands the card Offline — to read the chip "Stale" in the neutral Unknown tone when the
+    /// server is offline. <c>metricBands</c> is the ONE builder both the fleet cards and the per-server detail
+    /// header render (server.js imports it), so the fix lands on both surfaces at once and cannot diverge.
+    /// Pinned as source (no JS/DOM runner); verified live by calling metricBands with an offline card
+    /// (→ "Stale" / sev-Unknown) and an online one (→ "OK" / sev-Healthy).</para>
+    /// </summary>
+    [Fact]
+    public void OfflineServerCollectorsChip_ReadsStale_NotAGreenOk()
+    {
+        var fleet = FleetJs;
+        Assert.Contains("const collectorsStale = c.is_online === false;", fleet, StringComparison.Ordinal);
+        /* Offline → "Stale" in the neutral tone, not the green OK / N-healthy line. */
+        Assert.Contains("? \"Stale\"", fleet, StringComparison.Ordinal);
+        Assert.Contains("collectorsStale ? \"Unknown\" : c.collector_severity", fleet, StringComparison.Ordinal);
+
+        /* One shared builder: the detail header RENDERS the same metricBands (the load-bearing call, not just
+           the import), so the fix covers both surfaces and they cannot drift. */
+        var server = ReadRepoFileLf(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server.js"));
+        Assert.Contains("import { metricBands }", server, StringComparison.Ordinal);
+        Assert.Contains("metricBands(card)", server, StringComparison.Ordinal);
+    }
+
     private static int CountOccurrences(string haystack, string needle)
     {
         var count = 0;
@@ -275,19 +387,5 @@ public sealed class FleetPageAttentionFilterTests
             index += needle.Length;
         }
         return count;
-    }
-
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        for (var dir = new DirectoryInfo(Path.GetDirectoryName(thisFile)!); dir is not null; dir = dir.Parent)
-        {
-            var candidate = Path.Combine(dir.FullName, relative);
-            if (File.Exists(candidate))
-            {
-                return File.ReadAllText(candidate).Replace("\r\n", "\n", StringComparison.Ordinal);
-            }
-        }
-
-        throw new FileNotFoundException($"Could not locate {relative} walking up from {thisFile}");
     }
 }

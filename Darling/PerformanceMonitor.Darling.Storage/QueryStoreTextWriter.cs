@@ -46,6 +46,7 @@ public static class QueryStoreTextWriter
         string databaseName,
         IReadOnlyList<FetchedQueryText> texts,
         DateTime collectionTimeUtc,
+        int commandTimeoutSeconds,
         CancellationToken cancellationToken = default)
     {
         if (connection is null)
@@ -90,7 +91,11 @@ public static class QueryStoreTextWriter
             stamps[i] = stamp;
         }
 
-        using var upsert = new NpgsqlCommand(QueryStoreTextStore.UpsertSql, connection);
+        /* #2776: explicit store-side budget, same reason as the plan writer. Text bodies are not compressed
+           and carry no decompression cost on the way in, so this upsert is the cheaper of the two writes —
+           but it was inheriting the same unchosen 30s default, and a cancel here has the identical effect:
+           the ids read as still-missing and the target re-ships the same statements next cycle. */
+        using var upsert = new NpgsqlCommand(QueryStoreTextStore.UpsertSql, connection) { CommandTimeout = commandTimeoutSeconds };
         upsert.Parameters.AddWithValue(serverIds);
         upsert.Parameters.AddWithValue(databases);
         upsert.Parameters.AddWithValue(queryIds);

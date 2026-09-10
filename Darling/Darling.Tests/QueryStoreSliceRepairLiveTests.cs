@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -42,6 +43,71 @@ public sealed class QueryStoreSliceRepairLiveTests
            of a timeout. Bounded on purpose - the slice transaction holds chunk locks the live
            service's compression jobs also want, so infinite (the VACUUM precedent) is wrong here. */
         Assert.Equal(900, QueryStoreSliceRepair.SliceStatementTimeoutSeconds);
+    }
+
+    [Fact]
+    public void TheCollapseStagesEveryPayloadColumn_BecauseTheWIDTHIsWhatKeepsThePlanSafe()
+    {
+        /* #2876. Lite's collapse (#2771) OOM'd pushing query_plan_text through a per-group aggregate and was
+           rewritten to narrow the staged projection. The obvious reading is that Darling should follow; the
+           measurement says the opposite, and this pin exists so the "obvious" change cannot be made quietly.
+
+           Measured on PostgreSQL 18 at 31,426 and 51,426 split groups carrying 3,033 MB of decompressed plan
+           text: the SHIPPED statement's ~50 aggregate transition states per group make GroupAggregate win on
+           cost, which spills through an external merge sort (125 MB temp, negligible resident). A cut-down
+           three-column form of the same query instead plans as an UNSPILLED HashAggregate at 1.6 GB.
+
+           So the breadth is load-bearing: narrowing this projection toward Lite's shape moves it toward the
+           very plan that is dangerous. Asserted over the collector's own PayloadColumns rather than a literal
+           count, so a column added to the collector has to appear here too. */
+        var sql = QueryStoreSliceRepair.BuildCollapseSql();
+        var staged = sql[..sql.IndexOf("DELETE FROM", StringComparison.Ordinal)];
+
+        var payload = QueryStoreCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
+        Assert.True(payload.Length >= 40, $"expected a wide payload, saw {payload.Length}");
+
+        /* Matched on a WORD BOUNDARY rather than an assumed delimiter. Working copies are CRLF
+           (.gitattributes eol=crlf) so the raw string literal carries \r\n, and a suffix check for "\n"
+           silently misses the final column — which is exactly how the first draft of this pin failed. */
+        var missing = payload.Where(name => !StagesColumn(staged, name)).ToArray();
+
+        Assert.True(
+            missing.Length == 0,
+            "the staged projection dropped payload column(s), which moves the plan toward the unspilled "
+                + "HashAggregate #2876 measured at 1.6 GB: " + string.Join(", ", missing));
+    }
+
+    /// <summary>
+    /// Whether the staged projection names <paramref name="column"/> — as an aggregate alias or carried
+    /// through as a key — requiring a non-identifier character after it so <c>min_dop</c> cannot be
+    /// satisfied by <c>min_dop_something</c>.
+    /// </summary>
+    private static bool StagesColumn(string staged, string column)
+    {
+        foreach (var prefix in new[] { " AS ", "s." })
+        {
+            var needle = prefix + column;
+            var at = -1;
+
+            while ((at = staged.IndexOf(needle, at + 1, StringComparison.Ordinal)) >= 0)
+            {
+                var end = at + needle.Length;
+
+                if (end >= staged.Length)
+                {
+                    return true;
+                }
+
+                var next = staged[end];
+
+                if (!char.IsLetterOrDigit(next) && next != '_')
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private const int TestServerId = -919120;

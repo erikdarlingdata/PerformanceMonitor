@@ -222,6 +222,40 @@ public class PgPlanLogParserTests
         Assert.DoesNotContain(plans, p => p.TopNodeType is null);
     }
 
+    /// <summary>
+    /// The prefix a MANAGED target renders. <c>auto_explain</c>'s query id needs <c>%Q</c> in
+    /// <c>log_line_prefix</c>, and adding it to the system default on a managed parameter group gives
+    /// <c>'%t:%r:%u@%d:[%p]:%Q '</c> - which puts a COLON after the bracketed pid where PostgreSQL's own
+    /// default puts a space (#3030).
+    ///
+    /// <para>Mixed on purpose: the first block is re-rendered under the managed prefix and the second
+    /// keeps the self-hosted one, so the count is the assertion and neither shape can pass on the
+    /// other's behalf.</para>
+    ///
+    /// <para>Identifiers synthesised, shape verbatim: %r renders host(port) and %u@%d the connected user
+    /// and database, so a real line carries a real user and database name there. 192.0.2.10 is RFC 5737
+    /// documentation space, which exists to be written down.</para>
+    /// </summary>
+    [Fact]
+    public void ExtractReadsAManagedPrefixAlongsideASelfHostedOne()
+    {
+        var mixed = RawLog.Replace(
+            "2026-08-25 14:50:05.299 UTC [58] ",
+            "2026-08-25 14:50:05 UTC:192.0.2.10(52345):app_user@app_db:[58]:",
+            StringComparison.Ordinal);
+
+        /* The re-rendering fired, so this is not a second run over RawLog. */
+        Assert.DoesNotContain("UTC [58] ", mixed, StringComparison.Ordinal);
+        Assert.Contains(":[58]:", mixed, StringComparison.Ordinal);
+
+        var plans = PgPlanLogParser.Extract(mixed);
+
+        Assert.Equal(2, plans.Count);
+        Assert.Equal(-3560200806914842915, plans[0].QueryId);
+        Assert.Equal(0.006, plans[0].DurationMs, 3);
+        Assert.Equal(510393640047350727, plans[1].QueryId);
+    }
+
     [Fact]
     public void ExtractRedactsEveryPlanItReturns()
     {

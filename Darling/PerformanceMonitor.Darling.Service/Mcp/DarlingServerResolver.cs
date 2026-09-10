@@ -218,6 +218,7 @@ ORDER BY server_name";
 
         await using var connection = await postgres.OpenConnectionAsync();
         using var command = new NpgsqlCommand(LoadEnabledServersSql, connection);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         using var reader = await command.ExecuteReaderAsync();
 
         while (await reader.ReadAsync())

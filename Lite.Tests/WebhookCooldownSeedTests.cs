@@ -100,6 +100,7 @@ public class WebhookCooldownSeedTests
         public string PagerDutyProxyAddress => "";
         public double AnalysisNotifySeverity => 1.5;
         public int AnalysisNotifyCooldownMinutes => 360;
+        public string TriageBaseUrl => "";
     }
 
     private sealed class FakeHistoryStore : IAlertHistoryStore
@@ -120,7 +121,7 @@ public class WebhookCooldownSeedTests
                 return Task.FromResult<DateTime?>(null);
             return Task.FromResult(LastWebhookSent);
         }
-        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName) => Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) => Task.FromResult<DateTime?>(null);
     }
 
     private static AlertContext ContextWith(string dedupKey) => new()

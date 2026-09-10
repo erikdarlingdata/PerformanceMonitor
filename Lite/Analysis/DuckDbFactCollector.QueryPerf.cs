@@ -25,18 +25,45 @@ public partial class DuckDbFactCollector
             await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
+            /* #2705/#2999: max_dop on v_query_stats is sys.dm_exec_query_stats' lifetime-max for the
+               plan's time in cache (QueryStatExtremes.cs's doctrine — same semantics as
+               max/min_cpu_ms), so a plan compiled before 'max degree of parallelism' was lowered
+               keeps reporting the old higher DOP until it is evicted or recompiled.
+               get_top_queries_by_cpu's parallel_only description carries this caveat for a human
+               reader; current_maxdop applies the same provable-tell reasoning QueryStatExtremes uses
+               for CPU/elapsed: a max_dop reading that EXCEEDS what the server's current maxdop
+               setting can produce right now is impossible under today's configuration, so it provably
+               predates whatever change set that configuration and must not be counted. Lowering
+               MAXDOP is the ordinary remediation for this very finding, so without the cross-check
+               the finding survives its own fix. A current_maxdop of 0 (unlimited) or unknown (no
+               v_server_config row yet) makes no configuration impossible, so the count is unchanged
+               in both of those cases.
+               LEFT JOIN ... ON true rather than a correlated subquery: the CTE is at most one row, so
+               the join stays one-to-one and the config read is evaluated once, not per query row. */
             cmd.CommandText = @"
+WITH current_maxdop AS
+(
+    SELECT value_in_use
+    FROM v_server_config
+    WHERE server_id = $1
+    AND   configuration_name = 'max degree of parallelism'
+    ORDER BY capture_time DESC
+    LIMIT 1
+)
 SELECT
-    SUM(delta_spills) AS total_spills,
-    COUNT(CASE WHEN max_dop > 8 THEN 1 END) AS high_dop_queries,
-    COUNT(CASE WHEN delta_spills > 0 THEN 1 END) AS spilling_queries,
-    SUM(delta_execution_count) AS total_executions,
-    SUM(delta_worker_time) AS total_cpu_time_us
-FROM v_query_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-AND   delta_execution_count > 0";
+    SUM(v.delta_spills) AS total_spills,
+    COUNT(CASE WHEN v.max_dop > 8
+                AND (m.value_in_use IS NULL OR m.value_in_use = 0 OR v.max_dop <= m.value_in_use)
+               THEN 1 END) AS high_dop_queries,
+    COUNT(CASE WHEN v.delta_spills > 0 THEN 1 END) AS spilling_queries,
+    SUM(v.delta_execution_count) AS total_executions,
+    SUM(v.delta_worker_time) AS total_cpu_time_us
+FROM v_query_stats AS v
+LEFT JOIN current_maxdop AS m ON true
+WHERE v.server_id = $1
+AND   v.collection_time >= $2
+AND   v.collection_time <= $3
+AND   v.delta_execution_count > 0";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
@@ -87,7 +114,10 @@ AND   delta_execution_count > 0";
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -108,14 +138,39 @@ AND   delta_execution_count > 0";
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
-WITH latest AS
+WITH svr AS
+(
+    -- creation_time is the MONITORED SERVER's local wall clock -- QueryStatsCollector ships the
+    -- dm_exec_query_stats value verbatim -- while the window bound is naive UTC off DateTime.UtcNow.
+    -- De-skewing the column by the collected offset is what lets the compiled-before-the-window test
+    -- compare a single frame. Untranslated, a negative offset admits exactly the in-window plans this
+    -- predicate exists to exclude, and a positive one discards plans that legitimately predate the
+    -- window; either way a wide min/max worker-time spread stops being evidence of parameter
+    -- sensitivity and becomes an artefact of plan age. COALESCE to 0 because server_properties is an
+    -- on-load collector, so an absent offset is the state every server passes through on its first
+    -- cycle -- refusing the read there would pre-empt the two answers that outrank any window. The
+    -- CTE returns exactly one row, so no plan is lost to it.
+    SELECT COALESCE
+    (
+        (
+            SELECT utc_offset_minutes
+            FROM v_server_properties
+            WHERE server_id = $1
+            AND   utc_offset_minutes IS NOT NULL
+            ORDER BY collection_time DESC
+            LIMIT 1
+        ),
+        0
+    ) AS offset_minutes
+),
+latest AS
 (
     SELECT
         query_hash,
         query_plan_hash,
         database_name,
         execution_count,
-        creation_time,
+        creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,
         min_worker_time,
         max_worker_time,
         min_grant_kb,
@@ -127,7 +182,7 @@ WITH latest AS
             PARTITION BY database_name, query_hash, query_plan_hash
             ORDER BY collection_time DESC
         ) AS rn
-    FROM v_query_stats
+    FROM v_query_stats, svr
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
@@ -144,7 +199,7 @@ WHERE rn = 1
 AND   min_worker_time >= 10000
 AND   max_worker_time >= 250000
 AND   execution_count >= 20
-AND   creation_time <= $2
+AND   creation_time_utc <= $2
 AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
 ORDER BY worker_ratio DESC
 LIMIT 20";
@@ -197,7 +252,10 @@ LIMIT 20";
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -423,7 +481,10 @@ LIMIT 20";
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -486,7 +547,10 @@ AND   delta_execution_count > 0";
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
-            /* Table may not exist or have no data. An abandonment is NOT swallowed here (#2443). */
+            /* Degrades to "no facts" so one unavailable input cannot cost this server its other
+               facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
+               not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
         }
     }
 
@@ -572,6 +636,7 @@ LIMIT 10";
         {
             // query_stats / plan parse may be unavailable — skip, the advisory is best-effort.
             // An abandonment is NOT swallowed here (#2443).
+            ReportCollectionFailure(ex, context);
         }
     }
 

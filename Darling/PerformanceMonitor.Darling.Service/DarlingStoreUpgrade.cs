@@ -1842,7 +1842,7 @@ internal sealed class DarlingStoreUpgrade
             FROM pg_database AS d
             WHERE d.datname = 'template0'
             """,
-            connection);
+            connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -1879,7 +1879,7 @@ internal sealed class DarlingStoreUpgrade
         {
             await connection.OpenAsync(cancellationToken);
             await using var command = new NpgsqlCommand(
-                "SELECT datname FROM pg_database WHERE datallowconn ORDER BY datname", connection);
+                "SELECT datname FROM pg_database WHERE datallowconn ORDER BY datname", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -1906,7 +1906,7 @@ internal sealed class DarlingStoreUpgrade
 
             string? installed;
             await using (var probe = new NpgsqlCommand(
-                "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", connection))
+                "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
             {
                 installed = await probe.ExecuteScalarAsync(cancellationToken) as string;
             }
@@ -1941,7 +1941,7 @@ internal sealed class DarlingStoreUpgrade
             }
 
             await using var verify = new NpgsqlCommand(
-                "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", connection);
+                "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             var after = await verify.ExecuteScalarAsync(cancellationToken) as string;
             if (!string.Equals(after, targetVersion, StringComparison.Ordinal))
             {
@@ -2079,7 +2079,7 @@ internal sealed class DarlingStoreUpgrade
 
             if (upgraded)
             {
-                await using var version = new NpgsqlCommand("SHOW server_version_num", connection);
+                await using var version = new NpgsqlCommand("SHOW server_version_num", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
                 var raw = await version.ExecuteScalarAsync(cancellationToken) as string;
                 var liveMajor = int.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out var num) ? num / 10000 : 0;
                 if (liveMajor != bundledMajor)
@@ -2099,7 +2099,7 @@ internal sealed class DarlingStoreUpgrade
                statement on this fresh connection, for the same alone-first reason as the bridge. */
             string? installed;
             await using (var probe = new NpgsqlCommand(
-                "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", connection))
+                "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
             {
                 installed = await probe.ExecuteScalarAsync(cancellationToken) as string;
             }
@@ -2125,7 +2125,7 @@ internal sealed class DarlingStoreUpgrade
                 }
 
                 await using var verify = new NpgsqlCommand(
-                    "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", connection);
+                    "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
                 var after = await verify.ExecuteScalarAsync(cancellationToken) as string;
                 if (string.Equals(after, bundledTimescaleVersion, StringComparison.Ordinal))
                 {
@@ -2188,7 +2188,7 @@ internal sealed class DarlingStoreUpgrade
     /// </summary>
     private async Task VerifySentinelReadAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
-        await using var exists = new NpgsqlCommand("SELECT to_regclass('collect.collection_log') IS NOT NULL", connection);
+        await using var exists = new NpgsqlCommand("SELECT to_regclass('collect.collection_log') IS NOT NULL", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         if (await exists.ExecuteScalarAsync(cancellationToken) is not true)
         {
             _logger.LogWarning(
@@ -2196,7 +2196,7 @@ internal sealed class DarlingStoreUpgrade
             return;
         }
 
-        await using var count = new NpgsqlCommand("SELECT count(*) FROM collect.collection_log", connection);
+        await using var count = new NpgsqlCommand("SELECT count(*) FROM collect.collection_log", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         var rows = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken) ?? 0L, CultureInfo.InvariantCulture);
         _logger.LogInformation(
             "Post-upgrade sentinel read OK: collect.collection_log returned {Rows:N0} rows through the upgraded cluster.", rows);

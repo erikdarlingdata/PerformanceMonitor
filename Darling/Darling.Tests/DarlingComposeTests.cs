@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -88,9 +89,9 @@ public sealed class DarlingComposeTests
     [Fact]
     public void EveryRatioMeasure_ReferencesRealSameSourceScalars()
     {
-        /* Sum/Avg ratios divide two scalar measures; Weighted ratios instead reference RAW source columns
-           (WeightedValueColumn + WeightColumn), pinned separately by WeightedRatio_Columns_AreRealPayloadColumns. */
-        foreach (var ratio in MeasureCatalog.Measures.Where(m => m.Kind == MeasureKind.Ratio && m.RatioMode != MeasureRatioMode.Weighted))
+        /* Sum/Avg ratios divide two scalar measures; Weighted/WeightedSum ratios instead reference RAW source
+           columns (WeightedValueColumn + WeightColumn), pinned separately by WeightedRatio_Columns_AreRealPayloadColumns. */
+        foreach (var ratio in MeasureCatalog.Measures.Where(m => m.Kind == MeasureKind.Ratio && m.RatioMode is MeasureRatioMode.Sum or MeasureRatioMode.Avg))
         {
             var numerator = MeasureCatalog.Measure(ratio.NumeratorKey);
             var denominator = MeasureCatalog.Measure(ratio.DenominatorKey);
@@ -108,13 +109,14 @@ public sealed class DarlingComposeTests
     {
         var payload = PayloadColumnsByTable();
         var weighted = MeasureCatalog.Measures
-            .Where(m => m.Kind == MeasureKind.Ratio && m.RatioMode == MeasureRatioMode.Weighted).ToList();
+            .Where(m => m.Kind == MeasureKind.Ratio && m.RatioMode is MeasureRatioMode.Weighted or MeasureRatioMode.WeightedSum).ToList();
         Assert.NotEmpty(weighted);
         foreach (var ratio in weighted)
         {
             var columns = payload[ratio.SourceTable];
-            /* A Weighted ratio's two operands are raw columns of its own source (the pre-aggregated average and
-               its execution weight), so both must be real payload columns — the compiler emits them directly. */
+            /* A Weighted/WeightedSum ratio's two operands are raw columns of its own source (the pre-aggregated
+               average and its execution weight), so both must be real payload columns — the compiler emits them
+               directly. */
             Assert.True(ratio.WeightedValueColumn is not null && columns.Contains(ratio.WeightedValueColumn),
                 $"weighted ratio '{ratio.Key}' value column '{ratio.WeightedValueColumn}' is not a payload column of '{ratio.SourceTable}'.");
             Assert.True(ratio.WeightColumn is not null && columns.Contains(ratio.WeightColumn),
@@ -135,6 +137,30 @@ public sealed class DarlingComposeTests
             var table = dimension.ViaModuleJoin ? "procedure_stats" : dimension.SourceTable;
             Assert.True(payload[table].Contains(dimension.Column),
                 $"dimension '{dimension.SourceTable}.{dimension.Name}' column '{dimension.Column}' is not a payload column of '{table}'.");
+        }
+    }
+
+    [Fact]
+    public void ModuleFallbackColumns_AreRealSourceColumns_AndOnlyOnModuleJoinDimensions()
+    {
+        var payload = PayloadColumnsByTable();
+        var withFallback = MeasureCatalog.Dimensions.Where(d => d.FallbackColumn is not null).ToList();
+        /* The statement dimension (#2737) exists — this pin must not pass vacuously. */
+        Assert.NotEmpty(withFallback);
+        foreach (var dimension in MeasureCatalog.Dimensions)
+        {
+            if (dimension.FallbackColumn is null)
+            {
+                continue;
+            }
+
+            /* The fallback is emitted as f.<column> against the FACT source (not the module side), so it
+               must be a real payload column of the dimension's own table — and a fallback only means
+               anything on a module-join dimension, whose join can miss. */
+            Assert.True(dimension.ViaModuleJoin,
+                $"dimension '{dimension.SourceTable}.{dimension.Name}' declares a FallbackColumn without ViaModuleJoin — the compiler would never use it.");
+            Assert.True(payload[dimension.SourceTable].Contains(dimension.FallbackColumn),
+                $"dimension '{dimension.SourceTable}.{dimension.Name}' fallback column '{dimension.FallbackColumn}' is not a payload column of '{dimension.SourceTable}'.");
         }
     }
 
@@ -222,6 +248,61 @@ public sealed class DarlingComposeTests
         Assert.Equal(10, plan.TopN);
     }
 
+    /* ─────────────── #2734: timeBucket + topN = rank-then-bucket (window-total top-N series) ─────────────── */
+
+    [Fact]
+    public void TryParsePanel_AcceptsTopNWithTimeBucket_AsRankedTimeSeries()
+    {
+        /* The old XOR rejection flipped to acceptance (#2734): "the hourly trend of the top N" is a real
+           shape now. Ranking is by the WINDOW TOTAL (option 1, decided); includeOther defaults OFF. */
+        var plan = ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"line\"}");
+        Assert.Equal(PanelMode.RankedTimeSeries, plan.Mode);
+        Assert.Equal(5, plan.TopN);
+        Assert.Equal(ComposeTimeBucket.Hour, plan.TimeBucket);
+        Assert.False(plan.IncludeOther);
+    }
+
+    [Fact]
+    public void TryParsePanel_RankedTimeSeries_ReadsIncludeOther()
+    {
+        var plan = ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"includeOther\":true,\"viz\":\"stacked\"}");
+        Assert.Equal(PanelMode.RankedTimeSeries, plan.Mode);
+        Assert.True(plan.IncludeOther);
+    }
+
+    [Theory]
+    /* includeOther:true is only meaningful when both timeBucket and topN are set — naming that beats a
+       silently ignored knob. A literal false is the same as absence and stays accepted anywhere (the
+       annotations empty-array precedent, tested below). */
+    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"groupBy\":[\"wait_type\"],\"includeOther\":true,\"viz\":\"line\"}", "needs both 'timeBucket' and 'topN'")]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"includeOther\":true,\"viz\":\"bar\"}", "needs both 'timeBucket' and 'topN'")]
+    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"includeOther\":\"yes\",\"viz\":\"line\"}", "must be a boolean")]
+    /* A rank-then-bucket panel is still a time series to the viz gate: bar/pie stay ranked-only. */
+    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"bar\"}", "not a time series")]
+    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"pie\"}", "not a time series")]
+    /* A grouped time series never carries a dual-axis overlay, ranked or not. */
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"database_name\"],\"viz\":\"line\",\"overlay\":{\"measure\":\"query_elapsed_us\",\"aggregate\":\"sum\"}}", "cannot also group")]
+    public void TryParsePanel_RankedTimeSeries_RejectsIncoherence_NamingTheReason(string json, string expectedFragment)
+    {
+        Assert.Contains(expectedFragment, RejectReason(json), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    /* Every time-series viz renders the new mode (its rows are the same bucket+dims+value shape), table
+       renders anything, and annotations ride it — it has the time axis the markers need. */
+    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"area\"}")]
+    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"stacked-bar\"}")]
+    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"table\"}")]
+    [InlineData("{\"source\":\"deadlocks\",\"measure\":\"deadlock_count\",\"aggregate\":\"count\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"database_name\"],\"viz\":\"line\",\"annotations\":[\"deadlocks\"]}")]
+    /* includeOther:false is a no-op and legal anywhere, exactly like an empty annotations array. */
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"includeOther\":false,\"viz\":\"bar\"}")]
+    public void TryParsePanel_RankedTimeSeries_AcceptsCoherentShapes(string json)
+    {
+        var (plan, error) = ComposeSpec.TryParsePanel(PanelJson(json), Array.Empty<string>());
+        Assert.True(error is null, error);
+        Assert.NotNull(plan);
+    }
+
     [Fact]
     public void TryParsePanel_AcceptsARatio()
     {
@@ -258,7 +339,9 @@ public sealed class DarlingComposeTests
     [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"unit\":\"gb\",\"viz\":\"table\"}", "not valid for measure")]
     [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"viz\":\"nope\"}", "unknown or missing viz")]
     [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"nope\",\"viz\":\"line\"}", "unknown timeBucket")]
-    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"minute\",\"topN\":5,\"viz\":\"line\"}", "cannot set both")]
+    /* #2734: timeBucket + topN is a real mode now, but it ranks the groupBy members — without one there
+       is nothing to rank. */
+    [InlineData("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"minute\",\"topN\":5,\"viz\":\"line\"}", "add 'groupBy'")]
     /* like on a non-likeable dimension (query_hash). */
     [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"viz\":\"table\",\"filters\":[{\"dimension\":\"query_hash\",\"op\":\"like\",\"value\":\"x\"}]}", "not allowed on dimension")]
     /* a dimension the measure does not allow. */
@@ -436,12 +519,173 @@ public sealed class DarlingComposeTests
         Assert.DoesNotContain("ROW_NUMBER()", sql, StringComparison.Ordinal);
     }
 
+    /* ─────────────── #2737: the module join's NULL misses (the ad-hoc population) ─────────────── */
+
+    [Fact]
+    public void Compile_ObjectNameGroupBy_LabelsTheAdHocBucket()
+    {
+        /* The module LEFT JOIN misses every ad-hoc statement; a bare m.object_name folded them all into ONE
+           null-named row per (database, bucket) — usually the row that wins the ranking, labeled nothing. The
+           dimension compiles COALESCEd to the sentinel so the bucket is visibly "(ad hoc)". */
+        var sql = Compile(ValidPlan(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"bar\"}"));
+        Assert.Contains("COALESCE(m.object_name, '(ad hoc)') AS object_name", sql, StringComparison.Ordinal);
+        var groupBy = sql.Substring(sql.IndexOf("GROUP BY", StringComparison.Ordinal));
+        Assert.Contains("COALESCE(m.object_name, '(ad hoc)')", groupBy, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_ObjectNameNeq_IsNullSafe_SoAdHocRowsSurviveTheFilter()
+    {
+        /* The DECISION (#2737): neq 'X' INCLUDES ad-hoc rows. NULL fails "<> ALL", so the bare column made
+           "everything except this procedure" silently mean "every OTHER procedure" — the ad-hoc population
+           vanished from the result with nothing on screen saying so. Compiling the filter against the folded
+           expression means the compared value is never NULL: "not X" is the rest of the workload, and the old
+           procedures-only read is still available EXPLICITLY as neq '(ad hoc)' + neq 'X'. */
+        var sql = Compile(ValidPlan(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"," +
+            "\"filters\":[{\"dimension\":\"object_name\",\"op\":\"neq\",\"value\":\"dbo.usp_Payment\"}]}"));
+        Assert.Contains("COALESCE(m.object_name, '(ad hoc)') <> ALL(", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("m.object_name <> ALL(", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_ObjectNameEqTheAdHocSentinel_SelectsTheBucket_AsABoundParameter()
+    {
+        /* Filtering TO the ad-hoc population is eq '(ad hoc)' — no new operator: the sentinel IS the
+           dimension's value for ad-hoc rows. The label rides as a bound parameter VALUE like any other
+           filter literal; only the compiler's own catalog constant is ever emitted as a SQL literal. */
+        var plan = ValidPlan(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"," +
+            "\"filters\":[{\"dimension\":\"object_name\",\"op\":\"eq\",\"value\":\"(ad hoc)\"}]}");
+        var (compiled, error) = ComposeCompiler.Compile(
+            plan, new ComposeRunContext(null, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown));
+        Assert.True(error is null, error);
+        Assert.Contains("COALESCE(m.object_name, '(ad hoc)') = ANY(", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains(compiled.Parameters, p => p.Value is string[] values && values.Contains(MeasureCatalog.AdHocLabel));
+    }
+
+    [Fact]
+    public void Compile_StatementGroupBy_KeepsAdHocDistinctByQueryHash()
+    {
+        /* The fallback-identity dimension (#2737): the real "top statements" panel. Procedures keep their
+           module name; the join's misses fall back to the fact row's OWN query_hash instead of one shared
+           label, so ad-hoc statements rank individually. Uses the same #1568 module CTE on the raw route. */
+        var sql = Compile(ValidPlan(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"statement\"],\"viz\":\"bar\"}"));
+        Assert.Contains("COALESCE(m.object_name, f.query_hash) AS statement", sql, StringComparison.Ordinal);
+        Assert.Contains("ROW_NUMBER()", sql, StringComparison.Ordinal);
+        Assert.Contains("procedure_stats", sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Compile_RankedShape_OrdersByValueDescWithBoundLimit()
     {
         var sql = Compile(ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"}"));
-        Assert.Contains("ORDER BY value DESC", sql, StringComparison.Ordinal);
+        /* NULLS LAST pins the #2743 review fix: DESC's default NULLS FIRST ranked a NULL-aggregate group
+           at the top, and under the LIMIT it evicted a legitimate member. The bare form must stay gone. */
+        Assert.Contains("ORDER BY value DESC NULLS LAST", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ORDER BY value DESC\n", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $", sql, StringComparison.Ordinal);
+    }
+
+    /* ─────────────── #2734: the rank-then-bucket SQL shape ─────────────── */
+
+    [Fact]
+    public void Compile_RankedTimeSeries_RanksByWindowTotal_ThenBucketsOnlyThoseMembers()
+    {
+        var sql = Compile(ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"line\"}"));
+
+        /* The rank pass: the Ranked query minus the time column, as a CTE — window-total ordering with the
+           bound topN LIMIT ($3 here: window $1/$2, then topN; no scope, no filters). */
+        Assert.StartsWith("WITH topn AS (", sql, StringComparison.Ordinal);
+        /* NULLS LAST, because DESC's Postgres default is NULLS FIRST and this ordering decides series
+           MEMBERSHIP — a NULL-aggregate group must never evict a real winner (#2743 review). */
+        Assert.Contains("ORDER BY value DESC NULLS LAST", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $3", sql, StringComparison.Ordinal);
+
+        /* The series pass buckets ONLY the winners: membership is IS NOT DISTINCT FROM (a NULL group key
+           that wins a slot must not be knocked out of its own series by '='). */
+        Assert.Contains("AND EXISTS (SELECT 1 FROM topn AS t WHERE t.wait_type IS NOT DISTINCT FROM f.wait_type)", sql, StringComparison.Ordinal);
+        Assert.Contains("date_trunc('hour', f.collection_time)", sql, StringComparison.Ordinal);
+
+        /* Default is NO residual series — the label appears only under includeOther. */
+        Assert.DoesNotContain(ComposeCompiler.OtherSeriesLabel, sql, StringComparison.Ordinal);
+
+        /* Still a time series to the #1687 row cap: newest buckets kept, re-sorted ascending — and the
+           wrapper opens AFTER the rank CTE, so the WITH stays top-level. */
+        Assert.Contains("SELECT * FROM (", sql, StringComparison.Ordinal);
+        Assert.True(
+            sql.IndexOf("topn AS (", StringComparison.Ordinal) < sql.IndexOf("SELECT * FROM (", StringComparison.Ordinal),
+            "the row-cap wrapper must open after the rank CTE, not swallow it");
+        Assert.EndsWith("ORDER BY bucket", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_RankedTimeSeries_IncludeOther_FoldsTheRemainderIntoOneSeries()
+    {
+        var sql = Compile(ValidPlan("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"includeOther\":true,\"viz\":\"stacked\"}"));
+
+        /* The residual fold: non-members keep contributing, relabeled — so every bucket still sums to the
+           window total. The CASE replaces the WHERE semi-filter (a row filtered out cannot be folded). */
+        var fold = $"CASE WHEN EXISTS (SELECT 1 FROM topn AS t WHERE t.wait_type IS NOT DISTINCT FROM f.wait_type) THEN f.wait_type ELSE '{ComposeCompiler.OtherSeriesLabel}' END";
+        Assert.Contains(fold + " AS wait_type", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY date_trunc('hour', f.collection_time), " + fold, sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("  AND EXISTS", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_RankedTimeSeries_BindsEachValueOnce_SharedByBothPasses()
+    {
+        /* Both passes aggregate the same fact rows, so the filter/scope predicates appear TWICE in the
+           text but each value is bound ONCE — the clause text (same $n) is reused, never re-bound.
+           Params: $1/$2 window, $3 scope, $4 filter array, $5 topN. */
+        var plan = ValidPlan(
+            "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"viz\":\"line\"," +
+            "\"filters\":[{\"dimension\":\"wait_type\",\"op\":\"neq\",\"value\":[\"SLEEP_TASK\",\"BROKER_TASK_STOP\"]}]}");
+        var (compiled, error) = ComposeCompiler.Compile(
+            plan, new ComposeRunContext(new[] { "PROD-01" }, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown));
+        Assert.True(error is null, error);
+
+        var sql = compiled!.Sql;
+        Assert.Equal(5, compiled.Parameters.Count);
+        Assert.Equal(2, CountOccurrences(sql, "f.server_name = ANY($3)"));
+        Assert.Equal(2, CountOccurrences(sql, "<> ALL($4)"));
+        Assert.Contains("LIMIT $5", sql, StringComparison.Ordinal);
+        /* Values stay bound, never interpolated — in either pass. */
+        Assert.DoesNotContain("PROD-01", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SLEEP_TASK", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_RankedTimeSeries_ModuleJoinDim_JoinsInBothPasses_WithTheWithTopLevel()
+    {
+        /* object_name is the #1568 stitched dimension: the module CTE (m) comes first, the rank CTE joins
+           it (rank one population), and the series pass joins it again (chart the same population). Both
+           passes go through the SAME ColumnRef, so the #2737 ad-hoc fold rides along: the '(ad hoc)'
+           bucket ranks and charts as an ordinary member, never a NULL that membership would drop. */
+        var sql = Compile(ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"line\"}"));
+
+        Assert.StartsWith("WITH m AS (", sql, StringComparison.Ordinal);
+        Assert.Contains(", topn AS (", sql, StringComparison.Ordinal);
+        Assert.Equal(2, CountOccurrences(sql, "LEFT JOIN m ON m.sql_handle = f.sql_handle"));
+        Assert.Contains(
+            $"t.object_name IS NOT DISTINCT FROM COALESCE(m.object_name, '{MeasureCatalog.AdHocLabel}')",
+            sql, StringComparison.Ordinal);
+        Assert.True(
+            sql.IndexOf(", topn AS (", StringComparison.Ordinal) < sql.IndexOf("SELECT * FROM (", StringComparison.Ordinal),
+            "both CTEs must precede the row-cap wrapper");
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        for (var i = haystack.IndexOf(needle, StringComparison.Ordinal); i >= 0; i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
     }
 
     [Fact]
@@ -523,6 +767,21 @@ public sealed class DarlingComposeTests
     }
 
     [Fact]
+    public void Compile_OldWindow_QueryStore_WeightedSum_RoutesToCagg_ReadsTheWeightedSumColumnAlone()
+    {
+        /* #2732: the total remaps to the reshaped CAGG's pre-multiplied product-sum DIRECTLY — the corrected
+           rollups materialize SUM(avg * execution_count) as cpu_us_weighted_sum, so the total re-aggregates
+           additively with no denominator and no NULLIF. */
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_total_cpu_us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_store_stats_corrected_hourly AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(f.cpu_us_weighted_sum) AS double precision)", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("NULLIF", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("avg_cpu_time_us", compiled.Sql, StringComparison.Ordinal); /* not the raw column */
+    }
+
+    [Fact]
     public void Compile_VeryOldWindow_QueryStore_RoutesToDailyCagg()
     {
         /* A 120-day QS window routes to the corrected daily (same weighted-sum columns as the hourly). This
@@ -588,6 +847,24 @@ public sealed class DarlingComposeTests
         Assert.Contains("LEFT JOIN collect.module_map AS m ON m.sql_handle = f.sql_handle AND m.server_name = f.server_name", compiled.Sql, StringComparison.Ordinal);
         Assert.Contains("m.object_name", compiled.Sql, StringComparison.Ordinal);        /* attribution from the map */
         Assert.DoesNotContain("ROW_NUMBER()", compiled.Sql, StringComparison.Ordinal);   /* not the raw #1568 CTE */
+        /* #2737: the module_map join's misses are NULL exactly like the CTE's — the fold applies on BOTH routes. */
+        Assert.Contains("COALESCE(m.object_name, '(ad hoc)') AS object_name", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_OldWindow_Statement_RoutesToCagg_WithTheHashFallback()
+    {
+        /* statement is CAGG-coverable for the same reason object_name is (#2737): the query_stats CAGG carries
+           sql_handle for the module_map join AND query_hash for the fallback identity. Without the router
+           coverage entry every statement panel would silently pin to raw (4d retention) and read empty on
+           older windows. */
+        var (compiled, error) = CompileAged(
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"statement\"],\"viz\":\"bar\"}",
+            daysOld: 120, servers: new[] { "PROD-01" });
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_stats_daily AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN collect.module_map AS m", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("COALESCE(m.object_name, f.query_hash) AS statement", compiled.Sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -976,6 +1253,12 @@ public sealed class DarlingComposeTests
            be a false alarm on the most ordinary result there is. */
         Assert.Null(ComposeStoreAvailability.BuildRowCapNotice(PanelMode.Ranked, ComposeLimits.HardRowCap));
         Assert.Null(ComposeStoreAvailability.BuildRowCapNotice(PanelMode.Scalar, ComposeLimits.HardRowCap));
+
+        /* Rank-then-bucket (#2734) is a time series to the cap: its row count is series x buckets (the
+           bound topN LIMIT lives in the rank CTE, not on the output rows), so exactly-at-cap means the
+           newest-bucket truncation happened and must be said. */
+        Assert.NotNull(ComposeStoreAvailability.BuildRowCapNotice(PanelMode.RankedTimeSeries, ComposeLimits.HardRowCap));
+        Assert.Null(ComposeStoreAvailability.BuildRowCapNotice(PanelMode.RankedTimeSeries, ComposeLimits.HardRowCap - 1));
     }
 
     /* ─────────────────────────── #991 Availability Group measures ─────────────────────────── */
@@ -1158,6 +1441,22 @@ public sealed class DarlingComposeTests
         Assert.Contains("/ 1000.0", sql, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("qs_total_duration_us", "avg_duration_us")]
+    [InlineData("qs_total_cpu_us", "avg_cpu_time_us")]
+    public void Compile_WeightedSum_IsProductSum_WithNoDenominator(string measureKey, string valueColumn)
+    {
+        /* #2732: the window TOTAL — the Weighted ratios' numerator alone, SUM(avg * execution_count), since
+           avg * execution_count is each interval's total consumption. No NULLIF anywhere: there is no division. */
+        var sql = Compile(ValidPlan($"{{\"source\":\"query_store_stats\",\"ratio\":\"{measureKey}\",\"timeBucket\":\"hour\",\"viz\":\"line\"}}"));
+        Assert.Contains($"CAST(SUM(f.{valueColumn} * f.execution_count) AS double precision)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("NULLIF", sql, StringComparison.Ordinal);
+        Assert.Contains("collect.query_store_stats", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("config.", sql, StringComparison.Ordinal);
+        /* native µs displayed as the default s — a window total across a store runs to seconds-to-hours. */
+        Assert.Contains("/ 1000000.0", sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Compile_QueryStoreRawRoute_DedupsPerIntervalBeforeAggregating()
     {
@@ -1244,6 +1543,35 @@ public sealed class DarlingComposeTests
             var reason = RejectReason($"{{\"source\":\"query_store_stats\",\"measure\":\"{key}\",\"aggregate\":\"sum\",\"viz\":\"table\"}}");
             Assert.Contains("reference it as 'ratio'", reason, StringComparison.OrdinalIgnoreCase);
         }
+    }
+
+    [Fact]
+    public void WeightedSumQsTotals_ValidateAsRatios_AndRejectMeasureReference()
+    {
+        /* #2732: the totals ride the Ratio kind (their aggregation is the definition, like a ratio's), so the
+           spec/wire seam needs no new special case — referenced as 'ratio', aggregate fixed, default unit 's'. */
+        foreach (var key in new[] { "qs_total_duration_us", "qs_total_cpu_us" })
+        {
+            var plan = ValidPlan($"{{\"source\":\"query_store_stats\",\"ratio\":\"{key}\",\"timeBucket\":\"hour\",\"viz\":\"line\"}}");
+            Assert.Equal(MeasureKind.Ratio, plan.Measure.Kind);
+            Assert.Equal(MeasureRatioMode.WeightedSum, plan.Measure.RatioMode);
+            Assert.Equal("s", plan.Unit);
+
+            var reason = RejectReason($"{{\"source\":\"query_store_stats\",\"measure\":\"{key}\",\"aggregate\":\"sum\",\"viz\":\"table\"}}");
+            Assert.Contains("reference it as 'ratio'", reason, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public void WeightedSumQsTotals_SupportRankedMode_TopQueryHashByTotalCpu()
+    {
+        /* The panel the issue exists for: "top query_hash by total CPU" — ranked mode, ORDER BY value DESC.
+           A per-execution average would rank a one-shot 30s query over one that burned an hour at 200ms/call. */
+        var sql = Compile(ValidPlan(
+            "{\"source\":\"query_store_stats\",\"ratio\":\"qs_total_cpu_us\",\"topN\":10,\"groupBy\":[\"query_hash\"],\"viz\":\"table\"}"));
+        Assert.Contains("CAST(SUM(f.avg_cpu_time_us * f.execution_count) AS double precision)", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY value DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $", sql, StringComparison.Ordinal);
     }
 
     /* ─────────────────────────── D3: per-panel thresholds (render-only) ─────────────────────────── */
@@ -1525,7 +1853,12 @@ public sealed class DarlingComposeTests
     [InlineData("deadlocks", "collect.deadlocks", "f.deadlock_time AS ts", "f.database_name AS label")]
     [InlineData("blocked_process_reports", "collect.blocked_process_reports", "f.event_time AS ts", "f.contentious_object AS label")]
     [InlineData("long_query_completions", "collect.long_query_completions", "f.event_time AS ts", "f.object_name AS label")]
-    [InlineData("default_trace_events", "collect.default_trace_events", "f.event_time AS ts", "f.event_name AS label")]
+    /* #3198: default_trace_events is the one server-local annotation source, so its ts is the DE-SKEWED
+       expression — the panel's x-axis is naive UTC (the measure query buckets on collection_time), and a
+       local marker would be both selected from the wrong slice and drawn at the wrong x-position, next to
+       four XE sources that are UTC on the same chart. ServerLocalReadFrameDisciplineTests derives which
+       sources are server-local from the collectors' own SQL rather than from this list. */
+    [InlineData("default_trace_events", "collect.default_trace_events", "f.event_time - make_interval(mins => COALESCE(o.utc_offset_minutes, 0)) AS ts", "f.event_name AS label")]
     [InlineData("system_health_events", "collect.system_health_events", "f.event_time AS ts", "f.event_type AS label")]
     public void CompileAnnotations_EachSource_SelectsItsCatalogTimeAndLabelColumns(string key, string table, string tsExpr, string labelExpr)
     {
@@ -1724,12 +2057,301 @@ public sealed class DarlingComposeTests
     [Fact]
     public void ValidateDefinition_RejectsACellsDoc_SentWithoutTheNotebookKind()
     {
-        /* Without "kind":"notebook", a cells-only doc is just a dashboard missing its panels — rejected, so a
-           notebook can never be silently mistaken for (or stored as) an empty dashboard. */
+        /* Without "kind":"notebook", a cells-only doc dispatches down the dashboard arm — still rejected (a
+           notebook can never be silently stored as an empty dashboard), and since #2733 the strict root-key
+           check names the actual mis-shape (add the kind) instead of "panels must be an array". */
         var result = DarlingWebEndpoints.ValidateDefinition(
             "{\"cells\":[{\"type\":\"markdown\",\"text\":\"x\"}]}");
         Assert.False(result.IsValid);
-        Assert.Contains("panels", result.Error!, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("'cells'", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("\"kind\":\"notebook\"", result.Error!, StringComparison.Ordinal);
+    }
+
+    /* ─────────────────────────── #2733: unknown keys are write-path errors ─────────────────────────── */
+
+    /* The footgun class: TryParsePanel positive-reads known keys and defaults every optional one on absence,
+       so before #2733 each of these validated {valid:true} and stored a syntactically-valid DIFFERENT panel —
+       a typo'd 'filter' silently dropping the filter and widening the query to the whole fleet. Every case
+       here was proven red against the pre-fix validator (they all validated clean, or failed with the
+       misdirecting "unknown source ''"). */
+    [Theory]
+    /* panel level: the reported footgun — a typo'd/mis-cased optional key that silently defaults. */
+    [InlineData(
+        "{\"panels\":[{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"filter\":[{\"dimension\":\"wait_type\",\"op\":\"eq\",\"value\":\"CXPACKET\"}]}]}",
+        "panel 0: panel has unknown key 'filter' — did you mean 'filters'?")]
+    [InlineData(
+        "{\"panels\":[{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"Filters\":[{\"dimension\":\"wait_type\",\"op\":\"eq\",\"value\":\"x\"}]}]}",
+        "panel 0: panel has unknown key 'Filters' — did you mean 'filters'?")]
+    [InlineData(
+        "{\"panels\":[{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"threshold\":[90]}]}",
+        "did you mean 'thresholds'?")]
+    /* filter level. */
+    [InlineData(
+        "{\"panels\":[{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"filters\":[{\"dimension\":\"wait_type\",\"op\":\"eq\",\"value\":\"x\",\"values\":\"y\"}]}]}",
+        "filter 0 has unknown key 'values' — did you mean 'value'?")]
+    /* overlay level. */
+    [InlineData(
+        "{\"panels\":[{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"overlay\":{\"measure\":\"query_avg_elapsed_us\",\"unt\":\"us\"}}]}",
+        "overlay has unknown key 'unt' — did you mean 'unit'?")]
+    /* view root, variables, range. */
+    [InlineData(
+        "{\"variabels\":[{\"name\":\"db\",\"dimension\":\"database_name\"}],\"panels\":[{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}]}",
+        "definition has unknown key 'variabels' — did you mean 'variables'?")]
+    [InlineData(
+        "{\"variables\":[{\"name\":\"db\",\"dimension\":\"database_name\",\"defalut\":\"x\"}],\"panels\":[{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}]}",
+        "variable 0 has unknown key 'defalut' — did you mean 'default'?")]
+    [InlineData(
+        "{\"range\":{\"hours\":24,\"days\":3},\"panels\":[{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}]}",
+        "range has unknown key 'days'.")]
+    /* notebook root + cells. */
+    [InlineData(
+        "{\"kind\":\"notebook\",\"panels\":[],\"cells\":[{\"type\":\"markdown\",\"text\":\"x\"}]}",
+        "notebook has unknown key 'panels' — a notebook carries 'cells', not 'panels'.")]
+    [InlineData(
+        "{\"kind\":\"notebook\",\"cells\":[{\"type\":\"markdown\",\"text\":\"x\",\"texte\":\"y\"}]}",
+        "cell 0 (markdown) has unknown key 'texte' — did you mean 'text'?")]
+    [InlineData(
+        "{\"kind\":\"notebook\",\"cells\":[{\"type\":\"panel\",\"titel\":\"t\",\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}]}",
+        "cell 0: panel has unknown key 'titel' — did you mean 'title'?")]
+    public void ValidateDefinition_RejectsUnknownKeys_NamingKeyPathAndNearMiss(string json, string expectedError)
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(json);
+        Assert.False(result.IsValid, "a stray key must not validate {valid:true} — that is the #2733 footgun");
+        Assert.Contains(expectedError, result.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateDefinition_NamesTheRunSpecNesting_OnAPanelCell()
+    {
+        /* The reported repro verbatim: run_custom_view_panel's spec nests under 'panel' while a notebook
+           panel cell is FLAT, so nesting is the natural guess — and it used to fail with the misdirecting
+           "unknown source ''". The strict check now names the wrapper and says what to do. */
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"cells\":[{\"type\":\"panel\",\"panel\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("cell 0: panel has unknown key 'panel'", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("run_custom_view_panel", result.Error!, StringComparison.Ordinal);
+        Assert.DoesNotContain("unknown source", result.Error!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ValidateDefinition_NamesTheRunSpecNesting_OnADashboardPanel()
+    {
+        /* The same mis-shape on the dashboard arm: {"panel":{...}} names neither 'read' nor 'source', so it
+           lands in the v1 arm — which now recognizes the wrapper instead of shrugging "missing 'read' or
+           'source'". */
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"panels\":[{\"panel\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"viz\":\"table\"}}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("nests its spec under 'panel'", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("run_custom_view_panel", result.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateDefinition_SuggestsTheModeKey_OnANearMissTypo()
+    {
+        /* 'sorce' names neither mode key, so the panel lands in the v1 arm; the near-miss scan points at the
+           typo instead of leaving the author to diff their JSON against the docs. */
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"panels\":[{\"sorce\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"viz\":\"table\"}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("did you mean 'source' (found 'sorce')?", result.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateDefinition_AcceptsEveryDeclaredComposedKey_AtOnce()
+    {
+        /* The sync guard for the key universe: one panel carrying EVERY key in ComposeSpec.ComposedPanelKeys
+           plus every presentation extra (title/span/hours) validates clean, so a key declared in the set but
+           not actually read by the parser cannot hide. The converse cannot drift silently either: the strict
+           check runs BEFORE TryParsePanel on the write path, so a future key the parser learns but the set
+           does not is rejected here — the new feature's own first write-path test goes red. */
+        var ok = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"dashboard\",\"range\":{\"hours\":24},\"variables\":[{\"name\":\"w\",\"dimension\":\"wait_type\",\"default\":\"CXPACKET\"}]," +
+            "\"panels\":[" +
+            "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"unit\":\"ms\",\"timeBucket\":\"hour\",\"viz\":\"line\"," +
+            "\"filters\":[{\"dimension\":\"wait_type\",\"op\":\"eq\",\"value\":\"$w\"}],\"groupBy\":[],\"thresholds\":[100],\"annotations\":[\"deadlocks\"]," +
+            "\"title\":\"T\",\"span\":2,\"hours\":48}," +
+            "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":25,\"groupBy\":[\"query_hash\"],\"viz\":\"scatter\"," +
+            "\"overlay\":{\"measure\":\"query_executions\",\"aggregate\":\"sum\",\"unit\":\"count\"},\"title\":\"S\",\"span\":1}," +
+            "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"wait_type\"],\"includeOther\":true,\"viz\":\"line\",\"title\":\"TopN\"}," +
+            "{\"source\":\"wait_stats\",\"ratio\":\"signal_wait_pct\",\"timeBucket\":\"hour\",\"viz\":{\"type\":\"line\"}}]}");
+        Assert.True(ok.IsValid, ok.Error);
+    }
+
+    [Fact]
+    public void ValidateDefinition_LeavesTheV1ReadVocabularyOpen()
+    {
+        /* v1 read panels deliberately keep their open presentation vocabulary (rowsKey/xKey/format/emptyText/
+           columns/... — the renderer's contract, spread from the editor's vizcfg verbatim); enumerating it
+           server-side would be a second copy that decays. The v1 keys with semantic weight are each validated
+           individually, and raw 'path' stays rejected. */
+        var ok = DarlingWebEndpoints.ValidateDefinition(
+            "{\"panels\":[{\"title\":\"CPU\",\"read\":\"get_cpu_utilization\",\"params\":{\"hours\":24},\"viz\":\"line\",\"span\":2," +
+            "\"rowsKey\":\"samples\",\"xKey\":\"sample_time\",\"format\":\"pct\",\"unit\":\"%\",\"emptyText\":\"none\"," +
+            "\"series\":[{\"key\":\"total_cpu\",\"label\":\"Total %\"}]}]}");
+        Assert.True(ok.IsValid, ok.Error);
+    }
+
+    [Fact]
+    public void TryParsePanel_StaysLenient_ForTheRunAndReadPaths()
+    {
+        /* The write/read split (#2733): strictness lives in ValidateDefinition (validate/create/update), NOT
+           in the parser — a definition stored before the strictness existed must keep loading, rendering, and
+           running. This pin keeps a future "tidy-up" from moving the key check into TryParsePanel and
+           breaking every stored view carrying a legacy stray. */
+        var (plan, error) = ComposeSpec.TryParsePanel(
+            PanelJson("{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\",\"legacyStray\":1}"),
+            Array.Empty<string>());
+        Assert.True(error is null, error);
+        Assert.NotNull(plan);
+    }
+
+    [Fact]
+    public void TryParsePanel_SaysMissingSource_NotUnknownEmptySource()
+    {
+        /* The misdirecting half of the #2733 report: a mis-shaped panel has no 'source' at all, and "unknown
+           source ''" sent the author hunting the catalog instead of the shape. */
+        var reason = RejectReason("{\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"viz\":\"table\"}");
+        Assert.Contains("missing 'source'", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("unknown source", reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /* ─────────────────────────── #2735: per-cell window pins ─────────────────────────── */
+
+    /* A notebook is a comparison document, and one view-level window cannot say "cell 2 is Friday A, cell 3
+       is Friday B". A panel cell may now carry its own `range` — relative ({hours}) or absolute
+       ({windowStart, windowEnd}, the shape the run path already accepts per-run) — which the renderer applies
+       over the view scope for that cell only; absent = inherit (unchanged behavior). Every acceptance case
+       here was proven RED against the pre-fix validator: #2739's strict keys rejected the cell key as
+       "panel has unknown key 'range'", and ParseRange rejected the absolute shape as "range.hours must be
+       an integer" — the silently-ignored-then-rejected path the two issues cross-linked. */
+
+    [Fact]
+    public void ParseRange_ParsesTheAbsoluteShape_ToNaiveUtcInstants()
+    {
+        var (range, error) = ComposeSpec.ParseRange(
+            JsonNode.Parse("{\"windowStart\":\"2026-08-21T00:00:00Z\",\"windowEnd\":\"2026-08-22T00:00:00Z\"}"),
+            allowAbsolute: true);
+
+        Assert.Null(error);
+        Assert.NotNull(range);
+        Assert.True(range!.IsAbsolute);
+        Assert.Null(range.Hours);
+        Assert.Equal(new DateTime(2026, 8, 21, 0, 0, 0), range.WindowStart);
+        Assert.Equal(new DateTime(2026, 8, 22, 0, 0, 0), range.WindowEnd);
+        /* Naive UTC, Kind-Unspecified — the store-binding rule every Darling read follows (a Kind=Utc value
+           would infer timestamptz through Npgsql and silently zone-shift). */
+        Assert.Equal(DateTimeKind.Unspecified, range.WindowStart!.Value.Kind);
+    }
+
+    [Fact]
+    public void ParseRange_StillParsesTheRelativeShape_AndAbsentMeansInherit()
+    {
+        var (relative, relativeError) = ComposeSpec.ParseRange(JsonNode.Parse("{\"hours\":48}"), allowAbsolute: true);
+        Assert.Null(relativeError);
+        Assert.Equal(48, relative!.Hours);
+        Assert.False(relative.IsAbsolute);
+
+        /* The inherit pin: an ABSENT range parses to null with no error — the cell follows the view window. */
+        var (inherited, inheritedError) = ComposeSpec.ParseRange(null, allowAbsolute: true);
+        Assert.Null(inherited);
+        Assert.Null(inheritedError);
+    }
+
+    [Theory]
+    [InlineData("{\"windowStart\":\"2026-08-21T00:00:00Z\"}", "together")]
+    [InlineData("{\"windowStart\":\"not-a-date\",\"windowEnd\":\"2026-08-22T00:00:00Z\"}", "ISO-8601")]
+    [InlineData("{\"windowStart\":\"2026-08-22T00:00:00Z\",\"windowEnd\":\"2026-08-21T00:00:00Z\"}", "earlier")]
+    [InlineData("{\"windowStart\":\"2025-01-01T00:00:00Z\",\"windowEnd\":\"2026-08-22T00:00:00Z\"}", "ceiling")]
+    [InlineData("{\"hours\":24,\"windowStart\":\"2026-08-21T00:00:00Z\",\"windowEnd\":\"2026-08-22T00:00:00Z\"}", "not both")]
+    public void ParseRange_RejectsAMalformedAbsoluteRange(string json, string expectedFragment)
+    {
+        var (range, error) = ComposeSpec.ParseRange(JsonNode.Parse(json), allowAbsolute: true);
+        Assert.Null(range);
+        Assert.Contains(expectedFragment, error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ParseRange_RejectsTheAbsoluteShape_WhereOnlyRelativeIsAllowed()
+    {
+        /* The view-level range stays relative-only: an absolute window at the root would silently fall back
+           to the renderer's 24h default — the exact silently-wrong-window failure #2735 exists to close —
+           so the rejection points the author at the place the shape IS legal. */
+        var (range, error) = ComposeSpec.ParseRange(
+            JsonNode.Parse("{\"windowStart\":\"2026-08-21T00:00:00Z\",\"windowEnd\":\"2026-08-22T00:00:00Z\"}"));
+        Assert.Null(range);
+        Assert.Contains("notebook panel cell", error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateDefinition_AcceptsAPinnedNotebookCell_BothShapes()
+    {
+        /* The issue's two-Friday side-by-side, stored as LIVE panels: two absolutely-pinned cells, one
+           relatively-pinned cell, one live cell — plus the title/hours presentation extras, so this doubles
+           as the notebook cell's key-universe sync guard (the dashboard twin is
+           ValidateDefinition_AcceptsEveryDeclaredComposedKey_AtOnce). RED before the fix: #2739's strict
+           keys failed this with "cell 1: panel has unknown key 'range'". */
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"range\":{\"hours\":24},\"cells\":[" +
+            "{\"type\":\"markdown\",\"text\":\"# Two-Friday side-by-side\"}," +
+            "{\"type\":\"panel\",\"title\":\"Friday A\",\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"," +
+            "\"range\":{\"windowStart\":\"2026-08-21T00:00:00Z\",\"windowEnd\":\"2026-08-22T00:00:00Z\"}}," +
+            "{\"type\":\"panel\",\"title\":\"Friday B\",\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"," +
+            "\"range\":{\"windowStart\":\"2026-08-28T00:00:00Z\",\"windowEnd\":\"2026-08-29T00:00:00Z\"}}," +
+            "{\"type\":\"panel\",\"title\":\"Relative pin\",\"hours\":48,\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"," +
+            "\"range\":{\"hours\":48}}," +
+            "{\"type\":\"panel\",\"title\":\"Live (inherits)\",\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}]}");
+        Assert.True(result.IsValid, result.Error);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RejectsABadIsoCellRange_NamingTheCell()
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"cells\":[" +
+            "{\"type\":\"panel\",\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"," +
+            "\"range\":{\"windowStart\":\"nope\",\"windowEnd\":\"2026-08-22T00:00:00Z\"}}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("cell 0", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("ISO-8601", result.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RejectsATypodCellRangeSubKey_WithADidYouMean()
+    {
+        /* The #2739 discipline extended into the cell's range object: a typo'd sub-key must be named as
+           itself, never silently ignored into a different window. */
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"cells\":[" +
+            "{\"type\":\"panel\",\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"," +
+            "\"range\":{\"hours\":24,\"windwoEnd\":\"x\"}}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("windwoEnd", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("did you mean 'windowEnd'", result.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RejectsAnAbsoluteRange_AtTheNotebookRoot()
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"range\":{\"windowStart\":\"2026-08-21T00:00:00Z\",\"windowEnd\":\"2026-08-22T00:00:00Z\"}," +
+            "\"cells\":[{\"type\":\"markdown\",\"text\":\"x\"}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("notebook panel cell", result.Error!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RejectsARangeOnADashboardPanel_PointingAtNotebookCells()
+    {
+        /* A dashboard panel follows the view-level range (per-panel pins are a notebook concept); the stray
+           key gets a targeted hint instead of a bare rejection, so the author lands on the right surface. */
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"panels\":[{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"," +
+            "\"range\":{\"hours\":48}}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("unknown key 'range'", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("notebook panel cell", result.Error!, StringComparison.Ordinal);
     }
 
     /* ─────────────────────────── D7: list-summary kind (badge/route) ─────────────────────────── */
@@ -1852,6 +2474,117 @@ public sealed class DarlingComposeTests
         Assert.Equal(declaredKeys, templates.Select(t => t.Name).OrderBy(k => k, StringComparer.Ordinal).ToArray());
     }
 
+    /* ─────────── #2734: the editor's shape vocabulary must cover every server mode ─────────── */
+
+    /// <summary>
+    /// The category pin behind the #2743 review's save-path finding: the web composer models a panel's mode as a
+    /// single <c>shape</c> enum, and a server <see cref="PanelMode"/> with NO shape to map onto does not fail
+    /// loudly — it round-trips LOSSILY. A stored rank-then-bucket panel loaded as a plain "timeseries" re-saved
+    /// as one, silently dropping topN/includeOther and downgrading the panel, with no validation error because
+    /// the degraded result is itself valid. That is the exact silently-wrong class #2733 and this PR exist to
+    /// close, reached through the editor's round trip instead of the parser.
+    ///
+    /// <para>So this asserts the INVARIANT, not the instance: SHAPE_LABELS (editor.js — the shape vocabulary
+    /// both the dashboard composer and notebook.js share) declares exactly as many shapes as there are
+    /// PanelMode values. A fifth server mode added without an editor shape fails HERE, at the seam, instead of
+    /// quietly eating someone's stored panel on their next save.</para>
+    /// </summary>
+    [Fact]
+    public void EveryServerPanelMode_HasAnEditorShape()
+    {
+        var shapes = EditorShapeKeys();
+        Assert.Equal(Enum.GetValues<PanelMode>().Length, shapes.Length);
+
+        /* The rank-then-bucket shape specifically, since it is the one this PR adds — and both round-trip
+           functions must know it, or the save path drops a key the load path read. */
+        Assert.Contains("topseries", shapes);
+        var editor = EditorSource();
+        Assert.Contains("hasBucket && hasTopN ? \"topseries\"", editor, StringComparison.Ordinal);
+        Assert.Contains("else if (p.shape === \"topseries\")", editor, StringComparison.Ordinal);
+        /* Both keys AND the residual flag survive serialization — dropping any one is the data loss. */
+        Assert.Contains("d.includeOther = true;", editor, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The residual label is a CROSS-LANGUAGE constant: the compiler emits it into the rows, and the frontend has
+    /// to recognize that exact string to keep the series out of the drill path and out of the MAX_SERIES
+    /// competition (#2743 review). A mirrored literal drifts silently — rename it on one side and the residual
+    /// quietly becomes drillable-into-nothing again, and starts evicting a real top-N winner — so the copy is
+    /// pinned to the source of truth here.
+    /// </summary>
+    [Fact]
+    public void TheOtherSeriesLabel_IsMirroredInTheFrontend()
+    {
+        var composeJs = FrontendSource("compose.js");
+        Assert.Contains(
+            $"const OTHER_SERIES_LABEL = \"{ComposeCompiler.OtherSeriesLabel}\";",
+            composeJs,
+            StringComparison.Ordinal);
+
+        /* And the residual must be held out of BOTH places a synthetic series would otherwise be mistaken for a
+           real one: the drill path and the series cap. */
+        Assert.Contains("drills.set(key, null);", composeJs, StringComparison.Ordinal);
+        Assert.Contains("const realKeys = order.filter((k) => !residual.has(k));", composeJs, StringComparison.Ordinal);
+
+        /* But that recognition MUST be gated on the panel actually carrying a residual, which only a
+           rank-then-bucket panel with includeOther does. pivotTimeSeries serves EVERY grouped time series, and
+           several groupBy dimensions are free-form user text (database_name, program_name, login_name,
+           host_name), so a plain panel may legitimately hold a row whose value IS the sentinel — matching the
+           string alone would strip that real member's drill and pull it out of the series cap. The compiler is
+           the authority on when the fold exists; the renderer must be told, never sniff. */
+        Assert.Contains("pivotTimeSeries(rows, groupDims, label, hasResidual = false)", composeJs, StringComparison.Ordinal);
+        Assert.Contains("if (hasResidual && isResidualRow(r, groupDims)) {", composeJs, StringComparison.Ordinal);
+        Assert.Contains(
+            "const hasResidual = isRankedTimeSeries(panelSpec) && panelSpec.includeOther === true;",
+            composeJs,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The composer's default Top N for a top-N-over-time panel must not exceed what the chart will actually draw
+    /// (#2743 review): the mode's whole promise is "exactly these N", and compose.js draws at most MAX_SERIES, so
+    /// a larger default would silently hide winners the author never chose to hide. Two files, one number.
+    /// </summary>
+    [Fact]
+    public void TheEditorsTopSeriesDefault_DoesNotExceedWhatTheChartDraws()
+    {
+        var maxSeries = int.Parse(
+            Regex.Match(FrontendSource("compose.js"), @"const MAX_SERIES = (?<n>\d+);").Groups["n"].Value,
+            CultureInfo.InvariantCulture);
+        var editorCeiling = int.Parse(
+            Regex.Match(FrontendSource("editor.js"), @"const MAX_TIME_SERIES = (?<n>\d+);").Groups["n"].Value,
+            CultureInfo.InvariantCulture);
+
+        Assert.Equal(maxSeries, editorCeiling);
+        Assert.Contains(
+            "if (v === \"topseries\") p.topN = clampInt(p.topN, 1, MAX_TIME_SERIES, MAX_TIME_SERIES);",
+            FrontendSource("editor.js"),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>One wwwroot/js source file, read from the repo beside this test.</summary>
+    private static string FrontendSource(string fileName, [CallerFilePath] string thisFile = "")
+    {
+        var path = Path.GetFullPath(Path.Combine(
+            Path.GetDirectoryName(thisFile)!, "..", "PerformanceMonitor.Darling.Service", "wwwroot", "js", fileName));
+        Assert.True(File.Exists(path), $"{fileName} not found at {path} (did the frontend move?)");
+        return File.ReadAllText(path);
+    }
+
+    /// <summary>The shape keys declared in <c>SHAPE_LABELS</c> (wwwroot/js/editor.js) — the composer's whole
+    /// mode vocabulary, shared with notebook.js, which imports both round-trip functions from it.</summary>
+    private static string[] EditorShapeKeys()
+    {
+        var line = Regex.Match(EditorSource(), @"^const SHAPE_LABELS = \{(?<body>[^}]*)\};", RegexOptions.Multiline);
+        Assert.True(line.Success, "SHAPE_LABELS not found in editor.js (did the composer's shape model move?)");
+        return Regex.Matches(line.Groups["body"].Value, @"(?<key>\w+)\s*:")
+            .Select(m => m.Groups["key"].Value)
+            .OrderBy(k => k, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static string EditorSource() => FrontendSource("editor.js");
+
     /// <summary>Every <c>key:</c> declared in <c>NOTEBOOK_TEMPLATES</c> (wwwroot/js/notebook.js), sorted.
     /// <c>key:</c> appears nowhere else in that file, so a plain line scan is unambiguous.</summary>
     private static string[] NotebookTemplateKeys([CallerFilePath] string thisFile = "")
@@ -1936,6 +2669,22 @@ public sealed class DarlingComposeTests
             $"{TimescaleSupport.HourlyRetentionSpan.TotalDays:0} days",
             hourlyNotice,
             StringComparison.Ordinal);
+
+        /* Singular grammar (#2779-session dogfood): a store that only reaches back ONE day must read "1 day", not
+           "1 days". Measured hourly floor at now-1d, window 2 days back — held rounds to "1" (singular), window
+           to "2" (plural), so both arms are exercised in one notice. */
+        var oneDayCoverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStatsHourlyView] = now.AddDays(-1),
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal));
+        var singularNotice = ComposeStoreAvailability.BuildRetentionNotice(
+            "query_stats", hourlyRoute, now.AddDays(-2), now, RollupAvailability.All, oneDayCoverage);
+        Assert.NotNull(singularNotice);
+        Assert.Contains("reaches back about 1 day,", singularNotice, StringComparison.Ordinal);
+        Assert.Contains("2 days back", singularNotice, StringComparison.Ordinal);
+        Assert.DoesNotContain("1 days", singularNotice, StringComparison.Ordinal);
 
         /* Hourly route, window INSIDE the horizon: silent. */
         Assert.Null(ComposeStoreAvailability.BuildRetentionNotice("query_stats", hourlyRoute, now.AddDays(-10), now, RollupAvailability.All, RollupCoverage.Unknown));
@@ -2208,6 +2957,77 @@ public sealed class ComposeQueryStoreLivePostgresTests
         }
     }
 
+    [Fact]
+    public async Task ComposedQueryStoreTotalCpuPanel_RunsOnPostgres_AndSumsTheProductOverDedupedIntervals()
+    {
+        /* #2732: the WeightedSum raw route — SUM(avg_cpu_time_us * execution_count) — must ride the same #1841
+           dedup wrapper as everything else on this source. Every row carries avg_cpu_time_us = 500, so the
+           deduped total is 500 * 41 = 20500 µs; an un-deduped product-sum would read 500 * 53 = 26500. */
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live compose Query Store test.");
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteAsync(connection, TestContext.Current.CancellationToken);
+
+        var end = new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        var bucket = end.AddHours(-2);
+        var firstExecA = bucket.AddMinutes(1);
+        var firstExecB = bucket.AddMinutes(2);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* The dedup test's fixture: interval A re-collected three times flat at 1, interval B twice while
+               it grew 10 -> 40. Deduped executions = 41. */
+            foreach (var minute in new[] { 5, 10, 15 })
+            {
+                await InsertAsync(connection, bucket.AddMinutes(minute), queryId: 1, planId: 11, firstExecA, execCount: 1);
+            }
+
+            await InsertAsync(connection, bucket.AddMinutes(5), queryId: 2, planId: 22, firstExecB, execCount: 10);
+            await InsertAsync(connection, bucket.AddMinutes(10), queryId: 2, planId: 22, firstExecB, execCount: 40);
+
+            /* unit 'us' (not the 's' default) so the expected value stays integral. */
+            var (plan, parseError) = ComposeSpec.TryParsePanel(
+                (JsonObject)JsonNode.Parse("{\"source\":\"query_store_stats\",\"ratio\":\"qs_total_cpu_us\",\"unit\":\"us\",\"timeBucket\":\"hour\",\"viz\":\"line\"}")!,
+                []);
+            Assert.True(parseError is null, parseError);
+
+            var (compiled, compileError) = ComposeCompiler.Compile(
+                plan!,
+                new ComposeRunContext([ServerName], end.AddHours(-3), end, ComposeRunContext.NoVariables,
+                    RollupAvailability.All, end, RollupCoverage.Unknown));
+            Assert.True(compileError is null, compileError);
+            Assert.False(compiled!.Route.IsCagg, "the window must stay on the raw route for this test to mean anything");
+
+            await using var command = new NpgsqlCommand(compiled.Sql, connection);
+            foreach (var parameter in compiled.Parameters)
+            {
+                command.Parameters.Add(parameter);
+            }
+
+            var total = 0.0;
+            await using (var reader = await command.ExecuteReaderAsync(TestContext.Current.CancellationToken))
+            {
+                while (await reader.ReadAsync(TestContext.Current.CancellationToken))
+                {
+                    total += reader.GetDouble(reader.GetOrdinal("value"));
+                }
+            }
+
+            Assert.Equal(20500.0, total, 3);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task DeleteAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var command = new NpgsqlCommand("DELETE FROM collect.query_store_stats WHERE server_id = $1", connection);
@@ -2239,5 +3059,326 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)", connectio
         command.Parameters.AddWithValue(1000L);
         command.Parameters.AddWithValue(500L);
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+}
+
+/// <summary>
+/// Gated (DARLING_TEST_PG) execution of the #2734 rank-then-bucket shape against real Postgres — the string
+/// pins above prove the TEXT, this proves the ARITHMETIC: the top-N membership comes from the WINDOW TOTAL
+/// (not any single bucket), the residual "(other)" series carries exactly what the excluded members did per
+/// bucket, and without includeOther the excluded members simply vanish. The fixture is adversarial on
+/// purpose: the loudest single-bucket spike belongs to a member that must NOT rank (window-total beats
+/// bucket-loudness), and its name sorts alphabetically first so an accidental min()/first-N would pick it.
+/// </summary>
+[Collection("live-postgres")]
+public sealed class ComposeTopSeriesLivePostgresTests
+{
+    private const int ServerId = -973401;
+    private const string ServerName = "compose-topn-bucket";
+
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    [Fact]
+    public async Task RankedTimeSeriesPanel_RunsOnPostgres_TopNByWindowTotal_AndResidualArithmetic()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live rank-then-bucket test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteAsync(connection, ct);
+
+        /* Two hourly buckets ending on the last whole hour. Window totals: PAGELATCH_BIG 1000,
+           SOS_MEDIUM 500, AAA_LOUD_EARLY 300, ZZZ_LATE 200 — so topN=2 keeps PAGELATCH_BIG + SOS_MEDIUM.
+           The trap: in bucket 1 AAA_LOUD_EARLY (300) OUTSCORES SOS_MEDIUM (100); a per-bucket ranker (or
+           an alphabetical tie-break) would seat it. Window-total ranking must not. */
+        /* Capture Ticks ONCE: two UtcNow reads straddle by a few microseconds, which lands 'hour' just
+           BEFORE the boundary and no derived bucket key ever matches date_trunc's output. */
+        var nowTicks = DateTime.UtcNow.Ticks;
+        var hour = new DateTime(nowTicks - (nowTicks % TimeSpan.TicksPerHour), DateTimeKind.Utc);
+        var bucket1 = hour.AddHours(-2);
+        var bucket2 = hour.AddHours(-1);
+
+        var bodySucceeded = false;
+        try
+        {
+            await InsertAsync(connection, bucket1.AddMinutes(10), "PAGELATCH_BIG", 900, ct);
+            await InsertAsync(connection, bucket2.AddMinutes(10), "PAGELATCH_BIG", 100, ct);
+            await InsertAsync(connection, bucket1.AddMinutes(15), "SOS_MEDIUM", 100, ct);
+            await InsertAsync(connection, bucket2.AddMinutes(15), "SOS_MEDIUM", 400, ct);
+            await InsertAsync(connection, bucket1.AddMinutes(20), "AAA_LOUD_EARLY", 300, ct);
+            await InsertAsync(connection, bucket2.AddMinutes(20), "ZZZ_LATE", 200, ct);
+
+            /* includeOther: the two winners keep their names, everything else folds into "(other)". */
+            var withOther = await RunAsync(connection,
+                "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":2,\"groupBy\":[\"wait_type\"],\"includeOther\":true,\"viz\":\"stacked\"}",
+                hour, ct);
+
+            Assert.Equal(
+                new[] { ComposeCompiler.OtherSeriesLabel, "PAGELATCH_BIG", "SOS_MEDIUM" },
+                withOther.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
+
+            Assert.Equal(900.0, withOther["PAGELATCH_BIG"][bucket1], 3);
+            Assert.Equal(100.0, withOther["PAGELATCH_BIG"][bucket2], 3);
+            Assert.Equal(100.0, withOther["SOS_MEDIUM"][bucket1], 3);
+            Assert.Equal(400.0, withOther["SOS_MEDIUM"][bucket2], 3);
+
+            /* The residual is per-bucket honest: 300 (AAA_LOUD_EARLY) then 200 (ZZZ_LATE) — so every
+               bucket still sums to the window total (1300 and 700). */
+            Assert.Equal(300.0, withOther[ComposeCompiler.OtherSeriesLabel][bucket1], 3);
+            Assert.Equal(200.0, withOther[ComposeCompiler.OtherSeriesLabel][bucket2], 3);
+
+            /* Default (no includeOther): the excluded members vanish entirely — two series, no residual. */
+            var withoutOther = await RunAsync(connection,
+                "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"topN\":2,\"groupBy\":[\"wait_type\"],\"viz\":\"line\"}",
+                hour, ct);
+
+            Assert.Equal(
+                new[] { "PAGELATCH_BIG", "SOS_MEDIUM" },
+                withoutOther.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
+            Assert.Equal(900.0, withoutOther["PAGELATCH_BIG"][bucket1], 3);
+            Assert.Equal(400.0, withoutOther["SOS_MEDIUM"][bucket2], 3);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>Parses + compiles the panel, runs the SHIPPED statement, and shapes the rows as
+    /// series → bucket → value for assertion.</summary>
+    private static async Task<Dictionary<string, Dictionary<DateTime, double>>> RunAsync(
+        NpgsqlConnection connection, string panelJson, DateTime windowEnd, CancellationToken ct)
+    {
+        var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(panelJson)!, []);
+        Assert.True(parseError is null, parseError);
+
+        var (compiled, compileError) = ComposeCompiler.Compile(
+            plan!,
+            new ComposeRunContext([ServerName], windowEnd.AddHours(-3), windowEnd, ComposeRunContext.NoVariables,
+                RollupAvailability.All, windowEnd, RollupCoverage.Unknown));
+        Assert.True(compileError is null, compileError);
+
+        await using var command = new NpgsqlCommand(compiled!.Sql, connection);
+        foreach (var parameter in compiled.Parameters)
+        {
+            command.Parameters.Add(parameter);
+        }
+
+        var series = new Dictionary<string, Dictionary<DateTime, double>>(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var bucket = reader.GetDateTime(reader.GetOrdinal("bucket"));
+            var name = reader.GetString(reader.GetOrdinal("wait_type"));
+            var value = reader.GetDouble(reader.GetOrdinal("value"));
+            if (!series.TryGetValue(name, out var points))
+            {
+                series[name] = points = new Dictionary<DateTime, double>();
+            }
+
+            points[bucket] = value;
+        }
+
+        return series;
+    }
+
+    private static async Task InsertAsync(
+        NpgsqlConnection connection, DateTime collectionTimeUtc, string waitType, long deltaWaitMs, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO collect.wait_stats
+    (collection_id, collection_time, server_id, server_name, wait_type,
+     waiting_tasks_count, wait_time_ms, signal_wait_time_ms,
+     delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)", connection);
+        command.Parameters.AddWithValue(1L);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue(ServerName);
+        command.Parameters.AddWithValue(waitType);
+        command.Parameters.AddWithValue(1L);
+        command.Parameters.AddWithValue(deltaWaitMs); /* the cumulative column; unread by the SUM */
+        command.Parameters.AddWithValue(0L);
+        command.Parameters.AddWithValue(1L);
+        command.Parameters.AddWithValue(deltaWaitMs); /* delta_wait_time_ms — what the measure aggregates */
+        command.Parameters.AddWithValue(0L);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task DeleteAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand("DELETE FROM collect.wait_stats WHERE server_id = $1", connection);
+        command.Parameters.AddWithValue(ServerId);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+}
+
+/// <summary>
+/// Gated (DARLING_TEST_PG) execution of the #2737 ad-hoc fold against real Postgres. The string pins above
+/// prove the SHAPE; only a live run proves the SEMANTICS — that COALESCE inside a <c>&lt;&gt; ALL</c> really
+/// keeps the ad-hoc rows a bare NULL comparison dropped, that the bucket groups under one label, and that the
+/// statement fallback keeps ad-hoc rows distinct per hash. Fixture: one named module (sql_handle 0xH1 →
+/// usp_ComposeNamed, 100 µs) beside two ad-hoc statements (0xH2/0xH3 with distinct hashes, 200 + 300 µs) —
+/// deliberately a MIXED sample, since a one-situation fixture can never expose a cross-population defect.
+/// </summary>
+[Collection("live-postgres")]
+public sealed class ComposeAdHocModuleLivePostgresTests
+{
+    private const int ServerId = -973708;
+    private const string ServerName = "compose-adhoc-fold";
+
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    [Fact]
+    public async Task ComposedObjectNamePanels_LabelFilterAndSplitTheAdHocPopulation()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live ad-hoc fold test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteAsync(connection, ct);
+
+        var end = new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        var collectionTime = end.AddHours(-1);
+
+        var bodySucceeded = false;
+        try
+        {
+            await using (var insertProc = new NpgsqlCommand(@"
+INSERT INTO collect.procedure_stats
+    (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle, delta_worker_time, delta_execution_count)
+VALUES (1, $1, $2, $3, 'ComposeDb', 'dbo', 'usp_ComposeNamed', '0xH1', 100, 1)", connection))
+            {
+                insertProc.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified));
+                insertProc.Parameters.AddWithValue(ServerId);
+                insertProc.Parameters.AddWithValue(ServerName);
+                await insertProc.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var insertQueries = new NpgsqlCommand(@"
+INSERT INTO collect.query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle, delta_worker_time, delta_execution_count)
+VALUES (1, $1, $2, $3, 'ComposeDb', '0xHASHP', '0xH1', 100, 1),
+       (1, $1, $2, $3, 'ComposeDb', '0xHASHA', '0xH2', 200, 1),
+       (1, $1, $2, $3, 'ComposeDb', '0xHASHB', '0xH3', 300, 1)", connection))
+            {
+                insertQueries.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified));
+                insertQueries.Parameters.AddWithValue(ServerId);
+                insertQueries.Parameters.AddWithValue(ServerName);
+                await insertQueries.ExecuteNonQueryAsync(ct);
+            }
+
+            /* The labeled bucket: the named module attributes alone; BOTH ad-hoc statements land in one
+               visible "(ad hoc)" row carrying their combined weight (unit us keeps expectations integral). */
+            var byObject = await RunGroupedAsync(connection, end,
+                "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"unit\":\"us\",\"topN\":10,\"groupBy\":[\"object_name\"],\"viz\":\"bar\"}",
+                "object_name", ct);
+            Assert.Equal(100.0, ValueOf(byObject, "usp_ComposeNamed"), 3);
+            Assert.Equal(500.0, ValueOf(byObject, MeasureCatalog.AdHocLabel), 3);
+            Assert.Equal(2, byObject.Count);
+
+            /* The #2737 neq trap, run for real: before the fold this read 0 — NULL fails "<> ALL", so
+               excluding ONE procedure silently excluded the whole ad-hoc population with it. */
+            var neqNamed = await RunGroupedAsync(connection, end,
+                "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"unit\":\"us\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"," +
+                "\"filters\":[{\"dimension\":\"object_name\",\"op\":\"neq\",\"value\":\"usp_ComposeNamed\"}]}",
+                "database_name", ct);
+            Assert.Equal(500.0, ValueOf(neqNamed, "ComposeDb"), 3);
+
+            /* Filtering TO and AWAY FROM the bucket — the explicit reads the null row never allowed. */
+            var eqAdHoc = await RunGroupedAsync(connection, end,
+                "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"unit\":\"us\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"," +
+                "\"filters\":[{\"dimension\":\"object_name\",\"op\":\"eq\",\"value\":\"(ad hoc)\"}]}",
+                "database_name", ct);
+            Assert.Equal(500.0, ValueOf(eqAdHoc, "ComposeDb"), 3);
+
+            var neqAdHoc = await RunGroupedAsync(connection, end,
+                "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"unit\":\"us\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"table\"," +
+                "\"filters\":[{\"dimension\":\"object_name\",\"op\":\"neq\",\"value\":\"(ad hoc)\"}]}",
+                "database_name", ct);
+            Assert.Equal(100.0, ValueOf(neqAdHoc, "ComposeDb"), 3);
+
+            /* The statement fallback identity: the named module keeps its name, the ad-hoc statements stay
+               DISTINCT by hash instead of pooling — the actual "top statements" panel. */
+            var byStatement = await RunGroupedAsync(connection, end,
+                "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"unit\":\"us\",\"topN\":10,\"groupBy\":[\"statement\"],\"viz\":\"bar\"}",
+                "statement", ct);
+            Assert.Equal(100.0, ValueOf(byStatement, "usp_ComposeNamed"), 3);
+            Assert.Equal(200.0, ValueOf(byStatement, "0xHASHA"), 3);
+            Assert.Equal(300.0, ValueOf(byStatement, "0xHASHB"), 3);
+            Assert.Equal(3, byStatement.Count);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>The row's value for <paramref name="key"/>, failing with the WHOLE result rendered when the
+    /// row is missing — a bare KeyNotFoundException would hide which groups actually came back.</summary>
+    private static double ValueOf(Dictionary<string, double> rows, string key)
+    {
+        Assert.True(rows.TryGetValue(key, out var value),
+            $"expected a '{key}' row; got: {string.Join(", ", rows.Select(r => $"{r.Key}={r.Value}"))}");
+        return value;
+    }
+
+    /// <summary>Parses, compiles, and RUNS one panel (3-hour window ending <paramref name="endUtc"/>, scoped
+    /// to the fixture server — well inside the raw horizon, so this exercises the #1568 CTE route), returning
+    /// dimension value → value. The compiled artifact itself is what executes — never a retyped copy.</summary>
+    private static async Task<Dictionary<string, double>> RunGroupedAsync(
+        NpgsqlConnection connection, DateTime endUtc, string panelJson, string dimensionName, CancellationToken ct)
+    {
+        var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(panelJson)!, []);
+        Assert.True(parseError is null, parseError);
+
+        var (compiled, compileError) = ComposeCompiler.Compile(
+            plan!,
+            new ComposeRunContext([ServerName], endUtc.AddHours(-3), endUtc, ComposeRunContext.NoVariables,
+                RollupAvailability.All, endUtc, RollupCoverage.Unknown));
+        Assert.True(compileError is null, compileError);
+        Assert.False(compiled!.Route.IsCagg, "the window must stay on the raw route so the #1568 CTE path is what runs");
+
+        await using var command = new NpgsqlCommand(compiled.Sql, connection);
+        foreach (var parameter in compiled.Parameters)
+        {
+            command.Parameters.Add(parameter);
+        }
+
+        var rows = new Dictionary<string, double>(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows[reader.GetString(reader.GetOrdinal(dimensionName))] = reader.GetDouble(reader.GetOrdinal("value"));
+        }
+
+        return rows;
+    }
+
+    private static async Task DeleteAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using (var deleteQueries = new NpgsqlCommand("DELETE FROM collect.query_stats WHERE server_id = $1", connection))
+        {
+            deleteQueries.Parameters.AddWithValue(ServerId);
+            await deleteQueries.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var deleteProcs = new NpgsqlCommand("DELETE FROM collect.procedure_stats WHERE server_id = $1", connection))
+        {
+            deleteProcs.Parameters.AddWithValue(ServerId);
+            await deleteProcs.ExecuteNonQueryAsync(ct);
+        }
     }
 }

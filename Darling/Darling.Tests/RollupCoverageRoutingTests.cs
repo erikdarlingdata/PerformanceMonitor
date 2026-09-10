@@ -356,10 +356,7 @@ public sealed class RollupCoverageRoutingTests
         var scanned = 0;
         foreach (var file in Directory.EnumerateFiles(Path.Combine(root!, "Darling"), "*.cs", SearchOption.AllDirectories))
         {
-            if (file.Contains(@"\bin\", StringComparison.OrdinalIgnoreCase)
-                || file.Contains(@"\obj\", StringComparison.OrdinalIgnoreCase)
-                /* The tests deliberately exercise the un-gated overload to prove the two agree. */
-                || file.Contains(@"\Darling.Tests\", StringComparison.OrdinalIgnoreCase))
+            if (IsExcludedFromScan(Path.GetRelativePath(root!, file)))
             {
                 continue;
             }
@@ -408,6 +405,53 @@ public sealed class RollupCoverageRoutingTests
             "And if this reader has a twin answering the same question elsewhere, gate BOTH or the two will " +
             "disagree:\n\n" +
             string.Join("\n", offenders));
+    }
+
+    /// <summary>
+    /// True when a path is generated build output, or the test project's own source. Compared as whole
+    /// path SEGMENTS against BOTH separator characters, so the scanned set is the same wherever this runs
+    /// and a directory merely named <c>Objects</c> stays in it.
+    ///
+    /// <para><b>Both separators.</b> A substring test for <c>\bin\</c> matches nothing where the separator
+    /// is <c>/</c>, so off Windows this scan would take in the generated <c>.AssemblyInfo.cs</c> under
+    /// <c>obj/</c> AND the test project — and then report the test project's deliberate un-gated calls as
+    /// production offenders, which is a guard whose verdict depends on who ran it.</para>
+    ///
+    /// <para><b>The test project is excluded</b> because it calls the un-gated overload on purpose, to
+    /// prove the coverage-aware ladder and the age-only one agree. The same call in production code routes
+    /// a window on no evidence, which is what this file forbids.</para>
+    /// </summary>
+    private static bool IsExcludedFromScan(string relativePath) =>
+        relativePath.Split('/', '\\')
+            .Any(s => string.Equals(s, "bin", StringComparison.OrdinalIgnoreCase)
+                      || string.Equals(s, "obj", StringComparison.OrdinalIgnoreCase)
+                      || string.Equals(s, "Darling.Tests", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// <see cref="IsExcludedFromScan"/> reaches the same verdict for a path written with either separator.
+    /// The cases are written out rather than composed with <see cref="Path.Combine"/>, which emits only the
+    /// HOST's separator and so would leave one flavour unasserted wherever this ran.
+    /// </summary>
+    [Theory]
+    [InlineData(true, "Darling/Darling.Tests/RollupCoverageRoutingTests.cs")]
+    [InlineData(true, @"Darling\Darling.Tests\RollupCoverageRoutingTests.cs")]
+    [InlineData(true, "Darling/PerformanceMonitor.Darling.Storage/obj/Debug/net10.0/Generated.cs")]
+    [InlineData(true, @"Darling\PerformanceMonitor.Darling.Storage\obj\Debug\net10.0\Generated.cs")]
+    [InlineData(true, "Darling/PerformanceMonitor.Darling.Storage/bin/Debug/net10.0/Generated.cs")]
+    [InlineData(true, @"Darling\PerformanceMonitor.Darling.Storage\bin\Debug\net10.0\Generated.cs")]
+    [InlineData(false, "Darling/PerformanceMonitor.Darling.Storage/RetentionTierRouter.cs")]
+    [InlineData(false, @"Darling\PerformanceMonitor.Darling.Storage\RetentionTierRouter.cs")]
+    /* Segments, not substrings: source that merely CONTAINS an excluded name stays in the scan. */
+    [InlineData(false, "Darling/PerformanceMonitor.Darling.Storage/Objects/ObjectStore.cs")]
+    [InlineData(false, @"Darling\PerformanceMonitor.Darling.Storage\Objects\ObjectStore.cs")]
+    public void TheScanExclusionReadsBothSeparatorsTheSameWay(bool excluded, string relativePath)
+    {
+        Assert.True(
+            IsExcludedFromScan(relativePath) == excluded,
+            $"'{relativePath}' should{(excluded ? " " : " NOT ")}be excluded from the production scan. " +
+            "A separator-specific exclusion gives this guard a different set of files on Windows than on " +
+            "macOS or Linux: off Windows it would read the test project, whose un-gated calls are " +
+            "deliberate, and report them as production defects.");
     }
 
     /// <summary>

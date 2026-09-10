@@ -49,4 +49,16 @@ public interface IPostgresAlertReadAdapter
     /// </summary>
     Task<List<PostgresSlotAlertInfo>> GetReplicationSlotRiskAsync(
         int serverId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Accumulated wait time per poison wait event over the alert's window (#2711) — an ACCUMULATION, the
+    /// one departure from this interface's "current state" convention, because the poison condition is
+    /// defined by recent accrual rather than a level (see
+    /// <see cref="PostgresAlertEvaluator.PoisonWaitWindowMinutes"/>'s doc comment).
+    /// <para>An empty list is the healthy case AND the only possible answer on a target whose engine does
+    /// not populate the source (the cumulative wait counters are Aurora-only); the evaluator treats both
+    /// as silence, never as failure.</para>
+    /// </summary>
+    Task<List<PostgresPoisonWaitAlertInfo>> GetPoisonWaitPressureAsync(
+        int serverId, CancellationToken cancellationToken = default);
 }

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Viewer;
@@ -210,9 +211,47 @@ public sealed class ViewerCommandSqlTests
         Assert.Null(server.Username);
         Assert.Null(server.EncryptedPassword);
     }
+
+    /// <summary>
+    /// #3244 — every <c>test_connect</c> request the viewer builds names its engine explicitly. The field is
+    /// non-null with the SQL Server default, so the dialogs (which author SQL Server targets) need no call-site
+    /// change and the args can never be engine-silent; the service reads the same token contract as
+    /// <c>MonitoredServer.Engine</c> (omitted or unrecognized = SQL Server), so an older service is unaffected.
+    /// </summary>
+    [Fact]
+    public void BuildTestConnectArgs_AlwaysNamesTheEngine_DefaultSqlServer()
+    {
+        var json = ViewerDataService.BuildTestConnectArgs(new TestConnectServer { Host = "SQL2022", Auth = "integrated" });
+
+        Assert.Contains("\"engine\":\"sqlserver\"", json, StringComparison.Ordinal);
+
+        var server = JsonSerializer.Deserialize<MonitoredServer>(json, s_caseInsensitive);
+        Assert.NotNull(server);
+        Assert.Equal(CollectorTargetEngine.SqlServer, server!.TargetEngine);
+    }
+
+    /// <summary>
+    /// The other arm of the #3244 pin: a PostgreSQL request round-trips into a server the probe will actually
+    /// connect to as PostgreSQL. This is the latch that was missing — before the field existed, a viewer-built
+    /// probe could only ever reach the SQL Server arm, so the engine-aware reply the dialogs parse (#3149) was
+    /// unreachable with a PostgreSQL payload.
+    /// </summary>
+    [Fact]
+    public void BuildTestConnectArgs_PostgresEngine_ReachesTheServiceAsAPostgresTarget()
+    {
+        var json = ViewerDataService.BuildTestConnectArgs(
+            new TestConnectServer { Host = "pg18.example.test", Auth = "sql", Engine = "postgres" });
+
+        Assert.Contains("\"engine\":\"postgres\"", json, StringComparison.Ordinal);
+
+        var server = JsonSerializer.Deserialize<MonitoredServer>(json, s_caseInsensitive);
+        Assert.NotNull(server);
+        Assert.Equal(CollectorTargetEngine.PostgreSql, server!.TargetEngine);
+    }
 }
 
-/// <summary>The pure auth mapping — the service honors integrated + SQL only; the three Azure/Entra modes block.</summary>
+/// <summary>The pure auth mapping — the service honors integrated + SQL only; every Azure/Entra mode blocks,
+/// including any added later, because the mapping is a whitelist with a null default.</summary>
 public sealed class ServerStoreCredentialTests
 {
     [Theory]
@@ -228,6 +267,7 @@ public sealed class ServerStoreCredentialTests
     [InlineData(AuthenticationTypes.EntraMFA)]
     [InlineData(AuthenticationTypes.ServicePrincipal)]
     [InlineData(AuthenticationTypes.ManagedIdentity)]
+    [InlineData(AuthenticationTypes.EntraDefaultCredential)]
     public void MapAuth_AzureModes_AreUnsupported(string authType)
     {
         Assert.Null(ServerStoreCredential.MapAuth(authType));
@@ -342,6 +382,7 @@ public sealed class ViewerServerMigrationTests
     [InlineData(AuthenticationTypes.EntraMFA)]
     [InlineData(AuthenticationTypes.ServicePrincipal)]
     [InlineData(AuthenticationTypes.ManagedIdentity)]
+    [InlineData(AuthenticationTypes.EntraDefaultCredential)]
     public void Projection_AzureAuth_IsSkipped(string authType)
     {
         using var fixture = new Fixture();
@@ -513,6 +554,7 @@ public sealed class BulkServerOnboardingMappingTests
     [InlineData(AuthenticationTypes.EntraMFA)]
     [InlineData(AuthenticationTypes.ServicePrincipal)]
     [InlineData(AuthenticationTypes.ManagedIdentity)]
+    [InlineData(AuthenticationTypes.EntraDefaultCredential)]
     public void BuildMonitoredServerRow_AzureAuth_IsRejected_TheBelt(string authType)
     {
         // The trimmed radios never offer these, but a picked profile could resolve to one — the mapping helper

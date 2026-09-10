@@ -95,8 +95,30 @@ public sealed class DefaultTraceEventsCollector : CollectorDefinitionBase<Defaul
     /// smaller than any retention horizon, so on an archival-emptied (necessarily quiet) server it re-reads
     /// only genuinely-recent events — which by definition are not yet archived — and never re-scans parquet.
     /// Ports the Dashboard's collection_log-SUCCESS guard (install/29_collect_default_trace.sql lines 116-117).
+    ///
+    /// <para><b>Computed server-side against <c>SYSDATETIME()</c>, not from the host's collection time.</b>
+    /// <c>ft.StartTime</c> is the monitored server's LOCAL wall clock (the .trc files store local time), so a
+    /// host-supplied UTC bound is a different clock and the window it delivers is skewed by the server's
+    /// offset: at UTC-7 a 24-hour request reads only the last 17 hours, leaving a 7-hour hole in trace
+    /// history that nothing later refills, and at UTC+10 it reads 34 hours, re-ingesting events already aged
+    /// into parquet — the exact double-count this bound exists to prevent. Both are silent. The watermark
+    /// branch needs no such correction: the watermark IS a previously-stored <c>event_time</c>, already in
+    /// the server's clock. Same reasoning and same fix as <see cref="JobHistoryCollector"/>'s
+    /// <c>GETDATE()</c>-relative fallback, whose <c>run_datetime</c> is server-local for the same reason.</para>
     /// </summary>
     private const int ArchivalEmptyFallbackHours = 24;
+
+    /// <summary>
+    /// The archival-empty floor, in the monitored server's own clock. Sits behind a <c>COALESCE</c> so the
+    /// watermark and true-first-run branches keep binding <c>@cutoff_time</c> verbatim and only the archival
+    /// branch — which binds NULL — reaches the server clock. Non-sargable by construction and free anyway:
+    /// <c>fn_trace_gettable</c> materializes every file it is handed, so no predicate on
+    /// <c>ft.StartTime</c> pushes down (see the remarks at the top of this class).
+    /// </summary>
+    private static readonly string CutoffExpression = string.Format(
+        CultureInfo.InvariantCulture,
+        "COALESCE(@cutoff_time, DATEADD(HOUR, -{0}, SYSDATETIME()))",
+        ArchivalEmptyFallbackHours);
 
     /// <summary>
     /// The <see cref="CollectorContext.State"/> key holding the trace file path this collector read on
@@ -229,7 +251,7 @@ JOIN sys.trace_events AS te
   ON ft.EventClass = te.trace_event_id
 WHERE t.is_default = 1
 AND   t.status = 1
-AND   ft.StartTime > @cutoff_time
+AND   ft.StartTime > {1}
 AND   ISNULL(ft.DatabaseID, 0) NOT IN (1, 3, 4) /*master, model, msdb*/
 AND   ISNULL(ft.DatabaseID, 0) < 32761 /*exclude contained AG system databases*/{0}
 AND
@@ -307,17 +329,20 @@ SELECT
         var (exclusionClause, exclusionParameters) = BuildNullSafeDatabaseExclusion(context.ExcludedDatabases);
         var exclusionSplice = exclusionClause.Length == 0 ? string.Empty : "\r\n" + exclusionClause;
 
-        var text = string.Format(CultureInfo.InvariantCulture, QueryTemplateFormat, exclusionSplice);
+        var text = string.Format(CultureInfo.InvariantCulture, QueryTemplateFormat, exclusionSplice, CutoffExpression);
 
         /* Cutoff selection (the Dashboard's first-run guard, ported):
-             - watermark present            -> steady state, collect newer than it.
-             - watermark null, never succeeded -> TRUE first run, collect ALL on-disk .trc history.
-             - watermark null, HAS succeeded   -> hot store emptied by retention/archival, use a BOUNDED
-                                                  recent window so we never re-scan .trc events already in
-                                                  the parquet archive (which the v_ view would double-count). */
+             - watermark present            -> steady state, collect newer than it. Already the server's own
+                                               clock: the watermark IS a stored event_time (ft.StartTime).
+             - watermark null, never succeeded -> TRUE first run, collect ALL on-disk .trc history. A far-past
+                                               sentinel, so which clock reads it cannot matter.
+             - watermark null, HAS succeeded   -> hot store emptied by retention/archival. NULL here, and the
+                                               query's COALESCE supplies the bound from SYSDATETIME() — see
+                                               ArchivalEmptyFallbackHours for why the host's UTC clock cannot
+                                               express this window against a server-local ft.StartTime. */
         var cutoffTime = context.Watermark
             ?? (context.HasCollectedBefore
-                ? context.CollectionTime.AddHours(-ArchivalEmptyFallbackHours)
+                ? (DateTime?)null
                 : FirstRunCutoff);
 
         /* The path this collector read last cycle, or null when it has none — a first run, a host that

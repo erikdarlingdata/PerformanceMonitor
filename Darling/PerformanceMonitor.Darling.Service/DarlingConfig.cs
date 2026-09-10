@@ -14,6 +14,8 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using System.Text.Json.Serialization;
 using PerformanceMonitor.Notifications;
 
@@ -88,7 +90,28 @@ public sealed class DarlingConfig
     /// <summary>
     /// The per-session <c>statement_timeout</c> applied to the viewer and mcp roles — the hard backstop a
     /// composed query can never exceed (#2357). Seeds <c>config_service.compose_statement_timeout_seconds</c>;
-    /// the store is authoritative afterwards, like every other value here.
+    /// the store is authoritative afterwards, and since #2918 a reload delivers a change like every other
+    /// knob here — on a managed store. The mechanism is still unlike the others, and the difference shows
+    /// at the edges.
+    ///
+    /// <para><b>It lives on the roles, not in a query.</b> The ceiling is
+    /// <c>ALTER ROLE viewer/mcp SET statement_timeout</c>, written by startup provisioning and — since
+    /// #2918 — re-asserted by a control-plane reload when the value changed
+    /// (<see cref="!:DarlingManagedRoles.ReassertComposeStatementTimeoutAsync"/>). Three consequences a
+    /// reader of this property should not have to rediscover:</para>
+    ///
+    /// <para>1. <b>Re-assertion is managed-mode + Windows only</b>, mirroring the gate on provisioning,
+    /// which is where these roles get CREATED. A BYO store provisions them out-of-band through
+    /// <c>tools/provision-roles.sql</c> and names them itself, so there the old restart-scoped caveat still
+    /// holds — and an operator has to re-run that script by hand.</para>
+    ///
+    /// <para>2. <b>A role <c>SET</c> only takes on that role's NEXT session.</b> Lowering the ceiling bounds
+    /// the next runaway, not the one already running; an already-connected viewer keeps the old value until
+    /// it reconnects. This is not a kill switch.</para>
+    ///
+    /// <para>3. Reading this property tells you the store's <i>desired</i> value. It is kept in sync with
+    /// what was last successfully written to the roles on the paths above, but a failed re-assertion leaves
+    /// the roles behind until the next reload or start converges them.</para>
     ///
     /// <para>15 preserves the constant it replaces. It is a judgement about store size and disk speed, which
     /// this product cannot make for someone else's deployment — a fleet-wide aggregate over a wide window on a
@@ -133,6 +156,31 @@ public sealed class DarlingConfig
     public bool CollectSchemaChangeEvents { get; set; } = true;
 
     /// <summary>
+    /// #2862: how many collection cycles pass between plan-XML captures for <c>procedure_stats</c> — 1 is
+    /// every cycle (the pre-#2862 collector, byte-identical), 4 is one cycle in four. Clamped to [1,60] on
+    /// read. Only <c>procedure_stats</c> is gated; every other plan-capturing collector is untouched.
+    ///
+    /// <para><b>Why the knob exists.</b> procedure_stats is the most expensive collector on the production
+    /// us-east-1 store, and a controlled decomposition attributed 73.8% of its read loop to RENDERING plan
+    /// XML and a further 26.0% to shipping it, against 0.2% for the same query with no plan apply at all.
+    /// The render happens inside <c>sys.dm_exec_text_query_plan</c>, a server-side TVF, so it is CPU burned
+    /// on the MONITORED server — which is why the lever is cadence and not a dedup key: hashing at the
+    /// source would remove the transfer and leave the render on customer hardware.</para>
+    ///
+    /// <para>The cost paid is plan-data granularity: a captured plan is up to this many cycles old. 4 keeps
+    /// the worst-case plan age inside the collector's own ten-minute <c>last_execution_time</c> candidate
+    /// window, so a module busy enough to reach the TOP (150) cut is still busy when its plan is next
+    /// rendered. Runtime statistics are unaffected — they are collected at full resolution every cycle.</para>
+    ///
+    /// <para>A file-only knob (not seeded into the control-plane store), exactly like
+    /// <see cref="CollectSchemaChangeEvents"/> above, so an edit takes effect on the next restart and this
+    /// needs no schema rung. It is read through a live provider, so promoting it to a store column later is
+    /// a change to the source only and not to the collector seam.</para>
+    /// </summary>
+    [JsonPropertyName("procedureStatsPlanCycleInterval")]
+    public int ProcedureStatsPlanCycleInterval { get; set; } = 4;
+
+    /// <summary>
     /// The shared alert engine's enabled flags and thresholds (Phase-5 slice D). Every default
     /// mirrors Lite's <c>App.*</c> alert defaults exactly, so an empty section alerts like a
     /// fresh Lite install. Optional — omit it entirely for the defaults.
@@ -166,6 +214,22 @@ public sealed class DarlingConfig
     /// </summary>
     [JsonPropertyName("analysis")]
     public AnalysisConfig Analysis { get; set; } = new();
+
+    /// <summary>
+    /// The auto force-plan bot (#2138 phase 1). <c>enabled: false</c> (the default) means the bot
+    /// evaluates nothing; enabled with <c>dryRun: true</c> (also the default) journals every
+    /// would-force/blocked decision to <c>collect.plan_force_actions</c> in the MONITORING store.
+    /// Optional — omit the section entirely and the bot stays off.
+    ///
+    /// <para>Phase 1 has no write path at all: no build artifact here can force or unforce a plan on
+    /// a monitored server (see <see cref="PlanForceBot"/>), so these knobs govern what gets JUDGED
+    /// and JOURNALED. They are the same knobs the write path (#2731) will gate on — including the
+    /// third gate, the per-server <c>config_monitored_servers.plan_force_bot_enabled</c> opt-in that
+    /// nothing in this file can set — so a shadow-mode ledger scored now is a faithful rehearsal of
+    /// what an armed bot would have done.</para>
+    /// </summary>
+    [JsonPropertyName("forcePlanBot")]
+    public ForcePlanBotFileConfig ForcePlanBot { get; set; } = new();
 
     /// <summary>
     /// The embedded MCP server (analysis slice AN4): the same analysis + data-read tool surface Lite
@@ -542,9 +606,11 @@ public sealed class AlertsConfig
     public int SelfDiskFreeWarnPercent { get; set; } = 10;
 
     /// <summary>#2107: how long collection may go quiet before Collection Stopped / Agent Not
-    /// Running fire (was a compile-time 30 minutes).</summary>
+    /// Running fire (was a compile-time 30 minutes). Defaults to the shared constant behind the
+    /// display's Offline band, so the two definitions of "collection stopped" agree out of the
+    /// box (#2794); widening it here widens only the ALERT window.</summary>
     [JsonPropertyName("collectionStaleMinutes")]
-    public int CollectionStaleMinutes { get; set; } = 30;
+    public int CollectionStaleMinutes { get; set; } = ServerHealthThresholds.CollectionStoppedMinutesDefault;
 
     /// <summary>#2107: the Collection Stopped fast path — consecutive failures with zero successes
     /// that fire without waiting out the staleness window (was a compile-time 10).</summary>
@@ -567,9 +633,17 @@ public sealed class AlertsConfig
 
     /// <summary>#2136: the Store Job Over Cadence warning threshold — a store background job whose
     /// last run reaches this percent of its own schedule interval fires the Warning tier. The
-    /// Critical tier is fixed at 100 (a job outrunning its cadence compounds refresh lag).</summary>
+    /// Critical tier is fixed at 100 (a job outrunning its cadence compounds refresh lag).
+    ///
+    /// <para>#3060: the default is <see cref="TimescaleSupport.RefreshSlotPercentOfHourlyCadence"/>, named
+    /// rather than restated, so this seed and that constant cannot disagree. The figure is 25, and #3174
+    /// broke the derivation that used to produce it while leaving the value where it is — see that constant
+    /// for why a re-derived grid has no single slot for a percent of cadence to mean, and why V57's
+    /// already-applied column default is what the figure is anchored on instead. DarlingSelfAlertTests pins
+    /// this seed equal to the rung text and holds the knob firing at or before the heaviest refresh's
+    /// window.</para></summary>
     [JsonPropertyName("storeJobCadenceWarnPercent")]
-    public int StoreJobCadenceWarnPercent { get; set; } = 25;
+    public int StoreJobCadenceWarnPercent { get; set; } = TimescaleSupport.RefreshSlotPercentOfHourlyCadence;
 
     [JsonPropertyName("longRunningJobEnabled")]
     public bool LongRunningJobEnabled { get; set; } = true;
@@ -669,6 +743,94 @@ public sealed class AnalysisConfig
     /// <summary>Minimum finding severity (0.0–2.0) to notify on — the shared AnalysisNotificationService floor.</summary>
     [JsonPropertyName("notifySeverity")]
     public double NotifySeverity { get; set; } = 1.5;
+}
+
+/// <summary>
+/// The darling.json face of <see cref="PerformanceMonitor.Analysis.ForcePlanBotSettings"/> (#2138).
+/// File-level and NOT control-plane-backed in phase 1 (no <c>config_service</c> columns yet — a
+/// follow-up adds the store override + viewer surface), so these values are authoritative from the
+/// file at startup and a store reload does not change them. Kept as a separate JSON-shaped class
+/// rather than reusing the settings record so the wire names stay stable if the policy record grows.
+/// Every default is the safe state — see the settings record for what each knob means and why
+/// dry-run mirrors live mode exactly.
+///
+/// <para>The self-review knobs (<c>firstReviewMinutes</c>, <c>finalReviewMinutes</c>,
+/// <c>minReviewExecutions</c>, <c>netBenefitRatio</c>) are carried in full even though phase 1 places
+/// no force to review: they are the inputs to
+/// <see cref="PerformanceMonitor.Analysis.ForcePlanSelfReview"/>, whose whole verdict table is
+/// specced here so the rules a live force would be judged by are settled and reviewable BEFORE the
+/// write path exists to apply them.</para>
+/// </summary>
+public sealed class ForcePlanBotFileConfig
+{
+    /// <summary>Global gate 1 — false (default) means the bot evaluates nothing at all.</summary>
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; }
+
+    /// <summary>Global gate 2 — true (default) journals decisions without touching any server.</summary>
+    [JsonPropertyName("dryRun")]
+    public bool DryRun { get; set; } = true;
+
+    /// <summary>The bot's own action floor on regression_factor (detection fires at 2; this can be raised independently).</summary>
+    [JsonPropertyName("minRegressionFactor")]
+    public double MinRegressionFactor { get; set; } = 2.0;
+
+    /// <summary>One journaled decision per (server, database, query) per this window.</summary>
+    [JsonPropertyName("queryCooldownHours")]
+    public int QueryCooldownHours { get; set; } = 24;
+
+    /// <summary>Rolling 24h cap on actionable decisions per server.</summary>
+    [JsonPropertyName("maxActionsPerServerPerDay")]
+    public int MaxActionsPerServerPerDay { get; set; } = 3;
+
+    /// <summary>Failed forces within the cooldown window that block a query from further forcing.</summary>
+    [JsonPropertyName("failedForceThreshold")]
+    public int FailedForceThreshold { get; set; } = 2;
+
+    /// <summary>The failure-memory window in hours (a sliding window, not a permanent flag).</summary>
+    [JsonPropertyName("failedForceCooldownHours")]
+    public int FailedForceCooldownHours { get; set; } = 168;
+
+    /// <summary>First self-review checkpoint after a live force, in minutes. Read by the review
+    /// state machine, which the write path (#2731) drives — nothing in phase 1 places a force.</summary>
+    [JsonPropertyName("firstReviewMinutes")]
+    public int FirstReviewMinutes { get; set; } = 60;
+
+    /// <summary>Final (terminal) self-review checkpoint, in minutes.</summary>
+    [JsonPropertyName("finalReviewMinutes")]
+    public int FinalReviewMinutes { get; set; } = 1440;
+
+    /// <summary>Executions required before a checkpoint judges cost, and the executions limb of the
+    /// operator flow's post-eviction observation window.</summary>
+    [JsonPropertyName("minReviewExecutions")]
+    public int MinReviewExecutions { get; set; } = 25;
+
+    /// <summary>The elapsed limb of the post-eviction observation window, in minutes — the operator flow
+    /// observes until whichever of the two limbs fires first.</summary>
+    [JsonPropertyName("observationWindowMinutes")]
+    public int ObservationWindowMinutes { get; set; } = 30;
+
+    /// <summary>Post-force cpu/exec must be at or below this fraction of the baseline, or the review unforces.</summary>
+    [JsonPropertyName("netBenefitRatio")]
+    public double NetBenefitRatio { get; set; } = 0.75;
+
+    /// <summary>The clamped policy settings this file section resolves to.</summary>
+    public PerformanceMonitor.Analysis.ForcePlanBotSettings ToSettings() =>
+        new PerformanceMonitor.Analysis.ForcePlanBotSettings
+        {
+            Enabled = Enabled,
+            DryRun = DryRun,
+            MinRegressionFactor = MinRegressionFactor,
+            QueryCooldownHours = QueryCooldownHours,
+            MaxActionsPerServerPerDay = MaxActionsPerServerPerDay,
+            FailedForceThreshold = FailedForceThreshold,
+            FailedForceCooldownHours = FailedForceCooldownHours,
+            FirstReviewMinutes = FirstReviewMinutes,
+            FinalReviewMinutes = FinalReviewMinutes,
+            MinReviewExecutions = MinReviewExecutions,
+            ObservationWindowMinutes = ObservationWindowMinutes,
+            NetBenefitRatio = NetBenefitRatio,
+        }.Normalize();
 }
 
 /// <summary>
@@ -906,6 +1068,19 @@ public sealed class WebConfig
     public int Port { get; set; } = 5153;
 
     /// <summary>
+    /// The externally reachable base URL of this dashboard (#2710) — e.g. <c>http://10.0.0.5:5153</c> — used
+    /// only to build the triage-page link alert webhooks carry (<c>TriageLink.Build</c>). Empty (the default)
+    /// means alerts carry no link. It is configuration rather than derived from <see cref="Network"/>'s bind
+    /// address, because what the service binds is not necessarily what recipients can reach (a proxy, a DNS
+    /// name, TLS on a different host name). Deliberately FILE-authoritative like the rest of this block —
+    /// deployment plumbing, not an alert-tuning knob — so a store config reload (which overwrites only
+    /// <see cref="Enabled"/>/<see cref="Port"/> here) never resets it. An invalid value (not absolute
+    /// http/https) is treated as unset by the link builder rather than shipping a dead href.
+    /// </summary>
+    [JsonPropertyName("publicBaseUrl")]
+    public string PublicBaseUrl { get; set; } = "";
+
+    /// <summary>
     /// Opt-in network exposure for the web dashboard (darling-network-endpoints). Omit for the secure
     /// default = loopback-only HTTP. Managed-mode only; ignored in BYO with a caller warning. Any missing
     /// precondition (token / valid allowFrom / managed) keeps the dashboard loopback-only + LogCritical —
@@ -972,6 +1147,15 @@ public sealed class WebNetworkConfig
     public WebTlsConfig? Tls { get; set; }
 
     /// <summary>
+    /// Opt-in per-user OIDC sign-in for the LAN-exposed dashboard (#2550). Omit for the existing behavior —
+    /// the shared token is the only credential. When configured, the login page additionally offers an SSO
+    /// sign-in (authorization code + PKCE); the shared token KEEPS working beside it as the scripted-caller /
+    /// break-glass fallback. See <see cref="WebOidcConfig"/>.
+    /// </summary>
+    [JsonPropertyName("oidc")]
+    public WebOidcConfig? Oidc { get; set; }
+
+    /// <summary>
     /// True when any field is set — used only for the BYO "network.* is ignored" caller warning (D-BYO);
     /// NOT the same as "exposed".
     /// </summary>
@@ -981,7 +1165,8 @@ public sealed class WebNetworkConfig
         || !string.IsNullOrWhiteSpace(AllowFrom)
         || !string.IsNullOrWhiteSpace(EncryptedToken)
         || !string.IsNullOrWhiteSpace(Token)
-        || (Tls?.IsConfigured ?? false);
+        || (Tls?.IsConfigured ?? false)
+        || (Oidc?.IsConfigured ?? false);
 
     /// <summary>
     /// The access token, preferring <see cref="EncryptedToken"/> (DPAPI-decrypted; Windows-only) over the
@@ -1011,6 +1196,131 @@ public sealed class WebNetworkConfig
             /* An env:/file: reference (#1804) is not plaintext-in-config — no warning for it. */
             usedPlaintext = !DarlingSecretSource.IsReference(Token);
             return DarlingSecretSource.Resolve(Token, "web.network.token");
+        }
+
+        return null;
+    }
+}
+
+/// <summary>
+/// Opt-in per-user OIDC sign-in for the LAN-exposed web dashboard (#2550) — authorization code + PKCE against
+/// a standard OpenID Connect provider, resolved via its discovery document. Entirely OFF when this block is
+/// absent: the shared token → cookie exchange is byte-for-byte unchanged, and it KEEPS working beside OIDC when
+/// this is configured (the scripted-caller and break-glass path — an IdP outage must not lock the operator out
+/// of their own monitoring). Lives in darling.json rather than the store because the client secret needs the
+/// same DPAPI treatment <see cref="WebNetworkConfig.EncryptedToken"/> gets, and the host has to be able to bind
+/// before the store is necessarily reachable — the same reasoning as the token. File-defined, restart-only,
+/// like the rest of the network block.
+///
+/// <para><b>Role mapping.</b> With <see cref="RoleClaim"/> unset, every signed-in user gets the same reach the
+/// shared token grants (edit) — parity, not a new privilege. With it set, membership decides: a claim value in
+/// <see cref="AdminRoles"/> ⇒ edit; else a value in <see cref="ViewerRoles"/> ⇒ read-only; else the sign-in is
+/// REFUSED — an authenticated-at-the-IdP user with no mapped role gets nothing, which is per-user revocation
+/// doing its job. Matching is case-sensitive ordinal: role values are identifiers (Entra emits group GUIDs),
+/// not prose.</para>
+/// </summary>
+public sealed class WebOidcConfig
+{
+    /// <summary>
+    /// The provider's issuer/authority URL (e.g. <c>https://login.microsoftonline.com/{tenant}/v2.0</c> or
+    /// <c>https://{org}.okta.com/oauth2/default</c>). Discovery is fetched from
+    /// <c>{authority}/.well-known/openid-configuration</c>. Must be <c>https://</c> — plain <c>http://</c> is
+    /// accepted only for a loopback host (a local test IdP), because over HTTP the code exchange and the
+    /// tokens it returns would cross the wire in the clear.
+    /// </summary>
+    [JsonPropertyName("authority")]
+    public string? Authority { get; set; }
+
+    /// <summary>The registered client (application) id. Also the required ID-token audience — an ID token is
+    /// minted FOR a client, so there is no separate audience knob to misconfigure.</summary>
+    [JsonPropertyName("clientId")]
+    public string? ClientId { get; set; }
+
+    /// <summary>
+    /// DPAPI-LocalMachine-protected client secret, base64 — produced by <c>--encrypt-password</c>
+    /// (preferred over the plaintext <see cref="ClientSecret"/>). Read via <see cref="ResolveClientSecret"/>.
+    /// </summary>
+    [JsonPropertyName("encryptedClientSecret")]
+    public string? EncryptedClientSecret { get; set; }
+
+    /// <summary>
+    /// The client secret as a literal (dev convenience only; the caller warns) or an <c>env:</c>/<c>file:</c>
+    /// reference (#1804). Optional even in combination with <see cref="EncryptedClientSecret"/> absent: with
+    /// no secret at all the exchange runs as a PUBLIC client on PKCE alone, which some providers permit;
+    /// a confidential client with a secret is the recommended registration.
+    /// </summary>
+    [JsonPropertyName("clientSecret")]
+    public string? ClientSecret { get; set; }
+
+    /// <summary>Space-separated scopes. Default <c>openid profile email</c>; <c>openid</c> is always included
+    /// even when this names a set without it, because without it there is no ID token and no sign-in.</summary>
+    [JsonPropertyName("scopes")]
+    public string? Scopes { get; set; }
+
+    /// <summary>
+    /// The claim that becomes the seat's identity (the <c>updated_by</c> stamp). Unset = the useful-name chain:
+    /// <c>preferred_username</c> (Entra's UPN), then <c>email</c>, then <c>sub</c>. When SET, that exact claim
+    /// is required — a token without it REFUSES the sign-in rather than silently falling back, because "the
+    /// operator asked for X" and "we stamped something else" must not coexist quietly.
+    /// </summary>
+    [JsonPropertyName("subjectClaim")]
+    public string? SubjectClaim { get; set; }
+
+    /// <summary>The ID-token claim carrying role/group membership (e.g. <c>roles</c>, <c>groups</c>). String
+    /// or array-of-strings both work. Required whenever <see cref="AdminRoles"/>/<see cref="ViewerRoles"/> are
+    /// set, and pointless without them — either half alone is refused as a misconfiguration.</summary>
+    [JsonPropertyName("roleClaim")]
+    public string? RoleClaim { get; set; }
+
+    /// <summary>Claim values granting the EDIT seat (custom-view CRUD and any future write surface).</summary>
+    [JsonPropertyName("adminRoles")]
+    public string[]? AdminRoles { get; set; }
+
+    /// <summary>Claim values granting the READ-ONLY seat: the whole read surface plus running composed panels,
+    /// no mutations. The SPA already renders this seat (it hides edit affordances when <c>/api/session</c>
+    /// reports <c>can_edit: false</c>); the server refuses the writes regardless of what a client sends.</summary>
+    [JsonPropertyName("viewerRoles")]
+    public string[]? ViewerRoles { get; set; }
+
+    /// <summary>True when any field is set — the "does the operator want OIDC" gate.</summary>
+    [JsonIgnore]
+    public bool IsConfigured =>
+        !string.IsNullOrWhiteSpace(Authority)
+        || !string.IsNullOrWhiteSpace(ClientId)
+        || !string.IsNullOrWhiteSpace(EncryptedClientSecret)
+        || !string.IsNullOrWhiteSpace(ClientSecret)
+        || !string.IsNullOrWhiteSpace(Scopes)
+        || !string.IsNullOrWhiteSpace(SubjectClaim)
+        || !string.IsNullOrWhiteSpace(RoleClaim)
+        || AdminRoles is { Length: > 0 }
+        || ViewerRoles is { Length: > 0 };
+
+    /// <summary>
+    /// The client secret, preferring <see cref="EncryptedClientSecret"/> (DPAPI-decrypted; Windows-only) over
+    /// the plaintext/reference <see cref="ClientSecret"/> — the same shape as
+    /// <see cref="WebNetworkConfig.ResolveToken"/>. Returns null when neither is set (public-client PKCE-only
+    /// exchange).
+    /// </summary>
+    public string? ResolveClientSecret(out bool usedPlaintext)
+    {
+        usedPlaintext = false;
+
+        if (!string.IsNullOrWhiteSpace(EncryptedClientSecret))
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                throw new PlatformNotSupportedException(
+                    "web.network.oidc.encryptedClientSecret requires Windows (DPAPI); use \"clientSecret\" with an env:/file: reference on other platforms.");
+            }
+
+            return DarlingSecrets.Unprotect(EncryptedClientSecret);
+        }
+
+        if (!string.IsNullOrWhiteSpace(ClientSecret))
+        {
+            /* An env:/file: reference (#1804) is not plaintext-in-config — no warning for it. */
+            usedPlaintext = !DarlingSecretSource.IsReference(ClientSecret);
+            return DarlingSecretSource.Resolve(ClientSecret, "web.network.oidc.clientSecret");
         }
 
         return null;
@@ -1210,9 +1520,10 @@ public static class DarlingNetwork
     /// </summary>
     public static IReadOnlyList<string>? NormalizeNetworkRoles(string? role)
     {
-        /* Literals rather than DarlingManagedPostgres.ViewerRoleName/AdminRoleName: that type is
-           [SupportedOSPlatform("windows")] and this classifier is platform-neutral, so referencing its
-           consts would raise CA1416 here. The names mirror those consts (pinned equal by test). */
+        /* Literals rather than DarlingManagedPostgres.ViewerRoleName/AdminRoleName: originally forced
+           (the type carried [SupportedOSPlatform("windows")] until #3241 moved the attribute onto its
+           Windows-only members, so referencing the consts raised CA1416 here), kept so this classifier
+           stays decoupled from the managed store. The names mirror those consts (pinned equal by test). */
         if (string.IsNullOrWhiteSpace(role))
         {
             return new[] { "viewer" };
@@ -1442,6 +1753,67 @@ public sealed class MonitoredServer
     /// </summary>
     [JsonIgnore]
     public int? StoredServerId { get; set; }
+
+    /// <summary>
+    /// <c>config_monitored_servers.plan_force_bot_enabled</c> as READ FROM THE STORE — write-gate 2
+    /// of the #2138 two-gate contract. A live force on this server requires the global
+    /// <c>forcePlanBot</c> gates AND this flag.
+    ///
+    /// <para><b>Not settable from the file</b> (<see cref="JsonIgnore"/>) on purpose, the
+    /// <see cref="StoredServerId"/> reasoning applied to a WRITE authorization: the registry is
+    /// authoritative once seeded, so a darling.json knob would be a silent no-op on every seeded box
+    /// (#2254) — and a knob that silently does nothing is worst of all when what it claims to gate is
+    /// a write to a production server. The seed always writes FALSE; opting a server in is a store
+    /// write (viewer surface to follow).</para>
+    /// </summary>
+    [JsonIgnore]
+    public bool PlanForceBotEnabled { get; set; }
+
+    /// <summary>
+    /// The REMEDIATION credential's login name (<c>config_monitored_servers.remediation_username</c>) — the
+    /// second, per-server, opt-in identity a #2138 phase-1 action runs as.
+    ///
+    /// <para><b>The monitoring credential is never used for a write, ever.</b> That promise is stated in
+    /// both READMEs and in the MCP instructions, and operators grant against it, so the write travels on
+    /// its own identity or it does not travel. There is no fallback: null here means this server has no
+    /// phase-1 surface at all, which is the whole arming model — see
+    /// <see cref="PerformanceMonitor.Analysis.OperatorRemediationGate.SurfaceFor"/> for why the absence is
+    /// a null credential rather than an <c>enabled</c> flag.</para>
+    ///
+    /// <para><b>Presence IS the auth mode.</b> Deliberately no <c>remediationAuth</c> sibling: an
+    /// integrated remediation identity would be the service account, which is the monitoring identity,
+    /// which is exactly what this exists to keep read-only. So a remediation credential is always SQL auth
+    /// when set, and there is no third state to resolve wrongly.</para>
+    ///
+    /// <para><b>Settable from the file</b>, unlike <see cref="PlanForceBotEnabled"/> — and the difference is
+    /// deliberate. That flag is an ARM STATE, so a file knob would be a silent no-op on a seeded box
+    /// (#2254). This is a CREDENTIAL, and the container/compose deploy has no viewer to type one into; the
+    /// <c>env:</c>/<c>file:</c> reference path is the only way to arm a Linux install at all. It is still
+    /// only read at seed time like every other credential field here.</para>
+    /// </summary>
+    [JsonPropertyName("remediationUsername")]
+    public string? RemediationUsername { get; set; }
+
+    /// <summary>
+    /// The remediation credential's DPAPI-LocalMachine blob, base64 — produced by the same
+    /// <c>--encrypt-password</c> as <see cref="EncryptedPassword"/>, and resolvable as an
+    /// <c>env:</c>/<c>file:</c> reference by the same <c>DarlingSecretSource</c>. There is deliberately no
+    /// plaintext sibling of this one (no counterpart to <see cref="Password"/>): the dev-convenience
+    /// plaintext slot exists because a wrong monitoring password fails a read, and a wrong remediation
+    /// password fails a write to a production server.
+    /// </summary>
+    [JsonPropertyName("remediationEncryptedPassword")]
+    public string? RemediationEncryptedPassword { get; set; }
+
+    /// <summary>
+    /// Whether this server is armed for operator-initiated remediation: BOTH halves of the credential are
+    /// present. A one-sided credential is not a weaker arm, it is a misconfiguration — so it reads as
+    /// unarmed rather than as something to attempt and fail at against a production server.
+    /// </summary>
+    [JsonIgnore]
+    public bool HasRemediationCredential =>
+        !string.IsNullOrWhiteSpace(RemediationUsername) &&
+        !string.IsNullOrWhiteSpace(RemediationEncryptedPassword);
 
     /// <summary>
     /// This server's <c>server_id</c>: the stored value when there is one, otherwise derived from

@@ -174,6 +174,7 @@ public static class DarlingPgTableBloatReader
     {
         var rows = new List<PgTableBloatRow>();
         await using var command = postgres.CreateCommand(PgTableBloatSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* Kind-Unspecified at the BIND, per the store's naive-UTC discipline - a Kind=Utc DateTime makes
            Npgsql infer timestamptz and PostgreSQL then converts the naive column at the session TimeZone,
@@ -301,6 +302,7 @@ public static class DarlingPgTableBloatReader
         CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(PgTableBloatProbeSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));

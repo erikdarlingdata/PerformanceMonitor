@@ -33,7 +33,7 @@ LIMIT 10";
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var cmd = new NpgsqlCommand(FileLatencyBreakdownSql, connection);
+        using var cmd = new NpgsqlCommand(FileLatencyBreakdownSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -84,7 +84,7 @@ LIMIT 50";
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var cmd = new NpgsqlCommand(AutogrowthPercentFilesSql, connection);
+        using var cmd = new NpgsqlCommand(AutogrowthPercentFilesSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
 
         var items = new List<object>();
@@ -127,7 +127,7 @@ LIMIT 5";
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var cmd = new NpgsqlCommand(TempDbBreakdownSql, connection);
+        using var cmd = new NpgsqlCommand(TempDbBreakdownSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));

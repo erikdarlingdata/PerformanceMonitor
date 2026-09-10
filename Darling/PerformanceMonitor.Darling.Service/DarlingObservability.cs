@@ -84,8 +84,8 @@ WHERE s.is_enabled
       (SELECT 1 FROM config.config_monitored_servers c WHERE c.server_id = s.server_id);";
 
     private const string InsertCollectionLogSql = @"
-INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);";
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms, fanout_item_count, slowest_item, slowest_item_ms, sql_open_ms, sql_drain_ms, watermark_ms, drain_rows_read, drain_bytes_read, drain_last_read_ms, target_session_id, sweep_peer_max_ms, plan_fetch_probe_ms, plan_fetch_target_ms, plan_fetch_write_ms, plan_fetch_ids_attempted, plan_fetch_probe_ids, text_fetch_probe_ms, text_fetch_target_ms, text_fetch_write_ms, text_fetch_ids_attempted, text_fetch_probe_ids)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32);";
 
     /* The fleet-sentinel server_id the daily retention purge writes its run-record under. collection_log's
        server_id is NOT NULL and Collection Health reads per real server_id, but the purge is fleet-wide (per
@@ -128,13 +128,25 @@ ON CONFLICT (server_id) DO UPDATE SET
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(UpsertServerSql, connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(server.ServerId);
             command.Parameters.AddWithValue(server.StorageName);
             command.Parameters.AddWithValue(server.Config.DisplayName);
             /* The raw probed SERVERPROPERTY('EngineEdition') — real box editions (2/3/4...), not
                just the 5/8 Azure classifications. */
             command.Parameters.AddWithValue(server.EngineEdition);
-            command.Parameters.AddWithValue(server.Target.SqlMajorVersion);
+            /* The probed SQL Server major. DBNull rather than 0 off a PostgreSQL target (#3243): a SQL
+               Server major is not a fact about that server — Target.SqlMajorVersion is a non-nullable int
+               the PostgreSQL connect path never assigns, so unguarded this stamped a claim-shaped 0 on
+               every PostgreSQL row. Guarded on Engine as well as on the value, exactly as
+               postgres_major_version below: 0 is also what a SQL Server probe that failed before reading
+               the major leaves behind, and the reads treat NULL as "no claim". Rows written before the
+               guard keep their 0 — every reader treats 0 and NULL alike — and a live server's next connect
+               corrects it through the ON CONFLICT arm, so there is nothing to migrate. */
+            command.Parameters.AddWithValue(
+                server.Target.Engine == CollectorTargetEngine.SqlServer && server.Target.SqlMajorVersion > 0
+                    ? server.Target.SqlMajorVersion
+                    : (object)DBNull.Value);
             /* The engine KIND (#2530), derived from the target the connector probed rather than from the
                configured engine string: Aurora-ness is not configurable — it comes from aurora_version being
                present in pg_proc — and it is half of what this column exists to carry. */
@@ -178,7 +190,7 @@ ON CONFLICT (server_id) DO UPDATE SET
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            using (var command = new NpgsqlCommand(SyncEnabledStatesSql, connection))
+            using (var command = new NpgsqlCommand(SyncEnabledStatesSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds })
             {
                 var changed = await command.ExecuteNonQueryAsync(cancellationToken);
                 if (changed > 0)
@@ -187,7 +199,7 @@ ON CONFLICT (server_id) DO UPDATE SET
                 }
             }
 
-            using (var command = new NpgsqlCommand(DisableOrphanedServersSql, connection))
+            using (var command = new NpgsqlCommand(DisableOrphanedServersSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds })
             {
                 var orphaned = await command.ExecuteNonQueryAsync(cancellationToken);
                 if (orphaned > 0)
@@ -225,6 +237,10 @@ ON CONFLICT (server_id) DO UPDATE SET
         long storageMs,
         string? errorMessage,
         FanoutCost? fanout,
+        ServerPhaseCost? phases,
+        DrainForensics? drain,
+        FetchPhaseCost? fetchPhases,
+        int? sweepPeerMaxMs,
         ILogger? logger,
         CancellationToken cancellationToken)
     {
@@ -238,6 +254,7 @@ ON CONFLICT (server_id) DO UPDATE SET
 
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(InsertCollectionLogSql, connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(CollectionIdGenerator.Next());
             command.Parameters.AddWithValue(server.ServerId);
             command.Parameters.AddWithValue(server.StorageName);
@@ -256,6 +273,78 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = fanout.HasValue ? fanout.Value.ItemCount : (object)DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = fanout.HasValue ? fanout.Value.SlowestItem : (object)DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = fanout.HasValue ? fanout.Value.SlowestItemMs : (object)DBNull.Value });
+
+            /* V108, and all three NULL together or all three set for the same reason as the fanout triple
+               above: an open with no drain cannot be read as a split. The caller's gate is the #2851
+               MEASURED flag, not a non-zero test, so a genuinely instant open stores 0 rather than NULL -
+               "we measured it and it was fast" and "this path emits no split" must stay distinguishable.
+               other: is NOT stored; it is sql_duration_ms - sql_open_ms - sql_drain_ms and readers derive
+               it, so the terms cannot drift apart from the parent they decompose. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = phases.HasValue ? phases.Value.OpenMs : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = phases.HasValue ? phases.Value.DrainMs : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = phases.HasValue ? phases.Value.WatermarkMs : (object)DBNull.Value });
+
+            /* V109 (#2864): what the drain DELIVERED, as opposed to what the run stored. rows_collected is
+               0 for every abandoned cycle by definition - it ships nothing - so it could never separate a
+               target that sent no rows from one that sent 149 and went silent. Written together with the
+               phases and on the same MEASURED gate, since the counting reader is installed exactly where
+               the phase stopwatches are.
+
+               drain_last_read_ms is the one that carries the diagnosis: subtracted from sql_drain_ms it is
+               the time the reader spent with nothing arriving. NULL beside a 0 count says nothing ever
+               arrived; 0 is left free to mean what it honestly means, that row 1 arrived instantly.
+
+               NULL means NOT RECORDED, and deliberately says no more than that. It was tempting to claim NULL
+               beside a NULL count identifies a pre-rung row, but that is false in two reachable ways: an
+               abandon that fires inside ExecuteReaderAsync leaves all three at their -1 default and they are
+               guarded to NULL just below, and NO per-database enumerated collector sets the measured flag at
+               all, so query_store and every Pg*Stats collector will read NULL here forever on a store that is
+               fully current. A reader wanting 'was this measured' must ask that question of the column it
+               cares about, not infer the store's version from an absence.
+            */
+            /* Every figure guarded on >= 0, not just the last-read one (#2864 review). The budget can fire
+               INSIDE ExecuteReaderAsync, before the counting reader is constructed at all - the abandon arm
+               then returns ServerPhasesMeasured: true with these still at their -1 default, because only
+               the open was stamped. Unguarded, that wrote a literal -1 into a bigint column and broke this
+               rung's own documented invariant: that a stored count is always a real non-negative number
+               and -1 is a value no real count can take. An in-memory sentinel must not survive the write. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = drain.HasValue && drain.Value.RowsRead >= 0 ? drain.Value.RowsRead : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = drain.HasValue && drain.Value.BytesRead >= 0 ? drain.Value.BytesRead : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = drain.HasValue && drain.Value.LastReadMs >= 0 ? (int)drain.Value.LastReadMs : (object)DBNull.Value });
+            /* spid guarded on > 0, the session-id twin of the >= 0 count guards above (#2884): the
+               capture path normalizes 0 to null at the source, but DrainForensics is a public record any
+               caller can construct, and a 0 here would read as a real-looking session id that no join
+               could ever land. Belt beside braces, same as the -1 sentinels. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = drain.HasValue && drain.Value.TargetSessionId is int spid && spid > 0 ? spid : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = sweepPeerMaxMs is int peer ? peer : (object)DBNull.Value });
+
+            /* V110 (#2860): the per-database fetch split, summed across the fan-out. Nullable PER HALF, not
+               per group of ten: a run that fetched text but no plans writes the five text figures and leaves
+               the five plan ones NULL, matching how the log line emits its two sub-lines independently.
+               Within a half it is all or nothing, because a target time without its id count cannot be turned
+               into the ms-per-id rate the counts are here for.
+
+               NULL means no fetch RAN, which for these columns is the honest reading rather than a lost
+               measurement - a 0 ms fetch is a fetch that found nothing to do, unlike V108's 0 ms open, which
+               is a real event measured at zero and is why that path needs a MEASURED flag and this one does
+               not. See V110's doc comment; the cost of the difference is that a sub-millisecond fetch is
+               indistinguishable from none, and that is stated there rather than hidden.
+
+               other: is NOT stored, #2859's rule - and note that unlike V108 the parent is not a column
+               either, so the residual is not derivable from the store at all. It measured 0.1% of both
+               fetches fleet-wide, which makes probe + target + write the parent to within a rounding error. */
+            var planFetch = fetchPhases?.Plan;
+            var textFetch = fetchPhases?.Text;
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = planFetch.HasValue ? planFetch.Value.ProbeMs : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = planFetch.HasValue ? planFetch.Value.TargetMs : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = planFetch.HasValue ? planFetch.Value.WriteMs : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = planFetch.HasValue ? planFetch.Value.IdsAttempted : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = planFetch.HasValue ? planFetch.Value.ProbeIds : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = textFetch.HasValue ? textFetch.Value.ProbeMs : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = textFetch.HasValue ? textFetch.Value.TargetMs : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = textFetch.HasValue ? textFetch.Value.WriteMs : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = textFetch.HasValue ? textFetch.Value.IdsAttempted : (object)DBNull.Value });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = textFetch.HasValue ? textFetch.Value.ProbeIds : (object)DBNull.Value });
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)
@@ -297,7 +386,7 @@ ON CONFLICT (server_id) DO UPDATE SET
             var elapsed = durationMs > int.MaxValue ? int.MaxValue : (int)durationMs;
 
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(InsertCollectionLogSql, connection);
+            using var command = new NpgsqlCommand(InsertCollectionLogSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
             command.Parameters.AddWithValue(CollectionIdGenerator.Next());                                    // log_id
             command.Parameters.AddWithValue(FleetServerId);                                                   // server_id (sentinel)
             command.Parameters.AddWithValue(FleetServerName);                                                 // server_name
@@ -318,6 +407,44 @@ ON CONFLICT (server_id) DO UPDATE SET
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // fanout_item_count
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value });    // slowest_item
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // slowest_item_ms
+
+            /* And the V108 phase split, NULL for the same reason and by the same shared-statement rule: the
+               retention sweep runs against the STORE, so it has no monitored-server open or drain to report
+               and no watermark read. NULL says "no such phase here"; three zeros would claim a measured
+               instant open on a sweep that never opened a target at all. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // sql_open_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // sql_drain_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // watermark_ms
+
+            /* And V109's drain forensics, NULL by the same shared-statement rule that caught V108: this
+               statement has TWO writers, and widening the column list without widening EVERY binding block
+               raises 08P01 - which fails SILENTLY here, because an observability write must never break the
+               collection loop and so is failure-isolated to a Debug log. The retention sweep drains no
+               monitored-server reader and holds no target session, so there is nothing to record; NULL says
+               that, where a 0 would claim a measured drain that delivered nothing. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = DBNull.Value });  // drain_rows_read
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = DBNull.Value });  // drain_bytes_read
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // drain_last_read_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // target_session_id
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // sweep_peer_max_ms
+
+            /* And V110's fetch phase sums, NULL by the same shared-statement rule V108 learned and V109
+               restated: TWO writers bind this one statement, and widening the column list without widening
+               EVERY binding block raises 08P01 at runtime - which fails SILENTLY here, because an
+               observability write must never break the collection loop and so is failure-isolated to a Debug
+               log. The retention sweep performs no deferred plan or text fetch (it never touches a monitored
+               server at all), so there is nothing to record; NULL says that, where ten zeros would claim a
+               fetch that ran and cost nothing. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // plan_fetch_probe_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // plan_fetch_target_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // plan_fetch_write_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // plan_fetch_ids_attempted
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // plan_fetch_probe_ids
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_probe_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_target_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_write_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_ids_attempted
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_probe_ids
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)
@@ -349,6 +476,7 @@ ON CONFLICT (server_id) DO UPDATE SET
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(WriteAnalysisStateSql, connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(insufficientData);
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)message ?? DBNull.Value });

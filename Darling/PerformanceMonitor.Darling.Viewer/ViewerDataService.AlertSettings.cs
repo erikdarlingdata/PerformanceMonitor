@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -150,6 +151,7 @@ ON CONFLICT (id) DO UPDATE SET
     public async Task<AlertSettingsRow?> GetAlertSettingsAsync(CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(AlertSettingsSelectSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await reader.ReadAsync(cancellationToken) ? ReadAlertSettingsRow(reader) : null;
     }
@@ -161,6 +163,7 @@ ON CONFLICT (id) DO UPDATE SET
         ArgumentNullException.ThrowIfNull(row);
 
         await using var command = _dataSource.CreateCommand(AlertSettingsUpsertSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         BindAlertSettings(command, row);
         await ExecuteWriteAsync(command, cancellationToken);
     }
@@ -352,7 +355,12 @@ public sealed class AlertSettingsRow
     public int DiskCriticalFreePercent { get; set; } = 3;
     public int DiskCriticalFreeGb { get; set; } = 2;
     public int AnalysisNotifyCooldownMinutes { get; set; } = 360;
-    public int StoreJobCadenceWarnPercent { get; set; } = 25;
+    /* #3060: derived, unlike its neighbours, because this one is not merely a mirrored column default
+       — it is one refresh slot as a share of the hourly cadence. BuildAlertRowFromControls only
+       overwrites it when the textbox parses inside the clamp, so out-of-range input persists whatever
+       sits here, and a stale 25 after the grid moved would arm the alert past the point it exists to
+       precede. */
+    public int StoreJobCadenceWarnPercent { get; set; } = TimescaleSupport.RefreshSlotPercentOfHourlyCadence;
 
     /* #2391: defaults mirror the V79 column defaults, so a viewer prefilling against a store that has
        not seeded the row shows what the store would have given it. Ships OFF, per #2349. */

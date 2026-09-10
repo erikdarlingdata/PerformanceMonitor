@@ -201,6 +201,22 @@ public sealed class DarlingMcpCustomViewToolsSurfaceTests
             dead, "{\"panel\":{\"source\":\"wait_stats\",\"measure\":\"nope\",\"aggregate\":\"sum\",\"viz\":\"table\"}}");
         Assert.Equal("invalid", DarlingMcpTestData.StatusOf(result));
     }
+
+    [Fact]
+    public async Task RunCustomViewPanel_DoublyNestedSpec_NamesTheNesting_NotTheCatalog()
+    {
+        /* #2733's run-path half: the run spec DOES nest under 'panel', so the natural over-correction is
+           nesting twice — which has no 'source' and used to fail with the misdirecting "unknown source ''".
+           The run path stays lenient about unknown keys (stored pre-strictness views must keep running), but
+           this one mis-shape is named. */
+        await using var dead = NpgsqlDataSource.Create(DeadStore);
+        var result = await DarlingMcpCustomViewTools.RunCustomViewPanel(
+            dead,
+            "{\"panel\":{\"panel\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"viz\":\"table\"}}}");
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(result));
+        Assert.Contains("doubly nested", result, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("unknown source", result, StringComparison.OrdinalIgnoreCase);
+    }
 }
 
 /// <summary>

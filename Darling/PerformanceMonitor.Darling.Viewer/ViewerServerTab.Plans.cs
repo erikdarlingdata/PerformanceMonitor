@@ -48,7 +48,10 @@ public partial class ViewerServerTab
     /// This is the hook the parallel Queries wave calls for its Active Queries snapshots
     /// (<c>OpenPlanTab(planXml, label, queryText)</c>).
     /// </summary>
-    private async void OpenPlanTab(string planXml, string label, string? queryText = null)
+    // Returns a Task (not async void) for signature parity with Lite's OpenPlanTab (#2870): the Ctrl+V paste
+    // guard there awaits the load so it spans the off-thread parse, and this twin stays identical. This viewer
+    // tab has no paste caller today; every "View Plan" caller here discards the Task (CS4014 is an error).
+    private async Task OpenPlanTab(string planXml, string label, string? queryText = null)
     {
         HidePlanLoading();
         var viewer = new PlanViewerControl();
@@ -197,7 +200,7 @@ public partial class ViewerServerTab
                 return;
             }
 
-            OpenPlanTab(planXml, label, queryText);
+            _ = OpenPlanTab(planXml, label, queryText);
         }
         catch (OperationCanceledException)
         {
@@ -276,7 +279,7 @@ public partial class ViewerServerTab
                 return;
             }
 
-            OpenPlanTab(plan, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
+            _ = OpenPlanTab(plan, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
         }
         catch (Exception ex)
         {

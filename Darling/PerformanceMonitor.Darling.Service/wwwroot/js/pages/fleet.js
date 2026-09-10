@@ -13,7 +13,7 @@
  * API reports it (band = Warning, status text verbatim) — never the red offline treatment.
  */
 
-import { el, mount, apiGet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtPct, fmtMb, fmtMs, bandClass } from "../util.js";
+import { el, mount, apiGet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId } from "../util.js";
 import { VIZ, navigateServer } from "../panels.js";
 
 const BAND_RANK = { Offline: 0, Critical: 1, Warning: 2, Healthy: 3 };
@@ -257,7 +257,7 @@ function redrawCards() {
   mount(gridNode, [
     notice,
     matched.length
-      ? el("div", { class: "grid" }, matched.map(serverCard))
+      ? el("div", { class: "grid server-grid" }, matched.map(serverCard))
       /* The notice already explains an empty grid whenever it is showing, in more precise words than this
          line can manage — so this is the case it does NOT cover: no attention filter, and the search term is
          the only thing that could have emptied the grid. Two boxes saying the same thing in different words
@@ -335,7 +335,7 @@ function renderGrouped(matched) {
       continue;
     }
     if (g.cards.length) {
-      nodes.push(el("div", { class: "grid tag-group-grid", style: "margin-left:" + (g.depth + 1) * GROUP_INDENT + "px" }, g.cards.map(serverCard)));
+      nodes.push(el("div", { class: "grid server-grid tag-group-grid", style: "margin-left:" + (g.depth + 1) * GROUP_INDENT + "px" }, g.cards.map(serverCard)));
     }
   }
   return nodes;
@@ -448,12 +448,74 @@ function groupControl() {
   return el("label", { class: "group-control" }, [cb, el("span", { text: "Group by tag" })]);
 }
 
+/*
+ * #3017: the deadlock total's denominator, as a VISIBLE sub-line rather than a tooltip.
+ *
+ * total_deadlocks comes out of v_deadlocks, which is the SQL Server extended-event capture and nothing else,
+ * so it is structurally zero on a PostgreSQL fleet — permanently, whatever those clusters do. Zero is also
+ * exactly what a genuinely quiet SQL Server fleet reports, and the tile could not tell an operator which one
+ * they were looking at. The API answers that (deadlock_coverage), and this renders it.
+ *
+ * ALWAYS shown when the API reports coverage, including at full coverage, for two reasons. A line that
+ * appeared only on partial coverage would make its ABSENCE the load-bearing signal, which an operator has to
+ * already know the rule to read — and worse, it would leave "zero, whole fleet measured" and "zero, from a
+ * build that reports no coverage at all" looking identical, which is the same defect one step out. Present
+ * unconditionally, absence means exactly one thing: this response made no coverage claim.
+ *
+ * Returns null (no sub-line) for a response with no coverage object or an empty fleet — nothing to qualify.
+ */
+function deadlockCoverageSub(coverage) {
+  if (!coverage || typeof coverage.servers_total !== "number" || coverage.servers_total <= 0) return null;
+
+  const total = coverage.servers_total;
+  const read = typeof coverage.servers_read === "number" ? coverage.servers_read : 0;
+  const noun = total === 1 ? "server" : "servers";
+
+  return read >= total
+    ? { text: "read all " + fmtInt(total) + " " + noun, partial: false }
+    : { text: "read " + fmtInt(read) + " of " + fmtInt(total) + " " + noun, partial: true };
+}
+
 function rollup(d) {
-  const tile = (num, lbl, cls) =>
-    el("div", { class: "tile " + (cls || "") }, [
-      el("div", { class: "num", text: fmtInt(num) }),
-      el("div", { class: "lbl", text: lbl }),
+  /* #3031: every tile's number is programmatically tied to the text that says what it counts. The label and
+     the coverage sub-line carry stable ids and the number describes itself with them, so the figure and its
+     meaning travel together for a consumer that reaches the number's node on its own rather than browsing
+     the tile top to bottom. Reading order alone leaves that relationship inferable but not determinable, and
+     it is the same on all seven tiles — which is why it is wired once here in the helper and at no call site.
+     `rollupTextId` lives in util.js because the AG rollup is wired the same way (#3045), so the
+     de-duplication rule it carries has one implementation rather than one per page.
+
+     The label rides in aria-describedby rather than aria-label / aria-labelledby because .num is a plain
+     div: ARIA prohibits NAMING role=generic, so a name set there is invalid and may be dropped on the floor,
+     while a description is a supported property on it. Description is the carrier that works without
+     inventing a widget role for a static figure.
+
+     The coverage NOTE stays on the tile's title and out of describedby by design. It is a paragraph naming
+     both windows and every uncovered cause; announcing a paragraph on every pass over the number is worse
+     than the hover it would replace. The short coverage fact under the label is the accessible carrier, and
+     the note is detail on a signal that is already visible. */
+  const usedIds = new Set();
+  const tile = (num, lbl, cls, sub, title) => {
+    const lblId = rollupTextId(lbl, "lbl", usedIds);
+    const subId = sub ? rollupTextId(lbl, "sub", usedIds) : null;
+    return el("div", { class: "tile " + (cls || ""), title: title || null }, [
+      el("div", { class: "num", text: fmtInt(num), "aria-describedby": subId ? lblId + " " + subId : lblId }),
+      el("div", { class: "lbl", id: lblId, text: lbl }),
+      /* The sub-line's colour tracks COVERAGE, not the tile's number severity: "read all 12 servers" under a
+         red count is good news about a bad number and must not be painted as part of the alarm. */
+      sub ? el("div", { class: sub.partial ? "sub partial" : "sub", id: subId, text: sub.text }) : null,
     ]);
+  };
+
+  const coverage = d.deadlock_coverage;
+  const deadlockSub = deadlockCoverageSub(coverage);
+
+  /* A partly-covered fleet reporting zero deadlocks is not an all-clear, so it stops rendering as one. It is
+     not a confirmed incident either — warning is the "interrogate this number" class without claiming a
+     deadlock happened. A real deadlock keeps critical whatever the coverage: a measured incident outranks an
+     incomplete denominator, and the sub-line under it already says the count may be short. */
+  const deadlockClass = d.total_deadlocks > 0 ? "critical" : deadlockSub && deadlockSub.partial ? "warning" : "";
+
   /* Two fixed groups (server-band counts | event counts) split by a divider; a non-zero blocking / deadlock
      total takes a severity color. */
   return el("div", { class: "rollup" }, [
@@ -467,7 +529,16 @@ function rollup(d) {
     el("div", { class: "rollup-divider" }),
     el("div", { class: "rollup-group" }, [
       tile(d.total_blocking_events, "Blocking (recent)", d.total_blocking_events > 0 ? "warning" : ""),
-      tile(d.total_deadlocks, "Deadlocks (recent)", d.total_deadlocks > 0 ? "critical" : ""),
+      /* The API's own note rides along as the tile's title — the causes and the two windows, in the words the
+         service already renders for get_fleet_overview, so the hover is DETAIL on a signal that is already
+         visible rather than the only place the signal exists. */
+      tile(
+        d.total_deadlocks,
+        "Deadlocks (recent)",
+        deadlockClass,
+        deadlockSub,
+        coverage ? coverage.note : null,
+      ),
     ]),
   ]);
 }
@@ -535,8 +606,23 @@ export function metricBands(c) {
   const blockingDetail = c.blocking_count > 0 && c.max_blocking_wait_ms > 0 ? "max wait " + fmtMs(c.max_blocking_wait_ms) : null;
   const deadlockDetail = c.deadlock_count > 0 && c.deadlock_last_seen ? "last " + relTime(c.deadlock_last_seen) : null;
 
-  const collectorsValue = c.failed_collector_count > 0 ? fmtInt(c.failed_collector_count) + " failing" : "OK";
-  const collectorsDetail = fmtInt(c.healthy_collector_count) + " healthy · " + fmtInt(c.failed_collector_count) + " failing";
+  /* #2779: a server that has stopped collecting has stale collector counts — its collectors are not "OK", they
+     are unmeasured. collector_severity keys only on the FAILING count (a stale collector is neither healthy nor
+     failing), so it stays green while the server is offline. Rather than invent a stale-count threshold, reuse
+     the reachability signal the card already carries (is_online, the same one that bands the card Offline and
+     titles the header "no recent collection"): when the server is offline the chip reads "Stale" in the neutral
+     Unknown tone instead of a green "OK · N healthy" (the "no recent collection" detail carries the specifics,
+     and "Stale" is the word the Collection Health tab lands on for these rows once its own floor is crossed). */
+  const collectorsStale = c.is_online === false;
+  const collectorsValue = collectorsStale
+    ? "Stale"
+    : c.failed_collector_count > 0
+    ? fmtInt(c.failed_collector_count) + " failing"
+    : "OK";
+  const collectorsDetail = collectorsStale
+    ? "no recent collection" + (c.last_collection ? " · last " + relTime(c.last_collection) : "")
+    : fmtInt(c.healthy_collector_count) + " healthy · " + fmtInt(c.failed_collector_count) + " failing";
+  const collectorsSeverity = collectorsStale ? "Unknown" : c.collector_severity;
 
   return el("div", { class: "metric-bands" }, [
     chip("CPU", cpuValue, c.cpu_severity, cpuDetail),
@@ -544,7 +630,7 @@ export function metricBands(c) {
     chip("Memory", memValue, c.memory_severity, memDetail),
     chip("Blocking", fmtInt(c.blocking_count), c.blocking_severity, blockingDetail),
     chip("Deadlocks", fmtInt(c.deadlock_count), c.deadlock_severity, deadlockDetail),
-    chip("Collectors", collectorsValue, c.collector_severity, collectorsDetail),
+    chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail),
   ]);
 }
 

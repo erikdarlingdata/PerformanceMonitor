@@ -46,17 +46,24 @@ AND   status = 'PERMISSIONS'";
     }
 
     /// <summary>
-    /// Gets collection health summary for all collectors on a server.
+    /// The 7-day per-collector aggregate behind the Collection Health grid. A named constant rather
+    /// than an inline literal so <c>Lite.Tests</c> can pin its SHAPE by reference, the way its four
+    /// Darling twins are pinned - #2926 needs every one of the five banding reads asserted to count
+    /// abandonment the same way, and a pin that greps this file instead cannot tell the SQL from the
+    /// prose around it. Byte-parity with Darling's <c>CollectionHealthSql</c> is the standing contract:
+    /// both MCP surfaces read this result set POSITIONALLY.
     /// </summary>
-    public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync(int serverId)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-        command.CommandText = @"
+    internal const string CollectionHealthSql = $@"
 SELECT
     collector_name,
     COUNT(*) AS total_runs,
-    SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS success_count,
+    -- #2926: SUCCESS excludes an abandonment that predates #2803, so the Success column beside
+    -- Abandoned cannot count the same run twice. Post-#2803 rows need no exclusion - ABANDONED
+    -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
+    -- the shared predicate is for: NULL under this NOT would have dropped it.
+    SUM(CASE WHEN status = 'SUCCESS'
+              AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+             THEN 1 ELSE 0 END) AS success_count,
     SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
     AVG(duration_ms) AS avg_duration_ms,
     -- #2460: the mean above describes a collector whose runs all cost about the same, and says
@@ -83,10 +90,13 @@ SELECT
     -- status re-check is load-bearing rather than belt-and-braces: when no failing run in the window
     -- carried text, error_rank = 1 falls through to the newest row of ANY class, and without it a
     -- SUCCESS row's note could surface here as a fake last error.
-    MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error,
+    -- #3240: EXTENSION_MISSING is in the exemplar set for twin-parity with Darling's reads — its stored
+    -- sentence IS the remedy there. Lite's SQL Server collectors never write the status, so on this SKU
+    -- the branch is inert.
+    MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) AS last_error,
     -- The newest failure OUTRIGHT, text or not: when did this last FAIL is about the run, not the
     -- message. It can only name a different row than last_error if a failure was written with no text.
-    MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN collection_time END) AS last_error_time,
+    MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN collection_time END) AS last_error_time,
     SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
     -- YIELDED = the 1s LOCK_TIMEOUT guard fired (#1805): deliberate, benign for collection,
     -- counted apart from errors because clustering here is a signal about the TARGET's lock
@@ -111,7 +121,10 @@ SELECT
     -- no index at all; and it reads sys.master_files, so it still sees databases the monitoring login
     -- cannot ENTER — which is exactly the case being diagnosed. database_id > 4 excludes the system
     -- databases, tempdb included: the size collector takes every ONLINE database, so a bare row check
-    -- would be true on every server alive.
+    -- would be true on every server alive. A NULL database_id is an Azure sibling row (#2643/#3262):
+    -- sys.resource_stats carries no id, and it bills only USER databases, so those rows are inventory
+    -- too — without the IS NULL arm a master-connected Azure target with fifty user databases would
+    -- read as having none.
     --
     -- The inventory window is the health read's OWN ($2) — no second parameter, and an inventory that
     -- aged out says nothing rather than something stale. Uncorrelated, so both engines evaluate it
@@ -124,7 +137,7 @@ SELECT
                  FROM v_database_size_stats
                  WHERE server_id = $1
                  AND   collection_time >= $2
-                 AND   database_id > 4
+                 AND   (database_id > 4 OR database_id IS NULL)
              )
         THEN 1
         ELSE 0
@@ -140,7 +153,48 @@ SELECT
     MAX(CASE WHEN slowest_rank = 1 THEN fanout_item_count END) AS fanout_items,
     MAX(CASE WHEN slowest_rank = 1 THEN slowest_item END) AS slowest_item,
     MAX(CASE WHEN slowest_rank = 1 THEN slowest_item_ms END) AS slowest_item_ms,
-    MAX(CASE WHEN slowest_rank = 1 THEN duration_ms END) AS slowest_run_duration_ms
+    MAX(CASE WHEN slowest_rank = 1 THEN duration_ms END) AS slowest_run_duration_ms,
+    -- #2804: runs the #2673 wall-clock budget abandoned. APPENDED, never inserted — this result set
+    -- is read positionally and Darling's CollectionHealthSql mirrors these ordinals, so a mid-list
+    -- insert would silently re-map every later column in whichever surface was not edited with it.
+    --
+    -- #2926: keyed on the ROW, not on the status alone. collection_log is append-only, so a
+    -- window can still hold cycles written before #2803 gave abandonment its own status:
+    -- status = 'SUCCESS' beside rows_collected = 0 and the budget note. Counted by status
+    -- alone this read 0 for them, and the collector banded HEALTHY while losing cycles - a
+    -- filter correct against current writes and silently wrong against older ones, failing in
+    -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
+    -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
+    -- for query_store), so equality against one rendered sentence matches one collector.
+    SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
+             THEN 1 ELSE 0 END) AS abandoned_count,
+    -- #3010: the newest DENIAL on its own, which is what dates the last_error slot above.
+    -- last_error_time cannot stand in for it -- that column is a MAX over ERROR and PERMISSIONS
+    -- together, so on a collector carrying both it hands a reader an error's instant and lets them
+    -- call it a denial. Compared against last_success_time this separates a collector still being
+    -- refused from one whose refusals all predate a later success. APPENDED, and Darling's
+    -- CollectionHealthSql mirrors the ordinal, because both are read positionally.
+    MAX(CASE WHEN status = 'PERMISSIONS' THEN collection_time END) AS last_denied_time,
+    -- #3017: what the spend BOUGHT. Every other statistic on a health row describes cost -- total_runs,
+    -- the three durations, and the sweep-pressure roll-up built from them -- and the rows figure lived
+    -- on a different tool over a different (hourly, fleet-wide) series, so correlating spend against
+    -- output was a join a reader had to know to make. Read from THIS query's own window so cost and
+    -- output cannot describe different runs, the same reason #3010's two instants come out of one
+    -- aggregate. COALESCE so a zero is unambiguous at the store: without it a collector whose every
+    -- rows_collected is NULL returns NULL, which a reader would have to guess between not-measured and
+    -- stored-nothing, and the whole point is that the second becomes a fact rather than an absence.
+    -- APPENDED, and Darling's CollectionHealthSql mirrors both ordinals, because both are read
+    -- positionally.
+    COALESCE(SUM(rows_collected), 0) AS rows_stored,
+    -- The denominator's partner, and the honest half of a cost/output pair: 12 rows over 3 of 79,333
+    -- runs is a different collector from 12 rows over all of them. get_pg_blocking already reports
+    -- captures_with_blocking beside captures_total off this same rows_collected > 0 test.
+    SUM(CASE WHEN rows_collected > 0 THEN 1 ELSE 0 END) AS runs_with_rows,
+    -- #3240: runs skipped because a PostgreSQL extension the collector DECLARES is not installed — the
+    -- EXTENSION_MISSING status Darling's fault mapper split out of PERMISSIONS. Lite's SQL Server
+    -- collectors never write it, so this counts 0 on this SKU; selected anyway because the two health
+    -- reads are ordinal twins and the shared classifier takes the count. APPENDED, read positionally.
+    SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count
 FROM
 (
     -- #1855: rank each class of message newest-first so the two exemplar columns above can take the
@@ -157,6 +211,10 @@ FROM
         duration_ms,
         status,
         error_message,
+        -- #2926: the abandonment predicate above reads it. Projected here for the same reason
+        -- #2472's three columns are: this subquery ENUMERATES its columns, so an aggregate
+        -- outside naming one it does not carry fails at the STORE and nowhere earlier.
+        rows_collected,
         -- #2472: projected here because this subquery enumerates its columns rather than SELECT *-ing
         -- them, so an aggregate outside that names a column the inner query does not carry fails at the
         -- store and nowhere earlier.
@@ -173,7 +231,7 @@ FROM
         ROW_NUMBER() OVER
         (
             PARTITION BY collector_name
-            ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) IS NULL,
+            ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) IS NULL,
                      collection_time DESC,
                      error_message DESC
         ) AS error_rank,
@@ -193,6 +251,15 @@ FROM
 ) runs
 GROUP BY collector_name
 ORDER BY collector_name";
+
+    /// <summary>
+    /// Gets collection health summary for all collectors on a server.
+    /// </summary>
+    public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = CollectionHealthSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
@@ -223,7 +290,19 @@ ORDER BY collector_name";
                 FanoutItems = reader.IsDBNull(16) ? null : Convert.ToInt32(reader.GetValue(16)),
                 SlowestItem = reader.IsDBNull(17) ? null : reader.GetString(17),
                 SlowestItemMs = reader.IsDBNull(18) ? null : Convert.ToInt32(reader.GetValue(18)),
-                SlowestRunDurationMs = reader.IsDBNull(19) ? null : Convert.ToInt32(reader.GetValue(19))
+                SlowestRunDurationMs = reader.IsDBNull(19) ? null : Convert.ToInt32(reader.GetValue(19)),
+                /* Appended (#2804), for the same reason the four above were. */
+                AbandonedCount = reader.IsDBNull(20) ? 0 : ToInt64(reader.GetValue(20)),
+                /* Appended (#3010), for the same reason every column before it was. */
+                LastDeniedTime = reader.IsDBNull(21) ? null : reader.GetDateTime(21),
+                /* Appended (#3017), for the same reason every column before it was. ToInt64 rather than
+                   Convert: DuckDB widens SUM over an INTEGER column to HUGEINT, which arrives as a
+                   BigInteger and which Convert.ToInt64 cannot take. */
+                RowsStored = reader.IsDBNull(22) ? 0 : ToInt64(reader.GetValue(22)),
+                RunsWithRows = reader.IsDBNull(23) ? 0 : ToInt64(reader.GetValue(23)),
+                /* Appended (#3240), for the same reason every column before it was. Always 0 on this
+                   SKU — SQL Server collectors never write EXTENSION_MISSING. */
+                ExtensionMissingCount = reader.IsDBNull(24) ? 0 : ToInt64(reader.GetValue(24))
             });
         }
 
@@ -266,7 +345,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
         command.CommandText = @"
 SELECT
@@ -421,8 +500,26 @@ public class CollectorHealthRow
     public string? LastError { get; set; }
     public DateTime? LastErrorTime { get; set; }
     public long PermissionDeniedCount { get; set; }
+
+    /// <summary>Runs skipped because a PostgreSQL extension the collector declares is not installed
+    /// (#3240) — Darling's <c>EXTENSION_MISSING</c> status. Always 0 on this SKU (SQL Server collectors
+    /// never write it); carried because the shared classifier takes the count and the two SKUs' health
+    /// reads are ordinal twins.</summary>
+    public long ExtensionMissingCount { get; set; }
+
+    /// <summary>
+    /// The newest PERMISSIONS instant in the window (#3010) - what dates <see cref="LastError"/>.
+    /// Distinct from <see cref="LastErrorTime"/>, a MAX over ERROR and PERMISSIONS together, which
+    /// therefore cannot answer whether the last thing that happened here was a refusal.
+    /// </summary>
+    public DateTime? LastDeniedTime { get; set; }
     /// <summary>1s lock-timeout yields (#1805) — deliberate, benign, counted apart from errors.</summary>
     public long YieldCount { get; set; }
+
+    /// <summary>Runs the #2673 whole-server wall-clock budget gave up on (#2804). Counted apart from
+    /// errors for the same reason <see cref="YieldCount"/> is — a guard firing is not a fault — but unlike
+    /// a yield it is data LOSS: the cycle stored nothing and advanced no watermark.</summary>
+    public long AbandonedCount { get; set; }
 
     /// <summary>
     /// The note a non-failing run left behind (#1837): an enumeration that yielded 0 items, items whose
@@ -471,9 +568,78 @@ public class CollectorHealthRow
             : null;
 
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
+
+    /// <summary>
+    /// Whether <see cref="LastError"/> describes the collector's CURRENT state or a fault from a code
+    /// path it no longer takes (#3010). Derived from the one shared predicate so both SKUs answer it
+    /// identically. Reported, never banded: <see cref="HealthStatus"/> does not read it.
+    /// </summary>
+    public bool DeniedSinceLastSuccess => CollectorHealthClassifier.DeniedSinceLastSuccess(
+        PermissionDeniedCount, ErrorCount, LastSuccessTime, LastDeniedTime);
+
+    /* ── What the spend bought (#3017), twinning Darling's CollectorHealth ───────────────────────────
+       Populated by the per-server health read ALONE, so nothing but get_collection_health's own tool
+       row may render them - a defaulted zero reaching a surface as "stored nothing" is the #2804
+       hazard exactly. */
+
+    /// <summary>
+    /// Rows the window's runs stored (<c>rows_stored</c>) — the output half of the cost/output pair, over
+    /// the SAME window as <see cref="TotalRuns"/> and the durations beside it. Never
+    /// <c>get_collector_cost</c>'s <c>total_rows</c>, which is Darling's own separate hourly series over
+    /// that caller's window and across every server: see
+    /// <see cref="CollectorHealthClassifier.OutputWindowNote"/> for what this figure is and is not.
+    /// </summary>
+    public long RowsStored { get; set; }
+
+    /// <summary>
+    /// How many of <see cref="TotalRuns"/> stored anything (<c>runs_with_rows</c>) — the numerator whose
+    /// denominator is <see cref="TotalRuns"/>, on <c>get_pg_blocking</c>'s
+    /// <c>captures_with_blocking</c>/<c>captures_total</c> pattern: a rows total with no run count behind
+    /// it cannot tell a collector that is productive occasionally from one that is productive throughout.
+    /// </summary>
+    public long RunsWithRows { get; set; }
+
+    /// <summary>Share of runs that stored anything. 0 with a large <see cref="TotalRuns"/> is the reading
+    /// #3017 exists to surface; 0 runs gives 0 rather than a divide, matching every sibling rate here.</summary>
+    public double ProductiveRunPercent => TotalRuns > 0 ? (double)RunsWithRows / TotalRuns * 100 : 0;
+
+    /// <summary>
+    /// The sentence a collector that spent and stored NOTHING gets, or null when it stored something
+    /// (#3017). Its own member rather than an expression at the call site for the reason
+    /// <see cref="DeniedSinceLastSuccess"/> is one: both SKUs' tools compose it from the one shared
+    /// formatter instead of each writing the branch out, so the two cannot answer differently.
+    ///
+    /// <para>This is where <see cref="DeniedSinceLastSuccess"/> becomes the third term and
+    /// <see cref="NoteCount"/> the fourth. Zero output with a current denial is a collector that could not
+    /// read; zero output whose runs recorded a note is one that already said why, and the finding defers to
+    /// <see cref="LastNote"/> rather than asserting the event-collector reading over it (#3160); zero output
+    /// with neither is the event collector at rest. Both predicates are READ here and still not banded —
+    /// <c>HealthStatus</c> does not call this, and this returns display text.</para>
+    /// </summary>
+    public string? OutputFinding =>
+        CollectorHealthClassifier.FormatOutputFinding(RowsStored, TotalRuns, DeniedSinceLastSuccess, NoteCount)
+            is { Length: > 0 } finding
+            ? finding
+            : null;
+
+    /// <summary>Share of runs the #2673 budget abandoned (#2804) — its own rate, not folded into
+    /// <see cref="FailureRatePercent"/>, because the two carry very different thresholds and merging
+    /// them would report a 2%-abandoning collector as a 2%-erroring one.</summary>
+    public double AbandonRatePercent => TotalRuns > 0 ? (double)AbandonedCount / TotalRuns * 100 : 0;
     public double HoursSinceLastSuccess => LastSuccessTime.HasValue
         ? (DateTime.UtcNow - LastSuccessTime.Value).TotalHours
         : 999;
+
+    /// <summary>Hours since the newest run of ANY status — the input <see cref="CollectorHealthClassifier"/>'s
+    /// STOPPED band reads. Distinct from <see cref="HoursSinceLastSuccess"/>: a collector that keeps being
+    /// invoked and keeps failing has a small value here even while its success clock runs out; a collector
+    /// whose gate flipped off and stopped being invoked entirely has a large value here too, which is what
+    /// tells the two apart. Falls back to <see cref="HoursSinceLastSuccess"/> rather than the bare 999
+    /// sentinel when the column is unset: a run can never be MORE certain than a known success, so absent
+    /// better information this must not read more dormant than the success clock alone already says.</summary>
+    public double HoursSinceLastRun => LastRunTime.HasValue
+        ? (DateTime.UtcNow - LastRunTime.Value).TotalHours
+        : HoursSinceLastSuccess;
 
     /// <summary>The collector's default cadence from the shared <see cref="CollectorScheduleDefaults"/>
     /// (0 for an on-load or unknown collector — both fall to the floor thresholds). The banding uses the
@@ -484,8 +650,8 @@ public class CollectorHealthRow
         CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
 
     public string HealthStatus => CollectorHealthClassifier.Classify(
-        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount,
-        HoursSinceLastSuccess, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
+        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
+        HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
 
     public string AvgDurationFormatted => AvgDurationMs < 1000
         ? $"{AvgDurationMs:F0} ms"

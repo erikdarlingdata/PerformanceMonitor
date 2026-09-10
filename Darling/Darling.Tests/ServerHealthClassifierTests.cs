@@ -33,9 +33,11 @@ public sealed class ServerHealthClassifierTests
     [InlineData(0, ServerFreshness.Fresh)]
     [InlineData(120, ServerFreshness.Fresh)]     // exactly 2x cadence — still fresh
     [InlineData(121, ServerFreshness.Stale)]     // just past 2x cadence
-    [InlineData(900, ServerFreshness.Stale)]     // exactly 15 min — still stale
-    [InlineData(901, ServerFreshness.Offline)]   // just past 15 min
-    [InlineData(1200, ServerFreshness.Offline)]
+    [InlineData(900, ServerFreshness.Stale)]     // 15 min — the OLD Offline boundary, now mid-band (#2794)
+    [InlineData(1158, ServerFreshness.Stale)]    // 19m18s — the worst MEASURED legitimate sweep stretch (#2794's evidence); must never band Offline
+    [InlineData(1800, ServerFreshness.Stale)]    // exactly 30 min — still stale (strict >)
+    [InlineData(1801, ServerFreshness.Offline)]  // just past the shared collection-stopped window
+    [InlineData(3600, ServerFreshness.Offline)]
     public void ClassifyFreshness_BandsByAge(int ageSeconds, ServerFreshness expected) =>
         Assert.Equal(expected, ServerHealthClassifier.ClassifyFreshness(Now.AddSeconds(-ageSeconds), Now));
 
@@ -133,27 +135,27 @@ public sealed class ServerHealthClassifierTests
     [Fact]
     public void ClassifyBand_Offline_WhenNotOnline() =>
         Assert.Equal(FleetHealthBand.Offline,
-            ServerHealthClassifier.ClassifyBand(isOnline: false, awaitingFirstCollection: false, hasCollectorErrors: false, HealthSeverity.Healthy));
+            ServerHealthClassifier.ClassifyBand(isOnline: false, awaitingFirstCollection: false, collectionStale: false, HealthSeverity.Healthy));
 
     [Fact]
     public void ClassifyBand_AwaitingFirstCollection_IsWarning_NotOffline() =>
         Assert.Equal(FleetHealthBand.Warning,
-            ServerHealthClassifier.ClassifyBand(isOnline: null, awaitingFirstCollection: true, hasCollectorErrors: false, HealthSeverity.Healthy));
+            ServerHealthClassifier.ClassifyBand(isOnline: null, awaitingFirstCollection: true, collectionStale: false, HealthSeverity.Healthy));
 
     [Fact]
     public void ClassifyBand_CriticalMetric_IsCritical() =>
         Assert.Equal(FleetHealthBand.Critical,
-            ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, hasCollectorErrors: false, HealthSeverity.Critical));
+            ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, collectionStale: false, HealthSeverity.Critical));
 
     [Fact]
     public void ClassifyBand_StaleCollectionCalmMetrics_IsWarning() =>
         Assert.Equal(FleetHealthBand.Warning,
-            ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, hasCollectorErrors: true, HealthSeverity.Healthy));
+            ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, collectionStale: true, HealthSeverity.Healthy));
 
     [Fact]
     public void ClassifyBand_OnlineCalm_IsHealthy() =>
         Assert.Equal(FleetHealthBand.Healthy,
-            ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, hasCollectorErrors: false, HealthSeverity.Healthy));
+            ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, collectionStale: false, HealthSeverity.Healthy));
 
     /* ── worst-first score ── */
 

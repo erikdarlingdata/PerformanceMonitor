@@ -106,6 +106,7 @@ public static class DarlingPgWaitSamplingReader
 
         var rows = new List<PgWaitSamplingRow>();
         await using var command = postgres.CreateCommand(PgWaitSamplingSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* SpecifyKind(Unspecified) at the BIND, same as every other PostgreSQL read here: Npgsql infers
            timestamptz from Kind=Utc and PostgreSQL then resolves the comparison against these NAIVE columns

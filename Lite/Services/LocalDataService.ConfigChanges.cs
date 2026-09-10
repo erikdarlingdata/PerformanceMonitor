@@ -107,7 +107,7 @@ public partial class LocalDataService
         int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetServerConfigChangesAsync", "v_server_config snapshot diff");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var snapshots = await ReadServerConfigSnapshotsAsync(serverId, endTime);
         return ConfigChangeDiff.DiffServerConfigChanges(snapshots, startTime, endTime)
             .Select(c => new ServerConfigChangeRow(c))
@@ -121,7 +121,7 @@ public partial class LocalDataService
         int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetDatabaseConfigChangesAsync", "v_database_config snapshot diff");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var snapshots = await ReadDatabaseConfigSnapshotsAsync(serverId, endTime, databaseNames);
         return ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, startTime, endTime)
             .Select(c => new DatabaseConfigChangeRow(c))
@@ -135,7 +135,7 @@ public partial class LocalDataService
         int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetTraceFlagChangesAsync", "v_trace_flags snapshot diff");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var snapshots = await ReadTraceFlagSnapshotsAsync(serverId, endTime);
         return ConfigChangeDiff.DiffTraceFlagChanges(snapshots, startTime, endTime)
             .Select(c => new TraceFlagChangeRow(c))

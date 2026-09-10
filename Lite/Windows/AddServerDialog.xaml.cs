@@ -156,6 +156,12 @@ public partial class AddServerDialog : Window
             ManagedIdentityAuthRadio.IsChecked = true;
             ManagedIdentityClientIdBox.Text = existing.ManagedIdentityClientId ?? "";
         }
+        else if (existing.AuthenticationType == AuthenticationTypes.EntraDefaultCredential)
+        {
+            // Nothing to load: the mode holds no username, no secret and no client id. The
+            // credential lives outside this app.
+            EntraDefaultAuthRadio.IsChecked = true;
+        }
         else
         {
             WindowsAuthRadio.IsChecked = true;
@@ -186,6 +192,7 @@ public partial class AddServerDialog : Window
             if (EntraMfaPanel != null) EntraMfaPanel.Visibility = Visibility.Collapsed;
             if (ServicePrincipalPanel != null) ServicePrincipalPanel.Visibility = Visibility.Collapsed;
             if (ManagedIdentityPanel != null) ManagedIdentityPanel.Visibility = Visibility.Collapsed;
+            if (EntraDefaultPanel != null) EntraDefaultPanel.Visibility = Visibility.Collapsed;
         }
         else
         {
@@ -197,7 +204,8 @@ public partial class AddServerDialog : Window
     private void AuthMode_Changed(object sender, RoutedEventArgs e)
     {
         if (SqlCredentialsPanel != null && EntraMfaPanel != null &&
-            ServicePrincipalPanel != null && ManagedIdentityPanel != null)
+            ServicePrincipalPanel != null && ManagedIdentityPanel != null &&
+            EntraDefaultPanel != null)
         {
             // Show credentials panel for SQL Server authentication
             SqlCredentialsPanel.Visibility = SqlAuthRadio.IsChecked == true
@@ -216,6 +224,13 @@ public partial class AddServerDialog : Window
 
             // Show managed identity panel
             ManagedIdentityPanel.Visibility = ManagedIdentityAuthRadio.IsChecked == true
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+
+            // Show the existing-Azure-sign-in notes. This panel holds no input fields, so it is
+            // shown for what it SAYS: the mode never prompts, and the requirement has to be read
+            // before the connection test rather than inferred from its failure.
+            EntraDefaultPanel.Visibility = EntraDefaultAuthRadio.IsChecked == true
                 ? Visibility.Visible
                 : Visibility.Collapsed;
         }
@@ -322,6 +337,14 @@ public partial class AddServerDialog : Window
             authType = AuthenticationTypes.ManagedIdentity;
             managedIdentityClientId = ManagedIdentityClientIdBox.Text.Trim();
         }
+        else if (EntraDefaultAuthRadio.IsChecked == true)
+        {
+            /* No userId and no secret, and neither is an omission: this mode's credential is
+               established outside the app, and SqlClient forwards UserId on this path as a managed-
+               identity / workload-identity client id rather than as a username. See
+               ServerConnection.ApplyAuthentication. */
+            authType = AuthenticationTypes.EntraDefaultCredential;
+        }
         else
         {
             authType = AuthenticationTypes.SqlServer;
@@ -332,7 +355,7 @@ public partial class AddServerDialog : Window
         return builder;
     }
 
-    private async System.Threading.Tasks.Task<(bool Connected, string? ErrorMessage, bool MfaCancelled, string? ServerVersion)> RunConnectionTestAsync()
+    private async System.Threading.Tasks.Task<(bool Connected, string? ErrorMessage, bool MfaCancelled, string? ServerVersion, EntraBrokerFailureKind BrokerFailure, EntraAmbientCredentialFailureKind AmbientFailure)> RunConnectionTestAsync()
     {
         TestButton.IsEnabled = false;
         SaveButton.IsEnabled = false;
@@ -345,11 +368,37 @@ public partial class AddServerDialog : Window
         string? errorMessage = null;
         bool mfaCancelled = false;
         string? serverVersion = null;
+        var brokerFailure = EntraBrokerFailureKind.None;
+        var ambientFailure = EntraAmbientCredentialFailureKind.None;
 
         try
         {
-            using var connection = new SqlConnection(BuildConnectionBuilder().ConnectionString);
-            await connection.OpenAsync();
+            var builder = BuildConnectionBuilder();
+            using var connection = new SqlConnection(builder.ConnectionString);
+
+            /* Observability only, window exactly this open, non-null for EntraDefaultCredential alone
+               - see EntraCredentialSelectionLog. Instrumented here AS WELL AS in ServerManager, not
+               instead of it: the event fires at most once per process, so whichever site opens the
+               first EntraDefaultCredential connection is the only one that can observe it, and which
+               one that is depends on whether a server was already saved when the sweep ran.
+
+               Reported in a FINALLY for the same reason as the sibling site: the token is acquired,
+               and the event raised, BEFORE SQL Server accepts or rejects the identity it names. A
+               user pressing Test because they suspect the wrong Azure identity is being used gets a
+               failed open, and the selection has to survive it - which is also the only chance,
+               since the driver caches the credential as soon as a token exists. */
+            using (var credentialSelection = EntraCredentialSelectionLog.Begin(builder))
+            {
+                try
+                {
+                    await connection.OpenAsync();
+                }
+                finally
+                {
+                    EntraCredentialSelectionLog.Report(credentialSelection);
+                }
+            }
+
             using var cmd = new SqlCommand("SELECT @@VERSION", connection);
             var version = await cmd.ExecuteScalarAsync() as string;
             serverVersion = version?.Split('\n')[0]?.Trim();
@@ -359,7 +408,37 @@ public partial class AddServerDialog : Window
         {
             errorMessage = ex.Message;
             if (EntraMfaAuthRadio.IsChecked == true && MfaAuthenticationHelper.IsMfaCancelledException(ex))
+            {
                 mfaCancelled = true;
+            }
+            else
+            {
+                /* Both classifiers run on every failure, not one per selected mode. The mode the
+                   radios say is selected is what the connection string was built from, but it is not
+                   what the failure came from - and an ambient-credential failure arriving on an
+                   Entra MFA attempt, or a broker refusal arriving on an existing-sign-in attempt,
+                   is precisely the case worth seeing rather than the case worth suppressing. Gating
+                   each classifier behind its own radio would hide the crossover. */
+                brokerFailure = EntraBrokerFailure.Classify(ex);
+                ambientFailure = EntraAmbientCredentialFailure.Classify(ex);
+            }
+
+            /* Logged here, where the exception object still exists. ex.Message alone is what the
+               dialog can show, and for a federated-auth failure the message is the shallowest layer
+               of a chain several deep - the driver wraps MSAL's exception, which wraps the broker's.
+               AppLogger.Error walks that chain; nothing else on this path does, so a failure that is
+               not logged here is a failure whose detail the process never recorded anywhere.
+               Cancellations are excluded: one is a decision the user made, its own dialog already
+               reports it, and filing user intent as an error would bury real faults among them. */
+            if (!mfaCancelled)
+            {
+                AppLogger.Error(
+                    "AddServer",
+                    $"Connection test failed for '{ServerNameBox.Text.Trim()}' "
+                        + $"(authentication: {DescribeSelectedAuthentication()}, broker stage: {brokerFailure}, "
+                        + $"ambient credential: {ambientFailure})",
+                    ex);
+            }
         }
         finally
         {
@@ -368,8 +447,40 @@ public partial class AddServerDialog : Window
             StatusText.Text = string.Empty;
         }
 
-        return (connected, errorMessage, mfaCancelled, serverVersion);
+        return (connected, errorMessage, mfaCancelled, serverVersion, brokerFailure, ambientFailure);
     }
+
+    /// <summary>
+    /// The selected authentication mode, for the log line only.
+    ///
+    /// <para>Named from the radio buttons rather than read back off the connection string, because
+    /// the connection string holds a password and a log line must not. The mode is the part of the
+    /// form that changes which code path failed, and it is the first thing a report needs.</para>
+    /// </summary>
+    private string DescribeSelectedAuthentication()
+    {
+        if (WindowsAuthRadio.IsChecked == true) return "Windows";
+        if (SqlAuthRadio.IsChecked == true) return "SQL Server";
+        if (EntraMfaAuthRadio.IsChecked == true) return "Microsoft Entra MFA";
+        if (EntraDefaultAuthRadio.IsChecked == true) return "Existing Azure sign-in";
+        if (ServicePrincipalAuthRadio.IsChecked == true) return "Service principal";
+        if (ManagedIdentityAuthRadio.IsChecked == true) return "Managed identity";
+        return "unknown";
+    }
+
+    /// <summary>
+    /// The detail block for a "Connection Failed" dialog, carrying the log location so a report can
+    /// include the exception chain rather than a screenshot of its first line.
+    /// </summary>
+    private static string ComposeFailureDetail(
+        string? errorMessage,
+        EntraBrokerFailureKind brokerFailure,
+        EntraAmbientCredentialFailureKind ambientFailure) =>
+        ConnectionFailureMessage.Compose(
+            errorMessage,
+            brokerFailure,
+            ambientFailure,
+            string.IsNullOrEmpty(App.DataDirectory) ? null : System.IO.Path.Combine(App.DataDirectory, "logs"));
 
     private async void TestButton_Click(object sender, RoutedEventArgs e)
     {
@@ -379,7 +490,7 @@ public partial class AddServerDialog : Window
             return;
         }
 
-        var (connected, errorMessage, mfaCancelled, serverVersion) = await RunConnectionTestAsync();
+        var (connected, errorMessage, mfaCancelled, serverVersion, brokerFailure, ambientFailure) = await RunConnectionTestAsync();
 
         if (connected)
         {
@@ -410,7 +521,7 @@ public partial class AddServerDialog : Window
         }
         else
         {
-            var detail = errorMessage != null ? $"\n\nError: {errorMessage}" : string.Empty;
+            var detail = ComposeFailureDetail(errorMessage, brokerFailure, ambientFailure);
             MessageBox.Show(
                 $"Could not connect to {ServerNameBox.Text.Trim()}.{detail}",
                 "Connection Failed",
@@ -465,6 +576,13 @@ public partial class AddServerDialog : Window
             authenticationType = AuthenticationTypes.EntraMFA;
             username = EntraMfaUsernameBox.Text.Trim();
         }
+        else if (EntraDefaultAuthRadio.IsChecked == true)
+        {
+            /* No field to validate, and no early return demanding one. The credential-requiring
+               modes below each block a save with a missing secret; this one has nothing to be
+               missing, so demanding anything here would be a gate on a field that does not exist. */
+            authenticationType = AuthenticationTypes.EntraDefaultCredential;
+        }
         else if (ServicePrincipalAuthRadio.IsChecked == true)
         {
             authenticationType = AuthenticationTypes.ServicePrincipal;
@@ -504,7 +622,7 @@ public partial class AddServerDialog : Window
         // Test connection when data collection is enabled
         if (EnabledCheckBox.IsChecked == true)
         {
-            var (connected, errorMessage, mfaCancelled, _) = await RunConnectionTestAsync();
+            var (connected, errorMessage, mfaCancelled, _, brokerFailure, ambientFailure) = await RunConnectionTestAsync();
 
             if (!connected)
             {
@@ -524,7 +642,7 @@ public partial class AddServerDialog : Window
                 }
                 else
                 {
-                    var detail = errorMessage != null ? $"\n\nError: {errorMessage}" : string.Empty;
+                    var detail = ComposeFailureDetail(errorMessage, brokerFailure, ambientFailure);
                     MessageBox.Show(
                         $"Could not connect to {ServerNameBox.Text.Trim()}.{detail}\n\nTo save this server without a working connection, uncheck \"Enable data collection for this server\".",
                         "Connection Failed",

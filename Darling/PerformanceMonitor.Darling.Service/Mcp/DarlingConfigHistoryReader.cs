@@ -75,6 +75,7 @@ internal static class DarlingConfigHistoryReader
     {
         var rows = new List<ConfigChangeDiff.ServerConfigSnapshot>();
         await using var command = postgres.CreateCommand(ServerConfigSnapshotsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -137,6 +138,7 @@ internal static class DarlingConfigHistoryReader
     {
         var rows = new List<ConfigChangeDiff.DatabaseConfigSnapshot>();
         await using var command = postgres.CreateCommand(DatabaseConfigSnapshotsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -179,6 +181,7 @@ internal static class DarlingConfigHistoryReader
     {
         var rows = new List<ConfigChangeDiff.TraceFlagSnapshot>();
         await using var command = postgres.CreateCommand(TraceFlagSnapshotsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -211,6 +214,7 @@ internal static class DarlingConfigHistoryReader
     {
         var rows = new List<DatabaseScopedConfigReadRow>();
         await using var command = postgres.CreateCommand(DatabaseScopedConfigSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -244,6 +248,7 @@ internal static class DarlingConfigHistoryReader
     {
         var rows = new List<QueryStoreHealthReadRow>();
         await using var command = postgres.CreateCommand(QueryStoreHealthSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

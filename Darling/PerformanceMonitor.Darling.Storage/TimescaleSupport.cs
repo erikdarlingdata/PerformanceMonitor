@@ -93,6 +93,18 @@ public static class TimescaleSupport
     /// </summary>
     public const string CompressScheduleInterval = "1 hour";
 
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="CompressScheduleInterval"/>, for callers comparing a
+    /// job's cadence numerically instead of by text — <c>01:00:00</c> and <c>1 hour</c> are the same interval
+    /// and must never read as a difference (that would re-alter the same job on every service start).
+    ///
+    /// <para>Cross-checked against <see cref="CompressScheduleInterval"/> by PARSING that literal, not by
+    /// pinning each side to its own constant: two independent pins force the edit on whichever side the
+    /// editor is looking at and force nothing on the other, and a divergence here is not cosmetic —
+    /// <see cref="ConvergeCompressionScheduleAsync(NpgsqlConnection, ILogger, CancellationToken)"/> takes its
+    /// target seconds from THIS while the policy is created with the STRING, so the two disagreeing makes
+    /// every job read stale forever. Raised by review.</para></summary>
+    public static readonly TimeSpan CompressScheduleSpan = TimeSpan.FromHours(1);
+
     /// <summary>
     /// Hypertable chunk width in days. TimescaleDB's 7-day default is far too coarse for
     /// 1-minute-cadence monitoring data: a chunk stays open (and uncompressible) for its whole
@@ -147,7 +159,7 @@ public static class TimescaleSupport
         }
 
         using var command = new NpgsqlCommand(
-            "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')", connection);
+            "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')", connection) { CommandTimeout = SetupTimeoutSeconds };
         return (bool)(await command.ExecuteScalarAsync(cancellationToken))!;
     }
 
@@ -182,7 +194,7 @@ public static class TimescaleSupport
 
         try
         {
-            using var create = new NpgsqlCommand("CREATE EXTENSION IF NOT EXISTS timescaledb", connection);
+            using var create = new NpgsqlCommand("CREATE EXTENSION IF NOT EXISTS timescaledb", connection) { CommandTimeout = SetupTimeoutSeconds };
             await create.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -276,6 +288,12 @@ public static class TimescaleSupport
     /// initial_start TIMESTAMPTZ, timezone TEXT, compress_created_before INTERVAL)</c>, and the extension's own
     /// SQL notes it is "not strict because we need to set different default values for schedule_interval" —
     /// i.e. the default is computed in C, so omitting the argument is not the same as passing what we want.</para>
+    ///
+    /// <para>That verified signature is also where <c>initial_start</c> comes from: the statement names
+    /// it, which puts the job on this hypertable's slot on the <see cref="CompressionPhaseMinutes"/> grid
+    /// and on a FIXED schedule (#3035). The <c>-1</c> skip above applies to that too — it keys on the policy
+    /// EXISTING, not on its parameters matching — so the phase reaches a deployed store through the converge
+    /// and through nothing else.</para>
     /// </summary>
     public static string AddCompressionPolicySql(ICollectorSchemaInfo schema)
     {
@@ -287,10 +305,36 @@ public static class TimescaleSupport
         return AddCompressionPolicySql(schema.TargetTable);
     }
 
-    /// <summary>The raw-name compression-policy overload — the collection_log path (see
-    /// <see cref="CreateHypertableSql(string, string)"/>).</summary>
+    /// <summary>
+    /// The raw-name compression-policy overload — the collection_log path (see
+    /// <see cref="CreateHypertableSql(string, string)"/>), and the one that carries the phase.
+    ///
+    /// <para><b><c>initial_start</c> is named for every hypertable this product owns, and that is what puts
+    /// the job on a FIXED schedule (#3035).</b> Without it TimescaleDB computes each next start from the
+    /// previous FINISH, so a compression policy drifts through the hour by its own runtime every cycle and
+    /// crosses each fixed refresh slot in turn, spending hours to days inside one before drifting out. A
+    /// table outside <see cref="CompressionPhaseOrder"/> gets the statement without it: this code has no
+    /// business deciding when a foreign hypertable compresses.</para>
+    ///
+    /// <para><b>This resolves a bare name where the converge additionally checks the schema, and the
+    /// asymmetry is a caller invariant rather than an oversight.</b> A statement takes a table name and has
+    /// no schema to check — <c>add_compression_policy</c> resolves it through the session's search path, the
+    /// same way every other bare name in this file does. So the safety rests on WHO calls it, and both
+    /// callers pass names this product owns: <see cref="ApplyCompressionPolicyAsync"/> walks
+    /// <see cref="HypertableTables"/> and <see cref="EnsureCollectionLogHypertableAsync"/> passes
+    /// <see cref="CollectionLogTable"/>. The converge has a schema available because it reads one back from
+    /// the job catalog, where the rows are whatever the store contains rather than whatever this product
+    /// created, so it checks. A future caller handing this overload a foreign or qualified name would break
+    /// that invariant and get a phase it should not have. Raised by review.</para>
+    /// </summary>
     public static string AddCompressionPolicySql(string table)
-        => $"SELECT add_compression_policy('{table}', compress_after => INTERVAL '{CompressAfterDays} days', schedule_interval => INTERVAL '{CompressScheduleInterval}', if_not_exists => true)";
+    {
+        var initialStart = TryCompressionPhaseMinutesFor(table, out var phase)
+            ? $", initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + INTERVAL '{phase.ToString(CultureInfo.InvariantCulture)} minutes'"
+            : string.Empty;
+
+        return $"SELECT add_compression_policy('{table}', compress_after => INTERVAL '{CompressAfterDays} days', schedule_interval => INTERVAL '{CompressScheduleInterval}', if_not_exists => true{initialStart})";
+    }
 
     /* ─────────────────────────── continuous aggregates (query acceleration) ─────────────────────────── */
 
@@ -463,9 +507,9 @@ WITH NO DATA";
 
     /// <summary>
     /// One-time backfill of the baseline aggregates (#1757). WITHOUT THIS THE WHOLE CHANGE IS A REGRESSION:
-    /// the aggregates are created WITH NO DATA and their refresh policy has a 3-day start_offset, so left
-    /// alone they would hold roughly three days for a thirty-day question -- less than the four-day raw
-    /// horizon the change exists to escape. The provider is repointed at them, so an un-backfilled deploy
+    /// the aggregates are created WITH NO DATA and their refresh policy only re-materializes
+    /// <see cref="HourlyRefreshStartOffset"/>, so left alone they would hold roughly one day for a
+    /// thirty-day question -- far less than the four-day raw horizon the change exists to escape. The provider is repointed at them, so an un-backfilled deploy
     /// loses every baseline rather than improving it.
     ///
     /// <para>COVERAGE-GATED and self-healing, the shape the reshape sweep already uses: it compares the
@@ -500,8 +544,14 @@ WITH NO DATA";
                 DateTime? coverageOldest = null;
                 DateTime? needFrom = null;
                 using (var probe = new NpgsqlCommand(probeSql, connection) { CommandTimeout = SetupTimeoutSeconds })
-                await using (var reader = await probe.ExecuteReaderAsync(cancellationToken))
                 {
+                    /* Kind-Unspecified so Npgsql sends `timestamp`, not `timestamptz`: the horizon is
+                       compared against collection_time, which is naive UTC. */
+                    probe.Parameters.AddWithValue(
+                        DateTime.SpecifyKind(DateTime.UtcNow - BaselineRetentionSpan, DateTimeKind.Unspecified));
+
+                    await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+
                     if (await reader.ReadAsync(cancellationToken))
                     {
                         sourceOldest = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
@@ -735,6 +785,16 @@ WITH NO DATA";
     /// <para>This is the same predicate shape the retention arming uses (<c>MeasureRetentionCoverageAsync</c>) over
     /// the same pair of relations, deliberately: what we backfill and what unblocks arming cannot be allowed
     /// to drift apart.</para>
+    ///
+    /// <para>THE HORIZON IS BOUND AS <c>$1</c>, not computed in the SQL. <c>now()::timestamp</c> is
+    /// effectively <c>LOCALTIMESTAMP</c> — it renders the clock in the store session's TimeZone, which
+    /// initdb takes from the host OS — while <c>min(collection_time)</c> is naive UTC. Both sides are
+    /// <c>timestamp</c>, so PostgreSQL raises nothing and <c>GREATEST</c> simply picks between two values on
+    /// different clocks: on a store whose host sits east of UTC the horizon moves LATER and the gate
+    /// under-asks for coverage, leaving the baseline tier permanently short of the window #1757 needs, and
+    /// west of UTC it over-asks and materializes buckets the tier's own retention policy then drops. The
+    /// caller passes <see cref="BaselineRetentionSpan"/> off the service clock, the same clock that stamped
+    /// every <c>collection_time</c> it is compared against.</para>
     /// </summary>
     public static string BaselineBackfillProbeSql(string view, string source)
         => $@"
@@ -743,7 +803,7 @@ SELECT
     (SELECT min(bucket) FROM collect.{view}) AS coverage_oldest,
     time_bucket('1 hour', GREATEST(
         (SELECT min(collection_time) FROM collect.{source}),
-        now()::timestamp - INTERVAL '{BaselineRetentionInterval}')) AS need_from";
+        $1)) AS need_from";
 
     /// <summary>
     /// Drops a baseline relation ONLY when it is a plain fallback view and NOT a continuous aggregate — the
@@ -884,6 +944,31 @@ $do$";
         DeadlockBaselineView => "deadlocks",
         MemoryBaselineView => "memory_stats",
         _ => throw new ArgumentOutOfRangeException(nameof(view), view, "not a baseline aggregate"),
+    };
+
+    /// <summary>
+    /// The non-baseline HOURLY continuous aggregates, in CREATION order, paired with their CREATE SQL.
+    ///
+    /// <para>Order is load-bearing twice over. <see cref="EnsureContinuousAggregatesAsync"/> builds them in
+    /// this sequence because <see cref="CreateQueryStoreStatsCorrectedHourlySql"/> is hierarchical from
+    /// <see cref="CreateQueryStoreStatsIntervalHourlySql"/> and a hierarchical aggregate cannot precede its
+    /// source. And <see cref="HourlyRefreshPhaseOrder"/> derives each view's slot on the phase grid from its
+    /// position here, so a reordering moves phases — which is why the collision guard checks the RESULT rather
+    /// than trusting the list.</para>
+    ///
+    /// <para>Hoisted out of the ensure sweep (#3012) so that sweep, the phase order and the collision guard
+    /// all read ONE list. Restating it in the guard would let the guard pass while the sweep drifted.</para>
+    /// </summary>
+    public static readonly (string CreateSql, string View)[] HourlyAggregates =
+    {
+        (CreateQueryStatsHourlySql,      QueryStatsHourlyView),
+        (CreateProcedureStatsHourlySql,  ProcedureStatsHourlyView),
+        (CreateQueryStoreStatsHourlySql, QueryStoreStatsHourlyView),
+        (CreateQueryStatsDbHourlySql,    QueryStatsDbHourlyView),
+        /* The corrected Query Store rollups (#1849): L1 is raw-sourced and MUST precede the corrected view,
+           which is hierarchical from it. */
+        (CreateQueryStoreStatsIntervalHourlySql,  QueryStoreStatsIntervalHourlyView),
+        (CreateQueryStoreStatsCorrectedHourlySql, QueryStoreStatsCorrectedHourlyView),
     };
 
     /// <summary>The seven baseline-tier aggregates in creation order (nine until #2007 retired the unread CPU/IO pair). Named ONCE so the ensure sweep, the
@@ -1285,7 +1370,8 @@ WITH NO DATA";
     /// reduction is the collection multiplicity, NOT the dimensional collapse the composer-grain rollups get.
     /// It is therefore the one rollup here whose retention is deliberately SHORT
     /// (<see cref="IntervalRetentionInterval"/>): nothing reads it, so it only has to outlive raw for the
-    /// arming gate and outlive its consumers' 3-day refresh window.</para>
+    /// arming gate and outlive its consumers' refresh windows (<see cref="HourlyRefreshStartOffset"/> for
+    /// the corrected hourly, <see cref="DailyRefreshStartOffset"/> for the corrected daily).</para>
     /// </summary>
     public const string CreateQueryStoreStatsIntervalHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_interval_hourly
 WITH (timescaledb.continuous) AS
@@ -1478,15 +1564,2336 @@ GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bu
 WITH NO DATA";
 
     /// <summary>
-    /// The refresh policy for a continuous aggregate: materialize <c>[now - 3 days, now - endOffset]</c> every
-    /// <c>scheduleInterval</c>. <c>start_offset 3 days</c> gives margin past the ~2-day compression/hot window
-    /// (covers same-day-arriving corrections) and is the buffer the retention tiers lean on — a tier's drop must
-    /// never outrun the next tier's 3-day refresh start. <c>endOffset</c> leaves the still-filling current bucket
-    /// unmaterialized (no repeated rework); <c>scheduleInterval</c> matches the bucket. Defaults are the hourly
-    /// shape; the daily CAGGs pass <c>"1 day"</c>/<c>"1 day"</c>. <c>if_not_exists</c> so a restart re-converges.
+    /// The HOURLY refresh window: each hourly continuous aggregate re-materializes <c>[now - 1 day,
+    /// now - 1 hour]</c> on every run.
+    ///
+    /// <para><b>1 day rather than 3 (#3012).</b> A refresh's cost is set by the WINDOW it re-scans, not by the
+    /// rows that arrived in it — so a 3-day window against <see cref="RawRetentionInterval"/>'s 4 days
+    /// re-materialized roughly three quarters of the whole hypertable every hour, and that cost grew with the
+    /// hypertable rather than with ingest. Measured on the production store: the heaviest hourly refresh
+    /// (<see cref="QueryStoreStatsIntervalHourlyView"/>) ran 3,301-6,330 s against a 1-hour cadence —
+    /// <b>118-175% of its own schedule interval</b> — while rows arriving per hour FELL ~3x over the same
+    /// period. Narrowed to 1 day the same refresh finishes <b>inside one phase slot</b> — by 364 s of 1,260
+    /// against #3166's census and #3174's re-derived window — and the figure
+    /// with its derivation is on <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> rather than
+    /// restated here — a percentage of cadence written twice goes stale in one of the two places. The
+    /// direction of that measurement is the whole argument: duration tracking window size while ingest moves the other way is
+    /// what rules out "more rows to materialize" and rules in "too much window".</para>
+    ///
+    /// <para><b>Why a job that outran its cadence could not recover.</b> A refresh holds
+    /// <c>AccessShareLock</c> on the hypertable it reads; the compression policy on that same hypertable
+    /// queues an <c>AccessExclusiveLock</c> request behind it; and a queued exclusive request blocks every
+    /// SUBSEQUENT shared request — so collector store-writes and readers piled up behind a lock that was
+    /// merely QUEUED, not held, even though their own locks are mutually compatible. At >100% of cadence the
+    /// next run started into the tail of the previous one, and the convoy sustained itself. Below cadence it
+    /// cannot form, which is why this number and the phase grid
+    /// (<see cref="LightRefreshStepMinutes"/>) are complements rather
+    /// than alternatives: narrowing is what makes the heavy refresh finish, phasing is what keeps what
+    /// remains of it out of everyone else's way.</para>
+    ///
+    /// <para><b>What still has to fit inside it, now stated as a relationship rather than left to a
+    /// constant.</b> Two things need the window to reach back far enough. Live collectors only ever append
+    /// current-time rows, so for them one refresh interval would do and a day is generous. The one writer of
+    /// BACKDATED rows is <c>QueryStoreBackfill</c>, and its reach is now DERIVED from this span (minus one
+    /// <see cref="HourlyRefreshScheduleInterval"/>, because the window slides forward between runs) instead of
+    /// from the raw retention horizon. That inversion is the actual fix: before it, the refresh window had to
+    /// cover a depth that retention chose, so every retention increase silently bought more refresh cost;
+    /// after it, the refresh window is chosen against its own cadence and the backdating depth follows.</para>
     /// </summary>
-    public static string AddContinuousAggregatePolicySql(string view, string endOffset = "1 hour", string scheduleInterval = "1 hour")
-        => $"SELECT add_continuous_aggregate_policy('collect.{view}', start_offset => INTERVAL '3 days', end_offset => INTERVAL '{endOffset}', schedule_interval => INTERVAL '{scheduleInterval}', if_not_exists => true)";
+    public const string HourlyRefreshStartOffset = "1 day";
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="HourlyRefreshStartOffset"/> for callers doing
+    /// arithmetic against it — <c>QueryStoreBackfill.Horizon</c> is derived from this, so the backdating depth
+    /// cannot be left behind when the window moves. Pinned equal to the string by
+    /// TimescaleContinuousAggregateTests.</summary>
+    public static readonly TimeSpan HourlyRefreshStartSpan = TimeSpan.FromDays(1);
+
+    /// <summary>The hourly refresh cadence, and also the hourly <c>end_offset</c> — the still-filling current
+    /// bucket is left unmaterialized so no run reworks it.</summary>
+    public const string HourlyRefreshScheduleInterval = "1 hour";
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="HourlyRefreshScheduleInterval"/>. The refresh window
+    /// slides forward by exactly this much between runs, which is why anything relying on "the next run will
+    /// re-materialize what I just wrote" has to subtract it from
+    /// <see cref="HourlyRefreshStartSpan"/> rather than using the span itself.</summary>
+    public static readonly TimeSpan HourlyRefreshScheduleSpan = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// The DAILY refresh window, deliberately still 3 days.
+    ///
+    /// <para>The daily tier is NOT the tier #3012 was about and must not be "made consistent" with the hourly
+    /// one. Its jobs run once a day, so a 3-day window is 3 days of scan against an 86,400-second cadence
+    /// rather than against 3,600 — it was never near its own schedule interval, and it never appeared in the
+    /// convoy. What it buys is the buffer <see cref="HourlyRetentionInterval"/> leans on: the hourly rollups
+    /// are dropped at 90 days, and the daily refresh reaching 3 days back is what guarantees a drop can never
+    /// outrun the aggregate meant to preserve that history. Narrowing this would trade nothing for a
+    /// correctness risk.</para>
+    /// </summary>
+    public const string DailyRefreshStartOffset = "3 days";
+
+    /// <summary><see cref="TimeSpan"/> twin of <see cref="DailyRefreshStartOffset"/>, pinned equal to the
+    /// string and pinned STRICTLY BELOW <see cref="HourlyRetentionSpan"/> by
+    /// TimescaleContinuousAggregateTests.</summary>
+    public static readonly TimeSpan DailyRefreshStartSpan = TimeSpan.FromDays(3);
+
+    /// <summary>The daily refresh cadence, and also the daily <c>end_offset</c>.</summary>
+    public const string DailyRefreshScheduleInterval = "1 day";
+
+    /// <summary>
+    /// The width of the hourly refresh grid in minutes, taken from
+    /// <see cref="HourlyRefreshScheduleSpan"/> rather than written as 60, so the grid and the cadence it
+    /// tiles cannot disagree about how long an hour is.
+    /// </summary>
+    public static int MinutesInHourlyCadence => (int)HourlyRefreshScheduleSpan.TotalMinutes;
+
+    /// <summary>
+    /// THE HOURLY REFRESH GRID (#3012, re-derived at #3174) — stated as a method, because a table of
+    /// minutes cannot be re-derived by the next reader and a method can.
+    ///
+    /// <para><b>The grid is three bands, read left to right across the hour.</b> First the LIGHT refreshes,
+    /// one per minute, <see cref="LightRefreshStepMinutes"/> apart. Then <see cref="CompressionPhaseGuardMinutes"/>
+    /// of clear, so the last of them has finished. Then the HEAVIEST refresh's window,
+    /// <see cref="HeaviestRefreshWindowMinutes"/> wide, which no other refresh starts inside. Then the
+    /// compression band, <see cref="CompressionPhaseBandMinutes"/> wide, which is the rest of the hour.
+    /// Every boundary is derived from a measurement or from the catalog; nothing here is a chosen minute.</para>
+    ///
+    /// <para><b>Why the shape changed, and why no step change could have done it.</b> The old grid was a
+    /// uniform <c>index % slots * step</c>, so a view's minute — and therefore whether it collided with
+    /// another view — was a property of WHERE IT SAT IN A LIST. Thirteen policies over four slots means
+    /// collisions by counting alone, and which policies collided depended on list order: the three
+    /// <c>collect.query_stats</c> consumers sat at positions 0, 3 and 9, distinct only by accident, and
+    /// inserting one aggregate ahead of the last of them would have put two back on the same minute. The map
+    /// here is INJECTIVE over the whole list instead, so contention is structurally impossible rather than
+    /// incidentally absent: no two hourly policies start on the same minute at all, whatever the order and
+    /// whatever is inserted. Two independent facts also rule out simply widening the step. A wider step
+    /// leaves FEWER residues, so the <c>query_stats</c> trio — all congruent mod 3 — collapses onto one
+    /// minute at every step at or above 20, which is #3012's own convoy adjacency recreated by the change
+    /// meant to prevent it. And <see cref="RefreshSlotPercentOfHourlyCadence"/> is 25 only while the hour
+    /// divides into four, so every available wider step also moves a default that V57 has already applied to
+    /// every live store.</para>
+    ///
+    /// <para><b>What the old configuration measured, kept because it is the only lock-wait evidence there
+    /// is.</b> The production store's <c>query_store_stats</c> job family was moved to :00/:15/:30/:45 and
+    /// the first full staggered cycle came back 26 s / 2 s / 864 s / 140 s with zero ungranted locks on it —
+    /// a cycle that STRADDLES the narrowing boundary
+    /// (<see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>), so its four figures record what the
+    /// stagger did to lock waits and are not samples of the narrowed regime's cost. What that cycle
+    /// establishes is that phasing removes the lock waits; it says nothing about which minutes, which is why
+    /// moving them costs nothing it measured.</para>
+    ///
+    /// <para><b>Phasing alone is not the fix and neither is narrowing alone.</b>
+    /// <see cref="HourlyRefreshStartOffset"/> is what brought the heavy refresh down from 6,330 s to
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>; the grid is what keeps what remains of it
+    /// from being visible to anything else, because the refresh that is running is not the one a compression
+    /// policy or a sibling refresh is about to want. Dropping either one reopens the door.</para>
+    ///
+    /// <para><b>One thing the hour cannot hold, said here so it is not attempted.</b> Serialising all
+    /// thirteen — every policy finishing before the next starts — needs
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> plus twelve times
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/>, which is 3,617.6 s against a 3,600 s hour. It
+    /// is 17.6 s short of possible, so the light refreshes DO overlap each other and the guarantee is
+    /// distinct STARTS rather than disjoint runs. That is the guarantee #3012 needed — the convoy formed on a
+    /// compression policy's queued <c>AccessExclusiveLock</c> arriving while a refresh held
+    /// <c>AccessShareLock</c>, and two refreshes hold mutually compatible locks — and it is strictly stronger
+    /// than the old grid delivered, where four policies including the heaviest all started on :00.</para>
+    ///
+    /// <para><b>This step is sized by member COUNT and cannot be sized by member DURATION, which is why the
+    /// duration question is answered by a different term (#3185).</b> One minute delivers distinct starts at
+    /// any length the band can hold and guarantees nothing at all about overlap: a member running past
+    /// <c>LightRefreshStepMinutes * 60</c> overlaps its successor for the remainder of its run, and two
+    /// members past it overlap each other for essentially their whole runs. Widening this step is not the
+    /// repair, and that is DERIVED rather than argued —
+    /// <see cref="WidestFeasibleLightRefreshStepMinutes"/> searches the shipped comparison and returns this
+    /// same value, so the band is already as wide as the hour can carry. The binding constraint is not the
+    /// hour's sixty minutes but <see cref="HeaviestRefreshWindowMinutes"/>: eleven gaps at two minutes take
+    /// eleven minutes from <see cref="GuardAndWindowSharedMinutes"/>, which drops the watch line under
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> at every guard, so no step above one is
+    /// reachable at any guard rather than merely at today's.</para>
+    ///
+    /// <para><b>So the members that can consume a wider gap are separated INSIDE this band, and the band's
+    /// width does not move.</b> The gap goes between the members that need it and the ones that do not fill
+    /// it in — see <see cref="UnboundedLightRefreshSeparationMinutes"/> for the width,
+    /// <see cref="IsUnboundedCardinalityRefresh"/> for which members those are, and
+    /// <see cref="RefreshPhaseMinutesFor(IReadOnlyList{string}, string)"/> for the layout. A per-member step —
+    /// the obvious generalization of this constant — is what does NOT fit: giving each member a gap sized to
+    /// its own class widens the band to nineteen minutes, and the band cannot grow at all.</para>
+    /// </summary>
+    public const int LightRefreshStepMinutes = 1;
+
+    /// <summary>
+    /// The hourly refresh policies that are not <see cref="HeaviestHourlyRefreshView"/> — the ones that share
+    /// the light band, counted from <see cref="HourlyRefreshPhaseOrder"/> rather than written down so
+    /// registering an aggregate moves the grid instead of leaving a stale count beside it.
+    /// </summary>
+    public static int LightHourlyRefreshCount => HourlyRefreshPhaseOrder.Count - 1;
+
+    /// <summary>
+    /// How many minutes of the hour the light band SPANS — the distance from the first light refresh's
+    /// minute to the last one's, which is one fewer gap than there are members.
+    ///
+    /// <para>Named because three separate expressions were spelling it out —
+    /// <see cref="HeaviestRefreshStartMinute"/>, <see cref="GuardAndWindowSharedMinutes"/> and the watch
+    /// line's feasibility walk — and a band whose width is written three times can be widened in two of
+    /// them. It is a SPAN and not a count of minutes occupied: the band holds
+    /// <see cref="LightHourlyRefreshCount"/> starts and this is the last one's offset, so it is what the
+    /// guard sits after and what the rest of the hour is measured from.</para>
+    /// </summary>
+    public static int LightBandSpanMinutes =>
+        (LightHourlyRefreshCount - 1) * LightRefreshStepMinutes;
+
+    /// <summary>
+    /// The minute <see cref="HeaviestHourlyRefreshView"/>'s refresh starts on: past the last light refresh,
+    /// by <see cref="CompressionPhaseGuardMinutes"/>.
+    ///
+    /// <para><b>The heaviest refresh goes AFTER the light band rather than at :00, and that placement is the
+    /// decision rather than a layout preference.</b> The compression guard is one-sided
+    /// (<see cref="CompressionPhaseGuardMinutes"/>), so a compression policy on the hour's last minute is
+    /// still holding its <c>AccessExclusiveLock</c> when the next hour's grid opens. Whichever refresh opens
+    /// the hour is the one that waits behind it. Opening with the light band puts that wait on a policy whose
+    /// whole recorded ceiling is <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> and which has no
+    /// window to fit inside, and leaves the heaviest refresh — the one whose runtime has to stay under
+    /// <see cref="RefreshSlotWarningSeconds"/> — starting a full light band clear of the previous hour's
+    /// compression.</para>
+    /// </summary>
+    public static int HeaviestRefreshStartMinute =>
+        LightBandSpanMinutes + CompressionPhaseGuardMinutes;
+
+    /// <summary>
+    /// The heaviest hourly refresh's window: what the hour has LEFT once the light band, its guard and the
+    /// compression band are each at the width their own measurement asks for.
+    ///
+    /// <para><b>A remainder rather than a choice, and that is what settles where the hour's spare minutes
+    /// go.</b> The light band's width follows from how many policies there are, the guard's from
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/>, and the compression band's from the catalog
+    /// (<see cref="CompressionPhaseBandMinutes"/>). None of those has anything to gain from an extra minute —
+    /// a guard that already clears the light ceiling clears it no better at seven minutes than at four, and
+    /// the compression band spreads the same hypertables at the same
+    /// <see cref="CompressionPhaseMaxPerMinute"/> anywhere from 24 minutes wide to 27. This window does gain:
+    /// every minute here is 50 s of <see cref="RefreshSlotWarningSeconds"/> lead time on the one figure that
+    /// has a measured growth series behind it. So the remainder lands where it changes an answer, without
+    /// anyone choosing.</para>
+    ///
+    /// <para><b>It is not sized to fit the ceiling, and the difference matters.</b> Nothing above consults
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>. Whether the window the hour can spare is
+    /// wide enough for the refresh that has to fit in it is an ASSERTION —
+    /// <c>HeaviestHourlyRefreshObservedCeilingSeconds &lt; RefreshSlotWarningSeconds</c>, held by
+    /// TimescaleSupportTests — so a ceiling that outgrows the hour goes red instead of quietly re-sizing the
+    /// grid around itself. When it does go red the repair is fewer compression minutes, a cheaper refresh, or
+    /// a longer cadence for this one aggregate; it is not a wider window, because there is none to take.</para>
+    /// </summary>
+    public static int HeaviestRefreshWindowMinutes =>
+        MinutesInHourlyCadence - HeaviestRefreshStartMinute - CompressionPhaseBandMinutes;
+
+    /// <summary>
+    /// One refresh slot as a percent of the hourly cadence — the value #2136's Store Job Over Cadence warning
+    /// knob ships as its default (<c>AlertsConfig.StoreJobCadenceWarnPercent</c>).
+    ///
+    /// <para><b>This was <c>100 / RefreshPhaseSlots</c>, and #3174 broke the derivation rather than moving
+    /// the number.</b> The derivation needed the grid to be UNIFORM: "one slot" was a single width every
+    /// policy shared, so a percent of cadence could name it. The grid is three bands of different widths now
+    /// (see <see cref="LightRefreshStepMinutes"/>), and the tightest of them is one minute — so there is no
+    /// single slot left for a percent of cadence to mean, and a knob derived from the tightest band would
+    /// ship at 1% of cadence.</para>
+    ///
+    /// <para><b>And the number cannot move, which is why it is anchored here rather than re-derived
+    /// elsewhere.</b> V57 added <c>config.config_alert_settings.store_job_cadence_warn_percent</c> with
+    /// <c>DEFAULT 25</c>, and that rung has already run on every live store. The store column wins on a fresh
+    /// store, so a C# seed that drifted from it would ship a default nobody chose — moving this figure means
+    /// a new rung, deliberately not taken by re-deriving a grid. DarlingSelfAlertTests holds the seed and the
+    /// V57 text equal for exactly this reason.</para>
+    ///
+    /// <para><b>What the old derivation bought is kept as an assertion, since it is the half that mattered.</b>
+    /// The point of deriving it was that the alert must fire at or BEFORE the grid's precondition is false.
+    /// At 25% of a 3,600 s cadence the knob lands on 900 s, inside
+    /// <see cref="RefreshPhaseSlotSeconds"/> — so it still speaks first, and
+    /// TimescaleContinuousAggregateTests asserts that ordering in SECONDS against the window rather than as a
+    /// percent identity. What is GONE is the tightness half — the old
+    /// <c>(this + 1) * RefreshPhaseSlots &gt; 100</c>, which said this was the LATEST value that still
+    /// cleared one slot. That was a property of a uniform slot count and has nothing left to be tight
+    /// against; the knob now fires earlier than it strictly has to, which is the safe direction.</para>
+    ///
+    /// <para><b>What this does NOT do.</b> It does not bound what an operator may SET. The knob stays
+    /// clamped [5, 100] and a value above this one fires later — deliberately, because the knob judges
+    /// families that have no window, and silently retuning a live fleet's setting would be a worse trade than
+    /// the alert arriving late for one family. The heaviest refresh's window is watched independently of this
+    /// knob, on the grid's own terms, by #3044's <see cref="RefreshSlotWarningSeconds"/> line — so raising
+    /// the knob cannot leave the grid's precondition unattended, which is what makes leaving the clamp alone
+    /// the cheaper trade.</para>
+    /// </summary>
+    public const int RefreshSlotPercentOfHourlyCadence = 25;
+
+    /// <summary>
+    /// The hourly refresh policies in phase order — the ONLY thing that decides which slot a policy gets, and
+    /// it is keyed on the VIEW name.
+    ///
+    /// <para><b>Never on a job id.</b> TimescaleDB job ids are assigned per deployment: the ids that appear in
+    /// #3012's evidence exist only on the store it was measured against, and would name entirely different
+    /// jobs anywhere else. Keying the grid on view identity is what makes the same configuration reproducible
+    /// on a store that has never seen those ids.</para>
+    ///
+    /// <para>Order matters and is asserted, because what the grid has to guarantee is that the policies
+    /// sharing a hypertable land on DIFFERENT slots — that is the lock-queue adjacency the convoy formed on.
+    /// The baseline aggregates are appended from <see cref="BaselineAggregates"/> rather than restated, so
+    /// this list and that one cannot drift apart.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> HourlyRefreshPhaseOrder =
+        HourlyAggregates.Concat(BaselineAggregates).Select(a => a.View).ToArray();
+
+    /// <summary>
+    /// Every hourly continuous aggregate paired with the CREATE that defines it —
+    /// <see cref="HourlyAggregates"/> then <see cref="BaselineAggregates"/>, in the same order
+    /// <see cref="HourlyRefreshPhaseOrder"/> derives from.
+    ///
+    /// <para>Exists so the phase grid's real invariant can be checked against the SHIPPED DEFINITIONS rather
+    /// than a second hand-written map. What the grid has to guarantee is that policies CONTENDING FOR THE SAME
+    /// RELATION start at different minutes — that is the lock adjacency the convoy formed on — and a view's
+    /// contended relation is whatever its own CREATE selects <c>FROM</c>. Recovering it from this text means a
+    /// new aggregate is covered the moment it is registered, and a map that drifted from the definitions
+    /// cannot report a false all-clear.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<(string CreateSql, string View)> HourlyRefreshDefinitions =
+        HourlyAggregates.Concat(BaselineAggregates).ToArray();
+
+    /// <summary>
+    /// The grouping columns that identify an individual STATEMENT or PLAN, as opposed to a server, a
+    /// database, a schema object or a time bucket — the columns whose distinct count is a property of the
+    /// monitored workload rather than of the deployment.
+    ///
+    /// <para><b>This is the list the light band's spacing is decided by, and it is a list of COLUMNS rather
+    /// than of views for a reason (#3185).</b> A list of heavy views is a frozen enumeration: it is correct
+    /// until the next aggregate is registered and then silently wrong, which is exactly the failure the
+    /// phase grid's positional coupling was. A view's cost is decided by how many output groups one bucket
+    /// produces, and that is decided by its own GROUP BY — so the membership question is answered by reading
+    /// the shipped CREATE text through <see cref="HourlyRefreshDefinitions"/>, and a new aggregate is
+    /// classified the moment it is registered.</para>
+    ///
+    /// <para><b>The mechanism is measured, with source volume held constant, which is what makes this the
+    /// group key rather than a proxy for something else.</b> Two same-source pairs isolate it.
+    /// <see cref="QueryStoreStatsIntervalHourlyView"/> and <see cref="QueryStoreStatsHourlyView"/> read the
+    /// IDENTICAL rows for a given hour and reduce them 1.30:1 and 2.62:1, for refresh medians of 894.5 s and
+    /// 105.5 s. <see cref="QueryStatsHourlyView"/> and <see cref="QueryStatsDbHourlyView"/> read an identical
+    /// ~311,000 rows and reduce them 29:1 and 1,481:1, for 11.2 s and 1.8 s. In both pairs the only thing
+    /// that differs is how far the group key resolves, and the cost follows it.</para>
+    ///
+    /// <para><b>And the partition it produces matches the measured one.</b> #3183's scoped post-boundary
+    /// re-measurement recorded three light views above 3 s — <see cref="QueryStatsHourlyView"/> at 23.3 s,
+    /// <see cref="QueryStoreStatsHourlyView"/> at 263.9 s and
+    /// <see cref="QueryStoreStatsCorrectedHourlyView"/> at 265.5 s — and the other nine at 0.6 s to under
+    /// 3 s. Those three are exactly the light views whose group key reaches a column named here. The rule is
+    /// not fitted to that result: it is fitted to the pairs above, and the split is what it predicts.</para>
+    ///
+    /// <para><b>What is NOT here is the safeguard.</b> A view can be slow for a reason its group key does
+    /// not show, and no build-time rule can see that. <see cref="LogLightRefreshSpacingBreach"/> is the live
+    /// half — a light refresh that runs past the minutes its class was given is reported, whichever class
+    /// the rule put it in, so a rule that has stopped predicting says so rather than going quiet.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> PerStatementGroupingColumns = new[]
+    {
+        "query_hash",
+        "sql_handle",
+        "query_id",
+        "plan_id",
+        "runtime_stats_interval_id",
+        "first_execution_time",
+    };
+
+    /// <summary>
+    /// The GROUP BY terms of one aggregate's CREATE, recovered from the shipped text — the seam
+    /// <see cref="IsUnboundedCardinalityRefresh"/> reads and the seam a test can check the parse against.
+    ///
+    /// <para>Split at PARENTHESIS DEPTH ZERO, so <c>time_bucket('1 hour', bucket)</c> comes back as one term
+    /// rather than as two halves of one — a comma split would produce a term of <c>time_bucket('1 hour'</c>
+    /// and one of <c>bucket)</c>, and the second of those matches a real column name.</para>
+    ///
+    /// <para><b>It takes the LAST <c>GROUP BY</c> in the text, which is an assumption rather than a
+    /// parse.</b> Every registered aggregate has exactly one, so the two readings agree today. A future
+    /// CREATE that grouped inside a subquery would break one of them and which one depends on where that
+    /// subquery sat — so this is not a choice that generalizes, it is a statement about the shipped set. A
+    /// definition whose inner terms did not all resolve to classified columns is caught by
+    /// <c>EveryGroupingTerm_IsClassified_AndTheParseIsControlledPerView</c>; one whose inner terms happened
+    /// to resolve would be misclassified silently, and the repair then is a real parse rather than a
+    /// different index. Raised by review.</para>
+    ///
+    /// <para><b>Case-insensitive on the keywords, deliberately.</b> A parse that found no GROUP BY would
+    /// return nothing, and nothing contains no per-statement column — so a missed clause classifies a view
+    /// as deployment-bounded, which is the label that gives it LESS room. The failure has to be loud in the
+    /// safe direction from both ends: matching regardless of case is one end, and a test asserting that
+    /// every shipped definition yields at least one term is the other.</para>
+    /// </summary>
+    internal static IReadOnlyList<string> RefreshGroupingTermsFor(string createSql)
+    {
+        if (createSql is null)
+        {
+            throw new ArgumentNullException(nameof(createSql));
+        }
+
+        var start = createSql.LastIndexOf("GROUP BY", StringComparison.OrdinalIgnoreCase);
+        if (start < 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        start += "GROUP BY".Length;
+        var end = createSql.IndexOf("WITH NO DATA", start, StringComparison.OrdinalIgnoreCase);
+        var clause = end < 0 ? createSql[start..] : createSql[start..end];
+
+        var terms = new List<string>();
+        var depth = 0;
+        var termStart = 0;
+
+        for (var index = 0; index <= clause.Length; index++)
+        {
+            if (index == clause.Length || (clause[index] == ',' && depth == 0))
+            {
+                var term = string.Join(
+                    " ",
+                    clause[termStart..index].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+                if (term.Length > 0)
+                {
+                    terms.Add(term);
+                }
+
+                termStart = index + 1;
+                continue;
+            }
+
+            if (clause[index] == '(')
+            {
+                depth++;
+            }
+            else if (clause[index] == ')')
+            {
+                depth--;
+            }
+        }
+
+        return terms;
+    }
+
+    /// <summary>
+    /// The hourly views whose one-bucket output cardinality is UNBOUNDED by the deployment — the ones whose
+    /// GROUP BY reaches a <see cref="PerStatementGroupingColumns"/> column.
+    ///
+    /// <para><b>MUST stay declared after <see cref="HourlyRefreshDefinitions"/> and before
+    /// <see cref="CompressionPhaseMinutes"/>.</b> Static field initializers run in declaration order, and
+    /// this one reads the definitions while the compression grid's initializer reaches
+    /// <see cref="RefreshPhaseMinutesFor(string)"/>, which reads this. Declared out of order it is an empty
+    /// set at the moment the compression grid is built, and every hourly view is placed as
+    /// deployment-bounded once, permanently, with nothing red.</para>
+    ///
+    /// </summary>
+    private static readonly HashSet<string> UnboundedCardinalityRefreshViews =
+        HourlyRefreshDefinitions
+            .Where(definition => GroupKeyIsUnboundedCardinality(definition.CreateSql))
+            .Select(definition => definition.View)
+            .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// THE RULE, over one CREATE — whether its group key reaches a
+    /// <see cref="PerStatementGroupingColumns"/> column.
+    ///
+    /// <para><b>A CREATE whose GROUP BY cannot be recovered answers TRUE</b>, which is the label that asks
+    /// for more of the band. Read the other way an unparseable definition would quietly take a one-minute
+    /// step — the state #3185 recorded — and nothing would say so; this way it takes band positions and
+    /// <see cref="LightBandHoldsUnboundedRefreshCount"/> is what reports that the hour no longer holds.</para>
+    ///
+    /// <para><b>Declared as its own function so that branch is REACHABLE.</b> No shipped definition is
+    /// unparseable, so folded into the field initializer above the empty-terms arm would be a line no value
+    /// the registry can produce reaches: protection that certifies nothing and that no mutation can
+    /// distinguish from its own absence. Here a test hands it a CREATE with no GROUP BY and gets an
+    /// answer.</para>
+    /// </summary>
+    internal static bool GroupKeyIsUnboundedCardinality(string createSql)
+    {
+        var terms = RefreshGroupingTermsFor(createSql);
+
+        return terms.Count == 0
+            || terms.Any(term => PerStatementGroupingColumns.Contains(term, StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// Whether <paramref name="view"/>'s refresh cost grows with the monitored workload's distinct statement
+    /// population rather than with the size of the deployment.
+    ///
+    /// <para>Throws for a view that is not a registered hourly aggregate, for
+    /// <see cref="RefreshPhaseMinutesFor(string)"/>'s reason: a defaulted answer here decides how much of
+    /// the hour that view is given, and the quiet answer is the one that gives it the least.</para>
+    /// </summary>
+    public static bool IsUnboundedCardinalityRefresh(string view)
+    {
+        if (!HourlyRefreshDefinitions.Any(definition =>
+                string.Equals(definition.View, view, StringComparison.Ordinal)))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(view),
+                view,
+                "not a registered hourly continuous aggregate — its refresh cost class cannot be recovered from a CREATE that TimescaleSupport.HourlyRefreshDefinitions does not hold");
+        }
+
+        return UnboundedCardinalityRefreshViews.Contains(view);
+    }
+
+    /// <summary>
+    /// The minutes the grid keeps between two consecutive unbounded-cardinality light refreshes — the same
+    /// expression <see cref="CompressionPhaseGuardMinutes"/> is, because it is the same question.
+    ///
+    /// <para><b>One number, two jobs, and they cannot disagree because they are one expression.</b> The
+    /// guard asks how long after a light refresh starts something else may safely start; so does this. The
+    /// guard's answer clears the band's last member from
+    /// <see cref="HeaviestRefreshStartMinute"/> and this one clears one heavy light member from the next.
+    /// Deriving them separately from the same constant would leave two places to update and one of them
+    /// behind.</para>
+    ///
+    /// <para><b>It is a bound against the RECORDED ceiling, which is the honest scope of the guarantee.</b>
+    /// <c>UnboundedLightRefreshSeparationMinutes * 60</c> exceeds
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> by the guard's own rounding margin, so two
+    /// unbounded light refreshes provably cannot overlap AS LONG AS that constant is still a maximum. The
+    /// one way it can be insufficient is the constant being stale, and that is a reported finding with a
+    /// named remedy rather than a silent condition — <see cref="LogRefreshCeilingStaleness"/> (#3182).</para>
+    ///
+    /// <para><b>Why the constant is not re-derived to tonight's readings first.</b> The 263.9 s and 265.5 s
+    /// runs #3185 measured are runs of two aggregations that overlapped for essentially their whole
+    /// duration; the same two ran ~47 s each when the previous grid held them fifteen minutes apart. A
+    /// ceiling taken from the overlapping population would size the separation from the defect the
+    /// separation exists to remove, which is why #3182 holds both ceiling values until the grid is
+    /// stable.</para>
+    /// </summary>
+    public static int UnboundedLightRefreshSeparationMinutes => CompressionPhaseGuardMinutes;
+
+    /// <summary>
+    /// <see cref="UnboundedLightRefreshSeparationMinutes"/> expressed in band POSITIONS, which is the unit
+    /// the layout places members in — rounded UP, so a separation that does not divide the step still
+    /// clears it.
+    ///
+    /// <para><b>AT LEAST ONE, which is what the injectivity claim rests on, and it is worth writing down
+    /// because the implication is three members long.</b> A value of zero would give every
+    /// unbounded member band position zero — every one of them on the same minute, which is #3012's
+    /// adjacency exactly — and
+    /// <see cref="LightBandHoldsUnboundedRefreshCount(int, int)"/> would still answer true, because zero
+    /// fits in any band. It cannot be zero: <see cref="CompressionPhaseGuardMinutes"/> is asserted STRICTLY
+    /// POSITIVE by TimescaleContinuousAggregateTests' tiling case, this is that value over a positive step,
+    /// and the ceiling of a positive quotient is at least one. Raised by review. No assertion is added here
+    /// for it — the positivity is already asserted at the constant, and the collapse is caught twice over on
+    /// the map's own output, by that file's whole-set distinctness claim and by
+    /// <c>TheLightBand_SeparatesEveryUnboundedCardinalityRefresh_WithoutWidening</c>'s set identity. Both
+    /// are red under a mutation that zeroes the separation, which is how that is known rather than
+    /// argued.</para>
+    /// </summary>
+    public static int UnboundedLightRefreshSeparationIndexes =>
+        (int)Math.Ceiling(UnboundedLightRefreshSeparationMinutes / (double)LightRefreshStepMinutes);
+
+    /// <summary>
+    /// Which position in the light band the <paramref name="ordinal"/>-th unbounded-cardinality light
+    /// refresh takes, counting unbounded members only and from zero — exactly the shape a bounded member's
+    /// own position has, with the separation in place of the step.
+    /// </summary>
+    public static int LightBandIndexForUnboundedRefresh(int ordinal) =>
+        ordinal * UnboundedLightRefreshSeparationIndexes;
+
+    /// <summary>
+    /// Whether the light band still holds <paramref name="count"/> unbounded-cardinality members once each
+    /// is <see cref="UnboundedLightRefreshSeparationMinutes"/> clear of the last.
+    ///
+    /// <para><b>This is the feasibility bound the spacing needs, and it reads two ways at once.</b> The last
+    /// unbounded member's position landing inside the band is the same inequality as that member finishing
+    /// before <see cref="HeaviestRefreshStartMinute"/> opens: the start minute is
+    /// <see cref="LightBandSpanMinutes"/> plus the guard, the guard IS the separation, so
+    /// "the last one fits in the band" and "the last one clears the heaviest refresh's window" cancel to the
+    /// same statement. One condition covers both, which is why there is not a second one.</para>
+    ///
+    /// <para><b>False is the answer that matters, and it is not answered by throwing.</b> A registry that
+    /// grew past what the band can separate is not a wider band —
+    /// <see cref="WidestFeasibleLightRefreshStepMinutes"/> says the band is already as wide as the hour
+    /// carries. It is a scheduling decision: a cheaper aggregate, a longer cadence for one of them, or
+    /// fewer compression minutes. What the MAP does meanwhile is fall back to consecutive positions, which
+    /// is #3174's grid — distinct starts, no separation.</para>
+    ///
+    /// <para><b>THIS PREDICATE is what reports that, and it is the only reporter the condition needs.</b>
+    /// TimescaleContinuousAggregateTests asserts it over the shipped registry, and the classification it
+    /// counts is recovered from compile-time CREATE constants — so a degraded layout cannot differ between
+    /// CI and a running store, and a build in which the band degrades is red before it ships.
+    /// <see cref="LogLightRefreshSpacingBreach"/> is NOT a second reporter for this: it judges a live run
+    /// against the gap its class is given, and a state that cannot ship is a state no live run arrives in.
+    /// What that finding covers is the failure this predicate cannot see — a view slow for a reason its
+    /// group key does not show — which is reachable on every shipped build.</para>
+    ///
+    /// <para><b>Why a throw would be worse than a degraded grid, which is measured rather than assumed.</b>
+    /// <see cref="CompressionPhaseMinutes"/> is a static field whose initializer reaches
+    /// <see cref="RefreshPhaseMinutesFor(string)"/>, and a static initializer that throws takes the whole
+    /// TYPE down with a <c>TypeInitializationException</c> for the life of the process — every
+    /// retention horizon, every compression statement, every refresh policy, not just the aggregate that
+    /// could not be placed. Mutating the GROUP BY recovery to return nothing reaches exactly that: every
+    /// view classifies unbounded, the band cannot separate twelve, and a throwing map took 72 tests red
+    /// across four unrelated files. The existing throw for an unregistered view cannot fire from there
+    /// because that initializer only ever iterates registered views; this condition can, because it depends
+    /// on a parse. So the map degrades and the report is separate.</para>
+    /// </summary>
+    public static bool LightBandHoldsUnboundedRefreshCount(int count) =>
+        LightBandHoldsUnboundedRefreshCount(count, LightHourlyRefreshCount);
+
+    /// <summary>
+    /// <see cref="LightBandHoldsUnboundedRefreshCount(int)"/> asked of an EXPLICIT band size — the seam
+    /// <see cref="RefreshPhaseMinutesFor(IReadOnlyList{string}, string)"/> needs, because that overload
+    /// answers for the order it was handed and the shipped
+    /// <see cref="LightHourlyRefreshCount"/> is not that order's band.
+    /// </summary>
+    internal static bool LightBandHoldsUnboundedRefreshCount(int count, int lightBandPositions) =>
+        count <= 0
+        || LightBandIndexForUnboundedRefresh(count - 1) <= lightBandPositions - 1;
+
+    /// <summary>
+    /// Which minute of the hour <paramref name="view"/>'s hourly refresh policy starts on.
+    ///
+    /// <para><b>INJECTIVE, and that is the whole of the contention guarantee.</b>
+    /// <see cref="HeaviestHourlyRefreshView"/> is answered by IDENTITY, not by position, and gets
+    /// <see cref="HeaviestRefreshStartMinute"/> alone. Every other view gets its own minute in the light
+    /// band. There is no modulus anywhere, so two policies cannot share a residue — the map has no
+    /// collisions to have, at any list length the band can hold, in any order, with anything inserted
+    /// anywhere. That is what makes contention structurally impossible instead of a property of where a view
+    /// happens to sit in a list, which is the state #3174 replaced.</para>
+    ///
+    /// <para><b>Distinct minutes are a LOCK guarantee and were read as a cost guarantee, which is the defect
+    /// #3185 recorded.</b> Two refreshes hold mutually compatible <c>AccessShareLock</c>s, so overlapping
+    /// light refreshes cannot convoy and the band was sized on that alone. They still contend for CPU and
+    /// I/O: measured across the install, two ~265 s aggregations placed two minutes apart ran at
+    /// <b>5.4x</b> the per-output-group cost the same view had at fifteen minutes apart, with cardinality
+    /// flat to 1.4%. So the band separates the members whose runs are long enough for that to matter —
+    /// <see cref="IsUnboundedCardinalityRefresh"/> — and leaves the rest at
+    /// <see cref="LightRefreshStepMinutes"/>, where distinct starts is the whole of what is needed and the
+    /// measured runs are 0.6 s to under 3 s against a 60 s step.</para>
+    ///
+    /// <para>Throws for a view that is not on <see cref="HourlyRefreshPhaseOrder"/> — including every DAILY
+    /// view, which must not be dragged onto the grid. That is deliberately loud rather than defaulted: a new
+    /// hourly aggregate that silently got minute 0 would be coincident with the first light refresh, which is
+    /// the exact state #3012 was about. <see cref="EnsureContinuousAggregatesAsync"/> builds each policy
+    /// statement inside its own per-aggregate try, so an unregistered view costs that one aggregate and names
+    /// itself in the warning instead of taking the sweep down.</para>
+    /// </summary>
+    public static int RefreshPhaseMinutesFor(string view)
+        => RefreshPhaseMinutesFor(HourlyRefreshPhaseOrder, view);
+
+    /// <summary>
+    /// The phase map itself, over an EXPLICIT order — the seam that lets the injectivity claim be tested
+    /// against the shipped algorithm rather than against a copy of its rule.
+    ///
+    /// <para><b>Why this exists at all.</b> The claim the grid rests on is that no two hourly policies share
+    /// a minute <i>whatever the order</i>, and the public overload can only ever be called at the ONE order
+    /// <see cref="HourlyRefreshPhaseOrder"/> currently has. A test that permuted the list and re-implemented
+    /// the counting rule inline would prove the RULE injective and leave the shipped method untested at every
+    /// order but one — which is the "a test that agrees with any derivation" failure one layer down, and it
+    /// is the failure this whole grid exists to remove. So the order is a parameter and the product passes
+    /// its own list.</para>
+    ///
+    /// <para><b>Only the ORDER is a parameter, deliberately.</b> The GEOMETRY —
+    /// <see cref="HeaviestRefreshStartMinute"/>, <see cref="LightRefreshStepMinutes"/> and
+    /// <see cref="UnboundedLightRefreshSeparationIndexes"/> — still comes from the shipped registry, so this
+    /// cannot be used to fabricate a different grid: handing it a permutation asks "does the map still
+    /// collide-free at this order", which is the question, and handing it a different POPULATION would be
+    /// asking something the caller has no business asking.</para>
+    ///
+    /// <para><b>THE LIGHT BAND'S LAYOUT, which is what #3185 changed.</b> The band is a fixed set of
+    /// positions — <see cref="LightHourlyRefreshCount"/> of them, <see cref="LightRefreshStepMinutes"/>
+    /// apart, spanning <see cref="LightBandSpanMinutes"/>. The unbounded-cardinality members take every
+    /// <see cref="UnboundedLightRefreshSeparationIndexes"/>-th position from the first
+    /// (<see cref="LightBandIndexForUnboundedRefresh"/>); the deployment-bounded members take the positions
+    /// those leave, in registry order. So the gap the long runs need is filled by the short ones instead of
+    /// being added to the band, and <see cref="LightBandSpanMinutes"/> does not move — the guard, the
+    /// heaviest refresh's window and the compression band are all exactly what they were.</para>
+    ///
+    /// <para><b>The alternative shape, priced and rejected.</b> Walking the registry in order and jumping
+    /// forward whenever a member has to clear the last unbounded one widens the band to thirteen minutes at
+    /// today's two-per-hour spacing and to fifteen at three, which drops the watch line to 850 s against an
+    /// 896 s <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>. That shape is red at today's
+    /// registry and red again the moment
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> is re-derived upward. Interleaving is what
+    /// makes the separation free rather than a trade, and free is why it does not have to be argued
+    /// against <see cref="HeaviestRefreshWindowMinutes"/>.</para>
+    ///
+    /// <para><b>Still injective, and for a stronger reason than before.</b> The two classes draw from one
+    /// pool of positions and the bounded members are handed the positions the unbounded members did not
+    /// take, so no position can be issued twice by construction rather than by arithmetic. It survives any
+    /// permutation of the order for the same reason the consecutive form did: which member gets which
+    /// position moves, how many positions exist does not. It also holds in the DEGRADED case below, where
+    /// every member takes a consecutive position and the pool is the same pool.</para>
+    ///
+    /// <para><b>A band that cannot separate its unbounded members degrades to consecutive positions rather
+    /// than refusing</b> (<see cref="LightBandHoldsUnboundedRefreshCount(int)"/>), because this condition
+    /// is reachable from a static field initializer and a throw there costs the whole type rather than one
+    /// aggregate. It is reported by that predicate at build time rather than by an exception at run time,
+    /// and a build it is false on does not ship.</para>
+    ///
+    /// <para><c>internal</c> rather than public: the product must always reach the map through the overload
+    /// that supplies its own list, or a caller could phase a policy against an order the converge does not
+    /// share.</para>
+    /// </summary>
+    internal static int RefreshPhaseMinutesFor(IReadOnlyList<string> order, string view)
+    {
+        if (order is null)
+        {
+            throw new ArgumentNullException(nameof(order));
+        }
+
+        var lightCount = order.Count(candidate =>
+            !string.Equals(candidate, HeaviestHourlyRefreshView, StringComparison.Ordinal));
+
+        var unboundedCount = order.Count(candidate =>
+            !string.Equals(candidate, HeaviestHourlyRefreshView, StringComparison.Ordinal)
+            && UnboundedCardinalityRefreshViews.Contains(candidate));
+
+        /* When the band cannot hold them separated, every light member takes a consecutive position —
+           #3174's grid, which still gives distinct starts. Degrading rather than throwing because this
+           condition is reachable from CompressionPhaseMinutes' static initializer; see
+           LightBandHoldsUnboundedRefreshCount for what a throw there costs. */
+        var separates = LightBandHoldsUnboundedRefreshCount(unboundedCount, lightCount);
+
+        var unboundedIndexes = separates
+            ? Enumerable
+                .Range(0, unboundedCount)
+                .Select(LightBandIndexForUnboundedRefresh)
+                .ToArray()
+            : Array.Empty<int>();
+
+        var taken = new HashSet<int>(unboundedIndexes);
+        var boundedIndexes = Enumerable
+            .Range(0, lightCount)
+            .Where(index => !taken.Contains(index))
+            .ToArray();
+
+        var unboundedOrdinal = 0;
+        var boundedOrdinal = 0;
+
+        foreach (var candidate in order)
+        {
+            var heaviest = string.Equals(candidate, HeaviestHourlyRefreshView, StringComparison.Ordinal);
+            var unbounded = separates
+                && !heaviest
+                && UnboundedCardinalityRefreshViews.Contains(candidate);
+
+            if (string.Equals(candidate, view, StringComparison.Ordinal))
+            {
+                if (heaviest)
+                {
+                    return HeaviestRefreshStartMinute;
+                }
+
+                var index = unbounded
+                    ? unboundedIndexes[unboundedOrdinal]
+                    : boundedIndexes[boundedOrdinal];
+
+                return index * LightRefreshStepMinutes;
+            }
+
+            if (unbounded)
+            {
+                unboundedOrdinal++;
+            }
+            else if (!heaviest)
+            {
+                boundedOrdinal++;
+            }
+        }
+
+        throw new ArgumentOutOfRangeException(
+            nameof(view),
+            view,
+            "not an hourly continuous aggregate — register it in TimescaleSupport.HourlyRefreshPhaseOrder before giving it an hourly refresh policy");
+    }
+
+    /* ─────────────────────── the compression phase grid (#3035) ─────────────────────── */
+
+    /// <summary>
+    /// The hourly refresh the compression grid is placed AGAINST, named because its slot is the one no other
+    /// background work may be scheduled inside.
+    ///
+    /// <para>On the narrowed <see cref="HourlyRefreshStartOffset"/> window it is still by far the largest job
+    /// on the grid — see <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> for the number the grid is
+    /// sized against and for the operating envelope that number defines.</para>
+    ///
+    /// <para><b>The asymmetry the grid's shape rests on, stated as the two relationships it needs rather than
+    /// as a ratio (#3174).</b> Every other hourly refresh's recorded ceiling
+    /// (<see cref="OtherHourlyRefreshObservedCeilingSeconds"/>) fits inside
+    /// <see cref="CompressionPhaseGuardMinutes"/>, and this one's does not. That is why one refresh gets a
+    /// window of its own that no compression minute may enter, while the rest are treated as occupied only
+    /// for the guard band after their start. Both halves are asserted by TimescaleSupportTests, and both fail
+    /// in the direction that matters: a light ceiling past the guard band leaves compression starting inside a
+    /// running refresh, and a heaviest ceiling INSIDE the guard band would mean its window is excluded whole
+    /// for no reason. It used to be stated as a ratio — "more than 4x", "under a quarter of it" — and that was
+    /// the wrong pin twice over: the ratio was never what the geometry consumed, and at 896 s against 226.8 s
+    /// it is 3.95x, so a guard written as <c>Other * 4 &lt; Heaviest</c> was red at every possible step
+    /// while the geometry it was supposed to protect was fine.</para>
+    /// </summary>
+    public const string HeaviestHourlyRefreshView = QueryStoreStatsIntervalHourlyView;
+
+    /// <summary>
+    /// The runtime the compression grid is sized against for <see cref="HeaviestHourlyRefreshView"/>: the
+    /// LARGEST run in the clean narrowed-window population, on the one store that carries this workload.
+    ///
+    /// <para><b>WHICH STATISTIC, OVER WHICH POPULATION — stated at the top because that is the sentence a
+    /// later reader cites, and its absence is what let a narrower slice pass as the whole (#3182).</b> This
+    /// is a MAXIMUM. Its population is the runs of this job's refresh policy that started AFTER the
+    /// narrowing boundary named below, on one store, up to the instant named below. It is not a maximum over
+    /// this job's whole recorded history, not a fleet figure, and not a percentile — the estimator paragraph
+    /// re-takes that choice rather than assuming it. Every figure this comment draws is drawn against THAT
+    /// statistic over THAT population, and a figure taken from a narrower slice of it — one day, one hour —
+    /// is a DIFFERENT statistic even on the occasions when the two agree to the second.</para>
+    ///
+    /// <para><b>THE ESTIMATOR, AND WHAT CLOSES THE POPULATION IT IS TAKEN OVER — decided at #3188 and
+    /// stated WORD FOR WORD on both ceiling constants, because a reader who took one's method and applied
+    /// the other's scope has already published four wrong claims about this pair (#3182).</b>
+    /// ESTIMATOR: the maximum, and it stays the maximum because what a ceiling constant carries is the
+    /// EVIDENCE for a UNIVERSAL over runs — the job finishes inside the width the grid gives it — and not a
+    /// description of a distribution. A percentile below that width is compatible with part of its own
+    /// population sitting ABOVE the width, which is the NEGATION of the claim the grid rests on rather than
+    /// a weaker form of it: the build would then be offering, as its soundness evidence, the very condition
+    /// <see cref="ClassifyRefreshSlotHeadroom"/> reserves an Error for, and that band would report as news
+    /// something this summary had already conceded. CLOSURE: a population is closed when no later run can
+    /// join it, and a read instant does not do that — the READ closes and the series does not. So this value
+    /// is a PREFIX MAXIMUM: the largest run its regime has been RECORDED to make, which is a lower bound on
+    /// that regime's maximum and no bound at all on what the job will do next. That is why one of these two
+    /// values moved three times in one evening with nobody editing it (#3188) — a prefix maximum being
+    /// overtaken is the estimator working rather than the estimator failing — and
+    /// <see cref="ClassifyRefreshCeilingFreshness"/> is what reports the run that overtakes it (#3183).
+    /// What a prefix maximum may NOT do is call its population closed, or read as a bound on what the job
+    /// will do next; RefreshCeilingProvenancePinTests holds this paragraph identical between the two
+    /// constants, so the decision cannot be re-taken on one of them alone.</para>
+    ///
+    /// <para><b>AND THIS CONSTANT IS NOT IN THE FEEDBACK LOOP ITS SIBLING IS, which is the asymmetry the
+    /// shared paragraph above deliberately does not hide (#3188).</b> Nothing the grid does with this value
+    /// changes what this job's runs cost: <see cref="HeaviestRefreshWindowMinutes"/> is the remainder of the
+    /// other three bands, and this constant appears in no expression that places a job. So its role is
+    /// assertion SUBJECT — the grid is checked against it — while
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> is arithmetic INPUT to the adjacency its own
+    /// population is measured under, and that constant's summary states what follows from it. One ESTIMATOR
+    /// covers both, because a reader cross-applying their scopes is the documented failure mode; one ROLE
+    /// does not, so the direction each fails in is stated on each rather than assumed to be shared.</para>
+    ///
+    /// <para><b>WHAT THEY DO SHARE IS THE PROVENANCE, and the role difference is not a difference in how
+    /// either value was arrived at (#3188).</b> This one is the duration of ONE run on ONE night, and the
+    /// WHAT REPLACES IT IS A TREND paragraph below is the demonstration rather than a caveat beside it:
+    /// the per-closed-day maximum climbs monotonically across the span, so WHICH run this constant is
+    /// depends on the night the census was read and on nothing else about the workload. Its sibling's
+    /// value has the same shape for the same reason. So "a prefix maximum cannot size a fixed budget" and
+    /// "a prefix maximum cannot evidence a universal over runs" are ONE finding in two roles, which is
+    /// why the estimator paragraph is shared and this one is not.</para>
+    ///
+    /// <para><b>AND IT IS NOT THE SAME POPULATION AS ITS SIBLING'S, which has to be said here because the
+    /// two constants read as a matched pair and are not one (#3182).</b>
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> is scoped to the runs after the narrowing
+    /// boundary and grows with every hour its policies run; the LIVE ENVELOPE paragraph below is scoped to
+    /// ONE CLOSED DAY inside that span. So a maximum quoted from one of these constants is not comparable
+    /// with a maximum quoted from the other, and a figure swept over a wider span than either — the whole
+    /// of a store's job history, say — is comparable with neither, because the boundary exists precisely
+    /// because runs before it did structurally more work on an unnarrowed
+    /// <see cref="HourlyRefreshStartOffset"/>. <b>That comparison has been made and published as a defect
+    /// that was not one</b>, which is what this paragraph exists to stop: an all-span maximum measured
+    /// against a boundary-scoped constant reads as a constant understated by a factor when it is a
+    /// population mismatch. Whichever of the two spans a later reader wants, they have to take it from the
+    /// constant they are reading and not from its neighbour.</para>
+    ///
+    /// <para><b>A PREFIX MAXIMUM is a LOWER BOUND on what the job does, and since #3182
+    /// the product REPORTS when a live run falsifies it.</b> That is not a restatement of the slot watch and
+    /// the two are not interchangeable: <see cref="ClassifyRefreshSlotHeadroom"/> asks whether a run fits
+    /// the window the grid gives it and its remedy is re-deriving the grid, while
+    /// <see cref="ClassifyRefreshCeilingFreshness"/> asks whether THIS NUMBER is still a maximum and its
+    /// remedy is re-deriving this number. A run can be above this constant and comfortably inside the slot,
+    /// which is exactly the state that carried the defect: the recorded ceiling was overtaken from inside
+    /// the routine band, where the slot watch logs at Debug, so nothing anywhere said the constant had gone
+    /// stale. <see cref="LogRefreshCeilingStaleness"/> is called beside that watch rather than inside its
+    /// band switch, so the finding is reachable from the routine band too.</para>
+    ///
+    /// <para><b>THE DERIVATION, recorded as a method and not only as a value, because a value cannot be
+    /// re-derived by the next reader and a method can (#3101).</b> POPULATION: runs of this job's refresh
+    /// policy under the narrowed <see cref="HourlyRefreshStartOffset"/> window, each read from that store's
+    /// per-run job history with an explicit <c>succeeded</c> column that said <c>t</c>. EXCLUSION RULE:
+    /// every run that started at or before the narrowing boundary of <c>13:44:23</c> is out, whatever its
+    /// duration — membership is decided by position against the boundary, never by whether a reading looks
+    /// like it belongs. SPAN: the boundary day's remaining hours, plus the days after it. ESTIMATOR: the
+    /// maximum. RefreshCeilingProvenancePinTests holds this constant equal to the maximum of the population
+    /// published below and TimescaleSupportTests holds the grid clear of it, so the value and the method
+    /// cannot drift apart without a red test.</para>
+    ///
+    /// <para><b>THE READ IS A CENSUS, and that is what changed (#3166).</b> Every run of this job since the
+    /// boundary, one row per run, from <c>timescaledb_information.job_history</c> — the read this comment
+    /// used to NAME as the one that would settle the sampling qualifier, now performed.
+    /// <b>ONE STORE'S, and the scoping is a precondition of the READ rather than a caveat about the
+    /// workload (#3175).</b> That view only records executions where
+    /// <c>timescaledb.enable_job_execution_logging</c> is ON and it defaults to OFF. When this census was
+    /// read the GUC was set only by the v1 <c>postgresql.conf</c> block, whose marker
+    /// <c>EnsureConfAppended</c> finds already present on any pre-existing cluster — so a cluster predating
+    /// the block could not be healed into it. Measured then, on two stores running the same binary: the
+    /// older one had the GUC absent, effective <c>off</c>, <c>source = default</c>, and <b>1</b>
+    /// <c>job_history</c> row for <b>110</b> jobs; the newer had <b>39020</b> rows. <b>A maximum over that
+    /// view on such a store returns zero rows and reads as "no run exceeded the line".</b> Everything below
+    /// is therefore the census of ONE store — the one that carries this workload and did have the GUC — and
+    /// is not a fleet reading. <b>#3175/#3177 has since given the GUC its own marker, so existing stores
+    /// heal; that does not widen this population, because the read predates the heal.</b> A later census
+    /// could be broader, and would have to say so rather than inherit this one's scope. No SHIPPED read
+    /// touches <c>job_history</c> (every product surface uses <c>job_stats</c>,
+    /// deliberately — see <see cref="CompressionActivitySql"/>), so the gap is in what an investigation can
+    /// ask, not in what the product reports. Read at <c>2026-09-08 01:37Z</c>, so the
+    /// window is one that has ENDED and stays true rather than a scope read against a clock a doc comment
+    /// does not have. Each side of the boundary, since a bound is only as good as what it excludes: <b>304
+    /// runs</b> at or before it, median <b>1081.7 s</b>, maximum <b>13300.7 s</b>; <b>57 runs</b> after it,
+    /// median <b>418.3 s</b>, maximum <b>896.1 s</b>. Not one post-boundary run failed or was left without a
+    /// finish time, so the <c>succeeded</c> filter removes nothing from the span and the census is the whole
+    /// of it rather than a status-selected part.</para>
+    ///
+    /// <para><b>THE POPULATION ITSELF, published so the estimator can be recomputed rather than taken on
+    /// trust.</b> The boundary day's tail, every run that day after the boundary: <c>194, 222, 225, 335,
+    /// 594, 465, 359, 293, 355</c> seconds. The days after it: <c>347, 342, 348, 286, 368, 362, 320, 252,
+    /// 219, 225, 299, 376, 418, 546, 515, 473, 530, 523, 676, 778, 666, 705, 702, 599, 534, 479, 387, 373,
+    /// 391, 413, 356, 336, 395, 418, 386, 460, 591, 722, 570, 812, 641, 739, 830, 871, 786, 896, 815,
+    /// 681</c> seconds. Together <b>57 runs</b> spanning <b>194 s to 896 s</b>, totalling <b>27799 s</b>,
+    /// median <b>418 s</b> — and <b>7</b> of them at or past <see cref="RefreshSlotWarningSeconds"/>, where
+    /// the sixteen-run sample this population replaces had none.</para>
+    ///
+    /// <para><b>A TOTAL rather than a mean, and the reason is that a mean of this population is not
+    /// exactly stateable.</b> 27799 s over 57 runs is 487.7017… s, so any one-decimal figure for it would be
+    /// a rounded claim wearing an exact one's clothes — the same defect the occupancy figure below was
+    /// restated to avoid. The total is exact, it is checked against the published list, and it makes every
+    /// individual reading load-bearing in the same way the mean did: a single digit moved anywhere in the
+    /// list changes it.</para>
+    ///
+    /// <para><b>MAXIMUM, NOT A PERCENTILE PLUS MARGIN — decided rather than defaulted, and the trade stated
+    /// because the two answers diverge as the population grows.</b> What this constant sizes is a SCHEDULING
+    /// exclusion, and the cost of undersizing it is one lock convoy (#3012's measured harm) that no later
+    /// run amortises. A percentile is a statement about an ACCEPTED RATE OF EXCEEDANCE, and the rate this
+    /// bound may accept over the record it is derived from is zero — so the estimator is the maximum. No
+    /// margin is added on top either: the clearance is <see cref="RefreshPhaseSlotSeconds"/> minus this
+    /// value, stated where it is used, so a reader sees a bound and its margin as two numbers instead of
+    /// one padded one. The ground #3188 added — that a percentile would make this constant assert the
+    /// NEGATION of what the grid rests on rather than a weaker version of it — is stated once, in the
+    /// shared estimator paragraph above, rather than a second time here.</para>
+    ///
+    /// <para><b>THE SAMPLE-SIZE HALF OF THAT ARGUMENT HAS EXPIRED, which is exactly what it was written to
+    /// do (#3101, #3166).</b> At sixteen readings the 95th percentile WAS the maximum by nearest rank, so a
+    /// percentile bought no headroom and the two answers agreed. They no longer do: by nearest rank over
+    /// <b>57 readings</b> the 95th percentile is <b>830 s</b> and the 90th is <b>786 s</b>, <b>66 s</b> and
+    /// <b>110 s</b> below the maximum. So the decision is RE-TAKEN rather than inherited, and it comes out
+    /// the same way on the half that never depended on the sample size: one lock convoy is not amortised by
+    /// the runs that did fit, so a bound on a scheduling exclusion may accept no exceedance over its own
+    /// record, and a 95th percentile is a promise to be wrong three times in every sixty runs. What is gone
+    /// with the sample-size half is its EXPIRY: a reason that does not reference the population's size has
+    /// nothing left to expire, so this paragraph now pins both percentiles and both gaps as readings that
+    /// TRACK the population instead of as a coincidence that ends.</para>
+    ///
+    /// <para><b>What would change that answer, written down so it is not re-reasoned from scratch — and
+    /// both of the things it named have now happened.</b> The two triggers recorded were a population large
+    /// enough for a high percentile to sit meaningfully below the maximum, and this maximum ceasing to be a
+    /// lower bound on the truth. The first fired at 57 readings and the estimator paragraph above re-takes
+    /// the decision it forced. The second fired too, and it was a property of the READ rather than of the
+    /// estimator: the sixteen-run record mixed a census of the boundary day's tail with a SAMPLE of the days
+    /// after it, because the sweep that read it and the refresh that produced it tick on independent anchors
+    /// (see <see cref="HeaviestRefreshRuntimeSql"/>), so that figure bounded the runs which happened to be
+    /// OBSERVED. The census read named as the fix has been done and its result is this constant, so the
+    /// qualifier is retired rather than restated.</para>
+    ///
+    /// <para><b>WHAT REPLACES IT IS A TREND, and that is a different kind of limitation from a sampling
+    /// one.</b> Per closed day, the maximum of this job's runs went <b>594 s</b> over the boundary day's
+    /// nine remaining runs, <b>778 s</b> over the twenty-two runs of the day after, and <b>896 s</b> over
+    /// the twenty-four runs of the day after that. A census removes the "as observed" caveat and puts
+    /// nothing in its place: the population is closed at a stated instant and it grows, so this maximum is
+    /// the largest run the job has been RECORDED to make and not a ceiling on what it will make next. What
+    /// that means for the grid is stated below and is deliberately not decided here — the value is a
+    /// measurement, and the slot it has to fit inside is a scheduling choice.</para>
+    ///
+    /// <para><b>THE RUN THE EXCLUSION RULE REMOVES, recorded because a figure that looks like a ceiling and
+    /// is not one is how the wrong number gets cited.</b> One run, <c>13:30:00</c> to <c>13:44:24</c> on the
+    /// boundary day, 864 s, excluded for starting before the boundary. It is still <b>3.8x</b> faster than
+    /// the fastest run the 3-day window ever produced (3,301 s, of a 3,301-6,330 s band), so it remains no
+    /// sample of the pre-narrowing regime — but the other half of that argument is GONE. At <b>0.96x</b> of
+    /// the largest reading in the population above it now sits INSIDE the post-boundary range instead of
+    /// 1.45x past it, and an ordinary member of a distribution cannot be disqualified for belonging to
+    /// neither. Which is why the rule is POSITIONAL and always was: this run is out because it STARTED
+    /// before the boundary, and nothing about its duration does any of that work. The duration-based
+    /// disqualification the sixteen-run record leaned on was an artefact of a population whose maximum was
+    /// 302 s lower, and recording that it expired is the whole point of stating a rule rather than a
+    /// verdict. Why it is that fast is NOT established — the plausible candidate is
+    /// that the 6,330 s run before it had already cleared most of the backlog — and it is recorded as
+    /// unexplained precisely so the low figure is not read as evidence that the narrowing had partly taken
+    /// effect.</para>
+    ///
+    /// <para><b>ONE READING IS LEFT OPEN, and the derivation above does not rest on it: whether the boundary
+    /// timestamp is independent of the excluded run's completion.</b> No independent record of the narrowing
+    /// has been found — the boundary day's service log carries no <c>alter_job</c>, no <c>start_offset</c>,
+    /// no <c>StartOffset</c>, no <c>refresh policy</c> and no <c>HourlyRefreshStartOffset</c> line, on a
+    /// filter proved live by a positive control against the same file, so that is a real negative rather
+    /// than a dead filter. The boundary therefore cannot have come from a service-log ALTER, which leaves
+    /// the circular possibility live: it may have been read off the job history, plausibly off the excluded
+    /// run's own completion a fraction of a second later, in which case the boundary and that run's
+    /// exclusion are ONE OBSERVATION and cannot corroborate each other. That is NOT asserted as settled in
+    /// either direction. What would settle it is a record of the ALTER independent of the job history, and
+    /// none has been found — and nothing above needs one, because the exclusion rule is positional. It used
+    /// to say "and the excluded run is disqualified by its duration alone", which was the belt to the
+    /// boundary's braces; that belt is gone with the census, since 864 s is now an ordinary member of the
+    /// post-boundary range. The circularity is therefore no better corroborated than it was and no worse:
+    /// a positional rule needs no second reason, which is why it was chosen over one.</para>
+    ///
+    /// <para><b>And the rule that keeps a whole SERIES out of this constant, stated as a rule because the
+    /// series keeps growing.</b> The hourly self-metrics snapshot
+    /// (<see cref="StoreSelfMetrics.BackgroundJobInsertSql"/>, <c>object_kind = 'background_job'</c>)
+    /// records <c>last_run_duration</c> with NO STATUS COLUMN AT ALL, while
+    /// <see cref="HeaviestRefreshRuntimeSql"/> and #2136's <see cref="JobCadenceReadSql"/> both filter
+    /// <c>last_run_status = 'Success'</c>. An unfiltered series can carry an aborted run's duration, so NO
+    /// reading from it may set this constant — a statement about the SOURCE, deliberately not about any
+    /// particular reading, because that series gains one every hour this job runs and an enumeration of it
+    /// would be stale within the hour. The complete set of snapshot readings up to <c>04:20Z</c>
+    /// (342 s, 348 s, 286 s) says the series stayed flat, which is corroboration and nothing more — and
+    /// all three are now IN the census population above. <b>That is worth stating, because the sixteen-run
+    /// record held these three to being DISJOINT from it, and the reversal is not a defect in either
+    /// figure.</b> Disjointness held only while the published population was a SAMPLE of this job; against
+    /// a CENSUS of the same job it cannot hold at all, because a snapshot of a job's last run reports a
+    /// duration the census contains by construction. So the values were never what made these readings
+    /// inadmissible and a test on them was measuring the sample's incompleteness: the rule is about which
+    /// SOURCE may set this constant, and that is checked against the shipped SQL of all three reads. Note
+    /// the scope has to CLOSE the population, not merely date it: "up to 04:20Z" is a window that has ended
+    /// and will still be true next year, where "the readings so far" carries a scope and rots anyway,
+    /// because a doc comment has no timestamp of its own to be read relative to. They are kept out of the
+    /// population above for the rule's sake rather than for tidiness.</para>
+    ///
+    /// <para><b>Why the grid is sized against the high figure and not the low.</b> A slot chosen against the
+    /// 194 s low would be correct only at the load it was chosen at, and before the narrowing this job ran
+    /// 3,301-6,330 s against a 1-hour cadence, which is what invalidation looks like.</para>
+    ///
+    /// <para><b>THE OPERATING ENVELOPE, stated because it is a condition and not a property.</b> #3012's
+    /// convoy needed a refresh and a compression policy to want the same relation at the same time. Two things
+    /// make that residual small right now, and BOTH are load-dependent. The refresh window
+    /// (<c>[now - 1 day, now - 1 hour]</c>) and the chunks a compression policy finds eligible
+    /// (<c>range_end &lt;= now - 1 day</c> on <see cref="CompressAfterDays"/>) are disjoint at any single
+    /// instant — but the two <c>now</c>s are not the same instant. A refresh that started D seconds ago is
+    /// still holding its lock while a compression job evaluates eligibility against a <c>now</c> that has moved
+    /// D forward, so the set of chunks that are inside the running refresh's window AND already eligible for
+    /// the compression starting now is exactly <b>D wide</b>. The overlap therefore grows with D, and so does
+    /// the plain window in which a compression tick can queue an <c>AccessExclusiveLock</c> behind a refresh's
+    /// <c>AccessShareLock</c> on the same hypertable — the mechanism #3012 measured, which never needed chunk
+    /// overlap at all.</para>
+    ///
+    /// <para><b>So: the small-residual reading is conditional on how long this job runs, and what
+    /// invalidates it is that runtime approaching <see cref="RefreshPhaseSlotSeconds"/>.</b> At 896 s
+    /// against a 1260-second slot the margin is 364 seconds — the clearance the population above carries, a
+    /// property of that closed record rather than of current load; the heaviest
+    /// slot is excluded WHOLE rather than guarded on the guard band being shorter than the refresh rather
+    /// than on the refresh filling the slot (see <see cref="CompressionPhaseMinutes"/>). A value at or past
+    /// the slot width is asserted as a failure rather than accommodated: past that point the refresh runs
+    /// into its neighbour and the grid needs redesigning, not renumbering.</para>
+    ///
+    /// <para><b>THE LIVE ENVELOPE, which the census has now COLLAPSED onto that clearance rather than
+    /// leaving beside it (#3119, #3166).</b> Over <c>2026-09-07</c> — one closed day, its 24 runs read from
+    /// <c>timescaledb_information.job_history</c> at one row per run — this job's maximum was
+    /// <b>896.1 s</b>. That leaves <b>363.9 s</b> of the slot, <b>28.8%</b> of it, and sits <b>153.9 s</b>
+    /// BELOW <see cref="RefreshSlotWarningSeconds"/>, which <see cref="ClassifyRefreshSlotHeadroom"/> bands
+    /// <see cref="RefreshSlotHeadroom.InsideSlot"/>. #3119 had to state these figures apart from the
+    /// clearance because the constant was the maximum of a SAMPLE and the census exceeded it. They agree to
+    /// the second — and that agreement is a COINCIDENCE ABOUT WHERE ONE RUN LANDED rather than an identity
+    /// of populations (#3182). This day's runs are a SUBSET of the population above, not the whole of it:
+    /// the two figures coincide because the population's largest run falls inside this day, which is a fact
+    /// about that run's position and no evidence that a day is a census. <b>A day is not a population for
+    /// this constant and no sentence here may treat it as one</b>, because that is precisely the substitution
+    /// that lets one day's figure carry a census's authority. What one day is worth is what any single
+    /// reading is worth: it is a lower bound, and the classifier can be run against it. What
+    /// remains is the reading itself: short of the window width, so the grid's stated precondition holds —
+    /// but the residual is D wide and D is that maximum, so nothing here can be described as completing well
+    /// inside its slot. RefreshCeilingProvenancePinTests derives every figure stated against that maximum
+    /// from the grid's own constants and takes the band from the shipped classifier, so a re-derived grid
+    /// moves them all and a reading that started classifying as a warning goes red rather than sitting here
+    /// as prose.</para>
+    ///
+    /// <para><b>THE CONSEQUENCE THIS CONSTANT DID NOT SETTLE, and where it was settled (#3166, #3174).</b>
+    /// Against the 750 s watch line a 15-minute slot produced, a sizing figure of 896 s was ABOVE it, so
+    /// <see cref="ClassifyRefreshSlotHeadroom"/> banded the grid's own sizing figure a warning and six test
+    /// methods went red on exactly that — the checks doing their job rather than literals left behind, and
+    /// <see cref="RefreshSlotWarningSeconds"/>'s own summary had pre-registered it. They were not widened.
+    /// What the arithmetic said: restoring the five-sixths line's lead time above 896 s needs a slot of at
+    /// least <b>1,077 s</b> — the smallest <c>s</c> with <c>s * 5 / 6 &gt; 896</c>, since 1,076 gives exactly
+    /// 896 and <see cref="ClassifyRefreshSlotHeadroom"/> warns at <c>&gt;=</c> — which is 18 whole minutes,
+    /// and 60 does not divide 18. Every step that DOES divide 60 and is wide enough collapses the
+    /// <c>collect.query_stats</c> trio onto one minute and moves
+    /// <see cref="RefreshSlotPercentOfHourlyCadence"/> off the default V57 has already applied, so no step
+    /// change was available at all. #3174 re-derived the grid's SHAPE instead
+    /// (<see cref="LightRefreshStepMinutes"/>): the window the hour can spare is
+    /// <see cref="HeaviestRefreshWindowMinutes"/>, which puts the watch line at 1,050 s and this constant
+    /// 154 s below it.</para>
+    /// </summary>
+    public const int HeaviestHourlyRefreshObservedCeilingSeconds = 896;
+
+    /// <summary>
+    /// The heaviest hourly refresh's window in seconds — the wall
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>'s envelope is stated against, named once so
+    /// the build-time assertion and the runtime watch below cannot disagree about where it is.
+    ///
+    /// <para>Derived from <see cref="HeaviestRefreshWindowMinutes"/> rather than restated: a re-derived grid
+    /// must move every bound that was expressed over it, and a literal 900 sat still while the grid changed
+    /// underneath it. The name is kept because this is still the only "slot" the product has — a width one
+    /// refresh has to finish inside — but it is now the heaviest refresh's own window rather than one tile of
+    /// a uniform grid, which is the whole of #3174's change.</para>
+    /// </summary>
+    public static int RefreshPhaseSlotSeconds => HeaviestRefreshWindowMinutes * 60;
+
+    /// <summary>
+    /// The fraction of a window at which a runtime watch on that window speaks, as a numerator over
+    /// <see cref="WindowWatchLeadDenominator"/> — five sixths, so a watch line sits at 83.3% of whatever
+    /// space the thing being watched has.
+    ///
+    /// <para><b>Named because the grid now has TWO watches over it and one lead-time choice, not two.</b>
+    /// <see cref="RefreshSlotWarningSeconds"/> is this fraction of
+    /// <see cref="RefreshPhaseSlotSeconds"/> and <see cref="CompressionClearanceWatchSeconds"/> is the same
+    /// fraction of a compression minute's clearance. Both are re-derived over this pair rather than each
+    /// carrying its own <c>* 5 / 6</c>: a second literal would let the two lead times drift apart silently,
+    /// and this file's own <see cref="CompressScheduleSpan"/> remark states the rule that forbids it —
+    /// cross-check by DERIVING one side from the other, never by pinning each side to its own constant,
+    /// which forces the edit on whichever side the editor is looking at and forces nothing on the other.
+    /// The value of neither line moves by being expressed this way; the derivation is what changes.</para>
+    ///
+    /// <para><b>Why the same fraction is right for both, rather than a coincidence being institutionalised.</b>
+    /// The argument on <see cref="RefreshSlotWarningSeconds"/> is that the remaining sixth has to be usable
+    /// lead time against a runtime that grows with data volume — and the compression side is watched against
+    /// the same kind of quantity, a daily chunk rewrite whose cost scales with the day's ingest. What differs
+    /// between the two is the WIDTH each is a fraction of, and that is exactly what taking a fraction handles.
+    /// A compression minute at the tail of the band has one light-refresh step of clearance, so a sixth of it
+    /// is 10 s of lead — thin, and stated on
+    /// <see cref="CompressionMinuteClearanceMinutes"/> rather than hidden, because the answer to a thin lead
+    /// time there is a wider band and not a different fraction.</para>
+    /// </summary>
+    public const int WindowWatchLeadNumerator = 5;
+
+    /// <summary>The denominator of <see cref="WindowWatchLeadNumerator"/>'s fraction.</summary>
+    public const int WindowWatchLeadDenominator = 6;
+
+    /// <summary>
+    /// The line at which the heaviest hourly refresh's LIVE runtime is worth a warning — five sixths of
+    /// <see cref="RefreshPhaseSlotSeconds"/>, so 1,050 s against today's 1,260 s window.
+    ///
+    /// <para><b>Why this exists at all, which is the whole of #3044.</b> The assertion on
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> bounds a CONSTANT, and the thing it bounds is
+    /// a RUNTIME that moves with data volume. It fires when someone edits the constant and never when reality
+    /// changes underneath it. The grid's precondition can therefore become false with every test still green.
+    /// This is the same bound applied to the figure the envelope is actually about, on the hourly sweep that
+    /// already reads the job catalog.</para>
+    ///
+    /// <para><b>Five sixths is a lead-time choice, and it is applied to the derived slot rather than written
+    /// down as an answer.</b> Two things had to hold. It must clear the routine band:
+    /// five consecutive live readings during #3044's own review came back 335 s, 594 s, 465 s, 359 s and
+    /// 293 s — 26.6% to 47.1% of the window — so a line at 83.3% leaves the peak of THAT set more than a
+    /// third of the window below it, which is what keeps it off the load those five represent. And it must
+    /// leave usable lead
+    /// time: the remaining sixth is 210 s here, while the walk that carries this job through the hour advances
+    /// by its own runtime each cycle (see the finish-to-start note on
+    /// <see cref="SetCompressionSchedulePhaseSql"/>), so the warning lands while the job still finishes inside
+    /// its slot and the grid's stated precondition is still TRUE.</para>
+    ///
+    /// <para><b>The alternative, and the reason it is rejected — which #3174 had to RE-TAKE rather than
+    /// restate, because the old reason stopped being true.</b> The alternative that tempts here is the slot
+    /// less one <see cref="CompressionPhaseGuardMinutes"/> band, 1020 s, and it now sits ABOVE
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>. It used to sit below it — that was the
+    /// whole of its rejection, since a line under the recorded ceiling warns on the very run the compression
+    /// grid is sized against — and the re-derivation took that argument away by shrinking the guard band from
+    /// half a uniform slot to the light refreshes' own ceiling. Both lines now clear the ceiling and they are
+    /// 30 s apart, so the ordering no longer discriminates and lead time argues mildly FOR the lower one.
+    /// What rejects it instead is COUPLING, a property the old geometry could not have exposed: the guard band
+    /// is a DECLARED width for the TWELVE OTHER refresh policies, so the alternative would make the
+    /// heaviest refresh's watch line move whenever the light class's width was re-declared. While that width
+    /// was <c>ceil(OtherHourlyRefreshObservedCeilingSeconds / 60)</c> the coupling was worse still — the
+    /// line would have moved whenever a light refresh got slower — and #3188's inversion narrows the
+    /// coupling without removing it, which is why this rejection stands rather than being re-taken. Five sixths of <see cref="RefreshPhaseSlotSeconds"/> depends on the window
+    /// this job has to fit inside and on nothing else. Under a uniform grid the guard was
+    /// <c>step / 2</c> and both lines were functions of the same step, which is exactly why the argument had
+    /// to be about ordering back then and can be about coupling now.</para>
+    ///
+    /// <para><b>This line sits ABOVE <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>, and that is
+    /// what makes a crossing mean something.</b> The census re-derivation (#3166) put that constant at
+    /// <b>896 s</b>, which INVERTED the ordering against the 750 s line a 15-minute slot produced — and
+    /// restoring it is one of the two things the re-derived grid is for. Against the window the hour can
+    /// spare, this line is 1,050 s and the ceiling is 154 s below it, so a reading in this band is again past
+    /// the whole of the record the compression grid is sized against: a different signal calling for a
+    /// different response, rather than a restatement of the grid's own sizing. <b>The relationship is what
+    /// is pinned, not the two numbers</b> — a ceiling that rose past this line would put the grid's own
+    /// sizing figure inside the warning band, and TimescaleSupportTests says so by going RED rather than
+    /// leaving a reader to notice. That pin has now fired once and been answered by re-deriving the geometry
+    /// instead of by renumbering the band, which is the only answer that changes anything.</para>
+    /// </summary>
+    public static int RefreshSlotWarningSeconds =>
+        RefreshPhaseSlotSeconds * WindowWatchLeadNumerator / WindowWatchLeadDenominator;
+
+    /// <summary>
+    /// Where one live reading of <see cref="HeaviestHourlyRefreshView"/>'s runtime sits against the slot it
+    /// has to fit inside. <see cref="ClassifyRefreshSlotHeadroom"/> produces it; nothing here reads a clock or
+    /// a catalog, so it pins directly.
+    /// </summary>
+    public enum RefreshSlotHeadroom
+    {
+        /// <summary>Under <see cref="RefreshSlotWarningSeconds"/> — the routine band, and therefore inside
+        /// the slot the refresh has to fit in. Not worth a line above Debug.</summary>
+        InsideSlot,
+
+        /// <summary>At or past <see cref="RefreshSlotWarningSeconds"/> but still inside
+        /// <see cref="RefreshPhaseSlotSeconds"/>: the grid's precondition still holds, and there is still
+        /// time to re-derive it deliberately.</summary>
+        ApproachingSlot,
+
+        /// <summary>At or past <see cref="RefreshPhaseSlotSeconds"/>. The refresh no longer fits inside its
+        /// own slot, so excluding one slot is no longer enough — the compression grid's stated precondition
+        /// is FALSE and #3035 has to be re-derived rather than renumbered.
+        ///
+        /// <para><b>What that precondition IS, and why this band can say FALSE while no ceiling constant can
+        /// say TRUE (#3188).</b> It is a UNIVERSAL over runs — every run of
+        /// <see cref="HeaviestHourlyRefreshView"/> finishes inside the window the grid excludes for it — so
+        /// one run at or past that width is a WITNESS, and a witness settles it. This verdict therefore does
+        /// not depend on which statistic <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> is: that
+        /// constant is a PREFIX MAXIMUM, so it can only ever be EVIDENCE for the universal over the runs it
+        /// was measured on, and it establishes nothing about the next one. The band and the constant state
+        /// one proposition from its two sides, which is what a percentile ceiling would break — it would
+        /// assert at build time the condition this band exists to report. The Error line itself makes
+        /// that point WITHOUT naming the constant, because RefreshCeilingStalenessTests holds the two
+        /// findings' subjects apart so an operator reading one is not sent to the other's repair.</para></summary>
+        SlotExceeded,
+    }
+
+    /// <summary>
+    /// Classifies one observed runtime of <see cref="HeaviestHourlyRefreshView"/> against its slot.
+    ///
+    /// <para><b>Both boundaries are inclusive, and that is the point of the function rather than an
+    /// implementation detail.</b> The build-time assertion is
+    /// <c>HeaviestHourlyRefreshObservedCeilingSeconds &lt; RefreshPhaseSlotSeconds</c>, so a value AT the
+    /// slot width already fails it. <see cref="RefreshSlotHeadroom.SlotExceeded"/> therefore starts at
+    /// <c>&gt;=</c> the same width: the runtime watch and the constant's assertion agree on where the wall is
+    /// by construction, which is the property a second hand-written comparison could not offer.</para>
+    ///
+    /// <para>Negative and NaN readings classify as <see cref="RefreshSlotHeadroom.InsideSlot"/> rather than
+    /// throwing: this feeds a log line on an observability sweep, and a catalog that hands back something
+    /// impossible must cost the line, never the sweep.</para>
+    /// </summary>
+    public static RefreshSlotHeadroom ClassifyRefreshSlotHeadroom(double observedSeconds)
+    {
+        if (observedSeconds >= RefreshPhaseSlotSeconds)
+        {
+            return RefreshSlotHeadroom.SlotExceeded;
+        }
+
+        return observedSeconds >= RefreshSlotWarningSeconds
+            ? RefreshSlotHeadroom.ApproachingSlot
+            : RefreshSlotHeadroom.InsideSlot;
+    }
+
+    /// <summary>
+    /// Whether a live reading has FALSIFIED a recorded ceiling — the #3182 finding, and a different fact
+    /// from <see cref="RefreshSlotHeadroom"/> with a different remedy.
+    ///
+    /// <para><b>Why this is not a fourth slot band.</b> The slot bands answer "does this run fit in the
+    /// window the grid gives it", and their remedy is re-deriving the grid. This answers "is the number the
+    /// grid was DERIVED FROM still the maximum it claims to be", and its remedy is re-deriving that number.
+    /// Both can be true of one reading and neither implies the other: a run past the slot may be under a
+    /// ceiling that was measured on a worse day, and a run that falsifies the ceiling may sit comfortably
+    /// inside the slot. The second case is the one that had no signal at all, which is what #3182 is
+    /// about — a recorded maximum can be overtaken from inside the routine band, where the slot watch logs
+    /// at Debug and says nothing is happening.</para>
+    /// </summary>
+    public enum RefreshCeilingFreshness
+    {
+        /// <summary>The reading is at or under the recorded ceiling, so the constant is still a bound on
+        /// what has been seen.</summary>
+        CeilingHolds,
+
+        /// <summary>The reading is ABOVE the recorded ceiling. The constant is not the maximum of the job's
+        /// behaviour any more — whatever population it was derived from has been overtaken, and the value
+        /// has to be re-derived rather than the grid re-dimensioned.</summary>
+        CeilingFalsified,
+    }
+
+    /// <summary>
+    /// Classifies one observed runtime against a constant that claims to be a MAXIMUM.
+    ///
+    /// <para><b>STRICTLY greater, and that is the opposite inclusivity from
+    /// <see cref="ClassifyRefreshSlotHeadroom"/> — deliberately.</b> The slot bands open at <c>&gt;=</c>
+    /// because a run that took exactly its window was already colliding with its neighbour, so the wall is
+    /// inclusive. A recorded maximum is a different kind of claim: a reading EQUAL to it is the reading it
+    /// was derived from and confirms the constant rather than contradicting it. Only a value above it is
+    /// evidence the constant is wrong, so this boundary has to exclude equality where the other one
+    /// includes it. Getting that backwards would report the grid's own sizing figure as a falsification of
+    /// itself on the hour it was measured.</para>
+    ///
+    /// <para><b>NO SPECIAL CASE for an impossible reading, and its ABSENCE is deliberate.</b> The siblings
+    /// need one because they compare against a WIDTH: a negative reading is under every band boundary and a
+    /// NaN is under none of them, so both have to be steered somewhere. This compares against a ceiling that
+    /// is positive by construction — both constants that feed it are — so a negative reading is not greater
+    /// than it and <c>NaN &gt; x</c> is false, and each of them answers
+    /// <see cref="RefreshCeilingFreshness.CeilingHolds"/> from the one comparison. A guard added here would
+    /// be unreachable by any value the product can produce, and an unreachable guard is not caution: it is a
+    /// line no test can distinguish from its own absence, so it reads as protection and certifies nothing.
+    /// Where a non-finite reading does real damage is the rate limiter's mark —
+    /// <see cref="RefreshCeilingStalenessWatch.ShouldReport"/> holds that, and holds it where a mutation can
+    /// reach it.</para>
+    /// </summary>
+    public static RefreshCeilingFreshness ClassifyRefreshCeilingFreshness(
+        double observedSeconds, double recordedCeilingSeconds) =>
+        observedSeconds > recordedCeilingSeconds
+            ? RefreshCeilingFreshness.CeilingFalsified
+            : RefreshCeilingFreshness.CeilingHolds;
+
+    /// <summary>
+    /// The name <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> is reported under by
+    /// <see cref="LogRefreshCeilingStaleness"/>, taken from the member rather than typed — an operator
+    /// reading the line has to be able to grep the constant it names.
+    /// </summary>
+    public const string HeaviestRefreshCeilingConstantName =
+        nameof(HeaviestHourlyRefreshObservedCeilingSeconds);
+
+    /// <summary>
+    /// The name <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> is reported under, for the reason
+    /// <see cref="HeaviestRefreshCeilingConstantName"/> exists.
+    /// </summary>
+    public const string OtherRefreshCeilingConstantName =
+        nameof(OtherHourlyRefreshObservedCeilingSeconds);
+
+    /// <summary>
+    /// Reports that a live reading has overtaken a ceiling constant — the #3182 finding, kept SEPARATE from
+    /// <see cref="LogHeaviestRefreshSlotHeadroom"/> so it is reachable from every slot band.
+    ///
+    /// <para><b>Why a separate call and not a fourth case in that switch.</b> The defect #3182 records is
+    /// that a constant claiming to be a census maximum was overtaken while the runs that overtook it
+    /// classified <see cref="RefreshSlotHeadroom.InsideSlot"/> and logged at Debug. A branch inside the
+    /// band switch can only speak in the band it is written in; this is called beside it, so a falsified
+    /// ceiling is reported in the routine band, the warning band and the breach band alike. The two
+    /// findings are also worded so they cannot be mistaken for each other: this one names the CONSTANT and
+    /// asks for it to be re-derived, the slot line names the GRID and asks for that to be.</para>
+    ///
+    /// <para><b>WARNING, and the level is a decision rather than a default.</b> Debug is where the defect
+    /// lived, so it is not available. Error is reserved by
+    /// <see cref="LogHeaviestRefreshSlotHeadroom"/> for a stated precondition of the shipped grid being
+    /// FALSE, which a falsified ceiling does NOT make: that precondition is a UNIVERSAL over runs and a
+    /// run past the slot is its witness (#3188), while a reading can be past the ceiling and still well
+    /// inside the window. Levelling this Error too
+    /// would collapse the distinction the finding exists to draw. Warning is the level that says "still
+    /// true, still time to act deliberately", which is exactly the state a stale sizing constant is in.</para>
+    ///
+    /// <para><b>RATE-LIMITED BY A HIGH-WATER MARK, because a constant that has drifted trips this often.</b>
+    /// A ceiling overtaken by ordinary load is overtaken on a large share of runs, and an hourly Warning
+    /// that repeats the same fact is how a signal becomes furniture — the discipline
+    /// <see cref="LogCompressionActivity"/> states for Information. So
+    /// <see cref="RefreshCeilingStalenessWatch"/> reports the first falsifying reading for a constant and
+    /// thereafter only one that exceeds the largest already reported. That shape is chosen over a
+    /// once-per-process latch and over a time window for one reason: what this finding asks for is a
+    /// constant re-derived to at least the largest run on record, so a NEW record changes the answer and a
+    /// repeat does not. A time window would re-report the same value on a timer, and a plain latch would
+    /// hide the reading that actually sizes the re-derivation behind the first one that happened to
+    /// arrive.</para>
+    /// </summary>
+    public static void LogRefreshCeilingStaleness(
+        string constantName,
+        double recordedCeilingSeconds,
+        string view,
+        double observedSeconds,
+        RefreshCeilingStalenessWatch watch,
+        ILogger? logger)
+    {
+        if (watch is null)
+        {
+            throw new ArgumentNullException(nameof(watch));
+        }
+
+        if (logger is null)
+        {
+            return;
+        }
+
+        if (ClassifyRefreshCeilingFreshness(observedSeconds, recordedCeilingSeconds)
+            != RefreshCeilingFreshness.CeilingFalsified)
+        {
+            return;
+        }
+
+        if (!watch.ShouldReport(constantName, observedSeconds))
+        {
+            return;
+        }
+
+        logger.LogWarning(
+            "TimescaleDB: {View}'s refresh policy last ran {Seconds:F1}s, which is {Over:F1}s ABOVE {Constant} = {Ceiling:F1}s — a constant recorded as a PREFIX MAXIMUM: the largest run its regime had been recorded to make when it was read, which is no bound on the job, so a later run of the same regime joins that population and can exceed it. This run did, which makes the constant stale rather than wrong (#3188): it has to be RE-DERIVED over a population that includes this run (#3182), which is a different repair from re-deriving the compression phase grid (#3035) and is needed whatever band the slot watch puts this reading in. Its per-run history is timescaledb_information.job_history, one row per run, but only where timescaledb.enable_job_execution_logging is on — it is off by default and a store provisioned before that GUC gained its own conf marker reports nothing there until it heals, so an empty result is that gap and not a quiet hour (#3175/#3177). Reported once per constant and then only for a larger run, because what the re-derivation needs is the LARGEST reading and a repeat of one already reported adds nothing.",
+            view, observedSeconds, observedSeconds - recordedCeilingSeconds, constantName,
+            recordedCeilingSeconds);
+    }
+
+    /// <summary>
+    /// The minutes the light band guarantees between <paramref name="view"/>'s start and the next start of a
+    /// view in its own class — <see cref="UnboundedLightRefreshSeparationMinutes"/> for an
+    /// unbounded-cardinality member and <see cref="LightRefreshStepMinutes"/> for a deployment-bounded one.
+    ///
+    /// <para>Read off the same two terms
+    /// <see cref="RefreshPhaseMinutesFor(IReadOnlyList{string}, string)"/> lays the band out with, so what
+    /// this reports a run against is the room the grid actually gave it rather than a second opinion about
+    /// what it should have had. TimescaleContinuousAggregateTests holds that to the MEASURED gap — the
+    /// smallest distance between two of that class's minutes on the shipped map — so a layout change that
+    /// stopped delivering the gap this names is red rather than reported against a promise nothing
+    /// keeps.</para>
+    ///
+    /// <para><b>It does not consult <see cref="LightBandHoldsUnboundedRefreshCount(int)"/>, and the reason
+    /// is that a branch for the degraded band would be unreachable.</b> That predicate is asserted over the
+    /// shipped registry at build time and its input is recovered from compile-time constants, so a build in
+    /// which the band degrades does not ship — there is no live reading to judge against a consecutive gap
+    /// an unbounded member was given. A branch for it would read as care and certify nothing, which is what
+    /// <see cref="ClassifyRefreshCeilingFreshness"/>'s summary says about the guard it does not have.</para>
+    /// </summary>
+    public static int LightRefreshSpacingMinutesFor(string view) =>
+        IsUnboundedCardinalityRefresh(view)
+            ? UnboundedLightRefreshSeparationMinutes
+            : LightRefreshStepMinutes;
+
+    /// <summary>
+    /// The name <see cref="LogLightRefreshSpacingBreach"/> reports <paramref name="view"/>'s breach under,
+    /// which is the constant the reading falsified — <see cref="LightRefreshStepMinutes"/> for a
+    /// deployment-bounded member and <see cref="UnboundedLightRefreshSeparationMinutes"/> for an unbounded
+    /// one.
+    ///
+    /// <para><b>Two names rather than one, because the two breaches ask for different repairs.</b> A bounded
+    /// member past its step means the CLASSIFICATION is wrong for that view —
+    /// <see cref="IsUnboundedCardinalityRefresh"/> read its group key and predicted a short run. An unbounded
+    /// member past its separation means the SEPARATION is too narrow, which is
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> being stale. Sharing one name would let the
+    /// larger of the two suppress the other through the rate limiter's high-water mark, which is the one
+    /// thing a shared key must not do when the findings are not the same finding.</para>
+    /// </summary>
+    public static string LightRefreshSpacingConstantNameFor(string view) =>
+        IsUnboundedCardinalityRefresh(view)
+            ? nameof(UnboundedLightRefreshSeparationMinutes)
+            : nameof(LightRefreshStepMinutes);
+
+    /// <summary>
+    /// Whether one observed light-refresh runtime is longer than the minutes its class was given on the
+    /// band — the comparison <see cref="LogLightRefreshSpacingBreach"/> reports, separated out so it can be
+    /// asked without a logger.
+    ///
+    /// <para><b>STRICTLY greater, matching <see cref="ClassifyRefreshCeilingFreshness"/>.</b> The spacing is
+    /// a claim that the next start is this many minutes away; a run that took exactly that long finished as
+    /// the next one began and did not overlap it. Only a longer run did.</para>
+    /// </summary>
+    public static bool LightRefreshRunExceedsItsSpacing(string view, double observedSeconds) =>
+        observedSeconds > LightRefreshSpacingMinutesFor(view) * 60;
+
+    /// <summary>
+    /// Reports that a light refresh ran past the minutes its class was given on the band, so it overlapped
+    /// the next start in its class — the #3185 finding, and the LIVE half of a membership rule that is
+    /// otherwise a build-time prediction.
+    ///
+    /// <para><b>Why the classifier needs a live half at all.</b>
+    /// <see cref="IsUnboundedCardinalityRefresh"/> decides how much of the band a view gets by reading its
+    /// GROUP BY, and a view can be slow for a reason its group key does not show — an expensive aggregate
+    /// expression, a source hypertable that grew, a store under pressure. No build-time rule sees that, and
+    /// a membership rule that has stopped predicting is exactly the failure the rule was written to avoid: a
+    /// hand-kept list of heavy views goes stale loudly, on the next registration, while a rule that has
+    /// stopped matching reality goes stale quietly, forever. This is what makes it loud.</para>
+    ///
+    /// <para><b>A different finding from <see cref="LogRefreshCeilingStaleness"/>, and the difference is the
+    /// remedy.</b> That one says a constant recorded as a maximum has been overtaken and asks for the
+    /// constant to be re-derived. This one says the run overlapped a sibling, and asks either for the view
+    /// to be separated — a CLASS question — or for the separation to be widened. They are also not nested:
+    /// a bounded member at 100 s breaches its 60 s step while sitting far under
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/>, so the ceiling watch is silent on precisely
+    /// the case this exists for.</para>
+    ///
+    /// <para><b>WARNING, on <see cref="LogRefreshCeilingStaleness"/>'s argument.</b> Debug is where a
+    /// silently-inapplicable mechanism lives, so it is unavailable. Error is reserved for a stated
+    /// precondition of the grid being false, and an overlap between two light refreshes does not make one
+    /// false — the band's guarantee for the bounded class is distinct STARTS, which holds, and the cost of
+    /// two short runs overlapping is seconds. What is true is that the layout's reason for giving this view
+    /// one minute no longer holds, which is a deliberate-action finding.</para>
+    ///
+    /// <para><b>Rate-limited through <see cref="RefreshCeilingStalenessWatch"/> on the constant the reading
+    /// falsified</b> (<see cref="LightRefreshSpacingConstantNameFor"/>), so the same instance the ceiling
+    /// findings use carries this one: a high-water mark per constant is the shape this needs for the same
+    /// reason — what the repair wants is the LARGEST overrun, and a repeat of one already reported adds
+    /// nothing. One key per class rather than per view, because the repair is a change to the class's
+    /// spacing rule and not to one view's minute.</para>
+    /// </summary>
+    public static void LogLightRefreshSpacingBreach(
+        string view,
+        double observedSeconds,
+        RefreshCeilingStalenessWatch watch,
+        ILogger? logger)
+    {
+        if (watch is null)
+        {
+            throw new ArgumentNullException(nameof(watch));
+        }
+
+        if (logger is null)
+        {
+            return;
+        }
+
+        if (!LightRefreshRunExceedsItsSpacing(view, observedSeconds))
+        {
+            return;
+        }
+
+        var spacingMinutes = LightRefreshSpacingMinutesFor(view);
+        var constantName = LightRefreshSpacingConstantNameFor(view);
+
+        if (!watch.ShouldReport(constantName, observedSeconds))
+        {
+            return;
+        }
+
+        logger.LogWarning(
+            "TimescaleDB: {View}'s refresh policy last ran {Seconds:F1}s against the {Minutes}-minute gap the phase grid gives its cost class ({Constant}), so it overlapped the next refresh in that class for {Over:F1}s. Two refreshes hold mutually compatible AccessShareLocks and cannot convoy, so this is not #3012 — it is CPU and I/O contention, measured at 5.4x the per-output-group cost when two ~265s aggregations were placed two minutes apart (#3185). The repair depends on which constant is named: LightRefreshStepMinutes means TimescaleSupport.IsUnboundedCardinalityRefresh read this view's GROUP BY and predicted a short run, so the CLASSIFICATION is wrong for it; UnboundedLightRefreshSeparationMinutes means the separation itself is too narrow, which is OtherHourlyRefreshObservedCeilingSeconds being stale (#3182). Reported once per class and then only for a larger run, because what the repair needs is the largest overrun.",
+            view, observedSeconds, spacingMinutes, constantName, observedSeconds - (spacingMinutes * 60));
+    }
+
+    /// <summary>
+    /// The longest run recorded for any hourly refresh OTHER than <see cref="HeaviestHourlyRefreshView"/> —
+    /// the measurement <see cref="CompressionPhaseGuardMinutes"/>' declared width is CHECKED AGAINST. #3174
+    /// made it the number that width was DERIVED from; #3188 cut that tie, because a measurement whose own
+    /// population is decided by the width cannot set the width.
+    ///
+    /// <para><b>WHICH STATISTIC, OVER WHICH POPULATION — stated at the top for the reason
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> states it there (#3182).</b> This is a
+    /// MAXIMUM. Its population is the runs of the twelve other hourly views' refresh policies that started
+    /// AFTER the narrowing boundary named below, on one store, up to the instant named below. Not a
+    /// percentile, not a per-view figure, and not a fleet reading: one number covers twelve policies, so a
+    /// live run of ANY of them above it falsifies it. "Recorded" in the line above means recorded in that
+    /// read, and nowhere else — the word carries no claim about runs the read did not see.</para>
+    ///
+    /// <para><b>THE ESTIMATOR, AND WHAT CLOSES THE POPULATION IT IS TAKEN OVER — decided at #3188 and
+    /// stated WORD FOR WORD on both ceiling constants, because a reader who took one's method and applied
+    /// the other's scope has already published four wrong claims about this pair (#3182).</b>
+    /// ESTIMATOR: the maximum, and it stays the maximum because what a ceiling constant carries is the
+    /// EVIDENCE for a UNIVERSAL over runs — the job finishes inside the width the grid gives it — and not a
+    /// description of a distribution. A percentile below that width is compatible with part of its own
+    /// population sitting ABOVE the width, which is the NEGATION of the claim the grid rests on rather than
+    /// a weaker form of it: the build would then be offering, as its soundness evidence, the very condition
+    /// <see cref="ClassifyRefreshSlotHeadroom"/> reserves an Error for, and that band would report as news
+    /// something this summary had already conceded. CLOSURE: a population is closed when no later run can
+    /// join it, and a read instant does not do that — the READ closes and the series does not. So this value
+    /// is a PREFIX MAXIMUM: the largest run its regime has been RECORDED to make, which is a lower bound on
+    /// that regime's maximum and no bound at all on what the job will do next. That is why one of these two
+    /// values moved three times in one evening with nobody editing it (#3188) — a prefix maximum being
+    /// overtaken is the estimator working rather than the estimator failing — and
+    /// <see cref="ClassifyRefreshCeilingFreshness"/> is what reports the run that overtakes it (#3183).
+    /// What a prefix maximum may NOT do is call its population closed, or read as a bound on what the job
+    /// will do next; RefreshCeilingProvenancePinTests holds this paragraph identical between the two
+    /// constants, so the decision cannot be re-taken on one of them alone.</para>
+    ///
+    /// <para><b>THE POPULATION IS DOWNSTREAM OF THE CONSTANT, so no estimator over it is stable and moving
+    /// this value is a SCHEDULING decision rather than a renumbering (#3188).</b>
+    /// <see cref="UnboundedLightRefreshSeparationMinutes"/> IS <see cref="CompressionPhaseGuardMinutes"/>,
+    /// which WAS this constant rounded up to a whole minute — so this constant set the adjacency the twelve
+    /// light refreshes run under, and their runtimes are a measurement OF that adjacency. The loop closed in
+    /// BOTH directions and only one of them was written down. UPWARD is the paragraph on
+    /// <see cref="UnboundedLightRefreshSeparationMinutes"/>: a ceiling read while two of them overlapped
+    /// would size the separation from the defect the separation exists to remove. DOWNWARD is the half that
+    /// was missing, and it is the trap in the favourable arithmetic #3188 opens with — a ceiling read AFTER
+    /// the separation worked is small, a small ceiling gives a two-minute guard, and two minutes is the
+    /// adjacency <see cref="LogLightRefreshSpacingBreach"/> reports at 5.4x the per-output-group cost
+    /// (#3185) and #3186 shipped a layout to remove. So the value that fits the hour most comfortably is the
+    /// one that re-creates the mechanism it was measured under the repair for. What breaks the loop is
+    /// CHOOSING the guard's width and CHECKING this measurement against it, instead of deriving one from the
+    /// other. That is what <see cref="CompressionPhaseGuardMinutes"/> now is, so the loop is cut at the
+    /// width rather than argued about at the measurement; the width's own reason and its upper bound are
+    /// stated there.</para>
+    ///
+    /// <para><b>AND IT IS NOT THE SAME POPULATION AS ITS SIBLING'S (#3182).</b> This one spans the whole of
+    /// the post-boundary record and grows; the live-envelope figures on
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> are scoped to one closed day inside that
+    /// span. The two constants sit next to each other, are derived by the same named read with the same
+    /// positional exclusion rule, and still answer to different spans — so a maximum from one is not
+    /// comparable with a maximum from the other, and neither is comparable with a sweep over a store's
+    /// whole job history, because the boundary is there because runs before it worked an unnarrowed
+    /// <see cref="HourlyRefreshStartOffset"/>. The direction that mismatch fails in is stated on the
+    /// sibling: it makes a boundary-scoped constant read as understated by a factor.</para>
+    ///
+    /// <para><b>And since #3182 the product reports when a live run of one of those twelve falsifies it,
+    /// which it previously could not because nothing read them.</b> The heaviest refresh had
+    /// <see cref="HeaviestRefreshRuntimeSql"/>; these twelve had no live reading attributable to a view
+    /// anywhere in the product, because #2136's <see cref="JobCadenceReadSql"/> keys on
+    /// <c>proc_name || hypertable_name</c> and a refresh policy's <c>hypertable_name</c> is the
+    /// MATERIALIZATION hypertable rather than the view. So a check that looks like it covers these jobs
+    /// cannot attribute what it reads to the constant that bounds them.
+    /// <see cref="OtherHourlyRefreshRuntimesSql"/> is the read that can, and
+    /// <see cref="LogRefreshCeilingStaleness"/> is what it feeds. <b>The direction of the harm is why this
+    /// one matters more than a stale assertion:</b> this constant is arithmetic input, so a light refresh
+    /// past it means <see cref="CompressionPhaseGuardMinutes"/> no longer covers the refresh it exists to
+    /// cover, and a compression policy can start while that refresh still holds
+    /// <c>AccessShareLock</c> — #3012's convoy, by construction rather than by chance.</para>
+    ///
+    /// <para><b>THE DERIVATION, recorded as a method rather than only as a value (#3174).</b> The old figure
+    /// came from the first full staggered cycle — 26 s / 2 s / 864 s / 140 s — a cycle that STRADDLES the
+    /// narrowing boundary, so its readings' regime membership was undetermined in exactly the way the run
+    /// excluded from <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>'s population is. The
+    /// re-derivation is the same read that constant names, pointed at the other twelve policies.
+    /// POPULATION: every run of <c>policy_refresh_continuous_aggregate</c> for the hourly views OTHER than
+    /// <see cref="HeaviestHourlyRefreshView"/>, read from <c>timescaledb_information.job_history</c> at one
+    /// row per run on the one store that carries this workload, at <c>2026-09-08 14:57Z</c>. EXCLUSION RULE:
+    /// the same positional one — every run starting at or before the narrowing boundary of <c>13:44:23</c> is
+    /// out, whatever its duration. ESTIMATOR: the maximum, for the same reason it is the maximum there — what
+    /// this sizes is a scheduling exclusion, and the exceedance rate it may accept over its own record is
+    /// zero.</para>
+    ///
+    /// <para><b>THE CENSUS.</b> Post-boundary, the maximum is <b>226.8</b> s over <b>874</b> runs of
+    /// <b>12</b> views, with 95th percentile <b>42.2</b> s and median <b>0.8</b> s. Zero rows are removed by
+    /// the succeeded/finish filter (<b>874</b> of <b>874</b>), so this is the whole of the span rather than a
+    /// status-selected part of it. <b>ONE STORE'S, on the same precondition
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> states (#3175):</b> the read only sees
+    /// executions where <c>timescaledb.enable_job_execution_logging</c> is ON, that GUC could not be healed
+    /// onto a cluster predating the conf block that set it until #3175/#3177 gave it a marker of its own,
+    /// and a maximum over the view on an unhealed store returns zero rows and reads as "nothing exceeded
+    /// the line". This store had it at the read — 874 rows for twelve policies over three days is the
+    /// positive control that says so — and no claim is made about any other.
+    /// The full 874-run list is NOT republished: unlike the heaviest refresh's 57, a list that long stops
+    /// being re-derivable by reading and starts being a wall of digits, and what bounds a maximum is its
+    /// tail. So the tail is what the mechanism paragraph below states, and the estimator is recomputable from
+    /// the named read rather than from a transcription of it. The distance between the maximum and the 95th
+    /// percentile — 184.6 s over a population where the median run finishes in under a second — is the whole
+    /// reason a percentile is not the estimator here: it would discard exactly the runs this bound exists
+    /// for.</para>
+    ///
+    /// <para><b>THE MIDNIGHT REGIME IS IN, and this constant's own doc is why (#3174).</b> The two largest
+    /// runs are both <see cref="QueryStoreStatsHourlyView"/> starting at <c>00:30</c>: <b>226.8</b> s on
+    /// <c>2026-09-08</c> against <b>160.4</b> s on <c>2026-09-07</c>, <b>41%</b> higher night over night. So
+    /// the figure is a midnight reading, and the obvious move is to exclude the midnight hour as
+    /// unrepresentative. That is the wrong move, and this paragraph used to carry the argument against it:
+    /// <b>NOTHING WAS SIZED FROM IT</b> — the guard was derived from the grid step, and this figure "only
+    /// says how much margin that derivation happens to leave". A readout of a margin has to include the runs
+    /// where the margin was consumed, or it stops being a readout of anything; removing the runs that fired a
+    /// pin is the re-type-a-band-to-pass move one constant over. The mechanism behind those two values is
+    /// #3112's midnight band — the daily chunk-close burst meeting the refresh grid at the shared midnight
+    /// boundary, where at every other hour the compression ticks find nothing eligible and finish in seconds.
+    /// The grid does not change how much work midnight carries, so this figure is the right one for the guard
+    /// to be derived from and the midnight band remains its own question. The third-largest run is
+    /// <b>140.1</b> s, at <c>13:45:00</c> on the boundary day — the same reading the old constant's 140 came
+    /// from, reproduced as an ordinary post-boundary member, which is what says the method is the same one
+    /// rather than a new one that happens to agree.</para>
+    ///
+    /// <para><b>NOTHING IS SIZED FROM IT, and since #3188 that is a property of the grid rather than an
+    /// escape this figure happens to enjoy.</b> <see cref="CompressionPhaseGuardMinutes"/> is a DECLARED
+    /// width, so this constant is CHECKED AGAINST it and no longer sets it. The direction of risk is stated
+    /// rather than left to be discovered: a light-refresh ceiling past
+    /// <c>CompressionPhaseGuardMinutes * 60</c> leaves a compression policy able to start while a light
+    /// refresh still holds <c>AccessShareLock</c>, which is #3012's mechanism, and TimescaleSupportTests is
+    /// written to fail in that direction. Under the old derivation it could not fail in that direction at
+    /// all — a larger reading widened the width instead, and took the minutes out of
+    /// <see cref="HeaviestRefreshWindowMinutes"/> without anything going red.</para>
+    ///
+    /// <para><b>WHICH REGIME THIS VALUE BELONGS TO, and it is not the current one (#3188).</b> The read
+    /// named above is at <c>2026-09-08 14:57Z</c>, and the grid changed at <c>16:30Z</c> that day (#3178)
+    /// and again at <c>23:07Z</c> (#3186) — so this is a maximum over a layout that has since been replaced
+    /// twice, and the three layouts imply three different widths. The value is therefore held rather than
+    /// re-derived, and holding it is now SAFE in a way it was not before: with the width declared, a
+    /// re-derivation moves no job and no band, so it is a data task rather than a scheduling change. What it
+    /// needs is a population for the current layout with its own quantiles and its own midnight paragraph;
+    /// what exists is a maximum of <b>76.635</b> s over <b>29</b> runs of <b>12</b> views, all succeeded,
+    /// from <c>2026-09-08 23:07Z</c> and read at <c>2026-09-09 01:55:41Z</c> — which would leave
+    /// <b>163.365</b> s of the declared width instead of 13.2 s. It is not adopted here because the figures
+    /// every other sentence in this summary is stated against have not been read for that population, and a
+    /// constant moved ahead of the prose that explains it is the drift RefreshCeilingProvenancePinTests
+    /// exists to stop.</para>
+    /// </summary>
+    public const double OtherHourlyRefreshObservedCeilingSeconds = 226.8;
+
+    /// <summary>
+    /// How long after a light refresh starts a compression policy may be scheduled — a DECLARED width of 4
+    /// minutes, checked against a 226.8 s ceiling, and derived from no measurement at all (#3188).
+    ///
+    /// <para><b>WHY IT IS DECLARED, and this is the whole of #3188's repair.</b> This member IS
+    /// <see cref="UnboundedLightRefreshSeparationMinutes"/>, so its width decides the adjacency the twelve
+    /// light refreshes run under — and their runtimes are a measurement OF that adjacency. Deriving the
+    /// width from <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> therefore made the grid's shape a
+    /// function of a measurement the shape itself produced, and it closed in BOTH directions: a reading
+    /// taken while two of them overlapped asks for a WIDER width than the overlap warrants, and a reading
+    /// taken after the separation worked asks for a NARROWER one that re-creates the overlap. Both
+    /// directions were available on one store inside one day. A declared width has no such input, and what
+    /// the measurement does instead is stated two paragraphs down.</para>
+    ///
+    /// <para><b>FOUR, and the reason is what the width BUYS rather than which reading produced it — because
+    /// "this was the maximum we measured" is the defect rather than a justification.</b> UPPER BOUND:
+    /// <see cref="WidestFeasibleCompressionPhaseGuardMinutes"/>, read rather than re-derived — past it the
+    /// heaviest refresh's window no longer clears its own recorded ceiling with the watch line's lead
+    /// intact. COVERAGE: 240 s, which covers every light-refresh population this file admits as a source.
+    /// WHAT IT DECLINES TO COVER: the 265.5 s runs measured under the two-minute adjacency #3186 removed,
+    /// and declining is deliberate —
+    /// <see cref="UnboundedLightRefreshSeparationMinutes"/> states why a ceiling taken from an overlapping
+    /// population would size the separation from the defect the separation exists to remove, and a width
+    /// chosen to cover those runs would do exactly that. THE TRADE, both ways: every minute here is a minute
+    /// off <see cref="HeaviestRefreshWindowMinutes"/> and 50 s off
+    /// <see cref="RefreshSlotWarningSeconds"/>, and every minute here is 60 s more clearance for the light
+    /// class. WHAT IS NOT SETTLED: whether four is the best point on that trade. It is where the grid runs,
+    /// this declaration's job is to stop it moving as a SIDE EFFECT of a measurement, and moving it
+    /// deliberately is a scheduling decision with the upper bound above as its ceiling.</para>
+    ///
+    /// <para><b>THE DIRECTION OF FAILURE INVERTED WITH THE DEPENDENCY, which is what makes this a stronger
+    /// check and not a looser one.</b> Under the derivation ANY measurement was satisfiable: a larger
+    /// reading silently widened this band and took minutes from the heaviest refresh's window, with no
+    /// upper bound of its own — which is why #3183 had to add
+    /// <see cref="WidestFeasibleOtherRefreshCeilingSeconds"/> as the bound the derivation was missing. Under
+    /// the declaration a reading past 240 s fails the coverage requirement
+    /// (<c>CompressionPhaseGuardMinutes * 60 &gt;= OtherHourlyRefreshObservedCeilingSeconds</c>, held by
+    /// TimescaleSupportTests) and is reported live by <see cref="LogRefreshCeilingStaleness"/>. The old form
+    /// could be satisfied by a width that had stopped covering anything; this one goes red.</para>
+    ///
+    /// <para><b>The guard is one-sided, and that asymmetry is the mechanism rather than a simplification.</b>
+    /// #3012's convoy needs compression's <c>AccessExclusiveLock</c> request to ARRIVE while a refresh already
+    /// holds <c>AccessShareLock</c> on the same hypertable: a QUEUED exclusive blocks every subsequent shared
+    /// request, so collector writes pile up behind a lock nobody holds. The reverse order does not compose
+    /// that way — a compression run already holding its lock blocks collectors for its own duration whether or
+    /// not a refresh starts, which is the ordinary cost of compressing and not something a schedule can move.
+    /// So compression is kept clear of the minutes AFTER a refresh start and needs no clearance before the
+    /// next one. That one-sidedness is also what decides which band opens the hour — see
+    /// <see cref="HeaviestRefreshStartMinute"/>.</para>
+    ///
+    /// <para><b>What the width has been, in order, because each form was rejected for a different reason
+    /// (#3174, #3188).</b> It was <c>step / 2</c> — 7 minutes of a uniform slot, asserted as 3x the light
+    /// refreshes' then-recorded ceiling, which was a check on the CHARACTERISATION rather than on anything
+    /// the grid rested on. #3174 made it the ceiling rounded up, which tied it to the measurement it has to
+    /// cover and left the rounding as the whole margin — thin, and stated rather than dressed up. #3188
+    /// removed the tie: a measurement whose own population is decided by this width cannot set it. <b>The
+    /// coverage margin is the whole of what the width buys, and it is 13.2 s</b> against the ceiling
+    /// recorded today — as thin as the derivation's rounding left it, because the recorded value has not
+    /// moved. What the declaration changes is that the value CAN now move without moving a job, and the
+    /// margin the current layout's measured maximum would leave is stated on
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> along with why it is not adopted yet. Either
+    /// way the margin can only be consumed by the light refreshes actually getting slower, which goes red at
+    /// the coverage requirement.</para>
+    ///
+    /// <para><b>It can never exceed the gap it sits in</b>, because
+    /// <see cref="HeaviestRefreshStartMinute"/> and <see cref="CompressionPhaseBandMinutes"/> are both
+    /// expressed over it: widening the guard moves the heaviest refresh later and narrows its window rather
+    /// than overrunning a neighbour. TimescaleContinuousAggregateTests holds the three bands to tiling the
+    /// hour exactly, so a guard wide enough to leave no window at all is red rather than silent.</para>
+    ///
+    /// <para><b>It answers a SECOND question, and the same number answers both (#3185).</b>
+    /// <see cref="UnboundedLightRefreshSeparationMinutes"/> IS this member: "how long after a light refresh
+    /// starts is it safe to start something else" is the question the guard asks about a compression policy
+    /// and the light band asks about the next long-running refresh. Two derivations from one constant would
+    /// be two places to update; one declaration cannot disagree with itself. <b>And this is the second
+    /// reason the width is declared rather than derived (#3188):</b> while it was
+    /// <c>ceil(OtherHourlyRefreshObservedCeilingSeconds / 60)</c>, re-deriving that constant moved the light
+    /// band's internal spacing as well as this band's width — so a measurement of the light class silently
+    /// re-laid out the light class. Now re-deriving it moves neither, and whether the spacing should change
+    /// is asked here, once, as a scheduling question.</para>
+    /// </summary>
+    public const int CompressionPhaseGuardMinutes = 4;
+
+    /// <summary>
+    /// The minutes <see cref="CompressionPhaseGuardMinutes"/> and
+    /// <see cref="HeaviestRefreshWindowMinutes"/> SHARE — what the hour has left once the light band and the
+    /// compression band are at the widths their own measurements ask for.
+    ///
+    /// <para>Named because it is the budget the two of them compete for, and because it is the term that
+    /// makes that competition arithmetic rather than prose: every minute the guard takes is a minute the
+    /// heaviest refresh's window loses, and this is the total there is to divide. Derived from the same
+    /// expressions <see cref="HeaviestRefreshStartMinute"/> and
+    /// <see cref="HeaviestRefreshWindowMinutes"/> are built from, so a re-derived grid moves it rather than
+    /// leaving it behind as a second opinion.</para>
+    /// </summary>
+    public static int GuardAndWindowSharedMinutes =>
+        MinutesInHourlyCadence
+        - LightBandSpanMinutes
+        - CompressionPhaseBandMinutes;
+
+    /// <summary>
+    /// The watch line a guard of <paramref name="guardMinutes"/> would leave — the same chain
+    /// <see cref="RefreshSlotWarningSeconds"/> is, evaluated at a hypothetical guard instead of the shipped
+    /// one.
+    ///
+    /// <para><b>It exists so the feasibility question can be ASKED, which the shipped chain cannot do.</b>
+    /// <see cref="HeaviestRefreshWindowMinutes"/> reads <see cref="CompressionPhaseGuardMinutes"/>, so the
+    /// live chain answers for exactly one guard and there is no way to find out what a WIDER guard would
+    /// cost without re-spelling the arithmetic. This is that arithmetic in one place, and
+    /// TimescaleSupportTests requires it to agree with the shipped chain at the live guard — so it cannot
+    /// drift into being a second, kinder model of the grid.</para>
+    ///
+    /// <para>Integer division throughout, matching <see cref="RefreshSlotWarningSeconds"/>: a line computed
+    /// with rounding would sit above the shipped one on some widths and the two would disagree about
+    /// feasibility at exactly the boundary the question is about.</para>
+    ///
+    /// <para>Delegates to <see cref="RefreshSlotWarningSecondsForLightBandAndGuard"/> at the shipped band
+    /// span rather than carrying its own copy of the arithmetic, so the two feasibility questions the hour
+    /// admits — a wider guard and a wider light band — are asked of ONE expression.</para>
+    /// </summary>
+    public static int RefreshSlotWarningSecondsForGuardMinutes(int guardMinutes) =>
+        RefreshSlotWarningSecondsForLightBandAndGuard(LightBandSpanMinutes, guardMinutes);
+
+    /// <summary>
+    /// The watch line a light band spanning <paramref name="lightBandSpanMinutes"/> and a guard of
+    /// <paramref name="guardMinutes"/> would leave — the shipped chain with BOTH of the terms that compete
+    /// for the hour opened up (#3185).
+    ///
+    /// <para><b>Why the band span had to become a parameter too.</b> #3182 opened the guard because the
+    /// guard's derivation had no upper bound and the hour does. The light band's width has exactly the same
+    /// shape: it is <see cref="LightHourlyRefreshCount"/> minus one times
+    /// <see cref="LightRefreshStepMinutes"/>, neither of which consults what the hour has left, and the
+    /// obvious repair for #3185 was to widen the step. Nothing could ask what that would cost without
+    /// re-spelling the arithmetic, and re-spelled arithmetic is how a second and kinder model of the grid
+    /// gets built. <see cref="WidestFeasibleLightRefreshStepMinutes"/> asks it here instead.</para>
+    ///
+    /// <para>The hour is <see cref="MinutesInHourlyCadence"/> and
+    /// <see cref="CompressionPhaseBandMinutes"/> comes from the catalog, so those two stay closed: what is
+    /// open is the two terms a re-derivation can actually move.</para>
+    /// </summary>
+    public static int RefreshSlotWarningSecondsForLightBandAndGuard(
+        int lightBandSpanMinutes, int guardMinutes) =>
+        (MinutesInHourlyCadence - lightBandSpanMinutes - CompressionPhaseBandMinutes - guardMinutes) * 60
+        * WindowWatchLeadNumerator / WindowWatchLeadDenominator;
+
+    /// <summary>
+    /// The WIDEST <see cref="CompressionPhaseGuardMinutes"/> the hour can carry while the grid's own stated
+    /// precondition still holds at <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> — negative when
+    /// no guard at all leaves a wide enough window.
+    ///
+    /// <para><b>Why this is stated rather than discovered (#3182), and what it became at #3188.</b> The
+    /// guard USED TO BE <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> rounded up to a whole minute,
+    /// and that ceiling is a MAXIMUM over a series with a long tail — so the derivation had no upper bound of
+    /// its own, while the hour does. Nothing in it noticed when the two conflicted: the conflict surfaced as
+    /// a grid already widened past what the hour contains, and then as an argument about which number to
+    /// bend. This term is the bound that derivation was missing. It still binds now the width is DECLARED,
+    /// and it binds a different act: it is the ceiling on what a re-declaration may choose, rather than a
+    /// backstop on what a measurement may silently impose. And
+    /// <see cref="WidestFeasibleOtherRefreshCeilingSeconds"/> converts it back into the units the constant is
+    /// measured in, so a re-derivation that does not fit is red AT THE CONSTANT rather than after the grid
+    /// has been re-dimensioned around it.</para>
+    ///
+    /// <para><b>Searched downward rather than solved, so it is the SHIPPED comparison that decides.</b> The
+    /// precondition is <c>HeaviestHourlyRefreshObservedCeilingSeconds &lt; RefreshSlotWarningSeconds</c>, and
+    /// that line is an integer-divided fraction of an integer window. A closed form would have to reproduce
+    /// two truncations, and a closed form that reproduced them slightly differently would answer feasible
+    /// where the build answers infeasible — the one disagreement this term must not be capable of. The walk
+    /// evaluates the same expression the grid does, at most
+    /// <see cref="GuardAndWindowSharedMinutes"/> times, once.</para>
+    ///
+    /// <para><b>Negative is a real answer, not an error code.</b> A heaviest ceiling large enough that even a
+    /// zero-minute guard leaves too narrow a window is a grid the hour cannot contain at ANY guard, which is
+    /// a different fact from "the guard is too wide" and calls for a different repair — a cheaper refresh or
+    /// a longer cadence for that one aggregate, neither of which is a constant to re-derive. Returning a
+    /// negative says so; throwing would make the caller decide what it meant.</para>
+    /// </summary>
+    public static int WidestFeasibleCompressionPhaseGuardMinutes
+    {
+        get
+        {
+            for (var guard = GuardAndWindowSharedMinutes; guard >= 0; guard--)
+            {
+                if (HeaviestHourlyRefreshObservedCeilingSeconds
+                    < RefreshSlotWarningSecondsForGuardMinutes(guard))
+                {
+                    return guard;
+                }
+            }
+
+            return -1;
+        }
+    }
+
+    /// <summary>
+    /// The widest <see cref="CompressionPhaseGuardMinutes"/> the hour can carry, expressed in the unit
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> is measured in —
+    /// <see cref="WidestFeasibleCompressionPhaseGuardMinutes"/> back in seconds.
+    ///
+    /// <para><b>What it bounds changed at #3188 while the arithmetic did not.</b> While the width was that
+    /// constant rounded up, this was the largest value the CONSTANT could take before the grid stopped
+    /// fitting the hour — a backstop on what a measurement could silently impose. The width is declared now,
+    /// so a measurement imposes nothing and this is the ceiling on what a RE-DECLARATION may choose. Stated
+    /// in seconds either way, because the question a reader arrives with is still "the light refreshes are
+    /// taking N seconds, can the hour give them that", and the answer is a comparison against this
+    /// number.</para>
+    ///
+    /// <para>This is the number a re-derivation of that constant has to be read against. A light-refresh
+    /// census whose maximum lands above it is not a constant to update: it is a statement that the guard the
+    /// measurement asks for and the window the heaviest refresh needs cannot both be had, and that is a
+    /// SCHEDULING decision rather than a renumbering — the same distinction
+    /// <see cref="RefreshSlotHeadroom.SlotExceeded"/> draws for the other constant.</para>
+    ///
+    /// <para>Zero when no guard is feasible at all, because a negative ceiling is not a value the constant
+    /// can take and a bound expressed as one would read as a wider allowance than it is.</para>
+    /// </summary>
+    public static int WidestFeasibleOtherRefreshCeilingSeconds =>
+        Math.Max(0, WidestFeasibleCompressionPhaseGuardMinutes) * 60;
+
+    /// <summary>
+    /// The WIDEST <see cref="LightRefreshStepMinutes"/> the hour can carry while the grid's own stated
+    /// precondition still holds at <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> — zero when
+    /// even a one-minute step leaves too narrow a window.
+    ///
+    /// <para><b>This exists to answer #3185's first candidate repair in the build rather than in a
+    /// discussion.</b> "Give the light band a step that respects member duration" is the obvious reading of
+    /// a band that overlaps its own members, and it sounds like a trade against
+    /// <see cref="HeaviestRefreshWindowMinutes"/> that someone could choose to make. It is not a trade: this
+    /// returns <see cref="LightRefreshStepMinutes"/> itself, so the shipped step is already the widest the
+    /// hour carries and every duration-derived step is red. A member's duration is answered by
+    /// <see cref="UnboundedLightRefreshSeparationMinutes"/> INSIDE the band because outside it there is
+    /// nothing to spend.</para>
+    ///
+    /// <para><b>Searched downward through the shipped comparison</b>, for
+    /// <see cref="WidestFeasibleCompressionPhaseGuardMinutes"/>'s reason: the line is an integer-divided
+    /// fraction of an integer window, and a closed form that reproduced the two truncations slightly
+    /// differently would answer feasible where the build answers red. Evaluated at the SHIPPED guard, since
+    /// widening the step and widening the guard are alternatives rather than a pair — each is measured
+    /// against the hour with the other where it is.</para>
+    /// </summary>
+    public static int WidestFeasibleLightRefreshStepMinutes
+    {
+        get
+        {
+            for (var step = MinutesInHourlyCadence; step >= 1; step--)
+            {
+                if (HeaviestHourlyRefreshObservedCeilingSeconds
+                    < RefreshSlotWarningSecondsForLightBandAndGuard(
+                        (LightHourlyRefreshCount - 1) * step, CompressionPhaseGuardMinutes))
+                {
+                    return step;
+                }
+            }
+
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// The most compression policies the grid will put on one minute — the input the compression band's WIDTH
+    /// is derived from, rather than a figure read off it afterwards.
+    ///
+    /// <para><b>Why this is the input and the width is the output (#3174).</b> The band used to be whatever
+    /// minutes a uniform refresh step left over, and how thinly 70 hypertables spread across them was a
+    /// consequence nobody chose — a test asserted the resulting ceiling was 3 and would have accepted 4 or 5
+    /// from a moved step. The thing that has an operational meaning is the spread: every hypertable's newest
+    /// 1-day chunk becomes eligible at the same UTC midnight (see <see cref="CompressionPhaseMinutes"/>), so
+    /// the count sharing a minute is the count of simultaneous chunk rewrites at that boundary. So the spread
+    /// is stated and the width follows from the catalog.</para>
+    ///
+    /// <para><b>3 preserves the shipped behaviour rather than proposing new behaviour</b>, which is the
+    /// reason to prefer it to any other number here: it is the spread the grid has always produced, so a
+    /// re-derivation that lands on it changes where compression runs without changing how concentrated it is.
+    /// The failure direction is stated: a catalog grown past
+    /// <c>CompressionPhaseMaxPerMinute * CompressionPhaseBandMinutes</c> is red, and the repair is a wider
+    /// band — which the hour can only pay for out of <see cref="HeaviestRefreshWindowMinutes"/>, and only
+    /// while that window still clears <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>.</para>
+    /// </summary>
+    public const int CompressionPhaseMaxPerMinute = 3;
+
+    /// <summary>
+    /// The compression band's width in minutes: enough for every hypertable we own to start at no more than
+    /// <see cref="CompressionPhaseMaxPerMinute"/> per minute, taken from
+    /// <see cref="HypertableCount"/> so registering a collector moves the band instead of quietly crowding
+    /// it.
+    /// </summary>
+    public static int CompressionPhaseBandMinutes =>
+        (HypertableCount + CompressionPhaseMaxPerMinute - 1) / CompressionPhaseMaxPerMinute;
+
+    /// <summary>
+    /// Every minute of the hour a compression policy may start on — the tail of the hour, once every hourly
+    /// refresh has had the clearance its own recorded ceiling asks for.
+    ///
+    /// <para><b>RE-DERIVED at #3174, not renumbered.</b> These minutes were the second half of each uniform
+    /// refresh slot with the heaviest refresh's slot dropped, and a grid with no uniform slot makes those
+    /// minutes meaningless. The rule below is the same rule the old one was — no compression minute may start
+    /// while a refresh is running — applied to the re-derived refresh grid, which is why it produces a
+    /// contiguous band at the end of the hour instead of three chunks inside it: the refreshes are contiguous
+    /// now too.</para>
+    ///
+    /// <para><b>ONE predicate, and both exclusions are cases of it.</b> A minute is clear when it is at least
+    /// its own band past EVERY refresh start, measured forward round the hour. The band is
+    /// <see cref="CompressionPhaseGuardMinutes"/> for a light refresh and
+    /// <see cref="HeaviestRefreshWindowMinutes"/> — the whole window — for
+    /// <see cref="HeaviestHourlyRefreshView"/>. Writing the exclude-whole decision as "its band is its whole
+    /// window" is what keeps it a decision rather than a special case, and it walks
+    /// <see cref="HourlyRefreshPhaseOrder"/> through <see cref="RefreshPhaseMinutesFor"/>, so the grid and
+    /// this band cannot drift apart.</para>
+    ///
+    /// <para><b>Why the heaviest window is excluded whole rather than guarded.</b>
+    /// <see cref="HeaviestHourlyRefreshView"/> occupies 896 of the 1260 seconds in its window and the
+    /// <see cref="CompressionPhaseGuardMinutes"/> band is 4, so applying the ordinary band to this window
+    /// would admit 11 minutes that sit INSIDE the refresh — the band is the wrong size for it, which is the
+    /// arithmetic the exclusion rests on and the reason widening the band is not the alternative. The other
+    /// 6 minutes of the window are past the refresh and are left on the table deliberately: recovering them
+    /// means sizing a band for one window against a bound whose population is 57 readings and still moving
+    /// (194 s to 896 s within the clean regime), which is #3035's exclude-versus-guard decision to reopen and
+    /// not a renumbering. Stated in SECONDS against the window in seconds, because the occupancy is only
+    /// exactly stateable to a tenth of a minute while the ceiling happens to be a multiple of six seconds, and
+    /// 896 is not: a figure that has to be rounded to stay in its unit is a rounded claim wearing an exact
+    /// one's clothes.</para>
+    ///
+    /// <para><b>Why a spread rather than one shared minute.</b> All the compression policies would happily
+    /// share a minute as far as LOCKS go — they compress different hypertables, so they do not contend with
+    /// each other at all — but they would then do their real work simultaneously. <see cref="CompressAfterDays"/>
+    /// and <see cref="ChunkIntervalDays"/> are both 1 and TimescaleDB aligns 1-day chunks to the epoch, so
+    /// every hypertable's newest closed chunk becomes eligible at the same UTC midnight. Drifting policies
+    /// discover that eligibility at whatever minute they have drifted to, which spreads the daily rewrite
+    /// across the hour; collapsing them onto one minute would concentrate it into one. That is a burst this
+    /// change would be INTRODUCING, not removing, so the grid keeps the spread and takes only the drift away.
+    /// How thin the spread has to be is <see cref="CompressionPhaseMaxPerMinute"/>, and the band's width
+    /// follows from it — so the re-derivation moves WHERE compression runs without changing how concentrated
+    /// it is.</para>
+    ///
+    /// <para><b>Concentration is NOT the only property #3112's midnight band is sensitive to, and the
+    /// correction matters because the other one moved.</b> #3174 held the spread constant — <b>24</b> minutes
+    /// at <b>3</b> per minute before and after — and said so. What it did not hold constant, and did not
+    /// claim to, is each minute's CLEARANCE to the next refresh start
+    /// (<see cref="CompressionMinuteClearanceMinutes"/>): under the previous grid the three hypertables whose
+    /// chunk-close runs were measured sat on minutes with 240 s, 180 s and 120 s of clearance against runs of
+    /// 360 s, 198 s and 552 s, so every one of them ran past the refresh that followed it. On this grid the
+    /// same three hold minutes with <b>1,200 s</b>, <b>1,140 s</b> and <b>1,080 s</b>. A contiguous refresh
+    /// band followed by a contiguous compression band puts most of the compression minutes a long way from
+    /// the next refresh, where three chunks of a uniform grid put every compression minute within a guard
+    /// band of one — so the re-derivation changed the axis the band actually ran through, as a consequence of
+    /// its shape rather than as an aim. It remains true that NOTHING here reduces what midnight
+    /// carries.</para>
+    ///
+    /// <para>Declared HERE, after <see cref="HourlyRefreshPhaseOrder"/>, because a static field initializer
+    /// runs in declaration order and this one reads that list through
+    /// <see cref="RefreshPhaseMinutesFor"/>.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<int> CompressionPhaseMinutes = BuildCompressionPhaseMinutes();
+
+    private static int[] BuildCompressionPhaseMinutes()
+    {
+        var cadence = MinutesInHourlyCadence;
+        var minutes = new List<int>(cadence);
+
+        for (var minute = 0; minute < cadence; minute++)
+        {
+            var clear = true;
+
+            foreach (var view in HourlyRefreshPhaseOrder)
+            {
+                var band = string.Equals(view, HeaviestHourlyRefreshView, StringComparison.Ordinal)
+                    ? HeaviestRefreshWindowMinutes
+                    : CompressionPhaseGuardMinutes;
+
+                if ((minute - RefreshPhaseMinutesFor(view) + cadence) % cadence < band)
+                {
+                    clear = false;
+                    break;
+                }
+            }
+
+            if (clear)
+            {
+                minutes.Add(minute);
+            }
+        }
+
+        return minutes.ToArray();
+    }
+
+    /// <summary>
+    /// The hypertables that carry a compression policy, in phase order — the collector catalog, then
+    /// <c>collection_log</c>, which is a hypertable OUTSIDE that catalog (the same <c>+ 1</c>
+    /// <see cref="HypertableCount"/> accounts for).
+    ///
+    /// <para><b>Keyed on the HYPERTABLE, never on a job id.</b> TimescaleDB assigns job ids per deployment, so
+    /// an encoded id would name a different job on every other store. A compression job reports its own
+    /// hypertable directly in <c>timescaledb_information.jobs</c>, which is why the converge needs no catalog
+    /// join to recover identity the way the refresh converge does — and why the id only ever reaches
+    /// <c>alter_job</c> as a bound parameter.</para>
+    ///
+    /// <para>Derived from <see cref="HypertableTables"/> rather than hand-listed, so a new collector is
+    /// registered by adding it to the catalog and there is no second list to forget. That is why an
+    /// unrecognised name is a FOREIGN hypertable — a bring-your-own store's own table, or a fixture table —
+    /// rather than an omission, and is left unphased instead of throwing the way an unregistered hourly view
+    /// does.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> CompressionPhaseOrder =
+        HypertableTables.Select(t => t.TargetTable).Append(CollectionLogTable).ToArray();
+
+    /// <summary>
+    /// Which minute of the hour <paramref name="table"/>'s compression policy starts on; <c>false</c> when
+    /// this product does not own the hypertable, in which case its schedule is none of this code's business
+    /// beyond the <see cref="CompressScheduleInterval"/> tick #1778 already converges.
+    ///
+    /// <para>Accepts a bare or <c>collect.</c>-qualified name: the product always passes the bare
+    /// <c>TargetTable</c>, but the raw-name overload of <see cref="AddCompressionPolicySql(string)"/> is
+    /// reachable with a qualified one.</para>
+    /// </summary>
+    public static bool TryCompressionPhaseMinutesFor(string table, out int minutes)
+    {
+        minutes = 0;
+
+        if (string.IsNullOrEmpty(table))
+        {
+            return false;
+        }
+
+        var dot = table.LastIndexOf('.');
+        var bare = dot >= 0 ? table[(dot + 1)..] : table;
+
+        for (var index = 0; index < CompressionPhaseOrder.Count; index++)
+        {
+            if (string.Equals(CompressionPhaseOrder[index], bare, StringComparison.Ordinal))
+            {
+                minutes = CompressionPhaseMinutes[index % CompressionPhaseMinutes.Count];
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// How many minutes a compression policy starting on <paramref name="minute"/> has before the next hourly
+    /// refresh starts — the space that minute's run actually has, measured forward round the hour.
+    ///
+    /// <para><b>Why this quantity and not the cadence (#3112).</b> The compression band's WIDTH is derived
+    /// from a COUNT (<see cref="CompressionPhaseBandMinutes"/> over
+    /// <see cref="CompressionPhaseMaxPerMinute"/>), and nothing in the grid compares a compression run's
+    /// DURATION to anything. Both instruments that look as though they would catch it miss it, and one of
+    /// them misses by a factor rather than by a margin. #2136's Store Job Over Cadence judges a job against
+    /// its own <c>schedule_interval</c>, which for a compression policy is
+    /// <see cref="CompressScheduleInterval"/> — so its shipped warning share
+    /// (<see cref="RefreshSlotPercentOfHourlyCadence"/>) puts the line at 900 s of a 3,600 s hour, while the
+    /// wall a compression run actually faces is its own minute's clearance, as little as 60 s. That is
+    /// FIFTEEN times too high on the tightest minute in the band; the 552 s chunk-close run measured below
+    /// reads 15.3% of cadence and never approaches the knob at all. And #1778's
+    /// <see cref="LogCompressionActivity"/> reports a run that is STILL RUNNING and a chunk backlog, never a
+    /// completed run's duration against the space it had. So the compression band is the one band of this
+    /// grid with no runtime instrument over its own geometry, and the daily chunk close is precisely a
+    /// compression-runtime event.</para>
+    ///
+    /// <para><b>Relation-AGNOSTIC, deliberately, and it is a LOWER BOUND on the true clearance.</b> The lock
+    /// adjacency #3012 formed on is per-relation: a compression policy holds
+    /// <c>AccessExclusiveLock</c> on ONE hypertable and only a refresh reading THAT hypertable queues behind
+    /// it. This takes the minimum over EVERY refresh start, which is the same predicate
+    /// <see cref="CompressionPhaseMinutes"/> is built from — a minimum over a superset can only be smaller
+    /// than a minimum over the contending subset, so this figure is never larger than the true clearance and
+    /// the watch over it therefore speaks EARLIER than a relation-aware one, never later. Taken in that
+    /// direction on purpose: recovering each view's contended relation means parsing
+    /// <see cref="HourlyRefreshDefinitions"/>' CREATE text, which is a test-time capability here and not an
+    /// hourly-sweep one, and a watch that fails toward flagging a harmless overrun is worth more than one
+    /// that can miss a harmful one.</para>
+    ///
+    /// <para><b>The band's own range, which is what says where the residual is.</b> Clearance falls one
+    /// minute per minute across the band: 1,440 s on its first minute down to <b>60 s</b> on its last, that
+    /// last figure being exactly one <see cref="LightRefreshStepMinutes"/> step because the bands partition
+    /// the hour and the light band opens the next one. The tail minute is always OCCUPIED — the band is sized
+    /// to hold the whole catalog at <see cref="CompressionPhaseMaxPerMinute"/> per minute, so every minute in
+    /// it carries a policy — so a one-step clearance is a permanent feature of the grid rather than an
+    /// arrangement that happens to be tight today. That is the one-sidedness
+    /// <see cref="HeaviestRefreshStartMinute"/> accepted by DECISION, now carried as a number: which refresh
+    /// band opens the hour was chosen knowing something would still be compressing, and this is how much
+    /// space the something has.</para>
+    ///
+    /// <para><b>What the shipped grid puts where, so the residual is named rather than left to be found.</b>
+    /// <c>query_store_stats</c> — the largest hypertable this store has — sits at <b>:42</b> with
+    /// <b>1,080 s</b>, and <c>procedure_stats</c> sits at <b>:58</b> with <b>120 s</b>, the tightest placement
+    /// any of the large hypertables has. Both figures follow from the catalog's ORDER, so a collector
+    /// registered ahead of either moves them; they are pinned as derived values rather than stated as facts
+    /// about those two tables, and the prose going stale is what reddens the pin.</para>
+    ///
+    /// <para><b>The measurement this exists because of, scoped (#3112).</b> In the <c>2026-09-08 00:00Z</c>
+    /// hour on ONE store, three compression policies were read at <b>360 s</b> (<c>query_stats</c>),
+    /// <b>198 s</b> (<c>query_snapshots</c>) and <b>552 s</b> (<c>query_store_stats</c>) — stated in that
+    /// order throughout this paragraph, which is the order of the minutes they held. Those are
+    /// <c>collect.store_metrics</c>' hourly <c>background_job</c> snapshot — a LAST-RUN reading, so no
+    /// maximum question is answered by them (#3119) — and they are one store's and one night's. A far broader
+    /// population exists and is recorded on the change that added this member rather than restated here: a
+    /// multi-week <c>timescaledb_information.job_history</c> census of the same hypertables by hour of day,
+    /// which is maximum-capable where these readings are not. It puts <c>query_store_stats</c>' typical
+    /// midnight run INSIDE the clearance below and its upper tail PAST it. The readings quoted here are
+    /// therefore the weaker instrument, and they are kept because they are the ones the shares stated below
+    /// are computed from — a figure this file can be checked against beats a larger one it cannot. Under the
+    /// grid in force that night the three started at <c>00:26</c>, <c>00:27</c> and <c>00:28</c> with
+    /// <b>240 s</b>, <b>180 s</b> and <b>120 s</b> of clearance, so every one of them ran past the refresh
+    /// that followed it. The one whose hypertable that refresh also READ was <c>query_store_stats</c>, and it
+    /// is that refresh — not the other two — whose runtime went to 160.4 s and then 226.8 s against a
+    /// 20–58 s steady state. On the grid this file ships the same three hold <c>:40</c>, <c>:41</c> and
+    /// <c>:42</c>, where those readings are <b>30%</b>, <b>17%</b> and <b>51%</b> of their clearance.
+    /// <b>Nothing here reduces what midnight carries</b>, and the placement that absorbs it was not chosen
+    /// for that: it is a consequence of #3174's re-derivation, which claimed neutrality on CONCENTRATION and
+    /// was neutral on it. Clearance is a different axis and it moved.</para>
+    ///
+    /// <para>Modular in <paramref name="minute"/> rather than range-checked: minute-of-hour arithmetic is
+    /// modular anyway, and this feeds an observability line off a catalog timestamp, so an impossible value
+    /// must cost the line and never the sweep.</para>
+    /// </summary>
+    public static int CompressionMinuteClearanceMinutes(int minute)
+    {
+        var cadence = MinutesInHourlyCadence;
+        var start = ((minute % cadence) + cadence) % cadence;
+        var clearance = cadence;
+
+        foreach (var view in HourlyRefreshPhaseOrder)
+        {
+            var distance = (RefreshPhaseMinutesFor(view) - start + cadence) % cadence;
+
+            if (distance < clearance)
+            {
+                clearance = distance;
+            }
+        }
+
+        return clearance;
+    }
+
+    /// <summary><see cref="CompressionMinuteClearanceMinutes"/> in seconds — the wall a compression run
+    /// starting on that minute has to finish inside, named once so the watch line and the band boundary
+    /// cannot disagree about where it is (the same reason <see cref="RefreshPhaseSlotSeconds"/>
+    /// exists).</summary>
+    public static int CompressionMinuteClearanceSeconds(int minute) =>
+        CompressionMinuteClearanceMinutes(minute) * 60;
+
+    /// <summary>
+    /// The line at which a compression run on <paramref name="minute"/> is worth saying something about:
+    /// <see cref="WindowWatchLeadNumerator"/>/<see cref="WindowWatchLeadDenominator"/> of that minute's
+    /// clearance, the same lead-time fraction #3044 chose for the heaviest refresh's window.
+    ///
+    /// <para>Integer division, so the line is never ABOVE the fraction — a watch that rounded up would speak
+    /// later than its own stated lead time on some widths and not others.</para>
+    /// </summary>
+    public static int CompressionClearanceWatchSeconds(int minute) =>
+        CompressionMinuteClearanceSeconds(minute) * WindowWatchLeadNumerator / WindowWatchLeadDenominator;
+
+    /// <summary>
+    /// Where one observed compression run sits against the clearance the minute it started on had. Produced by
+    /// <see cref="ClassifyCompressionClearance"/>; nothing here reads a clock or a catalog, so it pins
+    /// directly.
+    /// </summary>
+    public enum CompressionClearanceBand
+    {
+        /// <summary>Under <see cref="CompressionClearanceWatchSeconds"/> — the routine band. This is where
+        /// every hour but the daily chunk close sits, by a wide margin: an ordinary tick finds nothing
+        /// eligible and finishes in well under a second.</summary>
+        InsideClearance,
+
+        /// <summary>At or past <see cref="CompressionClearanceWatchSeconds"/> but still inside
+        /// <see cref="CompressionMinuteClearanceSeconds"/>: the run still finished before the next refresh
+        /// started, with less than the watch's lead fraction to spare.</summary>
+        ApproachingRefresh,
+
+        /// <summary>At or past <see cref="CompressionMinuteClearanceSeconds"/>. The run was still holding its
+        /// <c>AccessExclusiveLock</c> when AT LEAST ONE hourly refresh started, which is the queue
+        /// <see cref="HourlyRefreshPhaseOrder"/>'s stagger exists to keep empty.
+        ///
+        /// <para><b>At least one, and the band does not say how many.</b> A grid places a job's START; it
+        /// cannot bound its END, and no arrangement of a sixty-minute hour contains a run longer than an
+        /// hour. A long enough compression run passes several refresh starts in sequence — the light band
+        /// alone holds one per minute — so this band must not be read as "one refresh waited". How far past
+        /// the FIRST start the run went is reported (<see cref="CompressionActivity.ClearOfRefreshSeconds"/>);
+        /// how many starts it passed is not derived, because that needs each refresh's own runtime and not
+        /// just its minute.</para></summary>
+        RefreshOverrun,
+    }
+
+    /// <summary>
+    /// Classifies one observed compression runtime against the clearance of the minute it started on.
+    ///
+    /// <para><b>Both boundaries are inclusive</b>, for the reason
+    /// <see cref="ClassifyRefreshSlotHeadroom"/>'s are: a run that took exactly its clearance was still
+    /// running when the refresh started, so <see cref="CompressionClearanceBand.RefreshOverrun"/> has to
+    /// begin at <c>&gt;=</c> rather than past it.</para>
+    ///
+    /// <para>Negative and NaN readings classify <see cref="CompressionClearanceBand.InsideClearance"/> rather
+    /// than throwing — same posture as the refresh classifier, and the same reason: a catalog handing back
+    /// something impossible must cost the line, never the sweep that carries it.</para>
+    /// </summary>
+    public static CompressionClearanceBand ClassifyCompressionClearance(double observedSeconds, int startMinute)
+    {
+        if (double.IsNaN(observedSeconds) || observedSeconds < 0d)
+        {
+            return CompressionClearanceBand.InsideClearance;
+        }
+
+        if (observedSeconds >= CompressionMinuteClearanceSeconds(startMinute))
+        {
+            return CompressionClearanceBand.RefreshOverrun;
+        }
+
+        return observedSeconds >= CompressionClearanceWatchSeconds(startMinute)
+            ? CompressionClearanceBand.ApproachingRefresh
+            : CompressionClearanceBand.InsideClearance;
+    }
+
+    /// <summary>
+    /// An HOURLY continuous aggregate's refresh policy: <see cref="HourlyRefreshStartOffset"/> of window, an
+    /// <see cref="HourlyRefreshScheduleInterval"/> cadence, and this view's own slot on the phase grid.
+    /// </summary>
+    public static string AddHourlyRefreshPolicySql(string view)
+        => AddContinuousAggregatePolicySql(
+            view,
+            HourlyRefreshStartOffset,
+            HourlyRefreshScheduleInterval,
+            HourlyRefreshScheduleInterval,
+            RefreshPhaseMinutesFor(view));
+
+    /// <summary>
+    /// A DAILY continuous aggregate's refresh policy: <see cref="DailyRefreshStartOffset"/> of window on a
+    /// daily cadence, and NO <c>initial_start</c> — the daily tier keeps TimescaleDB's finish-to-start
+    /// scheduling, exactly as it did before #3012, because it was never near its own cadence and never
+    /// appeared in the convoy.
+    /// </summary>
+    public static string AddDailyRefreshPolicySql(string view)
+        => AddContinuousAggregatePolicySql(
+            view,
+            DailyRefreshStartOffset,
+            DailyRefreshScheduleInterval,
+            DailyRefreshScheduleInterval,
+            phaseMinutes: null);
+
+    /// <summary>The TimescaleDB policy proc behind a continuous-aggregate refresh job — what
+    /// <c>timescaledb_information.jobs.proc_name</c> reports, and the leading token of the job label both
+    /// <see cref="JobCadenceReadSql"/> and <see cref="StoreSelfMetrics.BackgroundJobInsertSql"/>
+    /// build.</summary>
+    public const string RefreshPolicyProcName = "policy_refresh_continuous_aggregate";
+
+    /// <summary>
+    /// Whether a background job's <c>schedule_interval</c> is ALSO its <c>end_offset</c>, decided from the
+    /// job label the store telemetry names it by.
+    ///
+    /// <para><b>It is the same argument twice for every refresh policy this product creates.</b>
+    /// <see cref="AddHourlyRefreshPolicySql"/> passes <see cref="HourlyRefreshScheduleInterval"/> as both,
+    /// and <see cref="AddDailyRefreshPolicySql"/> passes <see cref="DailyRefreshScheduleInterval"/> as both;
+    /// TimescaleContinuousAggregateTests pins that equality out of the EMITTED statement, so this predicate
+    /// cannot outlive the fact it reports.</para>
+    ///
+    /// <para><b>Which makes "widen the interval" a collection change here, not a relaxed deadline</b> — the
+    /// half of #3060 an operator actually hits. On the hourly tier it does three things at once: the refresh
+    /// materializes a narrower window, a wider still-filling tail is left unmaterialized, and
+    /// <c>QueryStoreBackfill.RollupStoreHorizon</c> — derived as <see cref="HourlyRefreshStartSpan"/> minus
+    /// that interval — silently shortens with it. Advice that is correct for a compression or retention
+    /// policy alters what gets collected here.</para>
+    ///
+    /// <para>Keyed on <c>proc_name</c> rather than the view or the job id: the policy proc is what decides
+    /// whether the interval carries a second meaning, it is uniform across every deployment, and job ids are
+    /// per-deployment (the <see cref="HourlyRefreshPhaseOrder"/> reasoning). The label is
+    /// <c>proc_name</c> followed by a space or by nothing, so an exact-or-prefixed-token match is the whole
+    /// test — never a substring, which would also match a hypertable that happened to be named after a
+    /// policy.</para>
+    /// </summary>
+    public static bool ScheduleIntervalDoublesAsEndOffset(string? jobLabel)
+        => jobLabel is not null
+            && (jobLabel.Equals(RefreshPolicyProcName, StringComparison.Ordinal)
+                || jobLabel.StartsWith(RefreshPolicyProcName + " ", StringComparison.Ordinal));
+
+    /// <summary>
+    /// The refresh policy for a continuous aggregate: materialize
+    /// <c>[now - startOffset, now - endOffset]</c> every <c>scheduleInterval</c>. <c>endOffset</c> leaves the
+    /// still-filling current bucket unmaterialized (no repeated rework); <c>scheduleInterval</c> matches the
+    /// bucket. <c>if_not_exists</c> so a restart re-converges. Prefer
+    /// <see cref="AddHourlyRefreshPolicySql"/> / <see cref="AddDailyRefreshPolicySql"/>, which carry the
+    /// per-tier decisions; this overload exists so those two share one statement shape.
+    ///
+    /// <para><b><paramref name="phaseMinutes"/> does two things, and the second one is the less obvious
+    /// half.</b> It puts the job on a known minute of the hour, which is the stagger. It also switches the job
+    /// to a FIXED schedule: TimescaleDB computes the next start from the previous FINISH when
+    /// <c>initial_start</c> is absent, and from the previous START when it is present. Finish-to-start is what
+    /// let one convoy phase-lock a whole family permanently — three jobs with unrelated schedules and very
+    /// different workloads finished within 119 seconds of each other, and then re-started together every hour
+    /// after that. A fixed schedule cannot inherit a phase from a bad hour.</para>
+    ///
+    /// <para>The anchor is the NEXT whole hour plus the phase, deliberately in the future: a fixed schedule
+    /// needs a non-null <c>initial_start</c>, and anchoring forward means the statement never depends on
+    /// TimescaleDB's handling of a past anchor. It is computed in UTC (<c>now() AT TIME ZONE 'UTC'</c>, then
+    /// back to <c>timestamptz</c>) rather than with a bare <c>date_trunc('hour', now())</c>, which truncates
+    /// in the SESSION time zone and would land off-grid on any of the half-hour and quarter-hour zones.</para>
+    /// </summary>
+    public static string AddContinuousAggregatePolicySql(
+        string view,
+        string startOffset,
+        string endOffset,
+        string scheduleInterval,
+        int? phaseMinutes)
+    {
+        var initialStart = phaseMinutes is int phase
+            ? $", initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + INTERVAL '{phase.ToString(CultureInfo.InvariantCulture)} minutes'"
+            : string.Empty;
+
+        return $"SELECT add_continuous_aggregate_policy('collect.{view}', start_offset => INTERVAL '{startOffset}', end_offset => INTERVAL '{endOffset}', schedule_interval => INTERVAL '{scheduleInterval}', if_not_exists => true{initialStart})";
+    }
 
     /// <summary>
     /// The composer-dimension reshape: the QS hourly CAGG regrouped query_id/plan_id → module_name/query_hash
@@ -1570,10 +3977,20 @@ WITH NO DATA";
     /// statement. Failure-isolated per aggregate: one failure warns and the composer keeps querying raw.
     /// Idempotent (IF NOT EXISTS on both), so it re-converges every restart. Returns the number ready.
     ///
+    /// <para><b>MUST run AFTER <see cref="ConvergeContinuousAggregateRefreshAsync"/> (#3012).</b> The policy
+    /// half is idempotent only against a policy whose window MATCHES: <c>if_not_exists =&gt; true</c> returns
+    /// -1 for an identical policy, but against one whose window differs it raises <c>22023 refresh interval
+    /// overlaps with an existing continuous aggregate policy</c>. That is measured, and it is unlike
+    /// <c>add_compression_policy</c> and <c>add_retention_policy</c>, which both skip quietly. Run BEFORE the
+    /// converge, this sweep would raise on every hourly view of every already-deployed store, swallow it in
+    /// the per-aggregate catch, and report a count that reads as "the aggregates are broken" when only their
+    /// refresh windows are stale.</para>
+    ///
     /// <para>Does NOT backfill history, and on a store that already holds history that leaves a real gap rather
     /// than a merely un-accelerated one (#1759): the aggregates are born WITH NO DATA and each refresh policy
-    /// starts 3 days back, so the materialized span begins at roughly creation-minus-3-days and never reaches
-    /// further back on its own. Reads stay CORRECT because <see cref="RetentionTierRouter"/> routes windows
+    /// only reaches its own start offset back (<see cref="HourlyRefreshStartOffset"/> hourly,
+    /// <see cref="DailyRefreshStartOffset"/> daily), so the materialized span begins at roughly creation minus
+    /// that offset and never reaches further back on its own. Reads stay CORRECT because <see cref="RetentionTierRouter"/> routes windows
     /// below a rollup's measured floor to raw; the materialization itself is an operator op
     /// (<c>--backfill-rollups</c>), which is where the disk cost is preflighted rather than incurred at
     /// startup.</para>
@@ -1588,34 +4005,33 @@ WITH NO DATA";
         // Hourly CAGGs FIRST (the two delta tables + query_store_stats), THEN the daily tier — the daily CAGGs are
         // hierarchical (sourced from the hourly CAGGs), so the hourly ones must be created earlier in this ordered
         // sweep. Daily policies use the 1-day end-offset/schedule; the hourly ones take the helper's defaults.
-        var aggregates = new[]
+        /* The hourly tier comes from HourlyAggregates rather than being restated here (#3012): the phase grid
+           and its collision guard derive from that same list, and a second copy could drift from it. The
+           corrected Query Store rollups' ordering requirement lives with the list — L1 is raw-sourced and must
+           precede the corrected view, which is hierarchical from it. (The corrected DAILY is L1's SIBLING, not
+           the hourly's child: an identity-width hierarchical CAGG is a leaf — see
+           CreateQueryStoreStatsCorrectedDailySql.) */
+        var aggregates = HourlyAggregates
+            .Select(a => (CreateSql: a.CreateSql, View: a.View, Hourly: true))
+            .Concat(new[]
         {
-            (CreateSql: CreateQueryStatsHourlySql,      View: QueryStatsHourlyView,      PolicySql: AddContinuousAggregatePolicySql(QueryStatsHourlyView)),
-            (CreateSql: CreateProcedureStatsHourlySql,  View: ProcedureStatsHourlyView,  PolicySql: AddContinuousAggregatePolicySql(ProcedureStatsHourlyView)),
-            (CreateSql: CreateQueryStoreStatsHourlySql, View: QueryStoreStatsHourlyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsHourlyView)),
-            (CreateSql: CreateQueryStatsDbHourlySql,    View: QueryStatsDbHourlyView,    PolicySql: AddContinuousAggregatePolicySql(QueryStatsDbHourlyView)),
-            /* The corrected Query Store rollups (#1849). L1 is raw-sourced and MUST precede both corrected
-               views, which are hierarchical from it — the same ordering requirement the daily tier has. Both
-               corrected views read L1 (the daily is its SIBLING, not the hourly's child: an identity-width
-               hierarchical CAGG is a leaf — see CreateQueryStoreStatsCorrectedDailySql). */
-            (CreateSql: CreateQueryStoreStatsIntervalHourlySql,  View: QueryStoreStatsIntervalHourlyView,  PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsIntervalHourlyView)),
-            (CreateSql: CreateQueryStoreStatsCorrectedHourlySql, View: QueryStoreStatsCorrectedHourlyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsCorrectedHourlyView)),
-            (CreateSql: CreateQueryStatsDailySql,       View: QueryStatsDailyView,       PolicySql: AddContinuousAggregatePolicySql(QueryStatsDailyView, "1 day", "1 day")),
-            (CreateSql: CreateProcedureStatsDailySql,   View: ProcedureStatsDailyView,   PolicySql: AddContinuousAggregatePolicySql(ProcedureStatsDailyView, "1 day", "1 day")),
-            (CreateSql: CreateQueryStoreStatsDailySql,  View: QueryStoreStatsDailyView,  PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsDailyView, "1 day", "1 day")),
-            (CreateSql: CreateQueryStoreStatsCorrectedDailySql, View: QueryStoreStatsCorrectedDailyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsCorrectedDailyView, "1 day", "1 day")),
-            (CreateSql: CreateQueryStatsDbDailySql,     View: QueryStatsDbDailyView,     PolicySql: AddContinuousAggregatePolicySql(QueryStatsDbDailyView, "1 day", "1 day")),
+            (CreateSql: CreateQueryStatsDailySql,       View: QueryStatsDailyView,       Hourly: false),
+            (CreateSql: CreateProcedureStatsDailySql,   View: ProcedureStatsDailyView,   Hourly: false),
+            (CreateSql: CreateQueryStoreStatsDailySql,  View: QueryStoreStatsDailyView,  Hourly: false),
+            (CreateSql: CreateQueryStoreStatsCorrectedDailySql, View: QueryStoreStatsCorrectedDailyView, Hourly: false),
+            (CreateSql: CreateQueryStatsDbDailySql,     View: QueryStatsDbDailyView,     Hourly: false),
             /* The DAY-grain corrected daily (#1869), THREE levels deep: L1 (above) -> L2 interval_daily ->
                daygrain_daily. Both must follow L1 and L2 must precede its own child, which this ordered sweep
                gives — the same requirement the daily tier has, one level longer. */
-            (CreateSql: CreateQueryStoreStatsIntervalDailySql, View: QueryStoreStatsIntervalDailyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsIntervalDailyView, "1 day", "1 day")),
-            (CreateSql: CreateQueryStoreStatsDayGrainDailySql, View: QueryStoreStatsDayGrainDailyView, PolicySql: AddContinuousAggregatePolicySql(QueryStoreStatsDayGrainDailyView, "1 day", "1 day")),
-        }
-        /* The seven baseline-tier aggregates (#1757; nine until #2007) take the helper's hourly defaults: they are sourced from
+            (CreateSql: CreateQueryStoreStatsIntervalDailySql, View: QueryStoreStatsIntervalDailyView, Hourly: false),
+            (CreateSql: CreateQueryStoreStatsDayGrainDailySql, View: QueryStoreStatsDayGrainDailyView, Hourly: false),
+        })
+        /* The seven baseline-tier aggregates (#1757; nine until #2007) ride the HOURLY tier: they are sourced from
            raw like the hourly tier, not hierarchically from another CAGG, so they carry no ordering
            requirement against the daily tier. Appended from the single BaselineAggregates list so this sweep
-           and the retention list cannot drift apart. */
-        .Concat(BaselineAggregates.Select(a => (CreateSql: a.CreateSql, View: a.View, PolicySql: AddContinuousAggregatePolicySql(a.View))))
+           and the retention list cannot drift apart. HourlyRefreshPhaseOrder appends them from the same list,
+           so every view here has a slot on the phase grid. */
+        .Concat(BaselineAggregates.Select(a => (CreateSql: a.CreateSql, View: a.View, Hourly: true)))
         .ToArray();
 
         /* A store that ran WITHOUT TimescaleDB and has now gained it is carrying the plain fallback views
@@ -1639,7 +4055,7 @@ WITH NO DATA";
         }
 
         var ready = 0;
-        foreach (var (createSql, view, policySql) in aggregates)
+        foreach (var (createSql, view, hourly) in aggregates)
         {
             try
             {
@@ -1647,6 +4063,11 @@ WITH NO DATA";
                 {
                     await create.ExecuteNonQueryAsync(cancellationToken);
                 }
+
+                /* Built HERE, not in the array above, so RefreshPhaseMinutesFor's throw for an hourly view
+                   missing from HourlyRefreshPhaseOrder costs that one aggregate and names it in the warning
+                   below, instead of taking the whole sweep down before the first CREATE runs. */
+                var policySql = hourly ? AddHourlyRefreshPolicySql(view) : AddDailyRefreshPolicySql(view);
 
                 using (var policy = new NpgsqlCommand(policySql, connection) { CommandTimeout = SetupTimeoutSeconds })
                 {
@@ -1673,8 +4094,193 @@ WITH NO DATA";
         return ready;
     }
 
-    /// <summary>Raw-tier retention horizon: keep per-sweep raw ~4 days — one day past the hourly CAGG's own 3-day
-    /// refresh window, so the raw drop never outruns the aggregate that preserves it.</summary>
+    /// <summary>
+    /// Every continuous-aggregate REFRESH job in <c>collect</c>, with the three things #3012's treatment is
+    /// made of: the window it re-materializes, whether it is on a fixed schedule, and which minute of the hour
+    /// it starts on.
+    ///
+    /// <para><b>Keyed on the VIEW, and the join matches EITHER identity on purpose.</b> The caller decides
+    /// what each view should look like from <see cref="HourlyRefreshPhaseOrder"/>, so this has to hand it a
+    /// <c>view_name</c>; nothing here or in the caller reads a job id for anything except passing it back to
+    /// <c>alter_job</c>. What the join cannot assume is WHICH name a refresh job reports. The underlying
+    /// <c>bgw_job</c> row carries the aggregate's MATERIALIZATION hypertable id, so the obvious form joins on
+    /// <c>materialization_hypertable_schema/name</c> — and that form is measured to find NOTHING, because
+    /// <c>timescaledb_information.jobs</c> already resolves a continuous-aggregate job back to its USER VIEW
+    /// and reports <c>collect</c> / <c>&lt;view&gt;</c>. Matching either identity is therefore not
+    /// belt-and-braces for its own sake: it is one measured behaviour plus the one the catalog columns imply,
+    /// and it cannot double-count, because a user view lives in <c>collect</c> while a materialization
+    /// hypertable lives in <c>_timescaledb_internal</c> — disjoint, so at most one row can match per job.
+    /// This was a real defect caught by the live test rather than a hypothetical: the materialization-only
+    /// form shipped first and read back nothing at all.</para>
+    ///
+    /// <para>Emitted as NUMBERS, not text: <c>start_offset</c> comes back as seconds so a C# comparison cannot
+    /// be fooled by <c>1 day</c> / <c>1 day 00:00:00</c> / <c>24:00:00</c> all meaning the same interval, and
+    /// the phase comes back as a minute-of-hour already converted to UTC (a bare
+    /// <c>EXTRACT(MINUTE FROM initial_start)</c> would read the SESSION time zone). A policy created with a
+    /// NULL <c>start_offset</c> — refresh from the beginning of time — yields NULL here and is treated as
+    /// stale, which is correct: it is the widest window there is.</para>
+    /// </summary>
+    public const string ContinuousAggregateRefreshStateSql = @"
+SELECT
+    j.job_id,
+    ca.view_name,
+    EXTRACT(EPOCH FROM (j.config->>'start_offset')::interval)::bigint AS start_offset_seconds,
+    j.fixed_schedule,
+    CASE
+        WHEN j.initial_start IS NULL THEN NULL
+        ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int
+    END AS phase_minutes
+FROM timescaledb_information.jobs AS j
+JOIN timescaledb_information.continuous_aggregates AS ca
+  ON  (ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name)
+  OR  (ca.materialization_hypertable_schema = j.hypertable_schema AND ca.materialization_hypertable_name = j.hypertable_name)
+WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
+AND   ca.view_schema = 'collect'";
+
+    /// <summary>
+    /// Moves one EXISTING hourly refresh policy onto the shipped window and phase. <c>$1</c> the job id
+    /// (<c>::integer</c> — <c>alter_job</c> takes <c>job_id INTEGER</c> and PostgreSQL does not down-cast
+    /// bigint during function resolution, the #1586 trap), <c>$2</c> the <c>start_offset</c> text, <c>$3</c>
+    /// the minute of the hour.
+    ///
+    /// <para><b>Why this has to exist, and why it is worse than the sibling cases.</b>
+    /// <see cref="ConvergeRetentionHorizonSql"/> and <see cref="ConvergeCompressionScheduleAsync"/> exist
+    /// because their <c>add_*</c> function returns -1 for a policy the store already has and changes nothing.
+    /// <c>add_continuous_aggregate_policy</c> does that only when the window MATCHES. Against a policy whose
+    /// window DIFFERS it raises <c>22023 refresh interval overlaps with an existing continuous aggregate
+    /// policy</c> — measured on a live store, and it is why
+    /// <see cref="EnsureContinuousAggregatesAsync"/> must run AFTER this rather than before. So without this
+    /// the narrowing would not merely fail to reach an upgraded store: the create path would raise on all
+    /// thirteen hourly views every start, be swallowed by that sweep's per-aggregate isolation, and leave the
+    /// policies re-materializing three days an hour forever, with nothing failing until the hypertable grew
+    /// into the same convoy.</para>
+    ///
+    /// <para><c>config</c> is updated with <c>jsonb_set</c> against the job's OWN config so the other keys
+    /// (<c>end_offset</c>, <c>mat_hypertable_id</c>) are preserved untouched, which is why this is a
+    /// <c>SELECT ... FROM timescaledb_information.jobs</c> rather than a bare function call. <c>scheduled</c>
+    /// is deliberately not named: every un-named <c>alter_job</c> parameter means "leave unchanged", so this
+    /// cannot arm a paused job.</para>
+    /// </summary>
+    public const string SetContinuousAggregateRefreshSql = @"
+SELECT alter_job(
+    j.job_id,
+    config => jsonb_set(j.config, '{start_offset}', to_jsonb($2::text)),
+    fixed_schedule => true,
+    initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + ($3::int * INTERVAL '1 minute'))
+FROM timescaledb_information.jobs AS j
+WHERE j.job_id = $1::integer";
+
+    /// <summary>
+    /// Converges EXISTING hourly continuous-aggregate refresh policies onto both halves of #3012's treatment —
+    /// the narrowed <see cref="HourlyRefreshStartOffset"/> window and the
+    /// <see cref="RefreshPhaseMinutesFor"/> phase grid — for stores that already have policies.
+    ///
+    /// <para><b>Behaviour on each of the three store states, because that is the whole contract.</b> A FRESH
+    /// store has no refresh jobs yet — its aggregates are created moments LATER — so this reads an empty set
+    /// and returns 0. A store still carrying the OLD values gets both halves applied on the first start after
+    /// deploy, and the create that follows then finds policies which match. A store an operator already
+    /// patched BY HAND to the right window is matched on the window and left alone on it — it is only
+    /// re-phased if its job is not on a fixed schedule or not on this grid, which is the one case where code
+    /// deliberately wins over a live hand-applied value, and production settled that argument: measured about
+    /// two hours after the offsets were applied by hand, every job read <c>fixed_schedule = false</c> and only
+    /// one of six hourly refreshes was still on the minute it had been set to. Without a fixed schedule the
+    /// next start comes off the previous FINISH, so a hand-applied stagger decays back into coincidence within
+    /// hours.</para>
+    ///
+    /// <para><b>DAILY refresh policies are skipped, by membership rather than by name-matching.</b> A view
+    /// that is not on <see cref="HourlyRefreshPhaseOrder"/> is passed over untouched, so the daily tier keeps
+    /// <see cref="DailyRefreshStartOffset"/> and its finish-to-start scheduling. This is the guard against the
+    /// obvious future regression — a "make every refresh window consistent" edit — arriving through the
+    /// converge path instead of through the create path.</para>
+    ///
+    /// <para>Failure-isolated PER JOB, the #1775 shape: one <c>alter_job</c> that fails (most often because a
+    /// least-privilege bring-your-own store's login does not own the job) leaves that one policy on its old
+    /// window and the rest still converge. Returns how many it moved.</para>
+    /// </summary>
+    public static async Task<int> ConvergeContinuousAggregateRefreshAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var hourly = new HashSet<string>(HourlyRefreshPhaseOrder, StringComparer.Ordinal);
+        var desiredSeconds = (long)HourlyRefreshStartSpan.TotalSeconds;
+
+        var stale = new List<(int JobId, string View, long? WasSeconds, bool WasFixed, int? WasPhase)>();
+        try
+        {
+            using var probe = new NpgsqlCommand(ContinuousAggregateRefreshStateSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var view = reader.GetString(1);
+                if (!hourly.Contains(view))
+                {
+                    continue;
+                }
+
+                var seconds = reader.IsDBNull(2) ? (long?)null : reader.GetInt64(2);
+                var fixedSchedule = !reader.IsDBNull(3) && reader.GetBoolean(3);
+                var phase = reader.IsDBNull(4) ? (int?)null : reader.GetInt32(4);
+
+                if (seconds == desiredSeconds && fixedSchedule && phase == RefreshPhaseMinutesFor(view))
+                {
+                    continue;
+                }
+
+                stale.Add((Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture), view, seconds, fixedSchedule, phase));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A plain-PostgreSQL store (the views do not exist) or a TimescaleDB too old to expose
+               initial_start. The caller already gates on the extension; nothing to converge either way. */
+            logger?.LogDebug("Continuous-aggregate refresh converge: could not read policy jobs: {Message}", ex.Message);
+            return 0;
+        }
+
+        var converged = 0;
+        foreach (var (jobId, view, wasSeconds, wasFixed, wasPhase) in stale)
+        {
+            var phase = RefreshPhaseMinutesFor(view);
+            try
+            {
+                using var alter = new NpgsqlCommand(SetContinuousAggregateRefreshSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                alter.Parameters.AddWithValue(jobId);
+                alter.Parameters.AddWithValue(HourlyRefreshStartOffset);
+                alter.Parameters.AddWithValue(phase);
+                await alter.ExecuteNonQueryAsync(cancellationToken);
+                converged++;
+
+                logger?.LogInformation(
+                    "TimescaleDB: moved {View}'s refresh policy to a {Now} window on a fixed :{Phase} schedule (was {WasSeconds}s of window, fixed_schedule={WasFixed}, phase {WasPhase}) — a refresh window wider than its own cadence is what turns a shared lock into a convoy (#3012).",
+                    view, HourlyRefreshStartOffset, phase.ToString("00", CultureInfo.InvariantCulture), wasSeconds, wasFixed, wasPhase);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not move {View}'s refresh policy (job {JobId}) to a {Interval} window on a fixed :{Phase} schedule — it keeps re-materializing its old window every run (often a permission issue: the store login must own the job): {Message}",
+                    view, jobId, HourlyRefreshStartOffset, phase.ToString("00", CultureInfo.InvariantCulture), ex.Message);
+            }
+        }
+
+        if (converged > 0)
+        {
+            logger?.LogInformation(
+                "TimescaleDB: {Converged}/{Total} hourly refresh policies moved onto the {Interval} window and their own minute on the phase grid ({Minutes} distinct minutes, #3012/#3174).",
+                converged, stale.Count, HourlyRefreshStartOffset, HourlyRefreshPhaseOrder.Count);
+        }
+
+        return converged;
+    }
+
+    /// <summary>Raw-tier retention horizon: keep per-sweep raw ~4 days — comfortably past the hourly CAGG's own
+    /// <see cref="HourlyRefreshStartOffset"/> refresh window, so the raw drop never outruns the aggregate that
+    /// preserves it. The margin is three days since #3012 narrowed that window; it was one day before, and the
+    /// dependency now runs the other way — the refresh window is chosen against its own cadence and this
+    /// horizon only has to clear it.</summary>
     public const string RawRetentionInterval = "4 days";
 
     /// <summary>Hourly-CAGG-tier retention horizon: keep the hourly rollups 90 days — well past the daily CAGG's
@@ -1706,7 +4312,8 @@ WITH NO DATA";
     /// by taste. It must EXCEED <see cref="RawRetentionInterval"/> (4 days) with margin, because the raw purge
     /// is gated on this view covering raw's oldest row — equal horizons would race, with raw's newest-dropped
     /// chunk and L1's oldest-kept bucket at the same age. And it only has to exceed it: nothing READS this
-    /// view, and its consumers (the two corrected rollups) refresh over a 3-day window.</para>
+    /// view, and its consumers refresh over at most <see cref="DailyRefreshStartOffset"/> (the corrected
+    /// daily; the corrected hourly reaches only <see cref="HourlyRefreshStartOffset"/> back).</para>
     ///
     /// <para><b>MEASURED, because #1849 raises capacity as a real input and #1581 says settle it before
     /// shipping.</b> On a seeded 600-query store at the default 5-minute <c>query_store</c> cadence
@@ -1823,7 +4430,12 @@ WITH NO DATA";
     /// <para><b>Why it is safe to run on every start.</b> The <c>IS DISTINCT FROM</c> guard compares as
     /// INTERVAL, not text, so a policy already on the right horizon matches nothing and no job is touched —
     /// this is a no-op on the second and every later start, and on a fresh store the policy was just created
-    /// with the right value. Only <c>config</c> is named, so the job's SCHEDULED state is preserved exactly:
+    /// with the right value. That is asserted rather than only claimed:
+    /// <c>EnsureRetentionPolicies_ConvergesAnOldHorizon_PreservingScheduledStateAndNextStart_AgainstDevPostgres</c>
+    /// requires the settled third sweep to report moving NOTHING, and nothing else in that test can stand in
+    /// for it — every state value it compares reads the same whether this statement was a no-op or a
+    /// re-apply of all seventeen horizons. Only <c>config</c> is named, so the job's SCHEDULED state is
+    /// preserved exactly:
     /// measured on 2.28.1 against both an armed and a held policy, each kept its state across the update while
     /// the horizon moved. That is what lets this run BEFORE the coverage gate without disturbing it — a policy
     /// #1877 is holding paused stays paused, and the #1680 discipline of never exposing an armed window is not
@@ -2136,8 +4748,9 @@ AND   j.hypertable_name = '{relation}'";
     /// logs names all of them, because an operator cross-checking it against
     /// <c>timescaledb_information.jobs</c> meets every one (#1958).
     /// Ordering safety is by HORIZON, not run order — each tier's drop stays comfortably past the next
-    /// tier's 3-day refresh start_offset (4d raw vs 3d hourly refresh; 90d hourly vs 3d daily refresh), so a drop
-    /// never removes history the next tier has not yet materialized. Idempotent (<c>if_not_exists</c>) and
+    /// tier's refresh start_offset (4d raw vs the hourly refresh's <see cref="HourlyRefreshStartOffset"/>;
+    /// 90d hourly vs the daily refresh's <see cref="DailyRefreshStartOffset"/>), so a drop never removes
+    /// history the next tier has not yet materialized. Idempotent (<c>if_not_exists</c>) and
     /// failure-isolated per policy. MUST run AFTER <see cref="EnsureContinuousAggregatesAsync"/> so the hourly
     /// CAGGs the hourly policies target already exist. Returns the number of policies in place.
     ///
@@ -2337,6 +4950,7 @@ AND   j.hypertable_name = '{relation}'";
         }
 
         await using var command = dataSource.CreateCommand(RollupProbeSql);
+        command.CommandTimeout = JobCatalogReadTimeoutSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         await reader.ReadAsync(cancellationToken);
         return new RollupAvailability(
@@ -2427,8 +5041,9 @@ AND   j.hypertable_name = '{relation}'";
     /// pre-existing history serves ONLY what was materialized. Real-time aggregation cannot rescue it —
     /// the watermark is a hard partition (materialized below <c>UNION ALL</c> raw at-or-above), so raw
     /// older than the watermark is excluded by construction, not merely un-accelerated. Every rollup's
-    /// refresh policy starts 3 days back, so on a store that existed before its rollups the materialized
-    /// span begins at roughly creation-minus-3-days and NEVER reaches further back on its own.</para>
+    /// refresh policy only reaches its own start offset back, so on a store that existed before its rollups
+    /// the materialized span begins at roughly creation minus that offset and NEVER reaches further back on
+    /// its own.</para>
     ///
     /// <para><b><c>to_regclass</c>-safe by construction, not by guard.</b> A relation named in a statement
     /// is resolved at PARSE time, so no in-statement <c>to_regclass</c> test can keep <c>min(bucket)</c>
@@ -2472,6 +5087,7 @@ AND   j.hypertable_name = '{relation}'";
         }
 
         await using var command = dataSource.CreateCommand(RollupCoverageProbeSql(availability));
+        command.CommandTimeout = JobCatalogReadTimeoutSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
         {
@@ -2579,26 +5195,94 @@ AND   j.hypertable_name = '{relation}'";
     }
 
     /// <summary>
-    /// Every COMPRESSION-policy job whose <c>schedule_interval</c> is not
-    /// <see cref="CompressScheduleInterval"/> — the stores that need converging (#1778). The comparison is
-    /// done by PostgreSQL against a typed <c>INTERVAL</c> literal rather than by string in C#, so
-    /// <c>01:00:00</c> and <c>1 hour</c> compare equal instead of drifting on formatting.
+    /// Every COMPRESSION-policy job's schedule, with the three things a converged policy is made of: the
+    /// cadence it wakes on, whether that cadence is a FIXED schedule, and which minute of the hour it starts
+    /// on.
+    ///
+    /// <para><b>Unfiltered, with staleness decided in C# (#3035).</b> The #1778 form carried
+    /// <c>schedule_interval IS DISTINCT FROM INTERVAL '1 hour'</c> in the WHERE clause, and that cannot
+    /// express the phase test: the wanted minute is PER HYPERTABLE, so no single SQL literal stands for it and
+    /// a job stale only on its phase would be filtered out before the caller ever saw it. The cadence is
+    /// therefore emitted as SECONDS as well as text, which is what the typed-INTERVAL comparison used to
+    /// provide — <c>01:00:00</c> and <c>1 hour</c> cannot read as a difference and re-alter the same job on
+    /// every start — and the text form stays because the line an operator reads names the cadence the policy
+    /// LEFT.</para>
     ///
     /// <para>Scoped to compression jobs the SAME tolerant way <see cref="ReadStuckCompressionJobsAsync"/> is
     /// (<c>policy_compression</c> plus the 2.18+ <c>columnstore</c> rebrand). Retention, continuous-aggregate
     /// refresh, reorder and every other job type are deliberately untouched: their cadences are separate
     /// decisions, and the retention jobs in particular carry an armed/paused state (#1680) this must never
     /// disturb.</para>
+    ///
+    /// <para><b>Two of these columns are younger than the rest of the read, which is why
+    /// <see cref="CompressionCadenceOnlyStateSql"/> exists.</b> <c>fixed_schedule</c> and
+    /// <c>initial_start</c> entered <c>timescaledb_information.jobs</c> later than <c>schedule_interval</c>
+    /// did, so on a store old enough to lack them this statement throws — and #1778's cadence converge, which
+    /// only ever needed the older columns, would be lost with it. The caller retries with the narrow read
+    /// instead of returning zero.</para>
+    ///
+    /// <para>The phase comes back as a minute-of-hour already converted to UTC. A bare
+    /// <c>EXTRACT(MINUTE FROM initial_start)</c> would read the SESSION time zone, which on any of the
+    /// half-hour and quarter-hour zones is a store-wide silent skew rather than a local oddity.</para>
+    ///
+    /// <para><b><c>hypertable_schema</c> is selected because a bare name is not an identity.</b>
+    /// <see cref="CompressionPhaseOrder"/> holds bare table names, so a bring-your-own store carrying its own
+    /// <c>wait_stats</c> hypertable in another schema would otherwise match one of ours and be given a minute
+    /// this code has no basis for choosing. The cadence converge stays deliberately unscoped — that is
+    /// #1778's reach and narrowing it would be a behaviour change — so the schema gates the PHASE only.
+    /// Appended rather than inserted, so every ordinal the reader already uses keeps its position: an ordinal
+    /// shift in a column list is a defect nothing but a live store can see.</para>
     /// </summary>
-    public static string StaleCompressionScheduleSql =>
-        $@"
+    public const string CompressionPolicyStateSql = @"
 SELECT
     j.job_id,
     j.hypertable_name,
-    j.schedule_interval::text
+    j.schedule_interval::text,
+    EXTRACT(EPOCH FROM j.schedule_interval)::bigint AS schedule_interval_seconds,
+    j.fixed_schedule,
+    CASE
+        WHEN j.initial_start IS NULL THEN NULL
+        ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int
+    END AS phase_minutes,
+    j.hypertable_schema
 FROM timescaledb_information.jobs AS j
-WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')
-AND   j.schedule_interval IS DISTINCT FROM INTERVAL '{CompressScheduleInterval}'";
+WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
+
+    /// <summary>
+    /// The same read as <see cref="CompressionPolicyStateSql"/> minus the two columns the PHASE needs — the
+    /// fallback for a store whose <c>timescaledb_information.jobs</c> does not have them.
+    ///
+    /// <para><b>This exists because widening a read can turn a partial capability into a total outage, and
+    /// that direction is worse than the one it was widening for.</b> <c>schedule_interval</c> has been in that
+    /// view far longer than <c>fixed_schedule</c> and <c>initial_start</c> have. #1778's cadence converge only
+    /// ever needed the former, so a store old enough to lack the latter two used to be converged fine — and
+    /// once the phase columns were added to the one read this function makes, that store's probe would throw,
+    /// be caught, return 0, and lose the cadence converge it already had. A silent TOTAL regression in the
+    /// name of a feature it cannot use. Falling back keeps the old behaviour exactly: cadence converged, phase
+    /// skipped. Raised by review.</para>
+    ///
+    /// <para><b>The version range this is for is the one this file already states, not one assumed from the
+    /// bundled runtime.</b> Nothing in the product declares a TimescaleDB floor and nothing checks
+    /// <c>extversion</c>: <see cref="EnableCompressionSql"/> says the pre-2.18 compression vocabulary is
+    /// "preferred here for compatibility across 2.x", the forced-refresh path already handles a store where
+    /// <c>force</c> does not exist (2.18+), and the continuous-aggregate converge's own catch already names "a
+    /// TimescaleDB too old to expose <c>initial_start</c>" as a state that reaches it. Fixed-schedule
+    /// background jobs — and therefore these two columns — are a later 2.x addition than
+    /// <c>schedule_interval</c>, so inside a stated 2.x compatibility target they cannot be assumed present.
+    /// That is the whole argument for degrading rather than for a floor pin.</para>
+    ///
+    /// <para>The first four columns are byte-identical to the wide read's, in the same order, because the
+    /// caller reads both with one set of ordinals — the phase columns are what it stops reading, not a
+    /// different shape it starts reading.</para>
+    /// </summary>
+    public const string CompressionCadenceOnlyStateSql = @"
+SELECT
+    j.job_id,
+    j.hypertable_name,
+    j.schedule_interval::text,
+    EXTRACT(EPOCH FROM j.schedule_interval)::bigint AS schedule_interval_seconds
+FROM timescaledb_information.jobs AS j
+WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
 
     /// <summary>
     /// Retunes one existing compression policy to <see cref="CompressScheduleInterval"/>. The job id is BOUND
@@ -2611,72 +5295,220 @@ AND   j.schedule_interval IS DISTINCT FROM INTERVAL '{CompressScheduleInterval}'
     /// considers eligible. Measured on 2.28.1: the change also re-anchors <c>next_start</c> immediately
     /// (a job sitting at last-finish + 12h moved to last-finish + 1h), so a converged store starts honoring the
     /// new cadence on the next tick rather than after one final half-day wait.</para>
+    ///
+    /// <para>This is the FOREIGN-hypertable form. A hypertable this product owns takes
+    /// <see cref="SetCompressionSchedulePhaseSql"/> instead, which also pins the schedule; leaving a foreign
+    /// hypertable's <c>fixed_schedule</c> alone keeps #1778's reach exactly as wide as it was without this
+    /// code choosing a minute for a table it knows nothing about.</para>
     /// </summary>
     public static string SetCompressionScheduleSql =>
         $"SELECT alter_job($1::integer, schedule_interval => INTERVAL '{CompressScheduleInterval}')";
 
     /// <summary>
-    /// Retunes EXISTING compression policies to <see cref="CompressScheduleInterval"/> (#1778) — the half of
-    /// the tick fix that reaches stores which already have policies.
+    /// Moves one existing compression policy onto <see cref="CompressScheduleInterval"/> AND onto its slot on
+    /// the compression phase grid. <c>$1</c> the job id (<c>::integer</c>, the #1586 trap), <c>$2</c> the
+    /// minute of the hour.
     ///
-    /// <para>Without this the change would only ever help fresh installs: <see cref="AddCompressionPolicySql"/>
-    /// carries the interval, but <c>if_not_exists => true</c> makes it a documented no-op against an existing
-    /// policy (measured: returns -1, NOTICE, parameters untouched), so every store that ever ran an older build
-    /// — the field store in #1778 among them — would keep waking twice a day forever. Idempotent by
-    /// construction: it selects only the jobs that DIFFER, so the first start after deploy converges the store
-    /// and every start after that finds nothing and logs nothing.</para>
+    /// <para><b>Naming <c>initial_start</c> is the half that makes the minute durable</b>, not decoration:
+    /// TimescaleDB computes the next start from the previous FINISH when <c>initial_start</c> is absent, which
+    /// is why a compression policy set to a minute by hand slides off it by its own runtime every cycle. The
+    /// anchor is the NEXT whole hour plus the phase — deliberately in the future, because a fixed schedule
+    /// needs a non-null <c>initial_start</c> and anchoring forward never depends on how a past anchor is
+    /// handled — and computed in UTC rather than with a bare <c>date_trunc('hour', now())</c>, which truncates
+    /// in the SESSION time zone. Both for the same reasons
+    /// <see cref="AddContinuousAggregatePolicySql"/> computes it that way.</para>
+    ///
+    /// <para><c>scheduled</c> is deliberately not named, so this cannot arm a paused job. That is
+    /// load-bearing here rather than defensive: the fixture idiom for a deterministic compression test is a
+    /// policy created and parked at <c>scheduled = false</c> in one transaction (#1888), and a converge that
+    /// re-armed it would make those tests race the scheduler again.</para>
+    /// </summary>
+    public static string SetCompressionSchedulePhaseSql =>
+        $@"SELECT alter_job(
+    $1::integer,
+    schedule_interval => INTERVAL '{CompressScheduleInterval}',
+    fixed_schedule => true,
+    initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + ($2::int * INTERVAL '1 minute'))";
+
+    /// <summary>
+    /// Converges EXISTING compression policies onto <see cref="CompressScheduleInterval"/> (#1778) and onto
+    /// the <see cref="CompressionPhaseMinutes"/> grid on a fixed schedule (#3035) — one function owning both
+    /// properties, because they are set by the same <c>alter_job</c> and a second sweep would fight this one
+    /// for the same rows.
+    ///
+    /// <para><b>Why converging is the only path that reaches a deployed store, and why the reason is not the
+    /// one the refresh side has.</b> <see cref="AddCompressionPolicySql"/> carries both the interval and the
+    /// phase, but <c>if_not_exists =&gt; true</c> makes it a documented no-op against a policy the store
+    /// already has (measured: returns -1, NOTICE, parameters untouched) — it keys on the policy EXISTING, not
+    /// on its parameters matching. So the create path reaches fresh installs only. That is a quiet skip rather
+    /// than the <c>22023</c> raise <c>add_continuous_aggregate_policy</c> answers a differing window with,
+    /// which is why the compression create can keep running BEFORE this converge while the refresh create has
+    /// to run after its own.</para>
+    ///
+    /// <para><b>Behaviour on each of the three store states.</b> A FRESH store has already had its policies
+    /// created by <see cref="ApplyCompressionPolicyAsync"/> and
+    /// <see cref="EnsureCollectionLogHypertableAsync"/> moments earlier, WITH <c>initial_start</c>, so this
+    /// reads them back matching and returns 0 — the mirror image of the refresh converge, which sees an empty
+    /// set on a fresh store because its aggregates do not exist yet. A store carrying OLD values gets both
+    /// properties on the first start after deploy. A store an operator already patched BY HAND to a minute is
+    /// re-phased anyway, and that is deliberate: a hand-set minute on a finish-to-start job is not a stagger
+    /// with a slow leak, it is one with a countdown, and the production store settled the argument by reading
+    /// <c>fixed_schedule = f</c> on every compression job it had.</para>
+    ///
+    /// <para><b>Idempotent by construction</b>: only jobs that DIFFER on cadence or on phase are altered, so
+    /// the first start after deploy converges the store and every start after that finds nothing and logs
+    /// nothing. FOREIGN hypertables — a bring-your-own store's own tables, fixture tables — keep #1778's
+    /// cadence converge and are left off the grid, because <see cref="CompressionPhaseOrder"/> is derived from
+    /// the collector catalog and an unrecognised name means "not ours" rather than "forgotten".</para>
     ///
     /// <para>Failure-isolated PER JOB, the #1775 shape: one <c>alter_job</c> that fails (most often because a
     /// least-privilege bring-your-own store's login does not own the job) leaves that one hypertable on its old
-    /// cadence and the rest still converge. Returns how many it retuned.</para>
+    /// schedule and the rest still converge. Returns how many it moved.</para>
     /// </summary>
-    public static async Task<int> ConvergeCompressionScheduleAsync(
+    public static Task<int> ConvergeCompressionScheduleAsync(
         NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+        => ConvergeCompressionScheduleAsync(connection, logger, CompressionPolicyStateSql, cancellationToken);
+
+    /// <summary>
+    /// The seam that lets the FALLBACK DIRECTION be tested: <paramref name="phasedStateSql"/> is the wide read
+    /// the public entry point supplies, and a test supplies a deliberately-failing one instead.
+    ///
+    /// <para><b>Why a seam rather than prose.</b> The property that has to hold is not "the phase applies" but
+    /// "a probe failure costs the phase and NOTHING ELSE" — an old store must keep the
+    /// <see cref="CompressScheduleInterval"/> cadence converge it already had from #1778. Returning 0 there
+    /// would be a total regression wearing a partial's clothes, which is the failure shape this whole area
+    /// keeps producing: silent and partial, never loud. Against a runtime that HAS the phase columns there is
+    /// no other way to make the wide read fail, so without this the direction could only be reasoned about,
+    /// and that is exactly what a reviewer had to do.</para>
+    ///
+    /// <para>The FALLBACK statement is deliberately NOT injectable — <see cref="CompressionCadenceOnlyStateSql"/>
+    /// is always the one used, so a test cannot accidentally prove the degradation against a statement the
+    /// product does not ship. And the wide statement being injectable costs nothing: the public path's own
+    /// live assertions land real phases, which a wrong wide read could not do.</para>
+    /// </summary>
+    internal static async Task<int> ConvergeCompressionScheduleAsync(
+        NpgsqlConnection connection, ILogger? logger, string phasedStateSql, CancellationToken cancellationToken)
     {
         if (connection is null)
         {
             throw new ArgumentNullException(nameof(connection));
         }
 
-        var stale = new List<(int JobId, string? Hypertable, string? Interval)>();
-        try
+        var desiredSeconds = (long)CompressScheduleSpan.TotalSeconds;
+
+        var stale = new List<(int JobId, string? Hypertable, string? Interval, bool WasFixed, int? WasPhase, int? Phase)>();
+
+        /* One reader for both statements: the narrow one is the wide one's first four columns in the same
+           order, so withPhase decides which ordinals are READ rather than selecting a different shape. */
+        async Task ReadStateAsync(string sql, bool withPhase)
         {
-            using var probe = new NpgsqlCommand(StaleCompressionScheduleSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            stale.Clear();
+
+            using var probe = new NpgsqlCommand(sql, connection) { CommandTimeout = SetupTimeoutSeconds };
             await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
+                var hypertable = reader.IsDBNull(1) ? null : reader.GetString(1);
+                var intervalText = reader.IsDBNull(2) ? null : reader.GetString(2);
+                var seconds = reader.IsDBNull(3) ? (long?)null : reader.GetInt64(3);
+
+                var fixedSchedule = withPhase && !reader.IsDBNull(4) && reader.GetBoolean(4);
+                var wasPhase = withPhase && !reader.IsDBNull(5) ? reader.GetInt32(5) : (int?)null;
+
+                /* Schema-exact, because CompressionPhaseOrder holds BARE names: a foreign hypertable
+                   named like one of ours must not inherit its minute. */
+                var ours = withPhase
+                    && !reader.IsDBNull(6)
+                    && string.Equals(reader.GetString(6), PgSchemaGenerator.CollectSchema, StringComparison.Ordinal);
+
+                int? phase = ours && hypertable is not null && TryCompressionPhaseMinutesFor(hypertable, out var slot)
+                    ? slot
+                    : null;
+
+                /* A NULL cadence is the widest wakeup there is, so it counts as stale rather than as
+                   "nothing to compare". */
+                var cadenceStale = seconds != desiredSeconds;
+                var phaseStale = phase is int wanted && (!fixedSchedule || wasPhase != wanted);
+
+                if (!cadenceStale && !phaseStale)
+                {
+                    continue;
+                }
+
                 stale.Add((
                     Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture),
-                    reader.IsDBNull(1) ? null : reader.GetString(1),
-                    reader.IsDBNull(2) ? null : reader.GetString(2)));
+                    hypertable,
+                    intervalText,
+                    fixedSchedule,
+                    wasPhase,
+                    phase));
             }
+        }
+
+        try
+        {
+            await ReadStateAsync(phasedStateSql, withPhase: true);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* A plain-PostgreSQL store (the views do not exist) or a store hiccup. The caller already gates on
-               the extension; nothing to converge either way. */
-            logger?.LogDebug("Compression-schedule converge: could not read policy jobs: {Message}", ex.Message);
-            return 0;
+            /* The wide read names fixed_schedule and initial_start, which entered
+               timescaledb_information.jobs later than schedule_interval did. Retry WITHOUT them rather than
+               giving up: a store old enough to lack them was converged fine by #1778 before the phase was
+               added to this read, and returning 0 here would silently take that away as well. See
+               CompressionCadenceOnlyStateSql. */
+            /* The catch is deliberately broad — the file's existing tolerant style — so this line must not
+               assert a cause it has not established. It states what was observed and what it costs, and
+               offers the two candidate reasons as candidates. Raised by review. */
+            logger?.LogInformation(
+                "TimescaleDB: could not read compression-policy schedules with their phase ({Message}) — retrying without it, so the {Interval} tick (#1778) still converges and only the phase is skipped. The reason is not established here: a job catalog predating fixed_schedule/initial_start fails this way on every start, while a transient store error fails this way once and the next start pins the phases. Either way these policies keep TimescaleDB's finish-to-start scheduling until a phased read succeeds, so they drift through the refresh slots (#3035).",
+                ex.Message, CompressScheduleInterval);
+
+            try
+            {
+                await ReadStateAsync(CompressionCadenceOnlyStateSql, withPhase: false);
+            }
+            catch (Exception narrow) when (narrow is not OperationCanceledException)
+            {
+                /* A plain-PostgreSQL store (the views do not exist) or a store hiccup. The caller already
+                   gates on the extension; nothing to converge either way. */
+                logger?.LogDebug("Compression-schedule converge: could not read policy jobs: {Message}", narrow.Message);
+                return 0;
+            }
         }
 
         var converged = 0;
-        foreach (var (jobId, hypertable, interval) in stale)
+        foreach (var (jobId, hypertable, interval, wasFixed, wasPhase, phase) in stale)
         {
             try
             {
-                using var alter = new NpgsqlCommand(SetCompressionScheduleSql, connection) { CommandTimeout = SetupTimeoutSeconds };
-                alter.Parameters.AddWithValue(jobId);
-                await alter.ExecuteNonQueryAsync(cancellationToken);
-                converged++;
+                if (phase is int slot)
+                {
+                    using var alter = new NpgsqlCommand(SetCompressionSchedulePhaseSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                    alter.Parameters.AddWithValue(jobId);
+                    alter.Parameters.AddWithValue(slot);
+                    await alter.ExecuteNonQueryAsync(cancellationToken);
+                    converged++;
 
-                logger?.LogInformation(
-                    "TimescaleDB: retuned {Hypertable}'s compression policy from a {Was} tick to {Now} — that is the longest an already-eligible chunk can now sit uncompressed.",
-                    hypertable, interval, CompressScheduleInterval);
+                    logger?.LogInformation(
+                        "TimescaleDB: retuned {Hypertable}'s compression policy from a {Was} tick to {Now} on a fixed :{Phase} schedule (was fixed_schedule={WasFixed}, phase {WasPhase}) — an unpinned policy computes its next start from its last FINISH, so it drifts by its own runtime every cycle and laps the hour through every refresh slot in turn (#3035).",
+                        hypertable, interval, CompressScheduleInterval, slot.ToString("00", CultureInfo.InvariantCulture), wasFixed, wasPhase);
+                }
+                else
+                {
+                    using var alter = new NpgsqlCommand(SetCompressionScheduleSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                    alter.Parameters.AddWithValue(jobId);
+                    await alter.ExecuteNonQueryAsync(cancellationToken);
+                    converged++;
+
+                    logger?.LogInformation(
+                        "TimescaleDB: retuned {Hypertable}'s compression policy from a {Was} tick to {Now} — that is the longest an already-eligible chunk can now sit uncompressed.",
+                        hypertable, interval, CompressScheduleInterval);
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger?.LogWarning(
-                    "Could not retune {Hypertable}'s compression policy (job {JobId}) to a {Interval} tick — it keeps its {Was} cadence, so its newest closed chunk stays uncompressed longer (often a permission issue: the store login must own the job): {Message}",
+                    "Could not converge {Hypertable}'s compression policy (job {JobId}) onto a {Interval} tick — it keeps its {Was} cadence and its old schedule, so its newest closed chunk stays uncompressed longer and its tick keeps drifting through the refresh slots (often a permission issue: the store login must own the job): {Message}",
                     hypertable, jobId, CompressScheduleInterval, interval, ex.Message);
             }
         }
@@ -2684,7 +5516,7 @@ AND   j.schedule_interval IS DISTINCT FROM INTERVAL '{CompressScheduleInterval}'
         if (converged > 0)
         {
             logger?.LogInformation(
-                "TimescaleDB: {Converged}/{Total} compression policies retuned to a {Interval} tick (#1778 — TimescaleDB's own default for 1-day chunks is 12 hours).",
+                "TimescaleDB: {Converged}/{Total} compression policies converged onto a {Interval} tick and, where the hypertable is ours, onto the compression phase grid (#1778 — TimescaleDB's own default for 1-day chunks is 12 hours; #3035 — an unpinned policy drifts finish-to-start).",
                 converged, stale.Count, CompressScheduleInterval);
         }
 
@@ -2914,7 +5746,7 @@ WHERE j.proc_name LIKE '%compression%'
         var stuck = new List<StuckCompressionJob>();
         try
         {
-            using var command = new NpgsqlCommand(StuckCompressionJobsSql, connection);
+            using var command = new NpgsqlCommand(StuckCompressionJobsSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -2947,23 +5779,19 @@ WHERE j.proc_name LIKE '%compression%'
     }
 
     /// <summary>
-    /// Every background job's last-run duration against its own schedule interval (#2136) — the readings
-    /// the Store Job Over Cadence self-alert judges. <c>job_stats</c> for the same reason the #1778
-    /// observability path uses it (maintained unconditionally; the per-execution history table is empty
-    /// unless job-execution logging is on). Only a SUCCESSFUL last run judges: a failed run's duration is
-    /// not a cadence signal, and job failures are their own condition (<c>total_failures</c> rides the
-    /// V56 telemetry). Tolerant like <see cref="ReadStuckCompressionJobsAsync"/> — a plain-PG store or a
-    /// hiccup yields no readings, never an exception.
+    /// The #2136 job-cadence catalog read, public for the reason <see cref="RetentionHoldReadSql"/> is: one
+    /// of its projections is now load-bearing for what an ALERT SAYS, so it belongs in CI rather than only
+    /// in a throwaway harness. <see cref="StoreJobCadenceReading.JobName"/> is built <c>proc_name</c> FIRST,
+    /// which is what lets <see cref="ScheduleIntervalDoublesAsEndOffset"/> decide whether widening this
+    /// job's interval would move an <c>end_offset</c>; reversing the concatenation would keep collecting
+    /// perfectly good readings while silently restoring the wrong remedy text.
+    ///
+    /// <para><c>job_stats</c> for the same reason the #1778 observability path uses it (maintained
+    /// unconditionally; the per-execution history table is empty unless job-execution logging is on). Only
+    /// a SUCCESSFUL last run judges: a failed run's duration is not a cadence signal, and job failures are
+    /// their own condition (<c>total_failures</c> rides the V56 telemetry).</para>
     /// </summary>
-    public static async Task<IReadOnlyList<StoreJobCadenceReading>> ReadJobCadenceReadingsAsync(
-        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
-    {
-        if (connection is null)
-        {
-            throw new ArgumentNullException(nameof(connection));
-        }
-
-        const string sql = @"
+    public const string JobCadenceReadSql = @"
 SELECT
     j.job_id,
     j.proc_name || coalesce(' ' || j.hypertable_name, ''),
@@ -2973,10 +5801,24 @@ FROM timescaledb_information.job_stats AS js
 JOIN timescaledb_information.jobs AS j USING (job_id)
 WHERE js.last_run_status = 'Success'";
 
+    /// <summary>
+    /// Every background job's last-run duration against its own schedule interval (#2136) — the readings the
+    /// Store Job Over Cadence self-alert judges. Tolerant like
+    /// <see cref="ReadStuckCompressionJobsAsync"/> — a plain-PG store or a hiccup yields no readings, never
+    /// an exception. See <see cref="JobCadenceReadSql"/> for the statement and its decisions.
+    /// </summary>
+    public static async Task<IReadOnlyList<StoreJobCadenceReading>> ReadJobCadenceReadingsAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
         var readings = new List<StoreJobCadenceReading>();
         try
         {
-            using var command = new NpgsqlCommand(sql, connection);
+            using var command = new NpgsqlCommand(JobCadenceReadSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -2990,6 +5832,380 @@ WHERE js.last_run_status = 'Success'";
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogDebug("Store-job cadence check: could not read job stats: {Message}", ex.Message);
+        }
+
+        return readings;
+    }
+
+    /// <summary>
+    /// Everything <see cref="HeaviestRefreshRuntimeSql"/> and <see cref="OtherHourlyRefreshRuntimesSql"/>
+    /// have in common: the projection, the MEASURED OR-join, and the two filters that make the rows refresh
+    /// policies on this store's own aggregates. The two statements differ only in which views they keep.
+    ///
+    /// <para><b>Shared rather than copied, and the copy it replaces is the reason (#3182).</b> This join was
+    /// already carried in two places — here and
+    /// <see cref="ContinuousAggregateRefreshStateSql"/> — because the materialization-hypertable arm ALONE
+    /// was measured to find nothing, so both arms have to be present and a re-guessed join reads back empty
+    /// rather than wrong. A third copy would be a third chance to lose an arm, and it would be the copy with
+    /// the fewest readers. One text, two filters.</para>
+    ///
+    /// <para>Not a full statement on its own: it opens with the <c>FROM</c> and ends inside the
+    /// <c>WHERE</c>, so a caller appends its own <c>AND</c> clauses. That shape is what lets the composed
+    /// text be byte-identical to what each statement used to spell out, which is what keeps the pins on them
+    /// reading the statements rather than this fragment.</para>
+    /// </summary>
+    private const string RefreshPolicyRuntimeProjectionSql = @"
+SELECT
+    ca.view_name,
+    EXTRACT(EPOCH FROM js.last_run_duration)::double precision AS last_run_seconds
+FROM timescaledb_information.jobs AS j
+JOIN timescaledb_information.continuous_aggregates AS ca
+  ON  (ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name)
+  OR  (ca.materialization_hypertable_schema = j.hypertable_schema AND ca.materialization_hypertable_name = j.hypertable_name)
+JOIN timescaledb_information.job_stats AS js USING (job_id)
+WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
+AND   ca.view_schema = 'collect'";
+
+    /// <summary>
+    /// The last SUCCESSFUL run of <see cref="HeaviestHourlyRefreshView"/>'s refresh policy, in seconds — the
+    /// live figure <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>'s envelope is about (#3044).
+    ///
+    /// <para><b>Keyed on the VIEW, and the join is <see cref="ContinuousAggregateRefreshStateSql"/>'s
+    /// measured one rather than a fresh guess.</b> A refresh job's identity cannot be a job id — those are
+    /// assigned per deployment — and it cannot be the display string the V56 telemetry builds either, because
+    /// matching on a concatenation is the drifting paraphrase this file keeps warning about. It has to be the
+    /// view name, which is what the grid is keyed on. The OR-join is copied deliberately: the
+    /// materialization-hypertable form alone was measured to find NOTHING, and the two identities are disjoint
+    /// (a user view lives in <c>collect</c>, a materialization hypertable in
+    /// <c>_timescaledb_internal</c>), so at most one row matches per job.</para>
+    ///
+    /// <para><c>last_run_status = 'Success'</c> for the reason #2136's read has it: a failed run's duration is
+    /// not an envelope reading, and job failures are their own condition. <see cref="HeaviestHourlyRefreshView"/>
+    /// is a compile-time constant, so it interpolates like every other literal here.</para>
+    ///
+    /// <para><b>Deliberately a SAMPLE and not a record of every run.</b> The refresh and the sweep that reads
+    /// this both tick hourly but on independent anchors, and the refresh's start-minute walks (finish-to-start,
+    /// so it advances by its own runtime each cycle), so some runs are seen twice and some not at all. That is
+    /// adequate and it is what the condition needs: the thing being watched is a runtime trending with volume
+    /// over days, and a figure that persists near the line is seen by every tick. Neither this read nor the
+    /// recorded series it is often confused with is MAX-PRESERVING: <c>collect.store_metrics</c>
+    /// (<c>object_kind = 'background_job'</c>, #2136/V56) is the same hourly grain taken by a different
+    /// sweep, and the daily point <c>get_store_metrics</c> serves from it is that day's LAST reading rather
+    /// than the day's largest — so a maximum question asked of either lands short, and a day's peak is
+    /// dropped rather than smoothed. The route that carries one row per run is
+    /// <c>timescaledb_information.job_history</c>, named on
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> and read there for the live envelope
+    /// (#3119). This read supplies the BOUND, which is what was missing, not the history.</para>
+    /// </summary>
+    public static string HeaviestRefreshRuntimeSql =>
+        $@"{RefreshPolicyRuntimeProjectionSql}
+AND   ca.view_name = '{HeaviestHourlyRefreshView}'
+AND   js.last_run_status = 'Success'";
+
+    /// <summary>
+    /// The same read pointed at every OTHER continuous aggregate refresh policy — the live feed
+    /// <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> did not have (#3182).
+    ///
+    /// <para><b>Why this exists at all.</b> That constant is what
+    /// <see cref="CompressionPhaseGuardMinutes"/>' declared width is CHECKED AGAINST, so a light refresh
+    /// running longer than the constant records leaves a compression policy able to start while that refresh
+    /// still holds <c>AccessShareLock</c>, which is #3012's convoy. Until #3188 the constant was arithmetic
+    /// INPUT to that width rather than a check on it, and the difference is which way the failure goes: a
+    /// longer light refresh used to widen the width silently, and now it goes red. Until #3182 nothing read a light
+    /// refresh's runtime back at all: the heaviest one had <see cref="HeaviestRefreshRuntimeSql"/> and the
+    /// other twelve had no live reading keyed to a view anywhere in the product. #2136's
+    /// <see cref="JobCadenceReadSql"/> does read their durations, but it keys on
+    /// <c>proc_name || hypertable_name</c> and a refresh policy's <c>hypertable_name</c> is the
+    /// MATERIALIZATION hypertable, so those readings cannot be attributed to a view without this join —
+    /// which is why the gap survived a check that looks like it covers them.</para>
+    ///
+    /// <para><b>Filtered to "not the heaviest" in SQL and to "hourly" in C#, which is a split rather than an
+    /// inconsistency.</b> Excluding one named view is a compile-time constant and belongs in the statement.
+    /// Deciding which views are HOURLY is <see cref="HourlyRefreshPhaseOrder"/>'s job — it is the registry
+    /// this whole grid is keyed on, a view missing from it is already a stated defect
+    /// (<see cref="RefreshPhaseMinutesFor(string)"/> throws for one), and interpolating a runtime list into a
+    /// statement would put a second copy of that registry in SQL text where nothing checks it against the
+    /// first. So the daily tier's policies come back from the read and are dropped by
+    /// <see cref="ReadOtherHourlyRefreshRuntimesAsync"/> against the registry.</para>
+    ///
+    /// <para><c>last_run_status = 'Success'</c> for the reason every sibling read has it: a failed run's
+    /// duration is not a runtime reading, and job failures are their own condition.</para>
+    /// </summary>
+    public static string OtherHourlyRefreshRuntimesSql =>
+        $@"{RefreshPolicyRuntimeProjectionSql}
+AND   ca.view_name <> '{HeaviestHourlyRefreshView}'
+AND   js.last_run_status = 'Success'";
+
+    /// <summary>
+    /// Reads <see cref="HeaviestRefreshRuntimeSql"/>. Returns null when there is no reading — a fresh store
+    /// whose policy has not completed a run, a plain-PostgreSQL store, a store hiccup — never a synthesized
+    /// zero, which would read as "finished instantly" and is the honest-empty rule this store's collectors are
+    /// held to. Failure-isolated to null the same way <see cref="ReadCompressionActivityAsync"/> is to an empty
+    /// list: observability must never be able to break the sweep that carries it.
+    /// </summary>
+    public static async Task<HeaviestRefreshSlotReading?> ReadHeaviestRefreshRuntimeAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        try
+        {
+            using var command = new NpgsqlCommand(HeaviestRefreshRuntimeSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0) || reader.IsDBNull(1))
+            {
+                return null;
+            }
+
+            return new HeaviestRefreshSlotReading(
+                reader.GetString(0),
+                Convert.ToDouble(reader.GetValue(1), CultureInfo.InvariantCulture));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Heaviest-refresh slot headroom: could not read job stats: {Message}", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Reads <see cref="OtherHourlyRefreshRuntimesSql"/> and keeps the rows whose view is on
+    /// <see cref="HourlyRefreshPhaseOrder"/> — one reading per OTHER hourly refresh policy that has
+    /// completed a successful run (#3182).
+    ///
+    /// <para>Failure-isolated to an EMPTY LIST, the posture <see cref="ReadCompressionActivityAsync"/> and
+    /// <see cref="ReadJobCadenceReadingsAsync"/> take, rather than to a null the way the single-row heaviest
+    /// read is: a list read that found nothing and a list read that failed are the same absence of readings
+    /// to the caller, and the honest-empty rule is that neither is allowed to become a synthesized zero.</para>
+    ///
+    /// <para><b>A DAILY policy's row is dropped rather than logged.</b> The statement cannot tell the tiers
+    /// apart — both use <see cref="RefreshPolicyProcName"/> — and a daily aggregate's runtime is not
+    /// something <see cref="OtherHourlyRefreshObservedCeilingSeconds"/> bounds, so measuring it against that
+    /// constant would manufacture a finding out of a tier mismatch. Dropped silently because it is the
+    /// EXPECTED shape of the result rather than an anomaly: the daily tier is supposed to be there.</para>
+    /// </summary>
+    public static async Task<IReadOnlyList<HourlyRefreshRuntimeReading>> ReadOtherHourlyRefreshRuntimesAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var readings = new List<HourlyRefreshRuntimeReading>();
+        var hourly = new HashSet<string>(HourlyRefreshPhaseOrder, StringComparer.Ordinal);
+
+        try
+        {
+            using var command = new NpgsqlCommand(OtherHourlyRefreshRuntimesSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (reader.IsDBNull(0) || reader.IsDBNull(1))
+                {
+                    continue;
+                }
+
+                var view = reader.GetString(0);
+                if (!hourly.Contains(view))
+                {
+                    continue;
+                }
+
+                readings.Add(new HourlyRefreshRuntimeReading(
+                    view, Convert.ToDouble(reader.GetValue(1), CultureInfo.InvariantCulture)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(
+                "Light-refresh ceiling freshness: could not read job stats: {Message}", ex.Message);
+        }
+
+        return readings;
+    }
+
+    /// <summary>
+    /// Logs <see cref="ReadHeaviestRefreshRuntimeAsync"/>'s reading at a level proportionate to what it says —
+    /// the #3044 watch, and the reason it is a LOG LINE rather than a health band or a self-alert.
+    ///
+    /// <para><b>Not a band.</b> The Collection Health bands are keyed on (server, collector). This is a
+    /// store-side background job, which is neither, so there is no row for it — and #1852's inherited
+    /// constraints are that the band order and semantics do not change and that a new informational signal
+    /// never reaches the banding at all.</para>
+    ///
+    /// <para><b>Not a second self-alert, and the reason is arithmetic rather than taste.</b> #2136's Store Job
+    /// Over Cadence already judges this job's <c>last_run_duration</c> against its own schedule interval, and
+    /// its default warning knob of 25% of a 3,600 s cadence lands on 900 s, inside the
+    /// <see cref="RefreshPhaseSlotSeconds"/> window. So an alert at the window width would fire on the same
+    /// job, the same reading and the same hour as #2136 does, which is what rules the alert form out. What
+    /// #2136 would not do is make the bound reliable: that 25% is a store-backed operator knob clamped
+    /// [5, 100] with no relationship to the grid at all since #3174 broke the derivation
+    /// (<see cref="RefreshSlotPercentOfHourlyCadence"/>), so raising it to 50 to quiet a busy store silently
+    /// moves the effective line to 1,800 s — past the invalidation point — and a re-derived grid moves the
+    /// window underneath a knob that cannot follow it.</para>
+    ///
+    /// <para><b>That the two lines coincide is a coincidence of two independent decisions, and the clearest
+    /// evidence is that #2136 does not know this job's size.</b> Its clamp is justified in
+    /// <c>DarlingAlertSettings</c> on the grounds that "the production worst runs ~7% of cadence" — 252 s —
+    /// while <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> here records 896 s, which is <b>24.9%
+    /// of the same 3,600 s cadence</b> — so the line #2136 lands on is calibrated as though this job ran
+    /// under a third of its actual length, and nothing connects the two numbers. #2136's own remedy text —
+    /// "extend the job's schedule_interval" —
+    /// is actively wrong for this one, because <see cref="HourlyRefreshScheduleInterval"/> is also the
+    /// <c>end_offset</c> and widening it changes what the aggregate materializes without touching the slot.
+    /// A line derived from the slot, keyed on the view, naming the actual remedy, is the form that stays
+    /// correct when either of those numbers moves.</para>
+    ///
+    /// <para><b>Levels.</b> The routine band is Debug — an hourly Information line about a healthy job is
+    /// how a signal gets buried (the discipline <see cref="LogCompressionActivity"/> already states).
+    /// Approaching the slot is a Warning: still true, still time to act. At or past the slot it is an Error,
+    /// because a documented precondition of the shipped compression grid is now FALSE — the highest level a
+    /// log line has, and still not an alert, because the action it calls for is re-deriving #3035's grid
+    /// rather than anything an operator does tonight.</para>
+    /// </summary>
+    public static void LogHeaviestRefreshSlotHeadroom(HeaviestRefreshSlotReading? reading, ILogger? logger)
+    {
+        if (logger is null || reading is null)
+        {
+            return;
+        }
+
+        switch (reading.Headroom)
+        {
+            case RefreshSlotHeadroom.SlotExceeded:
+                logger.LogError(
+                    "TimescaleDB: {View}'s hourly refresh last ran {Seconds:F0}s, at or past the {Slot}s window it has to fit inside ({Percent:F1}% of it) — so excluding that window is no longer enough and the compression phase grid's stated precondition is false. That precondition is a UNIVERSAL over runs — every run of this view finishes inside the window the grid excludes for it — and this run is the WITNESS that falsifies it. No recorded ceiling could have established it in the first place, because a ceiling recorded as a PREFIX MAXIMUM is evidence over the runs it was measured on and says nothing about the next one (#3188). The grid has to be RE-DERIVED (#3035), not renumbered: the hour cannot spare a wider window than {Window} minutes while the compression band still spreads every hypertable, so the fix is fewer compression minutes, a longer cadence for this aggregate, or splitting it (#3044/#3174).",
+                    reading.View, reading.LastRunSeconds, RefreshPhaseSlotSeconds, reading.PercentOfSlot, HeaviestRefreshWindowMinutes);
+                break;
+
+            case RefreshSlotHeadroom.ApproachingSlot:
+                logger.LogWarning(
+                    "TimescaleDB: {View}'s hourly refresh last ran {Seconds:F0}s against the {Slot}s refresh slot it has to fit inside ({Percent:F1}% of it, {Clear:F0}s clear) — past the {Warn}s watch line. These runtimes scale with raw data volume, and at the slot width the compression phase grid has to be re-derived rather than renumbered (#3035). Its per-run history is timescaledb_information.job_history, one row per run, but only where timescaledb.enable_job_execution_logging is on — it is off by default, and a store provisioned before that GUC gained its own conf marker reports nothing there until it heals, so an empty result is that gap and not a quiet hour (#3175/#3177). The hourly collect.store_metrics series (object_kind = 'background_job') samples one reading an hour and serves a daily point that is the day's LAST, so neither answers a maximum question on its own (#3044, #3119).",
+                    reading.View, reading.LastRunSeconds, RefreshPhaseSlotSeconds, reading.PercentOfSlot,
+                    reading.ClearOfSlotSeconds, RefreshSlotWarningSeconds);
+                break;
+
+            default:
+                logger.LogDebug(
+                    "TimescaleDB: {View}'s hourly refresh last ran {Seconds:F0}s, {Percent:F1}% of its {Slot}s slot ({Clear:F0}s clear, watch line {Warn}s).",
+                    reading.View, reading.LastRunSeconds, reading.PercentOfSlot, RefreshPhaseSlotSeconds,
+                    reading.ClearOfSlotSeconds, RefreshSlotWarningSeconds);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// The steady-state deadline for the hourly job-catalog reads (#2813 review). Deliberately NOT
+    /// <see cref="SetupTimeoutSeconds"/>: that 300s budget is documented for one-time BULK SETUP — the
+    /// migrate session's first <c>migrate_data</c>, hypertable conversion — and reusing it here would let a
+    /// single stalled catalog read block the whole hourly self-alert sweep tick (disk pressure, compression
+    /// health, job cadence and this check run sequentially in it) for five minutes. That is exactly the
+    /// failure shape #2810 and #2871 removed from the analysis pass, and it would be perverse to
+    /// reintroduce it in the same release.
+    ///
+    /// <para>Bounded both ways. BELOW: this is a pure catalog round trip over
+    /// <c>timescaledb_information.jobs</c> and <c>chunks</c> with no hypertable scan — it returned in well
+    /// under a second on all three production stores. ABOVE: it shares an hourly tick with three sibling
+    /// checks, so its ceiling must be a small fraction of that hour rather than a fraction of a setup pass.
+    /// 30s is the value its direct sibling <see cref="ReadJobCadenceReadingsAsync"/> gets from Npgsql's
+    /// default — stated explicitly here so it is a DECISION rather than an inherited number nobody chose,
+    /// which is the whole lesson of #2810.</para>
+    /// </summary>
+    public const int JobCatalogReadTimeoutSeconds = 30;
+
+    /// <summary>The #2813 retention-hold catalog read, public so its two load-bearing predicates —
+    /// <c>proc_name = 'policy_retention'</c> and the <c>collect</c> schema scope — are pinned in CI rather
+    /// than only in a throwaway harness. Scoping matters for CORRECTNESS, not tidiness: the alert this
+    /// feeds asserts the rollup-coverage gate is the cause and tells the reader not to arm the policy by
+    /// hand, which would be wrong advice about a retention policy this product never created (review
+    /// catch). The mutating siblings ConvergeRetentionHorizonSql / SetRetentionScheduleSql scope the same
+    /// way.</summary>
+    public const string RetentionHoldReadSql = @"
+SELECT
+    j.job_id,
+    coalesce(j.hypertable_name, ''),
+    j.scheduled,
+    coalesce(j.config->>'drop_after', ''),
+    c.chunk_count,
+    EXTRACT(EPOCH FROM ((now() AT TIME ZONE 'UTC') - (c.oldest_range_start AT TIME ZONE 'UTC')))::bigint,
+    CASE
+        WHEN (j.config->>'drop_after') IS NULL THEN NULL
+        ELSE EXTRACT(EPOCH FROM (j.config->>'drop_after')::interval)::bigint
+    END
+FROM timescaledb_information.jobs AS j
+LEFT JOIN LATERAL (
+    SELECT
+        min(ch.range_start) AS oldest_range_start,
+        count(*)::bigint AS chunk_count
+    FROM timescaledb_information.chunks AS ch
+    WHERE ch.hypertable_schema = j.hypertable_schema
+      AND ch.hypertable_name   = j.hypertable_name
+) AS c ON true
+WHERE j.proc_name = 'policy_retention'
+  AND j.hypertable_schema = 'collect'";
+
+    /// <summary>
+    /// Every retention policy's ARMED state against the consequence of it being held (#2813) — the readings
+    /// the Retention Held self-alert judges, and the live block <c>get_store_metrics</c> reports.
+    ///
+    /// <para><b>Why this is read live rather than taken from the V56 job telemetry.</b>
+    /// <see cref="StoreSelfMetrics.BackgroundJobInsertSql"/> records <c>total_runs</c> and
+    /// <c>total_failures</c> but NOT <c>j.scheduled</c>, so a policy the #1680/#1877 coverage gate has held
+    /// reports <c>total_failures = 0</c> and a plausible last-run duration — byte-for-byte the shape of a
+    /// healthy job, because it is not failing, it is paused. On the production store five
+    /// <c>query_store_stats</c> policies sat held for 16 days and every stored metric read clean; the only
+    /// signal was one WARNING per service start (#2809). Persisting <c>scheduled</c> into the series is the
+    /// better long-term answer and needs a migration rung; this read makes the CURRENT state answerable
+    /// without one, which is the half that would have caught the incident.</para>
+    ///
+    /// <para><b>Held is judged by its CONSEQUENCE, not by a timer.</b> Nothing records when a policy was
+    /// paused, so hold duration is not directly knowable. The data span past the policy's own horizon is
+    /// the same signal measured at the other end, and it is strictly better: it is what an operator checks
+    /// by hand, it is the number that makes the cost legible (4 days configured against 18 days actual),
+    /// and it self-scales — a policy paused an hour ago on a young store sits at ~1x its horizon and says
+    /// nothing, while one held long enough to matter climbs without bound. That is why a freshly created
+    /// policy, which <see cref="EnsureRetentionPoliciesAsync"/> deliberately creates PAUSED, raises nothing.</para>
+    ///
+    /// <para>The span comes from <c>timescaledb_information.chunks</c>, never from the hypertable — the
+    /// oldest chunk's <c>range_start</c> is catalog metadata, so this stays a catalog round trip on a
+    /// multi-hundred-GB table instead of a scan. <c>range_start</c> is declared <c>timestamptz</c> even for
+    /// the naive-<c>timestamp</c> partitioning column every collector table uses, so it is normalized with
+    /// <c>AT TIME ZONE 'UTC'</c>: verified byte-identical under UTC, UTC+14 and UTC-7 sessions rather than
+    /// assumed. Tolerant like <see cref="ReadJobCadenceReadingsAsync"/> — a plain-PG store or a hiccup
+    /// yields no readings, never an exception.</para>
+    /// </summary>
+    public static async Task<IReadOnlyList<RetentionHoldReading>> ReadRetentionHoldReadingsAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var readings = new List<RetentionHoldReading>();
+        try
+        {
+            using var command = new NpgsqlCommand(RetentionHoldReadSql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                readings.Add(new RetentionHoldReading(
+                    Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    !reader.IsDBNull(2) && reader.GetBoolean(2),
+                    reader.IsDBNull(3) ? "" : reader.GetString(3),
+                    reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(6) ? null : Convert.ToInt64(reader.GetValue(6), CultureInfo.InvariantCulture)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Retention-hold check: could not read retention policy state: {Message}", ex.Message);
         }
 
         return readings;
@@ -3060,7 +6276,7 @@ WHERE j.proc_name LIKE '%compression%'
         var activity = new List<CompressionActivity>();
         try
         {
-            using var command = new NpgsqlCommand(CompressionActivitySql, connection);
+            using var command = new NpgsqlCommand(CompressionActivitySql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -3090,6 +6306,38 @@ WHERE j.proc_name LIKE '%compression%'
     /// operator actually needs to see: a compression that is RUNNING right now and how long it has been going
     /// (the field's hours-long runs were invisible while they happened), and a table whose eligible chunks are
     /// piling up. Everything else is one Debug summary line.</para>
+    ///
+    /// <para><b>The #3112 clearance watch rides the same reading, and adds no read, no timer and no per-policy
+    /// routine line.</b> Every term it needs is already in <see cref="CompressionActivity"/>: the hypertable
+    /// names the minute, the minute gives
+    /// <see cref="TimescaleSupport.CompressionMinuteClearanceSeconds"/>, and the last completed run's duration
+    /// is already projected. So the same discipline applies as above — nothing per-policy in the routine band,
+    /// because seventy Debug lines an hour is the burial this method's first paragraph is about. One Debug
+    /// summary carries the TIGHTEST reading in the band, which is the one figure that says how close the grid
+    /// is; a run at or past its watch line gets Information; an overrun gets Warning.</para>
+    ///
+    /// <para><b>Warning rather than Error for an overrun, unlike
+    /// <see cref="LogHeaviestRefreshSlotHeadroom"/>'s exceeded band.</b> There, past the window means a
+    /// documented precondition of the shipped grid is FALSE. Here it does not: the compression guard is
+    /// one-sided BY DECISION (<see cref="HeaviestRefreshStartMinute"/>), so a policy on the tail of the band
+    /// running past the hour is the accepted residual being consumed rather than an invariant breaking. It
+    /// still wants saying, because that residual is what #3112's midnight band ran through, and nothing said
+    /// it.</para>
+    ///
+    /// <para><b>Emitted unconditionally rather than folded into the existing all-clear summary.</b> That
+    /// summary only fires when nothing is running and no chunk is eligible, which is the routine hour — so
+    /// hanging the clearance figure off it would suppress it in exactly the hour the daily chunk close makes
+    /// interesting.</para>
+    ///
+    /// <para><b>The off-phase report is one line for the store too, and that branch is where the discipline
+    /// binds hardest rather than least.</b> A policy starting on a minute other than its assigned one is a
+    /// property of the store, not of the hypertable: the phased read either succeeds or it does not, so on a
+    /// job catalog too old to expose <c>fixed_schedule</c>/<c>initial_start</c> every policy is off phase at
+    /// once and stays that way, because that failure does not heal. Per-hypertable it would be one
+    /// Information line per hypertable per hour, indefinitely, on precisely the store where the least can be
+    /// done about it. It is Information rather than Debug because it is the PRECONDITION of every other
+    /// figure in this block — a clearance measured on a store whose grid was never applied describes where a
+    /// policy ran, not where this product placed it.</para>
     /// </summary>
     public static void LogCompressionActivity(
         IReadOnlyList<CompressionActivity> activity, DateTime nowUtc, ILogger? logger)
@@ -3133,7 +6381,166 @@ WHERE j.proc_name LIKE '%compression%'
                 "TimescaleDB: {Count} compression policies on a {Interval} tick, nothing running, no eligible chunk uncompressed.",
                 activity.Count, CompressScheduleInterval);
         }
+
+        LogCompressionClearance(activity, logger);
     }
+
+    /// <summary>
+    /// The #3112 half of <see cref="LogCompressionActivity"/>: every completed compression run against the
+    /// clearance the minute it started on had. Split out as its own method rather than threaded through the
+    /// loop above so the two concerns can be read, and tested, apart — #1778 asks "is compression keeping
+    /// up", this asks "did a run reach the next refresh".
+    /// </summary>
+    private static void LogCompressionClearance(IReadOnlyList<CompressionActivity> activity, ILogger logger)
+    {
+        CompressionActivity? tightest = null;
+        CompressionActivity? driftExample = null;
+        var offPhase = 0;
+        var onTheGrid = 0;
+
+        foreach (var item in activity)
+        {
+            if (item.ClearanceBand is not CompressionClearanceBand band
+                || item.ClearanceMinute is not int minute
+                || item.LastRunDuration is not TimeSpan duration)
+            {
+                continue;
+            }
+
+            if (IsTighter(item, tightest))
+            {
+                tightest = item;
+            }
+
+            /* DERIVED FROM THE MINUTE, not defaulted from a nullable. Both are non-null inside this walk -
+               the loop guard above has already skipped a reading with no minute or no duration - so taking
+               them off the minute removes the `?? 0` rather than hiding one, and a zero clearance below is a
+               REAL zero rather than a defaulted null. */
+            var clearance = CompressionMinuteClearanceSeconds(minute);
+            var clear = clearance - duration.TotalSeconds;
+
+            /* THE SHARE IS PATTERN-MATCHED, NEVER DEFAULTED, and that is the whole of this block's shape.
+               PercentOfClearance is null exactly when the clearance is ZERO - the sink case - and defaulting
+               it to 0d rendered that case as "0.0%", byte-identical to a near-instant run with the whole band
+               to spare. A reading that gets more alarming as it gets worse everywhere else wrapped around to
+               look BEST in the one case with no room at all, and 0.0% could not be told from "finished
+               instantly" by the operator reading it. So the two measurable bands take the share by pattern
+               and the null falls through to its own finding. Raised by review. */
+            switch (band)
+            {
+                case CompressionClearanceBand.RefreshOverrun when item.PercentOfClearance is not null:
+                    logger.LogWarning(
+                        "TimescaleDB: compression of {Hypertable} last ran {Seconds:F0}s from :{Minute:00}, at or past the {Clearance}s it had before the next hourly refresh started ({Over:F0}s past it) — so it was still holding AccessExclusiveLock when a refresh wanted the table. This is the daily chunk close: every hypertable's newest {Days}d chunk becomes eligible at the same UTC midnight, so one tick a day carries a full day's rewrite while the other twenty-three find nothing (#3112). The grid's guard is one-sided by decision, so the tail of the compression band has one refresh step of clearance and this is that residual being spent. Widening it costs minutes the heaviest refresh's window is holding (#3174).",
+                        item.HypertableName, duration.TotalSeconds, minute, clearance, -clear, CompressAfterDays);
+                    break;
+
+                case CompressionClearanceBand.ApproachingRefresh when item.PercentOfClearance is double percent:
+                    logger.LogInformation(
+                        "TimescaleDB: compression of {Hypertable} last ran {Seconds:F0}s from :{Minute:00}, {Percent:F1}% of the {Clearance}s it had before the next hourly refresh ({Clear:F0}s clear, watch line {Watch}s).",
+                        item.HypertableName, duration.TotalSeconds, minute, percent,
+                        clearance, clear, CompressionClearanceWatchSeconds(minute));
+                    break;
+
+                /* THE SINK CASE, and it is a DIFFERENT FINDING rather than the same one with an awkward
+                   number. An ordinary overrun says the day's rewrite outgrew a tight minute, and its remedy
+                   is the band's width. A policy sitting on a refresh's OWN minute says the phase grid was
+                   never applied to it, and its remedy is the converge - so the chunk-close reasoning above
+                   would point an operator at the wrong lever. Reached from either band, so an
+                   ApproachingRefresh with no share - which the arithmetic does not currently allow, since a
+                   zero clearance makes both boundaries zero and every non-negative run an overrun - would
+                   land here rather than on a milder line. That is the direction to be wrong in. */
+                case CompressionClearanceBand.RefreshOverrun:
+                case CompressionClearanceBand.ApproachingRefresh:
+                    logger.LogWarning(
+                        "TimescaleDB: compression of {Hypertable} last ran {Seconds:F0}s from :{Minute:00}, which is a minute an hourly refresh ALSO starts on — so it had NO CLEARANCE whatsoever, not a small amount, and was contending from the moment it began. Its share of clearance is UNDEFINED rather than low. A compression policy on a refresh's own minute means the phase grid was never applied to it, so the remedy is the phase converge and not the band's width (#3035/#3112).",
+                        item.HypertableName, duration.TotalSeconds, minute);
+                    break;
+
+                default:
+                    break;
+            }
+
+            if (item.OffAssignedPhase)
+            {
+                offPhase++;
+                driftExample ??= item;
+            }
+
+            onTheGrid++;
+        }
+
+        /* ONE line for the whole store, not one per hypertable, and this is the branch where that matters
+           most rather than least. The condition is a property of the STORE - a job catalog too old to expose
+           fixed_schedule/initial_start fails the phased read on every start, which
+           ConvergeCompressionScheduleAsync documents - so it is true of every policy at once and it does not
+           heal. Per-hypertable, it would be seventy Information lines an hour forever on exactly the store
+           where the least can be done about it, which is the burial this method's own discipline forbids and
+           which the first version of this branch did. Raised by review. */
+        if (offPhase > 0 && driftExample is not null)
+        {
+            logger.LogInformation(
+                "TimescaleDB: {OffPhase} of {OnGrid} compression policies last started on a minute other than the one the phase grid assigns them (e.g. {Hypertable} on :{Observed:00} rather than :{Assigned:00}) — so every clearance figure in this block is measured from where those policies actually ran, not from where this product placed them. A policy that drifts by its own runtime each cycle is the finish-to-start scheduling #3035's fixed schedule replaces, which the converge cannot apply on a job catalog too old to expose initial_start.",
+                offPhase, onTheGrid, driftExample.HypertableName,
+                driftExample.ObservedStartMinute ?? 0, driftExample.AssignedPhaseMinute ?? 0);
+        }
+
+        /* The summary splits the same way and for the same reason: the policy SELECTED because it has no
+           clearance must not be REPORTED as a low share of it. Everything here is derived from the tightest
+           reading's own minute, so no rendered quantity is a defaulted null. */
+        if (tightest is not null && tightest.ClearanceMinute is int tightestMinute)
+        {
+            var widest = CompressionMinuteClearanceSeconds(CompressionPhaseMinutes[0]);
+            var narrowest = CompressionMinuteClearanceSeconds(CompressionPhaseMinutes[^1]);
+
+            if (tightest.PercentOfClearance is double tightestShare)
+            {
+                logger.LogDebug(
+                    "TimescaleDB: tightest compression clearance this tick is {Hypertable} at {Percent:F1}% of its {Clearance}s from :{Minute:00} ({Band}); the band runs {Widest}s down to {Narrowest}s of clearance.",
+                    tightest.HypertableName, tightestShare, CompressionMinuteClearanceSeconds(tightestMinute),
+                    tightestMinute, tightest.ClearanceBand, widest, narrowest);
+            }
+            else
+            {
+                logger.LogDebug(
+                    "TimescaleDB: tightest compression clearance this tick is {Hypertable} with NO CLEARANCE at all — it ran from :{Minute:00}, a minute an hourly refresh also starts on, so its share of clearance is UNDEFINED rather than low ({Band}); the band runs {Widest}s down to {Narrowest}s of clearance.",
+                    tightest.HypertableName, tightestMinute, tightest.ClearanceBand, widest, narrowest);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Which of two clearance readings is the one worth naming in the per-tick summary: the larger share of
+    /// its own clearance.
+    ///
+    /// <para><b>The share IS the severity, so this needs no second key — and that is a PROPERTY rather than
+    /// a coincidence.</b> <see cref="ClassifyCompressionClearance"/>'s two boundaries are the clearance and
+    /// five sixths of it, and every clearance the grid can produce is a whole number of minutes, so both
+    /// boundaries fall at the same SHARE on every minute in the band — 83.3% and 100%. Ranking by share is
+    /// therefore ranking by band, and a reading the line calls the tightest can never carry a milder band
+    /// than one it passed over. <c>CompressionClearanceWatchTests</c> pins that exactness, because integer
+    /// division is what would break it: a clearance that was not a multiple of six would round the watch
+    /// line down and the two orders would diverge on that minute alone.</para>
+    ///
+    /// <para><b>A missing share means a ZERO clearance, and its limit is infinity rather than zero.</b>
+    /// <see cref="CompressionActivity.PercentOfClearance"/> is null exactly there — inside this walk the
+    /// duration and the minute are both known, so a zero denominator is the only way to lose it — and zero
+    /// clearance is reachable in production and is the worst geometry there is: a policy the converge could
+    /// not put on a fixed schedule, drifted onto a minute an hourly refresh also starts on.
+    /// <see cref="ClassifyCompressionClearance"/> already bands that
+    /// <see cref="CompressionClearanceBand.RefreshOverrun"/> for any non-negative run. Defaulting the missing
+    /// share to zero ranked that policy BELOW a routine reading, so the summary named the wrong one — the
+    /// per-item Warning fires either way, so the cost was the aggregate line pointing away from the thing it
+    /// exists to point at. Raised by review.</para>
+    ///
+    /// <para><b>One key rather than a band key and a share key.</b> A severity key would be redundant given
+    /// the exactness above, and a redundant arm makes each arm individually unfalsifiable: with both present,
+    /// restoring the zero default changes no outcome and a mutation sweep reports the defect as unreachable.
+    /// So the property is pinned and the comparison is single.</para>
+    /// </summary>
+    private static bool IsTighter(CompressionActivity candidate, CompressionActivity? incumbent) =>
+        incumbent is null
+        || (candidate.PercentOfClearance ?? double.PositiveInfinity)
+            > (incumbent.PercentOfClearance ?? double.PositiveInfinity);
 
     /// <summary>
     /// Re-arms one stuck background job via the parameterized <see cref="RearmJobSql"/> (job_id BOUND). Returns
@@ -3152,7 +6559,7 @@ WHERE j.proc_name LIKE '%compression%'
 
         try
         {
-            using var command = new NpgsqlCommand(RearmJobSql, connection);
+            using var command = new NpgsqlCommand(RearmJobSql, connection) { CommandTimeout = SetupTimeoutSeconds };
             command.Parameters.AddWithValue(jobId);
             await command.ExecuteNonQueryAsync(cancellationToken);
             return true;
@@ -3181,6 +6588,175 @@ public sealed record StuckCompressionJob(long JobId, string? HypertableName, str
 /// <c>[job_id]</c> suffix (the id rides separately as the alert key).
 /// </summary>
 public sealed record StoreJobCadenceReading(long JobId, string JobName, long? LastRunDurationMs, long ScheduleIntervalMs);
+
+/// <summary>
+/// One live reading of the heaviest hourly refresh's runtime against the slot it has to fit inside (#3044),
+/// from <see cref="TimescaleSupport.ReadHeaviestRefreshRuntimeAsync"/>.
+///
+/// <para>Carries the derived answers rather than leaving them to each caller, so a consumer cannot log the
+/// seconds and drop the classification — the same reason the readings this file's siblings return compute
+/// their own ratios. <see cref="View"/> is the CAGG's user-view name, which is the identity the phase grid is
+/// keyed on; a job id would name a different job on any other deployment.</para>
+/// </summary>
+public sealed record HeaviestRefreshSlotReading(string View, double LastRunSeconds)
+{
+    /// <summary>Where this reading sits against the slot — see
+    /// <see cref="TimescaleSupport.ClassifyRefreshSlotHeadroom"/>.</summary>
+    public TimescaleSupport.RefreshSlotHeadroom Headroom =>
+        TimescaleSupport.ClassifyRefreshSlotHeadroom(LastRunSeconds);
+
+    /// <summary>How many seconds of the slot were left unused. Goes NEGATIVE past the slot width rather than
+    /// clamping at zero: how far THROUGH the wall a run went is the number that sizes the re-derivation, and
+    /// clamping would report every breach as a dead heat.</summary>
+    public double ClearOfSlotSeconds => TimescaleSupport.RefreshPhaseSlotSeconds - LastRunSeconds;
+
+    /// <summary>This reading as a percentage of the slot — 71.1% for the recorded ceiling
+    /// (<see cref="TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds"/>) against the window the
+    /// hour can spare (<see cref="TimescaleSupport.HeaviestRefreshWindowMinutes"/>), which is the margin the
+    /// #3044 watch is stated against.</summary>
+    public double PercentOfSlot => 100.0 * LastRunSeconds / TimescaleSupport.RefreshPhaseSlotSeconds;
+}
+
+/// <summary>
+/// One live reading of an hourly refresh policy's runtime, keyed on the CAGG's user-view name (#3182) —
+/// what <see cref="TimescaleSupport.ReadOtherHourlyRefreshRuntimesAsync"/> returns for the twelve hourly
+/// views that are not <see cref="TimescaleSupport.HeaviestHourlyRefreshView"/>.
+///
+/// <para>Deliberately carries NO derived verdict, which is the difference from
+/// <see cref="HeaviestRefreshSlotReading"/>. The heaviest refresh has a slot of its own, so a reading of it
+/// has a band; a light refresh has only the guard band after its start, which is not a per-view quantity —
+/// so the only question asked of these readings is whether one has overtaken
+/// <see cref="TimescaleSupport.OtherHourlyRefreshObservedCeilingSeconds"/>, and that is asked by the
+/// classifier rather than answered here. Inventing a per-view band would be a verdict the grid does not
+/// have.</para>
+/// </summary>
+public sealed record HourlyRefreshRuntimeReading(string View, double LastRunSeconds);
+
+/// <summary>
+/// The rate limiter for <see cref="TimescaleSupport.LogRefreshCeilingStaleness"/> (#3182): a HIGH-WATER
+/// MARK per ceiling constant, held for the lifetime of the instance the caller keeps.
+///
+/// <para><b>Why an object the caller owns rather than static state.</b> The lifetime this limiter needs is
+/// the PROCESS — a store whose ceiling has drifted trips the finding on a large share of hourly sweeps, and
+/// a limiter reset per sweep would limit nothing. Static state would give that lifetime for free and take
+/// testability with it: two test cases sharing a static latch are order-dependent, and the interesting
+/// property here is a SEQUENCE of readings, which cannot be tested at all if the sequence leaks between
+/// cases. So the service holds one instance and the tests hold their own.</para>
+///
+/// <para><b>What it reports, stated as the rule rather than left to the implementation.</b> The first
+/// falsifying reading for a constant reports. After that, only a reading strictly greater than the largest
+/// already reported for that constant reports. Nothing ever lowers the mark, so the finding cannot start
+/// repeating because load fell — and that asymmetry is deliberate rather than an oversight: the mark is not
+/// a measure of current load, it is a record of the largest value already SAID OUT LOUD, and a value
+/// already said out loud stays said. A run below it changes nothing about what the constant has to be
+/// re-derived to.</para>
+///
+/// <para><b>Keyed on the constant's NAME, and the two names are
+/// <see cref="TimescaleSupport.HeaviestRefreshCeilingConstantName"/> and
+/// <see cref="TimescaleSupport.OtherRefreshCeilingConstantName"/>.</b> Not on the view: the light ceiling is
+/// ONE constant covering twelve views, so keying on the view would let each of them report the same
+/// constant's staleness independently and the rate limit would be twelve times looser than it reads. What
+/// is being reported is a constant being wrong, so the constant is the key.</para>
+///
+/// <para>Locked, because the sweep that calls it is one of several the worker runs and nothing in the type
+/// system says it stays single-threaded. A missed report is a lost finding and a double report is noise;
+/// neither costs anything worth an interlocked-compare loop at one call an hour.</para>
+/// </summary>
+public sealed class RefreshCeilingStalenessWatch
+{
+    private readonly Dictionary<string, double> _reportedHighWaterMark = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Whether <paramref name="observedSeconds"/> should be REPORTED for
+    /// <paramref name="constantName"/> — true for the first falsifying reading and thereafter only for one
+    /// larger than the largest already reported. Records the mark when it answers true, so a caller that
+    /// asks twice about the same reading is told once.
+    ///
+    /// <para><b>A NON-FINITE reading is refused and NOT recorded, and this is the one place that guard does
+    /// work.</b> The comparison below is <c>observedSeconds &lt;= mark</c>, and every comparison against NaN
+    /// is false — so a NaN allowed through would answer true, become the mark, and then answer true for
+    /// EVERY later reading, because none of them is <c>&lt;= NaN</c> either. One impossible catalog reading
+    /// would disable the rate limit for the life of the process, silently and permanently. That is why the
+    /// guard is here rather than in <see cref="TimescaleSupport.ClassifyRefreshCeilingFreshness"/>, where the
+    /// comparison already answers correctly for a non-finite value and a guard would be unreachable.</para>
+    /// </summary>
+    public bool ShouldReport(string constantName, double observedSeconds)
+    {
+        if (constantName is null)
+        {
+            throw new ArgumentNullException(nameof(constantName));
+        }
+
+        if (!double.IsFinite(observedSeconds))
+        {
+            return false;
+        }
+
+        lock (_reportedHighWaterMark)
+        {
+            if (_reportedHighWaterMark.TryGetValue(constantName, out var mark)
+                && observedSeconds <= mark)
+            {
+                return false;
+            }
+
+            _reportedHighWaterMark[constantName] = observedSeconds;
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The largest reading already reported for <paramref name="constantName"/>, or null when none has
+    /// been. Exists so the sequence property can be asserted directly instead of inferred from log lines —
+    /// a test that could only read the log would be testing the message, not the limiter.
+    /// </summary>
+    public double? ReportedHighWaterMark(string constantName)
+    {
+        if (constantName is null)
+        {
+            throw new ArgumentNullException(nameof(constantName));
+        }
+
+        lock (_reportedHighWaterMark)
+        {
+            return _reportedHighWaterMark.TryGetValue(constantName, out var mark) ? mark : null;
+        }
+    }
+}
+
+/// <summary>
+/// One retention policy's armed state and the consequence of it being held (#2813), from
+/// <see cref="TimescaleSupport.ReadRetentionHoldReadingsAsync"/>.
+///
+/// <para><see cref="Armed"/> is <c>timescaledb_information.jobs.scheduled</c> — false means the #1680/#1877
+/// coverage gate is holding this policy so it cannot drop history a consumer has never materialized.
+/// <see cref="SpanSeconds"/> is now minus the OLDEST chunk's start (null when the hypertable has no chunks
+/// yet) and <see cref="HorizonSeconds"/> is the policy's own <c>drop_after</c>, so
+/// <see cref="OverHorizonRatio"/> is how many times its intended depth the tier is actually holding. That
+/// ratio is the honest measure of a hold that has begun to cost something, and it is deliberately NOT a
+/// hold duration: nothing records when a policy was paused, and a policy created paused moments ago on a
+/// young store must read as unremarkable rather than as a 0-second-old incident.</para>
+/// </summary>
+public sealed record RetentionHoldReading(
+    long JobId,
+    string HypertableName,
+    bool Armed,
+    string DropAfter,
+    long ChunkCount,
+    long? SpanSeconds,
+    long? HorizonSeconds)
+{
+    /// <summary>
+    /// How many times its configured horizon this tier is actually holding — 4.5 on the production store
+    /// that held 18 days under a 4-day policy. Null when either side is unknown or the horizon is
+    /// non-positive: a ratio over an unmeasurable denominator is not a number, and reporting one would be
+    /// the false-precision this whole issue is about.
+    /// </summary>
+    public double? OverHorizonRatio =>
+        SpanSeconds is > 0 && HorizonSeconds is > 0
+            ? SpanSeconds.Value / (double)HorizonSeconds.Value
+            : null;
+}
 
 /// <summary>
 /// One hypertable's compression-policy activity (#1778): whether a run is in progress, when it started, how
@@ -3218,6 +6794,77 @@ public sealed record CompressionActivity(
         var elapsed = nowUtc - startedUtc;
         return elapsed > TimeSpan.Zero ? elapsed : TimeSpan.Zero;
     }
+
+    /// <summary>
+    /// The minute of the hour this hypertable's compression policy is ASSIGNED by
+    /// <see cref="TimescaleSupport.CompressionPhaseMinutes"/>, or null when this product does not own the
+    /// hypertable — a bring-your-own store's own table, or a fixture table. Null is what keeps every
+    /// clearance figure below silent for a FOREIGN hypertable: this code chose no minute for it, so it has no
+    /// standing to say whether its run overran anything.
+    /// </summary>
+    public int? AssignedPhaseMinute =>
+        HypertableName is not null
+        && TimescaleSupport.TryCompressionPhaseMinutesFor(HypertableName, out var assigned)
+            ? assigned
+            : null;
+
+    /// <summary>
+    /// The minute of the hour the last run actually STARTED on, or null when the store recorded no start (or
+    /// recorded the never-ran sentinel, which <see cref="RunningFor"/> documents).
+    /// </summary>
+    public int? ObservedStartMinute =>
+        LastRunStartedAtUtc is DateTime startedUtc && startedUtc != DateTime.MinValue
+            ? startedUtc.Minute
+            : null;
+
+    /// <summary>
+    /// The minute the clearance is measured from: the OBSERVED start when there is one, otherwise the
+    /// assigned minute.
+    ///
+    /// <para><b>Observed first, and that ordering is the point (#3112).</b> The assigned minute is what this
+    /// product INTENDS; the observed minute is what happened. Those differ on exactly the store state
+    /// <see cref="TimescaleSupport.ConvergeCompressionScheduleAsync"/> documents as its degraded path — a job
+    /// catalog too old to expose <c>fixed_schedule</c>/<c>initial_start</c> keeps TimescaleDB's
+    /// finish-to-start scheduling and drifts through the hour by its own runtime — and on that store the
+    /// intended clearance is a fiction while the observed one is the fact. Reading the intent would report the
+    /// grid working on a store where it had not been applied.</para>
+    /// </summary>
+    public int? ClearanceMinute =>
+        AssignedPhaseMinute is null ? null : ObservedStartMinute ?? AssignedPhaseMinute;
+
+    /// <summary>True when the last run started on a minute other than the one the grid assigns — the drift
+    /// condition above, worth reporting because it makes every other figure here a statement about a policy
+    /// this product has not actually placed.</summary>
+    public bool OffAssignedPhase =>
+        AssignedPhaseMinute is int assigned && ObservedStartMinute is int observed && assigned != observed;
+
+    /// <summary>How long the run had before the next hourly refresh started, from
+    /// <see cref="TimescaleSupport.CompressionMinuteClearanceSeconds"/>. Null for a foreign hypertable.</summary>
+    public int? ClearanceSeconds =>
+        ClearanceMinute is int minute ? TimescaleSupport.CompressionMinuteClearanceSeconds(minute) : null;
+
+    /// <summary>Where the last completed run sits against that clearance. Null when there is no completed run
+    /// to judge or the hypertable is foreign — never a synthesized <c>InsideClearance</c>, which would read as
+    /// "measured and fine" for something not measured at all.</summary>
+    public TimescaleSupport.CompressionClearanceBand? ClearanceBand =>
+        ClearanceMinute is int minute && LastRunDuration is TimeSpan duration
+            ? TimescaleSupport.ClassifyCompressionClearance(duration.TotalSeconds, minute)
+            : null;
+
+    /// <summary>Seconds of the clearance left unused. Goes NEGATIVE past it rather than clamping, for the
+    /// reason <see cref="HeaviestRefreshSlotReading.ClearOfSlotSeconds"/> does: how far THROUGH the next
+    /// refresh's start a run went is the number that sizes the repair, and clamping reports every overrun as
+    /// a dead heat.</summary>
+    public double? ClearOfRefreshSeconds =>
+        ClearanceSeconds is int clearance && LastRunDuration is TimeSpan duration
+            ? clearance - duration.TotalSeconds
+            : null;
+
+    /// <summary>The last completed run as a percentage of its minute's clearance.</summary>
+    public double? PercentOfClearance =>
+        ClearanceSeconds is int clearance and > 0 && LastRunDuration is TimeSpan duration
+            ? 100.0 * duration.TotalSeconds / clearance
+            : null;
 }
 
 /// <summary>

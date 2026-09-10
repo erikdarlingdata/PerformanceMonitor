@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 
 namespace PerformanceMonitor.Collectors;
@@ -86,6 +87,37 @@ public interface ICollectorSchemaInfo
     bool YieldsOnLockTimeout { get; }
 
     /// <summary>
+    /// WALL-CLOCK ceiling for one unit of work - the watermark refresh, the command, and the whole drain
+    /// (#2150). Null (the common case) = unbounded.
+    ///
+    /// <para><b>Why the command timeout is not this.</b> <c>CommandTimeout</c> bounds the wait for a network
+    /// read, and SqlClient RESETS it on every read that arrives - so a result set that trickles rows
+    /// continuously never trips it, however long it takes in total. A 100-minute read under a 30-second
+    /// timeout is the documented behaviour, not a bug, which is why the field report in #2150 shows six
+    /// per-database passes of up to 99.8 minutes against a 30-second timeout.</para>
+    ///
+    /// <para><b>What exceeding it means.</b> The item is abandoned and reported as a per-item FAILURE, and
+    /// the cycle continues to the next database - the same treatment an offline database gets. Nothing is
+    /// silently dropped: a collector with a watermark did not advance it, so the abandoned range is simply
+    /// re-read next cycle. For <c>query_store</c> that failure also feeds the #2111 consecutive-failure
+    /// count, so the window NARROWS on the next pass instead of retrying the same impossible width - a
+    /// bound that converges rather than one that just repeats.</para>
+    ///
+    /// <para>Host-enforced rather than definition-enforced, unlike the byte budget: only the host owns the
+    /// cancellation token and the loop, and the point is to bound the definition's own read.</para>
+    ///
+    /// <para><b>On the BASE interface rather than <c>ICollectorDefinition&lt;TRow&gt;</c></b> (#2864),
+    /// alongside <see cref="AppliesTo"/> and <see cref="YieldsOnLockTimeout"/> and for the same reason those
+    /// are: the catalog is keyed by NAME and holds this interface, so a host that knows only which collector
+    /// ran could not otherwise ask whether that collector is one of the budgeted heavy ones. Carrying a
+    /// budget at all is what distinguishes the few collectors capable of occupying a target for minutes from
+    /// the ordinary body of a sweep - a question the worker asks per run, and one it must not answer from a
+    /// hardcoded name list, since the list that needs editing when a fifth collector earns a budget is the
+    /// list that silently stops being right.</para>
+    /// </summary>
+    TimeSpan? PerItemWallClockBudget { get; }
+
+    /// <summary>
     /// Named pieces of per-server collector state the host loads from its own store before the query is
     /// built (exposed as <see cref="CollectorContext.State"/>) and persists back after the cycle (from
     /// <see cref="CollectorContext.PendingState"/>) — the sibling of
@@ -103,4 +135,30 @@ public interface ICollectorSchemaInfo
     /// host or a test can enumerate the collectors that carry state without the row type.</para>
     /// </summary>
     IReadOnlyList<string> StateKeys { get; }
+
+    /// <summary>
+    /// PostgreSQL extensions this collector's query cannot run without, each with what installing it costs
+    /// (#3187). Empty for every SQL Server definition and for the PostgreSQL ones that read core catalogs
+    /// and Aurora's built-in functions.
+    ///
+    /// <para><b>Why a declaration rather than prose.</b> A collector that needs an extension degrades to a
+    /// non-fatal <c>PERMISSIONS</c> skip and stores nothing, so the dependency is only ever visible in
+    /// whatever documentation somebody remembered to update. That documentation was once written naming
+    /// four of the six collectors that had one, with every check green on the commit that said so — an
+    /// enumeration in prose is only better than a count if something breaks when it is wrong. A reviewer
+    /// caught that one. Declared on the collector, it is derivable, so
+    /// <c>Darling/README.md</c>'s permissions paragraph is pinned to it and a new collector with a
+    /// dependency fails the build until the paragraph names it.</para>
+    ///
+    /// <para><b>Not the same set as <c>PgExtensionAvailabilityCollector</c>'s roster</b>, which exists so
+    /// absence is REPORTABLE and therefore both lists extensions no collector reads and omits one that a
+    /// collector does; see <see cref="PgExtensionDependency"/>.</para>
+    ///
+    /// <para>A default interface implementation rather than a required member, the same choice
+    /// <see cref="TargetEngine"/> made and for the same reason: the existing definitions and the test
+    /// doubles that implement this interface directly need no change. Declared HERE, beside
+    /// <see cref="AppliesTo"/> and <see cref="StateKeys"/>, so the set is enumerable off
+    /// <see cref="CollectorCatalog.All"/> without the row type.</para>
+    /// </summary>
+    IReadOnlyList<PgExtensionDependency> RequiredPgExtensions => Array.Empty<PgExtensionDependency>();
 }

@@ -10,6 +10,9 @@ using System;
 using System.Linq;
 using System.Reflection;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using Lite.Tests.Helpers;
 using PerformanceMonitor.Collectors;
 using Xunit;
 
@@ -113,6 +116,95 @@ public class AzureDatabaseSizeSiblingTests
     {
         Assert.Contains("ROW_NUMBER() OVER (PARTITION BY r.database_name ORDER BY r.end_time DESC)", AzureSql, StringComparison.Ordinal);
         Assert.Contains("WHERE rs.rn = 1", AzureSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3262: the seam every test above leaves untested. They pin the SQL that EMITS a sibling row —
+    /// including the NULLs at database_id, file_id and physical_name — and <c>ReadAsync</c> read
+    /// exactly those three ordinals unguarded, so the two halves were each correct and had never been
+    /// run against each other. In the field the first sibling row arrived when
+    /// <c>sys.resource_stats</c> finished ingesting (about an hour after database creation, which is
+    /// why every fresh-server validation window missed it), and the cast threw
+    /// "Object cannot be cast from DBNull to other types." — aborting the whole read, master's own
+    /// file rows included, permanently.
+    ///
+    /// <para>The reader is driven over the arm's documented shape: a real file row for the connected
+    /// database first (the ORDER BY puts sibling rows last), then a sibling row that carries only
+    /// what the arm can measure. Both rows must come back, and the sibling's absent measurements
+    /// must arrive as nulls rather than exceptions.</para>
+    /// </summary>
+    [Fact]
+    public async Task TheReaderSurvivesTheSiblingRow_TheArmDeliberatelyEmits()
+    {
+        using var reader = new FakeCollectorDataReader(
+            new object[]
+            {
+                "master", 1, 1, "ROWS", "data_0", "data_0.mdf", 4.00m, 2.63m,
+                16.00m, 2097152m, "FULL", 160, "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value,
+                0, DBNull.Value, DBNull.Value,
+            },
+            new object[]
+            {
+                "testdb1", DBNull.Value, DBNull.Value, "ROWS", "(whole database)", DBNull.Value,
+                23.00m, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
+                "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
+                DBNull.Value,
+            });
+
+        var rows = await DatabaseSizeStatsCollector.Instance.ReadAsync(
+            reader, CollectorTestContext.Make(new RecordingCollectorDeltaCalculator()), CancellationToken.None);
+
+        Assert.Equal(2, rows.Count);
+
+        /* The connected database's real file row is untouched by the guards. */
+        Assert.Equal("master", rows[0].DatabaseName);
+        Assert.Equal(1, rows[0].DatabaseId);
+        Assert.Equal(1, rows[0].FileId);
+        Assert.Equal("data_0.mdf", rows[0].PhysicalName);
+
+        /* The sibling row survives, and what the arm could not measure reads as null. */
+        Assert.Equal("testdb1", rows[1].DatabaseName);
+        Assert.Null(rows[1].DatabaseId);
+        Assert.Null(rows[1].FileId);
+        Assert.Null(rows[1].PhysicalName);
+        Assert.Equal("(whole database)", rows[1].FileName);
+        Assert.Equal(23.00m, rows[1].TotalSizeMb);
+        Assert.Null(rows[1].UsedSizeMb);
+        Assert.Equal("ONLINE", rows[1].StateDesc);
+    }
+
+    /// <summary>
+    /// The other half of the seam: the sibling row must also make it back OUT of the definition. The
+    /// positional writer contract (one value per declared payload column, nulls included) is what the
+    /// stores' appender / binary COPY adapters rest on, and both store schemas hold these three
+    /// columns nullable — so the row's nulls must be written as nulls, not skipped and not defaulted.
+    /// </summary>
+    [Fact]
+    public async Task TheSiblingRowWritesItsNulls_ThroughThePositionalContract()
+    {
+        using var reader = new FakeCollectorDataReader(
+            new object[]
+            {
+                "testdb1", DBNull.Value, DBNull.Value, "ROWS", "(whole database)", DBNull.Value,
+                23.00m, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
+                "ONLINE", DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
+                DBNull.Value,
+            });
+
+        var deltas = new RecordingCollectorDeltaCalculator();
+        var rows = await DatabaseSizeStatsCollector.Instance.ReadAsync(
+            reader, CollectorTestContext.Make(deltas), CancellationToken.None);
+
+        var writer = new RecordingCollectorRowWriter();
+        DatabaseSizeStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, CollectorTestContext.Make(deltas));
+
+        Assert.Equal(DatabaseSizeStatsCollector.Instance.PayloadColumns.Count, writer.Values.Count);
+        Assert.Equal("testdb1", writer.Values[0]);
+        Assert.Null(writer.Values[1]);    /* database_id */
+        Assert.Null(writer.Values[2]);    /* file_id */
+        Assert.Equal("(whole database)", writer.Values[4]);
+        Assert.Null(writer.Values[5]);    /* physical_name */
+        Assert.Equal(23.00m, writer.Values[6]);
     }
 
     /// <summary>

@@ -444,7 +444,8 @@ public partial class App : Application
             ConfigDirectory,
             new[] { "ignored_wait_types.json", "collection_schedule.json" });
 
-        // Load settings
+        // Load settings. The log level goes first so it governs every line the loaders below buffer.
+        LoadLogMinimumLevel();
         LoadDefaultTimeRange();
         LoadAlertSettings();
 
@@ -676,8 +677,8 @@ public partial class App : Application
     /// <summary>
     /// Records that settings.json is present but unparseable: to the log immediately (buffered until
     /// <c>AppLogger.Initialize</c>) and to <see cref="s_unreadableSettingsProblem"/> for the single dialog
-    /// shown once the main window is up. First caller wins, because both loaders read the same file and
-    /// would otherwise say the same thing twice.
+    /// shown once the main window is up. First caller wins, because all three loaders read the same file
+    /// and would otherwise say the same thing three times.
     ///
     /// <para>There is deliberately no counterpart for an ABSENT file. A first run has no settings.json,
     /// defaults are the correct answer, and a warning there would be pure noise — which is precisely why
@@ -700,7 +701,8 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Every settings.json key whose VALUE was the wrong shape, accumulated across both loaders and consumed
+    /// Every settings.json key whose VALUE was the wrong shape, accumulated across all three loaders and
+    /// consumed
     /// once by <see cref="ReportUnreadableSettingsToUser"/> (#2444).
     ///
     /// <para>Separate from <see cref="s_unreadableSettingsProblem"/> because they are different failures with
@@ -739,10 +741,10 @@ public partial class App : Application
             }
         }
 
-        /* Says "every other key this loader read", not "every other setting in the file": both loaders call
-           this and LoadDefaultTimeRange runs first, so a claim about the whole file would be written before
-           the alert settings had been read at all. The dialog CAN make the whole-file claim, because it is
-           shown once, after both loaders have run. */
+        /* Says "every other key this loader read", not "every other setting in the file": three loaders
+           call this — LoadLogMinimumLevel first, then LoadDefaultTimeRange, then LoadAlertSettings — so a
+           claim about the whole file would be written before the later ones had read anything. The dialog
+           CAN make the whole-file claim, because it is shown once, after all three have run. */
         AppLogger.Error("Settings",
             $"settings.json parsed, but {problems.Count} value(s) in it could not be read and are at their " +
             "defaults for this session. Only the keys named here fell back -- every other key this loader " +
@@ -842,7 +844,7 @@ public partial class App : Application
 
             if (read.TryGetProperty("default_time_range_hours", out var val))
             {
-                DefaultTimeRangeHours = val.Int(DefaultTimeRangeHours);
+                DefaultTimeRangeHours = val.WholeNumber(DefaultTimeRangeHours);
             }
 
             /* #2444: this loader already named its one key, which is the behaviour LoadAlertSettings could
@@ -857,6 +859,75 @@ public partial class App : Application
             AppLogger.Warn("Settings",
                 $"settings.json key 'default_time_range_hours' could not be read ({ex.Message}); the " +
                 $"default of {DefaultTimeRangeHours} hours is in use.");
+        }
+    }
+
+    /// <summary>
+    /// Applies the configured log verbosity (#3104). The FIRST settings loader and well before
+    /// <see cref="AppLogger.Initialize"/>, so the level governs every line the loaders after it buffer as
+    /// well as <c>Initialize</c>'s own — a level applied halfway through startup would leave whichever
+    /// lines happened to precede it, which is a verbosity decided by call order.
+    ///
+    /// <para>No UI: this is the knob that makes the per-database collection timing lines recoverable now
+    /// that they sit below the default, and its audience is someone reading a log to diagnose a collection
+    /// failure, not someone browsing Settings. An unrecognised token leaves the default in force and is
+    /// reported through the shared reporter, so a typo costs its own setting and is named at startup rather
+    /// than silently turning logging down.</para>
+    /// </summary>
+    private static void LoadLogMinimumLevel()
+    {
+        var settings = SettingsFileGuard.Read(Path.Combine(ConfigDirectory, "settings.json"));
+        if (settings.State == SettingsFileState.Unreadable)
+        {
+            /* Reported by LoadDefaultTimeRange rather than here, so one unreadable file produces one
+               report no matter how many loaders meet it. */
+            return;
+        }
+
+        if (settings.Text == null)
+        {
+            return;
+        }
+
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(settings.Text);
+            var read = new SettingsReader(doc.RootElement);
+
+            if (read.TryGetProperty("log_minimum_level", out var val))
+            {
+                var token = val.TextOrNull();
+
+                if (AppLogger.TryParseMinimumLevel(token, out var level))
+                {
+                    AppLogger.SetMinimumLevel(level);
+                }
+                else if (token != null)
+                {
+                    /* A string that is not one of the level names. TextOrNull has already reported a value
+                       that is not a string at all, so only the vocabulary is left to check here — and it
+                       goes through the shared reporter so it reaches the startup dialog beside any other
+                       key that fell back, rather than only the log. */
+                    ReportBadSettingValues(new[]
+                    {
+                        new SettingsValueProblem(
+                            "log_minimum_level",
+                            $"holds \"{token}\", which is not one of Trace, Debug, Information, Warning, "
+                                + $"Error, Critical or None; {AppLogger.DefaultMinimumLevel} is in use"),
+                    });
+                }
+            }
+
+            ReportBadSettingValues(read.Problems);
+        }
+        catch (Exception ex)
+        {
+            /* Every value read is shape-checked rather than caught, so nothing EXPECTED lands here. Kept
+               because an unexpected throw must not take startup down — and this runs before the logger
+               exists, so there is nowhere to record it other than the buffer Initialize will flush. */
+            AppLogger.Warn("Settings",
+                $"settings.json key 'log_minimum_level' could not be read ({ex.Message}); " +
+                $"{AppLogger.DefaultMinimumLevel} is in use.");
         }
     }
 
@@ -928,27 +999,27 @@ public partial class App : Application
             if (read.TryGetProperty("alerts_enabled", out var v)) AlertsEnabled = v.Bool(AlertsEnabled);
             if (read.TryGetProperty("notify_connection_changes", out v)) NotifyConnectionChanges = v.Bool(NotifyConnectionChanges);
             if (read.TryGetProperty("notify_connection_down_at_startup", out v)) NotifyConnectionDownAtStartup = v.Bool(NotifyConnectionDownAtStartup);
-            if (read.TryGetProperty("connection_refire_minutes", out v)) ConnectionRefireMinutes = v.Int(ConnectionRefireMinutes, 0, 1440);
+            if (read.TryGetProperty("connection_refire_minutes", out v)) ConnectionRefireMinutes = v.WholeNumber(ConnectionRefireMinutes, 0, 1440);
             /* #1696 AG knobs, clamped on READ to the same ranges Darling clamps, so a hand-edited settings.json
                cannot drive a nonsense threshold in either app. */
             if (read.TryGetProperty("notify_ag_health", out v)) NotifyAgHealth = v.Bool(NotifyAgHealth);
-            if (read.TryGetProperty("ag_lag_alert_seconds", out v)) AgLagAlertSeconds = v.Int(AgLagAlertSeconds, 0, 86400);
-            if (read.TryGetProperty("ag_redo_queue_alert_kb", out v)) AgRedoQueueAlertKb = v.Long(AgRedoQueueAlertKb, 0L, 1073741824L);
-            if (read.TryGetProperty("ag_disconnect_refire_minutes", out v)) AgDisconnectRefireMinutes = v.Int(AgDisconnectRefireMinutes, 0, 1440);
+            if (read.TryGetProperty("ag_lag_alert_seconds", out v)) AgLagAlertSeconds = v.WholeNumber(AgLagAlertSeconds, 0, 86400);
+            if (read.TryGetProperty("ag_redo_queue_alert_kb", out v)) AgRedoQueueAlertKb = v.BigWholeNumber(AgRedoQueueAlertKb, 0L, 1073741824L);
+            if (read.TryGetProperty("ag_disconnect_refire_minutes", out v)) AgDisconnectRefireMinutes = v.WholeNumber(AgDisconnectRefireMinutes, 0, 1440);
             if (read.TryGetProperty("alert_cpu_enabled", out v)) AlertCpuEnabled = v.Bool(AlertCpuEnabled);
-            if (read.TryGetProperty("alert_cpu_threshold", out v)) AlertCpuThreshold = v.Int(AlertCpuThreshold);
+            if (read.TryGetProperty("alert_cpu_threshold", out v)) AlertCpuThreshold = v.WholeNumber(AlertCpuThreshold);
             if (read.TryGetProperty("alert_cpu_mode", out v) && Enum.TryParse<CpuAlertMode>(v.TextOrNull(), out var mode))
                 AlertCpuMode = mode;
             if (read.TryGetProperty("alert_blocking_enabled", out v)) AlertBlockingEnabled = v.Bool(AlertBlockingEnabled);
-            if (read.TryGetProperty("alert_blocking_threshold", out v)) AlertBlockingThreshold = v.Int(AlertBlockingThreshold);
-            if (read.TryGetProperty("alert_blocking_wait_seconds_threshold", out v)) AlertBlockingWaitSecondsThreshold = v.Int(AlertBlockingWaitSecondsThreshold);
+            if (read.TryGetProperty("alert_blocking_threshold", out v)) AlertBlockingThreshold = v.WholeNumber(AlertBlockingThreshold);
+            if (read.TryGetProperty("alert_blocking_wait_seconds_threshold", out v)) AlertBlockingWaitSecondsThreshold = v.WholeNumber(AlertBlockingWaitSecondsThreshold);
             if (read.TryGetProperty("alert_deadlock_enabled", out v)) AlertDeadlockEnabled = v.Bool(AlertDeadlockEnabled);
-            if (read.TryGetProperty("alert_deadlock_threshold", out v)) AlertDeadlockThreshold = v.Int(AlertDeadlockThreshold);
+            if (read.TryGetProperty("alert_deadlock_threshold", out v)) AlertDeadlockThreshold = v.WholeNumber(AlertDeadlockThreshold);
             if (read.TryGetProperty("alert_poison_wait_enabled", out v)) AlertPoisonWaitEnabled = v.Bool(AlertPoisonWaitEnabled);
-            if (read.TryGetProperty("alert_poison_wait_threshold_ms", out v)) AlertPoisonWaitThresholdMs = v.Int(AlertPoisonWaitThresholdMs);
+            if (read.TryGetProperty("alert_poison_wait_threshold_ms", out v)) AlertPoisonWaitThresholdMs = v.WholeNumber(AlertPoisonWaitThresholdMs);
             if (read.TryGetProperty("alert_long_running_query_enabled", out v)) AlertLongRunningQueryEnabled = v.Bool(AlertLongRunningQueryEnabled);
-            if (read.TryGetProperty("alert_long_running_query_threshold_minutes", out v)) AlertLongRunningQueryThresholdMinutes = v.Int(AlertLongRunningQueryThresholdMinutes);
-            if (read.TryGetProperty("alert_long_running_query_max_results", out v)) AlertLongRunningQueryMaxResults = v.Int(AlertLongRunningQueryMaxResults, 1, 1000);
+            if (read.TryGetProperty("alert_long_running_query_threshold_minutes", out v)) AlertLongRunningQueryThresholdMinutes = v.WholeNumber(AlertLongRunningQueryThresholdMinutes);
+            if (read.TryGetProperty("alert_long_running_query_max_results", out v)) AlertLongRunningQueryMaxResults = v.WholeNumber(AlertLongRunningQueryMaxResults, 1, 1000);
             if (read.TryGetProperty("alert_long_running_query_exclude_sp_server_diagnostics", out v)) AlertLongRunningQueryExcludeSpServerDiagnostics = v.Bool(AlertLongRunningQueryExcludeSpServerDiagnostics);
             if (read.TryGetProperty("alert_long_running_query_exclude_waitfor", out v)) AlertLongRunningQueryExcludeWaitFor = v.Bool(AlertLongRunningQueryExcludeWaitFor);
             if (read.TryGetProperty("alert_long_running_query_exclude_backups", out v)) AlertLongRunningQueryExcludeBackups = v.Bool(AlertLongRunningQueryExcludeBackups);
@@ -969,30 +1040,30 @@ public partial class App : Application
                 }
             }
             if (read.TryGetProperty("alert_tempdb_space_enabled", out v)) AlertTempDbSpaceEnabled = v.Bool(AlertTempDbSpaceEnabled);
-            if (read.TryGetProperty("alert_tempdb_space_threshold_percent", out v)) AlertTempDbSpaceThresholdPercent = v.Int(AlertTempDbSpaceThresholdPercent);
+            if (read.TryGetProperty("alert_tempdb_space_threshold_percent", out v)) AlertTempDbSpaceThresholdPercent = v.WholeNumber(AlertTempDbSpaceThresholdPercent);
             if (read.TryGetProperty("alert_low_disk_enabled", out v)) AlertLowDiskEnabled = v.Bool(AlertLowDiskEnabled);
-            if (read.TryGetProperty("alert_low_disk_threshold_percent", out v)) AlertLowDiskThresholdPercent = v.Int(AlertLowDiskThresholdPercent, 0, 100);
-            if (read.TryGetProperty("alert_low_disk_threshold_gb", out v)) AlertLowDiskThresholdGb = v.Int(AlertLowDiskThresholdGb, 0, int.MaxValue);
+            if (read.TryGetProperty("alert_low_disk_threshold_percent", out v)) AlertLowDiskThresholdPercent = v.WholeNumber(AlertLowDiskThresholdPercent, 0, 100);
+            if (read.TryGetProperty("alert_low_disk_threshold_gb", out v)) AlertLowDiskThresholdGb = v.WholeNumber(AlertLowDiskThresholdGb, 0, int.MaxValue);
             /* #2107: the CRITICAL tier floors, clamped like the WARNING thresholds above. */
-            if (read.TryGetProperty("alert_disk_critical_free_percent", out v)) AlertDiskCriticalFreePercent = v.Int(AlertDiskCriticalFreePercent, 0, 100);
-            if (read.TryGetProperty("alert_disk_critical_free_gb", out v)) AlertDiskCriticalFreeGb = v.Int(AlertDiskCriticalFreeGb, 0, int.MaxValue);
+            if (read.TryGetProperty("alert_disk_critical_free_percent", out v)) AlertDiskCriticalFreePercent = v.WholeNumber(AlertDiskCriticalFreePercent, 0, 100);
+            if (read.TryGetProperty("alert_disk_critical_free_gb", out v)) AlertDiskCriticalFreeGb = v.WholeNumber(AlertDiskCriticalFreeGb, 0, int.MaxValue);
             if (read.TryGetProperty("alert_pvs_enabled", out v)) AlertPvsEnabled = v.Bool(AlertPvsEnabled);
-            if (read.TryGetProperty("alert_pvs_threshold_percent", out v)) AlertPvsThresholdPercent = v.Int(AlertPvsThresholdPercent, 0, 100);
+            if (read.TryGetProperty("alert_pvs_threshold_percent", out v)) AlertPvsThresholdPercent = v.WholeNumber(AlertPvsThresholdPercent, 0, 100);
             if (read.TryGetProperty("alert_file_growth_enabled", out v)) AlertFileGrowthEnabled = v.Bool(AlertFileGrowthEnabled);
-            if (read.TryGetProperty("alert_file_growth_rise_mb", out v)) AlertFileGrowthRiseMb = v.Int(AlertFileGrowthRiseMb, 0, int.MaxValue);
-            if (read.TryGetProperty("alert_file_growth_volume_percent", out v)) AlertFileGrowthVolumePercent = v.Int(AlertFileGrowthVolumePercent, 0, 100);
-            if (read.TryGetProperty("alert_file_growth_lookback_minutes", out v)) AlertFileGrowthLookbackMinutes = v.Int(AlertFileGrowthLookbackMinutes, 5, 1440);
-            if (read.TryGetProperty("alert_pvs_floor_gb", out v)) AlertPvsFloorGb = v.Int(AlertPvsFloorGb, 0, int.MaxValue);
+            if (read.TryGetProperty("alert_file_growth_rise_mb", out v)) AlertFileGrowthRiseMb = v.WholeNumber(AlertFileGrowthRiseMb, 0, int.MaxValue);
+            if (read.TryGetProperty("alert_file_growth_volume_percent", out v)) AlertFileGrowthVolumePercent = v.WholeNumber(AlertFileGrowthVolumePercent, 0, 100);
+            if (read.TryGetProperty("alert_file_growth_lookback_minutes", out v)) AlertFileGrowthLookbackMinutes = v.WholeNumber(AlertFileGrowthLookbackMinutes, 5, 1440);
+            if (read.TryGetProperty("alert_pvs_floor_gb", out v)) AlertPvsFloorGb = v.WholeNumber(AlertPvsFloorGb, 0, int.MaxValue);
             if (read.TryGetProperty("alert_long_running_job_enabled", out v)) AlertLongRunningJobEnabled = v.Bool(AlertLongRunningJobEnabled);
-            if (read.TryGetProperty("alert_long_running_job_multiplier", out v)) AlertLongRunningJobMultiplier = v.Int(AlertLongRunningJobMultiplier);
+            if (read.TryGetProperty("alert_long_running_job_multiplier", out v)) AlertLongRunningJobMultiplier = v.WholeNumber(AlertLongRunningJobMultiplier);
             if (read.TryGetProperty("alert_failed_job_enabled", out v)) AlertFailedJobEnabled = v.Bool(AlertFailedJobEnabled);
-            if (read.TryGetProperty("alert_failed_job_lookback_minutes", out v)) AlertFailedJobLookbackMinutes = v.Int(AlertFailedJobLookbackMinutes, 1, 1440);
+            if (read.TryGetProperty("alert_failed_job_lookback_minutes", out v)) AlertFailedJobLookbackMinutes = v.WholeNumber(AlertFailedJobLookbackMinutes, 1, 1440);
             if (read.TryGetProperty("alert_database_state_enabled", out v)) AlertDatabaseStateEnabled = v.Bool(AlertDatabaseStateEnabled);
-            if (read.TryGetProperty("alert_cooldown_minutes", out v)) AlertCooldownMinutes = v.Int(AlertCooldownMinutes, 1, 120);
-            if (read.TryGetProperty("email_cooldown_minutes", out v)) EmailCooldownMinutes = v.Int(EmailCooldownMinutes, 1, 120);
+            if (read.TryGetProperty("alert_cooldown_minutes", out v)) AlertCooldownMinutes = v.WholeNumber(AlertCooldownMinutes, 1, 120);
+            if (read.TryGetProperty("email_cooldown_minutes", out v)) EmailCooldownMinutes = v.WholeNumber(EmailCooldownMinutes, 1, 120);
             if (read.TryGetProperty("alert_delivery_mode", out v) && Enum.TryParse<AlertNotificationMode>(v.TextOrNull(), out var deliveryMode))
                 AlertDeliveryMode = deliveryMode;
-            if (read.TryGetProperty("alert_per_event_max_per_cycle", out v)) AlertPerEventMaxPerCycle = v.Int(AlertPerEventMaxPerCycle, 1, 100);
+            if (read.TryGetProperty("alert_per_event_max_per_cycle", out v)) AlertPerEventMaxPerCycle = v.WholeNumber(AlertPerEventMaxPerCycle, 1, 100);
             if (read.TryGetProperty("mute_rule_default_expiration", out v))
             {
                 var exp = v.TextOrNull();
@@ -1006,7 +1077,7 @@ public partial class App : Application
             {
                 /* Rejected rather than clamped, which is why it does not use the reader's clamping overload:
                    an out-of-range timeout here has always been ignored in favour of the current value. */
-                var timeout = v.Int(ConnectionTimeoutSeconds);
+                var timeout = v.WholeNumber(ConnectionTimeoutSeconds);
                 if (timeout >= 5 && timeout <= 60) ConnectionTimeoutSeconds = timeout;
             }
 
@@ -1099,7 +1170,7 @@ public partial class App : Application
             /* SMTP settings */
             if (read.TryGetProperty("smtp_enabled", out v)) SmtpEnabled = v.Bool(SmtpEnabled);
             if (read.TryGetProperty("smtp_server", out v)) SmtpServer = v.Text(SmtpServer);
-            if (read.TryGetProperty("smtp_port", out v)) SmtpPort = v.Int(SmtpPort);
+            if (read.TryGetProperty("smtp_port", out v)) SmtpPort = v.WholeNumber(SmtpPort);
             if (read.TryGetProperty("smtp_use_ssl", out v)) SmtpUseSsl = v.Bool(SmtpUseSsl);
             if (read.TryGetProperty("smtp_username", out v)) SmtpUsername = v.Text(SmtpUsername);
             if (read.TryGetProperty("smtp_from_address", out v)) SmtpFromAddress = v.Text(SmtpFromAddress);
@@ -1108,10 +1179,10 @@ public partial class App : Application
             if (read.TryGetProperty("analysis_enabled", out v)) AnalysisEnabled = v.Bool(AnalysisEnabled);
             if (read.TryGetProperty("query_store_backfill_enabled", out v)) QueryStoreBackfillEnabled = v.Bool(QueryStoreBackfillEnabled);
             if (read.TryGetProperty("analysis_notifications_enabled", out v)) AnalysisNotificationsEnabled = v.Bool(AnalysisNotificationsEnabled);
-            if (read.TryGetProperty("analysis_interval_minutes", out v)) AnalysisIntervalMinutes = v.Int(AnalysisIntervalMinutes, 5, 360);
-            if (read.TryGetProperty("analysis_notify_severity", out v)) AnalysisNotifySeverity = v.Double(AnalysisNotifySeverity, 0.0, 2.0);
-            if (read.TryGetProperty("analysis_notify_cooldown_minutes", out v)) AnalysisNotifyCooldownMinutes = v.Int(AnalysisNotifyCooldownMinutes, 30, 10080);
-            if (read.TryGetProperty("analysis_timeout_seconds", out v)) AnalysisTimeoutSeconds = v.Int(AnalysisTimeoutSeconds, 30, 600);
+            if (read.TryGetProperty("analysis_interval_minutes", out v)) AnalysisIntervalMinutes = v.WholeNumber(AnalysisIntervalMinutes, 5, 360);
+            if (read.TryGetProperty("analysis_notify_severity", out v)) AnalysisNotifySeverity = v.Number(AnalysisNotifySeverity, 0.0, 2.0);
+            if (read.TryGetProperty("analysis_notify_cooldown_minutes", out v)) AnalysisNotifyCooldownMinutes = v.WholeNumber(AnalysisNotifyCooldownMinutes, 30, 10080);
+            if (read.TryGetProperty("analysis_timeout_seconds", out v)) AnalysisTimeoutSeconds = v.WholeNumber(AnalysisTimeoutSeconds, 30, 600);
 
             /* #2444: reported AFTER every read, which is the point — the whole set, named, and every key that
                was fine applied. Empty on a healthy file, so this costs nothing on the normal path. */

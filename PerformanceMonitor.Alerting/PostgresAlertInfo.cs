@@ -20,12 +20,18 @@ namespace PerformanceMonitor.Alerting;
 /// <param name="MultiXactAge">Age of the oldest unfrozen MultiXact (datminmxid).</param>
 /// <param name="AutovacuumFreezeMaxAge">The server's autovacuum_freeze_max_age — the age at which
 /// autovacuum force-starts a wraparound-prevention vacuum whether or not the table is otherwise due.</param>
+/// <param name="WindowPeakXidAge">The highest XID age observed in the same freshness window this reading
+/// came from. 0 means no window data was supplied, which <see cref="XidFreezingIsKeepingUp"/> treats
+/// conservatively as "not recovering" rather than silently assuming health (see #2689).</param>
+/// <param name="WindowPeakMultiXactAge">The same for MultiXact age.</param>
 public sealed record PostgresWraparoundAlertInfo(
     string DatabaseName,
     long XidAge,
     long MultiXactAge,
     long AutovacuumFreezeMaxAge,
-    long AutovacuumMultixactFreezeMaxAge)
+    long AutovacuumMultixactFreezeMaxAge,
+    long WindowPeakXidAge = 0,
+    long WindowPeakMultiXactAge = 0)
 {
     /* WorstAge/WorstCounter used to pick by raw age and the evaluator graded the winner against
        autovacuum_freeze_max_age whichever counter it was. That is wrong: the two counters have DIFFERENT
@@ -58,6 +64,18 @@ public sealed record PostgresWraparoundAlertInfo(
     /// <summary>The name of that setting, so the body cannot contradict itself.</summary>
     public string WorstSettingName =>
         MultiXactIsWorse ? "autovacuum_multixact_freeze_max_age" : "autovacuum_freeze_max_age";
+
+    /* #2689: whether autovacuum has actually brought the age back down from its own recent peak, the
+       signal that separates a healthy sawtooth (routine, resets every cycle) from a stuck climb (autovacuum
+       losing the race). Mirrors DarlingMcpPgWraparoundTools' own derivation (r.FrozenXidAge <
+       r.WindowPeakFrozenXidAge) so the alert and the read tool can never disagree about what "keeping up"
+       means. A peak of 0 (no window supplied) makes this false — conservative, not optimistic. */
+
+    /// <summary>Whether the XID age has come down from its own peak within the window.</summary>
+    public bool XidFreezingIsKeepingUp => XidAge < WindowPeakXidAge;
+
+    /// <summary>The same for MultiXact age.</summary>
+    public bool MultiXactFreezingIsKeepingUp => MultiXactAge < WindowPeakMultiXactAge;
 }
 
 /// <summary>
@@ -79,6 +97,31 @@ public sealed record PostgresXminHorizonAlertInfo(
     int ObservationsHeld,
     int ObservationsTotal,
     string? Detail);
+
+/// <summary>
+/// Accumulated pressure for one poison wait event over the alert's evaluation window (#2711).
+/// <para>Deltas rather than levels, unlike the three Tier 0 records above: the question this alert asks is
+/// "how much wait time did this event accrue recently", which only the summed per-interval deltas can
+/// answer — the cumulative counters never reset and a level read of them means "since instance start".</para>
+/// </summary>
+/// <param name="WaitType">The wait class as the collector stored it (e.g. "IPC") — kept for display in the
+/// server's own casing, which differs between Aurora majors.</param>
+/// <param name="WaitEvent">The wait event within that class (e.g. "BtreePage").</param>
+/// <param name="AccumulatedWaitMs">Total wait time accrued across the window, from summed
+/// <c>delta_wait_time_us</c>. Safe against instance restarts and counter resets:
+/// <c>CollectorDeltaCalculator</c> returns 0 for first sightings, resets and gap re-baselines, so this sum
+/// can undercount after a disruption but can never spike from one.</param>
+/// <param name="AccumulatedWaits">Total completed waits across the window — context for the message, not a
+/// threshold input; the per-wait average is exactly the number this alert must NOT judge by.</param>
+/// <param name="NewestCollectionTime">The newest contributing store row's own collection_time — the
+/// collector's clock, not the alert sweep's, so the host can refuse to re-fire on a row it has already
+/// reported (the #2704 unrefreshed-source-row guard).</param>
+public sealed record PostgresPoisonWaitAlertInfo(
+    string WaitType,
+    string WaitEvent,
+    long AccumulatedWaitMs,
+    long AccumulatedWaits,
+    DateTime NewestCollectionTime);
 
 /// <summary>
 /// One replication slot's retention risk.

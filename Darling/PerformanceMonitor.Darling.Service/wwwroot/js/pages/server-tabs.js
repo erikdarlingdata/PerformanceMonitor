@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, readTool, mount, truncate, loadingStrip, errorStrip, emptyStrip, disclosure, noticeStrip, fmtMs } from "../util.js";
+import { el, readTool, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, fmtMs, windowFromHours } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
 import { renderLineChart, SERIES_COLORS } from "../charts.js";
 
@@ -134,10 +134,13 @@ function fanout(read, params, specs) {
     const res = await readTool(read, params);
     specs.forEach((spec, i) => {
       const body = shells[i].body;
-      if (res.kind === "error") return mount(body, errorStrip(res.message));
+      if (res.kind === "error") return mount(body, readErrorStrip(res.message));
       if (res.kind === "empty") return mount(body, emptyStrip(res.message));
       try {
-        mount(body, VIZ[spec.viz](res.data, spec));
+        /* #2802: a fanout spec carries no `params` of its own (the window lives on the shared fetch above), so
+           hand vizLine the fetch's `hours` as `windowHours` — otherwise a fanout line panel (Current Waits,
+           Blocking/Deadlock Severity, ...) would fall back to its sparse data extent. Inert for the table specs. */
+        mount(body, VIZ[spec.viz](res.data, { ...spec, windowHours: params && params.hours }));
       } catch (e) {
         mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
       }
@@ -159,7 +162,7 @@ export function waitsPanel(server, ctx) {
   const { panel, body } = panelShell("Wait Stats", ctx.label + ", with a trend for the wait you pick");
   (async () => {
     const res = await readTool("get_wait_stats", { server, hours: ctx.hours, limit: 20 });
-    if (res.kind === "error") return mount(body, errorStrip(res.message));
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, emptyStrip(res.message));
 
     const waits = res.data.waits || [];
@@ -184,7 +187,7 @@ async function drawWaitTrend(slot, server, ctx, waitType) {
   mount(slot, loadingStrip());
   const trend = await readTool("get_wait_trend", { server, wait_type: waitType, hours: ctx.hours });
   if (trend.kind !== "data") {
-    mount(slot, trend.kind === "empty" ? emptyStrip(trend.message) : errorStrip(trend.message));
+    mount(slot, trend.kind === "empty" ? emptyStrip(trend.message) : readErrorStrip(trend.message));
     return;
   }
   mount(
@@ -198,6 +201,8 @@ async function drawWaitTrend(slot, server, ctx, waitType) {
       ],
       formatValue: (v) => Math.round(v).toLocaleString(),
       unit: "ms/s",
+      /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. */
+      ...windowFromHours(ctx.hours),
     })
   );
 }
@@ -218,7 +223,7 @@ export function perfmonPanel(server, ctx) {
   const { panel, body } = panelShell("Perfmon Counters", "latest snapshot, with a trend for the counter you pick");
   (async () => {
     const res = await readTool("get_perfmon_stats", { server });
-    if (res.kind === "error") return mount(body, errorStrip(res.message));
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, emptyStrip(res.message));
 
     const names = [...new Set((res.data.counters || []).map((c) => c.counter_name).filter(Boolean))].sort();
@@ -246,7 +251,7 @@ export function perfmonPanel(server, ctx) {
 async function drawPerfmonTrend(slot, server, ctx, counterName) {
   mount(slot, loadingStrip());
   const trend = await readTool("get_perfmon_trend", { server, counter_name: counterName, hours: ctx.hours });
-  if (trend.kind === "error") return mount(slot, errorStrip(trend.message));
+  if (trend.kind === "error") return mount(slot, readErrorStrip(trend.message));
   if (trend.kind === "empty") {
     const hinted = trend.hints && Array.isArray(trend.hints.collected_counters) ? trend.hints.collected_counters : null;
     mount(slot, [
@@ -267,6 +272,8 @@ async function drawPerfmonTrend(slot, server, ctx, counterName) {
         { key: "delta_value", label: "Delta", color: SERIES_COLORS[1] },
       ],
       formatValue: (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+      /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. */
+      ...windowFromHours(ctx.hours),
     })
   );
 }
@@ -296,7 +303,7 @@ export function topQueriesPanel(server, ctx) {
   const { panel, body } = panelShell("Top Queries by CPU", ctx.label + ", with a per-collection trend for the query you pick");
   (async () => {
     const res = await readTool("get_top_queries_by_cpu", { server, hours: ctx.hours, top: 20 });
-    if (res.kind === "error") return mount(body, errorStrip(res.message));
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, emptyStrip(res.message));
 
     const queries = res.data.queries || [];
@@ -350,7 +357,7 @@ async function drawQueryTrend(slot, server, ctx, query) {
     hours: ctx.hours,
   });
   if (trend.kind !== "data") {
-    mount(slot, trend.kind === "empty" ? emptyStrip(trend.message) : errorStrip(trend.message));
+    mount(slot, trend.kind === "empty" ? emptyStrip(trend.message) : readErrorStrip(trend.message));
     return;
   }
 
@@ -381,6 +388,9 @@ async function drawQueryTrend(slot, server, ctx, query) {
       ],
       formatValue: (v) => Math.round(v).toLocaleString() + " ms",
       unit: "ms",
+      /* #2802: axis spans the requested window (ctx.hours ending now). When the read is #2353-truncated the data
+         starts later than the window and plots toward the right; the truncation notice above already says so. */
+      ...windowFromHours(ctx.hours),
     }),
     VIZ.table(trend.data, {
       rowsKey: "trend",
@@ -414,7 +424,7 @@ export function fileIoPanel(server, ctx) {
   const { panel, body } = panelShell("File I/O Latency", "avg read latency per database, " + ctx.label);
   (async () => {
     const res = await readTool("get_file_io_trend", { server, hours: ctx.hours });
-    if (res.kind === "error") return mount(body, errorStrip(res.message));
+    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, emptyStrip(res.message));
 
     const { points, series } = pivot(res.data.trend || [], {
@@ -423,7 +433,8 @@ export function fileIoPanel(server, ctx) {
       valueKey: "avg_read_latency_ms",
     });
     if (!series.length) return mount(body, emptyStrip("No file I/O samples in this window."));
-    mount(body, renderLineChart({ points, xKey: "time", series, formatValue: (v) => Math.round(v) + " ms" }));
+    /* #2802: axis spans the requested window (ctx.hours ending now), not the pivoted data's own extent. */
+    mount(body, renderLineChart({ points, xKey: "time", series, formatValue: (v) => Math.round(v) + " ms", ...windowFromHours(ctx.hours) }));
   })();
   return panel;
 }
@@ -1287,6 +1298,12 @@ export const SERVER_TABS = [
          heaviest query three times to open it. */
       ...fanout("get_collection_health", { server }, [
         { title: "Sweep Pressure", subtitle: "trailing 7 days", viz: "stat", stats: SWEEP_STATS },
+        /* #3013: the alerting layer's own store reads, which appear on no other health surface. Its own
+           panel rather than a tile on Sweep Pressure specifically because of the SUBTITLE: these figures are
+           in-memory counts since the service started, and inheriting "trailing 7 days" would have made the
+           panel assert a window it did not measure. Shared const so the SQL Server and PostgreSQL tabs cannot
+           drift apart on it. */
+        ALERT_READ_PANEL,
         {
           title: "Collectors",
           subtitle: "trailing 7 days",
@@ -1362,6 +1379,25 @@ export const POSTGRES_TABS = [
         1,
         "No freeze-headroom samples in this window."
       ),
+      /* #2719: Aurora only. get_pg_cpu_utilization reads AWS Performance Insights' os.cpuUtilization.total.avg
+         over the RDS/PI API, which self-hosted PostgreSQL has no route to at all — not gated by major version
+         or by an extension the way the rest of this tab's panels are, but by the target being Amazon Aurora in
+         the first place. On a stock PostgreSQL target the panel is permanently empty and says so in its own
+         words, the same treatment the Waits tab gives get_pg_wait_stats. */
+      line(
+        "Instance CPU",
+        "get_pg_cpu_utilization",
+        { server, hours: ctx.hours },
+        "samples",
+        "sample_time",
+        PG_CPU_SERIES,
+        {
+          subtitle: ctx.label + ", Amazon Aurora only (AWS Performance Insights)",
+          format: "pct",
+          unit: "%",
+          emptyText: "No CPU samples in this window. This is an Amazon Aurora feature — on a stock PostgreSQL target this panel is permanently empty.",
+        }
+      ),
       stat(
         "xmin Horizon",
         "get_pg_xmin_horizon",
@@ -1408,6 +1444,12 @@ export const POSTGRES_TABS = [
          three panels, for the reason fanout exists. */
       ...fanout("get_collection_health", { server }, [
         { title: "Sweep Pressure", subtitle: "trailing 7 days", viz: "stat", stats: SWEEP_STATS },
+        /* #3013: the alerting layer's own store reads, which appear on no other health surface. Its own
+           panel rather than a tile on Sweep Pressure specifically because of the SUBTITLE: these figures are
+           in-memory counts since the service started, and inheriting "trailing 7 days" would have made the
+           panel assert a window it did not measure. Shared const so the SQL Server and PostgreSQL tabs cannot
+           drift apart on it. */
+        ALERT_READ_PANEL,
         {
           title: "Collectors",
           subtitle: "trailing 7 days",
@@ -1521,6 +1563,20 @@ export const POSTGRES_TABS = [
         ctx.label + ", grouped by plan shape - plans are redacted at collection",
         "No captured plans. Usually auto_explain is not loaded, or the monitoring login cannot read the server log; on Aurora and RDS there is no log file to read at all."
       ),
+      /* #3070: directly under the plans, because it is the answer to the grid above being empty and to the
+         deadlock grid further down being empty. The Windows Viewer puts this panel on its Vacuum tab, which
+         is a different registry with a different shape; here it belongs beside the two reads whose absence
+         it explains, and its own empty text is what stops that explanation being circular. Every facet is
+         shown, satisfied ones included — a list of only the failures cannot show that capture is working. */
+      table(
+        "Plan Capture Readiness",
+        "get_pg_plan_capture_readiness",
+        { server, hours: ctx.hours, limit: 25 },
+        "facets",
+        PG_PLAN_CAPTURE_READINESS_COLUMNS,
+        ctx.label + ", the newest reading of each facet in it; in CAUSAL order rather than alphabetically - fix them top to bottom; the remedy is per facet, and on Aurora/RDS it says which changes need a parameter group and a reboot",
+        "No readiness state collected. Unlike the grids around it an empty panel here is never the healthy answer - the collector writes one row per facet on every run whatever it finds - so this means it has not run for this server, or the window is shorter than its hourly cadence."
+      ),
       /* Directly UNDER the query shapes, because that is the question it answers (#2539). A statement whose
          time makes no sense from its row count usually spilled, and pg_stat_database's temp counters are the
          only evidence of that we collect — the statement stats themselves cannot see it. The deadlock and
@@ -1604,7 +1660,7 @@ export const POSTGRES_TABS = [
         "deadlocks",
         PG_DEADLOCK_COLUMNS,
         ctx.label + ", newest first; Sightings counts re-reads of the same report, not repeats",
-        "No deadlock was reported in this window. That is the healthy answer - but it is the same shape as a server whose log cannot be read, which the plan-capture readiness panel reports on because it reads the same file. pg_stat_database's deadlock counter is the independent check."
+        "No deadlock was reported in this window. That is the healthy answer - but it is the same shape as a server whose log cannot be read, which the Plan Capture Readiness panel above reports on because it reads the same file. pg_stat_database's deadlock counter is the independent check."
       ),
       /* #2663 the regression read: what ONE execution of the busiest statement cost, interval by interval.
          The statement grid above ranks by total time across the window, which hides a step change - a query
@@ -2074,8 +2130,11 @@ const PROPERTY_STATS = [
 
 const DAILY_STATS = [
   { key: "summary_date", label: "Date", format: "text", small: true },
+  /* One health card, not two. get_daily_summary returns overall_health as the band's LABEL
+     (DarlingHealthReader: OverallHealth => DailyHealthBandCalculator.Label(HealthBand)) — the same value
+     health_band carries — so an "overall_health" card duplicated this one AND, formatted as num1, rendered
+     the label "Critical" as NaN. #2807. A numeric health SCORE would be a new backend field, not this label. */
   { key: "health_band", label: "Band", format: "text", small: true },
-  { key: "overall_health", label: "Health", format: "num1" },
   { key: "top_wait_type", label: "Top wait", format: "text", small: true },
   { key: "total_wait_time_sec", label: "Total wait", format: "int" },
   { key: "unique_queries", label: "Unique queries", format: "int" },
@@ -2148,6 +2207,35 @@ const SESSION_STATS = [
   { key: "collection_time", label: "Collected", format: "reltime", small: true },
 ];
 
+/* #3013: the alerting subsystem's own swallowed store reads. Its own panel object (not just a stats array)
+   because the WINDOW is the point: every other panel on this tab is the trailing seven days, and this one is
+   an in-memory count since the service process started, which a restart takes to zero. The subtitle says so,
+   because a reader who assumed otherwise would read a zero as seven quiet days.
+
+   Deliberately carries no severity hint and feeds no band: a threshold here would have to guess how many
+   blind reads make alerting unhealthy, and on this surface a wrong guess fails by saying nothing is wrong.
+   "Newest" beside the counts for the same reason the Last Error column has a timestamp - the count never
+   ages out of a window, so a nonzero value with an old stamp is a healed episode. */
+const ALERT_READ_STATS = [
+  { key: "alert_read_health.server_read_failures", label: "Blind reads (server)", format: "int" },
+  { key: "alert_read_health.server_alert_passes", label: "Alert passes", format: "int" },
+  { key: "alert_read_health.instance_read_failures", label: "Blind reads (service)", format: "int" },
+  { key: "alert_read_health.last_failure_read", label: "Which read", format: "text", small: true },
+  /* Beside "Which read" because the two answer one question together: which condition went blind, and
+     whose deadline ended it. An elapsed at or about the alert pass's command deadline is this service
+     giving up while the statement still ran on the store; well below it is a fault the store returned. */
+  { key: "alert_read_health.last_failure_elapsed_ms", label: "Ran for", format: "ms", small: true },
+  { key: "alert_read_health.last_failure_at", label: "Newest", format: "reltime", small: true },
+  { key: "alert_read_health.counting_since", label: "Counting since", format: "reltime", small: true },
+];
+
+const ALERT_READ_PANEL = {
+  title: "Alerting Reads",
+  subtitle: "since this service started \u2014 NOT the trailing 7 days",
+  viz: "stat",
+  stats: ALERT_READ_STATS,
+};
+
 const SWEEP_STATS = [
   { key: "sweep_pressure.verdict", label: "Verdict", format: "text", small: true },
   { key: "sweep_pressure.busy_percent", label: "Sweep busy %", format: "num1" },
@@ -2166,6 +2254,8 @@ const CPU_SERIES = [
   { key: "other_process_cpu", label: "Other %" },
   { key: "total_cpu", label: "Total %" },
 ];
+
+const PG_CPU_SERIES = [{ key: "cpu_percent", label: "CPU %" }];
 
 const MEMORY_SERIES = [
   { key: "total_server_memory_mb", label: "Total Server" },
@@ -2800,13 +2890,26 @@ const DEFAULT_TRACE_COLUMNS = [
 
 /* #2484: the raw log's columns. The duration SPLIT is the reason this table earns its place beside the
    rollup -- total time cannot separate a collector that is slow because the monitored server is slow from
-   one that is slow because the store is, and that is the first question anyone asks of a slow collector. */
+   one that is slow because the store is, and that is the first question anyone asks of a slow collector.
+
+   #3192: this column was headed "On Server", and on the collectors that fetch plan XML or statement text
+   that header was false. The deferred fetches run inside the driver's per-item SQL stopwatch and each one
+   round-trips the STORE before writing back what came off the target, so a measured 107,334 ms of a
+   124,972 ms query_store figure was the monitoring store -- 86% -- under a header naming the monitored
+   server. Headed "SQL" now, matching what the WPF viewer's grid has always called it - the HEADER only: that
+   grid has no "Store (in SQL)" breakout and cannot get one cheaply, because its row type and both backing
+   queries are verbatim copies of Lite's and Lite runs no deferred fetch. Its own comment says so. Here the
+   store share does get its own column beside the total. "Store (in SQL)" is blank on the ~98% of runs that perform no deferred
+   fetch, and blank there means "nothing to attribute", not "no store time": the per-item watermark refresh
+   is a store read inside the same stopwatch and is recorded nowhere, which is why that column is a floor
+   and "On Store" (the binary COPY of the collected rows) is not where the probe went either. */
 const COLLECTION_LOG_COLUMNS = [
   { key: "collection_time", label: "When", format: "time" },
   { key: "collector", label: "Collector" },
   { key: "status", label: "Status", statusSev: true },
   { key: "duration_ms", label: "Total", format: "ms" },
-  { key: "sql_duration_ms", label: "On Server", format: "ms" },
+  { key: "sql_duration_ms", label: "SQL", format: "ms" },
+  { key: "sql_store_ms", label: "Store (in SQL)", format: "ms" },
   { key: "store_duration_ms", label: "On Store", format: "ms" },
   { key: "rows_collected", label: "Rows", format: "int" },
   { key: "error_message", label: "Error", wrap: true },
@@ -2818,9 +2921,22 @@ const COLLECTOR_COLUMNS = [
   { key: "total_runs", label: "Runs", format: "int" },
   { key: "errors", label: "Errors", format: "int" },
   { key: "yields", label: "Yields", format: "int" },
+  /* #2804: cycles the wall-clock budget gave up on. Beside Yields because both are guards firing rather
+     than faults, but this one is data LOSS — the cycle stored nothing and advanced no watermark — and it
+     is why a WARNING in the Status column may have nothing to do with the Errors beside it. */
+  { key: "abandoned", label: "Abandoned", format: "int" },
   { key: "failure_rate_pct", label: "Failure %", format: "num1" },
   { key: "avg_duration_ms", label: "Avg Dur", format: "ms" },
   { key: "p95_duration_ms", label: "p95 Dur", format: "ms" },
+  /* #3017: what the spend BOUGHT, in the columns right after what it cost. Every column to the left of
+     these describes cost and none said whether any of it bought anything; the rows figure lived on
+     get_collector_cost, a different read over a different (hourly, fleet-wide) series. Rows beside Runs
+     w/ Rows because a rows total with no run count behind it cannot tell a collector that is productive
+     occasionally from one productive throughout — get_pg_blocking already reports its captures the same
+     way. Deliberately NOT a Status input: zero rows is the correct resting state for an event collector
+     on a quiet target, and a band keyed on cost-plus-zero-rows would light up the healthy install. */
+  { key: "rows_stored", label: "Rows", format: "int" },
+  { key: "runs_with_rows", label: "Runs w/ Rows", format: "int" },
   { key: "last_success", label: "Last Success", format: "time" },
   { key: "last_error", label: "Last Error", wrap: true },
   /* #1837: what a NON-failing run reported (an enumeration that came back with 0 items). Blank for a
@@ -2829,6 +2945,11 @@ const COLLECTOR_COLUMNS = [
      "(all N runs)" qualifier that separates a persistently empty collector from an occasionally quiet
      one, composed server-side from the shared formatter so this table cannot render it a third way. */
   { key: "note_summary", label: "Note", wrap: true },
+  /* #3017: which of the two zero-output readings a collector that spent and stored nothing is — read and
+     found nothing, or could not read. Blank whenever Rows is positive, for the same reason the Note
+     column is blank on a plainly healthy collector. Composed server-side from the shared formatter, so
+     this table cannot render the sentence a second way. */
+  { key: "output_finding", label: "Output", wrap: true },
 ];
 
 const HEAVIEST_COLUMNS = [
@@ -3222,6 +3343,18 @@ const PG_PLAN_COLUMNS = [
      statement actually ran, and this label has to keep the two apart. */
   { key: "captures", label: "Captures", format: "int" },
   { key: "plan_hash", label: "Plan Hash", mono: true },
+];
+
+/* Remedy last and deliberately widest. Facet, state and observed value are what the eye scans down; the
+   remedy is the sentence somebody reads once they have found the row that is wrong, and it is the column
+   this panel exists for — every other reader of these rows outside the Windows Viewer sees the facet name
+   and its observed value and nothing about what to do. */
+const PG_PLAN_CAPTURE_READINESS_COLUMNS = [
+  { key: "facet", label: "Facet" },
+  { key: "is_satisfied", label: "Satisfied", format: "bool" },
+  { key: "observed", label: "Observed", mono: true },
+  { key: "detail", label: "Consequence and Remedy" },
+  { key: "last_observed", label: "Last Seen", format: "time", small: true },
 ];
 
 const PG_TOP_QUERY_COLUMNS = [

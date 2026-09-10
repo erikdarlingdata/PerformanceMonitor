@@ -66,16 +66,70 @@ public sealed class QueryStoreBackfillTests
         Assert.Equal((from, to), QueryStoreBackfillState.MergeHole("garbage", from, to));
     }
 
+    /// <summary>
+    /// The backfill horizon is the SMALLER of two conditions that both have to hold, and #3012 is what made
+    /// them differ.
+    ///
+    /// <para>A slice lands rows at a BACKDATED <c>collection_time</c>, so two things must be true at the depth
+    /// it lands: raw retention must not immediately drop them, and the hourly aggregates must still
+    /// re-materialize the buckets it touched. The rollups are materialized-only — the watermark is a hard
+    /// partition, not a fallback — so a bucket the refresh window no longer covers keeps whatever it was
+    /// materialized with, and the backfilled rows become invisible to every window that routes at hourly grain
+    /// while still being visible at raw grain. A split between two tiers, not a delay.</para>
+    ///
+    /// <para><b>Why the old single-term form was not merely simpler.</b> It read
+    /// <c>Horizon == RetentionTierRouter.RawMaxAge</c>, and that was indistinguishable from correct only
+    /// because the hourly refresh window was ALSO 3 days: the retention term was standing in for the refresh
+    /// term. That is the coupling #3012 is about — the refresh window having to cover a depth retention chose,
+    /// so every retention increase silently bought more refresh cost. With the window now chosen against its
+    /// own cadence the two terms separate, and the refresh one is the binding one.</para>
+    ///
+    /// <para>The concrete value is pinned as well as the relationship, because the relationship alone would
+    /// hold under either treatment: 23 hours is the hourly window minus one refresh interval. Reverting the
+    /// window to 3 days makes it 71 hours; dropping the refresh term makes it 3 days. Both are red here.</para>
+    /// </summary>
     [Fact]
-    public void Horizon_IsDerivedFromTheRawTier_NotHandMaintained()
+    public void Horizon_IsTheSmallerOfTheRefreshWindowAndTheRawTier_NotEitherAlone()
     {
-        /* The backfill refuses to dig below the raw tier's read horizon: inside it, every CAGG's
-           3-day start_offset re-materializes backdated buckets and the 4-day raw retention cannot
-           immediately drop them; below it, neither holds (the issue's own staging boundary).
-           Derived so a retention change moves this automatically — the #1937 rule. */
-        Assert.Equal(RetentionTierRouter.RawMaxAge, QueryStoreBackfill.Horizon);
-        Assert.True(QueryStoreBackfill.Horizon < TimescaleSupport.RawRetentionSpan,
+        var refreshReach = TimescaleSupport.HourlyRefreshStartSpan - TimescaleSupport.HourlyRefreshScheduleSpan;
+
+        Assert.Equal(TimeSpan.FromHours(23), QueryStoreBackfill.RollupStoreHorizon);
+
+        Assert.True(QueryStoreBackfill.RollupStoreHorizon <= refreshReach,
+            "a slice below the depth the next hourly refresh still reaches lands rows no rollup will ever materialize");
+        Assert.True(QueryStoreBackfill.RollupStoreHorizon <= RetentionTierRouter.RawMaxAge,
+            "a slice below the raw read horizon lands rows the next purge immediately drops");
+        Assert.True(QueryStoreBackfill.RollupStoreHorizon < TimescaleSupport.RawRetentionSpan,
             "the backfill horizon must sit strictly inside raw retention, or a slice could land rows the next purge immediately drops");
+        Assert.True(QueryStoreBackfill.RollupStoreHorizon < TimescaleSupport.HourlyRefreshStartSpan,
+            "the horizon must sit strictly inside the refresh window: the window slides forward by one schedule interval between runs, so its own boundary is already outside it by the time the policy next fires");
+    }
+
+    /// <summary>
+    /// The refresh term applies only where there are rollups to fall out of.
+    ///
+    /// <para>TimescaleDB is optional and auto-detected, and plain PostgreSQL is a supported configuration
+    /// rather than a degraded one. On such a store every read goes to raw, so a backdated row cannot be
+    /// stranded outside a refresh window — and narrowing the horizon for that term anyway would have cost that
+    /// deployment mode two days of catch-up reach in exchange for nothing. #3012's change narrowed
+    /// unconditionally at first; this is the pin for the correction.</para>
+    ///
+    /// <para>Asserted as an INEQUALITY between the two horizons, not just as two values: the defect shape is
+    /// the plain store silently inheriting the rollup store's narrower reach, and that reads as equal
+    /// horizons. So a future change that collapses them back is red here even if both numbers move.</para>
+    /// </summary>
+    [Fact]
+    public void PlainPostgresHorizon_KeepsTheFullRawDepth_BecauseThereAreNoRollupsToFallOutOf()
+    {
+        Assert.Equal(RetentionTierRouter.RawMaxAge, QueryStoreBackfill.PlainStoreHorizon);
+        Assert.Equal(TimeSpan.FromDays(3), QueryStoreBackfill.PlainStoreHorizon);
+
+        Assert.True(QueryStoreBackfill.PlainStoreHorizon > QueryStoreBackfill.RollupStoreHorizon,
+            "a plain-PostgreSQL store must not inherit the rollup store's narrower reach — it has no rollups, so the refresh term does not apply to it");
+
+        /* The selector is what the slice path actually calls, so it is pinned rather than only the pair. */
+        Assert.Equal(QueryStoreBackfill.RollupStoreHorizon, QueryStoreBackfill.HorizonFor(hasContinuousAggregates: true));
+        Assert.Equal(QueryStoreBackfill.PlainStoreHorizon, QueryStoreBackfill.HorizonFor(hasContinuousAggregates: false));
     }
 
     [Fact]

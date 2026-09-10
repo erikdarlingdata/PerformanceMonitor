@@ -1,0 +1,56 @@
+<Project>
+
+  <!--
+    #3222: the ONE place a product version is declared. Every project in the tree inherits it by MSBuild's
+    automatic Directory.Build.props import, and AssemblyVersion / FileVersion / InformationalVersion derive
+    from it at build time. A release bump is the one line below.
+
+    The PropertyGroup comes FIRST, ahead of the rationale, and no prose above it may spell the property name
+    in its angle-bracket form. Two consumers read this file as TEXT and take the first match: the linux jobs
+    in build.yml and nightly.yml, with a grep lookbehind. A mention of the property ahead of the property
+    itself is what those reads return. Not hypothetical, it was written that way first, and both came back
+    with the word "from" out of this comment while the XML reads still returned 3.6.0. Naming artifacts is
+    all those reads do, so nothing goes red, the release tarball is just named wrongly.
+    ProductVersionDeclarationTests runs each shipped read's own pattern against this file and requires it to
+    agree with the XML read, so the ordering is enforced rather than remembered.
+  -->
+  <PropertyGroup>
+    <Version>3.7.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+
+  <!--
+    Why one declaration, and why here.
+
+    #2113 established the rule one level down and inside a single project: four hand-maintained copies of one
+    fact is a release-day trap. It proved that from a shipped artifact. The 3.4.0 release bumped the version
+    property and the binaries still STAMPED 3.3.0.0, because AssemblyVersion / FileVersion /
+    InformationalVersion were pinned by hand beside it. The remedy was to delete the derived properties and
+    let derivation happen.
+
+    The same trap had reassembled itself one level UP, across projects. Six csproj files each declared their
+    own version: four at 3.6.0, and the two deprecated Installer projects at 3.3.0, three releases behind.
+    Two consumers read two DIFFERENT files. check-version-bump.yml gated the release on
+    deprecated/Dashboard/Dashboard.csproj while nightly.yml named every artifact from
+    Lite/PerformanceMonitorLite.csproj, and nothing compared them, so bumping the file the gate read let a
+    release merge with every artifact still carrying the old version. The deprecated projects also still
+    hand-set the three derived properties #2113 deleted, which is why Dashboard's binary stamped 3.3.0.0
+    while its csproj said 3.6.0: the file the release gate took its judgement from produced an artifact three
+    releases behind.
+
+    The suffix suppression is the second half of the same fact. It keeps InformationalVersion a clean semver
+    rather than gaining a source-revision suffix under CI SourceLink; without it the deprecated projects'
+    binaries stamped 3.3.0 plus a sha even where the version was hand-pinned.
+
+    Directory.Build.props rather than a file the projects import by hand: an explicit Import is a convention a
+    new project can forget, which is the shape of the defect this replaces. The automatic import reaches the
+    test projects and the deprecated subtree as well, so all 22 projects in the tree now stamp the product
+    version instead of the SDK's 1.0.0 default. That is the blast radius and it is deliberate. Measured on
+    this change: the three shipped apps stamp 3.6.0.0 before and after, Dashboard and the two Installer
+    projects move 3.3.0.0 to 3.6.0.0, and the shared libraries and test assemblies move 1.0.0.0 to 3.6.0.0.
+    Nothing reads a library's or test assembly's own version to make a decision. UpdateCheckService reads the
+    ENTRY assembly, and DarlingCliCommands.ProductVersion reads the service assembly, which is a shipped
+    app and carries the product version either way.
+  -->
+
+</Project>

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
@@ -23,6 +24,17 @@ namespace PerformanceMonitorDashboard
         private const string PlanAddTabId = "__PLAN_ADD_TAB__";
         private TabControl? _mainPlanTabControl;
         private Grid? _planViewerContainer;
+
+        /* Re-entrancy latch for the "+"-sentinel auto-add (see HandleAddTabSelected / #2825). */
+        private bool _addTabInsertDeferred;
+
+        /* Re-entrancy latch shared by the Plan Viewer's two paste entry points -- the "Paste XML" button and the
+           Ctrl+V MainWindowPlanViewer_KeyDown (#2870). #2837's async clipboard retry keeps the UI pump responsive
+           but yields the thread for the ~175 ms can't-open retry window; the old Thread.Sleep had incidentally
+           serialized input, so a HELD Ctrl+V (OS key-repeat) could put several reads in flight at once and each
+           would LoadPlan another "Pasted Plan" tab. While a paste is running, a further paste trigger is dropped
+           (its key is still claimed via e.Handled). */
+        private bool _pasteInProgress;
 
         private void OpenPlanViewer_Click(object sender, RoutedEventArgs e)
         {
@@ -69,11 +81,8 @@ namespace PerformanceMonitorDashboard
 
             _mainPlanTabControl.SelectionChanged += (_, _) =>
             {
-                if (_mainPlanTabControl.SelectedItem is TabItem { Tag: string t } && t == PlanAddTabId)
-                {
-                    var newSub = AddNewEmptyPlanSubTab();
-                    _mainPlanTabControl.SelectedItem = newSub;
-                }
+                if (_mainPlanTabControl?.SelectedItem is TabItem { Tag: string t } && t == PlanAddTabId)
+                    HandleAddTabSelected();
             };
 
             var container = new Grid();
@@ -113,6 +122,44 @@ namespace PerformanceMonitorDashboard
             // Open the first empty sub-tab immediately
             AddNewEmptyPlanSubTab();
             Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => _planViewerContainer?.Focus()));
+        }
+
+        /// <summary>
+        /// The "+" sentinel became the selected tab -- add a fresh empty sub-tab and select it. Mirrors the shared
+        /// <c>StandalonePlanViewerController</c>'s #2825 re-entrancy fix: when the Plan Viewer tab is realized for the
+        /// first time, WPF re-asserts this selection for the auto-selected "+" tab from INSIDE the inner TabControl's
+        /// container generator, and <see cref="AddNewEmptyPlanSubTab"/>'s <c>ItemCollection.Insert</c> mid-generation
+        /// throws "Cannot call StartAt when content generation is in progress", which is unhandled and crashes the app.
+        /// Only the "+" tab present means we are in that first-time realization, so defer the insert off the generation
+        /// pass; the opener (<see cref="OpenPlanViewerTab"/>) adds a real sub-tab synchronously right after, so the
+        /// deferred pass finds "+" deselected and no-ops -- no duplicate tab. A real user click (steady state, more than
+        /// one item) stays synchronous exactly as before.
+        /// </summary>
+        private void HandleAddTabSelected()
+        {
+            if (_mainPlanTabControl == null) return;
+
+            // Steady state: real sub-tab(s) already present => a genuine user click on "+". Safe to mutate now.
+            if (_mainPlanTabControl.Items.Count > 1)
+            {
+                var newSub = AddNewEmptyPlanSubTab();
+                _mainPlanTabControl.SelectedItem = newSub;
+                return;
+            }
+
+            // Only the "+" sentinel exists => first-time realization, possibly mid-generation. Defer once.
+            if (_addTabInsertDeferred) return;
+            _addTabInsertDeferred = true;
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+            {
+                _addTabInsertDeferred = false;
+                if (_mainPlanTabControl != null &&
+                    _mainPlanTabControl.SelectedItem is TabItem { Tag: string t } && t == PlanAddTabId)
+                {
+                    var newSub = AddNewEmptyPlanSubTab();
+                    _mainPlanTabControl.SelectedItem = newSub;
+                }
+            }));
         }
 
         /// <summary>
@@ -232,7 +279,8 @@ namespace PerformanceMonitorDashboard
                     {
                         var xml = System.IO.File.ReadAllText(fileName);
                         var targetTab = isFirst ? subTab : AddNewEmptyPlanSubTab();
-                        LoadPlanIntoSubTab(targetTab, xml, System.IO.Path.GetFileName(fileName));
+                        // Fire-and-forget (open-file, not paste): discard the Task (CS4014 is an error here).
+                        _ = LoadPlanIntoSubTab(targetTab, xml, System.IO.Path.GetFileName(fileName));
                     }
                     catch (Exception ex)
                     {
@@ -243,16 +291,31 @@ namespace PerformanceMonitorDashboard
                 }
             };
 
-            pasteBtn.Click += (_, _) =>
+            pasteBtn.Click += async (_, _) =>
             {
-                var xml = Clipboard.GetText();
-                if (!string.IsNullOrWhiteSpace(xml))
+                // Re-entrancy guard (#2870): share the paste latch with the Ctrl+V handler so a rapid
+                // double-invoke of the button cannot double-load (a paste is a paste, whichever entry fires).
+                if (_pasteInProgress) return;
+                _pasteInProgress = true;
+                try
                 {
-                    LoadPlanIntoSubTab(subTab, xml, "Pasted Plan");
-                    return;
+                    var (ok, xml) = await ClipboardText.TryReadAsync();
+                    if (!ok)
+                    {
+                        MessageBox.Show("Couldn't read the clipboard. It may be in use by another app. Try again.",
+                            "Paste Plan XML", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+                    if (!string.IsNullOrWhiteSpace(xml))
+                    {
+                        // Await so the guard spans the off-thread parse, not just the clipboard read (#2870).
+                        await LoadPlanIntoSubTab(subTab, xml, "Pasted Plan");
+                        return;
+                    }
+                    MessageBox.Show("The clipboard does not contain any text.", "Paste Plan XML",
+                        MessageBoxButton.OK, MessageBoxImage.Information);
                 }
-                MessageBox.Show("The clipboard does not contain any text.", "Paste Plan XML",
-                    MessageBoxButton.OK, MessageBoxImage.Information);
+                finally { _pasteInProgress = false; }
             };
 
             // Insert before the "+" tab
@@ -276,9 +339,12 @@ namespace PerformanceMonitorDashboard
 
         /// <summary>
         /// Loads plan XML into an existing sub-tab (replacing whatever was there before).
-        /// Updates the sub-tab header label and shows the viewer layer.
+        /// Updates the sub-tab header label and shows the viewer layer. Returns a <see cref="Task"/> (not
+        /// <c>async void</c>) so the paste entry points can <c>await</c> it inside their <c>_pasteInProgress</c>
+        /// guard: the real parse runs off-thread in <c>LoadPlan</c>, so the guard has to span the load, not just
+        /// the clipboard read (#2870). Fire-and-forget callers (open-file, drag-drop) discard the Task.
         /// </summary>
-        private async void LoadPlanIntoSubTab(TabItem subTab, string planXml, string label, string? queryText = null)
+        private async Task LoadPlanIntoSubTab(TabItem subTab, string planXml, string label, string? queryText = null)
         {
             if (subTab.Content is not Grid subTabContent) return;
             if (subTabContent.Children.Count < 2) return;
@@ -387,7 +453,8 @@ namespace PerformanceMonitorDashboard
                 try
                 {
                     var xml = System.IO.File.ReadAllText(planFiles[i]);
-                    LoadPlanIntoSubTab(newTab, xml, System.IO.Path.GetFileName(planFiles[i]));
+                    // Fire-and-forget (drag-drop, not paste): discard the Task (CS4014 is an error here).
+                    _ = LoadPlanIntoSubTab(newTab, xml, System.IO.Path.GetFileName(planFiles[i]));
                 }
                 catch (Exception ex)
                 {
@@ -397,18 +464,30 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private void MainWindowPlanViewer_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        private async void MainWindowPlanViewer_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {
             if (e.Key == System.Windows.Input.Key.V &&
                 System.Windows.Input.Keyboard.Modifiers == System.Windows.Input.ModifierKeys.Control &&
                 e.OriginalSource is not System.Windows.Controls.TextBox)
             {
-                var xml = Clipboard.GetText();
-                if (!string.IsNullOrWhiteSpace(xml))
+                // Claim the paste gesture during event routing, before the async read yields on the retry
+                // path (#2837): setting e.Handled after the await would leave the key event unsuppressed.
+                e.Handled = true;
+                // Re-entrancy guard (#2870): the async retry window yields the UI thread, so a HELD Ctrl+V
+                // (OS key-repeat) could otherwise put several reads in flight at once and open several tabs.
+                // Drop repeats while a paste runs; the key stays claimed above so it can't fall through.
+                if (_pasteInProgress) return;
+                _pasteInProgress = true;
+                try
                 {
-                    e.Handled = true;
-                    LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");
+                    var (ok, xml) = await ClipboardText.TryReadAsync();
+                    if (ok && !string.IsNullOrWhiteSpace(xml))
+                    {
+                        // Await so the guard spans the off-thread parse, not just the clipboard read (#2870).
+                        await LoadPlanIntoActivePlanSubTab(xml, "Pasted Plan");
+                    }
                 }
+                finally { _pasteInProgress = false; }
             }
         }
 
@@ -417,7 +496,8 @@ namespace PerformanceMonitorDashboard
             try
             {
                 var xml = System.IO.File.ReadAllText(path);
-                LoadPlanIntoActivePlanSubTab(xml, System.IO.Path.GetFileName(path));
+                // Fire-and-forget (drag-drop, not paste): discard the Task (CS4014 is an error here).
+                _ = LoadPlanIntoActivePlanSubTab(xml, System.IO.Path.GetFileName(path));
             }
             catch (Exception ex)
             {
@@ -426,11 +506,11 @@ namespace PerformanceMonitorDashboard
             }
         }
 
-        private void LoadPlanIntoActivePlanSubTab(string planXml, string label)
+        private async Task LoadPlanIntoActivePlanSubTab(string planXml, string label)
         {
             var activeSubTab = GetActivePlanSubTab();
             if (activeSubTab != null)
-                LoadPlanIntoSubTab(activeSubTab, planXml, label);
+                await LoadPlanIntoSubTab(activeSubTab, planXml, label);
         }
 
         private static bool IsPlanFile(string path)

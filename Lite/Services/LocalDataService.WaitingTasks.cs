@@ -30,7 +30,7 @@ public partial class LocalDataService
 
         /* The window's upper edge is $3, so the optional database list starts at $4. Bounding both edges
            (rather than only the lower one) is what lets an as_of anchor mean anything here. */
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         command.CommandText = $@"
 SELECT
@@ -105,7 +105,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
         /* #1240 parity: exclude the user's ignored (benign) wait types at DISPLAY time (mirrors the
            wait-stats reads) so the Current Waits duration chart matches the Wait Stats tab. */
@@ -154,7 +154,7 @@ ORDER BY
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"

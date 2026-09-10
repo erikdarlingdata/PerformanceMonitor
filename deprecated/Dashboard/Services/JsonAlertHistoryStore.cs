@@ -170,7 +170,12 @@ namespace PerformanceMonitorDashboard.Services
         /// NotificationType (which can be "email", "webhook", or "tray" on
         /// Dashboard) and SendError. Returns null if no matching entry.
         /// </summary>
-        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName)
+        /// <remarks>
+        /// When <paramref name="dedupKey"/> is non-null (#1154, reused by #2716), the scan is
+        /// additionally restricted to rows whose ContextJson carries that #1140 fingerprint, same as
+        /// this store's email/webhook siblings.
+        /// </remarks>
+        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null)
         {
             lock (_alertLogLock)
             {
@@ -179,6 +184,7 @@ namespace PerformanceMonitorDashboard.Services
                 {
                     if (entry.ServerId != serverId) continue;
                     if (entry.MetricName != metricName) continue;
+                    if (dedupKey is not null && !AlertContextSerializer.ContextJsonContainsDedupKey(entry.ContextJson, dedupKey)) continue;
                     if (max == null || entry.AlertTime > max.Value) max = entry.AlertTime;
                 }
                 return Task.FromResult(max);

@@ -28,8 +28,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// purge via hypertable <c>drop_chunks</c> instead, which detaches whole expired chunks in O(1)
 /// instead of scanning rows. collection_log — a hypertable since V23, though converted directly by the
 /// V23 migration rather than the catalog loop — purges the SAME way (drop_chunks with a DELETE fallback for
-/// a plain-PostgreSQL store). config_alert_log and config.config_command stay DELETE-based either way
-/// (never converted — plain config-side registry tables), as do the analysis tables
+/// a plain-PostgreSQL store). config_alert_log, config.config_command and collect.plan_force_actions stay
+/// DELETE-based either way (never converted — the first two are plain config-side registry tables, and the
+/// journal keeps an identity PRIMARY KEY its own rows reference), as do the analysis tables
 /// (PgFindingStore.CleanupOldFindingsAsync owns those). Retention horizons are the shared
 /// per-collector <see cref="CollectorScheduleDefaults"/> (identity-pinned to Lite's
 /// ScheduleManager table), so both SKUs keep the same data horizons out of the box. NOTE: Lite
@@ -98,6 +99,26 @@ public static class DarlingRetention
     internal const int CommandHistoryRetentionDays = DataRetentionBaseDays;
 
     /// <summary>
+    /// collect.plan_force_actions (the auto force-plan bot's decision journal) keeps its rows this long. Like
+    /// config_alert_log it is neither a collector (no <see cref="CollectorScheduleDefaults"/> horizon) nor a
+    /// hypertable, and it is APPEND-ONLY with no other purge path — so this horizon is the only thing bounding
+    /// it. The bot's own cooldowns bound the arrival RATE, which is not a size bound: a bounded rate over
+    /// unbounded time is unbounded.
+    /// <para>A full year — deliberately the longest horizon in the store, because this is the audit trail of a
+    /// bot WRITING to production servers and it has to outlive the metrics that motivated each decision
+    /// (<see cref="DataRetentionBaseDays"/>) by enough that "why did this plan change" is still answerable
+    /// releases later. That is 4x the alert log's already-generous <see cref="AlertHistoryRetentionDays"/> and
+    /// 12x the metric window, and it is nearly free: volume is capped by the bot's per-query cooldown and
+    /// per-server daily force budget, so the ceiling is a few decisions per server per day rather than a
+    /// sample per collection cycle. It also clears, by a wide margin, the longest window the bot itself reads
+    /// back when judging eligibility (a week, for the two-taken-back-forces cooldown), so retention can never
+    /// make the bot forget a decision it is still bound by. Generous, but BOUNDED — a monitoring store is
+    /// sized for rolling windows, and "forever" is not a horizon. No operator setting governs this, so the
+    /// constant is the single source of truth.</para>
+    /// </summary>
+    internal const int PlanForceLedgerRetentionDays = 365;
+
+    /// <summary>
     /// The terminal-status filter for the command purge — the two states
     /// <c>ViewerDataService.IsTerminal</c> recognizes, which are also the only two
     /// <c>DarlingCommandExecutor</c> ever writes (its report path and its stale-command reaper). A
@@ -116,13 +137,15 @@ public static class DarlingRetention
     /// <summary>
     /// Purges every collector table past its shared <see cref="CollectorScheduleDefaults"/>
     /// RetentionDays, plus collection_log past <see cref="CollectionLogRetentionDays"/>,
-    /// config_alert_log past <see cref="AlertHistoryRetentionDays"/>, and terminal
-    /// config.config_command rows past <see cref="CommandHistoryRetentionDays"/>.
+    /// config_alert_log past <see cref="AlertHistoryRetentionDays"/>, terminal
+    /// config.config_command rows past <see cref="CommandHistoryRetentionDays"/>, and
+    /// collect.plan_force_actions past <see cref="PlanForceLedgerRetentionDays"/>.
     /// When <paramref name="timescaleAvailable"/> (the worker's startup detection), the
     /// collector tables purge via <c>drop_chunks</c> (<see cref="DropChunksSqlFor"/>) with a
     /// per-table DELETE fallback so a table that failed hypertable conversion still honors its
-    /// horizon; when false, the extension-free DELETE path runs unchanged. collection_log is
-    /// DELETE-based either way. Failure-isolated per table: one failed statement is logged as a
+    /// horizon; when false, the extension-free DELETE path runs unchanged. collection_log — a
+    /// hypertable since V23 — follows that same two-path shape at its own 2x horizon.
+    /// Failure-isolated per table: one failed statement is logged as a
     /// warning and the sweep continues (that table is retried on the next purge). Safe on a
     /// fresh/empty store — a purge that matches nothing removes nothing. Returns a coarse
     /// activity count: rows deleted by the DELETE paths plus whole chunks dropped by
@@ -271,7 +294,11 @@ public static class DarlingRetention
                same resolver the fact purge above uses, so a raised per-collector override can never outlive
                the dims and orphan a reader — plus a margin covering the two ways a fact can outlive its
                nominal horizon: drop_chunks only drops a chunk once its WHOLE range is past the cutoff (up to
-               one ChunkIntervalDays of extra rows), and the upsert refreshes last_seen at most hourly. */
+               one ChunkIntervalDays of extra rows), and last_seen is refreshed under a guard rather than on
+               every sighting. Two guards write it and the WIDER one is what the margin has to absorb: the
+               dim upsert's conflict arm at one hour, and the Query Store liveness touch at
+               QueryStoreLivenessTouchGuard.GuardHours — which is itself a stated share of this margin, so
+               the two cannot drift apart. */
             var widestFactRetentionDays = 1;
             foreach (var definition in CollectorCatalog.All)
             {
@@ -579,6 +606,39 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* collect.plan_force_actions (the force-plan bot's decision journal) purges on its own action_time
+               column at PlanForceLedgerRetentionDays — the longest horizon in the store. NOT in
+               CollectorCatalog.All (it is written by the service's post-analysis bot pass, not a collector), so
+               the loop above skips it, and it is append-only with no other purge path, which makes this the
+               only thing bounding it.
+               A batched DELETE, never a hypertable: action_id is a PRIMARY KEY that related_action_id points
+               back to (a self-review row references the force row it re-judges), and TimescaleSupport already
+               excludes PK-bearing tables for exactly that reason — conversion would reject the key or force it
+               onto the partition column, breaking the self-reference the append-only design is built on.
+               The work bound is the one-day SLICE, not an index seek: idx_plan_force_actions_time leads with
+               server_id and this DELETE has no server_id predicate, so that index cannot be seeked here. Same
+               shape as config_alert_log's purge against idx_config_alert_log_time(server_id, metric_name,
+               alert_time), and adequate for the same reason — the bot's per-query cooldown and per-server
+               daily budget cap arrivals at a few rows per server per day, so there is never much to scan.
+               SCHEMA-QUALIFIED to match the V107 DDL and PgPlanForceActionStore, which both name
+               collect.plan_force_actions explicitly. Unlike config.config_command a bare name would also
+               resolve here (search_path = collect, config, public), but naming the schema keeps the purge and
+               the writer readable against each other.
+               Failure-isolated like every sibling: a failed statement is warned + counted, the sweep goes on. */
+            var forceLedgerDeleted = await PurgeOneAsync(
+                postgres, "collect.plan_force_actions",
+                TimeSlicedDeleteSql("collect.plan_force_actions", "action_time"),
+                utcNow.AddDays(-PlanForceLedgerRetentionDays), logger, cancellationToken);
+            if (forceLedgerDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += forceLedgerDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
             var summary = new PurgeSummary(tablesPurged, totalRowsDeleted, totalChunksDropped);
             logger?.LogInformation(
                 "Retention purge: {Tables} table(s) purged, {Rows} row(s) deleted, {Chunks} chunk(s) dropped, {Failed} failed, {ElapsedMs}ms",
@@ -720,12 +780,14 @@ public static class DarlingRetention
 
     /// <summary>
     /// The dimension GC's cutoff (#1795): the ASSUMED horizon (widest dim-feeding fact retention +
-    /// <see cref="TimescaleSupport.ChunkIntervalDays"/> drop_chunks granularity + 1 day for the hourly
+    /// <see cref="TimescaleSupport.ChunkIntervalDays"/> drop_chunks granularity + 1 day for the
     /// <c>last_seen</c> refresh guard), CLAMPED to one day before the oldest surviving digest-carrying
     /// fact row when that measured floor reaches further back — held history bounds the GC instead of
     /// deferring it. The measured side carries the SAME one-day margin, for the same reason: a dim row's
-    /// <c>last_seen</c> can trail its newest referencing fact by up to the hourly refresh guard, so
-    /// pruning right AT the floor could take content the floor row still references. A null floor (no
+    /// <c>last_seen</c> can trail its newest referencing fact by up to the refresh guard's width
+    /// (<see cref="QueryStoreLivenessTouchGuard.GuardHours"/> hours, which is a stated share of this very
+    /// margin — see <see cref="QueryStoreLivenessTouchGuard"/>), so pruning right AT the floor could take
+    /// content the floor row still references. A null floor (no
     /// digest-carrying facts anywhere — a fresh or fully-aged store) leaves the assumed horizon alone:
     /// with no facts, nothing can dangle, and last_seen still bounds what is old enough to take.
     /// </summary>
@@ -746,7 +808,8 @@ public static class DarlingRetention
            GC unable to fire until a month after projected disk-full). With the knob enabled, a fact
            older than the window keeps its metrics, hashes and text but renders a MISSING plan — the
            null every reader already handles — in exchange for a bounded store. The same one-day
-           margin as the measured side covers the hourly last_seen refresh guard. Disabled (0 or
+           margin as the measured side covers the last_seen refresh guard, whose width is a stated
+           share of it (QueryStoreLivenessTouchGuard). Disabled (0 or
            below) returns the coupled cutoff before any dedicated value is computed, so the old
            behavior is reproduced exactly rather than approximated through a comparison. */
         if (planContentRetentionDays <= 0)
@@ -776,9 +839,12 @@ public static class DarlingRetention
     /// renders "not collected" and self-corrects; content pruned while a map row survives is a live fact
     /// resolving to absent XML, silently. The coupled pair keeps that gap at ChunkIntervalDays; the
     /// dedicated pair keeps it at one day (map at knob, dim at knob + 1 — the same one-day stamp-skew
-    /// margin as everywhere else, because <c>TouchAndProbeSql</c> refreshes the map's stamp eagerly while the
-    /// dim's refresh is hourly-guarded, so the dim's stamp can trail). Both components are strictly
-    /// ordered, so the max-of-newer composition preserves the ordering under every knob value —
+    /// margin as everywhere else). What that margin covers is the touch guard: <c>TouchAndProbeSql</c>
+    /// guards the map's stamp and the dim's at the SAME width — <see cref="QueryStoreLivenessTouchGuard"/>
+    /// is the one place it is written, deliberately, because two copies could diverge and the map row and
+    /// the dim row must not be able to age out at different times. So EITHER stamp can trail its newest
+    /// referencing fact by up to that width, and the margin is sized to absorb it. Both components are
+    /// strictly ordered, so the max-of-newer composition preserves the ordering under every knob value —
     /// pinned in PlanContentRetentionTests across the full age sweep.
     /// </summary>
     internal static DateTime ComputeMapCutoff(DateTime utcNow, int widestFactRetentionDays, int planContentRetentionDays = 0)
@@ -958,7 +1024,8 @@ public static class DarlingRetention
                purge deliberately is. Lift it for this connection only. On a store without the extension
                the qualified name is accepted as a placeholder GUC, so this is safe everywhere. */
             using (var lift = new NpgsqlCommand(
-                "SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0", connection))
+                "SET timescaledb.max_tuples_decompressed_per_dml_transaction = 0",
+                connection) { CommandTimeout = DeleteTimeoutSeconds })
             {
                 await lift.ExecuteNonQueryAsync(cancellationToken);
             }
@@ -986,8 +1053,9 @@ public static class DarlingRetention
                per-table and the summary is fleet-wide.
 
                The CUTOFF, because it is not the retention knob and reading it as the knob is a live trap:
-               ComputeDimensionCutoff subtracts the configured days PLUS a one-day margin for the hourly
-               last_seen refresh, so counting rows older than the knob value overstates what is eligible by
+               ComputeDimensionCutoff subtracts the configured days PLUS a one-day margin for the
+               last_seen refresh guard (QueryStoreLivenessTouchGuard.GuardHours wide, itself a stated share
+               of that margin), so counting rows older than the knob value overstates what is eligible by
                a full day of ingest — on this table that is hundreds of thousands of rows, which reads as a
                backlog retention is failing to clear when it is simply not due yet.
 

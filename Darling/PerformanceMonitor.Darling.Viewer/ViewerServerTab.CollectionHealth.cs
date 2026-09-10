@@ -61,6 +61,7 @@ public partial class ViewerServerTab
            settable window EXACTLY — a preset or a custom From/To — via GetWindowUtc(), matching the Wait
            Stats / Blocking tabs (the old GetWindowHoursBack() rounded a custom range to a now-relative span). */
         var (startUtc, endUtc) = GetWindowUtc();
+        using var readFanOut = ViewerReadFanOut.Of(2);
         var healthTask = _dataService.GetCollectionHealthAsync(_server.ServerId);
         var logTask = _dataService.GetRecentCollectionLogAsync(_server.ServerId, startUtc, endUtc);
         await Task.WhenAll(healthTask, logTask);

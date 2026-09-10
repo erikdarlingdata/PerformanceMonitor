@@ -126,4 +126,59 @@ public class AlertIncidentRenderTests
         Assert.Contains("fingerprint-abc", html);
         Assert.Contains("fingerprint-abc", plain);
     }
+
+    /// <summary>
+    /// #2710: the Datadog-parity resource_name/env tags — promoted to the LEAD section/fields
+    /// (not just nested inside the per-incident "Incident" item #1140 already renders), so a
+    /// reader/automation scanning only the top-level facts sees what the alert is about, matching
+    /// Datadog's <c>resource_name:</c> tag. First incident wins on a multi-incident alert, same
+    /// anchor <c>DerivePagerDutyDedupKey</c> already uses.
+    /// </summary>
+    [Fact]
+    public void ResourceNameAndDatabase_PromotedToTopLevel_OnTeamsAndSlack()
+    {
+        var ctx = new AlertContext();
+        AlertIncidentRenderer.Apply(ctx, new[]
+        {
+            new AlertIncident("k1", new[] { "SalesDB.dbo.Orders" }, Database: "SalesDB"),
+            new AlertIncident("k2", new[] { "OtherDb.dbo.Widgets" }, Database: "OtherDb"),
+        });
+
+        var teams = WebhookAlertService.BuildTeamsPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx);
+        using var teamsDoc = System.Text.Json.JsonDocument.Parse(teams);
+        var leadFacts = teamsDoc.RootElement.GetProperty("sections")[0].GetProperty("facts").EnumerateArray().ToList();
+        Assert.Contains(leadFacts, f => f.GetProperty("name").GetString() == "Resource" && f.GetProperty("value").GetString() == "SalesDB.dbo.Orders");
+        Assert.Contains(leadFacts, f => f.GetProperty("name").GetString() == "Database" && f.GetProperty("value").GetString() == "SalesDB");
+
+        var slack = WebhookAlertService.BuildSlackPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx);
+        Assert.Contains("*Resource:*\\nSalesDB.dbo.Orders", slack);
+        Assert.Contains("*Database:*\\nSalesDB", slack);
+    }
+
+    [Fact]
+    public void ResourceNameAndDatabase_Absent_WhenAlertHasNoIncident()
+    {
+        var teams = WebhookAlertService.BuildTeamsPayload("High CPU", "S1", "97%", "90%", Branding);
+        var slack = WebhookAlertService.BuildSlackPayload("High CPU", "S1", "97%", "90%", Branding);
+
+        Assert.DoesNotContain("\"name\":\"Resource\"", teams);
+        Assert.DoesNotContain("Resource:", slack);
+    }
+
+    /// <summary>
+    /// Review catch (#2710): a caller can pass a blank display object through
+    /// <see cref="AlertFingerprint.ForKey"/> without going through the object-filtering
+    /// <see cref="AlertFingerprint.ForObjects"/> callers get — the joined resource_name must not
+    /// render as a labeled-but-empty tag in that case, the exact failure the design otherwise avoids
+    /// by omitting the tag entirely on a null.
+    /// </summary>
+    [Fact]
+    public void ResourceName_Absent_WhenInvolvedObjectsIsBlank()
+    {
+        var ctx = new AlertContext();
+        AlertIncidentRenderer.Apply(ctx, new[] { new AlertIncident("k", new[] { "" }) });
+
+        var teams = WebhookAlertService.BuildTeamsPayload("Low Disk Space", "S1", "5%", "10%", Branding, context: ctx);
+        Assert.DoesNotContain("\"name\":\"Resource\"", teams);
+    }
 }

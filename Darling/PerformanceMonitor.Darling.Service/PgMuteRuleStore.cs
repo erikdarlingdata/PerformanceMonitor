@@ -47,7 +47,7 @@ SELECT id, enabled, created_at_utc, expires_at_utc, reason,
        server_name, metric_name, database_pattern,
        query_text_pattern, wait_type_pattern, job_name_pattern
 FROM config_mute_rules
-ORDER BY created_at_utc DESC", connection);
+ORDER BY created_at_utc DESC", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
 
             using var reader = await command.ExecuteReaderAsync();
             while (await reader.ReadAsync())
@@ -91,7 +91,7 @@ INSERT INTO config_mute_rules
     (id, enabled, created_at_utc, expires_at_utc, reason,
      server_name, metric_name, database_pattern,
      query_text_pattern, wait_type_pattern, job_name_pattern)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)", connection);
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(rule.Id);
         command.Parameters.AddWithValue(rule.Enabled);
         command.Parameters.AddWithValue(Naive(rule.CreatedAtUtc));
@@ -119,7 +119,7 @@ UPDATE config_mute_rules SET
     enabled = $2, expires_at_utc = $3, reason = $4,
     server_name = $5, metric_name = $6, database_pattern = $7,
     query_text_pattern = $8, wait_type_pattern = $9, job_name_pattern = $10
-WHERE id = $1", connection);
+WHERE id = $1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(rule.Id);
         command.Parameters.AddWithValue(rule.Enabled);
         AddNullable(command, rule.ExpiresAtUtc);
@@ -136,7 +136,7 @@ WHERE id = $1", connection);
     public async Task SetEnabledAsync(string ruleId, bool enabled)
     {
         await using var connection = await _postgres.OpenConnectionAsync();
-        using var command = new NpgsqlCommand("UPDATE config_mute_rules SET enabled = $2 WHERE id = $1", connection);
+        using var command = new NpgsqlCommand("UPDATE config_mute_rules SET enabled = $2 WHERE id = $1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(ruleId);
         command.Parameters.AddWithValue(enabled);
         await command.ExecuteNonQueryAsync();
@@ -145,7 +145,7 @@ WHERE id = $1", connection);
     public async Task DeleteAsync(string ruleId)
     {
         await using var connection = await _postgres.OpenConnectionAsync();
-        using var command = new NpgsqlCommand("DELETE FROM config_mute_rules WHERE id = $1", connection);
+        using var command = new NpgsqlCommand("DELETE FROM config_mute_rules WHERE id = $1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(ruleId);
         await command.ExecuteNonQueryAsync();
     }
@@ -160,7 +160,7 @@ WHERE id = $1", connection);
         await using var connection = await _postgres.OpenConnectionAsync();
         foreach (var id in expiredIds)
         {
-            using var command = new NpgsqlCommand("DELETE FROM config_mute_rules WHERE id = $1", connection);
+            using var command = new NpgsqlCommand("DELETE FROM config_mute_rules WHERE id = $1", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
             command.Parameters.AddWithValue(id);
             await command.ExecuteNonQueryAsync();
         }

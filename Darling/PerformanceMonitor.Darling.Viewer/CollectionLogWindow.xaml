@@ -83,6 +83,11 @@
                         <TextBlock Text="Duration" FontWeight="Bold"/>
                     </DataGridTextColumn.Header>
                 </DataGridTextColumn>
+                <!-- #3192: "SQL Duration" names the PHASE and deliberately not the side - on a plan/text-fetching
+                     collector this slice contains the monitoring store's own probe and write-back. No
+                     "Store (in SQL)" breakout here, for the reason given on the sibling grid in
+                     ViewerServerTab.xaml: the row type and both queries are verbatim copies of Lite's, which
+                     runs no deferred fetch. get_collection_log's sql_store_ms is the attribution. -->
                 <DataGridTextColumn Binding="{Binding SqlDurationFormatted}" ElementStyle="{StaticResource NumericCell}" Width="100" SortMemberPath="SqlDurationMs">
                     <DataGridTextColumn.Header>
                         <TextBlock Text="SQL Duration" FontWeight="Bold"/>

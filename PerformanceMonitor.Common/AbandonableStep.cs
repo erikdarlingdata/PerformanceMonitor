@@ -71,6 +71,15 @@ public sealed class AbandonableStep
     /// awaited path did NOT already receive; a fault landing in the microseconds between the deadline
     /// decision and the abandonment flag can be missed (never doubled), which costs one log line, not
     /// correctness — the caller already logged the abandonment itself.
+    /// <para><b><paramref name="holdUntilStepEnds"/> — the lease whose lifetime must match the guard's.</b>
+    /// Ownership transfers to this call, which disposes it EXACTLY ONCE on every path, at the moment the
+    /// in-flight guard clears: for an abandoned run that is when the wedged task truly ends, not when the
+    /// deadline hands the loop back. A caller cannot get this right on its own, because only this type knows
+    /// when the guard clears — and the shape it reaches for instead, a <c>using</c> scoped to its own loop
+    /// iteration, releases the lease while the abandoned work is still running, so the exclusion lapses
+    /// precisely in the case it was taken for (#2165). Released one step BEHIND the guard, so a caller that
+    /// finds the lease free can never then be told
+    /// <see cref="AbandonableStepOutcome.SkippedStillRunning"/>.</para>
     /// <para><b>Parameter order:</b> <paramref name="cancellationToken"/> is LAST, per CA1068. It was third
     /// until #2193, which is the ordering the analyzer flags — and every call site already passed
     /// <paramref name="onLateFault"/> by name, so the move cost nothing at the callers and the compiler
@@ -78,12 +87,22 @@ public sealed class AbandonableStep
     /// </summary>
     public async Task<AbandonableStepResult> RunAsync(
         Func<Task> step, TimeSpan timeout, Action<Exception>? onLateFault = null,
-        CancellationToken cancellationToken = default)
+        IDisposable? holdUntilStepEnds = null, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(step);
+        if (step is null)
+        {
+            /* Ownership transferred on entry, so even the argument-validation exit releases. A lease that
+               survived a throw from here would hold its gate for the life of the process. */
+            ReleaseHold(holdUntilStepEnds);
+            throw new ArgumentNullException(nameof(step));
+        }
 
         if (Interlocked.CompareExchange(ref _inFlight, 1, 0) != 0)
         {
+            /* This call holds no guard, so it has nothing to hand to a task it never started — the run
+               still wedged is an EARLIER one, carrying its own hold. Release now rather than pin this lease
+               to a completion that was never ours. */
+            ReleaseHold(holdUntilStepEnds);
             return new AbandonableStepResult(AbandonableStepOutcome.SkippedStillRunning);
         }
 
@@ -95,6 +114,7 @@ public sealed class AbandonableStep
         catch (Exception ex)
         {
             Interlocked.Exchange(ref _inFlight, 0);
+            ReleaseHold(holdUntilStepEnds);
             return new AbandonableStepResult(AbandonableStepOutcome.Faulted, ex);
         }
 
@@ -104,7 +124,9 @@ public sealed class AbandonableStep
            the deadline merely moves the loop on. Faults on the abandoned path are observed here (so an
            abandoned-then-faulted task cannot surface as UnobservedTaskException) AND handed to
            onLateFault, because a discarded exception from the wedged run is exactly the diagnostic the
-           field report needs. */
+           field report needs. The caller's hold rides this same moment, one step behind the guard — every
+           outcome still reachable from here (Completed, Faulted, Abandoned, Cancelled) leaves the release to
+           this continuation, because on all four the task itself is what decides when the work is over. */
         _ = work.ContinueWith(
             (t, state) =>
             {
@@ -123,6 +145,7 @@ public sealed class AbandonableStep
                 }
 
                 Interlocked.Exchange(ref self._inFlight, 0);
+                ReleaseHold(holdUntilStepEnds);
             },
             this,
             CancellationToken.None,
@@ -154,6 +177,22 @@ public sealed class AbandonableStep
         catch (Exception ex)
         {
             return new AbandonableStepResult(AbandonableStepOutcome.Faulted, ex);
+        }
+    }
+
+    /* Every release of the caller's hold goes through here, so "exactly once on every path" is one call per
+       path rather than a Dispose() spelled five ways. Swallows a throwing Dispose for the same reason the
+       late-fault callback is wrapped: a caller-supplied disposable must not take the continuation down and
+       with it the guard's own release, which would turn one bad Dispose into a permanently dead step. */
+    private static void ReleaseHold(IDisposable? hold)
+    {
+        try
+        {
+            hold?.Dispose();
+        }
+        catch
+        {
+            /* The caller's bug, and not one worth making this loop's hang. */
         }
     }
 }

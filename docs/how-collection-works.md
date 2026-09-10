@@ -100,11 +100,12 @@ Every run is wrapped so that one failure never stops the sweep. It writes exactl
 | --- | --- |
 | `SUCCESS` | Completed, including a legitimate zero rows |
 | `PERMISSIONS` | A grant is missing — the collector is skipped, not broken |
+| `EXTENSION_MISSING` | A PostgreSQL extension the collector declares isn't installed — the message names it; `CREATE EXTENSION` is the remedy, not a grant |
 | `SESSION_MISSING` | An expected Extended Events session isn't there |
 | `YIELDED` | Lock timeout on a collector that opted into yielding; excluded from error rates and health bands |
 | `ERROR` | Anything else. Fatal or timeout additionally forces a reconnect and re-probe on the next tick |
 
-Health is *derived* from that log by the shared `CollectorHealthClassifier` (`NEVER_RUN`, `NO_PERMISSIONS`, `FAILING`, `STALE`, `WARNING`, `HEALTHY`). Its thresholds are **relative to each collector's own cadence**, with the old flat values as floors — `FAILING` at `max(24h, 2 × interval)`, `STALE` at `max(4h, 1.5 × interval)` — so a 60-minute collector isn't judged like a 1-minute one. The on-connect collectors are exempt from staleness. One classifier is shared by Lite, the viewer, and the service so the three can't drift.
+Health is *derived* from that log by the shared `CollectorHealthClassifier` (`NEVER_RUN`, `NO_PERMISSIONS`, `EXTENSION_MISSING`, `FAILING`, `STALE`, `WARNING`, `HEALTHY`). Its thresholds are **relative to each collector's own cadence**, with the old flat values as floors — `FAILING` at `max(24h, 2 × interval)`, `STALE` at `max(4h, 1.5 × interval)` — so a 60-minute collector isn't judged like a 1-minute one. The on-connect collectors are exempt from staleness. One classifier is shared by Lite, the viewer, and the service so the three can't drift.
 
 Observability writes are deliberately failure-isolated: they log at debug and never throw, because an observability write must never break the collection loop.
 
@@ -141,9 +142,9 @@ That table is intentionally seeded empty — an absent row means "use the defaul
 
 Three independent mechanisms:
 
-- **Daily service purge** — horizons come from `CollectorScheduleDefaults` (7 days for snapshot-ish collectors, 30 for most, 90 for size/index/PVS, 365 for `server_properties` and `job_history`). With TimescaleDB this is `drop_chunks`, which is metadata-only; without it, a time-sliced `DELETE` that is safe against compressed chunks. Failure-isolated per table, with an auditable run-record under `server_id = 0`.
+- **Daily service purge** — horizons come from `CollectorScheduleDefaults` (7 days for snapshot-ish collectors, 30 for most, 90 for size/index/PVS, 365 for `server_properties` and `job_history`). With TimescaleDB this is `drop_chunks`, which is metadata-only; without it, a time-sliced `DELETE` that is safe against compressed chunks. Failure-isolated per table, with an auditable run-record under `server_id = 0`. `collection_log` rides the same sweep but is not a collector and carries its own horizon: 60 days, twice the base window, so a run-record outlives the metric rows it explains.
 - **TimescaleDB retention policies** for the rollup tiers — raw `query_stats` at 4 days, hourly aggregates at 90, daily kept indefinitely. Every policy is created *paused* and arms itself only once it can prove each downstream consumer has already captured the range it would drop. The governing rule, stated in the code: never drop what your consumer has not captured yet.
-- **Bounded deletes** for the non-hypertable tables (alert history at 90 days, terminal commands at 30 — a pending command is never purged at any age).
+- **Bounded deletes** for the non-hypertable tables (alert history at 90 days, terminal commands at 30 — a pending command is never purged at any age, and the force-plan bot's decision journal at 365, the longest horizon in the store because it audits writes to production servers rather than measuring them).
 
 Darling deliberately does not archive before deleting; compression is the archive.
 

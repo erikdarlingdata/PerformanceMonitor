@@ -91,8 +91,16 @@ public sealed class ViewerQueryStoreRow
     public double AvgNumPhysicalIoReads { get; set; }
     public double MinNumPhysicalIoReads { get; set; }
     public double MaxNumPhysicalIoReads { get; set; }
-    public string FirstExecutionTimeLocal => ViewerDataService.FormatServerClock(FirstExecutionTime);
-    public string LastExecutionTimeLocal => ViewerDataService.FormatServerClock(LastExecutionTime);
+    /// <summary>Query Store returns <c>datetimeoffset</c> and <c>QueryStoreCollector</c> normalises both
+    /// execution stamps through <c>((DateTimeOffset)…).UtcDateTime</c> before storing, so
+    /// <c>query_store_stats.first_execution_time</c> and <c>last_execution_time</c> are naive UTC —
+    /// unlike the <c>sys.dm_exec_*</c> stamps, which are the server's own clock. They therefore convert
+    /// through <see cref="ViewerDataService.FormatStoredUtc"/> rather than through the server-clock
+    /// renderer.</summary>
+    public string FirstExecutionTimeLocal => ViewerDataService.FormatStoredUtc(FirstExecutionTime);
+
+    /// <inheritdoc cref="FirstExecutionTimeLocal"/>
+    public string LastExecutionTimeLocal => ViewerDataService.FormatStoredUtc(LastExecutionTime);
     public double TotalCpuMs => TotalExecutions * AvgCpuTimeMs;
     public double TotalDurationMs => TotalExecutions * AvgDurationMs;
 }
@@ -319,6 +327,7 @@ public sealed partial class ViewerDataService
         var rows = new List<ViewerQueryStoreRow>();
 
         await using var command = _dataSource.CreateCommand(QueryStoreTopSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
@@ -547,6 +556,7 @@ public sealed partial class ViewerDataService
         var items = new List<QueryStatsComparisonItem>();
 
         await using var command = _dataSource.CreateCommand(QueryStoreComparisonSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddComparisonParameters(command, serverId, currentStart, currentEnd, baselineStart, baselineEnd);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

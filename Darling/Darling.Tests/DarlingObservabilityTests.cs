@@ -601,7 +601,7 @@ public sealed class DarlingObservabilityTests
 
         DateTime firstModified;
         using (var read = new NpgsqlCommand(
-            "SELECT server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, created_date, modified_date, engine_kind FROM servers WHERE server_id = $1", connection))
+            "SELECT server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, created_date, modified_date, engine_kind, postgres_major_version FROM servers WHERE server_id = $1", connection))
         {
             read.Parameters.AddWithValue(TestServerId);
             using var reader = await read.ExecuteReaderAsync(TestContext.Current.CancellationToken);
@@ -616,6 +616,9 @@ public sealed class DarlingObservabilityTests
             /* V82 (#2530): the engine KIND the connector probed, derived from the target rather than from
                the configured engine string. A SQL Server target stamps the SQL Server token. */
             Assert.Equal(MonitoredEngineKind.SqlServer, reader.GetString(7));
+            /* V100's engine guard, from the SQL Server side: a PostgreSQL major is not a fact about this
+               server, so the column carries no claim rather than a 0. */
+            Assert.True(reader.IsDBNull(8));
         }
 
         /* The ON CONFLICT arm CORRECTS the engine kind, unlike is_enabled which it deliberately leaves
@@ -636,11 +639,12 @@ public sealed class DarlingObservabilityTests
         /* try/finally around the repoint, so a failed assertion inside it cannot leave this shared-store
            row asserting Aurora for whatever runs next. The restore is the FINALLY, not a trailing
            statement: a trailing one is skipped by exactly the failure that makes it matter. */
+        var repointSucceeded = false;
         try
         {
             await DarlingObservability.UpsertServerAsync(postgres, repointed, null, TestContext.Current.CancellationToken);
 
-            using var read = new NpgsqlCommand("SELECT engine_kind, sql_engine_edition FROM servers WHERE server_id = $1", connection);
+            using var read = new NpgsqlCommand("SELECT engine_kind, sql_engine_edition, sql_major_version, postgres_major_version FROM servers WHERE server_id = $1", connection);
             read.Parameters.AddWithValue(TestServerId);
             using var reader = await read.ExecuteReaderAsync(TestContext.Current.CancellationToken);
             Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken), "servers row missing after re-upsert");
@@ -648,31 +652,71 @@ public sealed class DarlingObservabilityTests
             /* And the edition it carries is 0 — the value that used to be indistinguishable from "never
                connected", which is the whole reason the kind column exists. */
             Assert.Equal(0, reader.GetInt32(1));
+            /* #3243: the CONFLICT arm retracts the SQL Server major the row held a moment ago —
+               a SQL Server major is not a fact about a PostgreSQL server, and before the guard this
+               overwrote 16 with a claim-shaped 0. */
+            Assert.True(reader.IsDBNull(2));
+            /* And stamps the vocabulary the target actually speaks (V100). */
+            Assert.Equal(17, reader.GetInt32(3));
+
+            repointSucceeded = true;
         }
         finally
         {
             /* Put it back, so the rest of this test — and the next run of it — reads the SQL Server row it
-               was written against. Its own connection is not needed here the way LiveStoreCleanup gives
-               one: this restore goes through the pooled NpgsqlDataSource the upserts above use, not
-               through the possibly-broken body connection. */
-            await DarlingObservability.UpsertServerAsync(postgres, server, null, TestContext.Current.CancellationToken);
+               was written against. RunOwnedAsync rather than RunAsync (#1902): the restore goes through the
+               pooled NpgsqlDataSource the upserts above use, which UpsertServerAsync takes in place of a
+               connection, so this teardown was never exposed to the closed-body-connection half of the
+               defect. The masking half applies exactly as it does anywhere else — a throw from this finally
+               would replace the assertion that made it run — and that is the half this borrows. */
+            await LiveStoreCleanup.RunOwnedAsync(
+                repointSucceeded,
+                async () => await DarlingObservability.UpsertServerAsync(
+                    postgres, server, null, TestContext.Current.CancellationToken));
         }
 
         /* The second upsert must not throw and must refresh modified_date. */
         await Task.Delay(50, TestContext.Current.CancellationToken);
         await DarlingObservability.UpsertServerAsync(postgres, server, null, TestContext.Current.CancellationToken);
 
-        using (var read = new NpgsqlCommand("SELECT modified_date FROM servers WHERE server_id = $1", connection))
+        using (var read = new NpgsqlCommand("SELECT modified_date, sql_major_version, postgres_major_version FROM servers WHERE server_id = $1", connection))
         {
             read.Parameters.AddWithValue(TestServerId);
-            var secondModified = Assert.IsType<DateTime>(await read.ExecuteScalarAsync(TestContext.Current.CancellationToken));
-            Assert.True(secondModified > firstModified, "second upsert did not refresh modified_date");
+            using var reader = await read.ExecuteReaderAsync(TestContext.Current.CancellationToken);
+            Assert.True(await reader.ReadAsync(TestContext.Current.CancellationToken), "servers row missing after re-upsert");
+            Assert.True(reader.GetDateTime(0) > firstModified, "second upsert did not refresh modified_date");
+            /* Repointed BACK at the SQL Server target, the same correction runs the other way: the SQL
+               Server major returns and the PostgreSQL major is retracted, so each vocabulary's column
+               holds a value only while the row describes a server that speaks it (#3243). */
+            Assert.Equal(16, reader.GetInt32(1));
+            Assert.True(reader.IsDBNull(2));
+        }
+
+        /* The value half of the #3243 guard, same as postgres_major_version's: the detection query can
+           return a NULL major (DarlingServerConnector leaves 0), and a claim nobody probed is written as
+           no claim — not as a "version 0" that reads as fact. */
+        var unprobed = new ServerRuntime
+        {
+            Config = new MonitoredServer { Name = "obs-e2e", Host = "obs-e2e-host" },
+            ConnectionString = "Server=obs-e2e-host",
+            Target = new CollectorTargetInfo(),
+            StorageName = "obs-e2e-host",
+            ServerId = TestServerId,
+            EngineEdition = 3,
+        };
+
+        await DarlingObservability.UpsertServerAsync(postgres, unprobed, null, TestContext.Current.CancellationToken);
+
+        using (var read = new NpgsqlCommand("SELECT sql_major_version FROM servers WHERE server_id = $1", connection))
+        {
+            read.Parameters.AddWithValue(TestServerId);
+            Assert.IsType<DBNull>(await read.ExecuteScalarAsync(TestContext.Current.CancellationToken));
         }
 
         /* A collector that does NOT fan out: the three V80 columns must come back NULL rather than zero,
            which is what tells "this run had no fan-out" apart from "its fan-out was free" (#2472). */
         await DarlingObservability.LogCollectionAsync(
-            postgres, server, "wait_stats", "SUCCESS", 42, 100, 25, null, fanout: null, null, TestContext.Current.CancellationToken);
+            postgres, server, "wait_stats", "SUCCESS", 42, 100, 25, null, fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, null, TestContext.Current.CancellationToken);
 
         using (var read = new NpgsqlCommand(
             "SELECT collector_name, status, rows_collected, duration_ms, sql_duration_ms, duckdb_duration_ms, error_message, fanout_item_count, slowest_item, slowest_item_ms FROM v_collection_log WHERE server_id = $1", connection))
@@ -701,7 +745,7 @@ public sealed class DarlingObservabilityTests
            blind to it — a failure that only a read through the view can see (#2472, and V14 before it). */
         await DarlingObservability.LogCollectionAsync(
             postgres, server, "query_store", "SUCCESS", 900, 70_000, 10_800, null,
-            new FanoutCost(8, "the-busy-one", 61_900), null, TestContext.Current.CancellationToken);
+            new FanoutCost(8, "the-busy-one", 61_900), phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, null, TestContext.Current.CancellationToken);
 
         using (var read = new NpgsqlCommand(
             "SELECT duration_ms, fanout_item_count, slowest_item, slowest_item_ms FROM v_collection_log WHERE server_id = $1", connection))
@@ -772,16 +816,16 @@ public sealed class DarlingObservabilityTests
            PERCENTILE_DISC — sees the same number for both, which is the whole reason the rollup exists. */
         await DarlingObservability.LogCollectionAsync(
             postgres, server, "query_store", "SUCCESS", 900, 70_000, 10_800, null,
-            new FanoutCost(8, "even-worst", 10_100), null, TestContext.Current.CancellationToken);
+            new FanoutCost(8, "even-worst", 10_100), phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, null, TestContext.Current.CancellationToken);
 
         await DarlingObservability.LogCollectionAsync(
             postgres, server, "query_store", "SUCCESS", 900, 70_000, 10_800, null,
-            new FanoutCost(8, "the-busy-one", 61_900), null, TestContext.Current.CancellationToken);
+            new FanoutCost(8, "the-busy-one", 61_900), phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, null, TestContext.Current.CancellationToken);
 
         /* And a collector that does not fan out at all, so the null path is exercised by the same read. */
         await DarlingObservability.LogCollectionAsync(
             postgres, server, "wait_stats", "SUCCESS", 42, 100, 25, null,
-            fanout: null, null, TestContext.Current.CancellationToken);
+            fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: null, null, TestContext.Current.CancellationToken);
 
         var rows = await DarlingDataReader.GetCollectionHealthAsync(
             postgres, TestServerId, DateTime.UtcNow.AddDays(-1), TestContext.Current.CancellationToken);

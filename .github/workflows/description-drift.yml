@@ -1,0 +1,90 @@
+name: Description drift
+
+# #2978: every other check in CI reads the code and none reads the prose beside it, so a
+# description that has drifted from its own diff reaches every reviewer unchallenged. This
+# compares the two and annotates. It is ADVISORY -- see the exit-0 note at the bottom -- and
+# must never be added to the required-checks list.
+on:
+  pull_request:
+    # `edited` is load-bearing and is not in the default type set: the description is half the
+    # input, so a body rewritten after the last push has to re-run the comparison or the
+    # annotation describes a description nobody can still read.
+    types: [opened, synchronize, reopened, edited]
+    branches: [dev, main]
+  # Inert until a queue ruleset is enabled, and harmless if one ever is: a merge_group payload
+  # carries no pull request, so the two PR-scoped steps skip and the job reports success off the
+  # self-test alone. That is deliberate insurance -- if this check were ever marked required by
+  # mistake, a queued PR would still get a result instead of stalling on one that never reports.
+  merge_group:
+
+concurrency:
+  group: description-drift-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Read-only, and no `issues:` or write scope anywhere: this check annotates its own run and
+# posts nothing to the pull request. A body edit is one of its triggers, so a check that
+# commented would answer every description fix with another comment.
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  description-drift:
+    runs-on: ubuntu-latest
+    # Two API pages and a regex pass over one body. Anything approaching this is wedged.
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # The extractor is the whole check, and its filtering is tuned against a measured flag
+      # rate rather than derived from anything. Running its own assertions first means a change
+      # that quietly widens what counts as a symbol reports here instead of in the flag rate
+      # weeks later. This is the ONLY step that can fail the job: the two below cannot, by the
+      # lookup handling and the always-zero exit documented on each.
+      - name: Self-test the extractor
+        run: python3 .github/scripts/ci_description_symbol_drift.py --self-test
+
+      - name: Fetch the changed files
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # Deliberately NOT `set -e`: a lookup failure is not a verdict (#2309, same repo). This
+          # check is advisory, so a rate limit, a 5xx or a network blip must abstain loudly rather
+          # than turn the mark red for a reason that has nothing to do with the description.
+          set -uo pipefail
+          # `--jq '.[]'` then `jq -s .` rather than `--slurp`: this endpoint returns an array per
+          # page, and --slurp would hand back an array OF pages that reads as one file entry per
+          # page. Emitting elements and re-slurping flattens to one array at any page count.
+          if ! gh api "repos/$REPO/pulls/$PR/files?per_page=100" --paginate --jq '.[]' \
+               2>diffdesc-lookup-error.txt | jq -s . > diffdesc-files.json; then
+            # Flatten before slicing. A workflow command is single-line -- GitHub honours the
+            # `::warning ...::` prefix only up to the first newline -- and gh's error text is
+            # routinely multi-line (rate-limit bodies, pretty-printed JSON). Embedding it raw
+            # would split the annotation and render the useful half as untitled log text. Same
+            # invariant the symbol extractor holds on its side by rejecting CR and LF outright.
+            detail=$(tr '\r\n' '  ' < diffdesc-lookup-error.txt | head -c 300)
+            echo "::warning title=Description drift lookup failed::gh api (pulls/$PR/files) failed:"\
+              "${detail}. The description was NOT compared against"\
+              "the diff on this run -- re-run this check to get a verdict."
+            # An empty list is what the script reads as "no diff to compare", which it reports as
+            # an abstention rather than as a finding.
+            echo '[]' > diffdesc-files.json
+          fi
+          echo "changed files: $(jq 'length' diffdesc-files.json 2>/dev/null || echo unknown)"
+
+      - name: Compare the description against the diff
+        if: github.event_name == 'pull_request'
+        env:
+          # Through the environment, never through a workflow expression inside `run`. On a
+          # public repo the body is author-controlled text, and `${{ }}` interpolation into a
+          # shell would make a backticked "symbol" a command-substitution seam.
+          PR_BODY: ${{ github.event.pull_request.body }}
+        # No `continue-on-error` and no `|| true` needed: the script always exits 0 by design.
+        # A description is not a build failure, and a mark that goes red on prose is one people
+        # learn to ignore -- which costs more than it catches (the #2229 lesson, same repo).
+        run: python3 .github/scripts/ci_description_symbol_drift.py --files diffdesc-files.json

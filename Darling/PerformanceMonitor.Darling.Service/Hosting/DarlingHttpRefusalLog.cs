@@ -26,6 +26,21 @@ internal enum DarlingRefusalGate
 
     /// <summary>The in-app source-address allowlist built from <c>network.allowFrom</c>. 403.</summary>
     SourceCidr,
+
+    /// <summary>The read-only seat's write gate (#2550): an authenticated OIDC viewer sent a mutating
+    /// request. 403. Its own gate (not <see cref="Token"/>) because the fix is a ROLE change at the IdP /
+    /// role mapping, not a credential — and the (gate, source) fold key should not let a viewer's blocked
+    /// writes hide a genuine token refusal from the same address.</summary>
+    ReadOnlySeat,
+
+    /// <summary>The OIDC sign-in flow (#2550) refused or could not complete a sign-in — a stale or
+    /// forged transaction, a failed code exchange, an ID token that did not validate, a missing subject
+    /// claim, or the IdP being unreachable. Rate-limited HERE because the flow endpoints are reachable
+    /// pre-credential by design (a sign-in has to start somewhere), so a scanner can drive them without
+    /// ever holding a token — exactly the log-flood this class exists to bound. A refusal that names a
+    /// SUCCESSFULLY authenticated subject (the role-mapping denial) stays a direct log line instead: it
+    /// is the audit trail, and reaching it costs the caller a real IdP handshake.</summary>
+    SignIn,
 }
 
 /// <summary>
@@ -243,6 +258,8 @@ internal sealed class DarlingHttpRefusalLog
         DarlingRefusalGate.HostAllowlist => "Host header allowlist",
         DarlingRefusalGate.Token => "access token",
         DarlingRefusalGate.SourceCidr => "source address allowlist (network.allowFrom)",
+        DarlingRefusalGate.ReadOnlySeat => "read-only seat (web.network.oidc viewerRoles)",
+        DarlingRefusalGate.SignIn => "OIDC sign-in flow (web.network.oidc)",
         _ => gate.ToString(),
     };
 

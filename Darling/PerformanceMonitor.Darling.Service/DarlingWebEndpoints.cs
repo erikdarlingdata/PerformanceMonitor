@@ -13,12 +13,14 @@ using System.Linq;
 using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -87,14 +89,130 @@ public static class DarlingWebEndpoints
     private const int DefaultFleetHours = 1;
 
     /// <summary>
+    /// What <c>GET /api/ping</c> answers, as an object rather than a literal (#2953). <c>HttpStatus</c> is not
+    /// serialized — it is the same verdict expressed in the one field a load balancer or uptime check reads
+    /// without parsing a body.
+    /// </summary>
+    /// <param name="HttpStatus">200 while nothing is known to be wrong with collection, 503 once something is.</param>
+    /// <param name="Status">The machine-readable state: <c>ok</c>, <c>starting</c>, <c>degraded</c> or <c>stopped</c>.</param>
+    /// <param name="Collecting">The same answer as one bit, for a check that wants no string comparison at all.</param>
+    /// <param name="Step">Which startup step failed (<c>configuration</c>, <c>managed_store</c>, <c>store</c>); omitted otherwise.</param>
+    /// <param name="Attempt">The retry in flight and the cap it counts against; both omitted outside <c>degraded</c>.</param>
+    /// <param name="Attempts">The attempt cap the retry budget allows.</param>
+    /// <param name="Detail">The failure message, as the service's own log line reports it; omitted when there is none.</param>
+    /// <param name="SinceUtc">When this state began — collection start, or when the failure was last observed.</param>
+    internal sealed record PingReport(
+        [property: JsonIgnore] int HttpStatus,
+        [property: JsonPropertyName("status")] string Status,
+        [property: JsonPropertyName("collecting")] bool Collecting,
+        [property: JsonPropertyName("step")] string? Step,
+        [property: JsonPropertyName("attempt")] int? Attempt,
+        [property: JsonPropertyName("attempts")] int? Attempts,
+        [property: JsonPropertyName("detail")] string? Detail,
+        [property: JsonPropertyName("since")] DateTime? SinceUtc);
+
+    /// <summary>Omits the null members so each ping state carries only the fields that mean something in it —
+    /// a <c>degraded</c> body has an attempt count and an <c>ok</c> body does not, rather than every body
+    /// carrying nulls a check has to know to ignore.</summary>
+    internal static readonly JsonSerializerOptions PingJsonOptions = new()
+    {
+        WriteIndented = false,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
+
+    /// <summary>
+    /// Turns the collector's published verdict into the ping response (#2953). Pure over the snapshot so the
+    /// whole four-state table is unit-pinned without a server or a store, exactly as
+    /// <c>DarlingWebHostService.DecideWebAction</c> pins the supervisor's.
+    ///
+    /// <para><b>The four states, and how an external monitor tells them apart.</b> The status CODE separates
+    /// "collection is not a known problem" from "collection is not running", because that is the only field a
+    /// load balancer or an uptime check reads without parsing JSON; the <c>status</c> string then separates the
+    /// four:</para>
+    /// <list type="bullet">
+    /// <item><description><b>200 <c>ok</c></b> — the collection loop started. Byte-compatible with what this
+    /// route always answered for the healthy case, so an existing check that asserts <c>status: ok</c> keeps
+    /// passing and only stops passing when something is genuinely wrong.</description></item>
+    /// <item><description><b>200 <c>starting</c></b> — the worker has not reached a verdict yet. 200 rather than
+    /// 503 deliberately: this is the ordinary state for the first seconds of every service start, and a check
+    /// that alarmed here would alarm on every restart. It is bounded — the worker publishes one of the other
+    /// three, and a terminal stand-down publishes <c>stopped</c> before it returns, so this cannot be where a
+    /// dead collector comes to rest.</description></item>
+    /// <item><description><b>503 <c>degraded</c></b> — a collection-blocking startup step failed transiently and
+    /// is being retried. 503 because collection is not happening; self-clearing because the failure was
+    /// classified retryable, so within <c>StartupFailureTriage.RetryBudget</c> this becomes <c>ok</c> or
+    /// <c>stopped</c>.</description></item>
+    /// <item><description><b>503 <c>stopped</c></b> — a collection-blocking startup step failed terminally.
+    /// Collection does not start for the life of this process; <c>detail</c> carries what the critical log line
+    /// says, and the fix is to correct that and restart. This is the state the whole issue is about: it used to
+    /// answer <c>200 ok</c>.</description></item>
+    /// </list>
+    ///
+    /// <para><b>Why 503 and not 200-with-a-body.</b> The reporting failure is that automation was told the
+    /// service was fine — and automation reads the code. A body-only signal would leave every existing uptime
+    /// check exactly as wrong as it is now. The cost is that a load balancer health-checking this route pulls
+    /// the host from rotation during a store outage, which is the correct verdict for an API whose data all
+    /// comes from that store; the dashboard's static surface and its other routes are untouched, so a human can
+    /// still open the UI directly and read the reason out of this body.</para>
+    /// </summary>
+    internal static PingReport DescribePing(CollectorRuntimeState.Snapshot? snapshot)
+    {
+        if (snapshot is null)
+        {
+            return new PingReport(StatusCodes.Status200OK, "starting", false, null, null, null, null, null);
+        }
+
+        return snapshot.Phase switch
+        {
+            CollectorRuntimeState.CollectorPhase.Collecting =>
+                new PingReport(StatusCodes.Status200OK, "ok", true, null, null, null, null, snapshot.AsOfUtc),
+
+            CollectorRuntimeState.CollectorPhase.Retrying =>
+                new PingReport(
+                    StatusCodes.Status503ServiceUnavailable, "degraded", false, DescribeStartupStep(snapshot.Step),
+                    snapshot.Attempt, snapshot.Attempts, snapshot.Detail, snapshot.AsOfUtc),
+
+            CollectorRuntimeState.CollectorPhase.Stopped =>
+                new PingReport(
+                    StatusCodes.Status503ServiceUnavailable, "stopped", false, DescribeStartupStep(snapshot.Step),
+                    null, null, snapshot.Detail, snapshot.AsOfUtc),
+
+            /* Default-deny to the loudest answer: a phase this method does not know about is a phase whose
+               health it cannot vouch for, and the whole point of the route is that it does not report healthy
+               on a state it has not reasoned about. */
+            _ => new PingReport(
+                StatusCodes.Status503ServiceUnavailable, "stopped", false, DescribeStartupStep(snapshot.Step),
+                null, null, snapshot.Detail, snapshot.AsOfUtc),
+        };
+    }
+
+    /// <summary>The wire name for a startup step — snake_case like the store's own identifiers, and an explicit
+    /// map rather than the enum name so renaming the enum cannot silently change a public response field.</summary>
+    private static string? DescribeStartupStep(CollectorRuntimeState.StartupStep? step)
+        => step switch
+        {
+            CollectorRuntimeState.StartupStep.Configuration => "configuration",
+            CollectorRuntimeState.StartupStep.ManagedStore => "managed_store",
+            CollectorRuntimeState.StartupStep.Store => "store",
+            _ => null,
+        };
+
+    /// <summary>
     /// Maps the web dashboard's HTTP endpoints onto <paramref name="app"/>, reading from <paramref name="postgres"/>
     /// (the VIEWER-role store pool). Called ONCE from the web host's pipeline, after the auth middleware and before
     /// the static files. Every route lives under <c>/api/*</c> so the SPA's static surface never collides.
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector)
     {
-        /* Liveness probe (Builder 1's stub, kept): proves the host is up and the pipeline reaches the API. */
-        app.MapGet("/api/ping", () => Results.Json(new { status = "ok" }));
+        /* Liveness AND collection state (#2953). The one health surface that does not read the store, which
+           makes it the only one that can answer when the store IS the problem — so it reports the collector's
+           actual verdict instead of a hardcoded "ok". See DescribePing for the four states and their status
+           codes, and CollectorRuntimeState for why that verdict is an in-process field rather than a row. */
+        app.MapGet("/api/ping", () =>
+        {
+            var report = DescribePing(collector.Read());
+            return Results.Json(report, PingJsonOptions, statusCode: report.HttpStatus);
+        });
 
         /* The four analysis-READ tools take a DarlingAnalysisService; the web host does not register one, so
            build it once here from the same VIEWER-role pool (its read methods — fact collection, period compare,
@@ -147,6 +265,10 @@ public static class DarlingWebEndpoints
         }
 
         MapCustomViews(app, postgres);
+
+        /* The per-alert triage page's assembly endpoint (#2710): everything it serves is already reachable
+           through the /api/read mirror above — it adds assembly (alert match + anchored sections), not reach. */
+        DarlingTriageEndpoint.Map(app, postgres, analysis);
     }
 
     /* ─────────────────────────── #1563 custom views: session, catalog, CRUD ─────────────────────────── */
@@ -167,10 +289,14 @@ public static class DarlingWebEndpoints
         var store = new CustomViewStore(postgres);
 
         /* A request that reaches this endpoint has already cleared the host's auth gate (network: token→cookie +
-           CIDR; loopback: on the host), so it is a trusted operator that may edit. The frontend reads this to
-           show/hide affordances; a failed probe fails closed to read-only in the UI. */
-        app.MapGet("/api/session", () =>
-            JsonNodeResult(new JsonObject { ["can_edit"] = true }));
+           CIDR; loopback: on the host), so it holds a seat. WHICH seat decides the answer: the shared token and
+           an OIDC admin may edit, an OIDC viewer may not. Reporting the request's own seat rather than a
+           constant is what makes the SPA's read-only rendering reachable — it hides every edit affordance on
+           can_edit: false, and the middleware's group-level write gate refuses the mutation regardless of what a
+           client sends, so this is the affordance layer, never the enforcement. A failed probe fails closed to
+           read-only in the UI. */
+        app.MapGet("/api/session", (HttpContext context) =>
+            JsonNodeResult(new JsonObject { ["can_edit"] = DarlingWebSeat.FromContext(context).CanEdit }));
 
         /* The read catalog: input truth (read names + their WIRE query keys) the composer binds params from. */
         app.MapGet("/api/catalog", () => JsonNodeResult(BuildCatalogNode()));
@@ -215,7 +341,8 @@ public static class DarlingWebEndpoints
             try
             {
                 var result = await store.CreateAsync(
-                    request.Name, request.Description, request.DefinitionJson, WebEditorPrincipal, context.RequestAborted);
+                    request.Name, request.Description, request.DefinitionJson,
+                    updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
                 return result switch
                 {
                     CustomViewResult.Ok ok => CreatedResult(context, $"/api/views/{ok.View!.Id}", BuildFullViewNode(ok.View)),
@@ -260,7 +387,8 @@ public static class DarlingWebEndpoints
             try
             {
                 var result = await store.UpdateAsync(
-                    id, request.Name, request.Description, request.DefinitionJson, expectedVersion, WebEditorPrincipal, context.RequestAborted);
+                    id, request.Name, request.Description, request.DefinitionJson, expectedVersion,
+                    updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
                 return result switch
                 {
                     CustomViewResult.Ok ok => JsonNodeResult(BuildFullViewNode(ok.View!)),
@@ -367,6 +495,18 @@ public static class DarlingWebEndpoints
             return ComposeRunOutcome.BadRequest("Request body must be a JSON object with a 'panel'.");
         }
 
+        /* The run path stays LENIENT about unknown keys — a definition stored before the #2733 write-path
+           strictness existed must keep running — but the one mis-shape a lenient parse turns into a
+           misdirecting error is named: a DOUBLY-nested spec ({"panel":{"panel":{...}}}) has no 'source' and
+           used to fail as "unknown source ''", pointing at the catalog instead of the nesting. No stored
+           panel can carry a 'panel' key (the write path has never accepted one that parsed), so this
+           misses nothing legitimate. */
+        if (panel["panel"] is JsonObject && panel["source"] is null)
+        {
+            return ComposeRunOutcome.BadRequest(
+                "the spec is doubly nested — 'panel' should hold the panel object itself ({\"panel\":{\"source\":...}}), not another {\"panel\":{...}} wrapper.");
+        }
+
         var (variables, variablesError) = ComposeSpec.ParseVariables(body["variables"]);
         if (variablesError is not null)
         {
@@ -405,7 +545,7 @@ public static class DarlingWebEndpoints
                 return ComposeRunOutcome.BadRequest("windowStart and windowEnd must be provided together.");
             }
 
-            if (!TryParseUtcInstant(body["windowStart"], out start) || !TryParseUtcInstant(body["windowEnd"], out end))
+            if (!ComposeSpec.TryParseUtcInstant(body["windowStart"], out start) || !ComposeSpec.TryParseUtcInstant(body["windowEnd"], out end))
             {
                 return ComposeRunOutcome.BadRequest("windowStart/windowEnd must be ISO-8601 timestamps (UTC; a trailing Z and fractional seconds are fine).");
             }
@@ -449,11 +589,19 @@ public static class DarlingWebEndpoints
 
         try
         {
-            var rows = await RunComposedQueryAsync(postgres, compiled!, cancellationToken);
+            /* Resolved once per RUN, from the store, and deliberately not cached: see
+               McpCommandDeadlines.ResolveComposedQuerySecondsAsync for why a value captured at host start or
+               memoised per data source would be wrong for this particular knob. Threaded rather than
+               re-read per query so a panel with annotation overlays pays one read, not one per source —
+               which also means every query in ONE run shares one ceiling, matching the role
+               statement_timeout they all run under. */
+            var composedQuerySeconds = await McpCommandDeadlines.ResolveComposedQuerySecondsAsync(postgres, cancellationToken);
+
+            var rows = await RunComposedQueryAsync(postgres, compiled!, composedQuerySeconds, cancellationToken);
             /* Event-annotation overlays (design D5): one bounded, catalog-only event query per requested
                source, on the SAME window + server scope, under the same statement_timeout. Additive —
                {sql, rows} are unchanged; a panel that requests no annotations returns an empty array. */
-            var annotations = await RunAnnotationsAsync(postgres, plan!, runContext, cancellationToken);
+            var annotations = await RunAnnotationsAsync(postgres, plan!, runContext, composedQuerySeconds, cancellationToken);
             var payload = new JsonObject { ["sql"] = compiled!.Sql, ["rows"] = rows, ["annotations"] = annotations };
             /* Partial window, and says so (#1665): when the route landed on a tier whose retention cannot
                reach the window's start on a retention-active store, tell the caller instead of quietly
@@ -485,29 +633,9 @@ public static class DarlingWebEndpoints
     /// <summary>Default compose-run window (hours) when the request omits one.</summary>
     private const int DefaultComposeHours = 24;
 
-    /// <summary>Parses an absolute run-window bound (#1606): ISO-8601, treated as UTC whether or not it
-    /// carries a Z (JS <c>toISOString()</c> sends ms+Z; the store is naive UTC), normalized to
-    /// Kind-Unspecified naive UTC like every other Darling read binding.</summary>
-    private static bool TryParseUtcInstant(JsonNode? node, out DateTime value)
-    {
-        value = default;
-        if (node is not JsonValue jsonValue || !jsonValue.TryGetValue<string>(out var text) || string.IsNullOrWhiteSpace(text))
-        {
-            return false;
-        }
-
-        if (!DateTime.TryParse(
-                text,
-                System.Globalization.CultureInfo.InvariantCulture,
-                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
-                out var parsed))
-        {
-            return false;
-        }
-
-        value = DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified);
-        return true;
-    }
+    /* The absolute-instant parser lives in ComposeSpec.TryParseUtcInstant (#2735): the run path's
+       windowStart/windowEnd and a stored cell range's windowStart/windowEnd are the SAME vocabulary, so
+       they share one parser and can never drift on what "a timestamp" means. */
 
     /// <summary>Resolves the run's server scope (Erik's Decision 1): the top-level <c>server</c> (a name or an
     /// array of names), else the <c>$server</c> variable value. Absent / "All" / empty ⇒ null (the whole fleet,
@@ -573,9 +701,11 @@ public static class DarlingWebEndpoints
 
     /// <summary>Runs a compiled composed query on the viewer pool and serializes its rows to a JSON array of
     /// <c>{column: value}</c> objects — generic over the SELECT shape (bucket / group dims / value).</summary>
-    private static async Task<JsonArray> RunComposedQueryAsync(NpgsqlDataSource postgres, ComposeCompiled compiled, System.Threading.CancellationToken cancellationToken)
+    private static async Task<JsonArray> RunComposedQueryAsync(
+        NpgsqlDataSource postgres, ComposeCompiled compiled, int composedQuerySeconds, System.Threading.CancellationToken cancellationToken)
     {
         await using var command = postgres.CreateCommand(compiled.Sql);
+        command.CommandTimeout = composedQuerySeconds;
         foreach (var parameter in compiled.Parameters)
         {
             command.Parameters.Add(parameter);
@@ -605,12 +735,12 @@ public static class DarlingWebEndpoints
     /// caller's try/catch exactly like the measure query's (a runaway overlay fails the run with a clear 400,
     /// rather than silently dropping markers the caller can't tell are missing).</summary>
     private static async Task<JsonArray> RunAnnotationsAsync(
-        NpgsqlDataSource postgres, PanelPlan plan, ComposeRunContext runContext, System.Threading.CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, PanelPlan plan, ComposeRunContext runContext, int composedQuerySeconds, System.Threading.CancellationToken cancellationToken)
     {
         var annotations = new JsonArray();
         foreach (var (source, compiled) in ComposeCompiler.CompileAnnotations(plan, runContext))
         {
-            var events = await RunComposedQueryAsync(postgres, compiled, cancellationToken);
+            var events = await RunComposedQueryAsync(postgres, compiled, composedQuerySeconds, cancellationToken);
             annotations.Add(new JsonObject { ["source"] = source, ["events"] = events });
         }
 
@@ -631,13 +761,33 @@ public static class DarlingWebEndpoints
         _ => JsonValue.Create(value.ToString()),
     };
 
-    /// <summary>The <c>updated_by</c> stamp for a web edit. The web surface has no per-user identity, so a
-    /// constant is honest — it marks the row as web-authored.</summary>
+    /// <summary>
+    /// The <c>updated_by</c> stamp for a web edit made by a seat with NO subject — the shared token and the
+    /// tokenless loopback operator. A named OIDC seat stamps its own subject instead
+    /// (<see cref="DarlingWebSeat.EditorPrincipal"/> is the one place that choice is made), so this is the
+    /// fallback, not the web stamp.
+    ///
+    /// <para><b>The column is therefore heterogeneous, deliberately.</b> A row reads either as a person or as
+    /// the surface that wrote it, and a reader cannot tell which by shape alone — a directory that stamps an
+    /// opaque <c>sub</c> GUID produces values no more person-like than this one. The alternative was a second
+    /// column separating identity from provenance, rejected because the only consumer is a rendered byline
+    /// ("updated by X") that wants exactly one value, and splitting it would make every reader join two columns
+    /// to recover the string they already display. Nothing filters, sorts or groups on <c>updated_by</c>, so
+    /// heterogeneity costs nothing a query has to cope with; if something ever does, that is the moment to
+    /// revisit this, not before.</para>
+    /// </summary>
     internal const string WebEditorPrincipal = "web";
 
-    /// <summary>The <c>updated_by</c> stamp for a custom view created/updated over MCP (the
-    /// <c>create_custom_view</c> / <c>update_custom_view</c> tools). Like <see cref="WebEditorPrincipal"/> it is a
-    /// constant — the MCP surface has no per-user identity — and marks the row's provenance as MCP-authored.</summary>
+    /// <summary>
+    /// The <c>updated_by</c> stamp for a custom view created/updated over MCP (the <c>create_custom_view</c> /
+    /// <c>update_custom_view</c> tools). Unlike <see cref="WebEditorPrincipal"/> this stays an unconditional
+    /// constant, and the asymmetry is chosen rather than left over: MCP authenticates a CLIENT on its own
+    /// network block with its own shared token and has no sign-in flow to carry a person through, so there is no
+    /// subject to prefer. Stamping <c>mcp</c> always is the honest answer for a surface where per-user identity
+    /// does not exist, and MCP is such a surface: it has no OIDC path, so a seat-derived stamp here would have
+    /// nothing to derive from. Giving MCP identity is a separate piece of work on a separate credential model,
+    /// not a line change here.
+    /// </summary>
     internal const string McpEditorPrincipal = "mcp";
 
     /* ── loopback determination (the web host's tokenless-loopback auth arm) ── */
@@ -705,6 +855,94 @@ public static class DarlingWebEndpoints
     /// prose/tables, bounded against a definition padded out to the whole-doc size cap by one giant cell.</summary>
     internal const int MaxMarkdownCellBytes = 32 * 1024;
 
+    /* ── the strict key sets (#2733): what each WRITE-path object may carry beyond ComposeSpec's own sets ──
+       These are the ENDPOINT-owned halves of the key universe — the view-shape and presentation keys the
+       compose parser never sees. The composed-panel/filter/overlay/variable/range sets live in ComposeSpec,
+       beside the parser that reads them. v1 READ panels are deliberately NOT key-checked: their descriptor
+       carries an open presentation vocabulary (rowsKey/xKey/format/emptyText/columns/stats/... — the
+       renderer's contract, spread from the editor's vizcfg verbatim), so the server enumerating it would
+       just be a second copy that decays; the v1 keys with SEMANTIC weight are each validated individually
+       (read, viz, span, series colors — and raw 'path' is rejected outright). */
+
+    /// <summary>What a stored DASHBOARD definition's root may carry.</summary>
+    private static readonly IReadOnlySet<string> s_dashboardRootKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "kind", "panels", "variables", "range",
+    };
+
+    /// <summary>What a stored NOTEBOOK definition's root may carry (design D7).</summary>
+    private static readonly IReadOnlySet<string> s_notebookRootKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "kind", "cells", "variables", "range",
+    };
+
+    /// <summary>What a markdown cell may carry: its discriminator and its prose.</summary>
+    private static readonly IReadOnlySet<string> s_markdownCellKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "type", "text",
+    };
+
+    /// <summary>The presentation keys a COMPOSED dashboard panel carries beyond
+    /// <see cref="ComposeSpec.ComposedPanelKeys"/> — written by the composer (editor.js
+    /// <c>composedPanelToDesc</c>), read only by the frontend, never by the parser.</summary>
+    private static readonly IReadOnlySet<string> s_composedDashboardPanelExtraKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "title", "span", "hours",
+    };
+
+    /// <summary>The extra keys a notebook PANEL cell carries: the cell discriminator plus the composed
+    /// presentation keys minus <c>span</c> (a notebook cell has no width — the notebook composer's
+    /// <c>cellToDesc</c> drops it), plus the per-cell <c>range</c> window pin (#2735) — validated by
+    /// <see cref="ComposeSpec.ParseRange"/> in the cell arm below, NOT a free presentation key.</summary>
+    private static readonly IReadOnlySet<string> s_notebookPanelCellExtraKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "type", "title", "hours", "range",
+    };
+
+    /// <summary>Targeted guidance for the dashboard root's most likely mis-shape: <c>cells</c> without
+    /// <c>"kind":"notebook"</c> is a notebook that would otherwise read as a dashboard missing its panels.</summary>
+    private static readonly IReadOnlyDictionary<string, string> s_dashboardRootKeyHints = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["cells"] = "a notebook's 'cells' need \"kind\":\"notebook\" on the definition (a dashboard carries 'panels').",
+    };
+
+    /// <summary>Targeted guidance for the notebook root's most likely mis-shape.</summary>
+    private static readonly IReadOnlyDictionary<string, string> s_notebookRootKeyHints = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["panels"] = "a notebook carries 'cells', not 'panels'.",
+    };
+
+    /// <summary>The two keys that decide a panel's mode, for the near-miss suggestion when both are absent.</summary>
+    private static readonly string[] s_panelModeKeys = { "read", "source" };
+
+    /// <summary>Strict-key check (#2733) for the root objects BOTH view kinds share — each declared variable
+    /// (against <see cref="ComposeSpec.VariableKeys"/>) and the <c>range</c> (against
+    /// <see cref="ComposeSpec.RangeKeys"/>). Runs AFTER the ComposeSpec parsers accepted them, so structural
+    /// errors keep their existing messages and this only ever names a genuinely stray key. Returns the first
+    /// stray-key error, or null.</summary>
+    private static string? UnknownSharedRootKeyError(JsonObject rootObject)
+    {
+        if (rootObject["variables"] is JsonArray variableArray)
+        {
+            for (var i = 0; i < variableArray.Count; i++)
+            {
+                if (variableArray[i] is JsonObject variableObject
+                    && ComposeSpec.UnknownKeyError(variableObject, ComposeSpec.VariableKeys, $"variable {i}") is string variableError)
+                {
+                    return variableError;
+                }
+            }
+        }
+
+        if (rootObject["range"] is JsonObject rangeObject
+            && ComposeSpec.UnknownKeyError(rangeObject, ComposeSpec.RangeKeys, "range") is string rangeError)
+        {
+            return rangeError;
+        }
+
+        return null;
+    }
+
     /// <summary>The outcome of <see cref="ValidateDefinition"/>: valid, or invalid with a caller-facing reason.</summary>
     internal readonly record struct DefinitionValidation(bool IsValid, string? Error)
     {
@@ -729,6 +967,17 @@ public static class DarlingWebEndpoints
     /// are dispatched per panel. A <c>span</c> of 1 or 2 and any series <c>color</c> (a <c>#rrggbb</c> hex) are
     /// validated for both modes. Raw <c>path</c>-mode is REJECTED — a definition must stay on the allowlists,
     /// never name an arbitrary endpoint path.</para>
+    ///
+    /// <para><b>Unknown keys are errors (#2733), on the WRITE path only.</b> The compose parser positive-reads
+    /// known keys and defaults every optional one on absence, so before this a typo'd key ("filter", "Filters")
+    /// validated <c>{valid:true}</c> and stored a syntactically-valid DIFFERENT panel — a dropped filter
+    /// silently widening the query. This validator (the authority behind validate/create/update on both the
+    /// web and MCP surfaces) now rejects any key outside the known sets at every level it owns — the
+    /// definition root, each composed panel (+ its filters/overlay/viz object), each notebook cell — naming
+    /// the stray key and suggesting the near-miss. The READ/RUN path is deliberately untouched: a definition
+    /// stored before the strictness existed keeps loading, rendering, and running; it meets the strict check
+    /// only when someone next edits it. v1 READ panels keep their open presentation vocabulary — see the note
+    /// on the key sets above.</para>
     /// </summary>
     internal static DefinitionValidation ValidateDefinition(string? definitionJson)
     {
@@ -766,6 +1015,16 @@ public static class DarlingWebEndpoints
             return ValidateNotebookDefinition(rootObject);
         }
 
+        /* Strict keys at the root (#2733): a stray root key is an authoring error, not decoration — before
+           this check, "variabels" quietly declared NO variables and every $var filter downstream failed with
+           a message pointing at the filter. Checked before the panels-shape errors so the most likely
+           mis-shape ('cells' without the notebook kind) gets its targeted message rather than "panels must
+           be an array". */
+        if (ComposeSpec.UnknownKeyError(rootObject, s_dashboardRootKeys, "definition", keyHints: s_dashboardRootKeyHints) is string rootKeyError)
+        {
+            return DefinitionValidation.Fail(rootKeyError);
+        }
+
         if (rootObject["panels"] is not JsonArray panels)
         {
             return DefinitionValidation.Fail("definition.panels must be an array.");
@@ -795,6 +1054,13 @@ public static class DarlingWebEndpoints
             return DefinitionValidation.Fail(rangeError);
         }
 
+        /* Strict keys inside the shared root objects (#2733) — after the parsers, so a structural error
+           keeps its existing message and this only ever names a genuinely stray key ("defalut", "days"). */
+        if (UnknownSharedRootKeyError(rootObject) is string sharedKeyError)
+        {
+            return DefinitionValidation.Fail(sharedKeyError);
+        }
+
         var declaredVariables = variables!.Select(v => v.Name).ToHashSet(StringComparer.Ordinal);
 
         var reads = BuildReadDispatch();
@@ -816,6 +1082,13 @@ public static class DarlingWebEndpoints
                two coexist in one definition, dispatched per panel. */
             if (ComposeSpec.IsComposedPanel(panel))
             {
+                /* Strict keys FIRST (#2733), so a typo'd key is named as itself ("did you mean 'filters'?")
+                   instead of surfacing as whatever downstream symptom the defaulted absence produces. */
+                if (ComposeSpec.UnknownComposedPanelKeyError(panel, s_composedDashboardPanelExtraKeys) is string strayKeyError)
+                {
+                    return DefinitionValidation.Fail($"panel {i}: {strayKeyError}");
+                }
+
                 var (_, composeError) = ComposeSpec.TryParsePanel(panel, declaredVariables);
                 if (composeError is not null)
                 {
@@ -827,6 +1100,24 @@ public static class DarlingWebEndpoints
                 var read = TryGetString(panel, "read");
                 if (string.IsNullOrEmpty(read))
                 {
+                    /* Neither mode key is present, so name the likely mis-shape instead of shrugging
+                       (#2733): the run-spec {"panel":{...}} wrapper, or a near-miss typo of read/source. */
+                    if (panel["panel"] is JsonObject)
+                    {
+                        /* The SAME constant the composed arm's key-hint uses — one wording, no drift. */
+                        return DefinitionValidation.Fail(
+                            $"panel {i} nests its spec under 'panel' — {ComposeSpec.RunSpecNestingHint}");
+                    }
+
+                    foreach (var property in panel)
+                    {
+                        if (ComposeSpec.NearestKnownKey(property.Key, s_panelModeKeys) is string nearMiss)
+                        {
+                            return DefinitionValidation.Fail(
+                                $"panel {i} is missing 'read' or 'source' — did you mean '{nearMiss}' (found '{property.Key}')?");
+                        }
+                    }
+
                     return DefinitionValidation.Fail($"panel {i} is missing 'read' or 'source'.");
                 }
 
@@ -894,13 +1185,24 @@ public static class DarlingWebEndpoints
     /// <item><c>panel</c> — a v2 COMPOSED panel validated by <see cref="ComposeSpec.TryParsePanel"/> against the
     /// notebook's declared variables (the EXACT authority a dashboard's composed panel routes through), so a
     /// notebook panel cell carries all the v2 safety — catalog-resolved identifiers, bound values, caps — and can
-    /// always compile.</item>
+    /// always compile. It may also carry its own <c>range</c> (#2735) — relative <c>{hours}</c> or absolute
+    /// <c>{windowStart, windowEnd}</c> — pinning that cell's window over the view scope (absent = inherit),
+    /// validated by <see cref="ComposeSpec.ParseRange"/> so a stored pin is always a runnable window.</item>
     /// </list>
     /// An unknown cell <c>type</c>, a missing/oversize markdown <c>text</c>, an invalid panel cell, or an over-cap
-    /// cell count is rejected (400), naming the offending cell by index.
+    /// cell count is rejected (400), naming the offending cell by index. Unknown KEYS are errors too (#2733) —
+    /// at the notebook root, on every cell, and inside a panel cell's filters/overlay — with a did-you-mean;
+    /// see the strict-keys paragraph on <see cref="ValidateDefinition"/> for the write/read split.
     /// </summary>
     internal static DefinitionValidation ValidateNotebookDefinition(JsonObject rootObject)
     {
+        /* Strict keys at the notebook root (#2733) — first, so 'panels' on a notebook gets its targeted
+           message rather than "cells must be an array". */
+        if (ComposeSpec.UnknownKeyError(rootObject, s_notebookRootKeys, "notebook", keyHints: s_notebookRootKeyHints) is string rootKeyError)
+        {
+            return DefinitionValidation.Fail(rootKeyError);
+        }
+
         if (rootObject["cells"] is not JsonArray cells)
         {
             return DefinitionValidation.Fail("notebook.cells must be an array.");
@@ -930,6 +1232,12 @@ public static class DarlingWebEndpoints
             return DefinitionValidation.Fail(rangeError);
         }
 
+        /* Strict keys inside the shared root objects (#2733) — same placement rationale as the dashboard arm. */
+        if (UnknownSharedRootKeyError(rootObject) is string sharedKeyError)
+        {
+            return DefinitionValidation.Fail(sharedKeyError);
+        }
+
         var declaredVariables = variables!.Select(v => v.Name).ToHashSet(StringComparer.Ordinal);
 
         for (var i = 0; i < cells.Count; i++)
@@ -943,6 +1251,12 @@ public static class DarlingWebEndpoints
             switch (type)
             {
                 case "markdown":
+                    /* Strict keys first (#2733): a markdown cell is its discriminator and its prose, nothing else. */
+                    if (ComposeSpec.UnknownKeyError(cell, s_markdownCellKeys, $"cell {i} (markdown)") is string markdownKeyError)
+                    {
+                        return DefinitionValidation.Fail(markdownKeyError);
+                    }
+
                     /* A markdown cell is prose only — a string 'text' (present, a real string) within the cell
                        byte cap. It never enters the compiler; the renderer is responsible for safe markdown->HTML. */
                     if (cell["text"] is not JsonValue textValue || !textValue.TryGetValue<string>(out var text))
@@ -959,6 +1273,15 @@ public static class DarlingWebEndpoints
                     break;
 
                 case "panel":
+                    /* Strict keys FIRST (#2733). This is the reported repro's home: a panel cell is FLAT (the
+                       cell object IS the panel, plus 'type'), while run_custom_view_panel's spec nests under
+                       'panel' — the natural mis-shape used to fail as "unknown source ''", pointing at the
+                       catalog instead of the nesting. The walker's 'panel'-key hint now names it. */
+                    if (ComposeSpec.UnknownComposedPanelKeyError(cell, s_notebookPanelCellExtraKeys) is string strayKeyError)
+                    {
+                        return DefinitionValidation.Fail($"cell {i}: {strayKeyError}");
+                    }
+
                     /* A panel cell is a v2 composed panel, validated by the SAME ComposeSpec.TryParsePanel authority
                        a dashboard's composed panel routes through (against the notebook's declared variables) — so a
                        stored notebook panel cell can always compile and carries all the v2 safety. */
@@ -966,6 +1289,25 @@ public static class DarlingWebEndpoints
                     if (panelError is not null)
                     {
                         return DefinitionValidation.Fail($"cell {i}: {panelError}");
+                    }
+
+                    /* The per-cell window pin (#2735): an optional 'range' — relative ({hours}) or absolute
+                       ({windowStart, windowEnd}, the shape the run path already accepts) — that the renderer
+                       applies over the view scope for THIS cell only; absent means inherit the view window.
+                       Only a notebook cell gets the absolute form: a comparison document pins different
+                       windows to different cells, which is exactly what one view-level range cannot say.
+                       Parse first, then the strict sub-key walk (the root convention), so a structural error
+                       keeps its message and the walk only ever names a genuinely stray key. */
+                    var (_, cellRangeError) = ComposeSpec.ParseRange(cell["range"], allowAbsolute: true);
+                    if (cellRangeError is not null)
+                    {
+                        return DefinitionValidation.Fail($"cell {i}: {cellRangeError}");
+                    }
+
+                    if (cell["range"] is JsonObject cellRangeObject
+                        && ComposeSpec.UnknownKeyError(cellRangeObject, ComposeSpec.RangeKeys, $"cell {i} range") is string cellRangeKeyError)
+                    {
+                        return DefinitionValidation.Fail(cellRangeKeyError);
                     }
 
                     break;
@@ -1131,16 +1473,18 @@ public static class DarlingWebEndpoints
             ["get_top_queries_by_cpu"] = R(CatData, "Top queries by CPU, optionally parallel-only / min-DOP.", PServer(), PHours(24), PTop(20), PText("database_name"), PBool("parallel_only", false), PInt("min_dop", 0), PAsOf()),
             ["get_pg_top_queries"] = R(CatData, "Top PostgreSQL query shapes by total execution time (Aurora targets).", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_pg_plans"] = R(CatData, "Captured PostgreSQL execution plans, grouped by shape. Plans are redacted at collection.", PServer(), PHours(24), PLimit(10), PText("query_id"), PAsOf()),
+            ["get_pg_plan_capture_readiness"] = R(CatData, "Whether a PostgreSQL target can capture execution plans at all, facet by facet, with the remedy for each step that is not in place. Read this when a plan or target-log read is empty.", PServer(), PHours(24), PLimit(25), PAsOf()),
             ["get_pg_wraparound_risk"] = R(CatData, "PostgreSQL XID/MultiXact freeze headroom per database.", PServer(), PHours(24), PAsOf()),
             ["get_pg_xmin_horizon"] = R(CatData, "What is holding back the PostgreSQL xmin horizon, by cause.", PServer(), PHours(24), PAsOf()),
             ["get_pg_replication_slots"] = R(CatData, "PostgreSQL replication slot health, including whether retained WAL is still growing.", PServer(), PHours(24), PAsOf()),
             ["get_pg_autovacuum_health"] = R(CatData, "PostgreSQL tables behind on vacuum or analyze, ranked by how far past each table's own threshold.", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_pg_io_stats"] = R(CatData, "PostgreSQL I/O by backend type, object and context, differenced across the window.", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_pg_wait_stats"] = R(CatData, "Top PostgreSQL wait events in the window (Aurora targets).", PServer(), PHours(24), PLimit(20), PAsOf()),
+            ["get_pg_cpu_utilization"] = R(CatData, "Instance CPU utilization over time from AWS Performance Insights (Aurora/RDS targets).", PServer(), PHours(4), PAsOf()),
             ["get_pg_wait_sampling"] = R(CatData, "Sampled PostgreSQL waits by query shape, from pg_wait_sampling - the stock-PostgreSQL counterpart of get_pg_wait_stats. Sample counts, not measured durations; event_type CPU means running rather than waiting.", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_pg_kernel_stats"] = R(CatData, "Per-query OS CPU (user and system), device bytes and major faults, from pg_stat_kcache. The CPU half of the elapsed time get_pg_top_queries reports.", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_pg_predicate_stats"] = R(CatData, "Which columns queries actually filter on and how selectively, from pg_qualstats. SAMPLED counts - the evidence behind an index recommendation.", PServer(), PHours(24), PLimit(25), PAsOf()),
-            ["get_pg_index_bloat"] = R(CatData, "MEASURED PostgreSQL index bloat from pgstattuple: leaf density, fragmentation and reclaimable bytes. Rows carrying a skipped_reason were not measured.", PServer(), PHours(168), PLimit(25), PAsOf()),
+            ["get_pg_index_bloat"] = R(CatData, "MEASURED PostgreSQL index bloat from pgstattuple: leaf density, fragmentation and reclaimable bytes. Rows carrying a skipped_reason were not measured — a rotation-cursor or work-budget reason is deferred to a later cycle, a measurement-ceiling reason is permanent. The complete btree census, no size floor, so it counts MORE indexes than get_pg_index_usage (which floors at 64 kB).", PServer(), PHours(168), PLimit(25), PAsOf()),
             ["get_pg_column_stats"] = R(CatData, "Per-column distribution statistics the PLANNER uses: n_distinct, null fraction, correlation and top-value frequency.", PServer(), PHours(168), PLimit(25), PAsOf()),
             ["get_pg_buffer_usage"] = R(CatData, "What is resident in the shared buffer pool per relation, from pg_buffercache. Residency, not read volume.", PServer(), PHours(24), PLimit(25), PAsOf()),
             ["get_pg_extensions"] = R(CatData, "Which PostgreSQL extensions are installed, outdated, available or absent, per database. Usually the reason another read is empty.", PServer(), PHours(168), PLimit(50), PAsOf()),
@@ -1157,7 +1501,7 @@ public static class DarlingWebEndpoints
             ["get_pg_replication_stats"] = R(CatData, "Health of CONNECTED replicas from pg_stat_replication, with the worst lag in the window beside the latest. Counterpart of get_pg_replication_slots.", PServer(), PHours(24), PLimit(25), PAsOf()),
             ["get_pg_blocking"] = R(CatData, "PostgreSQL blocking chains that were sampled, with the root blocker attributed. A sample, not an event log.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_pg_database_stats"] = R(CatData, "PostgreSQL per-database temp-file spills, cache hit ratio, deadlocks and commit/rollback split, differenced across the window.", PServer(), PHours(24), PLimit(20), PAsOf()),
-            ["get_pg_index_usage"] = R(CatData, "PostgreSQL per-index scan counts and size, with the constraint, replica-identity and validity facts that decide whether an unused index can actually be dropped.", PServer(), PHours(168), PLimit(25), PAsOf()),
+            ["get_pg_index_usage"] = R(CatData, "PostgreSQL per-index scan counts and size, with the constraint, replica-identity and validity facts that decide whether an unused index can actually be dropped. Reports indexes of at least 64 kB plus any invalid index at any size, so it counts FEWER indexes than get_pg_index_bloat (the complete btree census) — that floor is the whole difference.", PServer(), PHours(168), PLimit(25), PAsOf()),
             ["get_pg_table_bloat"] = R(CatData, "PostgreSQL per-table bloat ESTIMATE with its measured sizes and dead-tuple counts. The estimate is suppressed, not captioned, when its statistics cannot be trusted.", PServer(), PHours(168), PLimit(25), PAsOf()),
             ["get_pg_session_states"] = R(CatData, "PostgreSQL sessions holding a transaction open, and whether each one actually pins the xmin horizon - which is not the same question as how long it has been idle in transaction.", PServer(), PHours(24), PLimit(25), PAsOf()),
             ["get_wait_stats"] = R(CatData, "Top wait statistics in the window.", PServer(), PHours(24), PLimit(20), PAsOf()),
@@ -1181,6 +1525,9 @@ public static class DarlingWebEndpoints
             ["get_fleet_overview"] = R(CatOverview, "The banded cross-server fleet roll-up.", PHours(DefaultFleetHours)),
             ["get_ag_health"] = R(CatOverview, "Availability Group topology: replicas and per-database secondary state.", PServer()),
             ["get_store_metrics"] = R(CatOverview, "The monitoring store's own size/compression/growth series (self-metrics).", PInt("days_back", 30)),
+            ["get_store_log"] = R(CatOverview, "What the monitoring store's OWN PostgreSQL server log recorded - a per-class census with the capture denominator beside it, not the lines. Deliberately unbanded.", PHours(24), PLimit(DarlingMcpStoreLogTools.DefaultRetainedLimit), PAsOf()),
+            ["get_collector_cost"] = R(CatOverview, "The monitoring tool's OWN per-collector cost on the monitored servers (self-monitoring) - which of our collectors is the most expensive to run. Pass collector_name for that one collector's daily trend instead of the ranked list.", PInt("days_back", 7), PText("collector_name")),
+            ["get_collector_stall_probes"] = R(CatOverview, "The out-of-band server-wide wait samples taken while one of OUR collectors was stalled mid-read - what the monitored instance was doing inside the window the sequential sweep records nothing in. Carries the outcome census beside the samples, deliberately unbanded.", PServer(), PInt("days_back", 7), PLimit(DarlingMcpStallProbeTools.DefaultLimit)),
 
             /* ── latch / spinlock (DarlingMcpLatchSpinlockTools) ── */
             ["get_latch_stats"] = R(CatLatch, "Top latch waits in the window.", PServer(), PHours(24), PTop(10), PAsOf()),
@@ -1615,12 +1962,14 @@ public static class DarlingWebEndpoints
                round trip through a JSON number has already been rounded, and the tool rejects one it
                cannot parse exactly rather than silently matching nothing. */
             ["get_pg_plans"] = (c, pg, an) => DarlingMcpPgPlanTools.GetPgPlans(pg, Server(c), Hours(c, 24), Rows(c, "limit", 10), Str(c, "query_id"), AsOf(c)),
+            ["get_pg_plan_capture_readiness"] = (c, pg, an) => DarlingMcpPgPlanTools.GetPgPlanCaptureReadiness(pg, Server(c), Hours(c, 24), Rows(c, "limit", 25), as_of: AsOf(c)),
             ["get_pg_wraparound_risk"] = (c, pg, an) => DarlingMcpPgWraparoundTools.GetPgWraparoundRisk(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
             ["get_pg_xmin_horizon"] = (c, pg, an) => DarlingMcpPgXminTools.GetPgXminHorizon(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
             ["get_pg_replication_slots"] = (c, pg, an) => DarlingMcpPgSlotTools.GetPgReplicationSlots(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
             ["get_pg_autovacuum_health"] = (c, pg, an) => DarlingMcpPgAutovacuumTools.GetPgAutovacuumHealth(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             ["get_pg_io_stats"] = (c, pg, an) => DarlingMcpPgIoTools.GetPgIoStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             ["get_pg_wait_stats"] = (c, pg, an) => DarlingMcpPgWaitTools.GetPgWaitStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
+            ["get_pg_cpu_utilization"] = (c, pg, an) => DarlingMcpPgCpuUtilizationTools.GetPgCpuUtilization(pg, Server(c), Hours(c, 4), as_of: AsOf(c)),
             ["get_pg_wait_sampling"] = (c, pg, an) => DarlingMcpPgWaitSamplingTools.GetPgWaitSampling(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             ["get_pg_kernel_stats"] = (c, pg, an) => DarlingMcpPgKernelStatsTools.GetPgKernelStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             ["get_pg_predicate_stats"] = (c, pg, an) => DarlingMcpPgPredicateTools.GetPgPredicateStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 25), as_of: AsOf(c)),
@@ -1673,6 +2022,9 @@ public static class DarlingWebEndpoints
             ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours)),
             ["get_ag_health"] = (c, pg, an) => DarlingMcpAgTools.GetAgHealth(pg, Server(c)),
             ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30)),
+            ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c)),
+            ["get_collector_cost"] = (c, pg, an) => DarlingMcpCollectorCostTools.GetCollectorCost(pg, QueryInt(c, "days_back", null, 7), Str(c, "collector_name")),
+            ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit)),
 
             /* ── latch / spinlock ── */
             ["get_latch_stats"] = (c, pg, an) => DarlingMcpLatchSpinlockTools.GetLatchStats(pg, Server(c), Hours(c, 24), Rows(c, "top", 10), as_of: AsOf(c)),

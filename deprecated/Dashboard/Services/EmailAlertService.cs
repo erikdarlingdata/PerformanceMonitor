@@ -98,11 +98,17 @@ namespace PerformanceMonitorDashboard.Services
             string notificationType, string? sendError = null, bool muted = false, string? detailText = null,
             string? contextJson = null)
         {
+            /* This SKU is deprecated and its 26 callers each hand-compute the alertSent/notificationType
+               pair, so the disposition arrives already decided rather than derived. FromLegacyStoredColumns
+               is internal and exists for exactly this call. */
+#pragma warning disable CS0618
+            var delivery = AlertDelivery.FromLegacyStoredColumns(alertSent, notificationType, sendError);
+#pragma warning restore CS0618
             _historyStore.RecordAlertAsync(new AlertHistoryRecord(
                 serverId, serverName, metricName,
                 currentValue, thresholdValue,
                 null, null,
-                alertSent, notificationType, sendError,
+                delivery,
                 muted, detailText, contextJson)).GetAwaiter().GetResult();
         }
 

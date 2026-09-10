@@ -216,6 +216,7 @@ internal static class DarlingQueryStoreRegressionReader
     {
         var rows = new List<RegressionRow>();
         await using var command = postgres.CreateCommand(QueryStoreRegressionsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new NpgsqlParameter
         {
@@ -258,6 +259,7 @@ internal static class DarlingQueryStoreRegressionReader
         CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(RegressionCoverageSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))

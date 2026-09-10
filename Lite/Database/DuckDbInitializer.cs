@@ -85,8 +85,10 @@ public class DuckDbInitializer
     /// timeout waits behind an archival for however long the archival takes. Eleven current callers do
     /// that, and can: they are alert-sweep and mute-CRUD paths whose failures are caught, logged and
     /// non-fatal. <c>LocalDataService.OpenWriteConnectionAsync</c> is the one that cannot, because it is on
-    /// the path the UI thread awaits, so it passes 5 seconds and #2208's maintenance block treats the
-    /// timeout as "skip this cycle". If you are adding a caller, decide which of those two you are.</para>
+    /// the path the UI thread awaits, so it passes <c>LocalDataService.WriteLockBudget</c> — five seconds
+    /// in the shipped app, and whatever a host with no dispatcher to protect states instead — and #2208's
+    /// maintenance block treats the timeout as "skip this cycle". If you are adding a caller, decide which
+    /// of those two you are.</para>
     /// </summary>
     private static readonly ReaderWriterLockSlim s_dbLock = new(LockRecursionPolicy.NoRecursion);
 
@@ -269,7 +271,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 56;
+    internal const int CurrentSchemaVersion = 57;
 
     private readonly string _archivePath;
 
@@ -1289,6 +1291,25 @@ public class DuckDbInitializer
                     generator. Column types and ordinals are unchanged, so the positional appender
                     and old parquet are unaffected. */
             _logger?.LogInformation("Running migration to v48: server_properties hardware columns become nullable");
+
+            /* #2748: on any database that has ever completed a prior startup, DuckDbSchemaGenerator.CreateIndex's
+               default case already created idx_server_properties_time ON server_properties(server_id,
+               collection_time) — a real catalog object persisted in the .duckdb file, surviving a restart.
+               DuckDB's ALTER COLUMN dependency check refuses to touch a table with ANY index on it, even one
+               that names none of the altered columns — confirmed empirically, not merely by reading the error
+               text: "Dependency Error: Cannot alter entry ... because there are entries that depend on it."
+               (An archive view on the table does NOT trigger this — only the index does.) Drop the index
+               first; Schema.GetAllIndexStatements()'s loop (called unconditionally right after migrations,
+               inside this same InitializeAsync) recreates it, so nothing is left dangling. */
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "DROP INDEX IF EXISTS idx_server_properties_time");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v48 could not drop idx_server_properties_time ahead of the ALTERs (non-fatal, the ALTERs below may still fail): {Error}", ex.Message);
+            }
+
             foreach (var column in new[] { "cpu_count", "hyperthread_ratio", "physical_memory_mb" })
             {
                 try
@@ -1384,12 +1405,24 @@ public class DuckDbInitializer
             _logger?.LogInformation("Running migration to v53: adding the alerted-state memory to config_database_state_expected");
             try
             {
+                /* #2748: config_database_state_expected itself was never given its own numbered migration —
+                   it only exists because Schema.GetAllTableStatements() unconditionally CREATE TABLE IF NOT
+                   EXISTS-es it, which does not run until AFTER RunMigrationsAsync returns. A database old
+                   enough to predate the table (upgrading through v53 for the first time) hits this ALTER
+                   before that later step ever creates it. CreateDatabaseStateExpectedTable is itself
+                   idempotent, so calling it here is a no-op for anyone who already has the table (from a
+                   prior run) and a correct fresh create — new columns included — for anyone who does not. */
+                await ExecuteNonQueryAsync(connection, Schema.CreateDatabaseStateExpectedTable);
                 await ExecuteNonQueryAsync(connection, "ALTER TABLE config_database_state_expected ADD COLUMN IF NOT EXISTS last_alerted_state VARCHAR");
                 await ExecuteNonQueryAsync(connection, "ALTER TABLE config_database_state_expected ADD COLUMN IF NOT EXISTS last_alerted_at TIMESTAMP");
             }
-            catch
+            catch (Exception ex)
             {
-                /* Table doesn't exist yet — will be created with the full schema below */
+                /* The CREATE above means "table doesn't exist yet" can no longer be the cause — a catch here
+                   now means something else went wrong. Log it rather than swallow it silently, matching every
+                   sibling migration block; this whole PR exists because a silently-swallowed failure here is
+                   exactly what left #2748's database unfixed for two releases. */
+                _logger?.LogWarning("Migration to v53 encountered an error (non-fatal): {Error}", ex.Message);
             }
         }
 
@@ -1472,6 +1505,47 @@ public class DuckDbInitializer
             catch (Exception ex)
             {
                 _logger?.LogWarning("Migration to v56 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 57)
+        {
+            /* v57: drop NOT NULL from database_size_stats.database_id / file_id / physical_name
+                    (#3262). The Azure sibling arm (#2643) reads sys.resource_stats, which has
+                    per-DATABASE sizes and no per-file breakdown, so a sibling row deliberately
+                    carries NULL in all three — and the reader now passes those NULLs through
+                    instead of dying on the cast. An existing database has to have the constraint
+                    dropped or the appender fails the first sibling row and the whole batch with
+                    it. New databases get it from the generator; Darling's Postgres store was
+                    always nullable here. Column types and ordinals are unchanged, so the
+                    positional appender and old parquet are unaffected. */
+            _logger?.LogInformation("Running migration to v57: database_size_stats sibling-row columns become nullable");
+
+            /* Same trap as v48 (#2748): DuckDB's ALTER COLUMN refuses on a table with ANY index,
+               even one naming none of the altered columns. Drop it first;
+               Schema.GetAllIndexStatements()'s loop (called unconditionally right after
+               migrations, inside this same InitializeAsync) recreates it. */
+            try
+            {
+                await ExecuteNonQueryAsync(connection, "DROP INDEX IF EXISTS idx_database_size_stats_time");
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v57 could not drop idx_database_size_stats_time ahead of the ALTERs (non-fatal, the ALTERs below may still fail): {Error}", ex.Message);
+            }
+
+            foreach (var column in new[] { "database_id", "file_id", "physical_name" })
+            {
+                try
+                {
+                    await ExecuteNonQueryAsync(connection, $"ALTER TABLE database_size_stats ALTER COLUMN {column} DROP NOT NULL");
+                }
+                catch (Exception ex)
+                {
+                    /* Already nullable, or the table does not exist yet (fresh install creates it
+                       correctly from the generator) — neither is fatal. */
+                    _logger?.LogWarning("Migration to v57 on {Column} encountered an error (non-fatal): {Error}", column, ex.Message);
+                }
             }
         }
     }

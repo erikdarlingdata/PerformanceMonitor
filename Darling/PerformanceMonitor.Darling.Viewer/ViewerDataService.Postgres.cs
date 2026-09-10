@@ -102,6 +102,7 @@ public sealed partial class ViewerDataService
         }
 
         await using var command = _dataSource.CreateCommand(PostgresCollectorHealthSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         /* Kind-Unspecified at the bind, per the store's naive-UTC discipline: a Kind=Utc DateTime makes
            Npgsql infer timestamptz, and PostgreSQL then zone-shifts these naive columns to compare them, so
@@ -332,10 +333,36 @@ public sealed partial class ViewerDataService
         int serverId, int limit = 500, CancellationToken cancellationToken = default) =>
         DarlingPgServerConfigReader.GetCurrentConfigAsync(_dataSource, serverId, limit, cancellationToken);
 
+    /// <summary>Overview tab - instance-level CPU utilization for a managed PostgreSQL/Aurora target
+    /// (#2719), sourced from AWS Performance Insights rather than a database connection. Newest first, so
+    /// the most recent reading is the one an operator sees without scrolling.</summary>
+    public sealed record PgCpuUtilizationRow
+    {
+        public required string Time { get; init; }
+        public required double CpuPercent { get; init; }
+    }
+
+    public async Task<List<PgCpuUtilizationRow>> GetPgCpuUtilizationHistoryAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        var samples = await DarlingPgCpuUtilizationReader.GetHistoryAsync(
+            _dataSource, serverId, startUtc, endUtc, cancellationToken);
+
+        return samples
+            .OrderByDescending(s => s.SampleTimeUtc)
+            .Select(s => new PgCpuUtilizationRow
+            {
+                Time = ViewerTimeHelper.ForDisplay(s.SampleTimeUtc).ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture),
+                CpuPercent = s.CpuPercent,
+            })
+            .ToList();
+    }
+
     /// <summary>Activity tab - PostgreSQL deadlocks reported in the window (#2661), one row per distinct
-    /// report. Windowed on when the deadlock HAPPENED rather than when it was collected: the collector
-    /// re-reads an overlapping log tail, so a report is found minutes later and found again for as long as
-    /// it stays in the window, and filtering on collection time would place it wrongly and move it.</summary>
+    /// report. Windowed on when the deadlock HAPPENED rather than when it was collected: a report is
+    /// always found some minutes after the fact, and on the <c>pg_read_file</c> route it is found again
+    /// for as long as it stays in the re-read tail, so filtering on collection time would place it
+    /// wrongly and move it every cycle.</summary>
     public Task<List<DarlingPgDeadlockReader.PgDeadlockRow>> GetPgDeadlocksAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 100,
         CancellationToken cancellationToken = default) =>
@@ -372,6 +399,15 @@ public sealed partial class ViewerDataService
         DarlingPgKernelStatsReader.GetPgKernelStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 
     /// <summary>
+    /// Instance-level CPU from AWS Performance Insights (#2719). Aurora only — see
+    /// <see cref="PerformanceMonitor.Collectors.PgCpuUtilizationCollector"/>'s doc comment for why a
+    /// self-hosted target has no route to this at all.
+    /// </summary>
+    public Task<List<DarlingPgCpuUtilizationReader.CpuSample>> GetPgCpuUtilizationAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DarlingPgCpuUtilizationReader.GetHistoryAsync(_dataSource, serverId, startUtc, endUtc, cancellationToken);
+
+    /// <summary>
     /// Which columns are filtered on and how badly the planner estimated them (#2603). Newest per
     /// predicate rather than differenced — see the reader for why a rate is the wrong shape here.
     /// </summary>
@@ -389,12 +425,25 @@ public sealed partial class ViewerDataService
 
     /// <summary>Storage tab - per-column planner statistics (#2543), latest per column and ranked by
     /// suspicion rather than alphabetically: heavy skew first (the parameter-sensitivity signal), then low
-    /// correlation (why an index scan was rejected). Zero rows has TWO causes - no qualifying table, or a
-    /// monitoring role without SELECT, since pg_stats filters on has_column_privilege - and the caller must
-    /// not report either as healthy statistics.</summary>
+    /// correlation (why an index scan was rejected). This returns the ROWS only; what the row count MEANS is
+    /// <see cref="GetPgColumnStatsCoverageAsync"/>, and a caller that prints one without the other is back
+    /// to reporting a privilege denial as healthy statistics.</summary>
     public Task<List<DarlingPgColumnStatsReader.PgColumnStatRow>> GetPgColumnStatsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 100, CancellationToken cancellationToken = default) =>
         DarlingPgColumnStatsReader.GetPgColumnStatsAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    /// <summary>Storage tab - WHICH of pg_column_stats' outcomes produced the row count above (#3154):
+    /// nothing clears the collector's page floor, the monitoring login cannot see pg_stats, coverage is
+    /// partial, or neither legitimate cause applies and it is a fault. The same classifier
+    /// <c>get_pg_column_stats</c> calls, over the same evidence, so the panel and the tool cannot give one
+    /// operator two answers.
+    /// <para>Takes the window END only, mirroring the reader: coverage is a CURRENT state of the target, so
+    /// there is no start to honour and no start is accepted. A parameter passed and ignored would let the
+    /// panel look as though its own window governed this answer.</para></summary>
+    public Task<PgColumnStatsCoverageVerdict> GetPgColumnStatsCoverageAsync(
+        int serverId, DateTime endUtc, int storedColumnRows, CancellationToken cancellationToken = default) =>
+        DarlingPgColumnStatsReader.GetCoverageVerdictAsync(
+            _dataSource, serverId, endUtc, storedColumnRows, cancellationToken);
 
     /// <summary>Replication tab - connected standbys and how far behind each got (#2544). Returns the latest
     /// sample AND the window's worst, because a replica that drifts hundreds of MB behind and recovers reads

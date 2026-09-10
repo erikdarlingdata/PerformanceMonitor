@@ -49,7 +49,8 @@ PerformanceMonitor_Install_*.txt
 
 # Internal development files (not for public release)
 .internal/
-.claude/
+.claude/*
+!.claude/skills/
 CLAUDE.md
 AGENTS.md
 Dashboard/todo.md

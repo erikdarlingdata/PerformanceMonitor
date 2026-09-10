@@ -72,8 +72,13 @@ namespace PerformanceMonitor.Darling.Service;
 /// initdb, no restart, no credential rewrite. The conf append is marker-guarded and re-checked
 /// every start, so a crash between initdb and the append self-heals on the next run instead of
 /// silently degrading TimescaleDB to plain-PG mode.</para>
+///
+/// <para>Managed mode is Windows-only (DPAPI credentials, ACL hardening, the Windows service
+/// lifecycle), annotated on the lifecycle members rather than the type: the pure statics some
+/// cross-platform paths reuse — the role-name consts, <see cref="CertificateSanCoversIp"/> (the web
+/// dashboard's SAN check shares it) — are platform-neutral, and a member cannot widen a type-level
+/// platform annotation.</para>
 /// </summary>
-[SupportedOSPlatform("windows")]
 public sealed class DarlingManagedPostgres
 {
     /// <summary>The cluster's bootstrap superuser AND the store's database name — the managed twin of the sample's unmanaged string.</summary>
@@ -182,6 +187,172 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV7 = "# Managed by PerformanceMonitor Darling (v7 compression memory) -- do not remove this block";
 
     /// <summary>
+    /// Marker for the v8 hardware-sizing block (#2845). The EIGHTH block, and the first keyed on
+    /// something other than a version: v1-v7 each ask "is this marker absent?", a question answered once
+    /// and then never again, so every one of them re-derives only on a FORMULA change. Nothing re-derived
+    /// on a HARDWARE change, and a resized host kept its old sizing indefinitely — observed on all three
+    /// monitoring boxes after a 16 GB -> 31.5 GB resize, which left <c>effective_cache_size</c> at
+    /// 11.86 GB (75% of the RAM the box no longer had).
+    ///
+    /// <para>This block keys on <see cref="ConfHardwareFingerprintPrefix"/> — a line recording the
+    /// DERIVATION INPUTS the settings below it were written under — so the question becomes "were these
+    /// derived under the hardware we are running on NOW?". The two triggers are orthogonal and compose: a
+    /// version marker heals "we changed our mind about the formula", this heals "the machine changed
+    /// underneath it". Precedence is therefore never ambiguous even though both write the same file:
+    /// v8 re-states the SAME formulas (it calls <see cref="DeriveMemorySettings"/> and
+    /// <see cref="DeriveWorkerSettings"/>, the same helpers the version blocks use), so it can only ever
+    /// differ from them by being FRESHER, never by disagreeing.</para>
+    /// </summary>
+    public const string ConfMarkerV8 = "# Managed by PerformanceMonitor Darling (v8 hardware sizing) -- do not remove this block";
+
+    /// <summary>
+    /// DEFENCE IN DEPTH for the naive-UTC/timestamptz split, not the fix for it. Every timestamp column in
+    /// the store is <c>timestamp without time zone</c> holding naive UTC, but initdb takes
+    /// <c>timezone</c> from the host OS — so a managed store on a Windows box in New York runs its sessions
+    /// at <c>America/New_York</c>, and anything that compares a naive column against <c>now()</c> has the
+    /// naive side converted at that zone. Pinning the session zone to UTC makes that conversion the identity
+    /// it was always assumed to be, and makes <c>timestamptz::text</c> (TimescaleDB's catalog views, psql
+    /// output) render on the same clock as the collected data instead of four hours off it.
+    ///
+    /// <para>It does NOT replace binding those bounds as parameters: it reaches MANAGED stores only, and a
+    /// bring-your-own store keeps whatever zone its owner built it with. <c>StoreSqlClockDisciplineTests</c>
+    /// is what actually holds the predicates; this is the belt behind it.</para>
+    ///
+    /// <para><c>timezone</c> is a SIGHUP-context setting and this append runs before pg_ctl start, so it
+    /// takes effect on the very start that writes it — the log-rotation story, not the shared_buffers one.
+    /// Existing clusters gain it by the marker being absent, which is what carries this to the stores
+    /// already in the field rather than only to a fresh initdb.</para>
+    /// </summary>
+    public const string ConfMarkerV9 = "# Managed by PerformanceMonitor Darling (v9 session time zone) -- do not remove this block";
+
+    /// <summary>
+    /// Marker for the v10 message-locale block (#3053): pin <c>lc_messages</c> so the server writes its own
+    /// messages — <b>and its severity labels</b> — untranslated. A TENTH independently versioned block, for
+    /// the same reason v9 is separate from v3: an existing cluster gains it by the marker being absent on its
+    /// next service-owned start, which is what carries the pin to the stores already in the field.
+    ///
+    /// <para><b>The severity label is the part that bites.</b> PostgreSQL translates the label as well as the
+    /// body — a store running a German catalogue writes <c>FEHLER:</c> where an English one writes
+    /// <c>ERROR:</c>. <see cref="StoreLogClassifier"/> anchors on that field and its residue class is gated on
+    /// <see cref="StoreLogClassifier.IsAtLeastWarning"/>, so a token it does not recognise cannot reach
+    /// <c>unclassified</c>-retained and lands in <c>routine</c>, counted with its text dropped. The design's
+    /// property is that a rule the table forgot costs a heading and never a row; under a translated label it
+    /// costs the row.</para>
+    ///
+    /// <para><b>What this block adds over the initdb line, stated precisely, because it is less than it
+    /// looks.</b> <see cref="InitializeClusterAsync"/> already passes <c>--locale=C</c>, and initdb templates
+    /// the resolved <c>lc_*</c> values into the conf it generates — so a cluster this build initialized was
+    /// never running a translated catalogue, and the plain default-initdb exposure does not apply to it. This
+    /// block buys three things that argument does not. It makes the parser's dependency EXPLICIT and testable,
+    /// so changing <c>--locale</c> for the collation reason it exists for cannot silently re-localise messages
+    /// as a side effect. It reaches data directories this build's initdb did not create — built before that
+    /// argument landed, restored, adopted, or hand-initialized — which is the population the marker-absent
+    /// heal exists for. And it wins over the generated line by last-occurrence, so an edited value is
+    /// corrected rather than inherited.</para>
+    ///
+    /// <para><b>What it does not reach.</b> <c>postgresql.auto.conf</c> is read after <c>postgresql.conf</c>,
+    /// so an <c>ALTER SYSTEM SET lc_messages</c> still wins; this is diagnostic fidelity, not a security
+    /// boundary, so it is not forced through the <c>-o</c> runtime override the way <c>listen_addresses</c>
+    /// is. And it reaches MANAGED stores only, while the classifier does not: <c>StoreLogSweep</c> runs on
+    /// every store shape, so a bring-your-own store's log is classified under whatever locale its owner gave
+    /// it.</para>
+    ///
+    /// <para><c>C</c> rather than <c>en_US.UTF-8</c>: <c>C</c> is guaranteed present with no locale
+    /// installed on the host, and it is the locale under which PostgreSQL emits its untranslated message
+    /// catalogue. Nothing in this product renders PostgreSQL message text to an end user in their own
+    /// language — it goes to parsers and to English-throughout operator diagnostics — so the pin costs
+    /// nothing it does not buy back. It is <c>lc_messages</c> ALONE: <c>lc_monetary</c>, <c>lc_numeric</c>
+    /// and <c>lc_time</c> govern how the server renders values the product reads as typed parameters, not as
+    /// text, and would be a behaviour change with no defect behind it.</para>
+    ///
+    /// <para><c>lc_messages</c> is a SIGHUP-context setting and this append runs before pg_ctl start, so it
+    /// takes effect on the very start that writes it — the v9 story. The one exception is the adopted-listener
+    /// path in <see cref="EnsureRunningAsync"/>: when a postmaster is already running this service neither
+    /// stops nor signals it, so the pin waits for the next service-owned start. Nothing here reloads, and the
+    /// class's only <c>pg_ctl reload</c> is gated on pg_hba.conf changing, so it cannot be relied on to
+    /// carry this.</para>
+    /// </summary>
+    public const string ConfMarkerV10 = "# Managed by PerformanceMonitor Darling (v10 message locale) -- do not remove this block";
+
+    /// <summary>
+    /// Marker for the v11 job-execution-logging block (#3175): pin
+    /// <c>timescaledb.enable_job_execution_logging</c> on, so <c>timescaledb_information.job_history</c>
+    /// records one row per background-job run. An ELEVENTH independently versioned block, and it exists for
+    /// a reason none of the others do — the setting was originally written into the <b>v1</b> block (#1681),
+    /// the one block whose marker is already present on every pre-existing cluster. <see cref="EnsureConfAppended"/>
+    /// skips a block whose marker it finds, so on any cluster that existed before #1681 the append that would
+    /// have carried the GUC never ran, and the setting never arrived. Every setting after v1 got its own
+    /// marker for exactly this reason; this one did not.
+    ///
+    /// <para><b>Why that is worse than a plain missing setting.</b> A maximum over an empty
+    /// <c>job_history</c> returns ZERO ROWS, and zero rows reads as <i>"no run exceeded the line"</i> rather
+    /// than as <i>"this instrument is off"</i> — an absence that reads as health, which is the failure shape
+    /// the rest of this codebase guards against explicitly. Measured on two field stores running the same
+    /// binary: the cluster initdb'd 2026-07-17 carried all ten markers, <b>no GUC line</b>, an effective
+    /// <c>off</c> with <c>source = default</c>, and ONE history row for 110 jobs; the cluster initdb'd
+    /// 2026-08-17 carried the line and 39,020 rows. Nothing in the first store's answer distinguished it
+    /// from a clean one, which silently scoped every <c>job_history</c>-derived conclusion to the newer
+    /// store.</para>
+    ///
+    /// <para><b>MOVED out of v1 rather than duplicated into v11.</b> Leaving a copy in
+    /// <see cref="BuildConfAppend"/> would cost nothing at runtime (identical value, last occurrence wins)
+    /// and would leave the repository asserting this setting in the block that provably cannot deliver it —
+    /// which is the reading #1681 made, and the one the next person would copy. The GUC is stated once, in
+    /// the block that heals. Two pins hold it: <c>TheJobExecutionLoggingGuc_IsInV11AndNotInTheUnhealableV1Block</c>
+    /// asserts both halves of the move, and <c>ConfV1Block_ContentIsFrozen_ANewSettingNeedsItsOwnMarker</c>
+    /// fails on any setting added to the v1 builder — the pin whose absence let this through.</para>
+    ///
+    /// <para><b>DELIBERATELY NOT A WIDENING OF THE V1 MARKER, and the harm is measured rather than
+    /// asserted.</b> Making the v1 check ask "is the GUC line present?" instead of "is the v1 marker
+    /// present?" would re-append the WHOLE v1 block to every pre-existing cluster, and that block is
+    /// shared. <c>shared_preload_libraries</c> is list-valued and the last occurrence REPLACES the list
+    /// rather than extending it: measured on TimescaleDB 2.30.0/PG17, a conf carrying an operator's
+    /// <c>'timescaledb,pg_stat_statements'</c> came back up serving <c>'timescaledb'</c> alone once the v1
+    /// block was appended behind it. <c>listen_addresses</c> would likewise re-assert loopback over a
+    /// conf-configured exposure, and <c>port</c> would override a hand-edited one. A separate marker
+    /// re-applies none of it.</para>
+    ///
+    /// <para><b>Reload semantics, measured rather than assumed.</b> The GUC's context is <c>sighup</c>
+    /// (measured on 2.30.0: <c>pg_settings.context = 'sighup'</c>, and a conf append plus one
+    /// <c>pg_reload_conf()</c> moved it from <c>off</c>/<c>source = default</c> to <c>on</c>/<c>source =
+    /// configuration file</c>). This append runs BEFORE pg_ctl start, so on a service-owned start no reload
+    /// is needed and the setting is live on the very start that writes it. The exception is the
+    /// adopted-listener path in <see cref="EnsureRunningAsync"/>: a postmaster already running is neither
+    /// stopped nor signalled, so there the heal waits for the next service-owned start. <b>No reload is
+    /// issued and that is a decision, not an omission</b> — v9 and v10 carry the same exposure and the same
+    /// choice, signalling a server this service did not start is the same class of act as stopping one, and
+    /// a reload would apply this block while leaving the restart-only settings that the SAME heal may have
+    /// just appended (v2/v3/v4/v5/v7) inert. A half-applied conf is worse than a consistently deferred one:
+    /// it removes the operator's ability to reason about the server's state from "did the service own this
+    /// start".</para>
+    ///
+    /// <para><b>Healing starts logging; it does not recover history.</b> A store that has been running
+    /// without the GUC wrote no per-run rows and there is nothing to backfill — TimescaleDB does not retain
+    /// what it was told not to record. So the honest outcome is "logging starts now", which the append's log
+    /// line states rather than implies, and a <c>job_history</c> window that predates the heal stays empty
+    /// on purpose. <c>timescaledb_information.job_stats</c> remains the surface that reports on an
+    /// untouched store; it is maintained unconditionally, which is why every shipped read uses it.</para>
+    ///
+    /// <para><b>What this cannot beat.</b> <c>postgresql.auto.conf</c> is read after
+    /// <c>postgresql.conf</c>, so an <c>ALTER SYSTEM SET timescaledb.enable_job_execution_logging = off</c>
+    /// still wins — measured: with the appended block last in <c>postgresql.conf</c> the effective value was
+    /// <c>off</c> with <c>sourcefile</c> naming <c>postgresql.auto.conf</c>. That is precisely why the
+    /// read-side check reports the EFFECTIVE value and its source rather than the presence of this marker: a
+    /// marker says the product did its part, and only the effective value says the instrument is on.</para>
+    /// </summary>
+    public const string ConfMarkerV11 = "# Managed by PerformanceMonitor Darling (v11 job execution logging) -- do not remove this block";
+
+    /// <summary>
+    /// Prefix of the v8 fingerprint line — the record of what the sizing beneath it was derived FROM,
+    /// which is the whole mechanism: a marker can only say "a block exists", a fingerprint says "a block
+    /// exists FOR THIS MACHINE". Compared by <see cref="ConfHasCurrentHardwareFingerprint"/> against the
+    /// LAST occurrence rather than any occurrence, which is what makes a resize BACK to a previous size
+    /// re-derive: a plain Contains would find the stale earlier fingerprint and skip, leaving the larger
+    /// host's block still winning by last-occurrence-wins.
+    /// </summary>
+    public const string ConfHardwareFingerprintPrefix = "# darling-hardware-fingerprint: ";
+
+    /// <summary>
     /// Markers delimiting the Darling-managed network access block in pg_hba.conf
     /// (darling-network-endpoints, D5). <see cref="ReconcilePgHba"/> replaces exactly the lines
     /// between them and preserves every non-marked line, so the opt-in <c>hostssl</c> rule is
@@ -233,6 +404,7 @@ public sealed class DarlingManagedPostgres
     private int _bundledMajor;
     private string? _bundledTimescaleVersion;
 
+    [SupportedOSPlatform("windows")]
     public DarlingManagedPostgres(PostgresConfig config, ILogger logger, string? runtimeRootOverride = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -262,6 +434,7 @@ public sealed class DarlingManagedPostgres
     /// can raise a real self-alert once the alert engine is up. The store is down while an upgrade runs, so
     /// its START can only be a log line; both terminal states happen with a live store and are alertable.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     internal DarlingStoreUpgrade.StoreUpgradeOutcome LastUpgradeOutcome { get; private set; }
         = DarlingStoreUpgrade.StoreUpgradeOutcome.None;
 
@@ -320,13 +493,12 @@ public sealed class DarlingManagedPostgres
         builder.Append("shared_preload_libraries = 'timescaledb'\n");
         builder.Append("port = ").Append(port).Append('\n');
         builder.Append("listen_addresses = '127.0.0.1'\n");
-        /* #1681: per-run audit trail for TimescaleDB background jobs. Off by default, which meant
-           timescaledb_information.job_errors and job_history returned ZERO rows for every job on a field
-           store — including jobs with dozens of confirmed successful runs. When a compression job hung
-           there (9 times in 6 days, always the two highest-write hypertables) there was no captured error,
-           no worker PID, no start/finish record: nothing to diagnose from. The rows are small and written
-           once per job run, not per row processed. */
-        builder.Append("timescaledb.enable_job_execution_logging = on\n");
+        /* timescaledb.enable_job_execution_logging lives in the v11 block, NOT here (#3175). It was here
+           (#1681) and that is why it never reached a single pre-existing cluster: this block's marker is
+           already present on any cluster that predates the setting, so the append carrying it is skipped
+           and the GUC arrives only on a fresh initdb. Every other setting added after v1 has its own
+           marker for exactly that reason. See ConfMarkerV11 for the measurement and for why the fix is a
+           new marker rather than a looser match on this one. */
         /* LZ4 TOAST (PG14+; the bundled runtime is PG18): large text/XML values — query text, plan
            XML, deadlock/blocked-process XML — auto-compress on write faster than the pglz default
            and about as small, shrinking the ~1-day hot window before TimescaleDB's columnar
@@ -354,18 +526,35 @@ public sealed class DarlingManagedPostgres
     /// </summary>
     public static string BuildWorkerSizingConfAppend()
     {
-        /* Derived from the TRUE hypertable count (never stale when a collector is added; includes
-           collection_log, the V23 hypertable outside the collector catalog): one background worker per
-           per-hypertable compression policy that can run concurrently + the scheduler + slack;
-           max_worker_processes = 3 (other bg workers) + bg workers + 8 (default max_parallel_workers). */
-        var maxBackgroundWorkers = TimescaleSupport.HypertableCount + 2;
-        var maxWorkerProcesses = 3 + maxBackgroundWorkers + 8;
+        var workers = DeriveWorkerSettings(TimescaleSupport.HypertableCount);
         var builder = new StringBuilder();
         builder.Append('\n');
         builder.Append(ConfMarkerV2).Append('\n');
-        builder.Append("timescaledb.max_background_workers = ").Append(maxBackgroundWorkers).Append('\n');
-        builder.Append("max_worker_processes = ").Append(maxWorkerProcesses).Append('\n');
+        builder.Append("timescaledb.max_background_workers = ").Append(workers.MaxBackgroundWorkers).Append('\n');
+        builder.Append("max_worker_processes = ").Append(workers.MaxWorkerProcesses).Append('\n');
         return builder.ToString();
+    }
+
+    /// <summary>The two worker settings derived from the live hypertable count, both restart-only.</summary>
+    internal readonly record struct WorkerSettings(int MaxBackgroundWorkers, int MaxWorkerProcesses);
+
+    /// <summary>
+    /// Derives the worker sizing from the hypertable count — extracted from
+    /// <see cref="BuildWorkerSizingConfAppend"/> (#2845) so the v2 block and the v8 hardware re-derivation
+    /// share ONE formula and cannot drift apart. One background worker per per-hypertable compression
+    /// policy that can run concurrently + the scheduler + slack; max_worker_processes = 3 (other bg
+    /// workers) + bg workers + 8 (the PostgreSQL default max_parallel_workers, which this class does not
+    /// set — see the v8 block for why raising it is deliberately NOT bundled here).
+    ///
+    /// <para>The v2 doc comment claims this "never goes stale as collectors are added". That was true of
+    /// the FORMULA and false of its application: v2 is marker-keyed, so an existing store computed these
+    /// once and kept the answer no matter how many collectors arrived afterwards. The v8 block is what
+    /// makes the claim true, by re-deriving whenever the hypertable count changes.</para>
+    /// </summary>
+    internal static WorkerSettings DeriveWorkerSettings(int hypertableCount)
+    {
+        var maxBackgroundWorkers = hypertableCount + 2;
+        return new WorkerSettings(maxBackgroundWorkers, 3 + maxBackgroundWorkers + 8);
     }
 
     /// <summary>
@@ -571,6 +760,203 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
+    /// The v8 fingerprint line for a given set of derivation inputs (#2845) — RAM and the hypertable
+    /// count, the two quantities every setting this block emits is a function of. Formatted invariantly so
+    /// the comparison is a plain ordinal string match on a machine with any locale.
+    ///
+    /// <para>RAM is normalised through the same non-positive fallback <see cref="DeriveMemorySettings"/>
+    /// applies, so a zero reading fingerprints as the 4 GB value it would actually have derived under. Note
+    /// that normalisation is NOT what makes the fingerprint stable across a failed read, and must not be
+    /// relied on for it: <see cref="GetTotalPhysicalMemoryBytes"/> falls back to a LIVE GC figure before it
+    /// reaches that sentinel, so a failed read arrives here as a varying positive number this guard cannot
+    /// see. Stability comes from <see cref="ShouldAppendHardwareSizing"/> refusing to act at all without an
+    /// authoritative reading.</para>
+    /// </summary>
+    internal static string BuildHardwareFingerprint(long totalPhysicalMemoryBytes, int hypertableCount)
+        => FormattableString.Invariant(
+            $"{ConfHardwareFingerprintPrefix}ram_mb={QuantizeRam(totalPhysicalMemoryBytes) / (1024L * 1024L)} hypertables={hypertableCount}");
+
+    /// <summary>
+    /// Rounds a raw RAM reading to the nearest GB for the v8 path (#2845 review), and is applied to BOTH
+    /// the fingerprint and the derivation so a block is exactly reproducible from the fingerprint above it.
+    ///
+    /// <para><b>Why quantize.</b> The fingerprint is an exact comparison and v8 runs on EVERY start, so any
+    /// jitter in the reported total reads as a hardware change: a fresh block appended per restart, seven
+    /// lines of postgresql.conf growth each time, forever. <c>ullTotalPhys</c> is not guaranteed
+    /// bit-identical across reboots — a balloon/Dynamic-Memory guest can report a different current total
+    /// with no operator resize — and these ARE cloud VMs. The fleet's own readings already show the total is
+    /// not a round number (31.5 GB on a nominally 32 GB host, firmware reservation), which is the same class
+    /// of wobble one size larger. Rounding also recovers the NOMINAL size the sizing formulas conceptually
+    /// want, rather than the slightly-short figure the OS reports.</para>
+    ///
+    /// <para>A GB is the right granularity because it is far above any plausible reporting jitter and far
+    /// below any real resize — the smallest step this class can be resized by is 4 -> 8 GB. It applies to the
+    /// v8 path ONLY: v3/v5/v7 keep deriving from the raw reading exactly as before, so this cannot shift a
+    /// value on a store that never reaches v8.</para>
+    /// </summary>
+    internal static long QuantizeRam(long totalPhysicalMemoryBytes)
+    {
+        const long oneGb = 1024L * 1024L * 1024L;
+        var ram = totalPhysicalMemoryBytes > 0 ? totalPhysicalMemoryBytes : MemoryFallbackRamBytes;
+        return (ram + oneGb / 2) / oneGb * oneGb;
+    }
+
+    /// <summary>
+    /// True when the MOST RECENT fingerprint in the conf matches the current hardware — the test that
+    /// decides whether <see cref="BuildHardwareSizingConfAppend"/> needs to run (#2845).
+    ///
+    /// <para>Deliberately NOT <c>conf.Contains(fingerprint)</c>. postgresql.conf takes the LAST occurrence
+    /// of a setting, so what is in force is whatever the newest block said. A host resized 16 -> 32 -> 16 GB
+    /// would, under a Contains test, find its original 16 GB fingerprint still present and skip — leaving
+    /// the 32 GB block as the last occurrence and therefore still in force on a box that no longer has
+    /// 32 GB. Comparing only the last fingerprint makes the check ask the question that matches the file's
+    /// own semantics, and is what lets this converge instead of latching.</para>
+    /// </summary>
+    internal static bool ConfHasCurrentHardwareFingerprint(string conf, string expectedFingerprint)
+    {
+        var lastIndex = conf.LastIndexOf(ConfHardwareFingerprintPrefix, StringComparison.Ordinal);
+        if (lastIndex < 0)
+        {
+            return false;
+        }
+
+        var lineEnd = conf.IndexOf('\n', lastIndex);
+        var line = lineEnd < 0 ? conf[lastIndex..] : conf[lastIndex..lineEnd];
+        return string.Equals(line.TrimEnd('\r'), expectedFingerprint, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Whether the v8 block should be appended on this start (#2845) — the whole decision as one pure
+    /// function so the property can be pinned without a data directory.
+    ///
+    /// <para>Two conditions, and the FIRST is the one that is easy to get wrong: the RAM reading must be
+    /// authoritative. A non-authoritative reading is not evidence that the hardware is unchanged, it is the
+    /// absence of evidence either way — and re-deriving production sizing from a number we could not read is
+    /// worse than leaving the last good block in force. It also stops a flapping Win32 call from minting a
+    /// novel fingerprint on every blip and appending a block each time, which a value-only guard cannot do
+    /// because the fallback it would guard against is a live, varying quantity rather than a fixed
+    /// sentinel.</para>
+    /// </summary>
+    internal static bool ShouldAppendHardwareSizing(string conf, bool ramReadingIsAuthoritative, string expectedFingerprint)
+        => ramReadingIsAuthoritative && !ConfHasCurrentHardwareFingerprint(conf, expectedFingerprint);
+
+    /// <summary>
+    /// The v8 hardware-sizing block (#2845): re-states the settings that are a pure function of the
+    /// HOST, at the host we are on now, and records the inputs it used so the next start can tell whether
+    /// they still hold.
+    ///
+    /// <para><b>What it emits, and why only these.</b> <c>effective_cache_size</c> is the setting the issue
+    /// was raised for — a planner hint with no allocation, found at 11.86 GB (75% of 16 GB) on hosts that
+    /// now have 31.5 GB, which biases the planner toward sequential scans on a store serving ~670k small
+    /// index lookups a day. <c>maintenance_work_mem</c> is a per-operation CEILING that PostgreSQL grows
+    /// into rather than reserves, so re-deriving it cannot overcommit. The two worker settings are
+    /// restart-only counts of background slots that only ever grow as collectors are added, and re-stating
+    /// them is what finally makes the v2 block's "never goes stale" claim true.</para>
+    ///
+    /// <para><b>What it deliberately does NOT emit, and why the omissions are the load-bearing part.</b></para>
+    /// <list type="bullet">
+    /// <item><b>shared_buffers</b> — EXCLUDED STRUCTURALLY, not by relying on the formula's cap. The 1 GB
+    ///   cap is the Windows error-487 mitigation (#1559, pgsql-bugs BUG #14050 / #18954): larger segments
+    ///   exacerbate <c>could not reserve shared memory region</c> when every backend re-reserves at the
+    ///   postmaster's base address, and that condition is LIVE on this fleet (measured 2026-09-03: use2
+    ///   112-205/day, use1 36-70, pgmon 4-34, with zero <c>could not fork</c> — the retry path is holding,
+    ///   which is precisely the margin a bigger segment would spend). min(25% RAM, 1 GB) is already 1 GB on
+    ///   any host above 4 GB, so a hardware change cannot move it and emitting it would buy nothing. The
+    ///   reason to leave it out is the FUTURE one: if the cap is ever raised deliberately, that is a formula
+    ///   change and belongs to a version-keyed block where it gets reviewed, not something a resize should
+    ///   silently propagate to production.</item>
+    /// <item><b>work_mem</b> — EXCLUDED. The formula would take it 31 MB -> 63 MB at 31.5 GB, and the only
+    ///   measurements above 31 MB on this store's heaviest read are WORSE: PlanRegressionSql at default
+    ///   26,565 ms, at 31 MB 25,617 ms, at 512 MB 59,323 ms (#2845). 63 MB is not 512 MB and no one has
+    ///   measured it, which is the point — the evidence that exists points the wrong way, so a resize is
+    ///   not the moment to move it. The deeper reason is that it does not belong to this block at all:
+    ///   everything here is a property of the MACHINE, while work_mem is a per-sort, per-connection ceiling
+    ///   whose right value follows from the QUERY MIX. The hardware changed; the sort behaviour did not.</item>
+    /// <item><b>max_parallel_workers</b> — not emitted because this class has never set it; it sits at the
+    ///   PostgreSQL default of 8 regardless of core count. Deriving it from cores is a plausible want on a
+    ///   16-core host, but it is a behaviour change rather than a staleness fix, and it multiplies the
+    ///   memory story above: each parallel worker gets its OWN work_mem for its share of a node, so raising
+    ///   parallelism raises peak sort memory on exactly the query that already degrades with more of it.
+    ///   It wants its own evidence and its own PR. Note this is also why the fingerprint records RAM and
+    ///   hypertables and not cores: with nothing core-derived to re-state, a core-only change has no work
+    ///   to do, and fingerprinting it would append a block of identical values on every resize.</item>
+    /// </list>
+    ///
+    /// <para><b>Reload semantics.</b> <c>effective_cache_size</c> and <c>maintenance_work_mem</c> are
+    /// SIGHUP-reloadable; the two worker settings are restart-only. The append runs before
+    /// <c>pg_ctl start</c> on a service-owned start, so in practice the whole block takes effect on that
+    /// very start — the same story as v3 and v7.</para>
+    /// </summary>
+    internal static string BuildHardwareSizingConfAppend(long totalPhysicalMemoryBytes, int hypertableCount)
+    {
+        /* The SAME quantized value the fingerprint records, so the block is exactly reproducible from it. */
+        var settings = DeriveMemorySettings(QuantizeRam(totalPhysicalMemoryBytes));
+        var workers = DeriveWorkerSettings(hypertableCount);
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV8).Append('\n');
+        builder.Append(BuildHardwareFingerprint(totalPhysicalMemoryBytes, hypertableCount)).Append('\n');
+        builder.Append("effective_cache_size = ").Append(settings.EffectiveCacheSizeMb).Append("MB\n");
+        builder.Append("maintenance_work_mem = ").Append(settings.MaintenanceWorkMemMb).Append("MB\n");
+        builder.Append("timescaledb.max_background_workers = ").Append(workers.MaxBackgroundWorkers).Append('\n');
+        builder.Append("max_worker_processes = ").Append(workers.MaxWorkerProcesses).Append('\n');
+        return builder.ToString();
+    }
+
+    /* ===================== v9 session time zone ===================== */
+
+    /// <summary>
+    /// The v9 block: pin the cluster's session <c>timezone</c> to UTC. See <see cref="ConfMarkerV9"/> for
+    /// why, and for what this deliberately does not cover. Appended last and carrying no fingerprint line,
+    /// so the v8 staleness check's invariant about what it reads is untouched.
+    /// </summary>
+    public static string BuildTimeZoneConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV9).Append('\n');
+        builder.Append("timezone = 'UTC'\n");
+        return builder.ToString();
+    }
+
+    /* ===================== v10 message locale ===================== */
+
+    /// <summary>
+    /// The v10 block: pin the cluster's <c>lc_messages</c> to <c>C</c> so the server writes its messages, and
+    /// the severity label that <see cref="StoreLogClassifier"/> anchors on, untranslated. See
+    /// <see cref="ConfMarkerV10"/> for why, why <c>C</c> and not a named English locale, and what this
+    /// deliberately does not pin. Carries no fingerprint line, so the v8 staleness check's invariant about
+    /// what it reads is untouched.
+    /// </summary>
+    public static string BuildMessageLocaleConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV10).Append('\n');
+        builder.Append("lc_messages = 'C'\n");
+        return builder.ToString();
+    }
+
+    /* ===================== v11 job execution logging ===================== */
+
+    /// <summary>
+    /// The v11 block: turn <c>timescaledb.enable_job_execution_logging</c> on so
+    /// <c>timescaledb_information.job_history</c> records one row per background-job run. This is the
+    /// setting #1681 put in the v1 block, where its marker guard meant it could only ever reach a fresh
+    /// initdb — see <see cref="ConfMarkerV11"/> for the two-store measurement, why the fix is a new marker
+    /// rather than a looser match on v1, what a heal does and does not recover, and the reload semantics.
+    /// Carries no fingerprint line, so the v8 staleness check's invariant about what it reads is untouched.
+    /// </summary>
+    public static string BuildJobExecutionLoggingConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV11).Append('\n');
+        builder.Append(StoreSelfMetrics.JobExecutionLoggingSetting).Append(" = on\n");
+        return builder.ToString();
+    }
+
+    /// <summary>
     /// The derived managed-mode connection string: <c>127.0.0.1</c> + port + darling/darling + the
     /// generated password, carrying the collect/config <see cref="SearchPath"/> so every pooled connection
     /// resolves the bare table names to the V8 schemas regardless of the database default. Uses the explicit
@@ -601,7 +987,26 @@ public sealed class DarlingManagedPostgres
                postgres.exe PROCESS on Windows, and each spawn must re-reserve the shared memory
                region (the 487 surface) — a field box showed 43 backends during a 24-server sweep.
                24 comfortably covers the 4-wide sweep + command/beacon/alert/analysis seams; Npgsql's
-               default idle pruning shrinks the pool between bursts. */
+               default idle pruning shrinks the pool between bursts.
+
+               #2819 re-derived this rather than raising it, and 24 is still right — but the arithmetic
+               above was only ever true by accident. Each swept server holds ONE store connection for its
+               whole body, so the sweep's demand is MaxConcurrentSweeps, not 24. Until #2819 the Query Store
+               plan and text fetches each opened another connection per database on top of it.
+
+               Two different multipliers, and only one of them is what this bound governs. Per database the
+               fetches ACQUIRED three connections (body + plan + text), which is the ~228-per-cycle figure
+               #2819 measured the 673-893ms floor against. But they acquire SEQUENTIALLY — readItem awaits
+               the plan fetch to completion, disposing its connection, before the text fetch starts — so
+               peak CONCURRENT holds per swept server were body + one in-flight fetch = 2. MaxPoolSize
+               bounds concurrency, so 2x the sweep width is the number that had to fit: fine at the 4-wide
+               default (8), over this bound at the 16-wide ClampConcurrentSweeps limit (32). Borrowing puts
+               peak concurrent demand back at the sweep width itself, so even a 16-wide sweep now fits inside
+               24 with the seams — which it demonstrably did not before.
+
+               Raising this number would have been the wrong fix for the same reason it is bounded at all:
+               every pooled connection is a postgres.exe PROCESS, and this store logged 8 "could not reserve
+               shared memory region" retries on 2026-09-03. Fewer acquisitions, not a bigger pool. */
             MaxPoolSize = 24,
         };
         return builder.ConnectionString;
@@ -612,6 +1017,7 @@ public sealed class DarlingManagedPostgres
     /// server — for secondary consumers (the MCP host) that must never bootstrap; the worker
     /// owns the lifecycle. Null until the worker's first initdb has written the credential.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     public static string? TryBuildConnectionStringFromStoredCredential(PostgresConfig config)
     {
         var credentialPath = CredentialPathFor(ResolveDataDirectory(config));
@@ -631,6 +1037,7 @@ public sealed class DarlingManagedPostgres
     /// has written the credential — which happens AFTER migration, later than the owner credential, so the
     /// MCP host's first-boot poll budget must tolerate the delay.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     public static string? TryBuildMcpConnectionStringFromStoredCredential(PostgresConfig config)
     {
         var credentialPath = McpCredentialPathFor(ResolveDataDirectory(config));
@@ -650,6 +1057,7 @@ public sealed class DarlingManagedPostgres
     /// the credential (AFTER migration), so the web host's first-boot poll budget must tolerate the delay — the
     /// twin of <see cref="TryBuildMcpConnectionStringFromStoredCredential"/>.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     public static string? TryBuildViewerConnectionStringFromStoredCredential(PostgresConfig config)
     {
         var credentialPath = ViewerCredentialPathFor(ResolveDataDirectory(config));
@@ -668,6 +1076,7 @@ public sealed class DarlingManagedPostgres
     /// ready-to-use connection string. Throws (actionably) on any failure — the worker logs it
     /// critical and exits cleanly.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     public async Task<string> EnsureRunningAsync(CancellationToken cancellationToken)
     {
         var binDirectory = await EnsureRuntimeAsync(cancellationToken);
@@ -817,6 +1226,7 @@ public sealed class DarlingManagedPostgres
     /// (fresh install, or someone deleted the extracted copy) it self-heals by extracting.
     /// Neither present is a packaging problem with a packaging answer, not a retry loop.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private async Task<string> EnsureRuntimeAsync(CancellationToken cancellationToken)
     {
         var pgsqlDirectory = Path.Combine(_runtimeRoot, "pgsql");
@@ -871,6 +1281,7 @@ public sealed class DarlingManagedPostgres
     /// the next attempt regenerates and overwrites it (initdb itself cleans up its partial data
     /// directory on failure).
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private async Task InitializeClusterAsync(string binDirectory, CancellationToken cancellationToken)
     {
         _logger.LogInformation("Initializing managed Postgres cluster in {DataDirectory} (first run)", _dataDirectory);
@@ -1070,6 +1481,93 @@ public sealed class DarlingManagedPostgres
                 "Appended v7 compression memory to postgresql.conf (maintenance_work_mem = {Maintenance}MB from min(max(5% RAM, 1536MB), 25% RAM, 2048MB); TimescaleDB compression sorts on this setting)",
                 DeriveMemorySettings(v7RamBytes).MaintenanceWorkMemMb);
         }
+
+        /* v8 (#2845): the ONE block not keyed on a version marker. Every check above asks "is this marker
+           absent?", which is true exactly once in a cluster's life, so none of them notices that the host
+           it derived from has been replaced underneath it. This asks "was the sizing derived under the
+           hardware we are on now?" by comparing the LAST fingerprint in the file, and re-states the
+           host-derived settings when it was not.
+
+           Runs unconditionally rather than only for pre-existing clusters, including straight after a
+           fresh initdb has just written v3 with identical values. The redundant first block is the price of
+           a simple invariant — after any start, the conf carries a fingerprint for the CURRENT host — and
+           without recording one on the first start there would be nothing for the second start to compare
+           against. It converges immediately: the next start finds its own fingerprint and appends nothing. */
+        /* INVARIANT this check depends on: `conf` was read ONCE at the top of this method, before v1-v7
+           may have appended. That is safe only because none of them emits a line carrying
+           ConfHardwareFingerprintPrefix, so nothing appended above can change this answer. A future version
+           block that DID write a fingerprint line would be silently invisible here and the staleness check
+           would quietly stop checking — re-read the file at that point rather than adding the block above. */
+        var hypertableCount = TimescaleSupport.HypertableCount;
+        var v8Authoritative = TryGetAuthoritativePhysicalMemoryBytes(out var v8RamBytes);
+        var v8Fingerprint = BuildHardwareFingerprint(v8RamBytes, hypertableCount);
+        if (!v8Authoritative)
+        {
+            /* No authoritative RAM reading, so we cannot tell whether the hardware changed. Leave whatever
+               block is currently in force alone rather than re-deriving from the best-effort guess: the
+               guess is a live GC figure well under true RAM, and unlike the marker-gated blocks this check
+               runs on EVERY start, so acting on it would both append a block per blip and shrink the
+               planner's cache estimate on a box that is fine. */
+            _logger.LogWarning(
+                "Skipped the v8 hardware-sizing check: total physical memory could not be read authoritatively, so a hardware change cannot be distinguished from a failed reading. The existing sizing block stays in force.");
+        }
+        else if (ShouldAppendHardwareSizing(conf, v8Authoritative, v8Fingerprint))
+        {
+            /* Quantize ONCE here and pass the result down, so the values logged are necessarily the values
+               written. Deriving the log line separately from the raw reading made them disagree near a GB
+               boundary — a 31.5 GB host writes effective_cache_size 24576MB but logged 24192MB, a number that
+               appears nowhere in the file. QuantizeRam is idempotent, so the call below still quantizes and
+               still gets the same answer. */
+            var v8QuantizedRam = QuantizeRam(v8RamBytes);
+            File.AppendAllText(confPath, BuildHardwareSizingConfAppend(v8QuantizedRam, hypertableCount));
+            var v8Settings = DeriveMemorySettings(v8QuantizedRam);
+            var v8Workers = DeriveWorkerSettings(hypertableCount);
+            _logger.LogInformation(
+                "Appended v8 hardware sizing to postgresql.conf (host RAM {RamMb} MB, {Hypertables} hypertables -> effective_cache_size {EffectiveCache}MB, maintenance_work_mem {Maintenance}MB, timescaledb.max_background_workers {BgWorkers}, max_worker_processes {WorkerProcesses}; shared_buffers and work_mem deliberately NOT re-derived, see #2845)",
+                v8QuantizedRam / (1024L * 1024L), hypertableCount, v8Settings.EffectiveCacheSizeMb, v8Settings.MaintenanceWorkMemMb, v8Workers.MaxBackgroundWorkers, v8Workers.MaxWorkerProcesses);
+        }
+
+        /* Checked independently of v1-v8, and placed AFTER v8 on purpose: v8 keys on the last fingerprint
+           line in the text it read at the top of this method, so a block appended before it must not carry
+           one. Every block from here down carries no sizing and no fingerprint, which is what keeps that
+           check reading what it thinks it reads. Effective on this start (SIGHUP-context, appended before
+           pg_ctl start). */
+        if (!conf.Contains(ConfMarkerV9, StringComparison.Ordinal))
+        {
+            File.AppendAllText(confPath, BuildTimeZoneConfAppend());
+            _logger.LogInformation(
+                "Appended v9 session time zone to postgresql.conf (timezone = 'UTC'): the store's timestamp columns hold naive UTC, so a host-derived session zone would shift any comparison against now() and render timestamptz output on a different clock than the collected data.");
+        }
+
+        /* Checked independently of v1-v9: a data directory this build's initdb did not create heals by
+           GAINING the message-locale block (#3053). PostgreSQL translates the SEVERITY LABEL as well as the
+           body, so a translated catalogue writes a token StoreLogClassifier does not recognise — which then
+           cannot reach its unclassified-retained residue class and is counted as routine with its text
+           dropped. The initdb call already passes --locale=C, so this states the parser's dependency rather
+           than repairing a fresh install; see ConfMarkerV10 for what that distinction does and does not buy.
+           SIGHUP-context and appended before pg_ctl start, so effective on this very start. */
+        if (!conf.Contains(ConfMarkerV10, StringComparison.Ordinal))
+        {
+            File.AppendAllText(confPath, BuildMessageLocaleConfAppend());
+            _logger.LogInformation(
+                "Appended v10 message locale to postgresql.conf (lc_messages = 'C'): PostgreSQL translates its severity labels under lc_messages, and the store's own log parser matches them as English tokens.");
+        }
+
+        /* Checked independently of v1-v10: an existing cluster heals by GAINING the job-execution-logging
+           block (#3175). This setting was written into the v1 block by #1681, and the v1 check above is the
+           one that a pre-existing cluster always answers "present" — so the GUC only ever reached a fresh
+           initdb, and every store older than that release has had timescaledb_information.job_history empty
+           the whole time. Its own marker is the whole fix; see ConfMarkerV11 for why widening v1's match
+           would have re-applied that shared block's list-valued shared_preload_libraries and its
+           listen_addresses, both measured to change behaviour. SIGHUP-context and appended before pg_ctl
+           start, so effective on this very start when the service owns it. */
+        if (!conf.Contains(ConfMarkerV11, StringComparison.Ordinal))
+        {
+            File.AppendAllText(confPath, BuildJobExecutionLoggingConfAppend());
+            _logger.LogInformation(
+                "Appended v11 job execution logging to postgresql.conf ({Setting} = on): timescaledb_information.job_history records one row per background-job run, and without this it stays EMPTY — a maximum over it returns no rows, which reads as 'no run exceeded the line' rather than 'this instrument is off'. Logging starts from this start onward if the service owns it, otherwise from the next start it owns; runs before that point wrote nothing and CANNOT be recovered. job_stats remains the unconditional surface for a store that has not yet healed.",
+                StoreSelfMetrics.JobExecutionLoggingSetting);
+        }
     }
 
     /// <summary>
@@ -1080,13 +1578,38 @@ public sealed class DarlingManagedPostgres
     /// zero/garbage reading. Windows-only, like the rest of this managed-mode class.
     /// </summary>
     private long GetTotalPhysicalMemoryBytes()
+        => TryGetAuthoritativePhysicalMemoryBytes(out var authoritative)
+            ? authoritative
+            : GC.GetGCMemoryInfo().TotalAvailableMemoryBytes is var gcTotal && gcTotal > 0
+                ? gcTotal
+                : MemoryFallbackRamBytes;
+
+    /// <summary>
+    /// The AUTHORITATIVE physical-RAM read: true only when <c>GlobalMemoryStatusEx</c> actually reported
+    /// the machine's installed memory. Split out from <see cref="GetTotalPhysicalMemoryBytes"/> for #2845,
+    /// because the v8 hardware block needs to distinguish "the RAM is X" from "we could not read the RAM
+    /// and are guessing", and the guess is not a stable quantity.
+    ///
+    /// <para><b>Why the distinction is load-bearing.</b> The fallback tier below is
+    /// <c>GC.GetGCMemoryInfo().TotalAvailableMemoryBytes</c> — a LIVE snapshot of what the runtime believes
+    /// is available, not a hardware property. It varies between calls and sits well under true physical RAM.
+    /// v1-v7 are marker-gated, so a bad reading could only ever stick once and the best-effort guess was the
+    /// right trade for them. v8 re-evaluates on EVERY start for the life of the cluster, which turns the
+    /// same rare Win32 failure into unbounded chances to (a) mint a novel fingerprint and append a block on
+    /// each blip, and (b) derive effective_cache_size/maintenance_work_mem from the low guess and have them
+    /// take effect on that very start. So v8 asks for the authoritative reading and does NOTHING without
+    /// one: if we cannot read the RAM we cannot know whether it changed, and leaving the last known-good
+    /// block in force is strictly safer than re-deriving from a number we do not trust.</para>
+    /// </summary>
+    private bool TryGetAuthoritativePhysicalMemoryBytes(out long totalPhysicalMemoryBytes)
     {
         try
         {
             var status = new MemoryStatusEx();
             if (GlobalMemoryStatusEx(status) && status.ullTotalPhys > 0)
             {
-                return (long)status.ullTotalPhys;
+                totalPhysicalMemoryBytes = (long)status.ullTotalPhys;
+                return true;
             }
 
             _logger.LogWarning(
@@ -1098,8 +1621,8 @@ public sealed class DarlingManagedPostgres
             _logger.LogWarning("Could not query total physical memory ({Message}); sizing Postgres memory from a fallback.", ex.Message);
         }
 
-        var gcTotal = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
-        return gcTotal > 0 ? gcTotal : MemoryFallbackRamBytes;
+        totalPhysicalMemoryBytes = 0;
+        return false;
     }
 
 #pragma warning disable CS0649 // fields are populated by the native GlobalMemoryStatusEx call, not in managed code
@@ -1161,6 +1684,7 @@ public sealed class DarlingManagedPostgres
     /// newer cluster with older binaries; starting anyway is how a downgrade silently corrupts a store.</item>
     /// </list>
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private async Task EnsureDataDirectoryMajorAsync(string binDirectory, CancellationToken cancellationToken)
     {
         var dataMajor = DarlingStoreUpgrade.ParseDataDirectoryMajor(
@@ -1251,6 +1775,7 @@ public sealed class DarlingManagedPostgres
         }
     }
 
+    [SupportedOSPlatform("windows")]
     private string PreviousRuntimeHint()
         => Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(_runtimeRoot), "pgsql");
 
@@ -1258,6 +1783,7 @@ public sealed class DarlingManagedPostgres
     /// manifest that could disagree with what is on disk. The probe's exit code rides out alongside it
     /// (#2186): when the answer is "unidentifiable", that code is the ONLY evidence of why, and the
     /// refusal that consumes it used to have to assert the reason instead of showing it.</summary>
+    [SupportedOSPlatform("windows")]
     private static async Task<(int? Major, int ExitCode)> ReadRuntimeMajorAsync(string binDirectory, CancellationToken cancellationToken)
     {
         var (exitCode, output) = await RunToolAsync(
@@ -1270,6 +1796,7 @@ public sealed class DarlingManagedPostgres
     /// <c>share\extension\timescaledb.control</c>. This is the version the store's extension must reach:
     /// every TimescaleDB function resolves to a version-suffixed library, and the runtime carries exactly one.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private static string? ReadBundledTimescaleVersion(string binDirectory)
     {
         try
@@ -1521,7 +2048,7 @@ public sealed class DarlingManagedPostgres
         await using var connection = new NpgsqlConnection(builder.ConnectionString);
         await connection.OpenAsync(cancellationToken);
 
-        using (var exists = new NpgsqlCommand($"SELECT 1 FROM pg_database WHERE datname = '{DatabaseName}'", connection))
+        using (var exists = new NpgsqlCommand($"SELECT 1 FROM pg_database WHERE datname = '{DatabaseName}'", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapConnectProbeSeconds })
         {
             if (await exists.ExecuteScalarAsync(cancellationToken) is not null)
             {
@@ -1534,7 +2061,7 @@ public sealed class DarlingManagedPostgres
         /* Identifier from the class constant, never from input — same interpolation reasoning
            as TimescaleSupport/DarlingRetention. CREATE DATABASE cannot run in a transaction;
            plain ExecuteNonQuery is the correct shape. */
-        using var create = new NpgsqlCommand($"CREATE DATABASE {DatabaseName}", connection);
+        using var create = new NpgsqlCommand($"CREATE DATABASE {DatabaseName}", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapConnectProbeSeconds };
         await create.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -1550,32 +2077,23 @@ public sealed class DarlingManagedPostgres
     /// exactly what a freshly upgraded cluster produced here while the server itself was demonstrably
     /// healthy and stayed up for minutes afterwards.</para>
     /// </summary>
-    private const int FirstConnectionAttempts = 6;
-    private static readonly TimeSpan s_firstConnectionRetryDelay = TimeSpan.FromSeconds(2);
+    internal const int FirstConnectionAttempts = 6;
+    internal static readonly TimeSpan s_firstConnectionRetryDelay = TimeSpan.FromSeconds(2);
 
     /// <summary>
     /// Whether an exception is a transport-level fault worth retrying (socket reset, stream write failure,
     /// timeout) rather than a definitive answer from a working server (bad password, missing role).
     /// <see cref="PostgresException"/> means the server replied, so it is never transient by this test.
+    ///
+    /// <para>The predicate itself lives in <see cref="PostgresTransportFault"/>, shared with the collector
+    /// runner's store-write re-attempt. The RETRY POLICY stays here — six attempts two seconds apart, sized
+    /// for the post-start shared-memory race above — because that is what differs between the two regimes;
+    /// the question asked of the exception does not.</para>
     /// </summary>
     private static bool IsTransientConnectionFault(Exception exception)
-    {
-        for (var current = exception; current is not null; current = current.InnerException)
-        {
-            if (current is PostgresException)
-            {
-                return false;
-            }
+        => PostgresTransportFault.IsTransportFault(exception);
 
-            if (current is SocketException or IOException or TimeoutException)
-            {
-                return true;
-            }
-        }
-
-        return exception is NpgsqlException;
-    }
-
+    [SupportedOSPlatform("windows")]
     private string ReadStoredPassword()
     {
         if (!File.Exists(_credentialPath))
@@ -1619,6 +2137,7 @@ public sealed class DarlingManagedPostgres
     /// loud but never bricks the service — the fresh-install path (the service account owns the
     /// just-created directory) succeeds, and the trusted-owner read guard is the complementary defense.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private void TryHardenDirectory(string path)
     {
         try
@@ -1642,6 +2161,7 @@ public sealed class DarlingManagedPostgres
     /// RESULT is checked, because "we tried" is not the same claim as "the secret is not readable". These blobs
     /// are machine-scoped DPAPI, so read access IS the secret.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private void TryHardenCredentialFile(string path, bool allowInteractiveRead)
     {
         try
@@ -1787,6 +2307,7 @@ public sealed class DarlingManagedPostgres
     /// generates the TLS cert — returning the effective <see cref="NetworkPlan"/>. NEVER throws: a cert-gen
     /// failure degrades to loopback with a reason (D6/D-validate).
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private NetworkPlan BuildNetworkPlan()
     {
         var certPath = Path.Combine(ParentOf(_dataDirectory), ServerCertFileName);
@@ -1836,6 +2357,7 @@ public sealed class DarlingManagedPostgres
     /// and hardened NON-interactive (SYSTEM + Administrators + service account only) — the postmaster reads
     /// it, never an interactive user.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     internal void EnsureServerCertificate(IPAddress listenIp, string certPath, string keyPath)
     {
         var rootPath = RootCertificatePathFor(certPath);
@@ -2102,6 +2624,7 @@ public sealed class DarlingManagedPostgres
     /// (Round 4 #3): its whole body is caught so a reconcile failure logs + degrades, it does not abort the
     /// bootstrap (whose contract is throw => service-exit).
     /// </summary>
+    [SupportedOSPlatform("windows")]
     private async Task ReconcileNetworkAsync(
         string binDirectory, NetworkPlan plan, string ownerConnectionString, CancellationToken cancellationToken)
     {
@@ -2199,7 +2722,7 @@ public sealed class DarlingManagedPostgres
             await connection.OpenAsync(cancellationToken);
 
             await using (var errors = new NpgsqlCommand(
-                "SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL", connection))
+                "SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
             {
                 var errorCount = Convert.ToInt64(await errors.ExecuteScalarAsync(cancellationToken) ?? 0L);
                 if (errorCount > 0)
@@ -2227,7 +2750,7 @@ public sealed class DarlingManagedPostgres
                 await using var command = new NpgsqlCommand(
                     "SELECT count(DISTINCT u) FROM pg_hba_file_rules AS r, unnest(r.user_name) AS u "
                     + "WHERE r.type = 'hostssl' AND $1 = ANY(r.database) AND u = ANY($2::text[])",
-                    connection);
+                    connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
                 command.Parameters.AddWithValue(DatabaseName);
                 command.Parameters.AddWithValue(plan.Roles!.ToArray());
                 present = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
@@ -2249,7 +2772,7 @@ public sealed class DarlingManagedPostgres
                 /* Disable: no Darling-managed hostssl rule (darling database, viewer/admin) should remain. */
                 await using var command = new NpgsqlCommand(
                     "SELECT count(*) FROM pg_hba_file_rules WHERE type = 'hostssl' AND $1 = ANY(database) AND (user_name && ARRAY['viewer','admin'])",
-                    connection);
+                    connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
                 command.Parameters.AddWithValue(DatabaseName);
                 present = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken) ?? 0L);
 
@@ -2289,7 +2812,7 @@ public sealed class DarlingManagedPostgres
         {
             await using var connection = new NpgsqlConnection(ownerConnectionString);
             await connection.OpenAsync(cancellationToken);
-            await using var command = new NpgsqlCommand("SHOW listen_addresses", connection);
+            await using var command = new NpgsqlCommand("SHOW listen_addresses", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             var liveListen = await command.ExecuteScalarAsync(cancellationToken) as string ?? string.Empty;
 
             if (plan.Mode == NetworkMode.Exposed)

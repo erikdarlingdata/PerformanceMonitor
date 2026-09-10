@@ -173,7 +173,7 @@ internal static class McpInstructions
         ### System Health & Default Trace Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_default_trace_events` | Significant Default Trace events: file auto-grow/shrink stalls, severe ErrorLog writes, schema DDL, security audits | `server_name`, `hours_back` (default 24), `limit` (default 100), `as_of` |
+        | `get_default_trace_events` | Significant Default Trace events: file auto-grow/shrink stalls, severe ErrorLog writes, schema DDL, security audits (`event_time` is UTC — the server-local trace StartTime, de-skewed) | `server_name`, `hours_back` (default 24), `limit` (default 100), `as_of` |
         | `get_health_parser_system_health` | Parsed sp_server_diagnostics health counters (spinlocks, latch warnings, dumps, CPU, bad pages) | `server_name`, `hours_back`, `limit`, `as_of` |
         | `get_health_parser_severe_errors` | Severe errors (severity >= 19) from system_health | `server_name`, `hours_back`, `limit`, `as_of` |
         | `get_health_parser_io_issues` | I/O warnings from system_health (15-second I/O, long/pending I/O) | `server_name`, `hours_back`, `limit`, `as_of` |

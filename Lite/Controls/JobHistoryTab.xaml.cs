@@ -32,6 +32,7 @@ public partial class JobHistoryTab : UserControl
     private LocalDataService? _dataService;
     private Func<IReadOnlyDictionary<int, string>>? _displayNames;
     private DataGridFilterManager<JobHistoryRow>? _filterManager;
+    private readonly ScopedLoadGenerations _loads = new();
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
     private DateTime? _lastRefreshed;
@@ -69,12 +70,17 @@ public partial class JobHistoryTab : UserControl
     {
         if (_dataService == null) return;
 
+        /* #2933: no load guard, and the server/hours combos scope the grid below them — the later-
+           starting of two overlapping reads can land first. Same idiom as FinOpsTab's. */
+        var gen = _loads.Claim(nameof(LoadJobsAsync));
+
         try
         {
             var hoursBack = GetSelectedHoursBack();
             int? serverId = GetSelectedServerId();
 
             var all = await System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryAsync(hoursBack, 2000, serverId));
+            if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             /* #2126: rows carry the raw collected server name; swap in the operator's alias where the
                config layer knows one, so the Server column and filter speak the same names as every
@@ -135,9 +141,12 @@ public partial class JobHistoryTab : UserControl
     {
         if (_dataService == null) return;
 
+        var gen = _loads.Claim(nameof(UpdateAgentStatusAsync));
+
         try
         {
             var statuses = await System.Threading.Tasks.Task.Run(() => _dataService.GetAgentStatusAsync(serverId));
+            if (_loads.Superseded(nameof(UpdateAgentStatusAsync), gen)) return;
 
             var okBrush = TryFindResource("ForegroundMutedBrush") as System.Windows.Media.Brush
                 ?? System.Windows.Media.Brushes.Gray;
@@ -181,6 +190,11 @@ public partial class JobHistoryTab : UserControl
         catch (Exception ex)
         {
             AppLogger.Debug("JobHistory", $"Failed to load agent status: {ex.Message}");
+
+            /* The error path paints too: a superseded read's failure must not blank the indicator the
+               newest read has already filled in. */
+            if (_loads.Superseded(nameof(UpdateAgentStatusAsync), gen)) return;
+
             AgentStatusIndicator.Text = "";
         }
     }

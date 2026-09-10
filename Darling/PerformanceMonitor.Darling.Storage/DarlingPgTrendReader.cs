@@ -203,6 +203,7 @@ public static class DarlingPgTrendReader
         CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(DominantWaitEventSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
@@ -215,6 +216,7 @@ public static class DarlingPgTrendReader
         CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(TopQueryIdSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
@@ -228,6 +230,7 @@ public static class DarlingPgTrendReader
     {
         var points = new List<PgWaitTrendPoint>();
         await using var command = postgres.CreateCommand(WaitTrendSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(waitEvent);
         /* Kind-Unspecified at the BIND, per the store's naive-UTC discipline: a Kind=Utc DateTime makes
@@ -255,6 +258,7 @@ public static class DarlingPgTrendReader
     {
         var points = new List<PgQueryDurationTrendPoint>();
         await using var command = postgres.CreateCommand(QueryDurationTrendSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(queryId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
@@ -829,6 +833,7 @@ public static class DarlingPgTrendReader
         CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(DominantIoSubjectSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
@@ -854,6 +859,7 @@ public static class DarlingPgTrendReader
         CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(TopDatabaseSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
@@ -871,6 +877,7 @@ public static class DarlingPgTrendReader
         CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(IoTimingSettingSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
         var value = await command.ExecuteScalarAsync(cancellationToken);
@@ -886,6 +893,7 @@ public static class DarlingPgTrendReader
     {
         var points = new List<PgIoTrendPoint>();
         await using var command = postgres.CreateCommand(IoTrendSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(backendType);
         command.Parameters.AddWithValue(context);
@@ -935,6 +943,7 @@ public static class DarlingPgTrendReader
     {
         var points = new List<PgDatabaseTrendPoint>();
         await using var command = postgres.CreateCommand(DatabaseTrendSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.Add(TextOrNull(databaseName));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));

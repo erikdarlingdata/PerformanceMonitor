@@ -50,10 +50,13 @@ public sealed class RdsPlanIngestor
         _logger = logger;
     }
 
-    /// <param name="host">The target's connection host. A non-RDS host is skipped silently — that target
-    /// uses the <c>pg_read_file</c> route instead, and there is nothing to report.</param>
-    /// <returns>Rows stored, or zero when this target is not RDS or had nothing new.</returns>
-    public async Task<int> IngestAsync(
+    /// <param name="host">The target's connection host. A non-RDS host means this transport does not apply
+    /// to that target — it uses the <c>pg_read_file</c> route instead — and the outcome says so rather than
+    /// reporting an empty log (#3017).</param>
+    /// <returns>Rows stored and whether the log was reached at all. Reaching it and finding nothing is a
+    /// real statement about the log; not reaching it is not, and
+    /// <see cref="RdsIngestOutcome.SourceReached"/> is what keeps the runner from making one.</returns>
+    public async Task<RdsIngestOutcome> IngestAsync(
         int serverId,
         string storageName,
         string host,
@@ -86,12 +89,46 @@ public sealed class RdsPlanIngestor
                 ex.Message, RdsLogUnavailableException.IsAuthorizationRefusal(ex), ex);
         }
 
-        if (chunk is null || string.IsNullOrEmpty(chunk.Value.Text))
+        if (chunk is null)
+        {
+            /* #3017: NOT_REACHED, not zero rows — the same distinction, and the same single cause, as
+               RdsDeadlockIngestor. ReadNewestAsync answers null only when RdsEndpoint.TryParse declined the
+               host, which means no AWS call was made and nothing is known about the log. */
+            return RdsIngestOutcome.NotReached;
+        }
+
+        var written = await StoreAsync(serverId, storageName, chunk.Value.Text, cancellationToken);
+
+        /* THE MARKER MOVES HERE AND NOWHERE ELSE — the same order, and for the same reason, as
+           RdsDeadlockIngestor (#3008). Reaching this line means everything the chunk held is either in the
+           store or was nothing to store; anything else threw out of StoreAsync and left the marker where it
+           was, so the next cycle asks RDS for the same window again rather than resuming past it.
+
+           Plan rows dedup on (queryid, plan_hash), so the repeat this can cause costs a re-store of shapes
+           the store already has. The loss it replaces was unbounded and silent. */
+        _logs.CommitResume(chunk.Value.Resume);
+
+        return RdsIngestOutcome.Read(written);
+    }
+
+    /// <summary>
+    /// Parse a chunk and store what it held, or throw. Split out so the resume marker has exactly one
+    /// commit point above it: every way this can decline to store rows — empty text, a slab no plan
+    /// threshold was crossed in — is a legitimate zero that loses nothing, and every way it can FAIL leaves
+    /// via an exception rather than a zero the caller would have to tell apart from those.
+    /// </summary>
+    private async Task<int> StoreAsync(
+        int serverId,
+        string storageName,
+        string text,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(text))
         {
             return 0;
         }
 
-        var plans = PgPlanLogParser.Extract(chunk.Value.Text);
+        var plans = PgPlanLogParser.Extract(text);
 
         if (plans.Count == 0)
         {
@@ -138,31 +175,80 @@ public sealed class RdsPlanIngestor
         var writer = new PgCollectorRowWriter();
         var written = 0;
 
-        using (var importer = await connection.BeginBinaryImportAsync(
-            PgCollectorRowWriter.CopyCommandFor(definition), cancellationToken))
+        /* The start phase's deadline. It is separate from the importer's because the importer does not
+           exist until Begin returns, and the await that returns it runs under the connection's
+           CommandTimeout, which Npgsql exposes read-only. StoreCopyStartDeadline carries the value, the
+           stop-versus-deadline discrimination and the fault shape — see it for why a breach is re-raised
+           as a TimeoutException rather than left as the cancellation Npgsql threw. */
+        using var startDeadline = StoreCopyStartDeadline.Start(cancellationToken);
+
+        /* Which COPY phase a fault came out of, on the same terms as
+           DarlingCollectorRunner.CopyBatchOnceAsync — see CollectorFaultCopyPhase, which is the authority
+           for what each value means and what it authorises.
+
+           Start until Begin returns, and the transition sits INSIDE the block for that reason: Start has to
+           mean strictly "the importer never came back". A fault anywhere past that line may have sent rows,
+           so it must read as Data even where it happens to have sent none. */
+        var copyPhase = StoreCopyPhase.Start;
+
+        try
         {
-            writer.Importer = importer;
-
-            foreach (var row in rows)
+            using (var importer = await connection.BeginBinaryImportAsync(
+                PgCollectorRowWriter.CopyCommandFor(definition), startDeadline.Token))
             {
-                await importer.StartRowAsync(cancellationToken);
+                copyPhase = StoreCopyPhase.Data;
 
-                if (definition.IncludesCollectionId)
+                /* #2874: the COPY's own deadline, on NpgsqlBinaryImporter.Timeout — a TimeSpan on a different type
+                   from the rest of the regime, invisible to a command-shaped regex, and inherited from the
+                   connection's CommandTimeout (30 s) when left unset. Same constant, same regime, and it reaches
+                   the row loop only — startDeadline above bounds the Begin that returns the importer, on the same
+                   terms as DarlingCollectorRunner.CopyBatchOnceAsync. */
+                importer.Timeout = TimeSpan.FromSeconds(ServiceCommandDeadlines.CollectionSweepSeconds);
+
+                writer.Importer = importer;
+
+                foreach (var row in rows)
                 {
-                    writer.Value(CollectionIdGenerator.Next());
+                    await importer.StartRowAsync(cancellationToken);
+
+                    if (definition.IncludesCollectionId)
+                    {
+                        writer.Value(CollectionIdGenerator.Next());
+                    }
+
+                    writer.Value(collectionTime)
+                          .Value(serverId)
+                          .Value(storageName);
+
+                    writer.BeginPayload();
+                    definition.WritePayload(row, writer, NullContext(serverId, storageName, collectionTime));
+                    writer.EndPayload(definition.PayloadColumns.Count);
+                    written++;
                 }
 
-                writer.Value(collectionTime)
-                      .Value(serverId)
-                      .Value(storageName);
-
-                writer.BeginPayload();
-                definition.WritePayload(row, writer, NullContext(serverId, storageName, collectionTime));
-                writer.EndPayload(definition.PayloadColumns.Count);
-                written++;
+                await importer.CompleteAsync(cancellationToken);
             }
-
-            await importer.CompleteAsync(cancellationToken);
+        }
+        /* The start phase's deadline, re-raised as the shape a client-side deadline has here, on the same
+           terms as DarlingCollectorRunner.CopyBatchOnceAsync. A throw from a catch arm leaves the whole
+           try, so this fault is stamped HERE rather than by the arm below; the phase term in the filter is
+           what keeps the arm unreachable once the row loop has begun, whatever Npgsql throws from inside
+           it, so a data-phase fault cannot be relabelled as the one a re-attempt trusts. */
+        catch (OperationCanceledException cancellation)
+            when (copyPhase == StoreCopyPhase.Start && startDeadline.Breached())
+        {
+            var breach = StoreCopyStartDeadline.Breach(cancellation);
+            CollectorFaultCopyPhase.Stamp(breach, copyPhase);
+            throw breach;
+        }
+        /* Stamped, then rethrown bare, for CopyBatchOnceAsync's reason: the fault keeps its own type,
+           message and inner chain, so every classification arm upstream sees exactly what it sees without
+           this. OperationCanceledException is excluded because a stopping token says the service is shutting
+           down, not which protocol exchange was in flight. */
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            CollectorFaultCopyPhase.Stamp(ex, copyPhase);
+            throw;
         }
 
         _logger?.LogInformation(

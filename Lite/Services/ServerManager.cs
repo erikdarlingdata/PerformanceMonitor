@@ -236,11 +236,12 @@ public class ServerManager
         }
         else if (server.AuthenticationType == AuthenticationTypes.Windows ||
                  server.AuthenticationType == AuthenticationTypes.ManagedIdentity ||
+                 server.AuthenticationType == AuthenticationTypes.EntraDefaultCredential ||
                  server.AuthenticationType == AuthenticationTypes.EntraMFA)
         {
-            // Zero-touch auth (Windows / Managed Identity): remove any stored credential.
-            // This also deletes an orphaned secret left behind when switching away from
-            // SqlServer or ServicePrincipal (e.g. SP -> MI, SP -> Windows).
+            // Zero-touch auth (Windows / Managed Identity / existing Azure sign-in): remove any
+            // stored credential. This also deletes an orphaned secret left behind when switching
+            // away from SqlServer or ServicePrincipal (e.g. SP -> MI, SP -> Windows).
             //
             // EntraMFA reaches this arm ONLY when the MFA username is blank, because the
             // earlier EntraMFA arm (which requires a non-blank username) runs first and stores
@@ -371,8 +372,15 @@ public class ServerManager
         // Get previous status to detect status changes
         var previousStatus = GetConnectionStatus(serverId);
 
-        // Skip interactive authentication methods during background checks
-        if (!allowInteractiveAuth && server.AuthenticationType == AuthenticationTypes.EntraMFA)
+        // Skip interactive authentication methods during background checks.
+        //
+        // Asked as a question about the MODE rather than as an equality test against EntraMFA, so
+        // that adding an Entra mode is a decision about whether it can raise a window and not an
+        // omission at whichever gate nobody remembered. EntraDefaultCredential answers false and is
+        // therefore collected on schedule like Windows or SQL auth: the driver excludes the
+        // interactive browser from its credential chain outright, so there is no prompt to suppress
+        // and suppressing it would leave a perfectly unattended mode uncollected.
+        if (!allowInteractiveAuth && AuthenticationTypes.RequiresInteractiveSignIn(server.AuthenticationType))
         {
             // Determine appropriate message based on whether user cancelled
             var errorMsg = previousStatus.UserCancelledMfa 
@@ -400,7 +408,8 @@ public class ServerManager
 
         // CRITICAL: Prevent connection checks while Add/Edit dialog is open
         // This prevents MFA popups when user is just configuring the server
-        if (Windows.AddServerDialog.IsDialogOpen && server.AuthenticationType == AuthenticationTypes.EntraMFA)
+        if (Windows.AddServerDialog.IsDialogOpen &&
+            AuthenticationTypes.RequiresInteractiveSignIn(server.AuthenticationType))
         {
             return new ServerConnectionStatus
             {
@@ -434,7 +443,31 @@ public class ServerManager
             };
 
             using var connection = new SqlConnection(builder.ConnectionString);
-            await connection.OpenAsync();
+
+            /* Observability only: the listener reads one Azure-Identity event and writes the chosen
+               credential's type name. It is non-null for EntraDefaultCredential alone, so every other
+               mode disposes nothing and logs nothing, and the window is exactly this open rather than
+               the life of the process - see EntraCredentialSelectionLog for both lifetime decisions.
+               This is also the site that usually gets there first: the sweep runs on a timer, and the
+               driver's static credential cache means the event fires at most once per process.
+
+               Reported in a FINALLY, so a failed open reports too. Azure.Identity raises the event
+               when it ACQUIRES a token, before SQL Server has accepted or rejected the identity that
+               token names - so "DefaultAzureCredential picked the wrong ambient identity" arrives as
+               a login failure with the selection already captured, and that is the case this whole
+               feature exists for. It is also the only chance to see it: the driver caches the
+               credential the moment a token is acquired, so a retry raises nothing. */
+            using (var credentialSelection = EntraCredentialSelectionLog.Begin(builder))
+            {
+                try
+                {
+                    await connection.OpenAsync();
+                }
+                finally
+                {
+                    EntraCredentialSelectionLog.Report(credentialSelection);
+                }
+            }
 
             // Connection succeeded — server is reachable regardless of DMV permissions below.
             status.IsOnline = true;
@@ -511,7 +544,11 @@ public class ServerManager
             }
             else
             {
-                _logger?.LogWarning("Connectivity check failed for server '{DisplayName}': {Message}", server.DisplayName, ex.Message);
+                /* The exception object, not just its Message. A federated-auth failure arrives as a
+                   SqlException wrapping MSAL's exception wrapping the Windows broker's, and Message
+                   is the outermost layer only; the sibling generic-catch arm below already passes the
+                   whole chain, and a SqlException is the shape an Entra MFA failure actually takes. */
+                _logger?.LogWarning(ex, "Connectivity check failed for server '{DisplayName}'", server.DisplayName);
             }
         }
         catch (Exception ex)

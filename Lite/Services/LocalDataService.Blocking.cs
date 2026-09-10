@@ -78,7 +78,7 @@ GROUP BY collection_time";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
         command.CommandText = @"
 SELECT
@@ -125,7 +125,7 @@ LIMIT 50";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -179,7 +179,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -267,12 +267,25 @@ ORDER BY collection_time DESC, cpu_time_ms DESC";
     /// Gets lightweight blocking + deadlock counts and latest event time for alert badge updates.
     /// Much cheaper than fetching full rows with XML — just COUNT(*) and MAX(time).
     /// </summary>
-    public async Task<(int blockingCount, int deadlockCount, DateTime? latestEventTime)> GetAlertCountsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    /// <param name="utcOffsetMinutes">
+    /// The UTC offset of <paramref name="serverId"/> itself, not of whichever server tab the desktop has
+    /// selected. This read is the one on the badge path, which runs on every tab's own timer whether or
+    /// not that tab is visible, so the server it names and the server the desktop is showing are
+    /// routinely different ones.
+    ///
+    /// <para>Required, and required to be the SAME offset the caller used to convert
+    /// <paramref name="fromDate"/>/<paramref name="toDate"/> out of the display mode. Those two
+    /// conversions cancel in <c>TimeDisplayMode.UTC</c> and <c>LocalTime</c> and only the one here
+    /// applies in <c>ServerTime</c>; sourcing them from different servers leaves a residue in every
+    /// mode. <c>ServerTab.RefreshAlertCountsAsync</c> derives both from the tab's own
+    /// <c>UtcOffsetMinutes</c>.</para>
+    /// </param>
+    public async Task<(int blockingCount, int deadlockCount, DateTime? latestEventTime)> GetAlertCountsAsync(int serverId, int hoursBack, DateTime? fromDate, DateTime? toDate, int utcOffsetMinutes)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, utcOffsetMinutes);
 
         /* blocking_count prefers the blocked-process-report; falls back to the always-on DMV snapshot when
            BPR captured nothing (AWS RDS). latest_event_time includes DMV blocking recency too. */
@@ -318,7 +331,7 @@ SELECT
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -557,7 +570,7 @@ LIMIT 5000";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         /* BPR buckets, falling back to the always-on DMV snapshot only when BPR has no buckets in the
@@ -627,7 +640,7 @@ ORDER BY bucket";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
 
         command.CommandText = @"
 SELECT
@@ -670,7 +683,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         /* Use blocked_process_reports from XE session - more reliable than point-in-time snapshots
@@ -722,7 +735,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
         command.CommandText = @"
 SELECT
@@ -823,7 +836,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
         command.CommandText = @"
 SELECT
@@ -891,7 +904,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
         command.CommandText = @"
 WITH raw AS
@@ -971,13 +984,22 @@ public class DeadlockRow : DeadlockAlertRow
 /// sp_BlitzLock-style graph walk now live once on the shared <see cref="DeadlockProcessInfo"/> /
 /// <see cref="DeadlockGraphProcessParser"/> (Common); only Lite's per-server display getters
 /// (<see cref="ServerTimeHelper"/>) stay here.
+///
+/// <para>The two timestamps are in DIFFERENT frames and take different renderers.
+/// <c>DeadlockTime</c> is <c>deadlocks.deadlock_time</c>, the XE <c>@timestamp</c>, so it is naive UTC
+/// and converts through <see cref="ServerTimeHelper.FormatServerTime"/>. <c>LastTranStarted</c> is the
+/// deadlock graph's <c>lasttranstarted</c> attribute, walked out of the stored XML at READ time by
+/// <see cref="DeadlockGraphProcessParser"/>, and SQL Server writes that attribute in its own local
+/// clock — so it renders through <see cref="ServerTimeHelper.FormatServerClock"/>. No
+/// <c>CollectorColumn</c> declares it, so the catalog-derived clock-frame census cannot reach this
+/// pair and the frames are stated here instead.</para>
 /// </summary>
 public class DeadlockProcessDetail : DeadlockProcessInfo
 {
     public string DeadlockTimeLocal => ServerTimeHelper.FormatServerTime(DeadlockTime);
     public string VictimDisplay => IsVictim ? "Victim" : "";
     public string WaitTimeFormatted => WaitTime > 0 ? $"{WaitTime:N0} ms" : "";
-    public string LastTranStartedLocal => ServerTimeHelper.FormatServerTime(LastTranStarted);
+    public string LastTranStartedLocal => ServerTimeHelper.FormatServerClock(LastTranStarted);
 
     /// <summary>
     /// Parses a list of <see cref="DeadlockRow"/> into per-process detail rows via the shared
@@ -1030,9 +1052,12 @@ public class BlockedProcessReportRow : BlockedProcessAlertRow
     public string EventTimeLocal => ServerTimeHelper.FormatServerTime(EventTime);
     public string WaitTimeFormatted => WaitTimeMs < 1000 ? $"{WaitTimeMs} ms" : $"{WaitTimeMs / 1000.0:F1} sec";
     public bool IsLongBlock => WaitTimeMs > 30000;
-    public string BlockedLastTranStartedLocal => ServerTimeHelper.FormatServerTime(BlockedLastTranStarted);
-    public string BlockedLastBatchStartedLocal => ServerTimeHelper.FormatServerTime(BlockedLastBatchStarted);
-    public string BlockedLastBatchCompletedLocal => ServerTimeHelper.FormatServerTime(BlockedLastBatchCompleted);
+    /* EventTime above is the XE @timestamp and is naive UTC. These three are attributes of the
+       blocked-process report XML, which SQL Server writes in the monitored server's own clock, so
+       they take the server-clock renderer instead: one row, two frames, two renderers. */
+    public string BlockedLastTranStartedLocal => ServerTimeHelper.FormatServerClock(BlockedLastTranStarted);
+    public string BlockedLastBatchStartedLocal => ServerTimeHelper.FormatServerClock(BlockedLastBatchStarted);
+    public string BlockedLastBatchCompletedLocal => ServerTimeHelper.FormatServerClock(BlockedLastBatchCompleted);
 }
 
 public class QuerySnapshotRow
@@ -1087,7 +1112,12 @@ public class QuerySnapshotRow
     public double TranLogUsedMb { get; set; }
     public DateTime? TranStartTime { get; set; }
     public int RequestId { get; set; }
-    public string TranStartTimeLocal => ServerTimeHelper.FormatServerTime(TranStartTime);
+    /// <summary>The transaction begin time, empty when the request has no open transaction.
+    /// <c>query_snapshots.tran_start_time</c> is <c>MIN(transaction_begin_time)</c> off
+    /// <c>sys.dm_tran_active_transactions</c> — the server's own wall clock, not naive UTC — so unlike
+    /// <see cref="CollectionTimeLocal"/> beside it, it renders through
+    /// <see cref="ServerTimeHelper.FormatServerClock"/>.</summary>
+    public string TranStartTimeLocal => ServerTimeHelper.FormatServerClock(TranStartTime);
 
     // Chain mode — set by WaitDrillDownWindow when showing head blockers
     public string ChainBlockingPath { get; set; } = "";

@@ -76,6 +76,15 @@ public sealed record ComposeVariable(string Name, string Dimension, string? Defa
     public const string ServerDimension = "server";
 }
 
+/// <summary>A parsed, validated <c>range</c> — exactly ONE shape populated: relative (<see cref="Hours"/>),
+/// or absolute (<see cref="WindowStart"/>/<see cref="WindowEnd"/>, #2735's per-cell pinned window, naive UTC).
+/// Produced only by <see cref="ComposeSpec.ParseRange"/>, so a value in hand is within the window ceiling.</summary>
+public sealed record ComposeRange(int? Hours, DateTime? WindowStart, DateTime? WindowEnd)
+{
+    /// <summary>True for the absolute shape (a pinned window); false for the relative one.</summary>
+    public bool IsAbsolute => WindowStart is not null;
+}
+
 /// <summary>A panel filter's value — exactly one of a literal set (one value, or many for a multi-select
 /// <c>eq</c>/<c>neq</c>) or a reference to a declared <see cref="ComposeVariable"/>. Either way it is
 /// resolved to bound parameters at compile time; a value is NEVER interpolated into SQL.</summary>
@@ -88,7 +97,8 @@ public sealed record ComposeFilterValue(IReadOnlyList<string>? Literals, string?
 /// that resolves to bound parameters.</summary>
 public sealed record ComposeFilter(ComposeDimension Dimension, ComposeFilterOp Op, ComposeFilterValue Value);
 
-/// <summary>Which shape the compiler emits — chosen by the presence of a time bucket vs. a topN.</summary>
+/// <summary>Which shape the compiler emits — chosen by which of timeBucket / topN the panel sets
+/// (both together = <see cref="RankedTimeSeries"/>, #2734).</summary>
 public enum PanelMode
 {
     /// <summary>Bucketed over time: <c>date_trunc</c> + GROUP BY bucket [+ dims], ordered by bucket.</summary>
@@ -99,6 +109,14 @@ public enum PanelMode
 
     /// <summary>A single aggregate over the whole window (one row) — the stat tile.</summary>
     Scalar,
+
+    /// <summary>Rank-then-bucket (#2734, <c>timeBucket</c> + <c>topN</c> together): the top-N groupBy
+    /// members by the aggregate over the WHOLE window, then the bucketed series for exactly those members
+    /// — "the hourly trend of the top N consumers". Window-total ranking is the deliberate semantic
+    /// (stable series membership, readable lines); PER-BUCKET re-ranking ("who was hot at 3am") answers a
+    /// different question, churns membership bucket to bucket, and is a NON-GOAL rejected on purpose, not
+    /// by omission.</summary>
+    RankedTimeSeries,
 }
 
 /// <summary>
@@ -123,6 +141,13 @@ public sealed record PanelPlan
     public PanelMode Mode { get; init; }
     public ComposeTimeBucket TimeBucket { get; init; }
     public int TopN { get; init; }
+
+    /// <summary>Whether a <see cref="PanelMode.RankedTimeSeries"/> panel folds the non-top-N remainder
+    /// into one residual "(other)" series (#2734; default OFF). ON, the chart's series sum to the window
+    /// total at every bucket; OFF, the panel silently under-reports the total by whatever the excluded
+    /// members did — the author chooses which honesty they want. Only ever true in RankedTimeSeries mode
+    /// (parse rejects it elsewhere, so the compiler never has to ask).</summary>
+    public bool IncludeOther { get; init; }
     public required IReadOnlyList<ComposeFilter> Filters { get; init; }
     public required IReadOnlyList<ComposeDimension> GroupBy { get; init; }
     public required string Viz { get; init; }
@@ -133,8 +158,8 @@ public sealed record PanelPlan
 
     /// <summary>Optional event-annotation sources to overlay as markers on a TIME-SERIES panel (design D5):
     /// 0-<see cref="ComposeLimits.MaxAnnotations"/> catalog-resolved sources. Only ever non-empty for a
-    /// <see cref="PanelMode.TimeSeries"/> panel (a marker overlay needs a time axis — parse rejects them
-    /// otherwise). They do NOT change the measure query: each is compiled to its own bounded event query by
+    /// <see cref="PanelMode.TimeSeries"/> / <see cref="PanelMode.RankedTimeSeries"/> panel (a marker
+    /// overlay needs a time axis — parse rejects them otherwise). They do NOT change the measure query: each is compiled to its own bounded event query by
     /// <see cref="ComposeCompiler.CompileAnnotations"/> and returned alongside the panel's rows.</summary>
     public IReadOnlyList<ComposeAnnotationSource> Annotations { get; init; } = Array.Empty<ComposeAnnotationSource>();
 
@@ -169,6 +194,213 @@ public static class ComposeSpec
 
     /// <summary>Set form of <see cref="ComposeVizList"/> for O(1) membership.</summary>
     public static readonly IReadOnlySet<string> KnownComposeViz = new HashSet<string>(ComposeVizList, StringComparer.Ordinal);
+
+    /* ─────────────────────────── unknown keys (#2733) ─────────────────────────── */
+
+    /* The write path is STRICT about keys; the parse/run path is not. TryParsePanel positive-reads the keys
+       it knows and defaults every optional one on absence, so a typo'd key ("filter", "Filters") used to
+       yield a syntactically-valid DIFFERENT panel that validated {valid:true} — a dropped filter silently
+       widening a query to the whole fleet (#2733). The write-time validators (ValidateDefinition /
+       ValidateNotebookDefinition) now reject any key outside these sets BEFORE parsing, naming the stray and
+       suggesting the near-miss. The sets live HERE, beside the parser that reads them, and cannot drift
+       silently in either direction: a key listed but not parsed is caught by the every-key acceptance test,
+       and a key parsed but not listed can never reach the parser through the write path — the new feature's
+       own first write-path test rejects it. TryParsePanel itself stays lenient ON PURPOSE: the run/read path
+       must keep rendering definitions that stored before the strictness existed. */
+
+    /// <summary>The composed-panel key universe: exactly the keys <see cref="TryParsePanel"/> reads. The
+    /// write path rejects anything else (plus the caller's presentation extras — title/span/hours — which the
+    /// frontend owns and the parser never sees).</summary>
+    public static readonly IReadOnlySet<string> ComposedPanelKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "source", "measure", "ratio", "aggregate", "unit", "timeBucket", "topN", "includeOther", "viz",
+        "filters", "groupBy", "overlay", "thresholds", "annotations",
+    };
+
+    /// <summary>The keys a panel filter object may carry (<see cref="ParseFilters"/>).</summary>
+    public static readonly IReadOnlySet<string> ComposedFilterKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "dimension", "op", "value",
+    };
+
+    /// <summary>The keys an overlay object may carry (the #1606 second measure).</summary>
+    public static readonly IReadOnlySet<string> ComposedOverlayKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "measure", "aggregate", "unit",
+    };
+
+    /// <summary>The keys a view-level variable object may carry (<see cref="ParseVariables"/>).</summary>
+    public static readonly IReadOnlySet<string> VariableKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "name", "dimension", "default",
+    };
+
+    /// <summary>The keys a <c>range</c> object may carry (<see cref="ParseRange"/>): the relative shape's
+    /// <c>hours</c>, and the absolute shape's <c>windowStart</c>/<c>windowEnd</c> (#2735 — cell-level only;
+    /// the parser itself rejects the absolute shape where it is not allowed, so ONE key set serves both
+    /// call sites without letting a root range smuggle a window through the strict-key walk).</summary>
+    public static readonly IReadOnlySet<string> RangeKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "hours", "windowStart", "windowEnd",
+    };
+
+    /// <summary>The keys the object form of <c>viz</c> may carry (<see cref="ParseViz"/>).</summary>
+    private static readonly IReadOnlySet<string> s_vizObjectKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "type",
+    };
+
+    /// <summary>The one mis-shape worth a targeted message instead of a generic did-you-mean: nesting the
+    /// spec under a <c>panel</c> key is <c>run_custom_view_panel</c>'s RUN-SPEC wrapper leaking into a stored
+    /// definition — the natural guess, since that tool nests while a stored panel/cell is flat (#2733). ONE
+    /// constant, because the same mis-shape is also named by the write path's v1 arm (a nested panel has no
+    /// <c>source</c>, so it never reaches the composed strict check) — two independently-worded copies would
+    /// drift on the next tweak.</summary>
+    internal const string RunSpecNestingHint =
+        "a stored panel is flat (the {\"panel\":{...}} wrapper belongs to run_custom_view_panel's spec); put the panel's keys (source, measure, ...) directly on this object.";
+
+    /// <summary>Targeted guidance per stray key — see <see cref="RunSpecNestingHint"/>. The <c>range</c> hint
+    /// only ever fires on a DASHBOARD panel: a notebook panel cell's extras allow the key (#2735), so a cell
+    /// carrying one never reaches the hint.</summary>
+    private static readonly IReadOnlyDictionary<string, string> s_panelKeyHints = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["panel"] = RunSpecNestingHint,
+        ["range"] = "a per-panel window pin belongs to a notebook panel cell; a dashboard panel follows the view-level range.",
+    };
+
+    /// <summary>
+    /// The first unknown key in <paramref name="obj"/> as a caller-facing error, or null when every key is in
+    /// <paramref name="knownKeys"/> (or <paramref name="extraAllowedKeys"/>). <paramref name="path"/> names the
+    /// object in the error ("panel", "overlay", "filter 0", ...). A stray key close to a known one gets a
+    /// did-you-mean; a key in <paramref name="keyHints"/> gets its targeted guidance instead. Write-path only
+    /// by design — see the strictness note above.
+    /// </summary>
+    public static string? UnknownKeyError(
+        JsonObject obj,
+        IReadOnlySet<string> knownKeys,
+        string path,
+        IReadOnlySet<string>? extraAllowedKeys = null,
+        IReadOnlyDictionary<string, string>? keyHints = null)
+    {
+        foreach (var property in obj)
+        {
+            var key = property.Key;
+            if (knownKeys.Contains(key) || (extraAllowedKeys?.Contains(key) ?? false))
+            {
+                continue;
+            }
+
+            if (keyHints is not null && keyHints.TryGetValue(key, out var hint))
+            {
+                return $"{path} has unknown key '{key}' — {hint}";
+            }
+
+            var candidates = extraAllowedKeys is null ? knownKeys : knownKeys.Concat(extraAllowedKeys);
+            return NearestKnownKey(key, candidates) is string suggestion
+                ? $"{path} has unknown key '{key}' — did you mean '{suggestion}'?"
+                : $"{path} has unknown key '{key}'.";
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The write-time strict-key walk over one COMPOSED panel: the panel object itself (against
+    /// <see cref="ComposedPanelKeys"/> + the caller's presentation extras), the object form of <c>viz</c>,
+    /// each filter object, and the overlay object. Returns the first stray-key error, or null. Only the
+    /// shapes the parser understands are walked — a filters value that is not an array (say) is left for
+    /// <see cref="TryParsePanel"/> to reject with its structural message.
+    /// </summary>
+    public static string? UnknownComposedPanelKeyError(JsonObject panel, IReadOnlySet<string>? extraAllowedKeys = null)
+    {
+        if (UnknownKeyError(panel, ComposedPanelKeys, "panel", extraAllowedKeys, s_panelKeyHints) is string topError)
+        {
+            return topError;
+        }
+
+        if (panel["viz"] is JsonObject vizObject
+            && UnknownKeyError(vizObject, s_vizObjectKeys, "panel.viz") is string vizError)
+        {
+            return vizError;
+        }
+
+        if (panel["filters"] is JsonArray filters)
+        {
+            for (var i = 0; i < filters.Count; i++)
+            {
+                if (filters[i] is JsonObject filterObject
+                    && UnknownKeyError(filterObject, ComposedFilterKeys, $"filter {i}") is string filterError)
+                {
+                    return filterError;
+                }
+            }
+        }
+
+        if (panel["overlay"] is JsonObject overlayObject
+            && UnknownKeyError(overlayObject, ComposedOverlayKeys, "overlay") is string overlayError)
+        {
+            return overlayError;
+        }
+
+        return null;
+    }
+
+    /// <summary>The known key nearest to <paramref name="unknown"/> when it is plausibly a typo — a
+    /// case-insensitive match ("Filters"), or within edit distance 2 ("filter", "defalut") — else null.</summary>
+    internal static string? NearestKnownKey(string unknown, IEnumerable<string> candidates)
+    {
+        string? best = null;
+        var bestDistance = int.MaxValue;
+        foreach (var candidate in candidates)
+        {
+            if (string.Equals(unknown, candidate, StringComparison.OrdinalIgnoreCase))
+            {
+                return candidate;
+            }
+
+            var distance = EditDistance(unknown, candidate);
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = candidate;
+            }
+        }
+
+        return bestDistance <= 2 ? best : null;
+    }
+
+    /// <summary>Case-insensitive Levenshtein distance — keys are short, so the O(len²) two-row form is fine.</summary>
+    private static int EditDistance(string a, string b)
+    {
+        if (Math.Abs(a.Length - b.Length) > 2)
+        {
+            /* Distance is at least the length difference; past the suggestion threshold, skip the work. */
+            return int.MaxValue;
+        }
+
+        var previous = new int[b.Length + 1];
+        var current = new int[b.Length + 1];
+        for (var j = 0; j <= b.Length; j++)
+        {
+            previous[j] = j;
+        }
+
+        for (var i = 1; i <= a.Length; i++)
+        {
+            current[0] = i;
+            for (var j = 1; j <= b.Length; j++)
+            {
+                var substitution = char.ToLowerInvariant(a[i - 1]) == char.ToLowerInvariant(b[j - 1]) ? 0 : 1;
+                current[j] = Math.Min(
+                    Math.Min(current[j - 1] + 1, previous[j] + 1),
+                    previous[j - 1] + substitution);
+            }
+
+            (previous, current) = (current, previous);
+        }
+
+        return previous[b.Length];
+    }
 
     /* ─────────────────────────── variables ─────────────────────────── */
 
@@ -232,9 +464,20 @@ public static class ComposeSpec
 
     /* ─────────────────────────── range ─────────────────────────── */
 
-    /// <summary>Validates a definition/run <c>range</c> object (absent = the caller's default). Only
-    /// <c>{hours}</c> is understood today; hours must be a positive int within the window ceiling.</summary>
-    public static (int? Hours, string? Error) ParseRange(JsonNode? node)
+    /// <summary>
+    /// Validates a definition <c>range</c> object into one of its two shapes (absent = the caller's default,
+    /// i.e. inherit): RELATIVE <c>{hours}</c> (a positive int within the window ceiling), or — only where
+    /// <paramref name="allowAbsolute"/> says so — ABSOLUTE <c>{windowStart, windowEnd}</c> (#2735, the
+    /// notebook panel cell's pinned window; ISO-8601 UTC through the SAME <see cref="TryParseUtcInstant"/>
+    /// the run path's <c>windowStart</c>/<c>windowEnd</c> go through, so a range that stores is a window that
+    /// runs). Exactly one shape may be present — both at once is ambiguous and rejected. The absolute pair
+    /// must be start&lt;end within the <see cref="ComposeLimits.MaxWindowHours"/> ceiling; there is
+    /// deliberately NO clamp-to-now here (the write path is PURE — no clock; the run path clamps a future
+    /// end at run time). The view-level range stays relative-only: an absolute window at the root would
+    /// silently fall back to the renderer's 24h default, the exact silently-wrong-window failure this
+    /// feature exists to close.
+    /// </summary>
+    public static (ComposeRange? Range, string? Error) ParseRange(JsonNode? node, bool allowAbsolute = false)
     {
         if (node is null)
         {
@@ -244,6 +487,43 @@ public static class ComposeSpec
         if (node is not JsonObject obj)
         {
             return (null, "range must be an object.");
+        }
+
+        var hasStart = obj["windowStart"] is not null;
+        var hasEnd = obj["windowEnd"] is not null;
+        if (hasStart || hasEnd)
+        {
+            if (!allowAbsolute)
+            {
+                return (null, "an absolute range (windowStart/windowEnd) is only supported on a notebook panel cell; a view-level range is relative ({\"hours\": n}).");
+            }
+
+            if (obj["hours"] is not null)
+            {
+                return (null, "range must be either relative ({hours}) or absolute ({windowStart, windowEnd}), not both.");
+            }
+
+            if (!hasStart || !hasEnd)
+            {
+                return (null, "range.windowStart and range.windowEnd must be provided together.");
+            }
+
+            if (!TryParseUtcInstant(obj["windowStart"], out var start) || !TryParseUtcInstant(obj["windowEnd"], out var end))
+            {
+                return (null, "range.windowStart/windowEnd must be ISO-8601 timestamps (UTC; a trailing Z and fractional seconds are fine).");
+            }
+
+            if (start >= end)
+            {
+                return (null, "range.windowStart must be earlier than range.windowEnd.");
+            }
+
+            if ((end - start) > TimeSpan.FromHours(ComposeLimits.MaxWindowHours))
+            {
+                return (null, $"range spans more than the {ComposeLimits.MaxWindowHours / 24}-day ceiling; narrow it.");
+            }
+
+            return (new ComposeRange(null, start, end), null);
         }
 
         if (obj["hours"] is not JsonValue hoursValue || !hoursValue.TryGetValue<int>(out var hours))
@@ -256,7 +536,32 @@ public static class ComposeSpec
             return (null, $"range.hours must be between 1 and {ComposeLimits.MaxWindowHours}.");
         }
 
-        return (hours, null);
+        return (new ComposeRange(hours, null, null), null);
+    }
+
+    /// <summary>Parses an absolute window bound (#1606 run path, #2735 stored cell range): ISO-8601, treated
+    /// as UTC whether or not it carries a Z (JS <c>toISOString()</c> sends ms+Z; the store is naive UTC),
+    /// normalized to Kind-Unspecified naive UTC like every other Darling read binding. ONE parser for both
+    /// surfaces, so a stored cell window and a run window can never drift on what "a timestamp" means.</summary>
+    internal static bool TryParseUtcInstant(JsonNode? node, out DateTime value)
+    {
+        value = default;
+        if (node is not JsonValue jsonValue || !jsonValue.TryGetValue<string>(out var text) || string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        if (!DateTime.TryParse(
+                text,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out var parsed))
+        {
+            return false;
+        }
+
+        value = DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified);
+        return true;
     }
 
     /* ─────────────────────────── panels ─────────────────────────── */
@@ -272,7 +577,15 @@ public static class ComposeSpec
     public static (PanelPlan? Plan, string? Error) TryParsePanel(JsonObject panel, IReadOnlyCollection<string> declaredVariables)
     {
         var source = Str(panel, "source");
-        if (string.IsNullOrEmpty(source) || !MeasureCatalog.IsKnownSource(source))
+        if (string.IsNullOrEmpty(source))
+        {
+            /* Say "missing", not "unknown source ''" — the misdirecting error #2733 was reported on: a
+               mis-shaped object (the panel nested under a 'panel' key, say) has no source at all, and
+               quoting an empty string sent the author hunting the catalog instead of the shape. */
+            return (null, "panel is missing 'source'.");
+        }
+
+        if (!MeasureCatalog.IsKnownSource(source))
         {
             return (null, $"panel references unknown source '{source}'.");
         }
@@ -318,7 +631,8 @@ public static class ComposeSpec
             return (null, aggUnitError);
         }
 
-        /* mode: a real timeBucket => time series; else topN => ranked; else scalar. */
+        /* mode: timeBucket + topN together => rank-then-bucket (#2734); a real timeBucket alone => time
+           series; else topN => ranked; else scalar. */
         var bucket = ComposeTimeBucket.None;
         var bucketWire = Str(panel, "timeBucket");
         if (bucketWire is not null && !MeasureCatalog.TryParseTimeBucket(bucketWire, out bucket))
@@ -339,12 +653,28 @@ public static class ComposeSpec
             topN = Math.Min(topN, ComposeLimits.MaxTopN);
         }
 
-        if (hasBucket && hasTopN)
-        {
-            return (null, "panel cannot set both 'timeBucket' and 'topN' (a ranked panel is not a time series).");
-        }
+        var mode = hasBucket && hasTopN ? PanelMode.RankedTimeSeries
+            : hasBucket ? PanelMode.TimeSeries
+            : hasTopN ? PanelMode.Ranked
+            : PanelMode.Scalar;
 
-        var mode = hasBucket ? PanelMode.TimeSeries : hasTopN ? PanelMode.Ranked : PanelMode.Scalar;
+        /* includeOther (#2734): fold the non-top-N remainder into one "(other)" residual series. Only
+           meaningful in RankedTimeSeries mode — but a literal false is the same as absence, so it is
+           accepted anywhere (the annotations empty-array precedent); only a TRUE on the wrong mode is
+           author error worth naming. */
+        var includeOther = false;
+        if (panel["includeOther"] is JsonNode includeOtherNode)
+        {
+            if (includeOtherNode is not JsonValue includeOtherValue || !includeOtherValue.TryGetValue<bool>(out includeOther))
+            {
+                return (null, "panel.includeOther must be a boolean.");
+            }
+
+            if (includeOther && mode != PanelMode.RankedTimeSeries)
+            {
+                return (null, "'includeOther' folds the remainder of a top-N time series into an '(other)' series; it needs both 'timeBucket' and 'topN'.");
+            }
+        }
 
         /* viz — the v2 composed-panel vocabulary (distinct from v1 read panels' KnownViz); coherence with the
            panel's mode is checked below once groupBy is known (design §4). */
@@ -366,6 +696,13 @@ public static class ComposeSpec
         if (groupError is not null)
         {
             return (null, groupError);
+        }
+
+        /* Rank-then-bucket ranks the groupBy members — without one there is nothing to rank, and the
+           panel would just be a time series with a decorative topN. */
+        if (mode == PanelMode.RankedTimeSeries && groupBy!.Count == 0)
+        {
+            return (null, "'timeBucket' with 'topN' ranks a group-by dimension's members over the window; add 'groupBy' (the series to keep).");
         }
 
         /* viz ↔ mode coherence, so a stored def can never be un-renderable (design §4): line/area/stacked are
@@ -422,10 +759,11 @@ public static class ComposeSpec
             if (!overlayAllowed)
             {
                 /* Name the REAL blocker: a viz that never carries an overlay reports that, and only a
-                   line/area whose sole problem is the groupBy gets the dual-axis-grouping message. */
+                   line/area whose sole problem is the groupBy gets the dual-axis-grouping message (a
+                   RankedTimeSeries panel is grouped by construction, so it always gets that one). */
                 var vizCarriesOverlay = string.Equals(viz, "line", StringComparison.Ordinal)
                     || string.Equals(viz, "area", StringComparison.Ordinal);
-                return (null, vizCarriesOverlay && mode == PanelMode.TimeSeries && groupBy!.Count > 0
+                return (null, vizCarriesOverlay && mode is PanelMode.TimeSeries or PanelMode.RankedTimeSeries && groupBy!.Count > 0
                     ? "an overlay (dual-axis) time series cannot also group by a dimension — two value axes times many series is unreadable; drop the groupBy or the overlay."
                     : $"a '{viz}' panel cannot carry an overlay; overlays belong to scatter and ungrouped line/area panels.");
             }
@@ -465,6 +803,7 @@ public static class ComposeSpec
             Mode = mode,
             TimeBucket = bucket,
             TopN = topN,
+            IncludeOther = includeOther,
             Filters = filters!,
             GroupBy = groupBy!,
             Viz = viz,
@@ -691,8 +1030,9 @@ public static class ComposeSpec
             return (Array.Empty<ComposeAnnotationSource>(), null);
         }
 
-        if (mode != PanelMode.TimeSeries)
+        if (mode is not (PanelMode.TimeSeries or PanelMode.RankedTimeSeries))
         {
+            /* RankedTimeSeries qualifies: it has the time axis the markers need. */
             return (null, "annotations are only valid on a time-series panel (add a timeBucket).");
         }
 
@@ -737,7 +1077,8 @@ public static class ComposeSpec
         || measure.AllowedDimensions.Contains(dimensionName);
 
     /// <summary>Rejects a viz that cannot render the panel's shape (design §4 shape-steering, enforced so a
-    /// stored def is never un-renderable): line/area/stacked/stacked-bar are time series; bar/pie are ranked
+    /// stored def is never un-renderable): line/area/stacked/stacked-bar are time series (plain or the
+    /// #2734 rank-then-bucket, whose rows are the same bucket+dims+value shape); bar/pie are ranked
     /// (topN) with a categorical group; stat is a single scalar; table renders any shape. A stacked (or
     /// stacked-bar) chart also needs a group-by (the parts that stack), and a single-value panel cannot group.</summary>
     private static string? ValidateVizMode(string viz, PanelMode mode, int groupByCount)
@@ -750,6 +1091,7 @@ public static class ComposeSpec
         switch (mode)
         {
             case PanelMode.TimeSeries:
+            case PanelMode.RankedTimeSeries:
                 if (viz is not ("line" or "area" or "stacked" or "stacked-bar"))
                 {
                     return $"a '{viz}' chart is not a time series; use line/area/stacked/stacked-bar (or drop the timeBucket).";

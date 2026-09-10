@@ -100,6 +100,29 @@ export function disclosure(summaryText, detail, opts = {}) {
   return el("details", { class: "disclosure" }, [summary, el("div", { class: "disc-body" }, detail)]);
 }
 
+/*
+ * #3031: a stable id for one of a rollup tile's text rows, so the tile's NUMBER can point at it.
+ *
+ * Derived from the label rather than from a render counter so the relationship stays inspectable: whoever
+ * reads the DOM — an operator, a review, a check — can tell which figure "rollup-deadlocks-recent-sub"
+ * belongs to without counting siblings. `used` de-duplicates within one render, because two tiles sharing a
+ * label would emit a duplicate id and aria-describedby resolves a duplicate to the FIRST match: a silent
+ * mis-association rather than a visible break.
+ *
+ * Shared rather than per-page (#3045): both the fleet and the AG rollup wire their numbers with it. The
+ * de-duplication rule above is subtle enough that a second copy of it is a copy written without the `used`
+ * set — correct on a page whose labels all differ, silently wrong the day a tile repeats one. `part` names
+ * the row ("lbl", "sub"); a page with only labels passes only "lbl" and needs nothing else from this.
+ */
+export function rollupTextId(lbl, part, used) {
+  const slug = String(lbl == null ? "" : lbl).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const base = "rollup-" + (slug || "tile") + "-" + part;
+  let id = base;
+  for (let n = 2; used.has(id); n++) id = base + "-" + n;
+  used.add(id);
+  return id;
+}
+
 /* ─────────────────────────── state strips ─────────────────────────── */
 
 export function errorStrip(message) {
@@ -111,6 +134,25 @@ export function emptyStrip(message) {
 /** A non-fatal caveat about otherwise-good data (e.g. the #1665 partial-window notice). */
 export function noticeStrip(message) {
   return el("div", { class: "strip notice", role: "status" }, [message]);
+}
+/**
+ * Render a read error, degrading the "window too wide" case to a notice (#2780). A range wider than a read can
+ * serve comes back as a raw `hours_back value 'N' exceeds maximum of M hours (D days)...` validation string
+ * (McpHelpers.ValidateHoursBack); that is a range choice, not a fault, so it becomes a status notice naming the
+ * window the view keeps rather than a red error carrying the API's own wording. Every other message stays an
+ * error. SHARED by every read-error site — the descriptor loader AND the hand-built server-tab composites — so
+ * a tab cannot show a friendly notice on one panel and the raw string on its neighbour.
+ */
+export function readErrorStrip(message) {
+  const m = /exceeds maximum of (\d+) hours/.exec(message || "");
+  if (m) {
+    const hours = Number(m[1]);
+    const days = Math.round(hours / 24);
+    return noticeStrip(
+      "This view keeps up to " + hours + " hours (" + days + " day" + (days === 1 ? "" : "s") +
+      ") of history — pick a shorter range.");
+  }
+  return errorStrip(message);
 }
 export function loadingStrip(label) {
   return el("div", { class: "strip loading" }, [label || "Loading…"]);
@@ -157,7 +199,7 @@ export function relTime(s) {
 }
 
 /** Compact axis label for a Date: HH:MM, widening to include the calendar date when `withDate` is set (the
- *  chart passes true whenever the domain's first and last samples fall on different calendar days). */
+ *  chart passes true whenever the domain's start and end fall on different calendar days). */
 export function axisTime(date, withDate) {
   if (!date) return "";
   if (withDate) {
@@ -166,16 +208,40 @@ export function axisTime(date, withDate) {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+/**
+ * The x-axis DOMAIN window for a "last N hours" trend chart (#2802): [now - hours, now] as UTC-epoch ms, for
+ * renderLineChart's windowStart/windowEnd. windowEnd is the client's render-time now, NOT the last data point —
+ * the trend reads echo only hours_back (the requested width), never a window-end/as-of timestamp, and the SPA
+ * never sends as_of, so the server anchors the window at ITS request-time now, which the render-time now matches
+ * to within request latency (sub-second to a couple of seconds; negligible at the charts' minute-granularity
+ * tick labels). Anchoring to the last data point instead would slide an old sparse burst to the right edge and
+ * read as current — the #2802 bug. Returns null for a missing/non-positive hours so the chart falls back to its
+ * data-extent domain unchanged (byte-for-byte the pre-#2802 behavior). `Date.now()` is a UTC epoch, directly
+ * comparable to the parseUtc'd data times.
+ */
+export function windowFromHours(hours) {
+  const h = Number(hours);
+  if (!isFinite(h) || h < 1) return null;
+  const windowEnd = Date.now();
+  return { windowStart: windowEnd - h * 3600000, windowEnd };
+}
+
 /* ─────────────────────────── value formatters ─────────────────────────── */
 
 export function fmtInt(v) {
-  return v == null ? "—" : Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
+  if (v == null) return "—";
+  const n = Number(v);
+  return isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 0 }) : "—";
 }
 export function fmtNum(v, d = 1) {
-  return v == null ? "—" : Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+  if (v == null) return "—";
+  const n = Number(v);
+  return isFinite(n) ? n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }) : "—";
 }
 export function fmtPct(v) {
-  return v == null ? "—" : Math.round(Number(v)) + "%";
+  if (v == null) return "—";
+  const n = Number(v);
+  return isFinite(n) ? Math.round(n) + "%" : "—";
 }
 export function fmtMs(v) {
   if (v == null) return "—";
@@ -190,6 +256,7 @@ export function fmtMs(v) {
 export function fmtMb(v) {
   if (v == null) return "—";
   const n = Number(v);
+  if (!isFinite(n)) return "—";
   return n >= 1024 ? fmtNum(n / 1024, 1) + " GB" : fmtInt(n) + " MB";
 }
 export function fmtText(v) {
@@ -322,6 +389,40 @@ async function classifyResponse(resp) {
   }
 
   return { kind: "data", data: body };
+}
+
+/* ── alert delivery state (#3169) ──────────────────────────────────────────────────────────────────
+ * A config_alert_log row's notification_type either NAMES A CHANNEL (email / webhook / email+webhook)
+ * or STATES A DELIVERY STATE. The state values are listed here once, with the label every surface owes
+ * them, because there are three surfaces: this web dashboard, the WPF Darling Viewer and Lite's grid.
+ * The other two share PerformanceMonitor.Notifications.AlertDeliveryStatus; JS cannot call it, so this is
+ * the restatement, and Darling.Tests.AlertTrayStatusLoggedTests parses THIS OBJECT and compares it to
+ * those constants rather than scanning the branch text it used to.
+ *
+ * "tray" is a state here rather than a channel because this surface is HEADLESS - no system tray, no toast
+ * code - so a stored tray row records nothing that happened. #2781/#2814 established that and chose
+ * "Logged"; #3169 stopped the service writing it at all, so only rows recorded before then reach it.
+ */
+export const ALERT_STATE_LABELS = {
+  none: "No channel",
+  unconfigured: "No channel configured",
+  muted: "Muted",
+  undelivered: "Not sent",
+  tray: "Logged",
+};
+
+/**
+ * The delivery state of an alert-history row, or null when its notification_type names a real channel and
+ * the caller should fall through to its own sent/failed handling.
+ *
+ * Carries the one legacy signature that decodes: alert_sent true alongside "tray" is unreachable for a row
+ * written after #3169 - a row that delivered names its channel - so it can only be the resolution builder's
+ * old hardcoded true, which meant "no send channel applies" and never meant a delivery.
+ */
+export function alertDeliveryState(a) {
+  if (a.alert_sent && a.notification_type === "tray") return ALERT_STATE_LABELS.none;
+  if (a.alert_sent) return null;
+  return ALERT_STATE_LABELS[a.notification_type] || null;
 }
 
 /** GET a read-only tool by its MCP name with query-string params. */

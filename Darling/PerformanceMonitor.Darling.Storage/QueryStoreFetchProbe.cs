@@ -37,8 +37,9 @@ public static class QueryStoreFetchProbe
         string databaseName,
         IReadOnlyList<(long PlanId, string? PlanHash)> references,
         DateTime collectionTimeUtc,
+        int commandTimeoutSeconds,
         CancellationToken cancellationToken = default)
-        => ExecuteAsync(connection, QueryStorePlanMap.TouchAndProbeSql, serverId, databaseName, references, collectionTimeUtc, cancellationToken);
+        => ExecuteAsync(connection, QueryStorePlanMap.TouchAndProbeSql, serverId, databaseName, references, collectionTimeUtc, commandTimeoutSeconds, cancellationToken);
 
     public static Task<List<FetchProbeVerdict>> TouchAndProbeTextsAsync(
         NpgsqlConnection connection,
@@ -46,8 +47,9 @@ public static class QueryStoreFetchProbe
         string databaseName,
         IReadOnlyList<(long QueryId, string? QueryHash)> references,
         DateTime collectionTimeUtc,
+        int commandTimeoutSeconds,
         CancellationToken cancellationToken = default)
-        => ExecuteAsync(connection, QueryStoreTextStore.TouchAndProbeSql, serverId, databaseName, references, collectionTimeUtc, cancellationToken);
+        => ExecuteAsync(connection, QueryStoreTextStore.TouchAndProbeSql, serverId, databaseName, references, collectionTimeUtc, commandTimeoutSeconds, cancellationToken);
 
     private static async Task<List<FetchProbeVerdict>> ExecuteAsync(
         NpgsqlConnection connection,
@@ -56,6 +58,7 @@ public static class QueryStoreFetchProbe
         string databaseName,
         IReadOnlyList<(long Id, string? Hash)> references,
         DateTime collectionTimeUtc,
+        int commandTimeoutSeconds,
         CancellationToken cancellationToken)
     {
         if (connection is null)
@@ -86,7 +89,12 @@ public static class QueryStoreFetchProbe
             hashes[i] = references[i].Hash;
         }
 
-        using var command = new NpgsqlCommand(sql, connection);
+        /* #2776: an EXPLICIT store-side timeout, because the implicit one was the bug. Every command on
+           this path previously fell through to Npgsql's 30s default, and a cancelled probe or write is
+           indistinguishable to the caller from "these ids are still missing" — so the ids carry over and
+           the target re-decompresses the identical plans next cycle, forever. The caller passes the
+           collector's own budget so both halves of a fetch share one number. */
+        using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = commandTimeoutSeconds };
         command.Parameters.AddWithValue(serverIds);
         command.Parameters.AddWithValue(databases);
         command.Parameters.AddWithValue(ids);

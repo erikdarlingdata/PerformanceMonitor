@@ -9,7 +9,6 @@
 using System;
 using System.Linq;
 using System.IO;
-using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -19,6 +18,7 @@ using PerformanceMonitor.Darling.Service.Hosting;
 using Xunit;
 using Host = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpHostService;
 using WebHost = PerformanceMonitor.Darling.Service.Mcp.DarlingWebHostService;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -68,6 +68,31 @@ public sealed class DarlingCliCommandsTests
 
         Assert.Contains("[PASS]", line, StringComparison.Ordinal);
         Assert.Contains("msdb access: NO", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Azure SQL Database (engine edition 5) has no SQL Agent and no real msdb surface, so
+    /// "msdb access: yes" teaches the onboarding operator something false about the target (#3237).
+    /// The clause reports the Agent surface as not applicable instead — whichever way the meaningless
+    /// HAS_DBACCESS probe answered — matching dispatch, which never sends the Agent-family collectors
+    /// to an edition-5 target.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void FormatProbeLine_AzureSqlDb_ReportsAgentSurfaceNotApplicable_NotMsdb(bool hasMsdbAccess)
+    {
+        var probe = new ConnectionProbeResult(
+            Success: true, MajorVersion: 12, EngineEdition: 5, EngineEditionDescription: "Azure SQL Database",
+            IsAzureSqlDb: true, IsAzureManagedInstance: false, IsAwsRds: false, HasMsdbAccess: hasMsdbAccess, Error: null);
+
+        var line = DarlingCliCommands.FormatProbeLine("AZ-SVLESS", probe);
+
+        Assert.Contains("[PASS]", line, StringComparison.Ordinal);
+        Assert.Contains("SQL major version 12", line, StringComparison.Ordinal);
+        Assert.Contains("Azure SQL Database", line, StringComparison.Ordinal);
+        Assert.Contains("Agent surface: not applicable (Azure SQL Database)", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("msdb", line, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1629,19 +1654,6 @@ public sealed class DarlingMissingCredentialMessageTests
             }
             """);
         return configPath;
-    }
-
-    /* Locate the repo from this file — the DarlingEnumerationProbeFailureTests idiom; no build-output copying. */
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relative));
     }
 
     private static int CountOccurrences(string haystack, string needle)

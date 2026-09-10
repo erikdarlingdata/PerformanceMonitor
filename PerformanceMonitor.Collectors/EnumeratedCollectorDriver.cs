@@ -18,7 +18,13 @@ using System.Threading.Tasks;
 
 namespace PerformanceMonitor.Collectors;
 
-/// <summary>Per-run outcome of the enumeration driver: rows written and the summed SQL/storage slice times.</summary>
+/// <summary>Per-run outcome of the enumeration driver: rows written and the summed SQL/storage slice times.
+///
+/// <para><see cref="SqlMs"/> is the SLICE, not a target-side total (#3192): it is the sum of each item's
+/// stopwatch around <c>perItemWatermark</c> plus <c>readItem</c>, and both of those legitimately touch the
+/// HOST STORE. See <c>RunAsync</c>'s <c>readItem</c> parameter for the measured magnitude and for the
+/// <see cref="CollectorContext"/> stamps that let a host attribute it.</para>
+/// </summary>
 public readonly record struct EnumeratedRunResult(int Rows, long SqlMs, long StorageMs);
 
 /// <summary>
@@ -270,6 +276,102 @@ public static class EnumeratedCollectorDriver
         + "collected and will be re-read next cycle (the watermark did not advance)";
 
     /// <summary>
+    /// The collection_log status for a cycle the #2673 whole-server wall-clock budget abandoned, shared so
+    /// both hosts write the same value.
+    ///
+    /// <para>Its own status rather than any existing one, because each of the alternatives says something
+    /// false. <c>SUCCESS</c> is what it used to be and is the bug: the run shipped nothing and advanced no
+    /// watermark, yet counted as the newest success in <c>ReadCollectionSignalsAsync</c>'s
+    /// <c>status IN ('SUCCESS', 'SKIPPED')</c>, so a collector abandoning every cycle read as perpetually
+    /// fresh, and it landed in the #1837 note channel whose whole claim is that the run SUCCEEDED.
+    /// <c>ERROR</c> would page on a guard doing exactly its job. <c>YIELDED</c> is documented as the 1s
+    /// LOCK_TIMEOUT guard and is read as evidence of lock contention on the TARGET — reusing it would send
+    /// an operator hunting contention that is not there. <c>SKIPPED</c> is a healthy no-op that counts as
+    /// success; this is the opposite, work attempted and paid for that shipped nothing.</para>
+    ///
+    /// <para>Safe to add because every read buckets by explicit list — <c>IN ('ERROR', 'PERMISSIONS')</c>,
+    /// <c>= 'YIELDED'</c>, <c>IN ('SUCCESS', 'SKIPPED')</c> — never by complement, so a new value joins no
+    /// bucket rather than silently joining the wrong one, and <c>collection_log.status</c> carries no CHECK
+    /// constraint, so no migration rung is needed. The self-alert's consecutive-failure fast path is
+    /// server-scoped across every collector, so one collector abandoning among ~40 healthy ones cannot
+    /// empty its success window.</para>
+    /// </summary>
+    public const string AbandonedStatus = "ABANDONED";
+
+    /// <summary>
+    /// What a whole-cycle #2673 abandonment writes to <c>collection_log.error_message</c>, <c>{0}</c> = the
+    /// budget in seconds. Shared for the same reason <see cref="WallClockBudgetErrorFormat"/> is: both hosts
+    /// had their own copy of this literal, so the wording an operator greps for could drift between them.
+    /// </summary>
+    public const string WholeCycleBudgetNoteFormat =
+        "wall-clock budget ({0}s) reached; cycle abandoned";
+
+    /// <summary>
+    /// <see cref="WholeCycleBudgetNoteFormat"/> as a SQL <c>LIKE</c> pattern, the budget hole replaced by
+    /// <c>%</c> so ONE pattern matches every budget. Pinned equal to that format with <c>{0}</c> substituted,
+    /// so re-wording the note cannot leave the reads matching a sentence nothing writes.
+    ///
+    /// <para>The budget is interpolated and the shipped values differ - <c>procedure_stats</c>,
+    /// <c>query_stats</c> and <c>plan_correction</c> carry 120 s while <c>query_store</c> carries the 600 s
+    /// <c>QueryStoreCollector.PerDatabaseWallClockBudget</c> - so equality against any one rendered sentence
+    /// matches one collector and silently misses the rest.</para>
+    /// </summary>
+    public const string WholeCycleBudgetNoteSqlPattern = "wall-clock budget (%s) reached; cycle abandoned";
+
+    /// <summary>
+    /// How a read recognises a whole-cycle #2673 abandonment from the ROW rather than from its status:
+    /// nothing stored, and the abandonment's own note. Both facts are true of every abandonment ever
+    /// written, which is what <see cref="AbandonedStatus"/> is not.
+    ///
+    /// <para><c>collection_log</c> is an append-only hypertable, so the rows written before #2803 gave
+    /// abandonment its own status cannot be rewritten: they carry <c>status = 'SUCCESS'</c> beside
+    /// <c>rows_collected = 0</c> and this note (#2926). A count keyed on the status alone reads them as zero
+    /// abandonments AND as successes, so any window straddling that boundary under-reports - silently, and
+    /// in the direction that looks healthy.</para>
+    ///
+    /// <para><c>COALESCE</c> rather than a bare <c>LIKE</c>: <c>NULL LIKE</c> is NULL, and this predicate is
+    /// also used under a <c>NOT</c>, where a NULL would drop an ordinary empty run out of the success count
+    /// instead of leaving it there.</para>
+    /// </summary>
+    public const string AbandonedByNotePredicateSql =
+        "(rows_collected = 0 AND COALESCE(error_message, '') LIKE '" + WholeCycleBudgetNoteSqlPattern + "')";
+
+    /// <summary>
+    /// The era-invariant abandonment key the five Collection-Health reads count on (#2926): this status, or
+    /// <see cref="AbandonedByNotePredicateSql"/> for the rows that predate it.
+    ///
+    /// <para>SQL text rather than a shared query, because the five reads are <c>const</c> strings in three
+    /// projects against two engines. Each INTERPOLATES this constant - they are constant interpolated
+    /// strings, so the substitution is still compile-time and they are still <c>const</c> - which makes a
+    /// drifted copy a build error rather than something a pin has to notice. What the pins still carry is
+    /// the part no compiler can state: that every banding read selects the count at all, and that none of
+    /// them has hand-rolled a status-only bucket beside the shared one.</para>
+    /// </summary>
+    public const string AbandonedRunPredicateSql =
+        "(status = '" + AbandonedStatus + "' OR " + AbandonedByNotePredicateSql + ")";
+
+    /// <summary>
+    /// The statuses the freshness reads count as a collection having happened —
+    /// <c>DarlingSelfAlertEvaluator.ReadCollectionSignalsAsync</c>'s <c>last_success</c> and
+    /// <c>recent_success</c>, and the health reads' <c>last_success_time</c>. Named here so the invariant
+    /// that <see cref="AbandonedStatus"/> is NOT one of them is assertable rather than a property of four
+    /// separately-maintained SQL strings.
+    /// </summary>
+    public static readonly IReadOnlyList<string> FreshnessSuccessStatuses = new[] { "SUCCESS", "SKIPPED" };
+
+    /// <summary>
+    /// How a run that RETURNED (rather than threw) becomes a collection_log status, shared by both hosts so
+    /// the two cannot drift on it — they previously held one hardcoded <c>"SUCCESS"</c> literal each, which
+    /// is precisely how the whole-cycle abandonment inherited a success status in both.
+    /// </summary>
+    /// <param name="abandoned">
+    /// <c>CollectorRunResult.Abandoned</c> / <c>RunTelemetry.Abandoned</c> — set only where the #2673
+    /// whole-server wall-clock budget gave up, having stored nothing and advanced no watermark.
+    /// </param>
+    public static string ClassifyReturnedRun(bool abandoned) =>
+        abandoned ? AbandonedStatus : "SUCCESS";
+
+    /// <summary>
     /// The collection-log note for a per-database cycle where SOME databases failed and the rest
     /// succeeded (#2623). <c>{0}</c> = how many failed, <c>{1}</c> = how many were attempted,
     /// <c>{2}</c> = up to <see cref="MaxNamedFailedDatabases"/> of their names, <c>{3}</c> = the first
@@ -313,6 +415,17 @@ public static class EnumeratedCollectorDriver
 
     /// <summary><see cref="UnreadableFailureSetErrorFormat"/> parsed once (CA1863).</summary>
     private static readonly CompositeFormat s_unreadableFailureSet = CompositeFormat.Parse(UnreadableFailureSetErrorFormat);
+
+    /// <summary><see cref="WholeCycleBudgetNoteFormat"/> parsed once (CA1863).</summary>
+    private static readonly CompositeFormat s_wholeCycleBudgetNote = CompositeFormat.Parse(WholeCycleBudgetNoteFormat);
+
+    /// <summary>
+    /// The #2673 whole-cycle abandonment note, rendered. A method rather than the bare format string
+    /// because both HOSTS build this one (the other format constants here are consumed in-file), so
+    /// exposing the string would leave each host to parse it and to pick its own culture.
+    /// </summary>
+    public static string WholeCycleBudgetNote(int budgetSeconds) =>
+        string.Format(CultureInfo.InvariantCulture, s_wholeCycleBudgetNote, budgetSeconds);
 
     /// <summary>
     /// Reads an enumeration query's result: the item list, then the OPTIONAL SECOND RESULT SET of
@@ -524,6 +637,18 @@ public static class EnumeratedCollectorDriver
     /// <param name="readItem">
     /// The SQL phase: builds the per-item query, runs it, and materializes the batch. Returns a non-null
     /// (possibly empty) list. Its wall time is summed into <see cref="EnumeratedRunResult.SqlMs"/>.
+    ///
+    /// <para><b>Whatever this closure does is billed to <see cref="EnumeratedRunResult.SqlMs"/>, including
+    /// work against the HOST STORE (#3192).</b> That is not a target-side total, and on this driver's
+    /// heaviest caller it is mostly not target-side at all: <c>query_store</c>'s closure calls the deferred
+    /// plan-XML and statement-text fetches, each of which round-trips the store to learn what content is
+    /// already held and then writes back what came off the target, and one measured production run put
+    /// 107,334 ms of a 124,972 ms <c>SqlMs</c> in the store against 6,494 ms of target time. The same is true
+    /// of <paramref name="perItemWatermark"/> above, whose read and clamp-path write are also inside this
+    /// stopwatch. <see cref="CollectorContext"/> carries the phase stamps that let a host attribute it —
+    /// <c>PerItemWatermarkMs</c>, <c>PerItemPlan/TextProbeMs</c> and <c>PerItemPlan/TextWriteMs</c> are the
+    /// store terms — and a host that persists <c>SqlMs</c> as a target-side figure without them is publishing
+    /// a number that answers the opposite of the question it appears to.</para>
     /// </param>
     /// <param name="writeBatch">
     /// The storage phase: writes ONE item's batch to the host store. Skipped for an empty batch. Its wall
@@ -538,8 +663,16 @@ public static class EnumeratedCollectorDriver
     /// <param name="onItemError">Per-item skip log, invoked when one item fails (offline DB, timeout, permissions).</param>
     /// <param name="perItemBudget">
     /// Wall-clock ceiling for one item's watermark refresh plus its read (#2150), from
-    /// <c>ICollectorDefinition.PerItemWallClockBudget</c>. Null (every collector but <c>query_store</c>) leaves
-    /// the loop exactly as it was. Exceeding it abandons THAT item as a per-item failure and continues;
+    /// <c>ICollectorDefinition.PerItemWallClockBudget</c>. Null for a collector that declares none, which
+    /// leaves the loop exactly as it was.
+    ///
+    /// <para>Not "every collector but <c>query_store</c>", which is what this said and what
+    /// <see cref="StartItemBudget"/> said with it. FOUR definitions declare a budget —
+    /// <c>CollectorCatalog.HasWallClockBudget</c>'s own doc calls them "the four budgeted heavies" — and TWO
+    /// of them also enumerate, so <c>plan_correction</c> reaches this parameter non-null as well. The other
+    /// two are server-scoped, so this driver never sees theirs. Stated relationally rather than as a name,
+    /// because the count is derived from the catalog by a test: a hardcoded name is correct until the fifth
+    /// collector earns a budget, with nothing to say so.</para> Exceeding it abandons THAT item as a per-item failure and continues;
     /// the WRITE is deliberately outside the budget, because abandoning a flush that is already underway
     /// would trade a slow cycle for a partially-written one.
     /// </param>
@@ -643,8 +776,9 @@ public static class EnumeratedCollectorDriver
     }
 
     /// <summary>
-    /// Starts one item's wall-clock budget (#2150), or returns null when the definition declares none —
-    /// which is every collector but <c>query_store</c>, so the unbounded path stays byte-identical.
+    /// Starts one item's wall-clock budget (#2150), or returns null when the definition declares none, so
+    /// the unbounded path stays byte-identical for every collector that declares no budget. Which is most of
+    /// them but not only <c>query_store</c> — see <c>RunAsync</c>'s <c>perItemBudget</c> parameter.
     ///
     /// <para>A LINKED source, so host shutdown still cancels the item promptly; the timer only adds a
     /// second reason to stop. Callers must pass <see cref="CancellationTokenSource.Token"/> to the work

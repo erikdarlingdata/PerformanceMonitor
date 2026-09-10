@@ -12,7 +12,9 @@ using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
@@ -26,19 +28,305 @@ using PerformanceMonitor.Darling.Storage;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// Per-run outcome the worker logs (mirrors Lite's fetch/store phase split, #1180). <paramref name="Note"/>
-/// annotates a run that SUCCEEDED but is worth explaining on its collection_log row — today only the
-/// empty-enumeration case (see <see cref="EnumeratedCollectorDriver.EmptyEnumerationMessage"/>). It is the
-/// Darling twin of Lite's <c>_lastCollectionNote</c>; null (the default) leaves the row's message column
-/// null exactly as before.
+/// Per-run outcome the worker logs (mirrors Lite's fetch/store phase split, #1180).
+/// <see cref="Note"/> — what reaches <c>collection_log.error_message</c> — is COMPUTED from the two halves
+/// below and cannot be assigned, so no caller can pick up one half and drop the other.
 /// </summary>
+/// <param name="Measurements">
+/// The labelled counts the DEFINITION measured on the target (#3161), straight off
+/// <see cref="CollectorContext.Measurements"/>. REQUIRED rather than defaulted, and for the reason
+/// <c>DarlingObservability.LogCollectionAsync</c>'s <c>fanout</c> is: most construction sites here are the
+/// early returns of runs that never reached a definition's read — an <c>AppliesTo</c> miss, an enumeration
+/// that listed nothing, a cycle the wall-clock budget abandoned — and
+/// <see cref="CollectorContext.NoMeasurements"/> is their correct answer rather than a value they forgot. A
+/// default would let those sites stand in for the ONE success site that must pass the real list, which is
+/// the site whose silence #3161 was filed about. The compiler names every site instead of a grep.
+/// </param>
+/// <param name="SqlMs">
+/// What lands in <c>collection_log.sql_duration_ms</c>: the driver's SQL slice for this run.
+///
+/// <para><b>Not a purely target-side figure, and on the heaviest collector mostly not one (#3192).</b> On
+/// the enumerated path this is the per-item stopwatch around the watermark refresh plus the whole
+/// <c>readItem</c> closure, and for <c>query_store</c> that closure calls
+/// <c>DarlingCollectorRunner.FetchAndStorePlansAsync</c> /
+/// <c>FetchAndStoreQueryTextAsync</c> — each of which probes the STORE for
+/// what content is already held and writes back what came off the target. One measured production run put
+/// 107,334 ms of a 124,972 ms <c>SqlMs</c> in the store against 6,494 ms of plan-plus-text target time, and
+/// the store probe is the largest single term in both fetches fleet-wide (55.4% / 80.6%, V110).</para>
+///
+/// <para><b>Deliberately left blended rather than re-based</b>, and the reason is downstream: this value is
+/// also what <see cref="CollectorCostAccumulator"/> sums into <c>collect.collector_cost</c>, a 90-day hourly
+/// series that carries NO phase split and is built in memory rather than re-aggregated from
+/// <c>collection_log</c>. Subtracting the store terms here would leave 90 days of rows meaning one thing and
+/// every row after meaning another, with nothing in that series able to reconcile them — under a
+/// Collector Cost Regression self-alert whose baseline window is 14 days. The attribution is published
+/// instead of applied: <see cref="Mcp.DarlingDataReader.CollectionLogEntry.SqlStoreMs"/> derives the store
+/// share from the V110 columns, which makes it retroactive to every row that has them.</para>
+/// </param>
+/// <param name="HostNote">
+/// The note the RUNNER authored for a run worth explaining on its collection_log row: the RDS ingest
+/// outcome, the whole-cycle budget, the probe-failure summary, the fan-out bookkeeping. Null (the default)
+/// on an ordinary run. Named <c>HostNote</c> rather than <c>Note</c> because it is only one half of what
+/// the column receives — the rename is what made the compiler point at every site that used to assume
+/// otherwise.
+/// </param>
 /// <param name="Fanout">
 /// The per-database rollup for a run that fanned out, null for one that did not (#2472). Defaulted because
 /// the great majority of construction sites here are the early returns of runs that never reached a fan-out
 /// — a single query, an enumeration that yielded nothing — and null is their correct answer rather than a
 /// value they forgot to supply. The one site that MUST set it is the success return.
 /// </param>
-public sealed record CollectorRunResult(int Rows, long SqlMs, long StorageMs, string? Note = null, FanoutCost? Fanout = null);
+/// <param name="Abandoned">
+/// True only for a cycle the #2673 whole-server wall-clock budget gave up on: nothing was stored and no
+/// watermark advanced. Carried as its own field rather than inferred from <see cref="Note"/>, because
+/// matching on the note's TEXT would make the collection_log status depend on a human-readable string that
+/// exists to be reworded — the classification and the wording have to move independently. Defaulted false so
+/// the seven ordinary construction sites are unchanged; the abandonment return is the only site that sets it.
+/// </param>
+/// <param name="ServerPhasesMeasured">
+/// True when the SERVER-SCOPED path stamped <paramref name="ServerOpenMs"/>/<paramref name="ServerDrainMs"/>
+/// (#2851). The flag exists because the enumerated path gates its own split on <c>PerItemOpenMs &gt; 0</c>,
+/// which conflates "we measured it" with "the number was non-zero" — a genuinely instant open would suppress
+/// the whole split, and a reader could not tell that from a collector that emits none. Gate on the flag, so a
+/// measured zero prints as a zero.
+/// </param>
+/// <param name="ServerOpenMs">
+/// Milliseconds the server-scoped <c>ExecuteReaderAsync</c> took — the part no client-side budget can shorten.
+/// Stamped from a <c>finally</c> rather than after the await (#2816): a throwing open must still report how
+/// long it ran, or its time silently lands in the residual and the residual is the one term nobody can
+/// attribute.
+/// </param>
+/// <param name="ServerDrainMs">
+/// Milliseconds the server-scoped <c>ReadAsync</c> took — row streaming, which the read loop and any byte
+/// budget do govern. Measured rather than inferred so <paramref name="ServerOtherMs"/> is a real residual
+/// instead of "everything we did not time".
+/// </param>
+/// <param name="ServerWatermarkMs">
+/// Milliseconds the server-scoped watermark read took. **Deliberately NOT part of the <see cref="SqlMs"/>
+/// decomposition**, because on this path it is not part of <see cref="SqlMs"/> at all: it runs before the
+/// <c>sqlSlice</c> stopwatch is even started, so folding it into the sum would print a permanent <c>wm:0ms</c>
+/// and invite exactly the wrong conclusion — that a store read which #2796 measured at 50s cold is free. It is
+/// reported alongside as its own figure, and #2851's own framing (that <c>sql:</c> is wm+open+drain here) is
+/// the misreading this parameter exists to prevent.
+/// </param>
+public sealed record CollectorRunResult(
+    int Rows,
+    long SqlMs,
+    long StorageMs,
+    IReadOnlyList<CollectorMeasurement> Measurements,
+    string? HostNote = null,
+    FanoutCost? Fanout = null,
+    bool Abandoned = false,
+    bool ServerPhasesMeasured = false,
+    long ServerOpenMs = 0,
+    long ServerDrainMs = 0,
+    long ServerWatermarkMs = 0,
+    long ServerRowsRead = -1,
+    long ServerBytesRead = -1,
+    long ServerLastReadMs = -1,
+    int? TargetSessionId = null,
+    /* V110 (#2860): the per-database fetch split, summed across the fan-out. Passed in already ROLLED UP
+       rather than as loose figures plus a flag, unlike the Server* members above, because the rollup is a
+       cross-item accumulation the enumerated branch performs and this record cannot: the Server* pattern
+       works only because those are single-shot stamps on one path. Same reasoning as FanoutCost, which
+       arrives the same way for the same reason. */
+    FetchPhaseCost? FetchPhases = null)
+{
+    /// <summary>
+    /// What this run puts in <c>collection_log.error_message</c>: the runner's own
+    /// <see cref="HostNote"/> and then the definition's <see cref="Measurements"/>, composed through the
+    /// shared <see cref="CollectorMeasurementNote.Compose"/> that Lite's <c>RunTelemetry.Note</c> also
+    /// computes through — so the two SKUs cannot come to disagree about what a run note contains.
+    ///
+    /// <para><b>Computed rather than stored, and that is the parity guarantee.</b> There is no spelling of
+    /// "the host note alone" for a caller to reach for, so a definition-supplied count cannot be dropped by
+    /// a host that simply never learned about it. A shared member wired into one runner reads as a
+    /// permanently-empty value in the other SKU and nothing fails to build, which is the failure mode
+    /// CONTRIBUTING's two-store parity rules name.</para>
+    /// </summary>
+    public string? Note => CollectorMeasurementNote.Compose(HostNote, Measurements);
+
+    /// <summary>
+    /// The part of <see cref="SqlMs"/> that is neither the open nor the drain — query building, command
+    /// construction, the optional probe-failure rowset and the supplemental query. Computed as the residual so
+    /// the printed terms SUM to <see cref="SqlMs"/> by construction rather than approximately, which is the
+    /// whole point of splitting it (#2811's argument, one seam over). A large value here is itself the finding:
+    /// it would mean the cost sits in our own code between the phases, not in the target.
+    /// Clamped at zero — the phases run on separate stopwatches, so tiny skew must never print negative.
+    /// </summary>
+    public long ServerOtherMs => Math.Max(0, SqlMs - ServerOpenMs - ServerDrainMs);
+
+    /// <summary>
+    /// The three phase figures as one value for the collection_log write (V108), or NULL when this path did
+    /// not measure them. Gated on <see cref="ServerPhasesMeasured"/> rather than on any figure being
+    /// non-zero, for the reason that flag exists: a genuinely instant open must record as 0, not vanish.
+    ///
+    /// <para>ONE value rather than three loose nullables so a caller cannot persist half a split - the
+    /// FanoutCost discipline, where a slowest item without its count is worse than no answer at all.
+    /// <see cref="ServerOtherMs"/> is deliberately absent: it is a residual defined against
+    /// <see cref="SqlMs"/>, and a stored copy could drift from the column it is supposed to complete.
+    /// Readers subtract, exactly as the property above does.</para>
+    ///
+    /// <para>Narrowing to int matches the collection_log columns, which are integer like sql_duration_ms
+    /// itself; a phase would have to exceed 24 days to overflow, and the #2673 wall-clock budget abandons
+    /// the cycle at 120 seconds.</para>
+    /// </summary>
+    public ServerPhaseCost? ServerPhases => ServerPhasesMeasured
+        ? new ServerPhaseCost((int)ServerOpenMs, (int)ServerDrainMs, (int)ServerWatermarkMs)
+        : null;
+
+    /// <summary>
+    /// What the drain actually delivered (V109, #2864), or NULL when this path did not measure it. Gated on
+    /// <see cref="ServerPhasesMeasured"/> — the same flag and the same path, since the counting reader is
+    /// installed exactly where the phase stopwatches are.
+    ///
+    /// <para>One value rather than four loose fields, the <see cref="ServerPhases"/> discipline: a row count
+    /// without its last-read reading is the half-answer this issue was filed about. The two are only
+    /// meaningful together — a positive count says rows arrived, and only the elapsed reading says whether
+    /// they were still arriving when the budget fired.</para>
+    /// </summary>
+    public DrainForensics? Drain => ServerPhasesMeasured
+        ? new DrainForensics(ServerRowsRead, ServerBytesRead, ServerLastReadMs, TargetSessionId)
+        : null;
+}
+
+/// <summary>
+/// What a server-scoped drain delivered, as persisted by V109 (#2864).
+///
+/// <para><c>rows_collected</c> answers what a run STORED; an abandoned cycle stores nothing, so it is 0
+/// whether the target sent no rows at all or sent 149 and then went silent. These four say what actually
+/// arrived, so that distinction — a target that could not execute versus a stream that stalled — survives
+/// into the store instead of being lost with the cycle.</para>
+///
+/// <para><paramref name="LastReadMs"/> is the one that carries the diagnosis: subtracted from the drain it
+/// gives the time the reader spent with nothing arriving, which is what separates a slow stream from a
+/// stalled one when both end at the wall-clock budget. -1 on any figure means unmeasured or never-happened,
+/// never a real measurement, so an absence cannot read as a fast zero.</para>
+/// </summary>
+public readonly record struct DrainForensics(long RowsRead, long BytesRead, long LastReadMs, int? TargetSessionId);
+
+/// <summary>
+/// One server-scoped collector run's phase split, as persisted by V108: the open and the drain that
+/// decompose <c>sql_duration_ms</c>, and the watermark read that deliberately does NOT (it runs before that
+/// stopwatch starts - see <see cref="CollectorRunResult.ServerWatermarkMs"/>). All three or none, which is
+/// what makes the stored triple readable: a row with an open but no drain would be un-interpretable.
+/// </summary>
+public readonly record struct ServerPhaseCost(int OpenMs, int DrainMs, int WatermarkMs);
+
+/// <summary>
+/// One fetch half's phase split, SUMMED across a run's fan-out, as persisted by V110 (#2860).
+///
+/// <para>Five figures rather than three, because the counts are what turn the durations into rates and the
+/// rates are where the phase question stops being descriptive: <see cref="TargetMs"/> ÷
+/// <see cref="IdsAttempted"/> measured 31.65 ms/id against production's cold plans where #2806's controlled
+/// A/B saw ~1.6 ms/id on hot ones, and <see cref="ProbeMs"/> ÷ <see cref="ProbeIds"/> reproduces the
+/// ~0.61 ms/reference already documented on <c>PerItemPlanProbeIds</c>. #2902 wants them for a second reason:
+/// the fetch carryover has no eviction of any kind, so <see cref="IdsAttempted"/> beside
+/// <see cref="ProbeIds"/> is the only stored signal that would show a backlog growing.</para>
+///
+/// <para><c>other:</c> is deliberately absent, #2859's rule — it is a residual, and a stored copy could drift
+/// from the parent it completes. Unlike V108 the parent is not itself a column here, so the honest statement
+/// is that the residual is not recorded at all: it measured 0.1% of both fetches fleet-wide, which makes the
+/// three durations the parent to within a rounding error. <c>chunks</c> is absent too, as a batching artifact
+/// no question has asked for.</para>
+/// </summary>
+/// <param name="ProbeMs">Milliseconds in the store touch/probe round trip that decides which ids are missing.</param>
+/// <param name="TargetMs">Milliseconds inside the TARGET statements only, across every chunk.</param>
+/// <param name="WriteMs">Milliseconds writing what came back into the store.</param>
+/// <param name="IdsAttempted">Ids the fetch actually attempted — those the probe found MISSING.</param>
+/// <param name="ProbeIds">References the probe EXAMINED, which is what <paramref name="ProbeMs"/> scales with.</param>
+public readonly record struct FetchPhaseSums(int ProbeMs, int TargetMs, int WriteMs, int IdsAttempted, int ProbeIds);
+
+/// <summary>
+/// A run's plan-fetch and text-fetch phase sums (V110, #2860), each half null when THAT fetch never ran.
+///
+/// <para>Two independently-nullable halves rather than ten loose fields, and the nullability is per half on
+/// purpose: the log line emits its two sub-lines separately, so a run that fetched text but no plans has to
+/// store the text figures and leave the plan ones NULL rather than claiming five measured zeros. Within a
+/// half it is all-or-nothing — the <see cref="FetchPhaseSums"/> and <see cref="FanoutCost"/> discipline, where
+/// a target time without its id count is the half-answer that cannot be turned into the rate it exists for.</para>
+/// </summary>
+public readonly record struct FetchPhaseCost(FetchPhaseSums? Plan, FetchPhaseSums? Text);
+
+/// <summary>
+/// Accumulates a fan-out's PER-DATABASE fetch splits into one <see cref="FetchPhaseCost"/> of sums (V110,
+/// #2860).
+///
+/// <para><b>Why sums are the right rollup</b> is argued at length on V110's own doc comment; the short of it
+/// is that the split is N:1 against this row (N &gt; 1 on 68.8% of <c>query_store</c> runs) and the two
+/// questions are already split across two mechanisms — V80's rollup answers WHICH DATABASE, and a sum answers
+/// WHICH PHASE exactly rather than at 92.8% with a ~6.5 : 1 bias toward blaming the target for what was
+/// actually the store probe. Sums also compose against a row whose <c>duration_ms</c> and
+/// <c>sql_duration_ms</c> are already cross-item totals, so nothing new has to be decided about cardinality.</para>
+///
+/// <para><b>Observed for EVERY completed item, not only the ones the log line prints.</b> The per-database
+/// line is gated on <c>batchCount &gt; 0</c> and stays silent on a quiet database — but a quiet database can
+/// still pay real fetch time, because #2902's carryover means a pass with an empty batch may drain ids
+/// deferred from an earlier one. Counting only the noisy items would drop that time, which is the same
+/// reasoning that made V80's <see cref="FanoutCostAccumulator"/> count quiet items too. So this deliberately
+/// records MORE than the log line reports, and the log line is untouched.</para>
+/// </summary>
+public sealed class FetchPhaseCostAccumulator
+{
+    /* long, then clamped on the way out. Each per-item figure is an int, but a 7-database fan-out summing
+       them is arithmetic the accumulator does rather than the column, and a silent int overflow here would
+       surface as a negative duration in the store - the one thing a duration column must never hold. */
+    private long _planProbeMs, _planTargetMs, _planWriteMs, _planIds, _planProbeIds;
+    private long _textProbeMs, _textTargetMs, _textWriteMs, _textIds, _textProbeIds;
+
+    /* Per half, and set from the SAME condition the log line gates its two sub-lines on, so the stored
+       population and the logged population are the same one. See V110's doc comment for why that is the
+       right call here and the opposite of V108's MEASURED flag: a 0 ms open is a real event measured at
+       zero, while a 0 ms fetch is a fetch that found nothing to do. */
+    private bool _planRan, _textRan;
+
+    /// <summary>
+    /// Folds one completed item's per-database split into the run's totals. Reads the context's
+    /// <c>PerItem*</c> members, which are live at this point: they are cleared at the START of the next
+    /// item's read, not at the end of this one.
+    /// </summary>
+    public void Observe(CollectorContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        if (context.PerItemPlanFetchMs > 0)
+        {
+            _planRan = true;
+            _planProbeMs += context.PerItemPlanProbeMs;
+            _planTargetMs += context.PerItemPlanTargetMs;
+            _planWriteMs += context.PerItemPlanWriteMs;
+            _planIds += context.PerItemPlanIdsAttempted;
+            _planProbeIds += context.PerItemPlanProbeIds;
+        }
+
+        if (context.PerItemTextFetchMs > 0)
+        {
+            _textRan = true;
+            _textProbeMs += context.PerItemTextProbeMs;
+            _textTargetMs += context.PerItemTextTargetMs;
+            _textWriteMs += context.PerItemTextWriteMs;
+            _textIds += context.PerItemTextIdsAttempted;
+            _textProbeIds += context.PerItemTextProbeIds;
+        }
+    }
+
+    /// <summary>
+    /// The two halves, or null when NEITHER fetch ran anywhere in this run — which is every collector except
+    /// the plan/text-fetching ones, and ~78% of even those runs. Null is the honest answer there: the columns
+    /// say "this run performed no deferred fetch", which is not the claim "its fetch was free".
+    /// </summary>
+    public FetchPhaseCost? Result =>
+        _planRan || _textRan
+            ? new FetchPhaseCost(
+                _planRan ? Narrow(_planProbeMs, _planTargetMs, _planWriteMs, _planIds, _planProbeIds) : null,
+                _textRan ? Narrow(_textProbeMs, _textTargetMs, _textWriteMs, _textIds, _textProbeIds) : null)
+            : null;
+
+    private static FetchPhaseSums Narrow(long probeMs, long targetMs, long writeMs, long ids, long probeIds) =>
+        new((int)Math.Min(probeMs, int.MaxValue), (int)Math.Min(targetMs, int.MaxValue),
+            (int)Math.Min(writeMs, int.MaxValue), (int)Math.Min(ids, int.MaxValue),
+            (int)Math.Min(probeIds, int.MaxValue));
+}
 
 /// <summary>
 /// Runs a shared collector definition against one monitored server and binary-COPYs the rows
@@ -75,6 +363,27 @@ public sealed class DarlingCollectorRunner
        the same reason as the two above: a store reload takes effect on the NEXT cycle without rebuilding
        the runner. Lite has no equivalent and keeps the collector's compile-time constant. */
     private readonly Func<int> _textBudgetMb;
+
+    /* Feeds the procedure_stats plan-capture cadence (#2862) — how many collection cycles pass between
+       plan renders for that ONE collector. Provider-read for the same reason as the knobs above: the
+       value is re-read on every cycle, so whichever source ends up feeding it is honored on the NEXT
+       cycle without rebuilding the runner. 1 (and anything below) means capture on every cycle, which is
+       byte-identical to the pre-#2862 collector. Lite has no equivalent and never sets CapturePlanXml at
+       all, so it is unaffected either way. */
+    private readonly Func<int> _procedureStatsPlanCycleInterval;
+
+    /// <summary>
+    /// Per-(server, collector) cycle counter for the #2862 plan-capture cadence. In-memory, and lost on a
+    /// service restart — deliberately, and harmlessly, which is the whole reason this needs no stored
+    /// state: the fleet STAGGER comes from the server id (see <see cref="ShouldCapturePlanThisCycle"/>),
+    /// not from accumulated drift, so a fleet-wide restart cannot bunch every server onto the same capture
+    /// cycle. Persisting the counter in collect.collector_state would buy nothing for that and would cost a
+    /// store write per server per cycle on the hot path.
+    ///
+    /// <para>The only cost of the reset is that each server's first post-restart capture lands within one
+    /// interval of the restart rather than continuing its old phase.</para>
+    /// </summary>
+    private readonly ConcurrentDictionary<(int ServerId, string Collector), long> _planCadenceCycles = new();
 
     /* Azure SQL DB logins without master access fall back to single-database mode, throttled per
        server so master isn't retried every cycle (#857 — mirrors Lite).
@@ -130,21 +439,68 @@ public sealed class DarlingCollectorRunner
     /// failure counters and for the same reason: a restart forgetting the estimate costs exactly one
     /// first-contact-sized pass.
     /// </summary>
-    private readonly ConcurrentDictionary<(int ServerId, string Database), QueryStorePlanXmlState.PlanSizeEstimate> _observedPlanSize = new();
+    private readonly ConcurrentDictionary<(int ServerId, string Database, string Collector), QueryStorePlanXmlState.PlanSizeEstimate> _observedPlanSize = new();
 
     /// <summary>
-    /// Per-database ids the activity-driven fetch (#2312 Finding 2) still owes the store: probed missing in
-    /// an earlier cycle but deferred by the candidate cap or the byte budget. Carried IN MEMORY because the
-    /// probe's input is each cycle's batch references, and a plan referenced once — its delta rows shipped,
-    /// never executed again — would otherwise never re-enter the probe and never get its XML. The honest
-    /// costs of in-memory: a restart forgets the debt, and the ids re-enter only if their plans execute
-    /// again — for the literal-churn plans that dominate deferrals, XML nobody can reach from a fact is the
-    /// cheap thing to lose. Bounded: ids are 8 bytes and a first-contact backlog is one catalog's worth.
+    /// Per-database, per-COLLECTOR ids the activity-driven fetch (#2312 Finding 2) still owes the store
+    /// — see <see cref="FetchStateKey"/> for why the collector belongs in that key (#2902). Probed
+    /// missing in an earlier cycle but deferred by the candidate cap or the byte budget. Carried IN MEMORY
+    /// because the probe's input is each cycle's batch references, and a plan referenced once — its delta
+    /// rows shipped, never executed again — would otherwise never re-enter the probe and never get its
+    /// XML. The honest costs of in-memory: a restart forgets the debt, and the ids re-enter only if their
+    /// plans execute again — for the literal-churn plans that dominate deferrals, XML nobody can reach
+    /// from a fact is the cheap thing to lose. Bounded: ids are 8 bytes and a first-contact backlog is one
+    /// catalog's worth.
     /// </summary>
-    private readonly ConcurrentDictionary<(int ServerId, string Database), long[]> _planFetchCarryover = new();
+    private readonly ConcurrentDictionary<(int ServerId, string Database, string Collector), long[]> _planFetchCarryover = new();
 
     /// <summary>Text twin of <see cref="_planFetchCarryover"/> — same deferral contract, keyed by query_id.</summary>
-    private readonly ConcurrentDictionary<(int ServerId, string Database), long[]> _textFetchCarryover = new();
+    private readonly ConcurrentDictionary<(int ServerId, string Database, string Collector), long[]> _textFetchCarryover = new();
+
+    /// <summary>
+    /// Consecutive-failure count for the TEXT fetch (#2776), the backoff input its
+    /// <see cref="QueryStorePlanXmlState.NarrowForFailures"/> call reads.
+    ///
+    /// <para>A dictionary of its own rather than a field on a carried estimate, because the text fetch
+    /// deliberately has no estimator to hang it off — <c>DATALENGTH</c> on text is cheap, so there is no
+    /// decompression to bound and no learned average to carry. The plan side keeps its counter inside
+    /// <see cref="QueryStorePlanXmlState.PlanSizeEstimate"/> for exactly the opposite reason: it already has
+    /// a record to live in.</para>
+    /// </summary>
+    private readonly ConcurrentDictionary<(int ServerId, string Database, string Collector), int> _textFetchFailures = new();
+
+    /// <summary>
+    /// The key every one of the four fetch-state dictionaries above is read and written under. The COLLECTOR
+    /// is part of it, and that is the fix rather than a detail (#2902).
+    ///
+    /// <para><b>Why it was wrong without it.</b> The fetch's gate is a SKU flag —
+    /// <see cref="CollectorContext.CapturePlanXml"/> for plans and
+    /// <see cref="CollectorContext.FetchQueryTextSeparately"/> for text — not a collector identity, so
+    /// every collector that takes the enumerated path reaches it: five do off Azure, and only one of them
+    /// (query_store) can ever CREATE this state, because <see cref="ExtractPlanReferences"/> and its text
+    /// twin extract nothing from any other collector's batch. Keyed by database alone, the other four found
+    /// query_store's deferred ids waiting under the key they happened to share, drained them, and had the
+    /// fetch's wall clock recorded against their own <c>collection_log</c> row. Measured over 38 h on one
+    /// monitoring host: ~346 s of Query Store fetch time billed to plan_correction, query_store_health and
+    /// index_object_stats, with the signature that admits no other reading — <c>probed = 0</c> with
+    /// <c>ids &gt; 0</c>, a collector that fetched ids it never probed for.</para>
+    ///
+    /// <para>The key shape came from <see cref="_consecutiveQueryStoreItemFailures"/>, which is per-database
+    /// for the same reason and is safe that way only because every one of ITS call sites sits behind an
+    /// explicit <c>definition.Name == query_store</c> check. The shape was inherited; the guard was not.
+    /// Holding the collector in the key rather than re-testing the name at the fetch's call site keeps the
+    /// invariant in the data structure the state lives in, which is the one place it cannot drift from.</para>
+    ///
+    /// <para>A method rather than an inline tuple literal so the #2902 pin drives the SHIPPED construction
+    /// instead of a copy of it — an inline literal at each site is exactly how the collector went missing.
+    /// Ordinal comparison (the tuple's default for strings) matches the <c>StringComparison.Ordinal</c>
+    /// every <c>definition.Name</c> comparison in this file already uses.</para>
+    /// </summary>
+    internal static (int ServerId, string Database, string Collector) FetchStateKey(
+        int serverId,
+        string databaseName,
+        string collectorName)
+        => (serverId, databaseName, collectorName);
 
     /// <summary>
     /// Ids per IN-list statement for the plan fetch. Small on purpose: each id in the list is a plan the
@@ -162,6 +518,76 @@ public sealed class DarlingCollectorRunner
 
     public const int CommandTimeoutSeconds = 60;
 
+    /// <summary>The one collector the #2862 cadence gate applies to. Named rather than inferred from
+    /// &quot;does it capture plans&quot;, because query_stats, query_store, deadlocks and
+    /// blocked_process_report all capture plans too and are deliberately NOT gated: this is a targeted
+    /// response to one collector's measured cost, not a fleet-wide policy change.</summary>
+    internal const string PlanCadenceGatedCollector = "procedure_stats";
+
+    /// <summary>
+    /// Whether a given cycle captures plan XML under the #2862 cadence. Pure — no clock, no I/O, no state —
+    /// so the policy is unit-testable without a host, per the house rule for scheduling decisions.
+    ///
+    /// <para><paramref name="interval"/> at or below 1 captures on EVERY cycle, which is byte-identical to
+    /// the pre-#2862 collector; that is what makes the knob safely reversible.</para>
+    ///
+    /// <para><b>The phase is derived from the server id, and that is the whole point.</b> A bare
+    /// <c>ordinal % interval</c> would put every server in the fleet on the SAME capture cycle: 42 servers
+    /// would each skip three cycles and then all pay full plan-render cost together, converting a steady
+    /// load into a 4x spike every fourth cycle — worse for the monitored servers than collecting every
+    /// time, because peak is what produces the 120 s wall-clock abandonments. Offsetting by
+    /// <c>serverId % interval</c> spreads the fleet evenly across the interval instead, and does so
+    /// deterministically, so it survives a restart that resets the counters.</para>
+    /// </summary>
+    internal static bool ShouldCapturePlanThisCycle(long cycleOrdinal, int serverId, int interval)
+    {
+        if (interval <= 1)
+        {
+            return true;
+        }
+
+        /* Unsigned so a negative server id (none exist today, but the column is a signed integer and this
+           must not throw or bias if one ever does) still lands in [0, interval). */
+        var phase = (long)((uint)serverId % (uint)interval);
+        return (cycleOrdinal + phase) % interval == 0;
+    }
+
+    /// <summary>
+    /// The complete plan-capture decision for one collector on one server on this cycle: the SKU flag
+    /// AND the #2862 cadence gate. This is what <see cref="CollectorContext.CapturePlanXml"/> is set from,
+    /// and it exists as ONE named seam rather than as a <c>&amp;&amp;</c> inside the context initializer so the
+    /// decision is reachable from a test — a bare conjunction there is droppable by a refactor with every
+    /// pin still green, which is the failure mode this shape removes.
+    /// </summary>
+    internal bool ShouldCapturePlanXmlFor(string collectorName, int serverId) =>
+        _capturePlans() && ShouldCapturePlanForCollector(collectorName, serverId);
+
+    /// <summary>
+    /// The instance side of the #2862 cadence: advances this (server, collector) cycle counter and asks the
+    /// pure policy. Returns true unconditionally for every collector except
+    /// <see cref="PlanCadenceGatedCollector"/>, so no other collector's behaviour changes and no other
+    /// collector's counter is even allocated.
+    /// </summary>
+    private bool ShouldCapturePlanForCollector(string collectorName, int serverId)
+    {
+        if (!string.Equals(collectorName, PlanCadenceGatedCollector, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var interval = _procedureStatsPlanCycleInterval();
+        if (interval <= 1)
+        {
+            return true;
+        }
+
+        /* AddOrUpdate returns the STORED value, so the first cycle for a (server, collector) is ordinal 0
+           and each later cycle is one more. Concurrent sweeps of the same server do not overlap for one
+           collector, but the dictionary is concurrent because different servers are swept in parallel. */
+        var ordinal = _planCadenceCycles.AddOrUpdate((serverId, collectorName), 0L, static (_, previous) => previous + 1);
+        return ShouldCapturePlanThisCycle(ordinal, serverId, interval);
+    }
+
     /// <param name="capturePlans">
     /// Live provider for the plan-capture flag; null defaults to always-on (Darling's SKU default).
     /// The worker passes <c>() =&gt; config.CapturePlans</c> so a store reload takes effect next cycle;
@@ -172,7 +598,12 @@ public sealed class DarlingCollectorRunner
     /// behavior). The worker passes <c>() =&gt; config.CollectSchemaChangeEvents</c> so a noisy/benchmark box
     /// can suppress the default-trace Object:Created/Deleted flood; tests pass a constant lambda.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null)
+    /// <param name="procedureStatsPlanCycleInterval">
+    /// Live provider for the #2862 procedure_stats plan-capture cadence; null defaults to 1, which is
+    /// every cycle and therefore the pre-#2862 collector. Every existing caller and test keeps the
+    /// collector it already had without naming the knob.
+    /// </param>
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _deltas = deltas ?? throw new ArgumentNullException(nameof(deltas));
@@ -185,12 +616,26 @@ public sealed class DarlingCollectorRunner
            false = 'none': plain text into query_plan_xml so direct-SQL consumers read it bare.
            The worker passes () => config.PlanXmlCompression == "gzip"; tests pass a constant. */
         _compressPlanContent = compressPlanContent ?? (() => true);
+        /* Null provider = 1 = capture a plan on every cycle, i.e. the pre-#2862 behaviour. */
+        _procedureStatsPlanCycleInterval = procedureStatsPlanCycleInterval ?? (() => 1);
     }
 
     /* One ingestor for the process, so the resume marker survives between cycles - it is per-file and
        in-memory by design (#2538), and a fresh instance every cycle would silently re-read the same tail
        forever while looking like it was making progress. */
     private RdsPlanIngestor? _rdsPlans;
+
+    /* A SEPARATE ingestor from _rdsPlans, deliberately: RdsLogSource's resume marker is consumed per
+       (instance, file) on every read, so sharing one instance between plan capture and deadlock ingestion
+       would starve whichever of the two runs second in a cycle. Each needs its own marker to independently
+       read "the same bounded tail of the same file" - matching the pg_read_file route, where the two
+       collectors' SQL queries already read that tail independently rather than sharing a cursor. */
+    private RdsDeadlockIngestor? _rdsDeadlocks;
+
+    /* Own ingestor for the same "one instance per transport" reason as the two above — see
+       RdsCpuIngestor's own doc comment for why it does NOT need the marker-survival treatment
+       _rdsPlans/_rdsDeadlocks get: its resume watermark lives in the store, not in this field. */
+    private RdsCpuIngestor? _rdsCpu;
 
     /// <summary>
     /// Plan capture for Aurora and RDS, where the log is only reachable through the AWS API (#2538).
@@ -209,7 +654,7 @@ public sealed class DarlingCollectorRunner
 
         var started = Stopwatch.GetTimestamp();
 
-        var rows = await _rdsPlans.IngestAsync(
+        var outcome = await _rdsPlans.IngestAsync(
             server.ServerId, server.StorageName, host, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
@@ -217,8 +662,188 @@ public sealed class DarlingCollectorRunner
         /* Counted as STORAGE time rather than SQL time: no query ran against the monitored server, and
            filing an HTTPS round trip under sql_duration_ms would make one target's numbers mean something
            different from every other target's. */
-        return new CollectorRunResult(rows, 0, elapsedMs,
-            rows == 0 ? "no new auto_explain plans in the RDS log window" : null);
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
+            RdsIngestNote(outcome, RdsPlanLogNotReachedNote, RdsPlanLogEmptyNote));
+    }
+
+    /// <summary>
+    /// Deadlock capture for Aurora and RDS, where the log is only reachable through the AWS API — the
+    /// dispatch this collector was missing (it dispatched unconditionally to the <c>pg_read_file</c> route
+    /// even against a managed target, which has no filesystem to read; a 100% failure across the whole
+    /// Aurora fleet, since no grant fixes what does not exist there). Mirrors
+    /// <see cref="IngestRdsPlansAsync"/> exactly, including the STORAGE-time accounting rationale.
+    /// </summary>
+    public async Task<CollectorRunResult> IngestRdsDeadlocksAsync(
+        ServerRuntime server, CancellationToken cancellationToken)
+    {
+        _rdsDeadlocks ??= new RdsDeadlockIngestor(_postgres, logger: _logger);
+
+        var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
+
+        var started = Stopwatch.GetTimestamp();
+
+        var outcome = await _rdsDeadlocks.IngestAsync(
+            server.ServerId, server.StorageName, host, cancellationToken);
+
+        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
+            RdsIngestNote(outcome, RdsDeadlockLogNotReachedNote, RdsDeadlockLogEmptyNote));
+    }
+
+    /// <summary>
+    /// Instance CPU for Aurora and RDS Postgres, read from the AWS Performance Insights API (#2719) — the
+    /// third "reach the target a different way" collector alongside <see cref="IngestRdsPlansAsync"/> and
+    /// <see cref="IngestRdsDeadlocksAsync"/>, and unlike either of those, the ONLY route: PostgreSQL exposes
+    /// no instance-level CPU signal at all, so there is no <c>pg_read_file</c>-style fallback for a
+    /// self-hosted target to fall back to (see <see cref="PgCpuUtilizationCollector"/>'s doc comment).
+    /// Reported as a normal <see cref="CollectorRunResult"/> for the same reason the other two are.
+    /// </summary>
+    public async Task<CollectorRunResult> IngestPgCpuAsync(
+        ServerRuntime server, CancellationToken cancellationToken)
+    {
+        _rdsCpu ??= new RdsCpuIngestor(_postgres, logger: _logger);
+
+        var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
+
+        var started = Stopwatch.GetTimestamp();
+
+        var outcome = await _rdsCpu.IngestAsync(
+            server.ServerId, server.StorageName, host, cancellationToken);
+
+        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+        /* Counted as STORAGE time rather than SQL time, matching the other two RDS-API ingestors: no query
+           ran against the monitored server, and filing an HTTPS round trip under sql_duration_ms would make
+           one target's numbers mean something different from every other target's. */
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
+            RdsIngestNote(outcome, PiCpuNotReachedNote, PiCpuEmptyNote));
+    }
+
+    /* ── #3017: the notes an AWS-API ingest cycle leaves in collection_log ──────────────────────────────
+       Six constants, in pairs, because the two members of each pair are the whole point: one says the
+       source was read and held nothing, the other says the source was never asked. Before this there was
+       one sentence per collector and it was the first of the two, stamped on both outcomes — a claim about
+       the contents of a log nobody opened.
+
+       Named constants rather than inline strings so RdsIngestNote can be pinned without a store or an AWS
+       client, and so the pair for each collector can be asserted DIFFERENT — the failure mode of a fix like
+       this is the two arms converging back onto one sentence during a later edit, which no compiler
+       notices.
+
+       No host is interpolated into any of them. collection_log is read by operators and shipped in support
+       bundles, and the fact worth recording is the KIND of target, not its name. */
+
+    /// <summary>The plan log was read and no auto_explain block in it was new.</summary>
+    internal const string RdsPlanLogEmptyNote = "no new auto_explain plans in the RDS log window";
+
+    /// <summary>The plan log was never opened: this host is not an RDS or Aurora endpoint.</summary>
+    internal const string RdsPlanLogNotReachedNote =
+        "this target's host is not an RDS or Aurora endpoint, so no RDS log was requested and no plan "
+        + "capture was attempted - this cycle did not look";
+
+    /// <summary>The deadlock log was read and held no new deadlock.</summary>
+    internal const string RdsDeadlockLogEmptyNote = "no new deadlocks in the RDS log window";
+
+    /// <summary>The deadlock log was never opened: this host is not an RDS or Aurora endpoint.</summary>
+    internal const string RdsDeadlockLogNotReachedNote =
+        "this target's host is not an RDS or Aurora endpoint, so no RDS log was requested and no deadlock "
+        + "capture was attempted - this cycle did not look";
+
+    /// <summary>Performance Insights answered and had no new CPU sample.</summary>
+    internal const string PiCpuEmptyNote = "no new Performance Insights CPU samples this cycle";
+
+    /// <summary>Performance Insights was never queried: this host is not an RDS or Aurora endpoint.</summary>
+    internal const string PiCpuNotReachedNote =
+        "this target's host is not an RDS or Aurora endpoint, so Performance Insights was not queried and "
+        + "no instance CPU was attempted - this cycle did not look";
+
+    /// <summary>
+    /// The <c>collection_log</c> note for one AWS-API ingest cycle (#3017) — the three-way rendering the
+    /// bare row count could not express.
+    ///
+    /// <para><b>Not reached is asked FIRST and answers on its own.</b> A cycle that never made an AWS call
+    /// knows nothing about the source, so <paramref name="nothingNewNote"/> — which is a claim about what
+    /// the source held — must not be reachable from it. That ordering is the fix; the rest is unchanged
+    /// behaviour.</para>
+    ///
+    /// <para><b>A productive cycle still leaves no note</b>, exactly as before: the rows themselves are the
+    /// statement, and a note on every successful cycle would fill the column an operator scans for the
+    /// unusual.</para>
+    ///
+    /// <para>Pure and <c>internal static</c> so the three-way decision can be pinned directly, with no
+    /// store, no <c>ServerRuntime</c> and no AWS client — the shape #2633's own pins already use for this
+    /// family.</para>
+    /// </summary>
+    internal static string? RdsIngestNote(RdsIngestOutcome outcome, string notReachedNote, string nothingNewNote) =>
+        !outcome.SourceReached ? notReachedNote
+        : outcome.Rows == 0 ? nothingNewNote
+        : null;
+
+    /// <summary>
+    /// The per-database phase line for a database that FAULTED (#2896) — the case the #2855 split was added
+    /// to attribute and the one case it could not print, because its only log site sat on the success path
+    /// past the flush.
+    ///
+    /// <para><b>One method rather than two call sites</b> because both fault arms need it and the three
+    /// things that are easy to get wrong here are all decided once inside it: the null test, the read-once
+    /// rule, and the gate. A copy in each arm is how the budget arm and the generic arm would drift, and a
+    /// drifted decomposition is worse than an absent one — it still looks precise.</para>
+    ///
+    /// <para><b>The gate is the flag, and that is sufficient here rather than merely conventional.</b>
+    /// <c>PerDatabasePhasesMeasured</c> is set only from the connect's <c>finally</c>, which is downstream of
+    /// both the per-iteration clear and the stopwatch, so a true flag implies the stamps are this database's
+    /// own AND that the slice was started. A false flag means the fault landed before the connect — the
+    /// watermark read, the adaptive shrink's store write, <c>BuildQuery</c> — where there is no split to
+    /// print and no parent to print it against, and nothing is the honest answer.</para>
+    ///
+    /// <para><b>The stopwatch is read exactly once</b>, the #2472 rule this path already carries on its
+    /// success side. It is still running in the handler, so a second read a few statements later returns a
+    /// larger number: the gate and the line would then disagree about the parent, the residual would have
+    /// been computed against the smaller one, and the printed terms would not sum to the printed total. A
+    /// line that does not add up is the one outcome worse than no line.</para>
+    ///
+    /// <para><b>Same decomposition substring as the success line</b>, deliberately. These lines are parsed
+    /// by tooling outside this repo (#2811/#2851), so a fault split an existing parser already matches beats
+    /// a second shape it has to learn. Only the tail differs, and it has to: there are no rows and there was
+    /// no flush, so borrowing the success tail would print <c>(0 rows, pg:0ms)</c> and make a failed database
+    /// read as a quiet one.</para>
+    ///
+    /// <para><b>The level is the caller's</b>, not this method's. The budget arm is a Warning because a
+    /// collector that could not finish is not routine; the generic arm is Debug because one database being
+    /// offline or mid-restore is. A phase line louder than the error it decomposes would put a timing on the
+    /// default log with no reason beside it.</para>
+    ///
+    /// <para>Nothing here is persisted and nothing here is read back — a per-database split is N:1 against
+    /// <c>collection_log</c> and shaping that is the open decision in #2860. <c>internal</c> only so the pin
+    /// can call the shipped method instead of asserting on its source text.</para>
+    /// </summary>
+    internal static void LogPerDatabaseFaultSplit(
+        ILogger? logger,
+        LogLevel level,
+        CollectorContext context,
+        Stopwatch? databaseSqlSlice,
+        string displayName,
+        string collectorName,
+        string databaseName,
+        string outcome)
+    {
+        if (databaseSqlSlice is null)
+        {
+            return;
+        }
+
+        var databaseSqlMs = databaseSqlSlice.ElapsedMilliseconds;
+        if (context.PerDatabasePhasesFrom(databaseSqlMs) is not { } phases)
+        {
+            return;
+        }
+
+        logger?.Log(
+            level,
+            "  [{Server}] {Collector} [{Database}] {Outcome} after sql:{SqlMs}ms = connect:{ConnectMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms + other:{OtherMs}ms (nothing stored)",
+            displayName, collectorName, databaseName, outcome, databaseSqlMs,
+            phases.ConnectMs, phases.OpenMs, phases.DrainMs, phases.OtherMs);
     }
 
     public async Task<CollectorRunResult> RunAsync<TRow>(
@@ -234,14 +859,72 @@ public sealed class DarlingCollectorRunner
            dispatched at a non-SQL-Server target. */
         if (!CollectorCatalog.AppliesTo(definition, server.Target))
         {
-            return new CollectorRunResult(0, 0, 0);
+            return new CollectorRunResult(0, 0, 0, CollectorContext.NoMeasurements);
         }
 
         /* Watermark = the newest already-collected value of the definition's time column,
-           read from Postgres (Lite reads DuckDB here). */
-        DateTime? watermark = definition.WatermarkColumn is null
-            ? null
-            : await GetLastCollectedTimeAsync(server.ServerId, definition.TargetTable, definition.WatermarkColumn, cancellationToken);
+           read from Postgres (Lite reads DuckDB here).
+
+           #2344's read floor, applied to the SERVER-scoped read the way it already is to the
+           per-database one below. Name-guarded on the same collector and for the same reason
+           WatermarkPolicy's remarks give: the bound is only sound where the caller CLAMPS, and a
+           ring-buffer source whose legitimate catch-up spans days must keep reading its whole history.
+           The clamp and the bound travel together. query_store declares both watermark columns, so
+           before this guard it paid the unbounded server-scoped cost on top of the bounded
+           per-database reads — the 2,092-cancellations-a-day the method's remarks record. */
+        var serverReadFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
+            ? WatermarkPolicy.ReadFloor(collectionTime)
+            : null;
+
+        var excludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>();
+
+        /* #2797: on the two FAN-OUT paths the answer to this read is thrown away — both of them overwrite
+           context.Watermark with a per-database value before any query is built — so skip the round trip
+           there, and only there. ServerWatermarkIsDiscarded holds the predicate and the argument for why it
+           is a DISPATCH-PATH question rather than a watermark-column one.
+
+           Note what this does to the read floor just above: query_store is the only collector that guard
+           names, and the gate is true for query_store on EVERY target (it runs per database on Azure and
+           enumerates everywhere else), so the floor it computes is now unused. Kept rather than deleted
+           because it is the BOUND on this read, and removing it would make #2796's correctness depend on
+           #2797's gate continuing to fire — two unrelated conditions that must not become one.
+
+           The probe context exists because the real one cannot be built yet: hasCollectedBefore below is
+           computed FROM this read, and CollectorContext.HasCollectedBefore/NumericWatermark/State are all
+           init-only, so constructing the cycle's context ahead of the read would mean widening three
+           deliberately-immutable members on a type both SKUs and every definition share. It carries the
+           real Target and the real ExcludedDatabases — everything the five BuildEnumerationQuery
+           implementations actually read — and nothing this read produces. */
+        var dispatchProbe = new CollectorContext
+        {
+            ServerId = server.ServerId,
+            ServerName = server.StorageName,
+            CollectionTime = collectionTime,
+            Deltas = _deltas,
+            Target = server.Target,
+            ExcludedDatabases = excludedDatabases,
+        };
+        var serverWatermarkDiscarded = ServerWatermarkIsDiscarded(definition, dispatchProbe);
+
+        /* #2851: timed because this is a STORE round trip that the server-scoped path's sql: stopwatch does
+           not cover — it runs before that stopwatch starts. #2796 measured a sibling store read at 50s cold
+           on a bounded-only-by-luck predicate, so "the watermark read is free" is an assumption worth
+           holding a number against rather than believing. finally, not a trailing assignment (#2816): a
+           throwing read must still report how long it ran. Zero when the definition declares no watermark
+           column, or when #2797's gate skipped the read, which is honest either way — no read happened. */
+        var serverWatermarkWatch = Stopwatch.StartNew();
+        long serverWatermarkMs;
+        DateTime? watermark;
+        try
+        {
+            watermark = definition.WatermarkColumn is null || serverWatermarkDiscarded
+                ? null
+                : await GetLastCollectedTimeAsync(server.ServerId, definition.TargetTable, definition.WatermarkColumn, cancellationToken, serverReadFloor);
+        }
+        finally
+        {
+            serverWatermarkMs = serverWatermarkWatch.ElapsedMilliseconds;
+        }
 
         /* Numeric (bigint) watermark = the newest already-collected value of the definition's monotonic
            identity column (job_history's instance_id), read from Postgres — the bigint twin of the timestamp
@@ -253,8 +936,16 @@ public sealed class DarlingCollectorRunner
 
         /* Only when the watermark came back null: tell a TRUE first run from a store merely emptied by
            retention, so default_trace_events uses a bounded window instead of re-scanning all .trc history
-           (CollectorContext.HasCollectedBefore). Skipped in the common (non-null watermark) path. */
+           (CollectorContext.HasCollectedBefore). Skipped in the common (non-null watermark) path.
+
+           #2797 gates this on the SAME flag, and it is not incidental: this branch keys off `watermark is
+           null`, so skipping the read above would otherwise READ AS A FIRST RUN and fire this store query
+           on precisely the cycles the gate exists to make cheaper — trading one round trip for another and
+           netting nothing. The two consumers of HasCollectedBefore (default_trace_events, job_history)
+           declare no PerDatabaseWatermarkColumn, so the flag is false for both on every target and neither
+           loses the signal. */
         bool hasCollectedBefore = definition.WatermarkColumn is not null
+            && !serverWatermarkDiscarded
             && watermark is null
             && await HasPriorCollectorSuccessAsync(server.ServerId, definition.Name, cancellationToken);
 
@@ -340,9 +1031,16 @@ public sealed class DarlingCollectorRunner
             HasCollectedBefore = hasCollectedBefore,
             State = collectorState ?? CollectorContext.NoState,
             IgnoredWaitTypes = IgnoredWaitDefaults.All,
-            ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
+            /* The same array the #2797 dispatch probe above was built with, deliberately shared rather than
+               re-derived: the probe's answer is only sound if it saw the exclusions this cycle will actually
+               use, and two independent reads of server.Config could disagree. */
+            ExcludedDatabases = excludedDatabases,
             PerfmonCounterOverride = null,
-            CapturePlanXml = _capturePlans(),
+            /* #2862: plan capture is additionally cadence-gated for procedure_stats — see
+               ShouldCapturePlanForCollector. Every other collector reads exactly _capturePlans().
+               Only this path is gated: FetchRowsAsync below is the on-demand live fetch, which an
+               operator asked for by name and which stores nothing, so it always renders. */
+            CapturePlanXml = ShouldCapturePlanXmlFor(definition.Name, server.ServerId),
             /* #2150: ON. query_sql_text is no longer carried on every runtime-stats row — it is fetched once
                per query_id into collect.query_store_text (FetchAndStoreQueryTextAsync, below) and resolved
                back by the readers, all six of which now prefer that table and fall back to the fact row's
@@ -368,12 +1066,27 @@ public sealed class DarlingCollectorRunner
         long storageMs = 0;
         var rowsWritten = 0;
 
+        /* #2851: whether the server-scoped branch ran at all. The phase VALUES live on the context (next
+           to PerItemOpenMs, the enumerated twin) so the stamps are property setters a reachability pin can
+           see; only this flag needs method scope, because the success return sits outside the branch that
+           sets it. Left false on the enumerated and Azure branches, which have their own per-item split
+           (#2164) and no server-scoped line to hang this one off — the flag, not the values, is what tells
+           a reader which of those two situations produced a zero. */
+        bool serverPhasesMeasured = false;
+
         /* The per-database rollup (#2472). Both fan-out shapes feed it — the enumeration driver's
            onItemComplete hook and the Azure per-database connection loop — so a collector that fans out on
            one branch on Azure and the other on-prem reports the same shape either way. A run that never
            fans out never calls Observe and the accumulator stays empty, which is how the columns end up
            NULL on ~98 percent of collection_log rows. */
         var fanout = new FanoutCostAccumulator();
+
+        /* The per-database FETCH split, summed (#2860). Only the enumerated branch feeds it — the plan and
+           text fetches run inside its per-item read and nowhere else — so a collector that never fetches
+           never calls Observe and the accumulator stays empty, which is how these ten columns end up NULL on
+           ~98 percent of collection_log rows. Declared beside the fan-out accumulator because it is the same
+           kind of thing: a cross-item rollup the run's single row could not otherwise carry. */
+        var fetchPhases = new FetchPhaseCostAccumulator();
 
         /* The collection_log note for this run (#1837) — null on every ordinary path. Only the enumeration
            branch sets it, but it is declared here so the note reaches the single success return below when
@@ -383,8 +1096,8 @@ public sealed class DarlingCollectorRunner
         /* The engine's provider, resolved ONCE for both branches. It used to be resolved only inside the
            per-database branch, and the branch below opened a hardcoded SqlConnection — so every collector
            that does NOT fan out per database was handed a SQL Server connection whatever the target was.
-           Six of the seven PostgreSQL collectors take that path (only pg_autovacuum_stats fans out), and
-           SqlClient rejects Npgsql's keywords while parsing the connection string, before any query runs:
+           Six of the seven PostgreSQL collectors then shipping took that path (only pg_autovacuum_stats
+           fanned out), and SqlClient rejects Npgsql's keywords while parsing the connection string, before any query runs:
            "Keyword not supported: 'host'". Worse, an ArgumentException is neither SqlException nor
            PostgresException, so it missed BOTH classification arms in DarlingWorker and recorded a raw
            ERROR every sweep forever — including for all three Tier 0 outage predictors. */
@@ -456,11 +1169,47 @@ public sealed class DarlingCollectorRunner
                    after its read and flush succeed — per iteration, so a fault cannot leak a stamp
                    into a sibling database's landing. */
                 string? stagedOpenIntervalStamp = null;
+
+                /* #2896: the DECLARATION is hoisted, the START is not. The catch arms below print this
+                   database's split and a split needs its parent, so the stopwatch has to be in scope
+                   there — but it is still started at exactly the statement it was started at before, so
+                   the interval it measures is unchanged and dbSqlMs is the same number it always was.
+                   That matters because dbSqlMs is not log-only: it feeds sqlMs, fanout.Observe and
+                   collection_log.sql_duration_ms, and starting the stopwatch above the watermark read
+                   and BuildQuery to make it non-null would widen all three to satisfy a log line.
+
+                   Null therefore means "the fault landed before the timed region" — in the watermark
+                   read, the adaptive shrink's store write, or BuildQuery. There is genuinely no parent
+                   in that case, and the compiler enforces the check rather than a comment claiming it. */
+                Stopwatch? sqlSlice = null;
                 try
                 {
                     /* The authoritative database_name for XE rows read on this path — see
                        CollectorContext.CurrentDatabaseName. */
                     context.CurrentDatabaseName = databaseName;
+
+                    /* #2855: cleared once per iteration, because this loop reuses ONE context across every
+                       database and without the reset a database whose read faults would print the PREVIOUS
+                       database's split as its own — a stale timing that looks precise is worse than no
+                       timing at all. Same rule, and the same reason, as the enumerated readItem's clear of
+                       its own stamps.
+
+                       #2896 moved it from just below the stopwatch to HERE, above the watermark read and
+                       BuildQuery. #2855 only needed it before the CONNECT, because only the success path
+                       read the split; the catch arms now read it too, and a fault in the watermark read
+                       reaches them without having passed the old position — so the flag and the three
+                       stamps would still hold the previous database's values and the fault line would
+                       confidently attribute another database's connect to this one. Nothing between here
+                       and the connect reads any PerDatabase* field, so the success path is unchanged.
+
+                       This is also what makes PerDatabasePhasesMeasured a SUFFICIENT gate on the fault
+                       path: the flag is only ever set from the connect's finally below, which is
+                       downstream of both this clear and the stopwatch, so a true flag now implies both
+                       that these stamps are this database's own and that sqlSlice was started. */
+                    context.PerDatabaseConnectMs = 0;
+                    context.PerDatabaseOpenMs = 0;
+                    context.PerDatabaseDrainMs = 0;
+                    context.PerDatabasePhasesMeasured = false;
 
                     var dbPlan = plan;
                     if (dbPlan is null)
@@ -569,16 +1318,70 @@ public sealed class DarlingCollectorRunner
                         }
                     }
 
-                    var sqlSlice = Stopwatch.StartNew();
+                    sqlSlice = Stopwatch.StartNew();
                     List<TRow> batch;
+
                     /* dbToken, not cancellationToken (#2150): connect, execute and drain are the phases the
                        budget bounds. The FLUSH below deliberately stays on cancellationToken — abandoning a
                        write already in flight would trade a slow cycle for a partially-written one. */
-                    using (var dbConnection = await OpenDatabaseConnectionAsync(perDbProvider, server, databaseName, dbToken))
-                    using (var dbCommand = CreateCollectorCommand(perDbProvider, dbPlan, dbConnection, perDbTimeout))
-                    using (var dbReader = await dbCommand.ExecuteReaderAsync(dbToken))
+                    /* #2855: the CONNECT is a phase in its own right here, and only here. This branch opens a
+                       connection per database, so on Azure SQL DB every cycle pays a fresh login per
+                       database — a cost that had nowhere to appear and therefore sat inside the blended
+                       number with everything else. Timed around OpenDatabaseConnectionAsync alone, so
+                       command construction lands in the residual rather than in a phase that is supposed to
+                       mean "reaching the database".
+
+                       Stamped from a finally, with the flag, for the #2854 reason: a login that times out or
+                       a per-database budget that fires during the handshake is exactly the case this exists
+                       to attribute, and a trailing assignment is skipped on precisely that path. The stamp
+                       would then read connect:0ms and hand its whole cost to other: — the one term whose job
+                       is to be small and unattributed. The flag rides the same finally so the two can never
+                       disagree about whether a measurement happened. */
+                    var connectWatch = Stopwatch.StartNew();
+                    DbConnection openedConnection;
+                    try
                     {
-                        batch = await definition.ReadAsync(dbReader, context, dbToken);
+                        openedConnection = await OpenDatabaseConnectionAsync(perDbProvider, server, databaseName, dbToken);
+                    }
+                    finally
+                    {
+                        context.PerDatabaseConnectMs = connectWatch.ElapsedMilliseconds;
+                        context.PerDatabasePhasesMeasured = true;
+                    }
+
+                    using (var dbConnection = openedConnection)
+                    using (var dbCommand = CreateCollectorCommand(perDbProvider, dbPlan, dbConnection, perDbTimeout))
+                    {
+                        /* #2855: the open, same contract as the other two paths — ExecuteReaderAsync returns
+                           only when the first rowset is available, so this is server-side work before the
+                           first row, which no client-side budget shortens. Hoisted out of the `using` header
+                           only so the reader below keeps its original disposal scope. */
+                        var openWatch = Stopwatch.StartNew();
+                        DbDataReader openedReader;
+                        try
+                        {
+                            openedReader = await dbCommand.ExecuteReaderAsync(dbToken);
+                        }
+                        finally
+                        {
+                            context.PerDatabaseOpenMs = openWatch.ElapsedMilliseconds;
+                        }
+
+                        using var dbReader = openedReader;
+
+                        /* #2855: the drain, measured rather than inferred — the ServerScopeDrainMs argument.
+                           A residual drain would silently absorb command construction and the trailing
+                           probe-failure rowset below, and then a large other: would say nothing about our
+                           own code. From a finally so a budget expiry mid-stream reports how far it got. */
+                        var drainWatch = Stopwatch.StartNew();
+                        try
+                        {
+                            batch = await definition.ReadAsync(dbReader, context, dbToken);
+                        }
+                        finally
+                        {
+                            context.PerDatabaseDrainMs = drainWatch.ElapsedMilliseconds;
+                        }
 
                         /* #1875: the payload path's probe-failure contract, on the path that used to
                            ignore it. blocked_process_report is the declaring collector that also runs per
@@ -592,10 +1395,27 @@ public sealed class DarlingCollectorRunner
                                 await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(dbReader, dbToken));
                         }
                     }
-                    /* Read ONCE. The stopwatch is still running, so a second read a few statements later
-                       returns a larger number, and the per-item total would then exceed the blended total
-                       it is a ratio against — a dominance a hair above the truth, on every Azure run
-                       (#2472). Small, and wrong in the direction that matters. */
+                    /* Read ONCE. A second read a few statements later returns a larger number, and the
+                       per-item total would then exceed the blended total it is a ratio against — a dominance
+                       a hair above the truth, on every Azure run (#2472). Small, and wrong in the direction
+                       that matters.
+
+                       #2896 review catch: STOPPED rather than merely read once, and stopped BEFORE the read
+                       so the read is the frozen value. "Read once" was a convention the success path kept by
+                       having only one read; the fault arms below now hold the same stopwatch, and everything
+                       between here and them — the flush above all — kept accumulating into it. A store write
+                       that throws (WriteBatchAsync deliberately runs on cancellationToken, so it CAN throw
+                       into these arms) would have printed a sql: larger than the dbSqlMs already folded into
+                       sqlMs and fanout.Observe for this same database, with the whole difference landing in
+                       other: — storage latency reported as unattributed SQL-side residual, which is the
+                       exact mis-attribution this instrumentation exists to prevent.
+
+                       Stopping makes the two paths print the same parent by construction rather than by
+                       both happening to read at the same moment. It does NOT widen dbSqlMs: the interval
+                       still ends here, a hair earlier than the old read if anything. A fault BEFORE this
+                       point still finds the stopwatch running and reports how far it got, which is what the
+                       fault line is for. */
+                    sqlSlice.Stop();
                     var dbSqlMs = sqlSlice.ElapsedMilliseconds;
                     sqlMs += dbSqlMs;
 
@@ -615,6 +1435,55 @@ public sealed class DarlingCollectorRunner
                        completion hook fires after the flush: both slices are only known once the write is
                        done. */
                     fanout.Observe(databaseName, dbSqlMs + dbStorageMs);
+
+                    /* #2855: this branch's per-database phase line — the line it did not emit at all. Read
+                       after the flush, like the other two paths, so pg: is this database's own figure.
+
+                       Gated on the split being present rather than on a figure being non-zero, and the
+                       null-or-value decision lives on the context so "no split" and "no line" are one
+                       decision made once. A `connect: > 0` gate would suppress the whole line for a pooled
+                       connect that really did cost nothing — the case where the rest of the line is most
+                       worth reading, and the mistake #2854 had to undo on the enumerated path.
+
+                       NOT gated on batch.Count > 0, unlike the enumerated path's #1565 quiet-on-zero rule.
+                       That rule guards a ROW-COUNT line, whose payload is the row count, and a zero-row one
+                       carries nothing. This is a PHASE line, and its payload — the connect above all — is
+                       paid on a quiet database exactly as on a busy one. The server-scoped phase line is the
+                       closer sibling and prints for every measured run regardless of rows; suppressing quiet
+                       databases here would leave them emitting nothing whatsoever, which is the state this
+                       issue is about.
+
+                       Its OWN line rather than folded into anything, the #2811/#2851 rule: these lines are
+                       parsed by tooling outside this repo, so "don't break the parser" outranks "one line to
+                       grep". Nothing here is persisted — a per-database split is N:1 against collection_log
+                       and shaping that is the open decision in #2860.
+
+                       THE SUCCESS PATH IS NO LONGER THE ONLY ONE (#2896). This site still prints only when
+                       the read and flush both landed; a database that faults is printed by
+                       LogPerDatabaseFaultSplit from the catch arms below, which is the case #2855's stamps
+                       were placed in a finally to serve and which used to reach a log that said nothing but
+                       an error string.
+
+                       The obstacle #2855 recorded was that dbSqlMs is out of scope in the catch, and that
+                       hoisting sqlSlice above the watermark read and BuildQuery to fix it would silently
+                       widen dbSqlMs — which is not log-only: it feeds sqlMs, the fan-out rollup and
+                       collection_log's sql_duration_ms. Neither of the two options it named was taken. Only
+                       the DECLARATION moved above the try; the START stayed exactly where it was, so the
+                       interval is unchanged, dbSqlMs is the same number, and no second stopwatch measures a
+                       second interval that a reader would then have to reconcile with this one.
+
+                       #3102: Debug, matching the enumerated branch's block below and the generic fault
+                       arm's own level. A database that SUCCEEDED has no error for its split to sit beside,
+                       which is exactly LogPerDatabaseFaultSplit's rule about a phase line being louder
+                       than the thing it decomposes. */
+                    if (context.PerDatabasePhasesFrom(dbSqlMs) is { } dbPhases)
+                    {
+                        _logger?.LogDebug(
+                            "  [{Server}] {Collector} [{Database}] sql:{SqlMs}ms = connect:{ConnectMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms + other:{OtherMs}ms ({Rows} rows, pg:{PgMs}ms)",
+                            server.Config.DisplayName, definition.Name, databaseName, dbSqlMs,
+                            dbPhases.ConnectMs, dbPhases.OpenMs, dbPhases.DrainMs, dbPhases.OtherMs,
+                            batch.Count, dbStorageMs);
+                    }
 
                     /* Same per-database bounded-cycle WARNING the enumeration path emits from
                        onItemComplete, mirroring Lite. Reachable here since #1836 put query_store — the
@@ -671,6 +1540,7 @@ public sealed class DarlingCollectorRunner
                         definition.PerItemWallClockBudget!.Value);
                     failed++;
                     failedDatabases.Add(databaseName);
+                    CollectorFaultDatabase.Stamp(budgetFailure, databaseName);
                     firstFailure ??= budgetFailure;
 
                     /* Same #2111 stamp the generic arm makes, and it MATTERS more here: this is what turns
@@ -687,6 +1557,13 @@ public sealed class DarlingCollectorRunner
                     _logger?.LogWarning(
                         "{Collector} on '{Server}' database [{Database}] {Message}",
                         definition.Name, server.Config.DisplayName, databaseName, budgetFailure.Message);
+
+                    /* #2896: and the split behind it, at the arm's own WARNING. This is the case the budget
+                       exists to bound, and connect: is the term that says whether the wall clock went on
+                       reaching the database or on reading it — which the message above cannot say. */
+                    LogPerDatabaseFaultSplit(
+                        _logger, LogLevel.Warning, context, sqlSlice,
+                        server.Config.DisplayName, definition.Name, databaseName, "budget expired");
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
                 {
@@ -694,6 +1571,13 @@ public sealed class DarlingCollectorRunner
                        routine one-database miss. */
                     failed++;
                     failedDatabases.Add(databaseName);
+                    /* #2997: which database this was, carried ON the exception. When every database fails
+                       the loop rethrows firstFailure bare, and the fault handlers upstream have only
+                       ServerRuntime.ConnectedDatabase to fall back on - an init-only field stamped once at
+                       the initial probe, which for a RunsPerDatabase collector is not the database that
+                       failed. The stamp travels with the exception through the rethrow, so a message can
+                       name the database it means. */
+                    CollectorFaultDatabase.Stamp(ex, databaseName);
                     firstFailure ??= ex;
 
                     /* #2111: the yield-to-live stamp + adaptive-shrink count for the Azure SQL DB
@@ -707,10 +1591,41 @@ public sealed class DarlingCollectorRunner
                     }
 
                     _logger?.LogDebug("Skipping database '{Database}' for {Collector}: {Error}", databaseName, definition.Name, ex.Message);
+
+                    /* #2896: the split, at the SAME Debug as the skip it decomposes — deliberately, and it
+                       is the level question the issue raises answered rather than dodged.
+
+                       This arm stays Debug because the level is not what makes a persistently-failing
+                       database visible, and treating it as though it were would trade a real signal for a
+                       loud one. A partial loss already composes BuildPartialFailureNote below — "N of M
+                       database(s) failed", up to three named, plus the first error — into
+                       collection_log.error_message, which is PERSISTED and queryable and is what
+                       get_collection_health reports as last_note/note_count. A database failing every cycle
+                       for a week shows up there as a note on every run; a Warning would only have shown up
+                       in whatever log window had not yet rolled. And a TOTAL loss is already a Warning plus
+                       a rethrow further down, so it classifies and reaches the Capture Down self-alert.
+                       Raising this arm would emit one Warning per database per cycle per collector, which on
+                       a target with many databases is the flood #1875's one-capped-burst rule exists to
+                       stop.
+
+                       So the split rides the arm rather than the arm rising to meet it: a phase line louder
+                       than the error it decomposes puts a timing on the default log with no reason beside
+                       it, which reads as an unexplained slow database rather than a skipped one. At Debug
+                       the two lines arrive together, which is the state the issue is about — before this,
+                       turning Debug on bought the error string and no timing at all. */
+                    LogPerDatabaseFaultSplit(
+                        _logger, LogLevel.Debug, context, sqlSlice,
+                        server.Config.DisplayName, definition.Name, databaseName, "failed");
                 }
             }
 
             context.CurrentDatabaseName = null;
+
+            /* #3153: retire per-database state for databases this sweep did not enumerate, using the list
+               it just swept. AFTER the loop on purpose - the enumeration is what makes the list
+               authoritative, and a database that merely failed to READ is still enumerated, so its cursor
+               is kept. No-ops for every collector without a PgPerDatabaseCollectorState entry. */
+            await PrunePgPerDatabaseStateAsync(server.ServerId, definition.Name, databases, cancellationToken);
 
             /* #1875: ONE note for the cycle and ONE capped log burst, composed from every database's
                failures together. Assigned unconditionally — a cycle where nothing failed composes null,
@@ -767,7 +1682,7 @@ public sealed class DarlingCollectorRunner
                        empty-enumeration breadcrumb, the probe-failure summary, or both) rides onto the
                        collection_log row so it is distinguishable from a healthy collector whose databases
                        were simply quiet (#1837). Mirrors Lite's _lastCollectionNote. */
-                    return new CollectorRunResult(0, sqlMs, 0, enumeration.Note);
+                    return new CollectorRunResult(0, sqlMs, 0, CollectorContext.NoMeasurements, enumeration.Note);
                 }
 
                 /* Optional quick scalar probe (query_store's live PRODUCTVERSION check) —
@@ -796,7 +1711,14 @@ public sealed class DarlingCollectorRunner
                 var itemTimeout = definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds;
 
                 /* One pooled store connection for the whole body; the driver writes one binary COPY per
-                   database on it, flushing each before reading the next. */
+                   database on it, flushing each before reading the next.
+
+                   #2819: "for the whole body" is now literally true. The Query Store plan and text fetches
+                   used to open their own on every item — a third and a fourth connection per database, ~228
+                   acquisitions per cycle against MaxPoolSize=24, at a measured 673-893ms floor each — and
+                   they now borrow this one. Safe precisely because of the flushing order named above: the
+                   driver reads an item and then awaits its write, so this connection is idle for the whole
+                   read, which is when those fetches run. */
                 await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
 
                 /* #2312: open-interval stamps STAGED at decision time (perItemWatermark, below), landed
@@ -822,7 +1744,23 @@ public sealed class DarlingCollectorRunner
                                would otherwise be silently counted as row-streaming time. Measured here so
                                DrainMsFrom can subtract it; the whole point of the split is that each number
                                names one real phase. */
+                            /* #2854: hoisted and stamped from finally, not assigned after the awaits below.
+                               A trailing assignment is SKIPPED when an await throws, and this delegate's
+                               awaits are store reads and a store write — precisely the ones #2796 found being
+                               cancelled.
+
+                               LATENT rather than live, and the distinction is worth writing down: a throwing
+                               watermark refresh propagates out of the driver's per-item try, which routes to
+                               onItemError, leaves `batch` null and `continue`s past onItemComplete
+                               (EnumeratedCollectorDriver.cs:635-702). onItemComplete is the ONLY reader of
+                               these fields, so that item prints no split line at all and the bad number never
+                               reaches a log. Stamped from finally anyway, because the field's honesty should
+                               not rest on a caller two files away continuing to discard the item, and because
+                               the pin derives its set from CollectorContext and requires every phase stamp to
+                               be handler-reachable. */
                             var watermarkWatch = Stopwatch.StartNew();
+                            try
+                            {
                             /* #2344: bound the read for the ONE collector whose value is clamped right
                                below. Name-guarded rather than applied to every enumerating definition,
                                for the reason WatermarkPolicy's remarks give: a ring-buffer source whose
@@ -913,7 +1851,11 @@ public sealed class DarlingCollectorRunner
                                 }
                             }
 
-                            context.PerItemWatermarkMs = watermarkWatch.ElapsedMilliseconds;
+                            }
+                            finally
+                            {
+                                context.PerItemWatermarkMs = watermarkWatch.ElapsedMilliseconds;
+                            }
                         },
                     readItem: async (item, ct) =>
                     {
@@ -932,9 +1874,45 @@ public sealed class DarlingCollectorRunner
                         context.PerItemOpenMs = 0;
                         context.PerItemPlanFetchMs = 0;
                         context.PerItemTextFetchMs = 0;
+                        /* #2811: the sub-phases clear on the SAME rule as their parents, and for the same
+                           reason — an item whose fetch faults before setting them must not print the previous
+                           database's split as its own. A stale sub-split is worse than a stale total, because
+                           it looks precise. */
+                        context.PerItemPlanProbeMs = 0;
+                        context.PerItemPlanTargetMs = 0;
+                        context.PerItemPlanWriteMs = 0;
+                        context.PerItemPlanChunks = 0;
+                        context.PerItemPlanIdsAttempted = 0;
+                        context.PerItemPlanProbeIds = 0;
+                        context.PerItemTextProbeMs = 0;
+                        context.PerItemTextTargetMs = 0;
+                        context.PerItemTextWriteMs = 0;
+                        context.PerItemTextChunks = 0;
+                        context.PerItemTextIdsAttempted = 0;
+                        context.PerItemTextProbeIds = 0;
+                        context.PerItemPhasesMeasured = false;
+                        /* #2854: stamped from finally, and the reader is hoisted out of the try only so the
+                           `using` below keeps its original disposal scope. A trailing assignment here was
+                           skipped whenever the open threw — a command timeout, a cancelled budget.
+
+                           Latent for the same reason as the watermark above: a throwing open never reaches
+                           onItemComplete, so the reading it would have produced cannot currently print. What
+                           it WOULD have produced is why the stamp is worth fixing regardless — DrainMsFrom
+                           subtracts open from the item total, so an unstamped 500s open hands its whole cost
+                           to drain: and blames row streaming for a statement that never returned a row. The
+                           flag is set in the same finally so the two can never disagree. */
                         var openWatch = Stopwatch.StartNew();
-                        using var itemReader = await itemCommand.ExecuteReaderAsync(ct);
-                        context.PerItemOpenMs = openWatch.ElapsedMilliseconds;
+                        DbDataReader openedReader;
+                        try
+                        {
+                            openedReader = await itemCommand.ExecuteReaderAsync(ct);
+                        }
+                        finally
+                        {
+                            context.PerItemOpenMs = openWatch.ElapsedMilliseconds;
+                            context.PerItemPhasesMeasured = true;
+                        }
+                        using var itemReader = openedReader;
                         await definition.ReadItemAsync(item, itemReader, batch, context, ct);
                         /* #2210: this database's plan-XML fetch, right after its runtime-stats read. A separate
                            query on purpose — it ships in plan_id order, so a budget cut truncates a SUFFIX,
@@ -951,10 +1929,22 @@ public sealed class DarlingCollectorRunner
                             /* #2312 investigation: timed so the log split can say whether the invariant
                                per-cycle cost lives HERE rather than in the payload — a 0-row cycle's
                                blended sql: could not distinguish them. */
+                            /* #2854: stamped from finally. This one is the PARENT of the sub-split #2816
+                               already fixed, which makes a bare stamp here worse than the defect it fixed:
+                               probe/target/write stamp from their own handlers and report real values, so a
+                               throwing fetch printed plan_fetch:0ms above non-zero children. PlanFetchOtherMs
+                               then clamps a negative residual to zero and the line reads as precise while
+                               being arithmetically impossible. */
                             var planFetchWatch = Stopwatch.StartNew();
-                            await FetchAndStorePlansAsync(planFetchConnection,
-                                server, item, context, itemTimeout, ExtractPlanReferences(batch), ct);
-                            context.PerItemPlanFetchMs = planFetchWatch.ElapsedMilliseconds;
+                            try
+                            {
+                                await FetchAndStorePlansAsync(planFetchConnection, pgConnection,
+                                    server, item, definition.Name, context, itemTimeout, ExtractPlanReferences(batch), ct);
+                            }
+                            finally
+                            {
+                                context.PerItemPlanFetchMs = planFetchWatch.ElapsedMilliseconds;
+                            }
                         }
 
                         /* #2150: and this database's statement-text fetch, for the same reason and with the
@@ -969,10 +1959,17 @@ public sealed class DarlingCollectorRunner
                         if (context.FetchQueryTextSeparately && targetConnection is SqlConnection textFetchConnection)
                         {
                             /* #2312 investigation: same split as the plan fetch above. */
+                            /* #2854: stamped from finally, same parent/child inconsistency as the plan fetch. */
                             var textFetchWatch = Stopwatch.StartNew();
-                            await FetchAndStoreQueryTextAsync(textFetchConnection,
-                                server, item, context, itemTimeout, ExtractTextReferences(batch), ct);
-                            context.PerItemTextFetchMs = textFetchWatch.ElapsedMilliseconds;
+                            try
+                            {
+                                await FetchAndStoreQueryTextAsync(textFetchConnection, pgConnection,
+                                    server, item, definition.Name, context, itemTimeout, ExtractTextReferences(batch), ct);
+                            }
+                            finally
+                            {
+                                context.PerItemTextFetchMs = textFetchWatch.ElapsedMilliseconds;
+                            }
                         }
 
                         return batch;
@@ -985,6 +1982,15 @@ public sealed class DarlingCollectorRunner
                            their read time is in the blended total, so leaving them out would inflate the
                            dominance ratio of whichever database happened to have rows. */
                         fanout.Observe(item, itemSqlMs + itemStorageMs);
+
+                        /* #2860: and this item's FETCH split into the run's sums, for every completed item
+                           rather than only the ones the line below prints. That line is gated on
+                           batchCount > 0, but a quiet database can still pay real fetch time — #2902's
+                           carryover means an empty-batch pass may drain ids deferred from an earlier one —
+                           so gating the sums the same way would drop exactly the time hardest to attribute.
+                           The accumulator reads the PerItem* members, which are still live here: they clear
+                           at the START of the next item's read, not at the end of this one. */
+                        fetchPhases.Observe(context);
 
                         /* #2111: a completed item resets the adaptive-shrink count — recovery returns
                            the member to the full catch-up width on its next cycle. */
@@ -1004,35 +2010,71 @@ public sealed class DarlingCollectorRunner
                         /* Per-DATABASE line for non-empty batches (#1565): the per-server summary blends
                            every database into one number, which hid a single busy database's 50s burst
                            behind four quiet siblings. Quiet databases (0 rows — the 2-of-3 cycles between
-                           Query Store's 900s flushes) stay silent. */
+                           Query Store's 900s flushes) stay silent.
+
+                           #3102: every line in this block is Debug, below the default filter. This is the
+                           branch that multiplies — one line per DATABASE per cycle, and two or three of
+                           them for a collector that fetches plans or text — so it is where the level
+                           decision is worth the most and where a per-cycle timing on the default log
+                           displaces the errors the log is opened for. Suppressed, not removed: the whole
+                           block returns at Debug (Darling/README.md, "Logs"). */
                         if (batchCount > 0)
                         {
                             /* #2164: open vs drain, because they have different fixes. A pass that is nearly
                                all OPEN is bound by server-side work before the first row (for query_store,
                                the #pm_qs_slice aggregate) and no client-side budget or payload trimming will
                                touch it; a pass that is mostly drain is bound by moving rows, where the byte
-                               budget and the link are the levers. Only emitted when the host measured it. */
-                            if (context.PerItemOpenMs > 0)
+                               budget and the link are the levers. Only emitted when the host measured it.
+
+                               #2854: the gate is the FLAG, not `PerItemOpenMs > 0`. That form conflated a
+                               genuinely instant open with a path that measured nothing, and suppressed the
+                               whole split for the former — a real loss, because a fast open is exactly the
+                               item whose drain: number is worth reading. No value alone can separate those
+                               two states; a flag set beside the stamp can. */
+                            if (context.PerItemPhasesMeasured)
                             {
                                 /* #2312: the fetch phases print only when a separate fetch actually ran,
                                    so every other collector's line is byte-identical to before. */
                                 if (context.PerItemPlanFetchMs > 0 || context.PerItemTextFetchMs > 0)
                                 {
-                                    _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms = wm:{WatermarkMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms + plan_fetch:{PlanFetchMs}ms + text_fetch:{TextFetchMs}ms, pg:{PgMs}ms)",
+                                    _logger?.LogDebug("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms = wm:{WatermarkMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms + plan_fetch:{PlanFetchMs}ms + text_fetch:{TextFetchMs}ms, pg:{PgMs}ms)",
                                         server.Config.DisplayName, definition.Name, item, batchCount, itemSqlMs,
                                         context.PerItemWatermarkMs, context.PerItemOpenMs, context.DrainMsFrom(itemSqlMs),
                                         context.PerItemPlanFetchMs, context.PerItemTextFetchMs, itemStorageMs);
+
+                                    /* #2811: the sub-split rides its OWN line rather than nesting inside the
+                                       one above, because that line is parsed by tooling outside this repo and
+                                       "don't break the parser" outranks "one line to grep". Emitted only when
+                                       the corresponding fetch actually ran, so a text-only pass prints one
+                                       line and a fetchless collector prints none. */
+                                    if (context.PerItemPlanFetchMs > 0)
+                                    {
+                                        _logger?.LogDebug("  [{Server}] {Collector} [{Database}] plan_fetch:{PlanFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
+                                            server.Config.DisplayName, definition.Name, item, context.PerItemPlanFetchMs,
+                                            context.PerItemPlanProbeMs, context.PerItemPlanTargetMs, context.PerItemPlanWriteMs,
+                                            context.PlanFetchOtherMs, context.PerItemPlanChunks, context.PerItemPlanIdsAttempted,
+                                            context.PerItemPlanProbeIds);
+                                    }
+
+                                    if (context.PerItemTextFetchMs > 0)
+                                    {
+                                        _logger?.LogDebug("  [{Server}] {Collector} [{Database}] text_fetch:{TextFetchMs}ms = probe:{ProbeMs}ms + target:{TargetMs}ms + write:{WriteMs}ms + other:{OtherMs}ms ({Chunks} chunk(s), {Ids} ids, {ProbeIds} probed)",
+                                            server.Config.DisplayName, definition.Name, item, context.PerItemTextFetchMs,
+                                            context.PerItemTextProbeMs, context.PerItemTextTargetMs, context.PerItemTextWriteMs,
+                                            context.TextFetchOtherMs, context.PerItemTextChunks, context.PerItemTextIdsAttempted,
+                                            context.PerItemTextProbeIds);
+                                    }
                                 }
                                 else
                                 {
-                                    _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms = wm:{WatermarkMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms, pg:{PgMs}ms)",
+                                    _logger?.LogDebug("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms = wm:{WatermarkMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms, pg:{PgMs}ms)",
                                         server.Config.DisplayName, definition.Name, item, batchCount, itemSqlMs,
                                         context.PerItemWatermarkMs, context.PerItemOpenMs, context.DrainMsFrom(itemSqlMs), itemStorageMs);
                                 }
                             }
                             else
                             {
-                                _logger?.LogInformation("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms, pg:{PgMs}ms)",
+                                _logger?.LogDebug("  [{Server}] {Collector} [{Database}] => {Rows} rows (sql:{SqlMs}ms, pg:{PgMs}ms)",
                                     server.Config.DisplayName, definition.Name, item, batchCount, itemSqlMs, itemStorageMs);
                             }
                         }
@@ -1062,8 +2104,11 @@ public sealed class DarlingCollectorRunner
                             definition.Name, item, server.Config.DisplayName, ex.Message);
                     },
                     cancellationToken,
-                    /* #2150: the per-database wall-clock ceiling. Null for every collector but
-                       query_store, so this argument leaves every other cycle untouched. */
+                    /* #2150: the per-database wall-clock ceiling, straight off the definition, so this
+                       argument leaves a cycle whose collector declares none exactly as it was.
+                       Not "every collector but query_store", which is what this said: four definitions
+                       declare a budget and two of them also enumerate, so plan_correction arrives here
+                       non-null too. */
                     perItemBudget: definition.PerItemWallClockBudget);
 
                 rowsWritten = driverResult.Rows;
@@ -1072,16 +2117,144 @@ public sealed class DarlingCollectorRunner
             }
             else
             {
-                /* Plain single-query path — unchanged: read all rows, then write them in one batch
+                /* Plain single-query path (server-scoped): read all rows, then write them in one batch
                    (supplemental never runs for per-database collectors). Routed through WriteBatchAsync
-                   so all three paths share one writer. */
+                   so all three paths share one writer.
+
+                   #2673: the primary read + DRAIN is bounded by the collector's PerItemWallClockBudget
+                   (one item = the whole server here). The 60s per-command timeout covers only EXECUTION,
+                   not the drain of a large result set, so a heavy server-scoped collector (procedure_stats,
+                   query_stats) could occupy a monitored server for minutes — the exact profile we must never
+                   present. Null budget = itemToken IS cancellationToken and this block is byte-for-byte what
+                   it was. */
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;
-                using (var command = CreateCollectorCommand(targetProvider, plan, targetConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds))
-                using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+                /* #2851: this branch IS the server-scoped path, so its phases are measured from here on.
+                   Set before the read rather than after it so the wall-clock-budget catch below reports the
+                   phases of the cycle it abandoned — that is the case where "where did the time go" matters
+                   most, and the one a trailing assignment would leave at zero. */
+                serverPhasesMeasured = true;
+
+                using var itemBudget = EnumeratedCollectorDriver.StartItemBudget(definition.PerItemWallClockBudget, cancellationToken);
+                var itemToken = itemBudget?.Token ?? cancellationToken;
+
+                /* #2880: the out-of-band arm. Started BEFORE the open and on its own clock, because the
+                   forensics found the degradation presents at ExecuteReaderAsync as well as in the drain —
+                   the four cheapest collectors' open_ms ran 3x to 152x their own baselines in the body
+                   before each abandoned run — so a watchdog scoped to the drain alone would miss the phase
+                   that names the cause. Inert for every collector that declares no wall-clock budget and for
+                   every non-SQL-Server target; see StallProbeArm.Start.
+
+                   The counting reader is read from the arm's thread without synchronisation, deliberately.
+                   The hazard here is STALENESS, not tearing: a 64-bit read is atomic on every architecture
+                   this ships to, so the arm cannot observe half of a counter — it can only observe an
+                   earlier value of one, which mis-states a diagnostic figure by at most the rows read since
+                   the cache line was last seen. Putting a lock, or a volatile write, in the hot read loop of
+                   66 collectors to serve a once-per-stall sample would be the wrong trade by a wide margin.
+
+                   Both stale readings fail in the CONSERVATIVE direction, which is what makes the trade safe
+                   rather than merely cheap: a lagging byte count reads the stream as SLOWER than it is, and a
+                   not-yet-visible reader reference reads as -1, which Decide treats as "still executing".
+                   Neither can talk the probe out of firing on a target that has earned one. */
+                var readWatch = Stopwatch.StartNew();
+                DrainCountingDataReader? countingForProbe = null;
+                using var stallProbeArm = StallProbeArm.Start(
+                    server.Target.Engine,
+                    definition.PerItemWallClockBudget,
+                    observe: () => new StallProbeObservation(
+                        readWatch.ElapsedMilliseconds,
+                        countingForProbe?.RowsRead ?? -1,
+                        countingForProbe?.PayloadBytes ?? -1,
+                        countingForProbe?.LastReadElapsedMs ?? -1),
+                    fire: observation => StallWaitProbeRunner.RunAsync(
+                        _postgres,
+                        server,
+                        definition.Name,
+                        definition.PerItemWallClockBudget!.Value,
+                        observation,
+                        _logger,
+                        cancellationToken),
+                    onDecision: decision => _logger?.LogDebug(
+                        "Stall probe for {Collector} on '{Server}': {Verdict} — {Reason} (#2880)",
+                        definition.Name, server.Config.DisplayName,
+                        decision.Fire ? "firing" : "not firing", decision.Reason),
+                    cancellationToken: cancellationToken);
+
+                try
                 {
-                    rows = await definition.ReadAsync(reader, context, cancellationToken);
+                    using var command = CreateCollectorCommand(targetProvider, plan, targetConnection, definition.CommandTimeoutSecondsOverride ?? CommandTimeoutSeconds);
+
+                    /* Both phases stamp from finally rather than after the await (#2816). A throwing open or
+                       a drain cut short by the budget must still report the time it burned; the alternative
+                       is that its milliseconds land in the residual, and the residual is the one term whose
+                       whole job is to be small and unattributed. 97% of a day's residual budget was one such
+                       misattribution the last time this was got wrong. */
+                    var openWatch = Stopwatch.StartNew();
+                    DbDataReader opened;
+                    try
+                    {
+                        opened = await command.ExecuteReaderAsync(itemToken);
+                    }
+                    finally
+                    {
+                        context.ServerScopeOpenMs = openWatch.ElapsedMilliseconds;
+                    }
+
+                    using var reader = opened;
+
+                    /* #2864: the target's own session id, read off the connection as a client property rather
+                       than asked for with SELECT @@SPID — a round trip would be ~25,000 extra queries an hour
+                       across the fleet to fetch a number the client already holds. It is what makes a stalled
+                       run joinable to waiting_tasks / dmv_blocking_snapshot / query_snapshots, all of which
+                       record a session id; without it "what was OUR session waiting on" cannot be asked
+                       retrospectively even for a window where the answering snapshot was captured.
+
+                       Captured HERE, after ExecuteReaderAsync has returned, and not beside the phase flag
+                       above (#2884): SqlConnection.ServerProcessId is not reliably populated until the
+                       connection has round-tripped a command, so a read placed before the open recorded 0 —
+                       a value no real session has — on exactly the abandoned cycles the id exists to explain.
+                       Here the round trip has provably happened, so a drain-stall abandon (open completes in
+                       ~100-200ms; the budget fires minutes into the read) records its REAL id, which is the
+                       load-bearing case. An abandon that fires INSIDE ExecuteReaderAsync leaves this null,
+                       which the store reads as NOT RECORDED — the honest answer for a connection that never
+                       finished its first exchange, and one of the reachable-NULL cases the V109 write-side
+                       comment already documents. */
+                    context.TargetSessionId = TryReadTargetSessionId(targetConnection);
+                    var drainWatch = Stopwatch.StartNew();
+
+                    /* #2864: the collector reads through a counting decorator rather than the provider reader
+                       directly, so what the drain DELIVERED is recorded whether or not the cycle survives to
+                       store it. An abandoned cycle ships nothing, so rows_collected is 0 either way and could
+                       never separate "the target never sent row 1" from "it sent 149 and stopped" — the first
+                       production capture with V108's phases read open:104ms drain:119,945ms rows=0 and could
+                       go no further. Decorating rather than editing 66 collectors' read loops means a
+                       collector cannot forget to count, and the counters ride the SAME drainWatch so the
+                       last-read reading and the drain figure it is subtracted from share one clock. */
+                    var counting = new DrainCountingDataReader(reader, drainWatch);
+
+                    /* #2880: hand the arm the live counters. Assigned here rather than passed in because the
+                       arm is started before the open, where this reader does not exist yet — until then the
+                       arm observes -1, which Decide reads as "still executing" and fires on, since a read
+                       still inside ExecuteReaderAsync at a quarter of its budget is exactly what is worth a
+                       sample. */
+                    countingForProbe = counting;
+
+                    try
+                    {
+                        rows = await definition.ReadAsync(counting, context, itemToken);
+                    }
+                    finally
+                    {
+                        context.ServerScopeDrainMs = drainWatch.ElapsedMilliseconds;
+
+                        /* Stamped from finally with the drain itself, and for the same #2816 reason: the run
+                           that matters most here is the one cut short, so a count only recorded on the
+                           success path would be absent from exactly the cycles it exists to explain. */
+                        context.ServerScopeRowsRead = counting.RowsRead;
+                        context.ServerScopeBytesRead = counting.PayloadBytes;
+                        context.ServerScopeLastReadMs = counting.LastReadElapsedMs;
+                    }
 
                     /* #1851: a definition that declares it may hand back an OPTIONAL trailing
                        (item_name, error_text) result set naming items its own server-side cursor
@@ -1094,10 +2267,58 @@ public sealed class DarlingCollectorRunner
                        exactly what they were. */
                     if (definition.EmitsProbeFailures)
                     {
-                        var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, cancellationToken);
+                        var probes = await EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync(reader, itemToken);
                         collectionNote = probes.Note;
                         LogEnumerationProbeFailures(definition, server, probes.ProbeFailures);
                     }
+
+                    /* #2880: disarm the moment the READ is over rather than when this branch ends.
+                       The `using` above guarantees disposal on the exception paths, but it would not
+                       run until after the storage and watermark phases — long enough for a probe to
+                       fire against a target the sweep has already stopped reading from, and to record
+                       trigger evidence that included time no reader was waiting on. Dispose is
+                       idempotent for exactly this pairing. */
+                    stallProbeArm.Dispose();
+                }
+                catch (Exception ex) when (EnumeratedCollectorDriver.ItemBudgetExpired(itemBudget, cancellationToken))
+                {
+                    /* #2673: this server-scoped collector blew its wall-clock budget mid read/drain. Abandon
+                       the whole cycle WITHOUT advancing any watermark — ship nothing, retry next cycle with
+                       the same cutoff — so no single collector runs minutes on a target. Returning here skips
+                       the storage phase AND the state-persistence block below, which is what keeps the
+                       watermark from moving. The provider's cancellation artifact (ex) is dropped in favour
+                       of the budget message, the same as the per-item arm. */
+                    _ = ex;
+                    var budgetSeconds = (int)definition.PerItemWallClockBudget!.Value.TotalSeconds;
+                    _logger?.LogWarning(
+                        "{Collector} on '{Server}' reached its {Budget}s wall-clock budget mid-collection — abandoned this cycle, will retry next (#2673).",
+                        definition.Name, server.Config.DisplayName, budgetSeconds);
+                    return new CollectorRunResult(
+                        0,
+                        sqlSlice.ElapsedMilliseconds,
+                        0,
+                        /* Deliberately NOT context.Measurements: this cycle stored nothing and advanced no
+                           watermark, so a partial count from the slice that ran before the budget fired
+                           would describe a read that was thrown away. "12 read, 0 stored" on an abandoned
+                           run reads as a collection fault, and the cause is a timeout. */
+                        CollectorContext.NoMeasurements,
+                        EnumeratedCollectorDriver.WholeCycleBudgetNote(budgetSeconds),
+                        Abandoned: true,
+                        /* #2851: the abandoned cycle reports its phases too. A collector that blew a
+                           wall-clock budget is precisely the one worth asking "on what" — and because the
+                           stamps come from finally above, the phase it died IN is reported rather than lost. */
+                        ServerPhasesMeasured: true,
+                        ServerOpenMs: context.ServerScopeOpenMs,
+                        ServerDrainMs: context.ServerScopeDrainMs,
+                        ServerWatermarkMs: serverWatermarkMs,
+                        /* #2864, and THIS is the arm the counters were added for: an abandoned cycle stores
+                           nothing, so rows_collected is 0 either way and cannot say whether the target sent
+                           nothing or sent rows and then stopped. The counting reader stamps from finally, so
+                           what arrived before the budget fired survives the abandon. */
+                        ServerRowsRead: context.ServerScopeRowsRead,
+                        ServerBytesRead: context.ServerScopeBytesRead,
+                        ServerLastReadMs: context.ServerScopeLastReadMs,
+                        TargetSessionId: context.TargetSessionId);
                 }
 
                 /* Optional best-effort second query on the same connection (server_properties'
@@ -1162,7 +2383,66 @@ public sealed class DarlingCollectorRunner
 
         _logger?.LogDebug("Collected {RowCount} {Collector} rows for server '{Server}'",
             rowsWritten, definition.Name, server.Config.DisplayName);
-        return new CollectorRunResult(rowsWritten, sqlMs, storageMs, collectionNote, fanout.Result);
+        /* #2864: the drain forensics are recorded on the SUCCESS path too, not only on abandon. The
+           abandoned row is the one being explained, but a ratio needs a denominator - "149 rows, last read
+           at 500 ms" only reads as pathological against what this collector on this server normally
+           delivers, and that baseline has to come from the same column on ordinary rows. Storing it only on
+           failures would reproduce exactly the cross-referencing this change exists to remove.
+
+           Kept ABOVE the return rather than inside the argument list: DarlingEmptyEnumerationNoteTests pins
+           this call's arguments as one whitespace-collapsed run, so a comment between them breaks a pin
+           whose actual job is to catch a DROPPED argument. */
+        /* #3099: merged rather than assigned, and read HERE — one place, after every write on all three
+           dispatch paths — because the count is a per-cycle total and the fan-out paths write once per
+           item. Merging keeps a re-attempt from displacing the probe-failure or partial-database note it
+           can legitimately co-occur with; MergeNotes composes null away, so an ordinary cycle carries
+           exactly the note it carried before. */
+        collectionNote = EnumeratedCollectorDriver.MergeNotes(
+            collectionNote, StoreWriteReattemptNote(context.StoreWriteReattempts));
+
+        return new CollectorRunResult(
+            rowsWritten, sqlMs, storageMs, context.Measurements, collectionNote, fanout.Result,
+            ServerPhasesMeasured: serverPhasesMeasured,
+            ServerOpenMs: context.ServerScopeOpenMs,
+            ServerDrainMs: context.ServerScopeDrainMs,
+            ServerWatermarkMs: serverWatermarkMs,
+            ServerRowsRead: context.ServerScopeRowsRead,
+            ServerBytesRead: context.ServerScopeBytesRead,
+            ServerLastReadMs: context.ServerScopeLastReadMs,
+            TargetSessionId: context.TargetSessionId,
+            FetchPhases: fetchPhases.Result);
+    }
+
+    /// <summary>
+    /// The monitored target's own session id, off the OPEN connection as a property (#2864). SQL Server's
+    /// SPID via <c>SqlConnection.ServerProcessId</c>, PostgreSQL's backend pid via
+    /// <c>NpgsqlConnection.ProcessID</c>; null for any other provider.
+    ///
+    /// <para>A property read rather than <c>SELECT @@SPID</c> deliberately: the value is already on the
+    /// client after the handshake, and asking for it would add a round trip per collector per server per
+    /// cycle — on this fleet roughly 25,000 extra queries an hour to learn something already known. The
+    /// point of the number is joinability: waiting_tasks, dmv_blocking_snapshot and query_snapshots all
+    /// carry a session id, so recording ours turns "what was our own stalled session waiting on" from an
+    /// unanswerable question into a join.</para>
+    ///
+    /// <para>Best-effort by design. A provider that exposes no such property returns null, which reads as
+    /// "not available" — never as a session id of 0, which is a real SPID.</para>
+    /// </summary>
+    private static int? TryReadTargetSessionId(DbConnection connection)
+    {
+        /* A session id of 0 is never real — SQL Server assigns no SPID 0 to a user session, and both
+           providers report 0 from this property for a connection that has not completed the exchange
+           that populates it — so 0 is the provider's "not available" state, not a measurement. #2884
+           found it written to the store as though it were data, on exactly the abandoned cycles where
+           the id is the join key. Normalized to null here, at the source, so every consumer sees the
+           declared NOT-RECORDED convention instead of a real-looking placeholder. */
+        var raw = connection switch
+        {
+            SqlConnection sql => sql.ServerProcessId,
+            NpgsqlConnection npgsql => npgsql.ProcessID,
+            _ => 0,
+        };
+        return raw > 0 ? raw : null;
     }
 
     /// <summary>
@@ -1229,6 +2509,159 @@ public sealed class DarlingCollectorRunner
             return 0;
         }
 
+        /* #3099: ONE re-attempt, gated on the COPY's START phase, and lossless because `rows` is still
+           the parameter this method was handed. The gate is what makes it lossless rather than merely
+           cheap: a start-phase fault sent no row, so a COPY ... FROM STDIN cannot have committed and the
+           store is byte-identical, and it ran no WritePayload, so no delta baseline moved. Both are
+           forfeit past that point — see CopyBatchOnceAsync, which stamps the phase and carries the
+           argument. StoreWriteReattempt.IsSafeToReattempt requires Start positively, so an unstamped
+           fault and a data-phase fault both decline and cost a sample rather than authorising a duplicate
+           or a fabricated zero.
+
+           What it recovers: a start-phase transport fault used to cost the whole cycle. Collectors with a
+           WatermarkColumn re-read the same range next cycle and lose nothing, but the base default in
+           CollectorDefinitionBase is `WatermarkColumn => null` — those are cumulative-counter snapshots
+           with no way to ask for that instant again, so the sample is simply gone.
+
+           The re-attempt takes a FRESH connection, and that is the mechanism rather than any wait: the first
+           attempt's connector is dead — the same reasoning DarlingManagedPostgres' post-start loop records —
+           so a second attempt on the caller's handle would fail on the protocol rather than on the store.
+           There is deliberately no delay between them. The sweep permit and the caller's borrowed store
+           connection are both held for the duration, so a pause long enough to outlast the store's own
+           hourly continuous-aggregate refresh (hundreds of seconds) would hold both for minutes, while any
+           pause short enough to be safe is noise against that window: no delay is purchasable here. The
+           accepted cost is that a write's worst case is two command deadlines rather than one.
+
+           The FIRST attempt also goes to a fresh connection when the caller's is no longer open, and that
+           is not tidiness. The caller's connection is shared across a fan-out's batches (#2819 has the
+           Query Store plan and text fetches borrowing the same one), and a transport fault breaks it — so
+           every batch after the first faulting one inherits a connection that cannot be used, and what it
+           throws then need not carry a phase stamp at all, and an unstamped fault declines. Deciding on the
+           connection's own STATE rather than on the shape or stamping of a later exception keeps those
+           batches out of that question entirely. plan_correction is the collector that makes it matter: it enumerates on
+           every non-Azure target and declares no WatermarkColumn, so it both fans out and cannot re-read a
+           sample it lost. The cost is that a faulted cycle's remaining batches hold two store connections
+           at a time on that server rather than one, for the rest of the cycle. */
+        var outcome = await StoreWriteReattempt.RunAsync(
+            write: async token => pgConnection.State == ConnectionState.Open
+                ? await CopyBatchOnceAsync(
+                    pgConnection, definition, rows, server, collectionTime, context, token)
+                : await CopyOnAFreshConnectionAsync(
+                    definition, rows, server, collectionTime, context, token),
+            rewrite: token => CopyOnAFreshConnectionAsync(
+                definition, rows, server, collectionTime, context, token),
+            onReattempt: firstAttempt => _logger?.LogWarning(
+                firstAttempt,
+                StoreWriteReattemptLogTemplate,
+                definition.Name, server.Config.DisplayName, rows.Count, firstAttempt.Message),
+            cancellationToken);
+
+        if (outcome.Reattempted)
+        {
+            /* Incremented only once the rows are actually stored: a re-attempt that also fails throws out
+               of RunAsync into RunOneAsync's fault arms, which record ERROR and never read this. So the
+               count means "stored on the second attempt", never "tried twice". */
+            context.StoreWriteReattempts++;
+        }
+
+        return outcome.RowsWritten;
+    }
+
+    /// <summary>
+    /// The template for the re-attempt's log line (#3099). A named constant so a pin can assert the shipped
+    /// string, and Warning rather than Debug because a store that drops collector writes is a finding even
+    /// when the row is recovered — the level is what keeps it on the default filter, where the log-based
+    /// measurement that found this reads.
+    /// </summary>
+    internal const string StoreWriteReattemptLogTemplate =
+        "{Collector} on '{Server}': the store write of {Rows} row(s) failed on a transport fault " +
+        "({Message}) — re-attempting once on a fresh store connection (#3099). The batch is still in " +
+        "memory and nothing was committed, so a successful re-attempt costs no sample.";
+
+    /// <summary>
+    /// The collection_log note for a cycle that stored its rows only after a re-attempt (#3099). <c>{0}</c>
+    /// = how many of the cycle's writes needed one.
+    ///
+    /// <para><b>The status stays SUCCESS, and the note is what makes the re-attempt visible.</b> A new
+    /// status value would be read as a failure by every consumer of
+    /// <c>status IN ('SUCCESS', 'SKIPPED')</c> — seven query clauses across five files: Lite's
+    /// collection-health read, the self-alert evaluator's <c>last_success</c> and <c>recent_success</c>, both
+    /// MCP readers, and the viewer's two — and would suppress <c>last_success</c> for a cycle that stored every row and
+    /// advanced its watermark. That is #2673's defect with the sign flipped, and the same reasoning that
+    /// put the whole-cycle-budget message in this channel rather than inventing a sixth status.</para>
+    ///
+    /// <para>Recording it at all is not decoration. Before the re-attempt a transport fault wrote a
+    /// collection_log ERROR row, and those rows are the measurement behind #3099's own in-window versus
+    /// out-window error-rate ratio. A silent retry would remove the sample loss AND the only instrument
+    /// that can check whether the association it was diagnosed from is real.</para>
+    /// </summary>
+    internal const string StoreWriteReattemptNoteFormat =
+        "{0} store write(s) this cycle stored their rows only on a re-attempt after a transport fault " +
+        "(#3099); no rows were lost";
+
+    /// <summary><see cref="StoreWriteReattemptNoteFormat"/> parsed once (CA1863).</summary>
+    private static readonly CompositeFormat s_storeWriteReattemptNote =
+        CompositeFormat.Parse(StoreWriteReattemptNoteFormat);
+
+    /// <summary>
+    /// The note for this cycle's store-write re-attempts, or null when none of them needed one — the shape
+    /// every other note producer here takes, so <see cref="EnumeratedCollectorDriver.MergeNotes"/> composes
+    /// it with the probe-failure and partial-failure channels without a special case.
+    /// </summary>
+    internal static string? StoreWriteReattemptNote(int reattempts) =>
+        reattempts <= 0
+            ? null
+            : string.Format(CultureInfo.InvariantCulture, s_storeWriteReattemptNote, reattempts);
+
+    /// <summary>
+    /// One attempt at the batch on a store connection of its own, borrowed for the attempt and returned
+    /// when it ends (#3099). Both the re-attempt and a first attempt whose shared connection is already
+    /// broken route through here, so "a fresh connection" is one named method with one body rather than two
+    /// copies that could drift.
+    /// </summary>
+    private async Task<int> CopyOnAFreshConnectionAsync<TRow>(
+        ICollectorDefinition<TRow> definition,
+        List<TRow> rows,
+        ServerRuntime server,
+        DateTime collectionTime,
+        CollectorContext context,
+        CancellationToken cancellationToken)
+    {
+        await using var freshConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+        return await CopyBatchOnceAsync(
+            freshConnection, definition, rows, server, collectionTime, context, cancellationToken);
+    }
+
+    /// <summary>
+    /// ONE attempt at the batch: the binary COPY, and for the diverting collectors the transaction that
+    /// wraps it and its dimension flush. Separate from <see cref="WriteBatchAsync"/> so the importer and
+    /// the transaction are both disposed before the re-attempt runs — a retry that fired while the failed
+    /// attempt's transaction was still in scope would re-enter with an aborted transaction on the
+    /// connection and fail on 25P02 rather than on anything to do with the store.
+    ///
+    /// <para><b>The phase this method stamps is what makes a re-attempt sound, and only the start phase
+    /// is.</b> #3095's <c>StoreCopyPhase</c> transition sits inside the COPY block below, so
+    /// <c>Start</c> means strictly "the importer never came back": no row started, so a
+    /// <c>COPY ... FROM STDIN</c> cannot have committed, and <c>WritePayload</c> never ran, so no
+    /// <c>CollectorDeltaCalculator</c> baseline moved. <see cref="StoreWriteReattempt.IsSafeToReattempt"/>
+    /// requires that value positively.</para>
+    ///
+    /// <para><b>Both properties are why the row loop below must never be re-run.</b> Past the transition a
+    /// fault may have sent rows and may have lost a commit acknowledgment in flight, and every baseline
+    /// the loop reached has advanced — so a second pass would re-derive each delta against its own new
+    /// baseline and write a zero. A zero delta reads as a genuinely idle interval, carries no error and
+    /// never self-corrects, which is strictly worse than the lost sample the re-attempt exists to prevent.
+    /// <c>WritePayload</c> is not a pure function of its row, and that is the reason.</para>
+    /// </summary>
+    private async Task<int> CopyBatchOnceAsync<TRow>(
+        NpgsqlConnection pgConnection,
+        ICollectorDefinition<TRow> definition,
+        List<TRow> rows,
+        ServerRuntime server,
+        DateTime collectionTime,
+        CollectorContext context,
+        CancellationToken cancellationToken)
+    {
         var rowsWritten = 0;
         var writer = new PgCollectorRowWriter();
 
@@ -1251,31 +2684,108 @@ public sealed class DarlingCollectorRunner
         /* Naive-UTC storage — see PgCollectorRowWriter. */
         var storedCollectionTime = DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified);
 
-        using (var importer = await pgConnection.BeginBinaryImportAsync(
-            PgCollectorRowWriter.CopyCommandFor(definition), cancellationToken))
+        /* The start phase's deadline. It is separate from the importer's because it has to be: the
+           importer does not exist until Begin returns, and the await that returns it runs under the
+           connection's CommandTimeout, which Npgsql exposes read-only. StoreCopyStartDeadline carries the
+           value, the stop-versus-deadline discrimination and the fault shape; the two lines it costs here
+           are the token below and the arm that translates a breach. */
+        using var startDeadline = StoreCopyStartDeadline.Start(cancellationToken);
+
+        /* #3095: which COPY phase a fault came out of, stamped onto the exception by the arm below so a
+           handler upstream can tell a start-phase failure from a data-phase one. Both render as
+           "Exception while reading from stream", so nothing about the exception itself carries this.
+
+           Start until Begin returns, and the transition sits INSIDE the block for that reason: Start has to
+           mean strictly "the importer never came back", because that is the state whose two properties a
+           consumer relies on — no row started, so a COPY ... FROM STDIN cannot have committed, and no
+           delta baseline moved, since CollectorDeltaCalculator advances inside WritePayload below. A
+           fault anywhere past this line forfeits both, so it must read as Data even where it happens to
+           have sent nothing. The unsafe mislabel is the one that would report Start for a fault that had
+           already sent rows; this ordering makes that unreachable rather than unlikely.
+
+           The dimension flush and commit after the block are deliberately left unstamped: they are not the
+           COPY, and Unknown is the honest answer for them. */
+        var copyPhase = StoreCopyPhase.Start;
+
+        try
         {
-            writer.Importer = importer;
-
-            foreach (var row in rows)
+            using (var importer = await pgConnection.BeginBinaryImportAsync(
+                PgCollectorRowWriter.CopyCommandFor(definition), startDeadline.Token))
             {
-                await importer.StartRowAsync(cancellationToken);
+                copyPhase = StoreCopyPhase.Data;
 
-                if (definition.IncludesCollectionId)
+                /* #2874: the COPY's own deadline — and a DIFFERENT property from every other site in this
+                   regime. NpgsqlBinaryImporter.Timeout is a TimeSpan on the importer, not the int seconds of
+                   NpgsqlCommand.CommandTimeout, and there is neither an NpgsqlCommand nor a CreateCommand here,
+                   so no regex written for either command shape can see this site. Left unset it is initialised
+                   from the connection's CommandTimeout, so this write — PgCollectorRowWriter.CopyCommandFor over
+                   every collector, every server, every cycle — inherited the same undocumented 30 s default as
+                   the rest of the regime while being invisible to every pin that closed them.
+
+                   It takes the SAME constant because it is the same regime: no enclosing budget, one sweep permit
+                   and one borrowed store connection held for the duration, retried on the collector's own cadence.
+
+                   It reaches ONE of the COPY's two phases, and that is a property of the API rather than a
+                   choice. Measured against Npgsql 10.0.3: this bounds StartRowAsync / Write / CompleteAsync,
+                   and nothing above them — the importer does not exist until Begin has returned. The await
+                   that returns it is bounded by startDeadline above, which is why the two lines are separate
+                   and why both take the same constant. */
+                importer.Timeout = TimeSpan.FromSeconds(ServiceCommandDeadlines.CollectionSweepSeconds);
+
+                writer.Importer = importer;
+
+                foreach (var row in rows)
                 {
-                    writer.Value(CollectionIdGenerator.Next());
+                    await importer.StartRowAsync(cancellationToken);
+
+                    if (definition.IncludesCollectionId)
+                    {
+                        writer.Value(CollectionIdGenerator.Next());
+                    }
+
+                    writer.Value(storedCollectionTime)
+                          .Value(server.ServerId)
+                          .Value(server.StorageName);
+
+                    writer.BeginPayload();
+                    definition.WritePayload(row, writer, context);
+                    writer.EndPayload(definition.PayloadColumns.Count);
+                    rowsWritten++;
                 }
 
-                writer.Value(storedCollectionTime)
-                      .Value(server.ServerId)
-                      .Value(server.StorageName);
-
-                writer.BeginPayload();
-                definition.WritePayload(row, writer, context);
-                writer.EndPayload(definition.PayloadColumns.Count);
-                rowsWritten++;
+                await importer.CompleteAsync(cancellationToken);
             }
+        }
+        /* The start phase's deadline, re-raised as the shape a client-side deadline has here. Npgsql
+           cancels Begin with an OperationCanceledException, and on this path that word is reserved for the
+           service stopping — the arm below excludes it from the phase stamp, and StoreWriteReattempt
+           refuses to re-attempt through one. Left in that shape a breach would be bounded and invisible.
 
-            await importer.CompleteAsync(cancellationToken);
+           The phase term in the filter is what makes this arm unable to lie, and it is not redundant with
+           Breached(). A throw from a catch arm leaves the whole try, so this fault is stamped HERE rather
+           than by the arm below — and Start is what the re-attempt gate acts on. Requiring copyPhase to
+           still hold its initial value makes the arm unreachable once the row loop has begun, whatever
+           Npgsql chooses to throw from inside it, so a data-phase fault cannot be relabelled as the
+           recoverable one. The stamp still reads the variable rather than naming a phase. */
+        catch (OperationCanceledException cancellation)
+            when (copyPhase == StoreCopyPhase.Start && startDeadline.Breached())
+        {
+            var breach = StoreCopyStartDeadline.Breach(cancellation);
+            CollectorFaultCopyPhase.Stamp(breach, copyPhase);
+            throw breach;
+        }
+        /* Stamped, then rethrown bare: the fault keeps its own type, message and stack, so every
+           classification arm upstream — PostgresTargetProvider.Classify, the reconnect decision in
+           DarlingWorker's general handler, and any predicate walking the inner chain for a transport
+           fault — sees exactly what it sees today. The phase rides alongside as an independent axis.
+
+           OperationCanceledException is excluded because a stopping token is not a COPY phase: it says the
+           service is shutting down, not which protocol exchange was in flight, and a consumer must not be
+           able to read a shutdown as a recoverable start-phase stall. */
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            CollectorFaultCopyPhase.Stamp(ex, copyPhase);
+            throw;
         }
 
         if (transaction is not null)
@@ -1354,28 +2864,120 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
+    /// The server-scoped watermark SQL, exposed so a pin can assert the SHIPPED string rather than a
+    /// retyped copy of it. <paramref name="bounded"/> adds the <c>collection_time</c> predicate — the
+    /// partitioning column, and the only thing here that prunes a chunk.
+    /// </summary>
+    internal static string BuildServerWatermarkSql(string tableName, string columnName, bool bounded) =>
+        bounded
+            ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND collection_time > $2"
+            : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+
+    /// <summary>
+    /// True when this cycle will OVERWRITE the server-scoped watermark before any query is built, so
+    /// <see cref="GetLastCollectedTimeAsync"/>'s answer would be read by nothing and the round trip can be
+    /// skipped (#2797).
+    ///
+    /// <para><b>This is a DISPATCH-PATH question, not a watermark-column one, and that is the whole issue.</b>
+    /// #2797 proposed gating on <c>PerDatabaseWatermarkColumn is not null</c> alone — the signal the per-item
+    /// paths already key on. That reads plausibly and would ship a data-correctness bug. Four collectors
+    /// declare BOTH watermark columns (query_store, deadlocks, blocked_process_report,
+    /// long_query_completions) and all four declare <c>RunsPerDatabase =&gt; target.IsAzureSqlDb</c>, but only
+    /// query_store overrides <see cref="ICollectorDefinition{TRow}.BuildEnumerationQuery"/>; the other three
+    /// inherit <c>CollectorDefinitionBase</c>'s <c>=&gt; null</c>. So OFF Azure — which is the entire on-prem
+    /// and RDS fleet — three of the four fall through to the plain server-scoped path and genuinely CONSUME
+    /// this value. Gating on the column alone would hand them a null watermark on every cycle and make them
+    /// re-collect their whole first-run window forever: #2795's defect, arrived at from the other side.</para>
+    ///
+    /// <para><b>The three paths.</b> <see cref="RunAsync"/> dispatches down exactly one of them.
+    /// <see cref="ICollectorDefinition{TRow}.RunsPerDatabase"/> opens a connection per database and assigns
+    /// <c>context.Watermark</c> from <see cref="GetLastCollectedTimeForDatabaseAsync"/> inside the loop; a
+    /// non-null <see cref="ICollectorDefinition{TRow}.BuildEnumerationQuery"/> drives the enumerated loop,
+    /// which assigns <c>context.Watermark</c> inside its <c>perItemWatermark</c> delegate; anything else
+    /// reads the server-scoped value this method guards. Both fan-out paths wire their per-item refresh only
+    /// when BOTH watermark columns are declared, which is why that conjunct belongs here too: a collector
+    /// that enumerates with no <c>PerDatabaseWatermarkColumn</c> keeps the server-wide value and still
+    /// consumes it.</para>
+    ///
+    /// <para><b>Derived, not declared, so it cannot drift.</b> The enumeration half asks the definition's own
+    /// <c>BuildEnumerationQuery</c> rather than a second flag mirroring it — a hand-maintained "enumerates"
+    /// signal would just relocate the bug the moment the two disagreed. The price is that the question is
+    /// asked against a probe context rather than the cycle's own (which cannot exist yet — see the call
+    /// site), and that is sound only while null-ness is a function of
+    /// <see cref="CollectorContext.Target"/> alone. That is not assumed: <c>ServerWatermarkDispatchGateTests</c>
+    /// varies Watermark, NumericWatermark, HasCollectedBefore, State and ExcludedDatabases across every
+    /// definition in <see cref="CollectorCatalog.All"/> and fails if any of them moves the answer.</para>
+    /// </summary>
+    internal static bool ServerWatermarkIsDiscarded<TRow>(
+        ICollectorDefinition<TRow> definition, CollectorContext dispatchProbe) =>
+        definition.WatermarkColumn is not null
+        && definition.PerDatabaseWatermarkColumn is not null
+        && (definition.RunsPerDatabase(dispatchProbe.Target)
+            || definition.BuildEnumerationQuery(dispatchProbe) is not null);
+
+    /// <summary>
     /// Gets the most recent value of a timestamp column from Postgres for incremental collection.
     /// Returns null on first run or if the query fails (caller uses a fallback window) — the
     /// Postgres twin of Lite's GetLastCollectedTimeAsync.
+    ///
+    /// <para><paramref name="collectedSince"/> bounds the read on <c>collection_time</c> — the
+    /// PARTITIONING column, so the bound actually prunes chunks. This is #2344's bound applied to the
+    /// SERVER-scoped read; #2344 fixed only the per-database sibling
+    /// (<see cref="GetLastCollectedTimeForDatabaseAsync"/>), and query_store declares BOTH watermark
+    /// columns, so it kept paying the unbounded cost here on every cycle. Pass
+    /// <see cref="WatermarkPolicy.ReadFloor"/> only from a caller whose value is clamped, and read that
+    /// method's remarks for why the bound provably changes no answer. Null keeps the unbounded
+    /// behaviour, which stays correct for any reader whose watermark is NOT clamped.</para>
+    ///
+    /// <para>Measured on use1 before the bound (query_store_stats, 62.5 GB, 19 chunks): 40.7 s and
+    /// 50.6 s cold, 9.3 s warm, against Npgsql's 30 s default CommandTimeout — so the read was being
+    /// cancelled mid-flight, which the store's own log recorded 2,092 times in one day while the
+    /// per-database bounded sibling was cancelled 17 times. Every one of those cancellations returned
+    /// null here, and null is indistinguishable from a first run: the caller fell back to
+    /// query_store's 60-minute window instead of the ~5-minute incremental one, re-collected what it
+    /// already had, and grew the table that made the next read slower.</para>
     /// </summary>
     public async Task<DateTime?> GetLastCollectedTimeAsync(
-        int serverId, string tableName, string columnName, CancellationToken cancellationToken)
+        int serverId, string tableName, string columnName, CancellationToken cancellationToken,
+        DateTime? collectedSince = null)
     {
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(
-                $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1", connection);
+            var sql = BuildServerWatermarkSql(tableName, columnName, collectedSince is not null);
+            using var command = new NpgsqlCommand(sql, connection);
+            /* Explicit rather than Npgsql's 30 s default: that default was never a decision anyone made
+               here, and it silently governed a read whose measured cost exceeded it. */
+            command.CommandTimeout = CommandTimeoutSeconds;
             command.Parameters.AddWithValue(serverId);
+            if (collectedSince is DateTime floor)
+            {
+                /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
+                   timestamptz and Postgres would convert it into the session zone on the way in. */
+                command.Parameters.AddWithValue(DateTime.SpecifyKind(floor, DateTimeKind.Unspecified));
+            }
+
             var result = await command.ExecuteScalarAsync(cancellationToken);
             if (result is DateTime dt)
             {
                 return dt;
             }
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* If the Postgres query fails, caller uses fallback window */
+            /* Caller still uses its fallback window — but SAY SO. Swallowing this silently is what let
+               a permanently-failing watermark read look identical to a healthy first run for an unknown
+               length of time: nothing reached collection_log, nothing reached this log, and the only
+               trace was a cancellation line in the store's own Postgres log.
+
+               The OperationCanceledException guard is the shape this file already uses at its
+               collector-run catches: a cancelled read is a service shutdown, not a watermark failure,
+               and logging it as one would put a misleading warning per in-flight collector on every
+               normal stop. */
+            _logger?.LogWarning(
+                "Watermark read failed for server {ServerId} on {Table}.{Column} — falling back to the "
+                + "collector's default window, which re-collects data already stored: {Message}",
+                serverId, tableName, columnName, ex.Message);
         }
         return null;
     }
@@ -1397,6 +2999,7 @@ public sealed class DarlingCollectorRunner
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(
                 "SELECT state_key, state_value FROM collector_state WHERE server_id = $1 AND collector_name = $2", connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(collectorName);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1418,10 +3021,14 @@ public sealed class DarlingCollectorRunner
 
     /// <summary>
     /// The cycle's distinct referenced plans with their live hashes — the probe's whole input (#2312).
-    /// Generic because the dispatch loop is; any batch that is not query_store rows extracts nothing, and
-    /// the caller's <c>CapturePlanXml</c> gate means that never actually happens. When one plan appears in
-    /// several rows (several intervals), a non-null hash wins over a null one — the probe compares against
-    /// whatever the engine reported, and null only means the payload row predated the hash column.
+    /// Generic because the dispatch loop is; any batch that is not query_store rows extracts nothing, which
+    /// #2902 measured happening on every cycle — <c>CapturePlanXml</c> is a SKU flag, so it gates the SKU
+    /// and not the collector, and all five enumerating collectors reach this. Extracting nothing is the
+    /// right answer for them; what was wrong is that the fetch then read a carryover key they shared.
+    ///
+    /// <para>When one plan appears in several rows (several intervals), a non-null hash wins over a null
+    /// one — the probe compares against whatever the engine reported, and null only means the payload row
+    /// predated the hash column.</para>
     /// </summary>
     private static IReadOnlyList<(long PlanId, string? PlanHash)> ExtractPlanReferences<TRow>(List<TRow> batch)
     {
@@ -1487,6 +3094,99 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
+    /// Clears this database's plan-fetch backoff (#2776) without disturbing the size it learned.
+    /// </summary>
+    /// <remarks>
+    /// Called from the "nothing to fetch this cycle" early returns, which are the two ways a pass can end
+    /// well without reaching the success line at the bottom of the fetch. Without this a database that
+    /// failed once and then went quiet would keep the count pinned — nothing resets it, because nothing
+    /// runs — and the first pass after the work came back, possibly hours later and against a completely
+    /// different store, would be narrowed for a reason that expired long ago. Only the counter is cleared;
+    /// the learned average is the expensive part and it stays. Advisory, so a lost race is fine: the next
+    /// idle cycle clears it again.
+    /// </remarks>
+    private void ClearPlanFetchBackoff((int ServerId, string Database, string Collector) carryKey)
+    {
+        if (_observedPlanSize.TryGetValue(carryKey, out var estimate) && estimate.ConsecutiveFetchFailures > 0)
+        {
+            _observedPlanSize.TryUpdate(carryKey, QueryStorePlanXmlState.RecordFetchSuccess(estimate), estimate);
+        }
+    }
+
+    /// <summary>
+    /// Puts the BORROWED store connection back into a usable state after a fetch faulted on it (#2819).
+    ///
+    /// <para><b>Why this is required rather than tidy.</b> The fetches swallow their own exceptions and
+    /// return normally, so <c>readItem</c> still hands the driver a non-null batch built from the target rows
+    /// it already read. <c>EnumeratedCollectorDriver.RunAsync</c> then calls <c>writeBatch</c> OUTSIDE its
+    /// per-item try/catch, and that path is documented to propagate — "a flush failure PROPAGATES, storage
+    /// failure is systemic". So a fetch that broke the connection would not cost one database its plan XML;
+    /// it would fail the runtime-stats write for that item and abort the REST OF THE SWEEP, every remaining
+    /// database for that collector this cycle. While the fetches held private connections that was
+    /// structurally impossible, and borrowing must not buy pool headroom at the price of a whole-cycle
+    /// abort.</para>
+    ///
+    /// <para><b>Takes no CancellationToken on purpose.</b> Every call site has one — query_store's per-item
+    /// wall-clock budget — and an expired budget is the likeliest reason this runs at all, so reopening
+    /// under it would fail on a token check before attempting a connection. Recovery of a connection SHARED
+    /// by every remaining database must not be abandoned because one slow database ran out of time.</para>
+    ///
+    /// <para>A transient fault — a cancelled command, a dropped socket — leaves the pooled connection
+    /// unusable but the store perfectly reachable, and that is the case this recovers: reopen, and the
+    /// caller's write proceeds as if the fetch had its own connection. If the reopen ALSO fails the store is
+    /// genuinely unreachable, which is exactly the systemic condition the driver's propagate-on-flush
+    /// behaviour exists for, so the failure is left to travel — swallowed here, surfaced there, unchanged
+    /// from before this borrowing.</para>
+    /// </summary>
+    private async Task<bool> RestoreBorrowedStoreConnectionAsync(
+        NpgsqlConnection storeConnection,
+        ServerRuntime server,
+        string databaseName)
+    {
+        if (storeConnection.State == ConnectionState.Open)
+        {
+            return true;
+        }
+
+        try
+        {
+            /* Close first: Npgsql will not reopen a Broken connection in place, and Close on an already
+               closed one is a no-op rather than a fault. */
+            await storeConnection.CloseAsync();
+
+            /* CancellationToken.None, deliberately, and this method takes no token so a caller cannot pass
+               a cancelled one by reflex. The token available at every call site is query_store's per-item
+               wall-clock budget, and an EXPIRED budget is the single most likely reason we are here — so
+               reopening under it would make OpenAsync throw OperationCanceledException off a token check
+               before it ever attempted a connection. That is recovery failing closed at exactly the moment
+               it is needed, and worse than not trying: the OCE would escape this method's own non-OCE catch
+               and skip the caller's remaining backoff bookkeeping too.
+
+               One slow database's budget is not a reason to abandon a connection SHARED by every database
+               still to come in this sweep. Real shutdown is still respected — it tears the process down
+               regardless, and this is one short reconnect, not a loop. */
+            await storeConnection.OpenAsync(CancellationToken.None);
+
+            _logger?.LogWarning(
+                "Reopened the shared store connection after a Query Store fetch fault on '{Server}' database [{Database}] — the fetch borrows the collector body's connection, and leaving it broken would fail this item's runtime-stats write and abort the rest of the sweep.",
+                server.Config.DisplayName, databaseName);
+
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* The store itself is unreachable. Deliberately swallowed: the write that follows will fail on
+               the same connection and PROPAGATE, which is the correct handling of a systemic store failure
+               and the behaviour that predates this borrowing. Logged so the cause is visible there. */
+            _logger?.LogWarning(ex,
+                "Could not reopen the shared store connection after a Query Store fetch fault on '{Server}' database [{Database}] — the store looks unreachable, so this cycle's remaining writes will fail systemically.",
+                server.Config.DisplayName, databaseName);
+
+            return false;
+        }
+    }
+
+    /// <summary>
     /// The activity-driven plan-XML fetch for one database (#2312 Finding 2): touch-and-probe the store for
     /// the cycle's referenced plans — which refreshes map/dim liveness (Finding 3's unwired TouchSql, now
     /// the same round trip) and answers which plans are missing or hash-stale — then fetch exactly those by
@@ -1508,25 +3208,129 @@ public sealed class DarlingCollectorRunner
     /// </summary>
     private async Task FetchAndStorePlansAsync(
         SqlConnection sqlConnection,
+        NpgsqlConnection storeConnection,
         ServerRuntime server,
         string databaseName,
+        string collectorName,
         CollectorContext context,
         int itemTimeout,
         IReadOnlyList<(long PlanId, string? PlanHash)> references,
         CancellationToken cancellationToken)
     {
+        /* Hoisted out of the try (#2776) so the catch can advance this database's backoff counter — the
+           handler needs the same key the body uses. Carries the collector since #2902 — see
+           FetchStateKey for why the database alone let four other collectors drain this one's debt. */
+        var carryKey = FetchStateKey(server.ServerId, databaseName, collectorName);
+
+        /* Hoisted for the same shape of reason (#2816): the probe stamp sits at the END of the probe phase,
+           so a probe that THROWS jumps clean over it and reports probe:0ms. The residual then absorbs the
+           whole cost into other:, which is documented as this method's own bookkeeping — "the cost would be
+           in our own code, not in either database" — and that is the exact INVERSE of the truth for a store
+           round trip that timed out. The target and write phases already stamp from finally blocks for
+           precisely this reason (#2811); the probe was the one phase that did not. Measured on 2026-09-03:
+           one failed probe put 43,053ms into other:, 97% of the whole fleet's other: budget that day. */
+        var probeWatch = new Stopwatch();
+        var probeStamped = false;
+
+        /* #2819: set by the catch, acted on AFTER it. The restore needs an await, and an await inside a
+           catch makes the compiler lift the handler's body out of the exception region — which would break
+           #2816's pin that the probe stamp is reachable from inside a handler, and with it the guarantee
+           that a throwing probe reports its own time instead of donating it to other:. Flag here, await
+           below: the property #2816 holds and the recovery #2819 needs are not in tension, they just cannot
+           share a block. */
+        var storeConnectionSuspect = false;
+
         try
         {
-            var carryKey = (server.ServerId, databaseName);
+            /* FIRST statement in the try, ahead of the quiet-cycle return below, and that ordering is
+               the whole point. The catch further down filters out OperationCanceledException, and OCE is
+               the fault most likely here: this method's token is the per-item wall-clock budget, not host
+               shutdown, and Npgsql throws OCE when a caller-supplied token fires. So a database that simply
+               ran slow mid-probe cancels, propagates past that catch, and never reaches the restore at the
+               bottom — leaving the BORROWED connection broken for whoever runs next.
+
+               Putting the repair after the early return would have missed exactly the case that matters.
+               "Nothing referenced, nothing owed" is derived from this database's own just-read rows and is
+               completely independent of whether it has runtime stats to WRITE, so a busy-but-stable database
+               routinely returns early here while still handing the driver a non-empty batch. writeBatch then
+               runs on the still-broken connection, outside any per-item try/catch, and propagates — aborting
+               the rest of the sweep. That is precisely the whole-cycle abort this borrowing must not buy.
+
+               Classifying on connection STATE rather than exception type is the discipline
+               EnumeratedCollectorDriver.ItemBudgetExpired already applies to the budget question: the tokens
+               and the connection know, the exception type does not. Free when nothing is wrong — the helper
+               returns immediately on an Open connection — and outside the probe measurement on purpose,
+               since a reopen is recovery rather than store work. */
+            /* Timed into probe:, not left to other:. A reconnect is store-connection time — the very cost
+               this PR removed from the steady-state path — and other: is documented as work in NEITHER
+               database, so letting a reopen land there would recreate the misattribution #2816 fixed for
+               the probe stamp. Zero on the ordinary pass: the helper returns on a state check. */
+            probeWatch.Restart();
+            if (!await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName))
+            {
+                /* The store is still down. Returning beats falling through: the probe below would fault on
+                   the same Broken connection, log a second "could not reopen" for one underlying outage,
+                   and the text sibling would double it again per item. This codebase caps repetitive
+                   failure logging deliberately (MaxLoggedProbeFailures), and attempting store work already
+                   known to be doomed is not diagnosis. The carryover is untouched, so nothing is forgotten
+                   and the next cycle re-selects it.
+
+                   Stamped before returning, like every other exit from this method: the failed reconnect
+                   still took real wall clock, the caller's fetch watch still counted it, and leaving it
+                   unstamped would hand the one measurable part of an outage to the other: residual. */
+                context.PerItemPlanProbeMs = probeWatch.ElapsedMilliseconds;
+                return;
+            }
+
             var hasCarryover = _planFetchCarryover.TryGetValue(carryKey, out var carriedIds);
             if (references.Count == 0 && !hasCarryover)
             {
                 /* The steady quiet cycle: nothing referenced, nothing owed. Zero store reads, zero target
-                   queries — the whole point of the reshape. */
+                   queries — the whole point of the reshape.
+
+                   Stamped anyway, matching the missing.Count == 0 return below. Normally this is 0ms, but
+                   the repair above CAN have reconnected a connection a previous item broke, and that is
+                   real store time: leaving it unstamped would drop it into the other: residual, which is
+                   documented as work in neither database. A quiet cycle should read as free because it WAS
+                   free, not because its one real cost went unattributed. */
+                context.PerItemPlanProbeMs = probeWatch.ElapsedMilliseconds;
+                ClearPlanFetchBackoff(carryKey);
                 return;
             }
 
-            await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+            /* #2811 named this phase "the store connection open PLUS the touch/probe round trip", and
+               declined to split them because doing so "would name a connection pool rather than a cost".
+               #2819 measured it and it WAS the connection pool: the probe SQL runs in 0.4ms (nothing stale)
+               to 37ms (40 stale ids), while the phase measured 673-6,663ms — and a cycle with zero ids,
+               which issues no SQL at all, still cost 673ms. That is acquisition, not work.
+
+               So this method no longer acquires. It borrows the caller's connection — the one opened once
+               per collector body at the top of RunEnumeratedAsync and described there as "one pooled store
+               connection for the whole body", a promise this method and its text sibling were quietly
+               breaking by opening a second and third. The driver is strictly sequential (read an item, then
+               await its write), so that connection is provably IDLE across exactly the window this fetch
+               occupies; there is no concurrent use to collide with.
+
+               What that buys: ~228 acquisitions per cycle (114 (server, database) pairs x two fetches)
+               against a MaxPoolSize of 24 collapse to zero, and the pool slot that used to be held across
+               the SQL Server target fetch — measured at 104,799ms on one database — is no longer held at
+               all, because it was already held by the caller regardless.
+
+               The trade, stated at its real size rather than a flattering one: the borrowed connection is
+               the BODY's, opened once per collector run and reused for every database in the sweep — so a
+               store fault in here does not just cost this item its write, it breaks the connection every
+               SUBSEQUENT item in the cycle will probe and write on. That is a larger blast radius than a
+               private connection had, and worth naming plainly.
+
+               It is still the right trade, because the write path already had exactly this shape: writeBatch
+               has always run on this same shared connection, so those later writes were going to fail on it
+               regardless. What changes is that their probes fail alongside, and a broken store connection
+               means the store is unreachable anyway. The driver's per-item catch skips each affected item
+               and the next cycle re-selects it, which is the recovery either arm takes.
+
+               probeWatch now times the probe ROUND TRIP only, which is what the phase name always claimed.
+               Started HERE rather than at the declaration so the quiet-cycle return above stays outside the
+               measurement, while a reconnect above it does not vanish into the residual. */
 
             var missing = new SortedSet<long>();
             if (hasCarryover)
@@ -1539,8 +3343,14 @@ public sealed class DarlingCollectorRunner
 
             if (references.Count > 0)
             {
+                /* #2823: the probe's INPUT size, stamped where the input is known. probe: scales with
+                   this (~0.61ms/reference), not with PerItemPlanIdsAttempted, which counts only what came
+                   back missing — so a pass probing hundreds of references and owing nothing logs 0 ids
+                   while doing real store work. Logging one and dividing by the other produced a phantom
+                   140x gap twice (#2819, #2822). */
+                context.PerItemPlanProbeIds = references.Count;
                 var verdicts = await QueryStoreFetchProbe.TouchAndProbePlansAsync(
-                    pgConnection, server.ServerId, databaseName, references, context.CollectionTime, cancellationToken);
+                    storeConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
                 foreach (var verdict in verdicts)
                 {
                     if (!verdict.Resolved || verdict.HashStale)
@@ -1555,9 +3365,19 @@ public sealed class DarlingCollectorRunner
                 }
             }
 
+            /* Stamped BEFORE the nothing-owed return below, so a pass that is pure store round trip still
+               reports where its milliseconds went. That pass is the interesting one: it issues no target
+               query at all, so anything it costs is unambiguously the store. */
+            context.PerItemPlanProbeMs = probeWatch.ElapsedMilliseconds;
+            probeStamped = true;
+
             if (missing.Count == 0)
             {
+                /* The probe round-tripped the store and came back with nothing owed — a stronger proof of
+                   store health than the quiet cycle above, since this one actually wrote touch timestamps.
+                   Treat it as the completed pass it is (#2776). */
                 _planFetchCarryover.TryRemove(carryKey, out _);
+                ClearPlanFetchBackoff(carryKey);
                 return;
             }
 
@@ -1579,6 +3399,19 @@ public sealed class DarlingCollectorRunner
                     server.Config.DisplayName, databaseName, cap);
             }
 
+            /* #2776: narrow the width by the consecutive-failure count before it is used. A database whose
+               store write keeps timing out re-paid FULL decompression every cycle and re-attempted a write
+               the store had already proven it could not commit; halving per failure converges on a width
+               that fits. Inert at zero failures, floored so the database never stops. */
+            var backedOff = QueryStorePlanXmlState.NarrowForFailures(cap, estimate.ConsecutiveFetchFailures);
+            if (backedOff != cap)
+            {
+                _logger?.LogInformation(
+                    "query_store plan fetch on '{Server}' database [{Database}]: width narrowed {Cap} -> {Narrowed} after {Failures} consecutive failure(s) — backing off, not giving up; a completed pass restores full width.",
+                    server.Config.DisplayName, databaseName, cap, backedOff, estimate.ConsecutiveFetchFailures);
+                cap = backedOff;
+            }
+
             /* Ascending ids (SortedSet order) so the budget's in-SQL cut and the cross-chunk break are
                deterministic — the same debt is retried in the same order until paid. */
             var attempt = missing.Take(cap).ToList();
@@ -1586,6 +3419,12 @@ public sealed class DarlingCollectorRunner
             var fetched = new List<FetchedPlan>();
             var shippedBytes = 0L;
             var brokeOnBudget = false;
+
+            /* #2811: the TARGET half, and only the target half — the statement plus its read loop, summed
+               across chunks. Query building and the budget check sit outside deliberately: they are our
+               arithmetic, and folding them in here would let this number quietly absorb the thing the
+               residual is meant to expose. */
+            var targetMs = 0L;
 
             foreach (var chunk in attempt.Chunk(PlanFetchIdsPerStatement))
             {
@@ -1598,21 +3437,36 @@ public sealed class DarlingCollectorRunner
                 var query = QueryStoreCollector.Instance.BuildPlanFetchByIdsQuery(
                     databaseName, context, chunk, budget - shippedBytes);
 
-                using var command = CreateCollectorCommand(query, sqlConnection, itemTimeout);
-                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                attempted.AddRange(chunk);
-                while (await reader.ReadAsync(cancellationToken))
+                var chunkWatch = Stopwatch.StartNew();
+                try
                 {
-                    var planXml = reader.IsDBNull(2) ? null : reader.GetString(2);
-                    fetched.Add(new FetchedPlan(
-                        reader.GetInt64(0),
-                        planXml,
-                        reader.IsDBNull(1) ? null : reader.GetString(1)));
-                    if (planXml is not null)
+                    using var command = CreateCollectorCommand(query, sqlConnection, itemTimeout);
+                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    attempted.AddRange(chunk);
+                    while (await reader.ReadAsync(cancellationToken))
                     {
-                        /* nvarchar length * 2 is DATALENGTH exactly — no server round-trip needed. */
-                        shippedBytes += (long)planXml.Length * 2;
+                        var planXml = reader.IsDBNull(2) ? null : reader.GetString(2);
+                        fetched.Add(new FetchedPlan(
+                            reader.GetInt64(0),
+                            planXml,
+                            reader.IsDBNull(1) ? null : reader.GetString(1)));
+                        if (planXml is not null)
+                        {
+                            /* nvarchar length * 2 is DATALENGTH exactly — no server round-trip needed. */
+                            shippedBytes += (long)planXml.Length * 2;
+                        }
                     }
+                }
+                finally
+                {
+                    /* finally, not after the block: a chunk that TIMES OUT is the case this instrumentation
+                       most needs to describe, and stamping only on success would report target:0ms for it —
+                       "the target was free" is the exact misreading this change exists to end. The ids and
+                       chunk count are stamped here too so the per-id cost stays computable on a failed pass. */
+                    targetMs += chunkWatch.ElapsedMilliseconds;
+                    context.PerItemPlanTargetMs = targetMs;
+                    context.PerItemPlanChunks++;
+                    context.PerItemPlanIdsAttempted += chunk.Length;
                 }
             }
 
@@ -1632,8 +3486,23 @@ public sealed class DarlingCollectorRunner
             var returned = new HashSet<long>(fetched.Count);
             if (fetched.Count > 0)
             {
-                var landed = await QueryStorePlanWriter.WriteAsync(
-                    pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, cancellationToken);
+                /* #2811: the store WRITE, on its own stopwatch. #2777 raised this command's timeout from
+                   Npgsql's unchosen 30s default to 500s because it was being cancelled mid-write; that fixed
+                   the failure but left the duration unmeasured, so "the write is slow" stayed an assertion. */
+                var writeWatch = Stopwatch.StartNew();
+                IReadOnlyList<long> landed;
+                try
+                {
+                    landed = await QueryStorePlanWriter.WriteAsync(
+                        storeConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
+                }
+                finally
+                {
+                    /* Same finally-not-after reasoning as the target chunks: a cancelled write is precisely
+                       the event #2777 chased, and it must not report write:0ms. */
+                    context.PerItemPlanWriteMs = writeWatch.ElapsedMilliseconds;
+                }
+
                 foreach (var id in landed)
                 {
                     missing.Remove(id);
@@ -1672,12 +3541,54 @@ public sealed class DarlingCollectorRunner
             {
                 _planFetchCarryover.TryRemove(carryKey, out _);
             }
+
+            /* #2776: the pass completed — restore full width. Recorded HERE rather than inside Learn
+               because Learn runs before the store write, so a pass that threw would otherwise clear its own
+               backoff on the way down. Reaching this line is the only proof the write actually committed. */
+            _observedPlanSize.AddOrUpdate(
+                carryKey,
+                static (_, _) => default,
+                static (_, current, _) => QueryStorePlanXmlState.RecordFetchSuccess(current),
+                0);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #2816: the probe stamp is unreachable once its own await throws, so stamp it here instead.
+               Guarded by the flag rather than by `== 0` because a throw in the LATER target or write phases
+               must not overwrite an already-honest probe reading with the whole elapsed span — and a probe
+               that genuinely measured 0ms is not distinguishable from an unstamped one by value alone. */
+            if (!probeStamped)
+            {
+                context.PerItemPlanProbeMs = probeWatch.ElapsedMilliseconds;
+            }
+
+            storeConnectionSuspect = true;
+
+            /* #2776: advance the backoff so the next pass attempts a narrower width. Read-modify-write
+               through the dictionary rather than the local `estimate`, because Learn may already have
+               written a newer record for this key and clobbering it would discard this pass's size
+               learning. */
+            var failed = _observedPlanSize.AddOrUpdate(
+                carryKey,
+                static (_, _) => QueryStorePlanXmlState.RecordFetchFailure(default),
+                static (_, current, _) => QueryStorePlanXmlState.RecordFetchFailure(current),
+                0);
+
             _logger?.LogWarning(ex,
-                "query_store plan fetch failed on '{Server}' database [{Database}] — runtime statistics are unaffected, and whatever did not land is still missing from the store, so the next cycle that references it re-selects it.",
-                server.Config.DisplayName, databaseName);
+                "query_store plan fetch failed on '{Server}' database [{Database}] ({Failures} consecutive) — runtime statistics are unaffected, and whatever did not land is still missing from the store, so the next cycle that references it re-selects it at a narrower width.",
+                server.Config.DisplayName, databaseName, failed.ConsecutiveFetchFailures);
+        }
+
+        /* Outside the catch on purpose — see the flag's declaration. Runs before this method returns, so
+           the caller's writeBatch (which propagates, and would abort the whole sweep) never meets a broken
+           borrowed connection that a reopen could have saved. */
+        if (storeConnectionSuspect)
+        {
+            /* Charged to probe: for the same reason as the top-of-try repair — a reconnect is store time,
+               and other: is documented as work in neither database. */
+            var reopenWatch = Stopwatch.StartNew();
+            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName);
+            context.PerItemPlanProbeMs += reopenWatch.ElapsedMilliseconds;
         }
     }
 
@@ -1702,23 +3613,93 @@ public sealed class DarlingCollectorRunner
     /// </summary>
     private async Task FetchAndStoreQueryTextAsync(
         SqlConnection sqlConnection,
+        NpgsqlConnection storeConnection,
         ServerRuntime server,
         string databaseName,
+        string collectorName,
         CollectorContext context,
         int itemTimeout,
         IReadOnlyList<(long QueryId, string? QueryHash)> references,
         CancellationToken cancellationToken)
     {
+        /* Hoisted out of the try (#2776), same reason as the plan side: the catch advances the backoff.
+           Collector-scoped since #2902, same as the plan side and for the same measured reason. */
+        var carryKey = FetchStateKey(server.ServerId, databaseName, collectorName);
+
+        /* #2816: hoisted for the same reason as the plan side — a probe that throws would otherwise report
+           probe:0ms and hand its whole cost to the other: residual, inverting where the time was spent. */
+        var probeWatch = new Stopwatch();
+        var probeStamped = false;
+
+        /* #2819: set by the catch, acted on AFTER it. The restore needs an await, and an await inside a
+           catch makes the compiler lift the handler's body out of the exception region — which would break
+           #2816's pin that the probe stamp is reachable from inside a handler, and with it the guarantee
+           that a throwing probe reports its own time instead of donating it to other:. Flag here, await
+           below: the property #2816 holds and the recovery #2819 needs are not in tension, they just cannot
+           share a block. */
+        var storeConnectionSuspect = false;
+
         try
         {
-            var carryKey = (server.ServerId, databaseName);
-            var hasCarryover = _textFetchCarryover.TryGetValue(carryKey, out var carriedIds);
-            if (references.Count == 0 && !hasCarryover)
+            /* FIRST statement in the try, ahead of the quiet-cycle return below, and that ordering is
+               the whole point. The catch further down filters out OperationCanceledException, and OCE is
+               the fault most likely here: this method's token is the per-item wall-clock budget, not host
+               shutdown, and Npgsql throws OCE when a caller-supplied token fires. So a database that simply
+               ran slow mid-probe cancels, propagates past that catch, and never reaches the restore at the
+               bottom — leaving the BORROWED connection broken for whoever runs next.
+
+               Putting the repair after the early return would have missed exactly the case that matters.
+               "Nothing referenced, nothing owed" is derived from this database's own just-read rows and is
+               completely independent of whether it has runtime stats to WRITE, so a busy-but-stable database
+               routinely returns early here while still handing the driver a non-empty batch. writeBatch then
+               runs on the still-broken connection, outside any per-item try/catch, and propagates — aborting
+               the rest of the sweep. That is precisely the whole-cycle abort this borrowing must not buy.
+
+               Classifying on connection STATE rather than exception type is the discipline
+               EnumeratedCollectorDriver.ItemBudgetExpired already applies to the budget question: the tokens
+               and the connection know, the exception type does not. Free when nothing is wrong — the helper
+               returns immediately on an Open connection — and outside the probe measurement on purpose,
+               since a reopen is recovery rather than store work. */
+            /* Timed into probe:, not left to other:. A reconnect is store-connection time — the very cost
+               this PR removed from the steady-state path — and other: is documented as work in NEITHER
+               database, so letting a reopen land there would recreate the misattribution #2816 fixed for
+               the probe stamp. Zero on the ordinary pass: the helper returns on a state check. */
+            probeWatch.Restart();
+            if (!await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName))
             {
+                /* The store is still down. Returning beats falling through: the probe below would fault on
+                   the same Broken connection, log a second "could not reopen" for one underlying outage,
+                   and the text sibling would double it again per item. This codebase caps repetitive
+                   failure logging deliberately (MaxLoggedProbeFailures), and attempting store work already
+                   known to be doomed is not diagnosis. The carryover is untouched, so nothing is forgotten
+                   and the next cycle re-selects it.
+
+                   Stamped before returning, like every other exit from this method: the failed reconnect
+                   still took real wall clock, the caller's fetch watch still counted it, and leaving it
+                   unstamped would hand the one measurable part of an outage to the other: residual. */
+                context.PerItemTextProbeMs = probeWatch.ElapsedMilliseconds;
                 return;
             }
 
-            await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+            var hasCarryover = _textFetchCarryover.TryGetValue(carryKey, out var carriedIds);
+            if (references.Count == 0 && !hasCarryover)
+            {
+                /* Nothing referenced, nothing owed — so any carried failure count is stale (#2776).
+                   Probe stamped for the same reason as the plan side: 0ms normally, but a reconnect
+                   performed by the repair above is store time and must not fall into other:. */
+                context.PerItemTextProbeMs = probeWatch.ElapsedMilliseconds;
+                _textFetchFailures.TryRemove(carryKey, out _);
+                return;
+            }
+
+            /* #2819: same borrowed connection as the plan side, for the same measured reason — this method
+               was the SECOND of the two per-item acquisitions, and its zero-id probes measured 893ms, the
+               worst floor of either. See the plan side for why borrowing is safe (the driver reads an item
+               and then awaits its write, so the caller's connection is idle across this window) and what it
+               trades (a store fault here breaks the caller's connection rather than a private one).
+
+               probeWatch covers the probe round trip and, on a pass that needed one, the recovery reconnect
+               above — both are store time, and neither belongs in the other: residual. */
 
             var missing = new SortedSet<long>();
             if (hasCarryover)
@@ -1731,8 +3712,10 @@ public sealed class DarlingCollectorRunner
 
             if (references.Count > 0)
             {
+                /* #2823: probe input size — see the plan-side comment. */
+                context.PerItemTextProbeIds = references.Count;
                 var verdicts = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
-                    pgConnection, server.ServerId, databaseName, references, context.CollectionTime, cancellationToken);
+                    storeConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
                 foreach (var verdict in verdicts)
                 {
                     if (!verdict.Resolved || verdict.HashStale)
@@ -1746,16 +3729,44 @@ public sealed class DarlingCollectorRunner
                 }
             }
 
+            context.PerItemTextProbeMs = probeWatch.ElapsedMilliseconds;
+            probeStamped = true;
+
             if (missing.Count == 0)
             {
+                /* Probed the store, nothing owed: the same end-well-without-fetching case as the plan side. */
                 _textFetchCarryover.TryRemove(carryKey, out _);
+                _textFetchFailures.TryRemove(carryKey, out _);
                 return;
             }
 
             var budget = context.TextByteBudgetOverride ?? 12 * 1024 * 1024;
-            var attempt = new List<long>(missing.Count);
+
+            /* #2776: the text fetch has no candidate cap by design — DATALENGTH on text is cheap, so only
+               the byte budget bounds it and the whole missing set is normally attempted. That stays true
+               while the fetch is healthy. Once it starts throwing, the unbounded set is the problem: the
+               store write is what times out, and re-attempting the identical width guarantees the identical
+               timeout. Narrowing by consecutive failures converges on a width the store can commit, and is
+               inert (full set) at zero failures. */
+            var textFailures = _textFetchFailures.TryGetValue(carryKey, out var carriedFailures)
+                ? carriedFailures
+                : 0;
+            var textWidth = QueryStorePlanXmlState.NarrowForFailures(missing.Count, textFailures);
+            if (textWidth != missing.Count)
+            {
+                _logger?.LogInformation(
+                    "query_store text fetch on '{Server}' database [{Database}]: width narrowed {Full} -> {Narrowed} after {Failures} consecutive failure(s) — backing off, not giving up; a completed pass restores full width.",
+                    server.Config.DisplayName, databaseName, missing.Count, textWidth, textFailures);
+            }
+
+            var attempt = new List<long>(textWidth);
             foreach (var id in missing)
             {
+                if (attempt.Count >= textWidth)
+                {
+                    break;
+                }
+
                 attempt.Add(id);
             }
 
@@ -1763,6 +3774,9 @@ public sealed class DarlingCollectorRunner
             var fetched = new List<FetchedQueryText>();
             var shippedBytes = 0L;
             var brokeOnBudget = false;
+
+            /* #2811: target half only, same contract as the plan side. */
+            var targetMs = 0L;
 
             foreach (var chunk in attempt.Chunk(TextFetchIdsPerStatement))
             {
@@ -1775,28 +3789,48 @@ public sealed class DarlingCollectorRunner
                 var query = QueryStoreCollector.Instance.BuildTextFetchByIdsQuery(
                     databaseName, context, chunk, budget - shippedBytes);
 
-                using var command = CreateCollectorCommand(query, sqlConnection, itemTimeout);
-                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-                attempted.AddRange(chunk);
-                while (await reader.ReadAsync(cancellationToken))
+                var chunkWatch = Stopwatch.StartNew();
+                try
                 {
-                    var text = reader.IsDBNull(2) ? null : reader.GetString(2);
-                    fetched.Add(new FetchedQueryText(
-                        reader.GetInt64(0),
-                        text,
-                        reader.IsDBNull(1) ? null : reader.GetString(1)));
-                    if (text is not null)
+                    using var command = CreateCollectorCommand(query, sqlConnection, itemTimeout);
+                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    attempted.AddRange(chunk);
+                    while (await reader.ReadAsync(cancellationToken))
                     {
-                        shippedBytes += (long)text.Length * 2;
+                        var text = reader.IsDBNull(2) ? null : reader.GetString(2);
+                        fetched.Add(new FetchedQueryText(
+                            reader.GetInt64(0),
+                            text,
+                            reader.IsDBNull(1) ? null : reader.GetString(1)));
+                        if (text is not null)
+                        {
+                            shippedBytes += (long)text.Length * 2;
+                        }
                     }
+                }
+                finally
+                {
+                    targetMs += chunkWatch.ElapsedMilliseconds;
+                    context.PerItemTextTargetMs = targetMs;
+                    context.PerItemTextChunks++;
+                    context.PerItemTextIdsAttempted += chunk.Length;
                 }
             }
 
             var returned = new HashSet<long>(fetched.Count);
             if (fetched.Count > 0)
             {
-                var landed = await QueryStoreTextWriter.WriteAsync(
-                    pgConnection, server.ServerId, databaseName, fetched, context.CollectionTime, cancellationToken);
+                var writeWatch = Stopwatch.StartNew();
+                IReadOnlyList<long> landed;
+                try
+                {
+                    landed = await QueryStoreTextWriter.WriteAsync(
+                        storeConnection, server.ServerId, databaseName, fetched, context.CollectionTime, itemTimeout, cancellationToken);
+                }
+                finally
+                {
+                    context.PerItemTextWriteMs = writeWatch.ElapsedMilliseconds;
+                }
                 foreach (var id in landed)
                 {
                     missing.Remove(id);
@@ -1831,12 +3865,46 @@ public sealed class DarlingCollectorRunner
             {
                 _textFetchCarryover.TryRemove(carryKey, out _);
             }
+
+            /* #2776: the pass completed — restore full width. Removing the key rather than zeroing it keeps
+               the dictionary to just the databases currently backing off. */
+            _textFetchFailures.TryRemove(carryKey, out _);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #2816: same as the plan side — an unstamped probe would otherwise report probe:0ms and push
+               its cost into the other: residual. */
+            if (!probeStamped)
+            {
+                context.PerItemTextProbeMs = probeWatch.ElapsedMilliseconds;
+            }
+
+            storeConnectionSuspect = true;
+
+            /* #2776: advance the backoff so the next pass attempts a narrower width. Saturates at the same
+               halving count the plan side uses, so the counter stays meaningful rather than unbounded. */
+            var failures = _textFetchFailures.AddOrUpdate(
+                carryKey,
+                1,
+                static (_, current) => current >= QueryStorePlanXmlState.MaxBackoffHalvings
+                    ? QueryStorePlanXmlState.MaxBackoffHalvings
+                    : current + 1);
+
             _logger?.LogWarning(ex,
-                "query_store text fetch failed on '{Server}' database [{Database}] — runtime statistics are already written, and whatever did not land is still missing from the store, so the next cycle that references those statements re-selects them.",
-                server.Config.DisplayName, databaseName);
+                "query_store text fetch failed on '{Server}' database [{Database}] ({Failures} consecutive) — runtime statistics are already written, and whatever did not land is still missing from the store, so the next cycle that references those statements re-selects them at a narrower width.",
+                server.Config.DisplayName, databaseName, failures);
+        }
+
+        /* Outside the catch on purpose — see the flag's declaration. Runs before this method returns, so
+           the caller's writeBatch (which propagates, and would abort the whole sweep) never meets a broken
+           borrowed connection that a reopen could have saved. */
+        if (storeConnectionSuspect)
+        {
+            /* Charged to probe: for the same reason as the top-of-try repair — a reconnect is store time,
+               and other: is documented as work in neither database. */
+            var reopenWatch = Stopwatch.StartNew();
+            await RestoreBorrowedStoreConnectionAsync(storeConnection, server, databaseName);
+            context.PerItemTextProbeMs += reopenWatch.ElapsedMilliseconds;
         }
     }
 
@@ -1867,6 +3935,7 @@ INSERT INTO collector_state (server_id, collector_name, state_key, state_value, 
 VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (server_id, collector_name, state_key)
 DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_at", connection);
+                command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
                 command.Parameters.AddWithValue(serverId);
                 command.Parameters.AddWithValue(collectorName);
                 command.Parameters.AddWithValue(entry.Key);
@@ -1928,6 +3997,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(
                 "DELETE FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3", connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(collectorName);
             command.Parameters.AddWithValue(stateKey);
@@ -2062,6 +4132,7 @@ RETURNING s.state_key";
             foreach (var (owner, prefix) in QueryStorePerDatabaseState.PrunableKeys)
             {
                 using var command = new NpgsqlCommand(PruneOrphanedDatabaseStateKeysSql, connection);
+                command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
                 command.Parameters.AddWithValue(serverId);
                 command.Parameters.AddWithValue(owner);
                 command.Parameters.AddWithValue(prefix);
@@ -2089,6 +4160,114 @@ RETURNING s.state_key";
         {
             _logger?.LogDebug(ex, "Pruning orphaned query_store database state failed; next cycle retries");
         }
+    }
+
+    /// <summary>
+    /// The PostgreSQL arm of the per-database state prune (#3153): retire every key whose database is not
+    /// in the list THIS SWEEP enumerated. <c>$1</c> server_id, <c>$2</c> collector_name, <c>$3</c> key
+    /// prefix, <c>$4</c> the enumerated database names as <c>text[]</c>.
+    ///
+    /// <para><b>Why not <see cref="PruneOrphanedDatabaseStateKeysSql"/>.</b> That one anti-joins
+    /// <c>database_states</c>, which is <c>sys.databases</c> from a SQL Server collector, so it holds no
+    /// rows for a PostgreSQL <c>server_id</c> — and it is guarded by <c>snapshot.newest IS NOT NULL</c>, so
+    /// on this engine it would delete nothing on every cycle forever while looking exactly like a working
+    /// prune. See <see cref="PgPerDatabaseCollectorState"/>.</para>
+    ///
+    /// <para><b>One array parameter, not one per database.</b> A name-per-parameter IN list would put this
+    /// statement on the same parameter budget the cursor splice it is cleaning up already competes for.
+    /// The array binds as one <c>text[]</c> whatever the database count.</para>
+    ///
+    /// <para><b>No pattern matching anywhere in it, which is load-bearing for names.</b>
+    /// <c>starts_with</c> is a plain prefix test and <c>= ANY</c> is equality, so a database name is
+    /// compared as the literal text it is. A <c>LIKE</c>-shaped prune would read <c>_</c> and <c>%</c> in a
+    /// database name as wildcards and keep or delete the wrong row. Verified on PostgreSQL 17 that
+    /// <c>substr(state_key, length(prefix) + 1)</c> recovers the name exactly for a multi-byte name
+    /// (<c>length</c> and <c>substr</c> are both character-based, so they agree), that the comparison is
+    /// case-SENSITIVE as PostgreSQL identifiers are, and that <c>a_b</c> and <c>a%b</c> are matched
+    /// literally rather than as patterns.</para>
+    ///
+    /// <para><b><c>array_length($4, 1) > 0</c> is deliberate redundancy.</b> The caller already refuses to
+    /// prune on an empty enumeration — an empty list is how a login that cannot read <c>pg_database</c>
+    /// presents, and pruning against it would delete every cursor on the server. Repeating the check here
+    /// means a future caller that forgets it gets a no-op instead of a wipe: the failure lands on the side
+    /// that costs re-measurement rather than the side that costs the mechanism.</para>
+    /// </summary>
+    internal const string PrunePgPerDatabaseStateKeysSql = @"
+DELETE FROM collector_state s
+WHERE s.server_id = $1
+AND   s.collector_name = $2
+AND   starts_with(s.state_key, $3)
+AND   array_length($4, 1) > 0
+AND   NOT (substr(s.state_key, length($3) + 1) = ANY($4))
+RETURNING s.state_key";
+
+    /// <summary>
+    /// Prunes <see cref="PgPerDatabaseCollectorState.PrunableKeys"/> entries owned by this definition
+    /// against the database list the cycle actually enumerated (#3153).
+    ///
+    /// <para>Gated on the REGISTRY rather than on a collector name: an entry is what makes a definition
+    /// eligible, so a second per-database PostgreSQL collector needs a registry line and no host edit.
+    /// Every other collector's <c>PrunableKeys</c> lookup misses and this returns without opening a
+    /// connection, so the sweep pays nothing for it.</para>
+    ///
+    /// <para>Best-effort, like its query_store sibling: a failed prune leaves the rows for the next cycle,
+    /// and the splice cap keeps the statement executable in the meantime.</para>
+    /// </summary>
+    internal async Task<List<string>> PrunePgPerDatabaseStateAsync(
+        int serverId, string collectorName, IReadOnlyList<string> enumeratedDatabases,
+        CancellationToken cancellationToken)
+    {
+        var pruned = new List<string>();
+
+        var owned = PgPerDatabaseCollectorState.PrunableKeys
+            .Where(pair => string.Equals(pair.Owner, collectorName, StringComparison.Ordinal))
+            .ToArray();
+
+        /* An empty enumeration is a permissions failure, not an empty server: every cursor would look
+           orphaned. Refused here as well as in the statement. */
+        if (owned.Length == 0 || enumeratedDatabases.Count == 0)
+        {
+            return pruned;
+        }
+
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            var live = enumeratedDatabases.ToArray();
+
+            foreach (var (owner, prefix) in owned)
+            {
+                using var command = new NpgsqlCommand(PrunePgPerDatabaseStateKeysSql, connection);
+                command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                command.Parameters.AddWithValue(serverId);
+                command.Parameters.AddWithValue(owner);
+                command.Parameters.AddWithValue(prefix);
+                command.Parameters.AddWithValue(live);
+
+                /* RETURNING, not a rows-affected count, for the reason the query_store prune gives: the
+                   only symptom of a WRONG delete is a silent restart of that database's pass, so the keys
+                   have to name the databases or there is nothing to diagnose it with. */
+                using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    pruned.Add(reader.GetString(0));
+                }
+            }
+
+            if (pruned.Count > 0)
+            {
+                _logger?.LogInformation(
+                    "[server_id {ServerId}] pruned {Count} {Collector} rotation cursor(s) for database(s) no longer enumerated: {Keys}",
+                    serverId, pruned.Count, collectorName, string.Join(", ", pruned));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(
+                ex, "Pruning orphaned {Collector} per-database state failed; next cycle retries", collectorName);
+        }
+
+        return pruned;
     }
 
     /// <summary>
@@ -2120,6 +4299,7 @@ RETURNING s.state_key";
             foreach (var (owner, prefix) in QueryStorePerDatabaseState.PrunableKeys)
             {
                 using var command = new NpgsqlCommand(PruneForeignDatabaseStateKeysSql, connection);
+                command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
                 command.Parameters.AddWithValue(serverId);
                 command.Parameters.AddWithValue(owner);
                 command.Parameters.AddWithValue(prefix);
@@ -2188,6 +4368,8 @@ RETURNING s.state_key";
                 ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2"
                 : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
             using var command = new NpgsqlCommand(sql, connection);
+            /* Parity with the server-scoped twin (#2795): explicit, not Npgsql's inherited 30 s. */
+            command.CommandTimeout = CommandTimeoutSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(databaseName);
             if (collectedSince is DateTime floor)
@@ -2203,9 +4385,17 @@ RETURNING s.state_key";
                 return dt;
             }
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* If the Postgres query fails, caller uses fallback window */
+            /* Parity with the server-scoped twin (#2795). #2344's bound makes a TIMEOUT unlikely here,
+               but every other failure — dropped connection, bad SQL — still returned a null that reads
+               as a first run, and silence is the property that let the twin's version of this survive
+               for months under a green suite. */
+            _logger?.LogWarning(
+                "Per-database watermark read failed for server {ServerId} database {Database} on "
+                + "{Table}.{Column} — falling back to the collector's default window, which re-collects "
+                + "data already stored: {Message}",
+                serverId, databaseName, tableName, columnName, ex.Message);
         }
         return null;
     }
@@ -2224,6 +4414,8 @@ RETURNING s.state_key";
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(
                 $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1", connection);
+            /* Parity with both timestamp twins (#2795): explicit, not Npgsql's inherited 30 s. */
+            command.CommandTimeout = CommandTimeoutSeconds;
             command.Parameters.AddWithValue(serverId);
             var result = await command.ExecuteScalarAsync(cancellationToken);
             if (result is not null && result != DBNull.Value)
@@ -2231,9 +4423,15 @@ RETURNING s.state_key";
                 return Convert.ToInt64(result);
             }
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* If the Postgres query fails, caller uses fallback window */
+            /* Parity with both timestamp twins (#2795). job_history is small enough that this is
+               unlikely to time out, but a swallowed failure here sets HasCollectedBefore down the
+               first-run path with no trace anywhere — the same silence, one table over. */
+            _logger?.LogWarning(
+                "Numeric watermark read failed for server {ServerId} on {Table}.{Column} — falling back "
+                + "to the collector's first-run path: {Message}",
+                serverId, tableName, columnName, ex.Message);
         }
         return null;
     }
@@ -2251,6 +4449,7 @@ RETURNING s.state_key";
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(
                 "SELECT EXISTS(SELECT 1 FROM collection_log WHERE server_id = $1 AND collector_name = $2 AND status = 'SUCCESS')", connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(collectorName);
             var result = await command.ExecuteScalarAsync(cancellationToken);
@@ -2428,8 +4627,8 @@ RETURNING s.state_key";
     /// The connection for a collector that reads the server as a whole — engine-resolved from the probed
     /// target, never constructed directly.
     /// <para>Extracted so it can be PINNED by test. This is the exact seam that broke: the non-per-database
-    /// branch built a <c>SqlConnection</c> literally, so six of the seven PostgreSQL collectors got a SQL
-    /// Server connection and failed in the connection-string parser before running a query. Both engines'
+    /// branch built a <c>SqlConnection</c> literally, so six of the seven PostgreSQL collectors then
+    /// shipping got a SQL Server connection and failed in the connection-string parser before running a query. Both engines'
     /// providers were already correct and individually tested — nothing asserted that the RUNNER asked them.
     /// A test that opens nothing and only checks the returned TYPE is enough to catch it, which is why it is
     /// worth having.</para>

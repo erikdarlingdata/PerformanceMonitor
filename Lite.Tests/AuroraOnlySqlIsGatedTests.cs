@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using Darling.Tests;
 using Xunit;
 
 namespace Lite.Tests;
@@ -77,6 +78,12 @@ public class AuroraOnlySqlIsGatedTests
         ["CollectorEngineCapability.cs"] =
             "PROSE. Names the surfaces in the sentence shown to an operator when a collector cannot run here. " +
             "It describes the dependency rather than depending on it.",
+
+        ["DarlingMcpPgStatementTools.cs"] =
+            "PROSE (#3261). get_pg_top_queries' description states the #2625 dual-source truth — Aurora reads " +
+            "aurora_stat_statements(), every other PostgreSQL the vanilla view with the Aurora-only columns " +
+            "null. The tool reads the STORE, never the target; the dependency itself is " +
+            "PgStatementStatsCollector's PAIRED entry above.",
     };
 
     [Fact]
@@ -142,6 +149,64 @@ public class AuroraOnlySqlIsGatedTests
         Assert.Contains("isaurora", source, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// The control for how <see cref="NamesAnAuroraSurfaceOutsideAComment"/> reads a file, on an arranged
+    /// input rather than on the tree — because both of the plausible one-line filters get this wrong, in
+    /// opposite directions, and neither failure is visible in a passing sweep.
+    ///
+    /// <para>The fixture puts the surface name in a SQL literal (which IS a dependency) and in a block
+    /// comment whose continuation lines carry no asterisk (which is not). A line-prefix filter finds the
+    /// comment; <c>StripCommentsAndStrings</c> alone finds neither, because the dependency lives in the
+    /// literal it blanks. Only asking both non-comment views gives the answer, and the second assertion
+    /// below is the one that stops someone "simplifying" this to the walker's stripper on the grounds that
+    /// #3052 named it as the fix.</para>
+    /// </summary>
+    [Fact]
+    public void TheReadFindsASurfaceInSql_AndNotOneInABlockComment()
+    {
+        const string fixture = """
+            internal static class Fixture
+            {
+                /* Aurora exposes aurora_stat_statements, which community PostgreSQL does not have; the
+                   vanilla path reads pg_stat_statements instead and types the missing columns as NULL. */
+                private const string Sql = "SELECT calls FROM aurora_stat_wait_event";
+            }
+            """;
+
+        var path = Path.Combine(Path.GetTempPath(), $"pm-3052-{Guid.NewGuid():N}.cs");
+
+        try
+        {
+            File.WriteAllText(path, fixture);
+
+            /* The literal is found. */
+            Assert.True(NamesAnAuroraSurfaceOutsideAComment(path));
+
+            /* And the reason the read cannot be the stripper alone: it hides exactly that literal. */
+            Assert.DoesNotContain(
+                "aurora_stat_wait_event",
+                CSharpSourceWalker.StripCommentsAndStrings(fixture),
+                StringComparison.Ordinal);
+
+            /* The comment half, asked the other way round: the walk removes the paragraph a line-prefix
+               filter would have handed over as code, continuation line and all. The prefix filter's own
+               failure on this shape is pinned in Darling.Tests/CommentFilterAdoptionTests. */
+            Assert.DoesNotContain(
+                "aurora_stat_statements",
+                CSharpSourceWalker.StripCommentsAndStrings(fixture),
+                StringComparison.Ordinal);
+
+            Assert.Contains(
+                "aurora_stat_wait_event",
+                string.Join("\n", CSharpSourceWalker.StringLiteralBodies(fixture).Select(b => b.Text)),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     private static string[] FilesNamingAuroraSurfaces()
     {
         var root = RepoRoot();
@@ -159,23 +224,52 @@ public class AuroraOnlySqlIsGatedTests
     }
 
     /// <summary>
-    /// Comment lines are skipped, or every explanatory paragraph about why Aurora is different would count
-    /// as a dependency on it — which would make the guard so noisy that the allow-list stopped being read.
+    /// Comments are skipped, or every explanatory paragraph about why Aurora is different would count as a
+    /// dependency on it — which would make the guard so noisy that the allow-list stopped being read.
+    ///
+    /// <para><b>Asked of code and of string LITERALS, and never of prose.</b> That combination is the whole
+    /// subtlety, because the two halves fail in opposite directions here. A line-prefix filter under-strips:
+    /// a block comment's continuation lines in this codebase carry no asterisk, so the second line of a
+    /// paragraph about <c>aurora_stat_statements</c> reads as a dependency and the file arrives unaccounted
+    /// (#3052). But <see cref="CSharpSourceWalker.StripCommentsAndStrings"/> alone over-strips for THIS
+    /// question, and catastrophically: every Aurora surface name in this repo is SQL inside a string
+    /// literal, so blanking literal text finds nothing at all — four accounted files become zero, which
+    /// fails <c>Assert.NotEmpty</c> loudly today and would otherwise be a guard that had quietly stopped
+    /// looking.</para>
+    ///
+    /// <para>So the walk is used for what it is exact about — where the comments are — and both of the
+    /// non-comment views it exposes are asked: the code, and the literal bodies. Blanking interpolation
+    /// holes inside those bodies costs nothing, because a surface NAME is never assembled out of a
+    /// hole.</para>
+    ///
+    /// <para><b>The raw-text gate is not an optimisation to taste.</b> This read enumerates every
+    /// <c>*.cs</c> file in the repository — 1,345 of them — once per test, four times over, and the walk is a
+    /// per-character pass with a <c>StringBuilder</c> behind it. Measured: walking unconditionally took the
+    /// class from 0.55s to 5.53s, a 10x regression on a guard that is not the thing under test. The gate is
+    /// EXACT rather than approximate, which is what makes it safe to skip the walk on: blanking only ever
+    /// replaces a character with a space or a newline, and no surface name contains either, so a needle
+    /// absent from the raw text is absent from every view of it. Roughly six files in the tree get past it,
+    /// and the class is back to 0.49s.</para>
     /// </summary>
     private static bool NamesAnAuroraSurfaceOutsideAComment(string path)
-        => File.ReadLines(path).Any(line =>
+    {
+        var text = File.ReadAllText(path);
+
+        if (!AuroraSurfaces.Any(s => text.Contains(s, StringComparison.Ordinal)))
         {
-            var trimmed = line.TrimStart();
+            return false;
+        }
 
-            if (trimmed.StartsWith("//", StringComparison.Ordinal)
-                || trimmed.StartsWith("*", StringComparison.Ordinal)
-                || trimmed.StartsWith("/*", StringComparison.Ordinal))
-            {
-                return false;
-            }
+        var code = CSharpSourceWalker.StripCommentsAndStrings(text);
 
-            return AuroraSurfaces.Any(s => line.Contains(s, StringComparison.Ordinal));
-        });
+        if (AuroraSurfaces.Any(s => code.Contains(s, StringComparison.Ordinal)))
+        {
+            return true;
+        }
+
+        return CSharpSourceWalker.StringLiteralBodies(text)
+            .Any(body => AuroraSurfaces.Any(s => body.Text.Contains(s, StringComparison.Ordinal)));
+    }
 
     private static string RepoRoot()
     {

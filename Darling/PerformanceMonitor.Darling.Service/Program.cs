@@ -407,6 +407,12 @@ builder.Services.AddSingleton<WebRuntimeState>();
    deliberately denied. */
 builder.Services.AddSingleton<MonitoredServerRegistryState>();
 
+/* #2953: the collector's startup verdict — the worker publishes it, the web host's /api/ping reads it, and
+   neither touches the store to do so. A singleton for the same reason the three above are: the publisher and
+   the reader are separate hosted services in one process, and the answer has to survive being asked at any
+   moment rather than being computed on demand from something that might be down. */
+builder.Services.AddSingleton<CollectorRuntimeState>();
+
 builder.Services.AddHostedService<DarlingWorker>();
 
 /* AN4: the analysis MCP tools over Streamable HTTP — registered always, self-gating on

@@ -412,6 +412,29 @@ public sealed class QueryStoreCollectorDefinitionTests
     }
 
     /// <summary>
+    /// #2776: the per-command budget is 500 s and it is SET, not inherited. Pinned because both defaults it
+    /// replaces were invisible — the store side fell through to Npgsql's 30 s and the SQL side to the runner's
+    /// 60 s, and neither number appeared anywhere a reader would look. The value is an empirical over-shoot
+    /// pending measurement, so this exists to make a silent revert to "no override" fail loudly, NOT to assert
+    /// that 500 is the right answer.
+    /// </summary>
+    [Fact]
+    public void CommandTimeoutOverride_IsSetExplicitly_AndFitsInsideTheWallClockBudget()
+    {
+        var over = QueryStoreCollector.Instance.CommandTimeoutSecondsOverride;
+
+        Assert.NotNull(over);
+        Assert.Equal(500, over!.Value);
+
+        /* The wall-clock bound of last resort must stay OUTSIDE the per-command one, or the command timeout
+           is unreachable and the budget it sits under can never fire. */
+        Assert.True(
+            QueryStoreCollector.PerDatabaseWallClockBudget.TotalSeconds > over.Value,
+            $"per-command {over.Value}s must sit under PerDatabaseWallClockBudget "
+            + $"{QueryStoreCollector.PerDatabaseWallClockBudget.TotalSeconds}s");
+    }
+
+    /// <summary>
     /// Replica attribution turns on at major 16 — sys.query_store_replicas and
     /// sys.query_store_runtime_stats.replica_group_id both exist from SQL 2022, verified live against
     /// 16.0.4255.1 (the docs' "2025+" claim for the view is wrong), so the gate is >= 16, not >= 17.
@@ -544,9 +567,10 @@ public sealed class QueryStoreCollectorDefinitionTests
     /// covers "nothing else moved" for every column at once, rather than for the handful someone thought
     /// to list.</para>
     ///
-    /// <para>The <c>query_store_query_text</c> join deliberately REMAINS. It is one row per key, and the
-    /// 10x measurement behind this change was taken with it in place, so dropping it would be an
-    /// unmeasured change riding along on a measured one.</para>
+    /// <para>The <c>query_store_query_text</c> join is DROPPED with the flag on: Darling nulls the text
+    /// column and fetches text by-ids, so the join fed nothing. Measured -12% on a 40,388-plan catalog.
+    /// Lite (flag off) keeps the join because it reads the text inline. Ordinal-safety of the SELECT list
+    /// is still asserted below, with both the text column and the Lite-only join normalized out.</para>
     /// </summary>
     [Fact]
     public void WithTheFlag_TheTextIsNulledAtTheSameOrdinal()
@@ -558,11 +582,17 @@ public sealed class QueryStoreCollectorDefinitionTests
         Assert.Contains("query_sql_text = CONVERT(nvarchar(1), NULL),", nulled, StringComparison.Ordinal);
         /* Immediately before query_hash, exactly where the real column sat. */
         Assert.Contains("query_sql_text = CONVERT(nvarchar(1), NULL),\n    query_hash", Lf(nulled), StringComparison.Ordinal);
-        Assert.Contains("JOIN sys.query_store_query_text AS qst", nulled, StringComparison.Ordinal);
+        /* The qst join is dropped with the flag on (text arrives by-ids); Lite keeps it. */
+        Assert.DoesNotContain("JOIN sys.query_store_query_text AS qst", nulled, StringComparison.Ordinal);
+        Assert.Contains("JOIN sys.query_store_query_text AS qst", inline, StringComparison.Ordinal);
 
+        /* Ordinal-safety still holds: normalize out BOTH the text column and the Lite-only qst join, and
+           the remainder - every other column at its ordinal - must be identical between the two forms. */
+        const string qstJoin = "JOIN sys.query_store_query_text AS qst\n  ON qst.query_text_id = qsq.query_text_id\n";
         Assert.Equal(
-            inline.Replace("query_sql_text = qst.query_sql_text,", "@@TEXT@@", StringComparison.Ordinal),
-            nulled.Replace("query_sql_text = CONVERT(nvarchar(1), NULL),", "@@TEXT@@", StringComparison.Ordinal));
+            Lf(inline).Replace("query_sql_text = qst.query_sql_text,", "@@TEXT@@", StringComparison.Ordinal)
+                      .Replace(qstJoin, "", StringComparison.Ordinal),
+            Lf(nulled).Replace("query_sql_text = CONVERT(nvarchar(1), NULL),", "@@TEXT@@", StringComparison.Ordinal));
     }
 
     /// <summary>

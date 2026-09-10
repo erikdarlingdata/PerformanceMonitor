@@ -37,7 +37,10 @@ public sealed class ViewerOverviewSqlTests
         Assert.Contains("sqlserver_cpu_utilization", sql, StringComparison.Ordinal);
         Assert.Contains("other_process_cpu_utilization", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY sample_time DESC", sql, StringComparison.Ordinal);
+        /* The partition column leads, sample_time is the within-batch tiebreak — see
+           LatestCpuReadShapeSqlTests for why, and for the tree-wide guard that keeps all three
+           latest-CPU reads on this one shape. */
+        Assert.Contains("ORDER BY collection_time DESC, sample_time DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
     }
 
@@ -212,9 +215,11 @@ public sealed class ViewerServerSummaryDisplayTests
     [InlineData(120, ServerFreshness.Fresh)]    // exactly 2x cadence — still fresh
     [InlineData(121, ServerFreshness.Stale)]    // just past 2x cadence
     [InlineData(300, ServerFreshness.Stale)]    // 5 min — stale
-    [InlineData(900, ServerFreshness.Stale)]    // exactly 15 min — still stale
-    [InlineData(901, ServerFreshness.Offline)]  // just past 15 min
-    [InlineData(1200, ServerFreshness.Offline)] // 20 min — offline
+    [InlineData(900, ServerFreshness.Stale)]    // 15 min — the OLD Offline boundary, now mid-band (#2794)
+    [InlineData(1158, ServerFreshness.Stale)]   // 19m18s — the worst measured legitimate sweep stretch (#2794)
+    [InlineData(1800, ServerFreshness.Stale)]   // exactly 30 min — still stale (strict >)
+    [InlineData(1801, ServerFreshness.Offline)] // just past the shared collection-stopped window
+    [InlineData(3600, ServerFreshness.Offline)] // an hour dark — offline
     public void ClassifyFreshness_BandsByAge(int ageSeconds, ServerFreshness expected)
     {
         var lastCollection = Now.AddSeconds(-ageSeconds);
@@ -227,7 +232,7 @@ public sealed class ViewerServerSummaryDisplayTests
         var item = new ServerSummaryItem { LastCollectionTime = Now.AddSeconds(-30) };
         item.ApplyFreshness(Now);
         Assert.True(item.IsOnline);
-        Assert.False(item.HasCollectorErrors);
+        Assert.False(item.CollectionStale);
         Assert.False(item.IsOffline);
         Assert.Equal("Online", item.StatusDisplay);
     }
@@ -238,7 +243,7 @@ public sealed class ViewerServerSummaryDisplayTests
         var item = new ServerSummaryItem { LastCollectionTime = Now.AddMinutes(-5) };
         item.ApplyFreshness(Now);
         Assert.True(item.IsOnline);
-        Assert.True(item.HasCollectorErrors);
+        Assert.True(item.CollectionStale);
         Assert.False(item.IsOffline);
         Assert.Equal("Warning", item.StatusDisplay);
     }
@@ -246,7 +251,7 @@ public sealed class ViewerServerSummaryDisplayTests
     [Fact]
     public void ApplyFreshness_Offline_ShowsOverlay()
     {
-        var offlineByAge = new ServerSummaryItem { LastCollectionTime = Now.AddMinutes(-20) };
+        var offlineByAge = new ServerSummaryItem { LastCollectionTime = Now.AddMinutes(-31) };
         offlineByAge.ApplyFreshness(Now);
         Assert.False(offlineByAge.IsOnline);
         Assert.True(offlineByAge.IsOffline);
@@ -258,7 +263,7 @@ public sealed class ViewerServerSummaryDisplayTests
         Assert.Null(neverCollected.IsOnline);
         Assert.False(neverCollected.IsOffline);
         Assert.True(neverCollected.AwaitingFirstCollection);
-        Assert.False(neverCollected.HasCollectorErrors);
+        Assert.False(neverCollected.CollectionStale);
         Assert.Equal("Awaiting first collection", neverCollected.StatusDisplay);
 
         /* And a later real collection clears the awaiting state through the same path. */
@@ -482,6 +487,46 @@ public sealed class ViewerServerSummaryDisplayTests
         Assert.Equal("2 failed", failing.CollectorDisplay);
         Assert.Equal("Healthy: 28, Failing: 2", failing.CollectorDetail);
         Assert.Equal("OK", new ServerSummaryItem { HealthyCollectorCount = 30 }.CollectorDisplay);
+    }
+
+    [Fact]
+    public void CollectorSeverity_OfflineServer_ReadsStaleNeutral_NotGreenOk()
+    {
+        // #2784 (parity with the web #2779/#2783 fix): a server that has gone dark has STALE collector counts
+        // — FailedCollectorCount stays 0 because a stale collector is neither healthy nor failing — so the
+        // failing-count-only verdict rendered a green "OK / Healthy: 0, Failing: 0" on an offline server
+        // (latent behind the offline overlay, but wrong). Keyed on IsOffline — the same reachability signal
+        // that drives the overlay — the verdict now reads a neutral "Stale".
+        var offline = new ServerSummaryItem { IsOnline = false, HealthyCollectorCount = 0, FailedCollectorCount = 0 };
+        Assert.True(offline.IsOffline);
+        Assert.Equal("Stale", offline.CollectorDisplay);
+        Assert.Equal("No recent collection", offline.CollectorDetail);
+        Assert.Equal(HealthSeverity.Unknown, offline.CollectorSeverity);   // neutral, NOT green Healthy
+
+        // Offline WINS over a stale failing count too: once the server is dark every count is unmeasured, so a
+        // leftover "2 failing" from the last collection must not keep reading as an active failure.
+        var offlineWithStaleFailures = new ServerSummaryItem { IsOnline = false, FailedCollectorCount = 2 };
+        Assert.Equal("Stale", offlineWithStaleFailures.CollectorDisplay);
+        Assert.Equal(HealthSeverity.Unknown, offlineWithStaleFailures.CollectorSeverity);
+
+        // A GENUINE collector failure on a reachable server still surfaces red / "N failed" — not swallowed
+        // into Stale.
+        var failing = new ServerSummaryItem { IsOnline = true, HealthyCollectorCount = 28, FailedCollectorCount = 2 };
+        Assert.Equal("2 failed", failing.CollectorDisplay);
+        Assert.Equal(HealthSeverity.Warning, failing.CollectorSeverity);
+
+        // A healthy ONLINE server is unchanged — green "OK".
+        var healthy = new ServerSummaryItem { IsOnline = true, HealthyCollectorCount = 30, FailedCollectorCount = 0 };
+        Assert.Equal("OK", healthy.CollectorDisplay);
+        Assert.Equal("Healthy: 30, Failing: 0", healthy.CollectorDetail);
+        Assert.Equal(HealthSeverity.Healthy, healthy.CollectorSeverity);
+
+        // Not-yet-connection-classified (IsOnline null — awaiting first collection) keeps the normal reading:
+        // "Stale" is for a KNOWN-offline server only, matching the web's strict `is_online === false`.
+        var notChecked = new ServerSummaryItem { HealthyCollectorCount = 30, FailedCollectorCount = 0 };
+        Assert.False(notChecked.IsOffline);
+        Assert.Equal("OK", notChecked.CollectorDisplay);
+        Assert.Equal(HealthSeverity.Healthy, notChecked.CollectorSeverity);
     }
 
     [Fact]

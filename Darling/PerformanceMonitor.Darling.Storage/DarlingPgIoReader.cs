@@ -133,6 +133,7 @@ public static class DarlingPgIoReader
     {
         var rows = new List<PgIoRow>();
         await using var command = postgres.CreateCommand(PgIoSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* Kind-Unspecified at the BIND, per the store's naive-UTC discipline: a Kind=Utc DateTime makes
            Npgsql infer timestamptz, and PostgreSQL then resolves the comparison against these naive

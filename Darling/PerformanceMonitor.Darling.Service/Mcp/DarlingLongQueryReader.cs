@@ -86,6 +86,7 @@ internal static class DarlingLongQueryReader
 
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
         await using var command = new NpgsqlCommand(LongQueryCompletionsSql, connection);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

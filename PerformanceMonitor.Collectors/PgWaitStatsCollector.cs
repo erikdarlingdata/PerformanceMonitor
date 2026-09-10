@@ -17,7 +17,7 @@ namespace PerformanceMonitor.Collectors;
 /// <summary>
 /// Cumulative wait statistics for an Amazon Aurora PostgreSQL target — the Postgres counterpart of
 /// <see cref="WaitStatsCollector"/>, with the same shape: cumulative counters in, deltas computed on
-/// write, noise filtered out.
+/// read, noise filtered out.
 /// <para><b>Core PostgreSQL has no cumulative wait accounting at all.</b> There is no
 /// <c>sys.dm_os_wait_stats</c> equivalent — only the instantaneous <c>pg_stat_activity.wait_event</c>,
 /// and a proposal to add accumulation has been rejected twice on overhead grounds. The usual
@@ -27,6 +27,30 @@ namespace PerformanceMonitor.Collectors;
 /// <para>Aurora provides it as a built-in, no extension required, which is why this collector gates on
 /// <see cref="CollectorTargetInfo.IsAurora"/> rather than on a version: on stock PostgreSQL there is
 /// nothing to read and the collector must not run at all.</para>
+/// <para><b>A wait event with zero NEW waits since the last cycle is not shipped.</b> <c>wait_time</c> is
+/// cumulative since instance start with no reset function anywhere in the Aurora API (see the query
+/// remarks below), so once any wait type has ever fired, <c>WHERE w.wait_time &gt; 0</c> keeps matching
+/// it forever — the same row gets re-shipped every single cycle whether or not the event fired again.
+/// This is the identical shape <see cref="PgStatementStatsCollector"/> had before #2691 (which reached
+/// 176.9 GB of a 180 GB store in 36 hours): a bounded catalog here (a fixed wait-event enumeration
+/// rather than an unbounded statement set) kept this from runaway-exploding the same way, but it was
+/// still the 2nd-largest table in the store at 1.25 GB on a 1-minute cadence with nothing but idle
+/// repeats to show for it.</para>
+/// <para>The delta on WAITS decides it, computed once in <see cref="ReadAsync"/> rather than
+/// <c>WritePayload</c> for the same reason #2691 documents: the write loop starts the binary-import row
+/// before <c>WritePayload</c> runs (see <c>DarlingCollectorRunner</c>), so by the time a collector could
+/// refuse to write, the row already exists. A REAL interval (not a first sighting, counter reset, or gap
+/// re-baseline — see <see cref="CollectorDeltaCalculator"/>) with zero new waits means the event
+/// demonstrably did not fire since the last look, and Aurora only advances <c>wait_time</c> when a wait
+/// completes — the same moment <c>waits</c> increments — so a confirmed zero-waits interval means
+/// <c>wait_time</c> is unchanged too. interval == 0 covers first-sight/reset/gap-reset together, and all
+/// three are genuinely new information, so all three still ship.</para>
+/// <para>The wait-time delta series is still computed for every row this reads, including ones this
+/// ultimately skips — not for symmetry, but because <see cref="CollectorDeltaCalculator"/> refreshes a
+/// series' cached timestamp only when it is called. Skipping that call during an idle stretch would leave
+/// the wait-time series' baseline stale, so the next GENUINELY active cycle could see a gap exceeding
+/// <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/> against a baseline that is, in fact, still
+/// current — reporting a false counter-reset on an event whose waits delta correctly showed the activity.</para>
 /// </summary>
 public sealed class PgWaitStatsCollector : PostgresCollectorDefinitionBase<PgWaitStatsCollector.Row>
 {
@@ -42,7 +66,12 @@ public sealed class PgWaitStatsCollector : PostgresCollectorDefinitionBase<PgWai
         string? TypeName,
         string? EventName,
         long Waits,
-        long WaitTimeMicroseconds);
+        long WaitTimeMicroseconds,
+        /* Computed in ReadAsync, not WritePayload — see the class remarks on why the delta decides
+           whether this row ships at all, which means it must exist before the row is (or is not)
+           added to the list WritePayload will later be called once per. */
+        long DeltaWaits,
+        long DeltaWaitTime);
 
     /* Wait TYPES whose events are never a finding. Filtered by type rather than by event name so a
        new background worker in a future Aurora release is excluded automatically instead of arriving
@@ -161,13 +190,45 @@ WHERE w.wait_time > 0";
                 continue;
             }
 
+            var eventId = reader.GetInt64(1);
+            var waits = reader.GetInt64(4);
+            var waitTimeMicroseconds = reader.GetInt64(5);
+
+            /* Delta key is the numeric event_id, NOT the event name. Wait-event NAME CASING DIFFERS
+               BETWEEN AURORA MAJORS — 16.11 emits AutoVacuumMain and BgWriterMain where 17.7 emits
+               AutovacuumMain and BgwriterMain — so a name-keyed delta would break its own history the
+               moment a cluster is upgraded, reading as one series ending and another beginning. The id
+               is stable, and event_id >> 24 == type_id holds (verified on every event on two clusters),
+               so the id also carries the type. */
+            var key = eventId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+            var deltaWaits = context.Deltas.CalculateDeltaWithInterval(
+                context.ServerId, "pg_wait_stats_waits", key, waits, out var waitsIntervalSeconds,
+                collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+            /* Computed unconditionally, even on a row this pass goes on to skip — see the class remarks
+               on why the wait-time series' baseline must stay fresh regardless. */
+            var deltaWaitTime = context.Deltas.CalculateDelta(
+                context.ServerId, "pg_wait_stats_time", key, waitTimeMicroseconds,
+                collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+            /* The skip: a REAL interval (this is not a first sighting, a counter reset, or a gap this
+               pass just re-baselined) with zero new waits means the event demonstrably did not fire,
+               and Aurora only advances wait_time when a wait completes — so nothing on this row changed
+               and there is nothing new to write. See the class remarks for the full reasoning. */
+            if (waitsIntervalSeconds > 0 && deltaWaits == 0)
+            {
+                continue;
+            }
+
             rows.Add(new Row(
                 TypeId: reader.GetInt32(0),
-                EventId: reader.GetInt64(1),
+                EventId: eventId,
                 TypeName: typeName,
                 EventName: reader.IsDBNull(3) ? null : reader.GetString(3),
-                Waits: reader.GetInt64(4),
-                WaitTimeMicroseconds: reader.GetInt64(5)));
+                Waits: waits,
+                WaitTimeMicroseconds: waitTimeMicroseconds,
+                DeltaWaits: deltaWaits,
+                DeltaWaitTime: deltaWaitTime));
         }
 
         return rows;
@@ -175,24 +236,6 @@ WHERE w.wait_time > 0";
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
-        /* Delta key is the numeric event_id, NOT the event name. Wait-event NAME CASING DIFFERS
-           BETWEEN AURORA MAJORS — 16.11 emits AutoVacuumMain and BgWriterMain where 17.7 emits
-           AutovacuumMain and BgwriterMain — so a name-keyed delta would break its own history the
-           moment a cluster is upgraded, reading as one series ending and another beginning. The id
-           is stable, and event_id >> 24 == type_id holds (verified on every event on two clusters),
-           so the id also carries the type.
-
-           The shared gap policy matches wait_stats: past it, emit no delta rather than a spike that
-           is really an interval measurement. */
-        var key = row.EventId.ToString(System.Globalization.CultureInfo.InvariantCulture);
-
-        var deltaWaits = context.Deltas.CalculateDelta(
-            context.ServerId, "pg_wait_stats_waits", key, row.Waits,
-            collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaWaitTime = context.Deltas.CalculateDelta(
-            context.ServerId, "pg_wait_stats_time", key, row.WaitTimeMicroseconds,
-            collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-
         writer
             .Value(row.TypeId)                  /* wait_type_id INTEGER */
             .Value(row.EventId)                 /* wait_event_id BIGINT */
@@ -200,7 +243,7 @@ WHERE w.wait_time > 0";
             .Value(row.EventName)               /* wait_event VARCHAR */
             .Value(row.Waits)                   /* waits BIGINT */
             .Value(row.WaitTimeMicroseconds)    /* wait_time_us BIGINT */
-            .Value(deltaWaits)                  /* delta_waits BIGINT */
-            .Value(deltaWaitTime);              /* delta_wait_time_us BIGINT */
+            .Value(row.DeltaWaits)              /* delta_waits BIGINT */
+            .Value(row.DeltaWaitTime);           /* delta_wait_time_us BIGINT */
     }
 }

@@ -7,7 +7,10 @@
  */
 
 using System;
+using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using Npgsql;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -61,10 +64,16 @@ public sealed class PgStatementTextSourceTests
     /// refresh failed every cycle, storing nothing — quietly, because the caller deliberately treats a
     /// text-refresh error as non-fatal.</para>
     /// </summary>
-    [Fact]
-    public void TheVanillaFetchDeduplicatesByQueryId_OrTheUpsertAbandonsTheBatch()
+    /// <para>Pinned over EVERY arm rather than the vanilla one, which is the whole lesson of the recurrence:
+    /// the original pin named the arm it was written for, so the arm that already existed stayed broken and
+    /// the suite stayed green. <c>FetchSqlFor</c> switches on a bool, so iterating both values is exhaustive
+    /// over the sources that can reach the upsert — a derived guard, not an enumerated one.</para>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void EveryFetchDeduplicatesByQueryId_OrTheUpsertAbandonsTheBatch(bool isAurora)
     {
-        var sql = PgStatementText.FetchSqlFor(isAurora: false, postgresMajorVersion: 17);
+        var sql = PgStatementText.FetchSqlFor(isAurora, postgresMajorVersion: 17);
 
         Assert.Contains("DISTINCT ON (s.queryid)", sql, StringComparison.Ordinal);
 
@@ -78,10 +87,12 @@ public sealed class PgStatementTextSourceTests
     /// is what keeps that true — ranking before the dedupe would spend the cap on duplicates of the same
     /// costly statement.
     /// </summary>
-    [Fact]
-    public void TheCostliestStatementsStillWinTheCap()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void TheCostliestStatementsStillWinTheCap(bool isAurora)
     {
-        var sql = PgStatementText.FetchSqlFor(isAurora: false, postgresMajorVersion: 17);
+        var sql = PgStatementText.FetchSqlFor(isAurora, postgresMajorVersion: 17);
 
         var dedupe = sql.IndexOf("DISTINCT ON (s.queryid)", StringComparison.Ordinal);
         var outerOrder = sql.IndexOf("ORDER BY d.total_exec_time DESC", StringComparison.Ordinal);
@@ -107,5 +118,106 @@ public sealed class PgStatementTextSourceTests
 
         Assert.Matches(new Regex($@"AND\s+{Regex.Escape(expected)}\b"), sql);
         Assert.DoesNotContain("{TOPLEVEL}", sql, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// Gated (DARLING_TEST_PG) proof of the fact the dedupe exists for, which no string pin can make: what
+/// PostgreSQL actually DOES to a batch carrying one queryid twice.
+///
+/// <para>The severity lives here rather than in the error code. <c>21000</c> aborts the STATEMENT, so the
+/// batch's other rows — the statements that were NOT duplicated — are lost along with it. A reader of the
+/// upsert would reasonably expect the conflicting row to be skipped or overwritten; it stores nothing at
+/// all. Measured on the pgmon fleet: 50 of 50 Aurora servers failing on every attempt, zero succeeding,
+/// and <c>get_pg_top_queries</c> returning <c>query_text: null</c> on every row of every server.</para>
+///
+/// <para>It compounds, too, and the cadence guard is what compounds it. <see cref="PgStatementText.IsDueSql"/>
+/// asks the store when text last landed and COALESCEs a missing answer to TRUE — correct for a first fetch,
+/// and indistinguishable from a server whose every write has failed. So a broken server is due on every
+/// sweep instead of hourly, and each of those attempts is the <c>showtext = true</c> call this table's whole
+/// design exists to ration.</para>
+/// </summary>
+[Collection("live-postgres")]
+public sealed class PgStatementTextUpsertLivePostgresTests
+{
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    /// <summary>A server_id of this run's own, so a shared rig and a repeat run cannot collide.</summary>
+    private static readonly int ServerId = Random.Shared.Next(2_000_000, int.MaxValue);
+
+    [Fact]
+    public async Task ADuplicateQueryIdAbandonsTheWholeBatch_WhichIsWhyBothFetchesDeduplicate()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live statement-text upsert test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+
+        await using (var ddl = new NpgsqlCommand("CREATE SCHEMA IF NOT EXISTS collect;", connection))
+        {
+            await ddl.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var ddl = new NpgsqlCommand(PgStatementText.CreateTableSql, connection))
+        {
+            await ddl.ExecuteNonQueryAsync(ct);
+        }
+
+        var bodySucceeded = false;
+        try
+        {
+            /* One queryid twice — exactly the shape aurora_stat_statements and pg_stat_statements hand back
+               when a statement was run in two databases — plus one that is NOT duplicated. */
+            var duplicated = new long[] { 42, 42, 99 };
+
+            var abandoned = await Assert.ThrowsAsync<PostgresException>(
+                () => UpsertAsync(connection, duplicated, ct));
+            Assert.Equal("21000", abandoned.SqlState);
+
+            /* The half that makes this data loss rather than a rejected row: queryid 99 was unique in the
+               batch and is gone too. */
+            Assert.Equal(0, await CountAsync(connection, ct));
+
+            /* Deduplicated the way both fetch arms now do it, the same batch stores every distinct row. */
+            await UpsertAsync(connection, duplicated.Distinct().ToArray(), ct);
+            Assert.Equal(2, await CountAsync(connection, ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            /* #1902: through LiveStoreCleanup on its own connection, never the body's. The body here ENDS in
+               a deliberate PostgresException, so a hand-rolled teardown on the same connection is the exact
+               shape the ratchet exists to stop — it would throw from the finally and replace the failure a
+               reader needs to see. */
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var delete = new NpgsqlCommand(
+                    "DELETE FROM collect.pg_statement_text WHERE server_id = $1", cleanup);
+                delete.Parameters.AddWithValue(ServerId);
+                await delete.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    private static async Task UpsertAsync(NpgsqlConnection connection, long[] queryIds, System.Threading.CancellationToken ct)
+    {
+        var stamp = PgStatementText.Naive(DateTime.UtcNow);
+        await using var upsert = new NpgsqlCommand(PgStatementText.UpsertSql, connection);
+        upsert.Parameters.AddWithValue(Enumerable.Repeat(ServerId, queryIds.Length).ToArray());
+        upsert.Parameters.AddWithValue(queryIds);
+        upsert.Parameters.AddWithValue(queryIds.Select(id => "select " + id).ToArray());
+        upsert.Parameters.AddWithValue(Enumerable.Repeat(stamp, queryIds.Length).ToArray());
+        await upsert.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<long> CountAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        await using var count = new NpgsqlCommand(
+            "SELECT count(*) FROM collect.pg_statement_text WHERE server_id = $1", connection);
+        count.Parameters.AddWithValue(ServerId);
+        return (long)(await count.ExecuteScalarAsync(ct))!;
     }
 }

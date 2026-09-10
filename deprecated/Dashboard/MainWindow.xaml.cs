@@ -1039,6 +1039,9 @@ namespace PerformanceMonitorDashboard
                         ServerTabControl.Items.Remove(_planViewerTab);
                         _planViewerTab = null;
                         _mainPlanTabControl = null;
+                        // Re-arm the "+"-sentinel deferral latch for the next open (matches the shared
+                        // controller's Reset(); a fresh _mainPlanTabControl is built by OpenPlanViewerTab).
+                        _addTabInsertDeferred = false;
                     }
                 }
                 else if (_openTabs.TryGetValue(tabId, out var tabToClose))

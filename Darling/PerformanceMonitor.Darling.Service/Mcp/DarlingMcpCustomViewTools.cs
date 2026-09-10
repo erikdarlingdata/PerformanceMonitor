@@ -93,8 +93,17 @@ public sealed class DarlingMcpCustomViewTools
         "the exact authority create_custom_view / update_custom_view run before saving, so use it to iterate on a " +
         "generated definition until it is valid. The definition is a dashboard {\"panels\":[...]} or a notebook " +
         "{\"kind\":\"notebook\",\"cells\":[...]}; a composed panel names a catalog 'source' + 'measure'|'ratio', an " +
-        "'aggregate', an optional 'timeBucket' or 'topN', 'filters', 'groupBy', 'unit', 'viz', and optionally an " +
-        "'overlay' second measure (scatter's y axis, or a dual-axis line/area).")]
+        "'aggregate', an optional 'timeBucket' (time series), 'topN' (ranked), or both together (the bucketed " +
+        "trend of the top-N groups by window total; optional 'includeOther' folds the remainder into one " +
+        "'(other)' series), 'filters', 'groupBy', 'unit', 'viz', and optionally an " +
+        "'overlay' second measure (scatter's y axis, or a dual-axis line/area). Unknown keys are ERRORS at every " +
+        "level (root, panel, cell, filter, overlay), with a did-you-mean for a near-miss — a typo'd key can never " +
+        "silently validate as a different panel. Note a notebook panel cell is FLAT (the cell object carries " +
+        "'type':'panel' plus the panel's own keys); only run_custom_view_panel's spec nests under 'panel'. A " +
+        "notebook panel cell may also carry its own 'range' — {\"hours\":n} or {\"windowStart\",\"windowEnd\"} " +
+        "(ISO-8601 UTC, one shape only) — pinning that cell's window over the notebook's view-level range so a " +
+        "comparison document (say, two Fridays side by side) stays a LIVE view; absent means the cell follows the " +
+        "view window. The view-level 'range' itself stays relative ({\"hours\":n} only).")]
     public static Task<string> ValidateCustomView(
         [Description("The view definition JSON to validate (NOT persisted).")] string definition)
     {
@@ -130,7 +139,7 @@ public sealed class DarlingMcpCustomViewTools
             }
 
             var store = new CustomViewStore(postgres);
-            var result = await store.CreateAsync(name, description, definition, DarlingWebEndpoints.McpEditorPrincipal);
+            var result = await store.CreateAsync(name, description, definition, updatedBy: DarlingWebEndpoints.McpEditorPrincipal);
             return result switch
             {
                 CustomViewResult.Ok ok => DarlingWebEndpoints.BuildFullViewNode(ok.View!).ToJsonString(McpHelpers.JsonOptions),
@@ -170,7 +179,7 @@ public sealed class DarlingMcpCustomViewTools
 
             var store = new CustomViewStore(postgres);
             var result = await store.UpdateAsync(
-                view_id, name, description, definition, version, DarlingWebEndpoints.McpEditorPrincipal);
+                view_id, name, description, definition, version, updatedBy: DarlingWebEndpoints.McpEditorPrincipal);
             return result switch
             {
                 CustomViewResult.Ok ok => DarlingWebEndpoints.BuildFullViewNode(ok.View!).ToJsonString(McpHelpers.JsonOptions),
@@ -264,11 +273,20 @@ public sealed class DarlingMcpCustomViewTools
         "'appliesTo' (which server types — onPrem/azureSqlDb/azureMi/awsRds — can collect it). A panel then names a " +
         "'source' + 'measure'|'ratio', an 'aggregate' from that measure's validAggregates, a 'unit' from its family, " +
         "an optional 'timeBucket' (time series; prefer 'auto', which adapts the grain minute/hour/day to the " +
-        "panel's window so any range renders) OR 'topN' (ranked, not both), 'groupBy'/'filters' from its " +
+        "panel's window so any range renders), 'topN' (ranked), or BOTH (the bucketed trend of exactly the top-N " +
+        "groupBy members ranked by the aggregate over the whole window — 'the hourly trend of the top 5'; add " +
+        "'includeOther':true to fold the remainder into one '(other)' series so buckets still sum to the total), " +
+        "'groupBy'/'filters' from its " +
         "allowedDimensions (plus the universal 'server' axis), and a 'viz' coherent with the mode (line/area/" +
-        "stacked/stacked-bar for time series; bar/pie/scatter for ranked; stat for a single value; table for any). " +
+        "stacked/stacked-bar for time series, including top-N time series; bar/pie/scatter for ranked; stat for a " +
+        "single value; table for any). " +
         "An optional 'overlay' {measure, aggregate?, unit?} adds a SECOND same-source measure: REQUIRED on scatter " +
-        "(the y axis; the primary ranks the points), or a dual right-hand axis on an UNGROUPED line/area. Static " +
+        "(the y axis; the primary ranks the points), or a dual right-hand axis on an UNGROUPED line/area. " +
+        "On query_stats, 'object_name' is stitched from procedure_stats, so ad-hoc SQL has no module: those rows " +
+        "carry the literal '(ad hoc)' — one labeled bucket per database, selectable/excludable with eq/neq " +
+        "'(ad hoc)' — and a neq on a procedure name INCLUDES the ad-hoc rows (the dimension's value is never " +
+        "null). For a true top-statements panel group by 'statement' instead: procedures keep their module name " +
+        "and ad-hoc statements stay distinct by query_hash. Static " +
         "reference data — no server or time window needed; it reads no monitored server and no collected data.")]
     public static Task<string> DescribeCustomViewCatalog()
     {

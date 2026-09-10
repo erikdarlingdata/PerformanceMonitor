@@ -33,7 +33,7 @@ public partial class LocalDataService
            check, so the outer batch still compiles on platforms without it. */
         const string sql = @"
 DECLARE @role nvarchar(20) = N'Standalone';
-IF CONVERT(int, ISNULL(SERVERPROPERTY('IsHadrEnabled'), 0)) = 1
+IF CONVERT(integer, ISNULL(SERVERPROPERTY('IsHadrEnabled'), 0)) = 1
    AND OBJECT_ID(N'sys.dm_hadr_availability_replica_states') IS NOT NULL
 BEGIN
     DECLARE @detected nvarchar(20);
@@ -78,13 +78,13 @@ SELECT @role;";
            basic_features ships in every supported version (2016+), so no
            column-existence check is needed. */
         const string sql = @"
-DECLARE @count int = 0;
-IF CONVERT(int, ISNULL(SERVERPROPERTY('IsHadrEnabled'), 0)) = 1
+DECLARE @count integer = 0;
+IF CONVERT(integer, ISNULL(SERVERPROPERTY('IsHadrEnabled'), 0)) = 1
    AND OBJECT_ID(N'sys.availability_groups') IS NOT NULL
 BEGIN
     EXEC sys.sp_executesql
-        N'SELECT @c = COUNT(*) FROM sys.availability_groups WHERE basic_features = 0;',
-        N'@c int OUTPUT', @c = @count OUTPUT;
+        N'SELECT @c = CONVERT(integer, COUNT_BIG(*)) FROM sys.availability_groups WHERE basic_features = 0;',
+        N'@c integer OUTPUT', @c = @count OUTPUT;
 END;
 SELECT @count;";
         try
@@ -115,8 +115,8 @@ SELECT @count;";
             await sqlConn.OpenAsync();
 
             using var editionCmd = new SqlCommand(
-                "SELECT CAST(SERVERPROPERTY('Edition') AS NVARCHAR(128)), " +
-                "CAST(SERVERPROPERTY('ProductMajorVersion') AS INT)", sqlConn);
+                "SELECT CAST(SERVERPROPERTY('Edition') AS nvarchar(128)), " +
+                "CAST(SERVERPROPERTY('ProductMajorVersion') AS integer)", sqlConn);
             editionCmd.CommandTimeout = 30;
             using var editionReader = await editionCmd.ExecuteReaderAsync();
             string edition = "";

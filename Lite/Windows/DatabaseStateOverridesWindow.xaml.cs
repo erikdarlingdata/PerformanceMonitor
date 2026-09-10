@@ -80,10 +80,38 @@ public partial class DatabaseStateOverridesWindow : Window
 
     private int? SelectedServerId => (ServerCombo.SelectedItem as ServerPick)?.ServerId;
 
+    private readonly PerformanceMonitor.Ui.ScopedLoadGenerations _loads = new();
+
     private async void ServerCombo_SelectionChanged(object sender, SelectionChangedEventArgs e) => await LoadAsync();
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e) => await LoadAsync();
 
+    /// <summary>
+    /// Loads the selected server's database states into the grid.
+    ///
+    /// <para><b>The scope is captured before the read and verified after it</b> (#2924). One grid, one
+    /// dropdown and one <see cref="_rows"/> model carry every server's answer, and
+    /// <see cref="ServerCombo_SelectionChanged"/> starts a load without a single-flight guard — so two
+    /// combo changes inside one store read leave two loads in flight and the last to COMPLETE painting,
+    /// which need not be the last one requested.</para>
+    ///
+    /// <para>Verifying rather than replaying, because the combo change is itself the re-read: the handler
+    /// has already started a load for the new server, so a mismatching answer is stale by definition and
+    /// its replacement is in flight. Dropping leaves the newest load — the only one whose scope can still
+    /// match when it lands — to paint.</para>
+    ///
+    /// <para><see cref="_rows"/> is the reason this is not only cosmetic. It is the model
+    /// <see cref="Save_Click"/> writes from, while that method resolves <see cref="SelectedServerId"/>
+    /// fresh: rows belonging to one server, edited under another server's selection, would be saved
+    /// against the server the combo names.</para>
+    ///
+    /// <para><b>And the read is ordered by generation</b> (#2933), because the scope verify above cannot
+    /// separate two reads that carry the SAME scope: after server A to B and back to A, the third read's
+    /// scope equals the first's, so an answer still in flight for the first compares current and lands
+    /// last. The two tests are not redundant — a load can be the newest and still answer for a departed
+    /// scope, and a load can carry a matching scope and still be superseded. This one is the same
+    /// generation idiom Lite's picker charts use (<c>ServerTab.Pickers.cs</c>).</para>
+    /// </summary>
     private async System.Threading.Tasks.Task LoadAsync()
     {
         if (SelectedServerId is not int serverId)
@@ -91,9 +119,26 @@ public partial class DatabaseStateOverridesWindow : Window
             return;
         }
 
+        var gen = _loads.Claim(nameof(LoadAsync));
+
         try
         {
             var rows = await _dataService.GetDatabaseStateExpectationsAsync(serverId);
+
+            /* A newer load for this grid has started, so this answer is not the one the operator is
+               waiting for even if the combo came back to the same server. */
+            if (_loads.Superseded(nameof(LoadAsync), gen))
+            {
+                return;
+            }
+
+            /* The combo moved while the read was in flight, so this answer is for a server the operator has
+               left. Drop it ahead of every paint below, _rows included. */
+            if (SelectedServerId != serverId)
+            {
+                return;
+            }
+
             _rows = rows.Select(r => new EditRow
             {
                 DatabaseName = r.DatabaseName,
@@ -125,6 +170,19 @@ public partial class DatabaseStateOverridesWindow : Window
         }
         catch (Exception ex)
         {
+            /* Both of the success path's tests, for the same reasons: a failure reading the departed
+               server's states must not blank the grid the operator is now looking at, and a superseded
+               load's failure must not overwrite the newest load's answer. */
+            if (_loads.Superseded(nameof(LoadAsync), gen))
+            {
+                return;
+            }
+
+            if (SelectedServerId != serverId)
+            {
+                return;
+            }
+
             StatesGrid.ItemsSource = null;
             StatusText.Text = $"Could not load database states: {ex.Message}";
         }
