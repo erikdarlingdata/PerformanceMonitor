@@ -22,8 +22,8 @@ namespace Darling.Tests;
 /// (#3153) — the read-side half of rotation, and the half that decides whether rotation is visible to an
 /// operator at all.
 ///
-/// <para><b>Why this needed its own test.</b> The collector now measures a rotating slice, so every index
-/// gets a row on every cycle and most of those rows are labels. The read took
+/// <para><b>Why this needed its own test.</b> When it was written the collector measured a rotating
+/// slice, so every index got a row on every cycle and most of those rows were labels. The read took
 /// <c>DISTINCT ON (index identity) ... ORDER BY collection_time DESC</c> — the newest ROW — which is the
 /// newest LABEL for any index the current cycle passed over. Measured on a two-cycle store: an index
 /// measured at 72.5% density with 194 MB estimated reclaimable came back the next day with no density, no
@@ -45,8 +45,19 @@ namespace Darling.Tests;
 /// claim actually being made.</para>
 ///
 /// <para>Rows are SEEDED rather than collected. The property under test belongs to the read, and seeding
-/// is what lets two cycles a day apart exist inside one test — <c>PgIndexBloatBudgetLivePostgresTests</c>
-/// is where the collector's own rotation is executed against a real catalog.</para>
+/// is what lets two cycles a day apart exist inside one test. There is no companion suite driving the
+/// collector for this any more: #3234 removed the rotation, and the budget suite that exercised it went
+/// with it.</para>
+///
+/// <para><b>Since #3234 this suite exercises the HISTORICAL row shape, deliberately.</b> The collector no
+/// longer calls <c>pgstatindex</c> on a schedule — it estimates from catalog statistics — but the store
+/// holds 90 days of exact rows written before that change, and the seeding below names only the pre-V114
+/// columns. So <c>est_tuple_bytes</c> is NULL on every row here, which is what makes
+/// <c>measurement_kind</c> resolve to <c>measured</c> and <c>MeasuredAt</c> carry a time. That is the
+/// property under test and it is not incidental: keying the estimate/measured discriminator on the
+/// PRESENCE of a modelled tuple width rather than on a null density is what keeps these rows correctly
+/// labelled, and an empty measured index — whose density is legitimately null — from being reported as an
+/// estimate.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class DarlingPgIndexBloatRotationReadLivePostgresTests

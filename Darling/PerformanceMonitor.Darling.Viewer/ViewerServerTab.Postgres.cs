@@ -932,12 +932,17 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
-    /// Measured index bloat (#2561), under index usage — the two are halves of one question.
+    /// Estimated index bloat (#3234), under index usage — the two are halves of one question.
     ///
-    /// <para>The note leads with RECLAIMABLE BYTES rather than a worst-density figure, because density
-    /// alone ranks the wrong thing: a tiny index at 20% looks alarming and is worth kilobytes. It also has
-    /// to say that a healthy index measures near 90 rather than 100, or the first person to read the density
-    /// column concludes every index in the fleet is 10% bloated.</para>
+    /// <para>The note leads with RECLAIMABLE BYTES rather than a worst-percentage figure, because a
+    /// percentage ranks the wrong thing: a tiny index at 20% looks alarming and is worth kilobytes. It also
+    /// has to state the accuracy, because the estimate is close enough to choose which index to act on and
+    /// not close enough to justify a REINDEX on its own — the Exact Measurement column is for that.</para>
+    ///
+    /// <para>The density caveat is still carried, but only for the rows that have one: a healthy index
+    /// measures near 90 rather than 100, so the first person to read that column would otherwise conclude
+    /// every index in the fleet is 10% bloated. Since #3234 those are the older exact rows still inside
+    /// retention, which is why the note distinguishes them rather than describing one kind of row.</para>
     /// </summary>
     private async Task LoadPgIndexBloatAsync(DateTime startUtc, DateTime endUtc)
     {
@@ -960,28 +965,34 @@ public partial class ViewerServerTab
 
         var skipped = rows.Count(r => r.SkippedReason is not null);
 
+        var estimated = rows.Count(r => r.SkippedReason is null && r.IsEstimate);
+        var exactly = rows.Count(r => r.SkippedReason is null && !r.IsEstimate);
+
         PgIndexBloatNote.Text = rows.Count == 0
-            ? "Nothing recorded. This panel needs the pgstattuple extension — without it the collector "
-              + "reports the function as missing rather than failing, and the Overview tab's extension panel "
-              + "says whether it is available on this server and one CREATE EXTENSION away. Only B-TREE "
-              + "indexes are measured; pgstatindex raises on GIN, BRIN and hash. When it does record, it "
-              + "records EVERY btree at any size, which is why its index count exceeds the usage panel's."
-            : $"MEASURED, not estimated from column statistics — every page of each index was read. About "
-              + $"{reclaimable:N0} bytes look reclaimable across {rows.Count:N0} index(es), and that is what "
-              + "the grid is ranked by: density alone ranks the wrong thing, since a tiny index at 20% is "
-              + "worth kilobytes next to a large one at 70%. **Leaf density is the server's raw figure and "
-              + "is not 100-minus-bloat** — a freshly built index measures around 90, so the reclaimable "
-              + "estimate is computed against that floor rather than against a full page."
-              + "  Each measured row is the latest MEASUREMENT of that index in this window, not the "
-              + "latest cycle - the collector measures a rotating slice, so check the Measured column "
-              + "before treating a density as current."
+            ? "Nothing recorded. This panel needs the pg_stats column widths, which pg_monitor alone does "
+              + "not confer - see the runbook step under \u201cThe one grant pg_monitor does not cover\u201d. "
+              + "Only B-TREE indexes are covered. When it does record, it records EVERY btree at any size, "
+              + "which is why its index count exceeds the usage panel's."
+            : $"ESTIMATED from catalog statistics - no index page is read. About {reclaimable:N0} bytes "
+              + $"look reclaimable across {rows.Count:N0} index(es), and that is what the grid is ranked "
+              + "by: a percentage ranks the wrong thing, since a tiny index at 20% is worth kilobytes next "
+              + "to a large one at 70%. Measured against pgstatindex ground truth, median absolute error "
+              + "is 2.79 percentage points and p90 is 6.63 - close enough to choose WHICH index to act on, "
+              + "not close enough to justify a REINDEX on its own. The Exact Measurement column carries the "
+              + "pgstatindex call for that; it walks every page, so run it on the one index concerned "
+              + "rather than on a schedule."
+              + (exactly > 0
+                  ? $"  {exactly:N0} row(s) are older EXACT measurements still inside retention rather "
+                    + "than estimates - the Kind column says which, and Leaf Density is populated only on "
+                    + "those. A blank density on an estimated row means the index was never walked, which "
+                    + "is not the same as a walk that found no leaf pages."
+                  : string.Empty)
               + (skipped > 0
-                  ? $"  {skipped:N0} index(es) have NO measurement in this window and are listed FIRST "
-                    + "with their reason: "
-                    + "their bloat is unknown rather than zero. Read the reason - one naming the rotation "
-                    + "cursor or the work budget is deferred to a later cycle in this pass, while one "
-                    + "naming the measurement ceiling is permanent at that size and only the index-usage "
-                    + "panel above tracks its growth."
+                  ? $"  {skipped:N0} index(es) have NO answer in this window and are listed FIRST with "
+                    + "their reason: their bloat is unknown rather than zero. Read the reason - a "
+                    + "never-analyzed parent needs an ANALYZE and invisible column widths need the "
+                    + "pg_read_all_data grant, while a PARTIAL or DEDUPLICATED index cannot be modelled at "
+                    + "any grant or statistics freshness and needs the exact command instead."
                   : string.Empty);
     }
 

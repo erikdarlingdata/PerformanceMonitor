@@ -46,18 +46,24 @@ public static class PgPerDatabaseCollectorState
     /// <see cref="QueryStorePerDatabaseState.PrunableKeys"/> gives: a prefix pruned under the wrong
     /// <c>collector_name</c> silently deletes nothing.
     ///
-    /// <para>The owner here is the DEFINITION's own name, unlike the query_store entries, which carry
-    /// their own <c>StateCollectorName</c>. <c>pg_index_bloat</c> declares
-    /// <see cref="ICollectorSchemaInfo.StateKeys"/>, so both hosts load and persist its state under
-    /// <c>definition.Name</c>, and the prune has to delete under the same name the writer used.</para>
+    /// <para><b>Empty since #3234, and empty as a FACT rather than as an omission.</b> Its only member was
+    /// <c>pg_index_bloat</c>'s rotation cursor, and that collector no longer rotates: the statistics
+    /// estimate covers every index in one statement, so there is no position to resume from and the
+    /// definition declares no <see cref="ICollectorSchemaInfo.StateKeys"/> at all. The class and its guard
+    /// stay because the NEXT per-database PostgreSQL cursor needs both, and because
+    /// <c>CollectorStateContractTests.EveryDeclaredStateKeyPrefixHasAPruneVerdict</c> censuses every
+    /// <c>*KeyPrefix</c> in this assembly -- deleting the class would remove the check that made this a
+    /// decision rather than a silently unpruned prefix.</para>
+    ///
+    /// <para>When a member returns, the owner is the DEFINITION's own name, unlike the query_store entries
+    /// which carry their own <c>StateCollectorName</c>: a collector declaring
+    /// <see cref="ICollectorSchemaInfo.StateKeys"/> has both hosts load and persist under
+    /// <c>definition.Name</c>, and the prune must delete under the same name the writer used. Read it off
+    /// the definition rather than retyping it, so a rename cannot desync the pair into a prune that
+    /// reports "nothing to prune".</para>
     /// </summary>
-    public static readonly IReadOnlyList<(string Owner, string Prefix)> PrunableKeys = new[]
-    {
-        /* The definition's own Name, read from it rather than retyped: the owner and the name the writer
-           persists under are the same fact, and a literal here would let a rename desync them silently -
-           which the prune reports as "nothing to prune". */
-        (PgIndexBloatCollector.Instance.Name, PgIndexBloatCollector.RotationCursorKeyPrefix),
-    };
+    public static readonly IReadOnlyList<(string Owner, string Prefix)> PrunableKeys =
+        System.Array.Empty<(string Owner, string Prefix)>();
 
     /// <summary>
     /// PostgreSQL state key prefixes deliberately NOT pruned because they are not keyed by database name.

@@ -73,6 +73,13 @@ public sealed class PgExtensionDependencyContractTests
             "records a pgstattuple_available flag read from pg_extension so a consumer knows whether an "
             + "exact measurement was possible; its own bloat figure is statistics-based and needs nothing "
             + "installed",
+        ["pg_index_bloat"] =
+            "records a pgstattuple_available flag read from pg_extension so a consumer knows whether the "
+            + "exact_measurement_command it carries needs a CREATE EXTENSION in front of it; since #3234 "
+            + "its own figure is statistics-based and needs nothing installed. Identical position to "
+            + "pg_table_bloat_stats above, and it moved into this list rather than out of "
+            + "RequiredPgExtensions by accident: the census that preceded it really did depend on "
+            + "pgstattuple, and a database without the extension failed collection for that database",
         ["pg_plan_capture_readiness"] =
             "reads GUCs and pg_available_extensions to report whether plan capture could work, and names "
             + "pg_stat_statements only inside the operator advice it emits",

@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Collectors;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -78,17 +79,83 @@ public static class DarlingPgIndexBloatReader
         double? LeafFragmentation,
         long? EstimatedReclaimableBytes,
         string? SkippedReason,
+        /// <summary><c>estimated</c> or <c>measured</c> — this row's PROVENANCE, not its outcome.</summary>
+        string? MeasurementKind,
+        double? EstBloatPct,
+        long? IndexPages,
+        long? TableRows,
+        int? Fillfactor,
+        long? EstTupleBytes,
+        long? EstLeafPages,
+        bool? PgstattupleAvailable,
         DateTime CaptureTime)
     {
         /// <summary>
-        /// When this index was MEASURED, or null when the window holds no measurement of it.
+        /// True when this row came from the statistics estimate rather than from <c>pgstatindex</c>.
+        /// </summary>
+        public bool IsEstimate =>
+            string.Equals(MeasurementKind, "estimated", StringComparison.Ordinal);
+
+        /// <summary>
+        /// When this index was EXACTLY measured, or null when the window holds no exact measurement of it.
         ///
         /// <para>Not the same as <see cref="CaptureTime"/>, and the difference is the point (#3153): on a
         /// labelled row <see cref="CaptureTime"/> is the LABEL's own timestamp, and showing that in a
         /// "measured" column would read as the age of a measurement that does not exist. Defined here so
         /// the grid and the MCP payload cannot disagree about which rows have an age at all.</para>
+        ///
+        /// <para><b>#3234 narrowed this, and the narrowing is load-bearing.</b> A row with no
+        /// <see cref="SkippedReason"/> used to mean measured, because a census was the only thing writing
+        /// rows. It now usually means ESTIMATED. Left as it was, this property would have reported an
+        /// estimate's timestamp as the age of a measurement that never happened — an accurate-looking
+        /// figure for the wrong quantity, on the surface an operator uses to decide whether to trust the
+        /// number. So it tests the row's provenance and not merely the absence of a reason.</para>
         /// </summary>
-        public DateTime? MeasuredAt => SkippedReason is null ? CaptureTime : null;
+        public DateTime? MeasuredAt =>
+            SkippedReason is null && !IsEstimate ? CaptureTime : null;
+
+        /// <summary>
+        /// When this index was ESTIMATED, or null when this row is not a successful estimate. The
+        /// counterpart to <see cref="MeasuredAt"/>: exactly one of the two is non-null on a row that
+        /// carries an answer, and neither is on a row that carries a reason.
+        /// </summary>
+        public DateTime? EstimatedAt =>
+            SkippedReason is null && IsEstimate ? CaptureTime : null;
+
+        /// <summary>
+        /// The exact <c>pgstatindex</c> call for this index, prefixed with a <c>CREATE EXTENSION</c> when
+        /// pgstattuple is not installed on the database this row came from.
+        ///
+        /// <para><b>Defined here rather than at each surface</b> so the grid and the MCP payload cannot
+        /// disagree about the command they tell an operator to run — one expression cannot drift from
+        /// itself. Built from schema and index name and never from the collected oid, which does not
+        /// survive a dump and restore and would send the reader at whatever now holds that number.</para>
+        ///
+        /// <para>It is offered on EVERY row, including ones that estimated cleanly: the estimate is close
+        /// enough to decide which index to act on and not close enough to justify a REINDEX, so the exact
+        /// figure is the next step for any index somebody intends to touch. On a partial or deduplicated
+        /// index it is not an escalation but the ONLY route — no statistics model reaches those.</para>
+        /// </summary>
+        public string ExactMeasurementCommand
+        {
+            get
+            {
+                /* TWO levels of escaping, and both are load-bearing rather than defensive.
+                   pgstatindex takes regclass, whose TEXT input parses like an SQL identifier: an unquoted
+                   part is folded to lower case, so a camelCase or reserved-word index resolves to the wrong
+                   object or to none. And a name created through a double-quoted CREATE INDEX may contain
+                   almost any character INCLUDING a single quote, which would close the outer literal and
+                   append whatever follows to a command an operator is being invited to paste into a
+                   privileged session. So each part is quoted as an identifier (doubling any embedded
+                   double quote, which is quote_ident's rule) and the assembled name is then escaped for
+                   the string literal it sits inside (doubling any single quote). */
+                var literal = PgIdentifier.Qualify(SchemaName, IndexName);
+
+                return PgstattupleAvailable == false
+                    ? $"CREATE EXTENSION pgstattuple; SELECT * FROM pgstatindex('{literal}');"
+                    : $"SELECT * FROM pgstatindex('{literal}');";
+            }
+        }
     }
 
     /* DISTINCT ON the index identity gives one row per index in one pass. The outer ORDER BY then ranks
@@ -161,18 +228,39 @@ public static class DarlingPgIndexBloatReader
                NULLIF(leaf_fragmentation, 'NaN'::double precision) AS leaf_fragmentation,
                estimated_reclaimable_bytes,
                skipped_reason,
+               measurement_kind,
+               est_bloat_pct, index_pages, table_rows, fillfactor, est_tuple_bytes, est_leaf_pages,
+               pgstattuple_available,
                collection_time
         FROM (
             SELECT DISTINCT ON (database_name, schema_name, table_name, index_name)
                    database_name, schema_name, table_name, index_name, index_bytes, tree_level,
                    empty_pages, deleted_pages, avg_leaf_density, leaf_fragmentation,
-                   CASE
-                       WHEN avg_leaf_density IS NULL THEN NULL
-                       WHEN avg_leaf_density = 'NaN'::double precision THEN 0::bigint
-                       ELSE GREATEST(
-                           0,
-                           (index_bytes * (90.0 - avg_leaf_density) / NULLIF(90.0, 0))::bigint)
-                   END AS estimated_reclaimable_bytes,
+                   /* ONE expression serving two row kinds. A row written since #3234 carries the
+                      collector's own est_reclaimable_bytes; the store also holds 90 days of exact
+                      pgstatindex rows written before it, which carry a density instead. COALESCE picks
+                      whichever exists, and it is correct in all three states rather than by luck: an
+                      estimated row that PASSED its gate has the stored figure, an estimated row that was
+                      suppressed has NULL on both sides and stays NULL because unknown is not zero, and a
+                      historical measured row falls through to the density derivation below. */
+                   COALESCE(
+                       est_reclaimable_bytes,
+                       CASE
+                           WHEN avg_leaf_density IS NULL THEN NULL
+                           WHEN avg_leaf_density = 'NaN'::double precision THEN 0::bigint
+                           ELSE GREATEST(
+                               0,
+                               (index_bytes * (90.0 - avg_leaf_density) / NULLIF(90.0, 0))::bigint)
+                       END) AS estimated_reclaimable_bytes,
+                   /* The discriminator, and it is not cosmetic: a NULL avg_leaf_density means this row was
+                      ESTIMATED, not that an exact measurement came back empty, and those two readings lead
+                      an operator to opposite conclusions. Keyed on est_tuple_bytes rather than on the
+                      density, because the estimate populates it even when the gate suppresses the answer -
+                      so it distinguishes the row's PROVENANCE rather than its outcome. */
+                   CASE WHEN est_tuple_bytes IS NOT NULL THEN 'estimated' ELSE 'measured' END
+                       AS measurement_kind,
+                   est_bloat_pct, index_pages, table_rows, fillfactor, est_tuple_bytes, est_leaf_pages,
+                   pgstattuple_available,
                    skipped_reason, collection_time
             FROM pg_index_bloat
             WHERE server_id = $1
@@ -224,9 +312,17 @@ public static class DarlingPgIndexBloatReader
                 LeafFragmentation: reader.IsDBNull(9) ? null : reader.GetDouble(9),
                 EstimatedReclaimableBytes: reader.IsDBNull(10) ? null : reader.GetInt64(10),
                 SkippedReason: reader.IsDBNull(11) ? null : reader.GetString(11),
-                CaptureTime: reader.IsDBNull(12)
+                MeasurementKind: reader.IsDBNull(12) ? null : reader.GetString(12),
+                EstBloatPct: reader.IsDBNull(13) ? null : reader.GetDouble(13),
+                IndexPages: reader.IsDBNull(14) ? null : reader.GetInt64(14),
+                TableRows: reader.IsDBNull(15) ? null : reader.GetInt64(15),
+                Fillfactor: reader.IsDBNull(16) ? null : reader.GetInt32(16),
+                EstTupleBytes: reader.IsDBNull(17) ? null : reader.GetInt64(17),
+                EstLeafPages: reader.IsDBNull(18) ? null : reader.GetInt64(18),
+                PgstattupleAvailable: reader.IsDBNull(19) ? null : reader.GetBoolean(19),
+                CaptureTime: reader.IsDBNull(20)
                     ? default
-                    : DateTime.SpecifyKind(reader.GetDateTime(12), DateTimeKind.Utc)));
+                    : DateTime.SpecifyKind(reader.GetDateTime(20), DateTimeKind.Utc)));
         }
 
         return rows;

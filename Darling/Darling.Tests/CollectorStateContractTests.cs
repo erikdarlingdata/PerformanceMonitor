@@ -110,11 +110,13 @@ public sealed class CollectorStateContractTests
            collector is a two-host concern rather than a definition-local one. Pinned on the catalog
            surface both hosts iterate.
 
-           TWO of them: default_trace_events' last-seen trace FILE (#1962), and pg_index_bloat's
-           per-database rotation cursor (#3153). Neither needed host CODE — the wiring below is generic —
-           but both depend on it, which is why they are enumerated in the same file that pins it. */
+           ONE of them now: default_trace_events' last-seen trace FILE (#1962). pg_index_bloat's
+           per-database rotation cursor (#3153) was the other and #3234 retired it — the statistics
+           estimate covers every index in one statement, so there is no position to resume from. It did
+           not need host CODE, and neither does the survivor: the wiring below is generic. Enumerated in
+           the same file that pins that wiring, so a collector newly declaring state lands here first. */
         Assert.Equal(
-            new[] { "default_trace_events", "pg_index_bloat" },
+            new[] { "default_trace_events" },
             CollectorCatalog.All
                 .Where(c => c.StateKeys.Count > 0)
                 .Select(c => c.Name)
@@ -171,11 +173,11 @@ public sealed class CollectorStateContractTests
                 StringComparison.Ordinal);
         }
 
-        /* And the definition that depends on it really does declare a prefix rather than its keys. */
-        Assert.Equal(
-            new[] { PgIndexBloatCollector.RotationCursorKeyPrefix },
-            PgIndexBloatCollector.Instance.StateKeys.ToArray());
-        Assert.EndsWith(":", PgIndexBloatCollector.RotationCursorKeyPrefix, StringComparison.Ordinal);
+        /* No definition declares a PREFIX today. pg_index_bloat was the one that did, and #3234 removed
+           its rotation cursor: the statistics estimate covers every index in one statement, so there is no
+           position to resume from. Pinned as statelessness rather than deleted, because re-introducing a
+           cursor here silently re-opens the prune question this whole class exists to force. */
+        Assert.Empty(PgIndexBloatCollector.Instance.StateKeys);
     }
 
     [Fact]
@@ -232,7 +234,8 @@ public sealed class CollectorStateContractTests
     /// <para><b>Why this exists as well as the query_store guard.</b>
     /// <c>QueryStoreStatePruneTests.EveryPerDatabaseKeyPrefixIsInOneSharedList</c> discovers its population
     /// by NAME PATTERN — static classes called <c>QueryStore*State</c> — which is the right census for that
-    /// family and blind to everything else. <c>PgIndexBloatCollector.RotationCursorKeyPrefix</c> is
+    /// family and blind to everything else. <c>pg_index_bloat</c>'s <c>rotate:</c> prefix — retired in
+    /// #3234, and named here as the history that justifies this census rather than as a live member — was
     /// declared on a COLLECTOR, so it matched no pattern, appeared in no list, and shipped with no verdict:
     /// the cursors accumulated for the life of the server, and because <c>BuildQuery</c> splices all of
     /// them into one statement reused per database, the end state was PostgreSQL's 65,535-parameter limit
@@ -258,8 +261,16 @@ public sealed class CollectorStateContractTests
         /* The census has to have found something, and specifically the one the pattern-based guard misses:
            a discovery that silently returned nothing would make every assertion below vacuous. */
         Assert.NotEmpty(declared);
+
+        /* The positive control. It used to be pg_index_bloat's rotation cursor, which was the only prefix
+           declared on a COLLECTOR rather than on a *State class and therefore the one the pattern-based
+           guard missed; #3234 removed it. Re-anchored to a prefix that still exists so the census cannot
+           silently return nothing and make every assertion below vacuous -- and note the collector-declared
+           case now has no member, so this census currently guards an empty class of prefix and is here for
+           the next one. */
         Assert.Contains(
-            (nameof(PgIndexBloatCollector), PgIndexBloatCollector.RotationCursorKeyPrefix), declared);
+            (nameof(QueryStoreOpenIntervalState), QueryStoreOpenIntervalState.WatermarkKeyPrefix),
+            declared);
 
         var queryStorePruned = QueryStorePerDatabaseState.PrunableKeys.Select(p => p.Prefix).ToArray();
         var pgPruned = PgPerDatabaseCollectorState.PrunableKeys.Select(p => p.Prefix).ToArray();
@@ -286,12 +297,13 @@ public sealed class CollectorStateContractTests
                 + "prefix there deletes nothing forever.");
         }
 
-        /* Owner and prefix travel together on the PostgreSQL side too, and the owner is the name the
-           WRITER used: pg_index_bloat declares StateKeys, so both hosts persist under definition.Name. A
-           literal that drifted from it would delete nothing. */
-        Assert.Contains(
-            (PgIndexBloatCollector.Instance.Name, PgIndexBloatCollector.RotationCursorKeyPrefix),
-            PgPerDatabaseCollectorState.PrunableKeys);
+        /* The PostgreSQL registry is EMPTY since #3234, and asserted empty rather than left unmentioned:
+           its only member was pg_index_bloat's rotation cursor. The rule for the next member is the part
+           worth keeping, because it is invisible until it is wrong -- owner and prefix travel together and
+           the owner is the name the WRITER used, so a collector declaring StateKeys has both hosts persist
+           under definition.Name and the prune must delete under that same name. Read it off the definition
+           rather than retyping it; a literal that drifted would delete nothing and report success. */
+        Assert.Empty(PgPerDatabaseCollectorState.PrunableKeys);
     }
 
     /// <summary>

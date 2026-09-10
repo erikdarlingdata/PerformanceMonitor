@@ -123,6 +123,19 @@ public sealed class MigrationDataMovingRungCensusPins
             + "series. The two ADD COLUMNs in the same rung are not findings and that was measured rather "
             + "than assumed - the volatile-DEFAULT shape needs DEFAULT <fn>( and this rung's default is "
             + "the literal 'bot', and ALTER COLUMN ... DROP DEFAULT is catalog-only"),
+        new(
+            114,
+            SetsTheFloor: false,
+            "one narrow-predicate DELETE of the retired rotation cursor keys from "
+            + "collect.collector_state (created V44), the same shape and the same table as V77's pair. "
+            + "#3234 replaced the pgstatindex census with a statistics estimate that covers every index "
+            + "in one statement, so pg_index_bloat declares no StateKeys and the per-database prune no "
+            + "longer owns the 'rotate:' prefix - which is why the rows need retiring here rather than "
+            + "being left for a prune that will never visit them. Bounded for V77's reason: "
+            + "collector_state holds a few rows per server per collector, and this predicate matches at "
+            + "most one row per DATABASE per server. The eight ADD COLUMNs in the same rung are not "
+            + "findings and that is structural rather than measured - none of them carries a DEFAULT at "
+            + "all, volatile or literal, so each is a catalog-only entry that rewrites no row"),
     ];
 
     /// <summary>

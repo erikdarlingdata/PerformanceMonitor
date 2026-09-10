@@ -170,7 +170,57 @@ public static class PgMigrations
         new Migration(111, "store-log-self-monitoring", V111Sql),
         new Migration(112, "collector-stall-wait-probes", V112Sql),
         new Migration(113, "remediation-credential-and-actor", V113Sql),
+        new Migration(114, "pg-index-bloat-estimate-columns", V114Sql),
     };
+
+    /// <summary>
+    /// V114 — the statistics ESTIMATE columns on <c>collect.pg_index_bloat</c>, and the retirement of the
+    /// rotation cursor that the exact census needed (#3234).
+    ///
+    /// <para><b>ADD only, deliberately.</b> The seven <c>pgstatindex</c> measurement columns stay and the
+    /// collector now writes them NULL. The store holds 90 days of exact measurements taken before this
+    /// change and an on-request measurement needs somewhere to land, so dropping them would destroy
+    /// history to save nothing. A NULL there means the row was ESTIMATED — it does not mean an exact
+    /// measurement came back empty, and the read has to keep those two apart.</para>
+    ///
+    /// <para><b>Why every input is stored and not just the answer.</b> <c>index_pages</c>,
+    /// <c>table_rows</c>, <c>fillfactor</c>, <c>est_tuple_bytes</c> and <c>est_leaf_pages</c> are the
+    /// terms the estimate is computed from, and storing them is what lets a reader disagree with the
+    /// number rather than believe it. It is also the only way a later change to the width model can be
+    /// evaluated against history instead of re-measured from scratch — the model was wrong twice before
+    /// it was right, in opposite directions, and both wrong versions produced plausible percentages.</para>
+    ///
+    /// <para><b>No stored bloat percentage is derived from a density.</b> <c>est_bloat_pct</c> is a page
+    /// count comparison. It is NULL under exactly the condition that populates <c>skipped_reason</c>, so a
+    /// suppressed estimate can never be read as zero bloat, and <c>est_reclaimable_bytes</c> is what reads
+    /// rank on because a 64 kB index at 20 percent tops a percentage-ranked list and is worth 50 kB
+    /// (#2561).</para>
+    ///
+    /// <para><b>The DELETE is the cursor cleanup, and it is scoped twice.</b> The estimate covers every
+    /// index in one statement, so <c>pg_index_bloat</c> declares no <c>StateKeys</c> and the per-database
+    /// prune no longer owns the <c>rotate:</c> prefix — which means these rows would sit in
+    /// <c>collector_state</c> forever with nothing to retire them. Filtered on the collector name AND the
+    /// prefix rather than either alone: the prefix is generic enough that another collector could adopt
+    /// it, and <c>collector_name</c> alone would delete a future key belonging to this one.</para>
+    ///
+    /// <para>No index is added for the new ranking column. The read is a per-index DISTINCT ON ordered by
+    /// <c>collection_time</c> and served by <c>idx_pg_index_bloat_time</c>; a ranking index would be a
+    /// guess, and this collector has already cost enough unmeasured constants.</para>
+    /// </summary>
+    private const string V114Sql = @"
+ALTER TABLE collect.pg_index_bloat
+    ADD COLUMN IF NOT EXISTS index_pages bigint,
+    ADD COLUMN IF NOT EXISTS table_rows bigint,
+    ADD COLUMN IF NOT EXISTS fillfactor integer,
+    ADD COLUMN IF NOT EXISTS est_tuple_bytes bigint,
+    ADD COLUMN IF NOT EXISTS est_leaf_pages bigint,
+    ADD COLUMN IF NOT EXISTS est_bloat_pct double precision,
+    ADD COLUMN IF NOT EXISTS est_reclaimable_bytes bigint,
+    ADD COLUMN IF NOT EXISTS pgstattuple_available boolean;
+
+DELETE FROM collect.collector_state
+WHERE collector_name = 'pg_index_bloat'
+AND   state_key LIKE 'rotate:%';";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
@@ -3328,7 +3378,15 @@ ALTER TABLE collect.pg_extension_availability
     ADD COLUMN IF NOT EXISTS database_name text;";
 
     /// <summary>
-    /// V94 — <c>collect.pg_index_bloat</c> (#2561): b-tree index bloat, MEASURED via <c>pgstatindex</c>
+    /// V94 — <c>collect.pg_index_bloat</c>. <b>Its column list carries the #3234 estimate columns that
+    /// V114 also adds, and that duplication is the convention rather than an oversight</b>: a collector's
+    /// creating rung must stay byte-identical to what <c>PgSchemaGenerator.CreateTable</c> emits from its
+    /// <c>PayloadColumns</c>, which <c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c>
+    /// asserts. So a fresh install gets the full shape here and V114's <c>ADD COLUMN IF NOT EXISTS</c> is a
+    /// no-op for it, while a store already past V94 gets the same columns from V114. Both converge, which
+    /// is what the <c>IF NOT EXISTS</c> is for. V95 did the same thing with <c>database_name</c>.
+    ///
+    /// <para>Originally (#2561): b-tree index bloat, MEASURED via <c>pgstatindex</c>
     /// rather than estimated from column statistics.
     ///
     /// <para>The issue proposed porting the ioguix estimator. Measured, that route is unusable for the role
@@ -3370,7 +3428,15 @@ CREATE TABLE IF NOT EXISTS collect.pg_index_bloat (
     deleted_pages bigint,
     avg_leaf_density double precision,
     leaf_fragmentation double precision,
-    skipped_reason text
+    skipped_reason text,
+    index_pages bigint,
+    table_rows bigint,
+    fillfactor integer,
+    est_tuple_bytes bigint,
+    est_leaf_pages bigint,
+    est_bloat_pct double precision,
+    est_reclaimable_bytes bigint,
+    pgstattuple_available boolean
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_index_bloat_time
