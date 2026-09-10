@@ -809,7 +809,7 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ discovery / health ═══════════════════════════ */
 
-    [McpServerTool(Name = "list_servers"), Description("Lists all monitored SQL Server instances with their collection freshness status and last collection time. Use this first to see available servers before calling other tools. The service has no live connection to the monitored servers, so status is derived from how recently each server was collected (Online = fresh, Warning = stale, Offline = no recent collection). The peer_fleets block names the SIBLING Darling stores that monitor the rest of a split fleet, with what each one covers — this server can only NAME them (no cross-store reads), and peer_note says what an empty peer_fleets does and does not prove.")]
+    [McpServerTool(Name = "list_servers"), Description("Lists all monitored servers — SQL Server and PostgreSQL — with their collection freshness status and last collection time. Use this first to see available servers before calling other tools. Each row says which engine it describes: engine_kind is the raw registry token (sqlserver, postgres, aurora-postgres; null when no connect has stamped the row — the same vocabulary get_fleet_overview uses) and engine_version is the engine-aware version label (\"SQL Server 2022\", \"PostgreSQL 18\"; empty when no version has been collected). sql_version is a DEPRECATED legacy alias carrying the same value as engine_version, kept so existing consumers keep working — read engine_version instead, and never infer the engine from that key's name: a PostgreSQL row's sql_version reads \"PostgreSQL 18\". The service has no live connection to the monitored servers, so status is derived from how recently each server was collected (Online = fresh, Warning = stale, Offline = no recent collection). The peer_fleets block names the SIBLING Darling stores that monitor the rest of a split fleet, with what each one covers — this server can only NAME them (no cross-store reads), and peer_note says what an empty peer_fleets does and does not prove.")]
     public static async Task<string> ListServers(
         NpgsqlDataSource postgres)
     {
@@ -858,18 +858,32 @@ public sealed class DarlingMcpDataTools
         DateTime nowUtc,
         DarlingPeerDirectory.Snapshot peers)
     {
-        var result = servers.Select(s => new
+        var result = servers.Select(s =>
         {
-            server_name = s.ServerName,
-            display_name = string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName,
-            /* Engine-aware (#3145). The KEY stays sql_version because a field an MCP client keys on is a
-               consumer API; the VALUE is now the label for whichever engine the row describes, so a
-               PostgreSQL target reads "PostgreSQL 18" instead of the "SQL Server v0" its 0-valued
-               sql_major_version used to produce. */
-            sql_version = MonitoredEngineVersion.DescribeEngineVersion(s.EngineKind, s.SqlMajorVersion, s.PostgresMajorVersion),
-            status = FreshnessStatus(s.LastCollection, nowUtc),
-            read_only = s.ServerName.EndsWith(":RO", StringComparison.Ordinal),
-            last_collection = s.LastCollection?.ToString("o")
+            /* Engine-aware (#3145): the label for whichever engine the row describes, so a PostgreSQL
+               target reads "PostgreSQL 18" instead of the "SQL Server v0" its 0-valued sql_major_version
+               used to produce. Computed once because it rides under two keys below. */
+            var engineVersion = MonitoredEngineVersion.DescribeEngineVersion(s.EngineKind, s.SqlMajorVersion, s.PostgresMajorVersion);
+
+            return new
+            {
+                server_name = s.ServerName,
+                display_name = string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName,
+                /* #3245: the row says which engine it describes, machine-readably. engine_kind is the raw
+                   registry token — sqlserver / postgres / aurora-postgres, null when no connect has stamped
+                   the row — the same key and vocabulary get_fleet_overview's FleetServerCard publishes, so
+                   a consumer keys on a field instead of parsing the label. */
+                engine_kind = s.EngineKind,
+                engine_version = engineVersion,
+                /* Legacy alias of engine_version, kept because a field an MCP client keys on is a consumer
+                   API (#3149). The NAME is the misdirection #3245 fixes — a PostgreSQL row reads
+                   sql_version: "PostgreSQL 18" — so it is documented as deprecated everywhere the payload
+                   is described, and retiring it belongs to a later major of the MCP contract, not here. */
+                sql_version = engineVersion,
+                status = FreshnessStatus(s.LastCollection, nowUtc),
+                read_only = s.ServerName.EndsWith(":RO", StringComparison.Ordinal),
+                last_collection = s.LastCollection?.ToString("o")
+            };
         });
 
         return JsonSerializer.Serialize(new
