@@ -298,7 +298,7 @@ public sealed class AnalysisPassTokenThreadingTests
     /// here. The old overload would block for the full hold; the token'd one gives up when asked.</para>
     /// </summary>
     [Fact]
-    public void TheReadLockWaitIsAbandonableWhileAWriterHoldsIt()
+    public async Task TheReadLockWaitIsAbandonableWhileAWriterHoldsIt()
     {
         var initializer = new DuckDbInitializer(Path.Combine(Path.GetTempPath(), $"pm-lock-{Guid.NewGuid():N}.db"));
 
@@ -332,7 +332,7 @@ public sealed class AnalysisPassTokenThreadingTests
         finally
         {
             releaseWriter.Set();
-            writer.Wait(TimeSpan.FromSeconds(30));
+            await writer.WaitAsync(TimeSpan.FromSeconds(30));
         }
 
         /* And once the writer is gone it is an ordinary read lock again, token or no token. */

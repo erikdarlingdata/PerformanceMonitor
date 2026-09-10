@@ -1520,9 +1520,10 @@ public static class DarlingNetwork
     /// </summary>
     public static IReadOnlyList<string>? NormalizeNetworkRoles(string? role)
     {
-        /* Literals rather than DarlingManagedPostgres.ViewerRoleName/AdminRoleName: that type is
-           [SupportedOSPlatform("windows")] and this classifier is platform-neutral, so referencing its
-           consts would raise CA1416 here. The names mirror those consts (pinned equal by test). */
+        /* Literals rather than DarlingManagedPostgres.ViewerRoleName/AdminRoleName: originally forced
+           (the type carried [SupportedOSPlatform("windows")] until #3241 moved the attribute onto its
+           Windows-only members, so referencing the consts raised CA1416 here), kept so this classifier
+           stays decoupled from the managed store. The names mirror those consts (pinned equal by test). */
         if (string.IsNullOrWhiteSpace(role))
         {
             return new[] { "viewer" };

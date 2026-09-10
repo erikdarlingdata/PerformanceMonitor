@@ -366,7 +366,7 @@ public class PgSessionStatesCollectorDefinitionTests
     public void QueryIdIsNullableRatherThanSentinelled()
     {
         var column = Assert.Single(
-            PgSessionStatesCollector.Instance.PayloadColumns.Where(c => c.Name == "query_id"));
+            PgSessionStatesCollector.Instance.PayloadColumns, c => c.Name == "query_id");
         Assert.Equal(CollectorColumnType.BigInt, column.Type);
 
         var writer = new RecordingCollectorRowWriter();

@@ -697,7 +697,7 @@ public sealed class StragglerCommandTimeoutTests
     [InlineData("private readonly NpgsqlCommand? _cached;")]
     [InlineData("await using var cmd = _dataSource.CreateCommand(Sql);")]
     public void TheUnscannedShapeSweep_DoesNotFireOnAnOrdinaryConstruction(string source)
-        => Assert.Empty(UnscannedShapes.Where(s => s.Probe.IsMatch(CSharpSourceWalker.StripCommentsAndStrings(source))));
+        => Assert.DoesNotContain(UnscannedShapes, s => s.Probe.IsMatch(CSharpSourceWalker.StripCommentsAndStrings(source)));
 
     /// <summary>
     /// And the same probes must see NOTHING when the phrase is in a comment or a literal, which is the other
@@ -712,10 +712,10 @@ public sealed class StragglerCommandTimeoutTests
 
         var stripped = CSharpSourceWalker.StripCommentsAndStrings(Prose);
 
-        Assert.Empty(UnscannedShapes.Where(s => s.Probe.IsMatch(stripped)));
+        Assert.DoesNotContain(UnscannedShapes, s => s.Probe.IsMatch(stripped));
 
         /* Positive control on that negative: unstripped, the same text trips the probes. */
-        Assert.NotEmpty(UnscannedShapes.Where(s => s.Probe.IsMatch(Prose)));
+        Assert.Contains(UnscannedShapes, s => s.Probe.IsMatch(Prose));
     }
 
     /// <summary>
