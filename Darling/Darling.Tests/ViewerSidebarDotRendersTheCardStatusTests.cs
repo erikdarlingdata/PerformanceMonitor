@@ -50,14 +50,14 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
     private static DarlingServer Dot(DateTime? lastCollectionUtc)
     {
         var server = new DarlingServer(1, "SQL2022", "Prod", true, 16);
-        server.ApplyFreshness(lastCollectionUtc, Now);
+        server.ApplyFreshness(lastCollectionUtc, Now, ServerHealthThresholds.StaleThreshold);
         return server;
     }
 
     private static ServerSummaryItem Card(DateTime? lastCollectionUtc)
     {
         var card = new ServerSummaryItem { ServerName = "SQL2022", ServerId = 1, LastCollectionTime = lastCollectionUtc };
-        card.ApplyFreshness(Now);
+        card.ApplyFreshness(Now, ServerHealthThresholds.StaleThreshold);
         return card;
     }
 
@@ -250,7 +250,7 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
             DeadlockCount = 12,
             FailedCollectorCount = 3,
         };
-        onFire.ApplyFreshness(Now);
+        onFire.ApplyFreshness(Now, ServerHealthThresholds.StaleThreshold);
 
         Assert.Equal(ServerCollectionStatus.Online, onFire.CardStatus);
         Assert.Equal("Online", onFire.StatusDisplay);

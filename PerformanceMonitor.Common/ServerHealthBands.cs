@@ -19,10 +19,11 @@ namespace PerformanceMonitor.Common
     /// </summary>
     public enum ServerFreshness
     {
-        /// <summary>The newest collection is within twice the fastest collector's cadence — Online (green).</summary>
+        /// <summary>The newest collection is inside the server's stale threshold — twice the collectors'
+        /// own cadence where the surface knows it (#3236), the flat two-minute floor otherwise — Online (green).</summary>
         Fresh,
 
-        /// <summary>Collection has lagged past twice the cadence but the server isn't long-dead — Warning (amber).</summary>
+        /// <summary>Collection has lagged past the stale threshold but the server isn't long-dead — Warning (amber).</summary>
         Stale,
 
         /// <summary>The newest collection is long-dead — the Offline overlay (red).</summary>
@@ -87,9 +88,11 @@ namespace PerformanceMonitor.Common
     /// Returning them together is what makes dropping one a visible edit rather than an omission.
     /// </summary>
     /// <param name="IsOnline">Reachability: true = fresh or stale, false = offline, null = not reached yet.</param>
-    /// <param name="CollectionStale">The amber warning flag: the newest collection has lagged past
-    /// <see cref="ServerHealthThresholds.StaleThreshold"/> but is not old enough to call the server dark. It is
-    /// <see cref="ServerFreshness.Stale"/> and nothing else — no error count, no <c>collection_log</c> read.
+    /// <param name="CollectionStale">The amber warning flag: the newest collection has lagged past the
+    /// server's stale threshold — <see cref="ServerHealthClassifier.EffectiveStaleThreshold"/> where the
+    /// surface knows the server's collectors, the flat <see cref="ServerHealthThresholds.StaleThreshold"/>
+    /// floor otherwise (#3236) — but is not old enough to call the server dark. It is
+    /// <see cref="ServerFreshness.Stale"/> and nothing else — no error count, no <c>collection_log</c> status read.
     ///
     /// <para><b>It is named for freshness because that is its whole population, and the name is load-bearing.</b>
     /// Lite carries a flag of the same shape on its own card (<c>ServerCardStatusRules.Classify</c>) fed from
@@ -251,8 +254,38 @@ namespace PerformanceMonitor.Common
         /// </summary>
         public static readonly TimeSpan CollectorCadence = TimeSpan.FromMinutes(1);
 
-        /// <summary>Older than twice the cadence = the collection has visibly lagged (Warning).</summary>
+        /// <summary>
+        /// Older than twice the cadence = the collection has visibly lagged (Warning). Since #3236 this flat
+        /// value is the FLOOR, not the whole rule: a surface that knows the server's own collectors compares
+        /// against <see cref="ServerHealthClassifier.EffectiveStaleThreshold"/> instead, which widens the
+        /// window for a server whose collectors legitimately run slower than the one-minute default — the
+        /// field case was 14 Aurora targets whose 5-minute <c>pg_cpu_utilization</c> rhythm banded Warning
+        /// on every fleet snapshot landing in the back half of its window. A caller with no per-collector
+        /// data still bands on this floor, which fails toward the label that asks for attention.
+        /// </summary>
         public static readonly TimeSpan StaleThreshold = TimeSpan.FromTicks(CollectorCadence.Ticks * 2);
+
+        /// <summary>
+        /// How many of a collector's OWN cadence intervals may elapse since its newest run before that
+        /// collector stops vouching for the server's freshness — the same "twice the cadence" grace
+        /// <see cref="StaleThreshold"/> has always applied to the assumed one-minute default, now applied to
+        /// each collector's actual schedule (#3236). One missed cycle is scheduling jitter; two is a lag a
+        /// human would call visible, whatever the cadence.
+        /// </summary>
+        public const int StaleCadenceGraceMultiplier = 2;
+
+        /// <summary>
+        /// The stale cutoff for a collector of the given cadence: <see cref="StaleCadenceGraceMultiplier"/>
+        /// times its own interval, floored at the flat <see cref="StaleThreshold"/> so a frequent collector
+        /// bands exactly as it always has — the same max(floor, multiplier x cadence) shape
+        /// <see cref="CollectorHealthClassifier.StaleThresholdHours"/> established for the per-collector
+        /// bands in #1573. A cadence of 0 (on-load / unknown) yields the floor.
+        /// </summary>
+        public static TimeSpan StaleThresholdFor(int frequencyMinutes)
+        {
+            var cadenceWindow = TimeSpan.FromMinutes((double)frequencyMinutes * StaleCadenceGraceMultiplier);
+            return cadenceWindow > StaleThreshold ? cadenceWindow : StaleThreshold;
+        }
 
         /// <summary>
         /// The ONE default for "collection has stopped", shared by the display's Offline band and the alert
@@ -320,6 +353,17 @@ namespace PerformanceMonitor.Common
     }
 
     /// <summary>
+    /// One enabled, SCHEDULED collector's newest <c>collection_log</c> row (any status — freshness is the
+    /// rows-are-landing axis, never the succeeding axis, per the #3098 separation) beside the cadence that
+    /// collector actually runs on for this server — the effective schedule, store override over code default.
+    /// The inputs <see cref="ServerHealthClassifier.EffectiveStaleThreshold"/> reduces to one per-server
+    /// stale cutoff (#3236). Callers exclude disabled and on-load (<c>FrequencyMinutes == 0</c>) collectors:
+    /// a disabled collector's cadence is not a schedule anything runs on, and an on-load collector runs on
+    /// connects, not on the loop this band watches.
+    /// </summary>
+    public readonly record struct CollectorCadenceSample(DateTime LastRunUtc, int FrequencyMinutes);
+
+    /// <summary>
     /// The single, app-agnostic source of truth for a server's per-metric health bands, its overall card band,
     /// the collection-freshness band, and the fleet-ranking score. Reproduces the Dashboard's <c>ServerHealthStatus</c>
     /// CASE logic exactly. Pure + static so every host (web, MCP tool, WPF viewer) bands identically and the whole
@@ -328,11 +372,25 @@ namespace PerformanceMonitor.Common
     public static class ServerHealthClassifier
     {
         /// <summary>
-        /// Classify how fresh the newest collection is. Pure over (last-collection, now). Both instants are UTC
-        /// (the store is naive UTC; <paramref name="nowUtc"/> is <see cref="DateTime.UtcNow"/>), so the
-        /// subtraction is a true elapsed-time regardless of Kind.
+        /// Classify how fresh the newest collection is against the FLAT default threshold — for callers with
+        /// no per-collector schedule data, whose behavior is unchanged. A caller that knows the server's own
+        /// collectors passes <see cref="EffectiveStaleThreshold"/>'s answer to the three-argument overload
+        /// instead (#3236). Pure over (last-collection, now). Both instants are UTC (the store is naive UTC;
+        /// <paramref name="nowUtc"/> is <see cref="DateTime.UtcNow"/>), so the subtraction is a true
+        /// elapsed-time regardless of Kind.
         /// </summary>
-        public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc)
+        public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc) =>
+            ClassifyFreshness(lastCollectionUtc, nowUtc, ServerHealthThresholds.StaleThreshold);
+
+        /// <summary>
+        /// <see cref="ClassifyFreshness(DateTime?, DateTime)"/> with the server's own stale cutoff
+        /// (<see cref="EffectiveStaleThreshold"/>) in place of the flat default (#3236). The Offline band is
+        /// deliberately NOT cadence-relative: 30 minutes is the #2794 contract shared with the alert
+        /// engine's Collection Stopped window, and it is checked first — so a server whose effective stale
+        /// threshold exceeds it (only slow-cadence collectors enabled) simply has no amber band and goes
+        /// straight to the red one, which is the stronger claim of the two.
+        /// </summary>
+        public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc, TimeSpan staleThreshold)
         {
             if (!lastCollectionUtc.HasValue)
             {
@@ -345,12 +403,57 @@ namespace PerformanceMonitor.Common
                 return ServerFreshness.Offline;
             }
 
-            if (age > ServerHealthThresholds.StaleThreshold)
+            if (age > staleThreshold)
             {
                 return ServerFreshness.Stale;
             }
 
             return ServerFreshness.Fresh;
+        }
+
+        /// <summary>
+        /// The one stale cutoff that makes the server-level band honor each collector's OWN schedule (#3236):
+        /// the newest collection is fresh while ANY enabled scheduled collector's newest row is inside
+        /// <see cref="ServerHealthThresholds.StaleThresholdFor"/> of its own cadence, and stale only when
+        /// every one of them is overdue. Returned as a single threshold on the newest collection's age —
+        /// the age at which the LAST collector's window expires — so the band stays a pure ladder over
+        /// (last collection, now, threshold) and a surface can publish the number beside the flag it
+        /// explains.
+        ///
+        /// <para><b>Why "any collector current", not "the fastest cadence".</b> The field signature this
+        /// fixes: 14 Aurora targets whose <c>pg_cpu_utilization</c> legitimately runs every 5 minutes
+        /// banded Warning on any fleet snapshot landing in the back half of that window, while faster
+        /// collectors on the same servers were demonstrably current. A threshold derived from the fastest
+        /// cadence alone still bands a server whose slower collectors are all exactly on schedule; the
+        /// server is only honestly "lagging" when nothing on it is inside its own window.</para>
+        ///
+        /// <para><b>The failure direction stays safe.</b> With no samples — a caller without schedule data,
+        /// a store written by a newer build, every collector disabled — this is exactly the flat
+        /// <see cref="ServerHealthThresholds.StaleThreshold"/>, today's behavior. A genuinely quiet server
+        /// exhausts every collector's window and still bands, and the Offline band is untouched.</para>
+        /// </summary>
+        public static TimeSpan EffectiveStaleThreshold(DateTime lastCollectionUtc, IEnumerable<CollectorCadenceSample> scheduledCollectors)
+        {
+            var threshold = ServerHealthThresholds.StaleThreshold;
+            if (scheduledCollectors is null)
+            {
+                return threshold;
+            }
+
+            foreach (var collector in scheduledCollectors)
+            {
+                /* The instant this collector's own window expires, expressed as an age of the NEWEST
+                   collection — lastRun never exceeds lastCollection (it is the max over these), so each
+                   term is at most the collector's own window and the floor keeps a straggler from
+                   tightening anything. */
+                var expiresAtAge = collector.LastRunUtc + ServerHealthThresholds.StaleThresholdFor(collector.FrequencyMinutes) - lastCollectionUtc;
+                if (expiresAtAge > threshold)
+                {
+                    threshold = expiresAtAge;
+                }
+            }
+
+            return threshold;
         }
 
         /// <summary>CPU band on total non-idle CPU: >= 95% Critical, >= 80% Warning; no snapshot Unknown.</summary>

@@ -57,7 +57,9 @@ public class ServerCollectionFreshnessTests
             LastCollectionTime = sinceLastCollection.HasValue ? Now - sinceLastCollection.Value : null,
         };
 
-        card.ApplyCollectionFreshness(Now);
+        /* The flat floor on purpose: these tests pin the DEFAULT band arithmetic; the cadence-aware
+           cutoff (#3236) is pinned separately below and in the shared classifier's own suite. */
+        card.ApplyCollectionFreshness(Now, ServerHealthThresholds.StaleThreshold);
         return card;
     }
 
@@ -300,11 +302,36 @@ public class ServerCollectionFreshnessTests
     {
         var card = new ServerSummaryItem { LastCollectionTime = Now };
 
-        card.ApplyCollectionFreshness(Now);
+        card.ApplyCollectionFreshness(Now, ServerHealthThresholds.StaleThreshold);
         Assert.Equal(ServerFreshness.Fresh, card.CollectionFreshness);
 
-        card.ApplyCollectionFreshness(Now + ServerHealthThresholds.OfflineThreshold + TimeSpan.FromMinutes(1));
+        card.ApplyCollectionFreshness(Now + ServerHealthThresholds.OfflineThreshold + TimeSpan.FromMinutes(1), ServerHealthThresholds.StaleThreshold);
         Assert.Equal(ServerFreshness.Offline, card.CollectionFreshness);
+    }
+
+    /// <summary>
+    /// #3236: the stamped cutoff is the one the band AND the tooltip read. A 5-minute-cadence install
+    /// (the shipped Low-Impact preset runs every collector at 5+ minutes) whose newest collection is
+    /// 3m49s old is ON SCHEDULE — the field false positive was exactly this reading "(stale)" — and the
+    /// tooltip quotes the widened number, not the flat floor it no longer bands by. A collection past
+    /// the widened cutoff must still band, in the same words.
+    /// </summary>
+    [Fact]
+    public void ACadenceAwareThresholdWidensTheBandAndTheTooltipQuotesIt()
+    {
+        var fiveMinuteCadence = ServerHealthClassifier.EffectiveStaleThreshold(
+            Now - TimeSpan.FromSeconds(229),
+            new[] { new CollectorCadenceSample(Now - TimeSpan.FromSeconds(229), 5) });
+
+        var onSchedule = new ServerSummaryItem { LastCollectionTime = Now - TimeSpan.FromSeconds(229) };
+        onSchedule.ApplyCollectionFreshness(Now, fiveMinuteCadence);
+        Assert.Equal(ServerFreshness.Fresh, onSchedule.CollectionFreshness);
+        Assert.Contains("10 minutes", onSchedule.CollectionFreshnessTooltip!, StringComparison.Ordinal);
+
+        var overdue = new ServerSummaryItem { LastCollectionTime = Now - TimeSpan.FromMinutes(11) };
+        overdue.ApplyCollectionFreshness(Now, TimeSpan.FromMinutes(10));
+        Assert.Equal(ServerFreshness.Stale, overdue.CollectionFreshness);
+        Assert.Contains("10 minutes", overdue.CollectionFreshnessTooltip!, StringComparison.Ordinal);
     }
 
     // ── Wiring: the half that lives in XAML, where no assertion about a C# object can reach it ─────────
@@ -342,14 +369,20 @@ public class ServerCollectionFreshnessTests
         var source = ParitySource.ReadFile("Lite/Services/LocalDataService.Overview.cs");
 
         Assert.Equal(1, CountOccurrences(source, "new ServerSummaryItem"));
-        Assert.Equal(1, CountOccurrences(source, "ApplyCollectionFreshness(DateTime.UtcNow)"));
+        Assert.Equal(1, CountOccurrences(source, "ApplyCollectionFreshness(DateTime.UtcNow, staleThreshold)"));
 
         /* And the stamp is after the object is built: banding an object that has already been handed back
            would band nothing, and the ordering is the half a count cannot see. */
         Assert.True(
             source.IndexOf("new ServerSummaryItem", StringComparison.Ordinal)
-                < source.IndexOf("ApplyCollectionFreshness(DateTime.UtcNow)", StringComparison.Ordinal),
+                < source.IndexOf("ApplyCollectionFreshness(DateTime.UtcNow, staleThreshold)", StringComparison.Ordinal),
             "The freshness stamp no longer follows the summary it is meant to band.");
+
+        /* #3236: and the cutoff it stamps is resolved through the service-installed cadence lookup, not a
+           constant — deleting the lookup wiring compiles clean and silently returns every card to the flat
+           floor, which is the field false positive one level up. */
+        Assert.Contains("EffectiveCadenceLookup", source, StringComparison.Ordinal);
+        Assert.Contains("ServerHealthClassifier.EffectiveStaleThreshold", source, StringComparison.Ordinal);
     }
 
     /// <summary>The two Grid.Row="4" TextBlocks of the Overview card template — the "Last Collect:" label

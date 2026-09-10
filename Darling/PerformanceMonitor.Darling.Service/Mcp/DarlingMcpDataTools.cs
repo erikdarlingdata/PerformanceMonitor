@@ -809,7 +809,7 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ discovery / health ═══════════════════════════ */
 
-    [McpServerTool(Name = "list_servers"), Description("Lists all monitored servers — SQL Server and PostgreSQL — with their collection freshness status and last collection time. Use this first to see available servers before calling other tools. Each row says which engine it describes: engine_kind is the raw registry token (sqlserver, postgres, aurora-postgres; null when no connect has stamped the row — the same vocabulary get_fleet_overview uses) and engine_version is the engine-aware version label (\"SQL Server 2022\", \"PostgreSQL 18\"; empty when no version has been collected). sql_version is a DEPRECATED legacy alias carrying the same value as engine_version, kept so existing consumers keep working — read engine_version instead, and never infer the engine from that key's name: a PostgreSQL row's sql_version reads \"PostgreSQL 18\". The service has no live connection to the monitored servers, so status is derived from how recently each server was collected (Online = fresh, Warning = stale, Offline = no recent collection). The peer_fleets block names the SIBLING Darling stores that monitor the rest of a split fleet, with what each one covers — this server can only NAME them (no cross-store reads), and peer_note says what an empty peer_fleets does and does not prove.")]
+    [McpServerTool(Name = "list_servers"), Description("Lists all monitored servers — SQL Server and PostgreSQL — with their collection freshness status and last collection time. Use this first to see available servers before calling other tools. Each row says which engine it describes: engine_kind is the raw registry token (sqlserver, postgres, aurora-postgres; null when no connect has stamped the row — the same vocabulary get_fleet_overview uses) and engine_version is the engine-aware version label (\"SQL Server 2022\", \"PostgreSQL 18\"; empty when no version has been collected). sql_version is a DEPRECATED legacy alias carrying the same value as engine_version, kept so existing consumers keep working — read engine_version instead, and never infer the engine from that key's name: a PostgreSQL row's sql_version reads \"PostgreSQL 18\". The service has no live connection to the monitored servers, so status is derived from how recently each server was collected (Online = fresh, Warning = stale, Offline = no recent collection). The stale cutoff is cadence-aware, per server: a target bands Warning only when every enabled collector is overdue against its OWN effective schedule (twice its cadence, floored at 2 minutes), and stale_threshold_minutes on each row is the cutoff that row's status was decided against — the same threshold get_fleet_overview's card for the server uses, so the two tools cannot disagree about one server. The peer_fleets block names the SIBLING Darling stores that monitor the rest of a split fleet, with what each one covers — this server can only NAME them (no cross-store reads), and peer_note says what an empty peer_fleets does and does not prove.")]
     public static async Task<string> ListServers(
         NpgsqlDataSource postgres)
     {
@@ -834,7 +834,23 @@ public sealed class DarlingMcpDataTools
                 return "No servers are registered yet. The service registers each monitored server on its first successful connection."
                     + DarlingPeerDirectory.EmptyRegistryDisclosure(DarlingPeerDirectory.Current);
 
-            return RenderServerList(servers, DateTime.UtcNow, DarlingPeerDirectory.Current);
+            var nowUtc = DateTime.UtcNow;
+
+            /* #3236: the same per-server cadence samples the fleet cards band with, so this row and that
+               card cannot call the same server's freshness differently. Failure-isolated — discovery must
+               not break because the staleness refinement read did; on a miss every row bands on the flat
+               floor, which is exactly the pre-#3236 reading. */
+            Dictionary<int, List<CollectorCadenceSample>> cadenceSamples;
+            try
+            {
+                cadenceSamples = await DarlingFleetReader.ReadCollectorCadenceSamplesAsync(postgres, nowUtc);
+            }
+            catch (Exception)
+            {
+                cadenceSamples = new Dictionary<int, List<CollectorCadenceSample>>();
+            }
+
+            return RenderServerList(servers, nowUtc, DarlingPeerDirectory.Current, cadenceSamples);
         }
         catch (Exception ex)
         {
@@ -856,7 +872,8 @@ public sealed class DarlingMcpDataTools
     internal static string RenderServerList(
         IReadOnlyList<DarlingDataReader.ServerListRow> servers,
         DateTime nowUtc,
-        DarlingPeerDirectory.Snapshot peers)
+        DarlingPeerDirectory.Snapshot peers,
+        IReadOnlyDictionary<int, List<CollectorCadenceSample>>? cadenceSamples = null)
     {
         var result = servers.Select(s =>
         {
@@ -864,6 +881,15 @@ public sealed class DarlingMcpDataTools
                target reads "PostgreSQL 18" instead of the "SQL Server v0" its 0-valued sql_major_version
                used to produce. Computed once because it rides under two keys below. */
             var engineVersion = MonitoredEngineVersion.DescribeEngineVersion(s.EngineKind, s.SqlMajorVersion, s.PostgresMajorVersion);
+
+            /* #3236: this server's own stale cutoff — each enabled collector's newest run against its
+               effective cadence — floored at the flat threshold; absent samples (no rows, or the read
+               was skipped) mean the floor, the pre-#3236 reading. */
+            var staleThreshold = s.LastCollection is DateTime lastCollection
+                && cadenceSamples is not null
+                && cadenceSamples.TryGetValue(s.ServerId, out var samples)
+                    ? ServerHealthClassifier.EffectiveStaleThreshold(lastCollection, samples)
+                    : ServerHealthThresholds.StaleThreshold;
 
             return new
             {
@@ -880,9 +906,12 @@ public sealed class DarlingMcpDataTools
                    sql_version: "PostgreSQL 18" — so it is documented as deprecated everywhere the payload
                    is described, and retiring it belongs to a later major of the MCP contract, not here. */
                 sql_version = engineVersion,
-                status = FreshnessStatus(s.LastCollection, nowUtc),
+                status = FreshnessStatus(s.LastCollection, nowUtc, staleThreshold),
                 read_only = s.ServerName.EndsWith(":RO", StringComparison.Ordinal),
-                last_collection = s.LastCollection?.ToString("o")
+                last_collection = s.LastCollection?.ToString("o"),
+                /* #3236: what the Warning/Online call above was decided against, so the status stays
+                   recomputable from the row — the same derivability the fleet card's twin field keeps. */
+                stale_threshold_minutes = staleThreshold.TotalMinutes
             };
         });
 
@@ -1243,10 +1272,13 @@ public sealed class DarlingMcpDataTools
     /// it does NOT share is the vocabulary: <see cref="ServerCollectionStatusRules.McpToken"/> spells the
     /// never-collected state as one word because that value was published to MCP clients, and a status value
     /// a client keys on is a consumer API.</para>
+    /// <para><paramref name="staleThreshold"/> is this server's own cutoff (#3236) —
+    /// <see cref="ServerHealthClassifier.EffectiveStaleThreshold"/> over the same cadence samples the fleet
+    /// cards band with, so a discovery row and the fleet card cannot disagree about the same server.</para>
     /// </summary>
-    private static string FreshnessStatus(DateTime? lastCollectionUtc, DateTime nowUtc) =>
+    private static string FreshnessStatus(DateTime? lastCollectionUtc, DateTime nowUtc, TimeSpan staleThreshold) =>
         ServerCollectionStatusRules
-            .FromFreshness(ServerHealthClassifier.ClassifyFreshness(lastCollectionUtc, nowUtc))
+            .FromFreshness(ServerHealthClassifier.ClassifyFreshness(lastCollectionUtc, nowUtc, staleThreshold))
             .McpToken();
 
     [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, newest first: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the store, rows collected, status and any error. get_collection_health rolls seven days of these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window. Also carries the phase decomposition where the run recorded one, as nested blocks that are null when the run took a path that does not report them — and a row carries at most ONE family. Server-scoped collectors fill sql_phases (open_ms, drain_ms, other_ms which is derived, watermark_ms) and drain (rows_read, bytes_read, last_read_ms, target_session_id). Per-database collectors that perform a deferred plan or statement-text fetch instead fill plan_fetch and/or text_fetch, each carrying probe_ms, target_ms, write_ms, ids_attempted and probe_ids summed across that run's databases. sweep_peer_max_ms is flat and present on every row: it is the slowest peer collector in the same sweep, the denominator for asking whether a slow run was slow alone or the whole sweep was. A null block means the run took the other path, not that the phase was free — most runs perform no deferred fetch at all. Divide target_ms by ids_attempted for the per-id target cost, probe_ms by probe_ids for the per-reference probe cost. CRITICAL for reading sql_duration_ms on a fetching collector: it is NOT purely target-side there. The deferred fetches run inside the driver's per-item SQL stopwatch and each one round-trips the MONITORING STORE to decide what plan XML and statement text are already held before writing back what came off the target, so the store's probe and write are billed to the column documented as the monitored server's. The probe is the largest single term in both fetches on this fleet — 55.4% of plan_fetch and 80.6% of text_fetch — and on one production run it was 107,334 ms of a 124,972 ms sql_duration_ms, 86%, against a plan-plus-text target time of 6,494 ms. sql_store_ms is that store share, derived from the two fetch blocks (probe_ms + write_ms of each) and null when no fetch ran. It is a FLOOR, not the whole: the per-item watermark refresh is also a store read inside the same stopwatch, the enumerated path records no watermark_ms, and that component is stored nowhere — so sql_duration_ms minus sql_store_ms is an UPPER bound on target-side time rather than the target-side time. store_duration_ms is not where the probe went either: it is the binary COPY of the collected rows and nothing else. Do NOT conclude a monitored server is slow from a large sql_duration_ms on query_store without reading sql_store_ms beside it.")]
