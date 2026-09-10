@@ -238,6 +238,12 @@ FROM v_collection_log
 WHERE collection_time >= $1
 GROUP BY server_id";
 
+    /// <summary>The sparse schedule-override rows the per-server stale cutoff resolves through (#3236) — the
+    /// same SELECT the worker's own scheduling reads, so the cutoff honors EXACTLY the cadence the sweep runs
+    /// on. One tiny table, read once per fleet call rather than per server. $ none.</summary>
+    public const string FleetScheduleOverridesSql =
+        "SELECT server_id, collector_name, frequency_minutes, retention_days, enabled FROM config_collector_schedules";
+
     /// <summary>Cross-server per-collector 7-day health aggregate — one row per (server, collector) pair carrying
     /// the columns the shared <c>CollectorHealth.HealthStatus</c> banding needs, so the caller counts each
     /// server's FAILING collectors exactly as the per-server Collection Health tab does. $1 window start (the
@@ -321,6 +327,7 @@ GROUP BY server_id, collector_name";
         var failingCollectors = await ReadFailingCollectorCountsAsync(postgres, now, cancellationToken);
         var tags = await ReadTagsAsync(postgres, cancellationToken);
         var tagForest = await ReadTagForestAsync(postgres, cancellationToken);
+        var scheduleOverrides = await ReadScheduleOverridesAsync(postgres, cancellationToken);
 
         var cards = new List<FleetServerCard>(servers.Count);
         foreach (var server in servers)
@@ -344,7 +351,7 @@ GROUP BY server_id, collector_name";
             failingCollectors.TryGetValue(server.ServerId, out var collectors);
             tags.TryGetValue(server.ServerId, out var serverTags);
 
-            cards.Add(BuildCard(server, c, m, mp, t, b, deadlock, lastColl, collectors, serverTags, now));
+            cards.Add(BuildCard(server, c, m, mp, t, b, deadlock, lastColl, collectors, serverTags, scheduleOverrides, now));
         }
 
         return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest);
@@ -363,6 +370,7 @@ GROUP BY server_id, collector_name";
         DateTime? lastCollection,
         CollectorCounts collectors,
         List<FleetTag>? tags,
+        IReadOnlyList<ScheduleOverride> scheduleOverrides,
         DateTime now)
     {
         var deadlockCount = deadlock.Count;
@@ -401,7 +409,14 @@ GROUP BY server_id, collector_name";
         /* Freshness -> the card's collection state, through the SAME mapping the WPF card and the sidebar
            row use (#2473). It was a hand-written copy of ApplyFreshness that happened to agree; the copy on
            the sidebar row happened not to, which is the argument for none of them writing it out. */
-        var freshness = ServerHealthClassifier.ClassifyFreshness(lastCollection, now);
+        /* The stale cutoff is the server's own (#3236): twice the fastest cadence any collector ENABLED for
+           this server's engine actually runs on, floored at the flat threshold so a one-minute fleet bands
+           exactly as before, and capped below the Offline band so the amber band stays reachable. The flat
+           threshold assumes a one-minute fastest cadence, which the Low-Impact preset's 5-minute floor makes
+           false — a healthy server there read Warning for three minutes in every five. */
+        var staleThreshold = ServerHealthClassifier.EffectiveStaleThreshold(
+            new[] { StoreConfigProvider.FastestEnabledCadenceMinutes(server.ServerId, EngineOf(server.EngineKind), scheduleOverrides) });
+        var freshness = ServerHealthClassifier.ClassifyFreshness(lastCollection, now, staleThreshold);
         var flags = ServerCollectionStatusRules.FlagsFor(freshness);
         var isOnline = flags.IsOnline;
         var awaitingFirstCollection = flags.AwaitingFirstCollection;
@@ -669,6 +684,14 @@ GROUP BY server_id, collector_name";
     internal static (bool IsPostgres, bool IsAurora) ClassifyEngineKind(string? engineKind) =>
         (MonitoredEngineKind.IsPostgres(engineKind), MonitoredEngineKind.IsAurora(engineKind));
 
+    /// <summary>
+    /// The stamped engine kind as the collector catalog's own engine discriminator, so the per-server stale
+    /// cutoff (#3236) only counts collectors that actually run on this target. An unstamped or unrecognized
+    /// kind reads as SQL Server, matching <see cref="CollectorTargetInfo.Engine"/>'s own default.
+    /// </summary>
+    internal static CollectorTargetEngine EngineOf(string? engineKind) =>
+        MonitoredEngineKind.IsPostgres(engineKind) ? CollectorTargetEngine.PostgreSql : CollectorTargetEngine.SqlServer;
+
     /* ─────────────────────────── per-query readers ─────────────────────────── */
 
     private static async Task<List<FleetServerRow>> ReadServersAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
@@ -844,6 +867,31 @@ GROUP BY server_id, collector_name";
         }
 
         return map;
+    }
+
+    /// <summary>
+    /// The store's schedule overrides, for the per-server stale cutoff (#3236). Read as a flat list and
+    /// resolved per (server, collector) by <see cref="StoreConfigProvider.FastestEnabledCadenceMinutes"/>,
+    /// which is the same precedence the worker schedules on.
+    /// </summary>
+    internal static async Task<IReadOnlyList<ScheduleOverride>> ReadScheduleOverridesAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    {
+        var overrides = new List<ScheduleOverride>();
+        await using var command = postgres.CreateCommand(FleetScheduleOverridesSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            overrides.Add(new ScheduleOverride(
+                reader.IsDBNull(0) ? null : reader.GetInt32(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetInt32(2),
+                reader.IsDBNull(3) ? null : reader.GetInt32(3),
+                reader.GetBoolean(4)));
+        }
+
+        return overrides;
     }
 
     private static async Task<Dictionary<int, DateTime>> ReadLastCollectionAsync(NpgsqlDataSource postgres, DateTime now, CancellationToken cancellationToken)

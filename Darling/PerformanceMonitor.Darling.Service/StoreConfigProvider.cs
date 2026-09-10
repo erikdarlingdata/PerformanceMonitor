@@ -1668,6 +1668,58 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     }
 
     /// <summary>
+    /// The fastest cadence, in minutes, that any collector ENABLED and SCHEDULED for this server actually
+    /// runs on — the input <see cref="ServerHealthClassifier.EffectiveStaleThreshold"/> reduces to the
+    /// server's stale cutoff (#3236). Resolved through <see cref="ResolveSchedule"/>, so it honors exactly
+    /// the schedule the sweep runs: per-server override over fleet-wide override over the
+    /// <see cref="CollectorScheduleDefaults"/> code default.
+    ///
+    /// <para>Three populations are excluded, and every exclusion widens nothing — it leaves the answer
+    /// larger or unchanged, which floors the cutoff at the flat threshold rather than loosening it:</para>
+    /// <list type="bullet">
+    /// <item><description>A collector for the OTHER engine, via
+    /// <see cref="CollectorCatalog.EngineMatches(string, CollectorTargetInfo)"/>. Without this a
+    /// PostgreSQL target would inherit the SQL Server collectors' one-minute cadences, and a fleet whose
+    /// PostgreSQL collectors were all slowed down would keep banding on a rhythm nothing on it runs.</description></item>
+    /// <item><description>A DISABLED collector: its cadence is not a schedule anything runs on. This is why
+    /// the answer for the Low-Impact preset is 5 and not 1 — <c>long_query_completions</c> keeps its
+    /// one-minute default there but ships opt-out (#1496), so it paces nothing.</description></item>
+    /// <item><description>An on-load collector (<c>FrequencyMinutes == 0</c>), which runs on connects rather
+    /// than the loop this band watches.</description></item>
+    /// </list>
+    ///
+    /// <para>Returns 0 when nothing qualifies, which <see cref="ServerHealthThresholds.StaleThresholdForFastestCadence"/>
+    /// maps to the flat floor. Pure — unit-testable without a store.</para>
+    /// </summary>
+    public static int FastestEnabledCadenceMinutes(
+        int serverId, CollectorTargetEngine engine, IReadOnlyList<ScheduleOverride> overrides)
+    {
+        var target = new CollectorTargetInfo { Engine = engine };
+        var fastest = 0;
+
+        foreach (var collectorName in CollectorScheduleDefaults.All.Keys)
+        {
+            if (!CollectorCatalog.EngineMatches(collectorName, target))
+            {
+                continue;
+            }
+
+            var schedule = ResolveSchedule(collectorName, serverId, overrides);
+            if (!schedule.Enabled || schedule.FrequencyMinutes <= 0)
+            {
+                continue;
+            }
+
+            if (fastest == 0 || schedule.FrequencyMinutes < fastest)
+            {
+                fastest = schedule.FrequencyMinutes;
+            }
+        }
+
+        return fastest;
+    }
+
+    /// <summary>
     /// The effective FLEET-WIDE retention horizon for a collector (a per-server override can't apply to a
     /// shared-table purge): the fleet override (<c>server_id</c> NULL) <c>retention_days</c> if set, else the
     /// <see cref="CollectorScheduleDefaults"/> default. Pure. Feeds <see cref="DarlingRetention"/>.

@@ -834,7 +834,13 @@ public sealed class DarlingMcpDataTools
                 return "No servers are registered yet. The service registers each monitored server on its first successful connection."
                     + DarlingPeerDirectory.EmptyRegistryDisclosure(DarlingPeerDirectory.Current);
 
-            return RenderServerList(servers, DateTime.UtcNow, DarlingPeerDirectory.Current);
+            /* #3236: the same schedule-override read the fleet overview resolves its per-server stale
+               cutoff from, so the discovery row and the fleet card cannot band one server's freshness
+               differently (#2473). Read here rather than inside RenderServerList, which stays pure over its
+               inputs so the response shape pins without a live store. */
+            var scheduleOverrides = await DarlingFleetReader.ReadScheduleOverridesAsync(postgres, default);
+
+            return RenderServerList(servers, DateTime.UtcNow, DarlingPeerDirectory.Current, scheduleOverrides);
         }
         catch (Exception ex)
         {
@@ -856,7 +862,8 @@ public sealed class DarlingMcpDataTools
     internal static string RenderServerList(
         IReadOnlyList<DarlingDataReader.ServerListRow> servers,
         DateTime nowUtc,
-        DarlingPeerDirectory.Snapshot peers)
+        DarlingPeerDirectory.Snapshot peers,
+        IReadOnlyList<ScheduleOverride>? scheduleOverrides = null)
     {
         var result = servers.Select(s =>
         {
@@ -880,7 +887,7 @@ public sealed class DarlingMcpDataTools
                    sql_version: "PostgreSQL 18" — so it is documented as deprecated everywhere the payload
                    is described, and retiring it belongs to a later major of the MCP contract, not here. */
                 sql_version = engineVersion,
-                status = FreshnessStatus(s.LastCollection, nowUtc),
+                status = FreshnessStatus(s.LastCollection, nowUtc, StaleThresholdFor(s, scheduleOverrides)),
                 read_only = s.ServerName.EndsWith(":RO", StringComparison.Ordinal),
                 last_collection = s.LastCollection?.ToString("o")
             };
@@ -1244,10 +1251,23 @@ public sealed class DarlingMcpDataTools
     /// never-collected state as one word because that value was published to MCP clients, and a status value
     /// a client keys on is a consumer API.</para>
     /// </summary>
-    private static string FreshnessStatus(DateTime? lastCollectionUtc, DateTime nowUtc) =>
+    private static string FreshnessStatus(DateTime? lastCollectionUtc, DateTime nowUtc, TimeSpan staleThreshold) =>
         ServerCollectionStatusRules
-            .FromFreshness(ServerHealthClassifier.ClassifyFreshness(lastCollectionUtc, nowUtc))
+            .FromFreshness(ServerHealthClassifier.ClassifyFreshness(lastCollectionUtc, nowUtc, staleThreshold))
             .McpToken();
+
+    /// <summary>
+    /// One registry row's stale cutoff, derived from the cadences its own schedule runs (#3236) — the same
+    /// resolution <c>get_fleet_overview</c> uses, so the two surfaces cannot disagree about one server.
+    /// A null override list (a caller that has none) yields the flat floor, which is the prior behavior.
+    /// </summary>
+    private static TimeSpan StaleThresholdFor(
+        DarlingDataReader.ServerListRow server, IReadOnlyList<ScheduleOverride>? scheduleOverrides) =>
+        scheduleOverrides is null
+            ? ServerHealthThresholds.StaleThreshold
+            : ServerHealthClassifier.EffectiveStaleThreshold(
+                new[] { StoreConfigProvider.FastestEnabledCadenceMinutes(
+                    server.ServerId, DarlingFleetReader.EngineOf(server.EngineKind), scheduleOverrides) });
 
     [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, newest first: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the store, rows collected, status and any error. get_collection_health rolls seven days of these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window. Also carries the phase decomposition where the run recorded one, as nested blocks that are null when the run took a path that does not report them — and a row carries at most ONE family. Server-scoped collectors fill sql_phases (open_ms, drain_ms, other_ms which is derived, watermark_ms) and drain (rows_read, bytes_read, last_read_ms, target_session_id). Per-database collectors that perform a deferred plan or statement-text fetch instead fill plan_fetch and/or text_fetch, each carrying probe_ms, target_ms, write_ms, ids_attempted and probe_ids summed across that run's databases. sweep_peer_max_ms is flat and present on every row: it is the slowest peer collector in the same sweep, the denominator for asking whether a slow run was slow alone or the whole sweep was. A null block means the run took the other path, not that the phase was free — most runs perform no deferred fetch at all. Divide target_ms by ids_attempted for the per-id target cost, probe_ms by probe_ids for the per-reference probe cost. CRITICAL for reading sql_duration_ms on a fetching collector: it is NOT purely target-side there. The deferred fetches run inside the driver's per-item SQL stopwatch and each one round-trips the MONITORING STORE to decide what plan XML and statement text are already held before writing back what came off the target, so the store's probe and write are billed to the column documented as the monitored server's. The probe is the largest single term in both fetches on this fleet — 55.4% of plan_fetch and 80.6% of text_fetch — and on one production run it was 107,334 ms of a 124,972 ms sql_duration_ms, 86%, against a plan-plus-text target time of 6,494 ms. sql_store_ms is that store share, derived from the two fetch blocks (probe_ms + write_ms of each) and null when no fetch ran. It is a FLOOR, not the whole: the per-item watermark refresh is also a store read inside the same stopwatch, the enumerated path records no watermark_ms, and that component is stored nowhere — so sql_duration_ms minus sql_store_ms is an UPPER bound on target-side time rather than the target-side time. store_duration_ms is not where the probe went either: it is the binary COPY of the collected rows and nothing else. Do NOT conclude a monitored server is slow from a large sql_duration_ms on query_store without reading sql_store_ms beside it.")]
     public static async Task<string> GetCollectionLog(
