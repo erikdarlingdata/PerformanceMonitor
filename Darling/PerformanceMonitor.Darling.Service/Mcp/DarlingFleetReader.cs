@@ -277,7 +277,12 @@ SELECT
     -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
     -- for query_store), so equality against one rendered sentence matches one collector.
     SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
-             THEN 1 ELSE 0 END) AS abandoned_count
+             THEN 1 ELSE 0 END) AS abandoned_count,
+    -- #3240: same reasoning as abandoned_count above — this rollup bands through the SAME shared
+    -- classifier as the per-server surfaces, and an unselected count defaults to 0, COMPILES, and
+    -- would band an extension-missing collector FAILING here (no success, staleness path) while every
+    -- other surface says EXTENSION_MISSING. APPENDED, read positionally.
+    SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count
 FROM v_collection_log
 WHERE collection_time >= $1
 GROUP BY server_id, collector_name";
@@ -882,6 +887,8 @@ GROUP BY server_id, collector_name";
                 PermissionDeniedCount = reader.IsDBNull(6) ? 0 : Convert.ToInt64(reader.GetValue(6)),
                 LastRunTime = reader.IsDBNull(7) ? null : reader.GetDateTime(7),
                 AbandonedCount = reader.IsDBNull(8) ? 0 : Convert.ToInt64(reader.GetValue(8)),
+                /* Appended (#3240) — the band this row computes must agree with the per-server reads. */
+                ExtensionMissingCount = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
             };
 
             counts.TryGetValue(serverId, out var existing);

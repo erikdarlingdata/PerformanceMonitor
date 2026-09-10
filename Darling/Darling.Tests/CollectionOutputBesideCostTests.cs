@@ -269,14 +269,16 @@ public sealed class CollectionOutputBesideCostTests
             .ToArray();
 
         /* The precondition, named so a signature change reports itself instead of turning the assertions
-           below into a vacuous pass over a list that no longer means what this test thinks. */
-        Assert.Equal(9, parameters.Length);
+           below into a vacuous pass over a list that no longer means what this test thinks. 10 since
+           #3240 added extensionMissingCount — a RUN-CLASS count like the two beside it, not an output or
+           denial-currency term, which is what this pin refuses. */
+        Assert.Equal(10, parameters.Length);
 
         Assert.Equal(
             new[]
             {
-                "totalRuns", "successCount", "errorCount", "permissionDeniedCount", "abandonedCount",
-                "hoursSinceLastSuccess", "hoursSinceLastRun", "frequencyMinutes", "isOnLoad",
+                "totalRuns", "successCount", "errorCount", "permissionDeniedCount", "extensionMissingCount",
+                "abandonedCount", "hoursSinceLastSuccess", "hoursSinceLastRun", "frequencyMinutes", "isOnLoad",
             },
             parameters);
 
@@ -421,28 +423,31 @@ public sealed class CollectionOutputBesideCostTests
             Path.Combine("Lite", "Services", "LocalDataService.CollectionHealth.cs"),
             "public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync");
 
-        /* The precondition. 24 columns since #3017 - 16 at #2460, plus #2472's four fan-out columns,
-           #2804's abandoned_count, #3010's last_denied_time and this change's two. A parse that stopped
-           finding them would otherwise turn the comparison below into two empty maps agreeing. */
-        Assert.Equal(24, darling.Count);
-        Assert.Equal(24, lite.Count);
+        /* The precondition. 25 columns since #3240's extension_missing_count - 16 at #2460, plus #2472's
+           four fan-out columns, #2804's abandoned_count, #3010's last_denied_time and #3017's two. A
+           parse that stopped finding them would otherwise turn the comparison below into two empty maps
+           agreeing. */
+        Assert.Equal(25, darling.Count);
+        Assert.Equal(25, lite.Count);
 
-        /* No gaps and no duplicates: ordinals 0..23 exactly once each. A duplicate would let two fields
+        /* No gaps and no duplicates: ordinals 0..24 exactly once each. A duplicate would let two fields
            read one column while a third read nothing, which compiles and is silently wrong. */
-        Assert.Equal(Enumerable.Range(0, 24), darling.Values.OrderBy(o => o));
-        Assert.Equal(Enumerable.Range(0, 24), lite.Values.OrderBy(o => o));
+        Assert.Equal(Enumerable.Range(0, 25), darling.Values.OrderBy(o => o));
+        Assert.Equal(Enumerable.Range(0, 25), lite.Values.OrderBy(o => o));
 
         /* And the same field at the same ordinal on both sides. */
         Assert.Equal(
             darling.OrderBy(kv => kv.Value).Select(kv => $"{kv.Value}={kv.Key}").ToArray(),
             lite.OrderBy(kv => kv.Value).Select(kv => $"{kv.Value}={kv.Key}").ToArray());
 
-        /* APPENDED, never inserted - the two new columns take the two highest ordinals, so nothing before
-           them moved. This is the assertion a bare map-equality cannot make: two sides that BOTH inserted
-           mid-list would agree with each other and disagree with every already-stamped read. */
+        /* APPENDED, never inserted - each change's columns take the highest ordinals of their day, so
+           nothing before them moved. This is the assertion a bare map-equality cannot make: two sides
+           that BOTH inserted mid-list would agree with each other and disagree with every
+           already-stamped read. */
         Assert.Equal(22, darling["RowsStored"]);
         Assert.Equal(23, darling["RunsWithRows"]);
         Assert.Equal(21, darling["LastDeniedTime"]);
+        Assert.Equal(24, darling["ExtensionMissingCount"]);
     }
 
     /// <summary>

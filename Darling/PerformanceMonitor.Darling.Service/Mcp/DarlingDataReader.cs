@@ -1303,10 +1303,12 @@ internal static class DarlingDataReader
             -- one. The status re-check is load-bearing rather than belt-and-braces: when no failing run
             -- in the window carried text, error_rank = 1 falls through to the newest row of ANY class,
             -- and without it a SUCCESS row's note could surface here as a fake last error.
-            MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error,
+            -- #3240: EXTENSION_MISSING is in the exemplar set because its stored sentence IS the remedy
+            -- (it names the extension and the database to create it in).
+            MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) AS last_error,
             -- The newest failure OUTRIGHT, text or not — "when did this last fail" means the run, not
             -- the message.
-            MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN collection_time END) AS last_error_time,
+            MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN collection_time END) AS last_error_time,
             SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
             SUM(CASE WHEN status = 'YIELDED' THEN 1 ELSE 0 END) AS yield_count,
             -- #1837: the note a SUCCEEDING run can leave behind (an enumeration that yielded 0 items,
@@ -1413,7 +1415,12 @@ internal static class DarlingDataReader
             -- POSITIONALLY and Lite's DuckDB read mirrors these ordinals, so a mid-list insert would
             -- silently re-map every column after it in whichever surface was not edited in the same
             -- breath.
-            SUM(CASE WHEN rows_collected > 0 THEN 1 ELSE 0 END) AS runs_with_rows
+            SUM(CASE WHEN rows_collected > 0 THEN 1 ELSE 0 END) AS runs_with_rows,
+            -- #3240: runs skipped because a PostgreSQL extension the collector DECLARES is not installed
+            -- — the EXTENSION_MISSING status the fault mapper split out of PERMISSIONS, counted apart so
+            -- the banding stops calling an uninstalled optional extension NO_PERMISSIONS. APPENDED, like
+            -- every column since #2472, because this result set is read positionally.
+            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -1450,7 +1457,7 @@ internal static class DarlingDataReader
                 ROW_NUMBER() OVER
                 (
                     PARTITION BY collector_name
-                    ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) IS NULL,
+                    ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) IS NULL,
                              collection_time DESC,
                              error_message DESC
                 ) AS error_rank,
@@ -1514,6 +1521,8 @@ internal static class DarlingDataReader
                 /* Appended (#3017), for the same reason every column before it was. */
                 RowsStored = reader.IsDBNull(22) ? 0 : Convert.ToInt64(reader.GetValue(22)),
                 RunsWithRows = reader.IsDBNull(23) ? 0 : Convert.ToInt64(reader.GetValue(23)),
+                /* Appended (#3240), for the same reason every column before it was. */
+                ExtensionMissingCount = reader.IsDBNull(24) ? 0 : Convert.ToInt64(reader.GetValue(24)),
             });
         }
 
@@ -2045,6 +2054,16 @@ internal sealed class CollectorHealth
     public long YieldCount { get; set; }
 
     /// <summary>
+    /// Runs skipped because a PostgreSQL extension the collector declares is not installed (#3240) — the
+    /// <c>EXTENSION_MISSING</c> status split out of PERMISSIONS so an uninstalled optional extension bands
+    /// apart from a grant problem. Deliberately NOT part of <see cref="PermissionDeniedCount"/> or
+    /// <see cref="LastDeniedTime"/>: those feed <see cref="DeniedSinceLastSuccess"/>, whose sentence is
+    /// about grants, and folding these in would resurrect the exact conflation the status split ends.
+    /// Always 0 for SQL Server collectors.
+    /// </summary>
+    public long ExtensionMissingCount { get; set; }
+
+    /// <summary>
     /// Runs the #2673 whole-server wall-clock budget gave up on (#2804). Counted apart from errors for the
     /// same reason <see cref="YieldCount"/> is — a guard firing is not a fault — but unlike a yield it is
     /// data LOSS: the cycle stored nothing and advanced no watermark. Feeds
@@ -2166,10 +2185,16 @@ internal sealed class CollectorHealth
     /// <c>HealthStatus</c> does not call this, and this returns display text.</para>
     /// </summary>
     public string? OutputFinding =>
-        CollectorHealthClassifier.FormatOutputFinding(RowsStored, TotalRuns, DeniedSinceLastSuccess, NoteCount)
-            is { Length: > 0 } finding
-            ? finding
-            : null;
+        /* #3240: an all-extension-missing window read NOTHING, so both of the formatter's zero-output
+           readings would be false for it — "being refused NOW" points at a grant, and "read and found
+           nothing" claims a read that never happened. The band plus the last_error sentence already
+           carry the whole story, extension named. */
+        string.Equals(HealthStatus, CollectorHealthClassifier.ExtensionMissing, StringComparison.Ordinal)
+            ? null
+            : CollectorHealthClassifier.FormatOutputFinding(RowsStored, TotalRuns, DeniedSinceLastSuccess, NoteCount)
+                is { Length: > 0 } finding
+                ? finding
+                : null;
 
     /// <summary>
     /// Share of runs the #2673 budget abandoned (#2804). Its own rate rather than part of
@@ -2203,6 +2228,6 @@ internal sealed class CollectorHealth
         CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
 
     public string HealthStatus => CollectorHealthClassifier.Classify(
-        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, AbandonedCount,
+        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
         HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
 }

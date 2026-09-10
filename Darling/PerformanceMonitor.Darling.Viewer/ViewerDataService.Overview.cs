@@ -341,14 +341,15 @@ WHERE server_id = $1";
     /// health banding (<see cref="GetCollectionHealthAsync"/> → <see cref="CollectorHealthRow.HealthStatus"/>).
     /// Mirrors the Dashboard's <c>GetCollectorStatusAsync</c> (SUM of HEALTHY / FAILING over
     /// <c>report.collection_health</c>) — HEALTHY and FAILING are the two bands the card surfaces; the
-    /// STALE / WARNING / NO_PERMISSIONS / NEVER_RUN rows count as neither (a failing collector is one the
-    /// banding calls FAILING: no success in over 24h).
+    /// STALE / WARNING / NO_PERMISSIONS / EXTENSION_MISSING / NEVER_RUN rows count as neither (a failing
+    /// collector is one the banding calls FAILING: no success in over 24h).
     ///
     /// <para>The <c>deadlocks</c> collector's own band comes back BESIDE the tallies rather than as a second
     /// read, because it is in the rows already enumerated here and the Overview fans this call out once per
     /// server (#3029). It is the one collector whose band the fleet deadlock total's coverage turns on, and
-    /// neither tally can stand in for it: STOPPED, NEVER_RUN and NO_PERMISSIONS all count as neither HEALTHY
-    /// nor FAILING, so a server reading nothing at all shows up in both counts as a zero.</para>
+    /// neither tally can stand in for it: STOPPED, NEVER_RUN, NO_PERMISSIONS and EXTENSION_MISSING all count
+    /// as neither HEALTHY nor FAILING, so a server reading nothing at all shows up in both counts as a
+    /// zero.</para>
     ///
     /// <para>Null when the collector left no row in the window. Matched from
     /// <see cref="DeadlocksCollector"/>'s own name rather than a literal, so a rename cannot leave this

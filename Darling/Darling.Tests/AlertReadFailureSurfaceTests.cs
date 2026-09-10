@@ -1761,7 +1761,8 @@ public sealed class AlertReadFailureSurfaceTests
             .GetMethod("Classify", BindingFlags.Public | BindingFlags.Static);
 
         Assert.NotNull(classify);
-        Assert.Equal(9, classify!.GetParameters().Length);
+        /* 10 since #3240 added extensionMissingCount — a run-class count, not an alert-read term. */
+        Assert.Equal(10, classify!.GetParameters().Length);
         Assert.DoesNotContain(
             "alert",
             string.Join("|", classify.GetParameters().Select(p => p.Name)),

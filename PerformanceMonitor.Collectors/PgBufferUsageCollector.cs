@@ -23,8 +23,9 @@ namespace PerformanceMonitor.Collectors;
 ///
 /// <para><b>Requires the <c>pg_buffercache</c> extension</b>, so on a server without it the query fails with
 /// 42P01, which <c>PostgresTargetProvider</c> already maps to
-/// <see cref="CollectorTargetFault.ObjectMissing"/> and the worker records as a non-fatal PERMISSIONS
-/// outcome. That is the correct behaviour rather than a workaround: the extension cannot be referenced
+/// <see cref="CollectorTargetFault.ObjectMissing"/> and the worker records as a non-fatal
+/// EXTENSION_MISSING skip naming the extension (#3240) — the declaration below is what routes it there.
+/// That is the correct behaviour rather than a workaround: the extension cannot be referenced
 /// conditionally in plain SQL (the parse fails before any guard could run), and the miss is now actionable —
 /// <c>pg_extension_availability</c> (#2545) reports whether the extension is <c>available</c> and one
 /// <c>CREATE EXTENSION</c> away. Hourly cadence keeps that outcome from being per-minute noise on a fleet

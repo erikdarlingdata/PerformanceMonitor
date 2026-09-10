@@ -319,8 +319,8 @@ ORDER BY collector_name;
 Within a couple of minutes, every **per-minute** collector the pre-flight count promised should appear
 with `non_success = 0`. The hourly and daily ones arrive on their own cadences — step 7's table says
 when each is due, so an absence there is a schedule, not a failure, until its first interval has passed.
-`status` is one of exactly five values — `SUCCESS`, `PERMISSIONS`, `ERROR`, `SESSION_MISSING`,
-`YIELDED` — and step 10 covers what a non-`SUCCESS` one means.
+`status` is one of exactly six values — `SUCCESS`, `PERMISSIONS`, `EXTENSION_MISSING`, `ERROR`,
+`SESSION_MISSING`, `YIELDED` — and step 10 covers what a non-`SUCCESS` one means.
 
 A collector that is **absent entirely** was gated off, not failing: cross-check it against the skipped
 list from step 3.
@@ -598,14 +598,15 @@ that cries wolf gets muted, and a muted outage predictor is worse than none.
 ## 10. Failure modes
 
 A collector that fails is classified rather than logged as `ERROR` forever. The store's non-fatal bucket
-is named `PERMISSIONS`, and most things landing in it are **not** missing grants — the `error_message`
-says which kind it is.
+is named `PERMISSIONS`, and things landing in it are not always missing grants — the `error_message`
+says which kind it is. A missing extension a collector declares gets its own `EXTENSION_MISSING` status
+(#3240) rather than that bucket, so an uninstalled optional module never reads as a grant problem.
 
 | `status` | `error_message` says | Actually means | Fix |
 |---|---|---|---|
 | `PERMISSIONS` | a missing grant | it is one | `GRANT pg_monitor` (step 1) |
 | `PERMISSIONS` | `permission denied for function pg_read_file`, names the grant pair | the self-hosted log readers (`pg_deadlocks`, `pg_plan_capture`) lack the log-reader grants | step 1's self-hosted subsection — run it **in the database Darling connects to**; issued elsewhere on the cluster it changes nothing |
-| `PERMISSIONS` | "NOT a missing grant", view/function absent | `pg_stat_statements` never created | step 1's optional half |
+| `EXTENSION_MISSING` | names the extension, "NOT a missing grant" | that extension never created where the collector connects | `CREATE EXTENSION` per the message (step 1's optional half), or leave it uninstalled and accept the gap |
 | `PERMISSIONS` | "NOT a missing grant", not implemented | reading something this engine lacks | nothing — expected off Aurora |
 | `PERMISSIONS` | "NOT a missing grant", feature disabled | switched off in the parameter group | enable it, or accept the gap |
 | `PERMISSIONS` | `is not authorized to perform: rds:Describe...`/`rds:Download...`, names an IAM role ARN | the **monitoring host's IAM role** lacks the AWS-level grant plan capture/deadlocks need on Aurora/RDS | attach the IAM policy in step 1's IAM subsection — a DB-side grant cannot fix this, it's a different identity entirely |
