@@ -7,10 +7,12 @@
  */
 
 using System;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -460,6 +462,99 @@ public sealed class DarlingCommandExecutorTests
         Assert.Equal("connection_failed", status);
         Assert.Contains("\"success\":false", json, StringComparison.Ordinal);
         Assert.Contains("network-related", json, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3244 — the <c>test_connect</c> reply names its engine. A SQL Server probe's reply carries the
+    /// <c>engine</c> discriminator and the PostgreSQL version fields at their no-claim zeros, ALONGSIDE
+    /// every field the reply carried before — additive, so an existing consumer reading
+    /// <c>majorVersion</c>/<c>engineEdition</c> keeps working unchanged. Without this pin the discriminator
+    /// could be dropped from the payload and nothing would red: <c>17</c> is a real major in both engines,
+    /// so a consumer guessing the vocabulary from the bare number would be silently believed.
+    /// </summary>
+    [Fact]
+    public void MapProbeResult_SqlServerSuccess_CarriesTheEngineDiscriminator()
+    {
+        var probe = new ConnectionProbeResult(
+            Success: true, MajorVersion: 16, EngineEdition: 3, EngineEditionDescription: "Enterprise",
+            IsAzureSqlDb: false, IsAzureManagedInstance: false, IsAwsRds: false, HasMsdbAccess: true, Error: null);
+
+        var (status, json) = DarlingCommandExecutor.MapProbeResult(probe);
+
+        Assert.Equal("connected", status);
+        Assert.Contains("\"engine\":\"SqlServer\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"postgresMajorVersion\":0", json, StringComparison.Ordinal);
+
+        /* The pre-#3244 shape, unchanged beside the discriminator. */
+        Assert.Contains("\"success\":true", json, StringComparison.Ordinal);
+        Assert.Contains("\"majorVersion\":16", json, StringComparison.Ordinal);
+        Assert.Contains("\"engineEdition\":3", json, StringComparison.Ordinal);
+        Assert.Contains("\"engineEditionDescription\":\"Enterprise\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"hasMsdbAccess\":true", json, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The PostgreSQL arm of the same #3244 pin: the reply says <c>engine</c> and populates the PostgreSQL
+    /// version fields, while the SQL Server fields stay present at their 0 values — so an engine-blind
+    /// consumer sees exactly what it saw before, and an engine-aware one can tell "PostgreSQL" from
+    /// "a half-failed SQL Server probe".
+    /// </summary>
+    [Fact]
+    public void MapProbeResult_PostgresSuccess_CarriesThePostgresEngineFacts()
+    {
+        var probe = new ConnectionProbeResult(
+            Success: true, MajorVersion: 0, EngineEdition: 0, EngineEditionDescription: null,
+            IsAzureSqlDb: false, IsAzureManagedInstance: false, IsAwsRds: false, HasMsdbAccess: false, Error: null,
+            Engine: CollectorTargetEngine.PostgreSql, PostgresMajorVersion: 18, PostgresVersionNum: 180004,
+            IsAurora: false, IsInRecovery: true);
+
+        var (status, json) = DarlingCommandExecutor.MapProbeResult(probe);
+
+        Assert.Equal("connected", status);
+        Assert.Contains("\"engine\":\"PostgreSql\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"postgresMajorVersion\":18", json, StringComparison.Ordinal);
+        Assert.Contains("\"postgresVersionNum\":180004", json, StringComparison.Ordinal);
+        Assert.Contains("\"isAurora\":false", json, StringComparison.Ordinal);
+        Assert.Contains("\"isInRecovery\":true", json, StringComparison.Ordinal);
+
+        /* The SQL Server fields remain, at values that make no claim. */
+        Assert.Contains("\"success\":true", json, StringComparison.Ordinal);
+        Assert.Contains("\"majorVersion\":0", json, StringComparison.Ordinal);
+        Assert.Contains("\"engineEdition\":0", json, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The seam (#3244): the executor's REAL reply payload feeds the shared engine-facts reader the dialogs
+    /// use (<c>ViewerDataService.ProbeVersionLabel</c>, #3149) and comes out in the right vocabulary. The
+    /// reader's own tests parse hand-written JSON, so both sides could test green with the property names
+    /// drifted apart — this is the only test in which the writer's names and the reader's names must agree.
+    /// </summary>
+    [Fact]
+    public void MapProbeResult_FeedsTheSharedProbeVersionLabelReader()
+    {
+        var sqlServer = new ConnectionProbeResult(
+            Success: true, MajorVersion: 16, EngineEdition: 3, EngineEditionDescription: "Enterprise",
+            IsAzureSqlDb: false, IsAzureManagedInstance: false, IsAwsRds: false, HasMsdbAccess: true, Error: null);
+
+        var postgres = new ConnectionProbeResult(
+            Success: true, MajorVersion: 0, EngineEdition: 0, EngineEditionDescription: null,
+            IsAzureSqlDb: false, IsAzureManagedInstance: false, IsAwsRds: false, HasMsdbAccess: false, Error: null,
+            Engine: CollectorTargetEngine.PostgreSql, PostgresMajorVersion: 18, PostgresVersionNum: 180004);
+
+        var aurora = postgres with { PostgresMajorVersion = 16, PostgresVersionNum = 160009, IsAurora = true };
+
+        Assert.Equal("SQL Server 2022", ProbeVersionLabelOf(sqlServer));
+        Assert.Equal("PostgreSQL 18", ProbeVersionLabelOf(postgres));
+        Assert.Equal("Aurora PostgreSQL 16", ProbeVersionLabelOf(aurora));
+    }
+
+    /// <summary>Runs a probe result through the executor's reply serializer and the viewer's shared reader —
+    /// the whole store-mediated round trip minus the store.</summary>
+    private static string ProbeVersionLabelOf(ConnectionProbeResult probe)
+    {
+        var (_, json) = DarlingCommandExecutor.MapProbeResult(probe);
+        using var document = JsonDocument.Parse(json);
+        return PerformanceMonitor.Darling.Viewer.ViewerDataService.ProbeVersionLabel(document.RootElement);
     }
 
     /* ---------------- live (DARLING_TEST_PG): claim + execute + report ---------------- */
