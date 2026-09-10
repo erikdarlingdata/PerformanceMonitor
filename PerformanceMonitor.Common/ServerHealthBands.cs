@@ -19,11 +19,10 @@ namespace PerformanceMonitor.Common
     /// </summary>
     public enum ServerFreshness
     {
-        /// <summary>The newest collection is inside the server's stale threshold — twice the collectors'
-        /// own cadence where the surface knows it (#3236), the flat two-minute floor otherwise — Online (green).</summary>
+        /// <summary>The newest collection is within twice the fastest collector's cadence — Online (green).</summary>
         Fresh,
 
-        /// <summary>Collection has lagged past the stale threshold but the server isn't long-dead — Warning (amber).</summary>
+        /// <summary>Collection has lagged past twice the cadence but the server isn't long-dead — Warning (amber).</summary>
         Stale,
 
         /// <summary>The newest collection is long-dead — the Offline overlay (red).</summary>
@@ -88,11 +87,9 @@ namespace PerformanceMonitor.Common
     /// Returning them together is what makes dropping one a visible edit rather than an omission.
     /// </summary>
     /// <param name="IsOnline">Reachability: true = fresh or stale, false = offline, null = not reached yet.</param>
-    /// <param name="CollectionStale">The amber warning flag: the newest collection has lagged past the
-    /// server's stale threshold — <see cref="ServerHealthClassifier.EffectiveStaleThreshold"/> where the
-    /// surface knows the server's collectors, the flat <see cref="ServerHealthThresholds.StaleThreshold"/>
-    /// floor otherwise (#3236) — but is not old enough to call the server dark. It is
-    /// <see cref="ServerFreshness.Stale"/> and nothing else — no error count, no <c>collection_log</c> status read.
+    /// <param name="CollectionStale">The amber warning flag: the newest collection has lagged past
+    /// <see cref="ServerHealthThresholds.StaleThreshold"/> but is not old enough to call the server dark. It is
+    /// <see cref="ServerFreshness.Stale"/> and nothing else — no error count, no <c>collection_log</c> read.
     ///
     /// <para><b>It is named for freshness because that is its whole population, and the name is load-bearing.</b>
     /// Lite carries a flag of the same shape on its own card (<c>ServerCardStatusRules.Classify</c>) fed from
@@ -254,38 +251,8 @@ namespace PerformanceMonitor.Common
         /// </summary>
         public static readonly TimeSpan CollectorCadence = TimeSpan.FromMinutes(1);
 
-        /// <summary>
-        /// Older than twice the cadence = the collection has visibly lagged (Warning). Since #3236 this flat
-        /// value is the FLOOR, not the whole rule: a surface that knows the server's own collectors compares
-        /// against <see cref="ServerHealthClassifier.EffectiveStaleThreshold"/> instead, which widens the
-        /// window for a server whose collectors legitimately run slower than the one-minute default — the
-        /// field case was 14 Aurora targets whose 5-minute <c>pg_cpu_utilization</c> rhythm banded Warning
-        /// on every fleet snapshot landing in the back half of its window. A caller with no per-collector
-        /// data still bands on this floor, which fails toward the label that asks for attention.
-        /// </summary>
+        /// <summary>Older than twice the cadence = the collection has visibly lagged (Warning).</summary>
         public static readonly TimeSpan StaleThreshold = TimeSpan.FromTicks(CollectorCadence.Ticks * 2);
-
-        /// <summary>
-        /// How many of a collector's OWN cadence intervals may elapse since its newest run before that
-        /// collector stops vouching for the server's freshness — the same "twice the cadence" grace
-        /// <see cref="StaleThreshold"/> has always applied to the assumed one-minute default, now applied to
-        /// each collector's actual schedule (#3236). One missed cycle is scheduling jitter; two is a lag a
-        /// human would call visible, whatever the cadence.
-        /// </summary>
-        public const int StaleCadenceGraceMultiplier = 2;
-
-        /// <summary>
-        /// The stale cutoff for a collector of the given cadence: <see cref="StaleCadenceGraceMultiplier"/>
-        /// times its own interval, floored at the flat <see cref="StaleThreshold"/> so a frequent collector
-        /// bands exactly as it always has — the same max(floor, multiplier x cadence) shape
-        /// <see cref="CollectorHealthClassifier.StaleThresholdHours"/> established for the per-collector
-        /// bands in #1573. A cadence of 0 (on-load / unknown) yields the floor.
-        /// </summary>
-        public static TimeSpan StaleThresholdFor(int frequencyMinutes)
-        {
-            var cadenceWindow = TimeSpan.FromMinutes((double)frequencyMinutes * StaleCadenceGraceMultiplier);
-            return cadenceWindow > StaleThreshold ? cadenceWindow : StaleThreshold;
-        }
 
         /// <summary>
         /// The ONE default for "collection has stopped", shared by the display's Offline band and the alert
@@ -324,17 +291,24 @@ namespace PerformanceMonitor.Common
         /// <summary>Total non-idle CPU the CPU band evaluates (SQL + other-process), or null with no snapshot.</summary>
         public double? CpuPercentForAlert { get; init; }
 
-        /// <summary>True when the resource semaphore shows grant waiters, timeouts, or forced grants.</summary>
-        public bool HasMemoryPressure { get; init; }
+        /// <summary>True when the resource semaphore shows grant waiters, timeouts, or forced grants;
+        /// <c>null</c> when this target has no resource-semaphore source at all (#3272 — every PostgreSQL
+        /// target). Nullable for the reason <see cref="TotalThreads"/> is: <c>false</c> is a MEASUREMENT
+        /// meaning the semaphore is calm, and a target with nothing to read must not be able to make
+        /// it.</summary>
+        public bool? HasMemoryPressure { get; init; }
 
-        /// <summary>Blocking events in the window.</summary>
-        public int BlockingCount { get; init; }
+        /// <summary>Blocking events in the window, or <c>null</c> when this target has no blocking source
+        /// the card reads (#3272). Same reasoning as <see cref="HasMemoryPressure"/>: <c>0</c> is a
+        /// measured quiet window.</summary>
+        public int? BlockingCount { get; init; }
 
         /// <summary>The worst blocking wait in the window, in seconds.</summary>
         public double MaxBlockedSeconds { get; init; }
 
-        /// <summary>Deadlocks in the window.</summary>
-        public int DeadlockCount { get; init; }
+        /// <summary>Deadlocks in the window, or <c>null</c> when this target has no deadlock source the
+        /// card reads (#3272). Same reasoning as <see cref="HasMemoryPressure"/>.</summary>
+        public int? DeadlockCount { get; init; }
 
         /// <summary>Worker-thread ceiling (max_workers_count), or null with no scheduler snapshot (e.g. Azure SQL DB).</summary>
         public int? TotalThreads { get; init; }
@@ -353,15 +327,40 @@ namespace PerformanceMonitor.Common
     }
 
     /// <summary>
-    /// One enabled, SCHEDULED collector's newest <c>collection_log</c> row (any status — freshness is the
-    /// rows-are-landing axis, never the succeeding axis, per the #3098 separation) beside the cadence that
-    /// collector actually runs on for this server — the effective schedule, store override over code default.
-    /// The inputs <see cref="ServerHealthClassifier.EffectiveStaleThreshold"/> reduces to one per-server
-    /// stale cutoff (#3236). Callers exclude disabled and on-load (<c>FrequencyMinutes == 0</c>) collectors:
-    /// a disabled collector's cadence is not a schedule anything runs on, and an on-load collector runs on
-    /// connects, not on the loop this band watches.
+    /// Whether a card's SQL-Server-DMV-sourced metric readings are measurements at all, for this target's
+    /// engine (#3272) — the ONE place that decision is made, so the service's fleet card and the viewer's
+    /// Overview card cannot disagree about whether a zero means anything.
+    ///
+    /// <para><b>Why these three travel together.</b> The memory-pressure, blocking and deadlock rows on a
+    /// card come from <c>v_memory_grant_stats</c>, <c>v_blocked_process_reports</c> /
+    /// <c>v_dmv_blocking_snapshots</c> and <c>v_deadlocks</c> — all SQL Server captures, none of which a
+    /// PostgreSQL target has a single row in. The per-metric reads therefore hand the card zeros, and a zero
+    /// is indistinguishable from a genuinely calm SQL Server. Threads already escaped this because its
+    /// ceiling is nullable and CPU escaped it in #3267; these three had no way to say "not measured" at all.
+    /// </para>
+    ///
+    /// <para><b>It names the ENGINE, not the collector state.</b> A SQL Server whose deadlock collector is
+    /// permission-denied also reads zero, and that stays Healthy here on purpose: #3017 routed that case to
+    /// <c>failed_collector_count</c> / <see cref="ServerHealthClassifier.CollectorSeverity"/> and the fleet
+    /// coverage block, which is where a fixable gap belongs. This distinguishes only the structural case,
+    /// where no grant, collector run or upgrade of the monitored server produces the number.</para>
     /// </summary>
-    public readonly record struct CollectorCadenceSample(DateTime LastRunUtc, int FrequencyMinutes);
+    public static class ServerMetricSources
+    {
+        /// <summary>
+        /// The reading as measured, or <c>null</c> when this target's engine has no source behind it.
+        /// Generic over the reading's own type because the three metrics are a <c>bool</c> and two
+        /// <c>int</c>s, and the DECISION is the same for all three — one function rather than three that
+        /// could drift.
+        /// </summary>
+        /// <param name="reading">What the SQL Server metric read produced (a zero, for a target with no rows).</param>
+        /// <param name="isPostgres">Whether the store SAYS this target is PostgreSQL. Absence of an engine
+        /// token is false, matching <c>MonitoredEngineKind.IsPostgres</c>'s asymmetry: a row no connect has
+        /// stamped keeps the SQL Server reading rather than being told its metrics do not exist.</param>
+        public static T? DmvSourced<T>(T reading, bool isPostgres)
+            where T : struct =>
+            isPostgres ? null : reading;
+    }
 
     /// <summary>
     /// The single, app-agnostic source of truth for a server's per-metric health bands, its overall card band,
@@ -372,25 +371,11 @@ namespace PerformanceMonitor.Common
     public static class ServerHealthClassifier
     {
         /// <summary>
-        /// Classify how fresh the newest collection is against the FLAT default threshold — for callers with
-        /// no per-collector schedule data, whose behavior is unchanged. A caller that knows the server's own
-        /// collectors passes <see cref="EffectiveStaleThreshold"/>'s answer to the three-argument overload
-        /// instead (#3236). Pure over (last-collection, now). Both instants are UTC (the store is naive UTC;
-        /// <paramref name="nowUtc"/> is <see cref="DateTime.UtcNow"/>), so the subtraction is a true
-        /// elapsed-time regardless of Kind.
+        /// Classify how fresh the newest collection is. Pure over (last-collection, now). Both instants are UTC
+        /// (the store is naive UTC; <paramref name="nowUtc"/> is <see cref="DateTime.UtcNow"/>), so the
+        /// subtraction is a true elapsed-time regardless of Kind.
         /// </summary>
-        public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc) =>
-            ClassifyFreshness(lastCollectionUtc, nowUtc, ServerHealthThresholds.StaleThreshold);
-
-        /// <summary>
-        /// <see cref="ClassifyFreshness(DateTime?, DateTime)"/> with the server's own stale cutoff
-        /// (<see cref="EffectiveStaleThreshold"/>) in place of the flat default (#3236). The Offline band is
-        /// deliberately NOT cadence-relative: 30 minutes is the #2794 contract shared with the alert
-        /// engine's Collection Stopped window, and it is checked first — so a server whose effective stale
-        /// threshold exceeds it (only slow-cadence collectors enabled) simply has no amber band and goes
-        /// straight to the red one, which is the stronger claim of the two.
-        /// </summary>
-        public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc, TimeSpan staleThreshold)
+        public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc)
         {
             if (!lastCollectionUtc.HasValue)
             {
@@ -403,7 +388,7 @@ namespace PerformanceMonitor.Common
                 return ServerFreshness.Offline;
             }
 
-            if (age > staleThreshold)
+            if (age > ServerHealthThresholds.StaleThreshold)
             {
                 return ServerFreshness.Stale;
             }
@@ -412,51 +397,27 @@ namespace PerformanceMonitor.Common
         }
 
         /// <summary>
-        /// The one stale cutoff that makes the server-level band honor each collector's OWN schedule (#3236):
-        /// the newest collection is fresh while ANY enabled scheduled collector's newest row is inside
-        /// <see cref="ServerHealthThresholds.StaleThresholdFor"/> of its own cadence, and stale only when
-        /// every one of them is overdue. Returned as a single threshold on the newest collection's age —
-        /// the age at which the LAST collector's window expires — so the band stays a pure ladder over
-        /// (last collection, now, threshold) and a surface can publish the number beside the flag it
-        /// explains.
+        /// CPU band on total non-idle CPU: &gt;= 95% Critical, &gt;= 80% Warning; no snapshot Unknown.
         ///
-        /// <para><b>Why "any collector current", not "the fastest cadence".</b> The field signature this
-        /// fixes: 14 Aurora targets whose <c>pg_cpu_utilization</c> legitimately runs every 5 minutes
-        /// banded Warning on any fleet snapshot landing in the back half of that window, while faster
-        /// collectors on the same servers were demonstrably current. A threshold derived from the fastest
-        /// cadence alone still bands a server whose slower collectors are all exactly on schedule; the
-        /// server is only honestly "lagging" when nothing on it is inside its own window.</para>
+        /// <para><b>The cutoffs are stated against a QUANTITY, not against a source</b> (#3267), because two
+        /// collectors now produce it. SQL Server's arm is <c>100 - SystemIdle</c> from the
+        /// <c>SCHEDULER_MONITOR</c> ring buffer; a PostgreSQL/Aurora target's is Performance Insights'
+        /// <c>os.cpuUtilization.total.avg</c>. What makes one ladder correct over both is that they are the
+        /// same measurement of the same thing: percent of the host's own CPU capacity that is not idle,
+        /// including processes outside the database engine, averaged over one minute
+        /// (<c>RdsCpuIngestor</c> asks PI for <c>PeriodInSeconds = 60</c>; the ring buffer publishes one
+        /// record a minute). Units, denominator, and averaging window all agree, so 80 means the same
+        /// "the host is approaching saturation" on both.</para>
         ///
-        /// <para><b>The failure direction stays safe.</b> With no samples — a caller without schedule data,
-        /// a store written by a newer build, every collector disabled — this is exactly the flat
-        /// <see cref="ServerHealthThresholds.StaleThreshold"/>, today's behavior. A genuinely quiet server
-        /// exhausts every collector's window and still bands, and the Offline band is untouched.</para>
+        /// <para>Two things about the PI arm are deliberately recorded rather than assumed. It is the OS
+        /// counter and NOT CloudWatch's <c>CPUUtilization</c>, which reads capacity-relative and runs roomy
+        /// on Aurora Serverless v2 — measured on one instance over one window at 6.8% against PI's 16.8%
+        /// (see <c>PgCpuUtilizationCollector</c>); banding the CloudWatch figure on these cutoffs would
+        /// under-read badly. And on Serverless v2 the denominator is the CURRENT ACU allocation, which
+        /// scales: a high reading there is a true statement that the instance is saturated at its present
+        /// capacity, and the follow-up question is the cluster's max-ACU ceiling rather than the
+        /// workload.</para>
         /// </summary>
-        public static TimeSpan EffectiveStaleThreshold(DateTime lastCollectionUtc, IEnumerable<CollectorCadenceSample> scheduledCollectors)
-        {
-            var threshold = ServerHealthThresholds.StaleThreshold;
-            if (scheduledCollectors is null)
-            {
-                return threshold;
-            }
-
-            foreach (var collector in scheduledCollectors)
-            {
-                /* The instant this collector's own window expires, expressed as an age of the NEWEST
-                   collection — lastRun never exceeds lastCollection (it is the max over these), so each
-                   term is at most the collector's own window and the floor keeps a straggler from
-                   tightening anything. */
-                var expiresAtAge = collector.LastRunUtc + ServerHealthThresholds.StaleThresholdFor(collector.FrequencyMinutes) - lastCollectionUtc;
-                if (expiresAtAge > threshold)
-                {
-                    threshold = expiresAtAge;
-                }
-            }
-
-            return threshold;
-        }
-
-        /// <summary>CPU band on total non-idle CPU: >= 95% Critical, >= 80% Warning; no snapshot Unknown.</summary>
         public static HealthSeverity CpuSeverity(double? cpuPercentForAlert)
         {
             if (!cpuPercentForAlert.HasValue)
@@ -477,13 +438,39 @@ namespace PerformanceMonitor.Common
             return HealthSeverity.Healthy;
         }
 
-        /// <summary>Memory band — Critical on any resource-semaphore pressure, else Healthy.</summary>
-        public static HealthSeverity MemorySeverity(bool hasMemoryPressure) =>
-            hasMemoryPressure ? HealthSeverity.Critical : HealthSeverity.Healthy;
-
-        /// <summary>Blocking band: >= 60s max wait or >= 5 events Critical; >= 10s max wait, >= 2 events, or any blocking Warning.</summary>
-        public static HealthSeverity BlockingSeverity(int blockingCount, double maxBlockedSeconds)
+        /// <summary>Memory band — Critical on any resource-semaphore pressure, else Healthy; no source
+        /// Unknown (#3272).
+        ///
+        /// <para><b>The Unknown arm is not cosmetic.</b> This band is read off
+        /// <c>v_memory_grant_stats</c>, a SQL Server DMV capture a PostgreSQL target has no row in, so the
+        /// zero counters such a card carried argued <c>false</c> and this returned <b>Healthy</b> — a
+        /// positive claim of health about a metric nothing measured, rendered as a green dot. That is worse
+        /// than the null it sat beside, and it is the same failure <see cref="CpuSeverity"/> and
+        /// <see cref="ThreadsSeverity"/> already avoid by taking a nullable input.</para></summary>
+        public static HealthSeverity MemorySeverity(bool? hasMemoryPressure)
         {
+            if (!hasMemoryPressure.HasValue)
+            {
+                return HealthSeverity.Unknown;
+            }
+
+            return hasMemoryPressure.Value ? HealthSeverity.Critical : HealthSeverity.Healthy;
+        }
+
+        /// <summary>Blocking band: >= 60s max wait or >= 5 events Critical; >= 10s max wait, >= 2 events, or any blocking Warning; no source Unknown (#3272).
+        ///
+        /// <para>The COUNT carries the measured/not-measured distinction on its own — there is no second
+        /// spelling of "unknown" to get wrong — because a max wait means nothing without a population to
+        /// have waited. See <see cref="MemorySeverity"/> for why the arm exists.</para></summary>
+        public static HealthSeverity BlockingSeverity(int? blockingCountOrNullWhenUnmeasured, double maxBlockedSeconds)
+        {
+            if (!blockingCountOrNullWhenUnmeasured.HasValue)
+            {
+                return HealthSeverity.Unknown;
+            }
+
+            var blockingCount = blockingCountOrNullWhenUnmeasured.Value;
+
             if (maxBlockedSeconds >= 60)
             {
                 return HealthSeverity.Critical;
@@ -512,9 +499,26 @@ namespace PerformanceMonitor.Common
             return HealthSeverity.Healthy;
         }
 
-        /// <summary>Deadlock band — any deadlock in the window is Critical.</summary>
-        public static HealthSeverity DeadlockSeverity(int deadlockCount) =>
-            deadlockCount > 0 ? HealthSeverity.Critical : HealthSeverity.Healthy;
+        /// <summary>Deadlock band — any deadlock in the window is Critical; no source Unknown (#3272).
+        ///
+        /// <para><b>This completes #3017 rather than reversing it.</b> That issue established that a
+        /// PostgreSQL target's zero is structural — <c>v_deadlocks</c> is the SQL Server extended-event
+        /// capture and nothing joins <c>pg_deadlocks</c> into it — and gave the CARD
+        /// <see cref="FleetDeadlockSource"/> plus the fleet total a coverage denominator to say so. It
+        /// deliberately added no band to the FLEET ROLLUP, so that a quiet, fully-covered SQL Server fleet
+        /// keeps reading healthy; that reasoning is untouched here. What it left behind was this
+        /// per-metric severity still answering <b>Healthy</b> for the same uncountable zero, so the card
+        /// disclosed the gap in <c>deadlock_source</c> and contradicted itself on the dot beside
+        /// it.</para></summary>
+        public static HealthSeverity DeadlockSeverity(int? deadlockCount)
+        {
+            if (!deadlockCount.HasValue)
+            {
+                return HealthSeverity.Unknown;
+            }
+
+            return deadlockCount.Value > 0 ? HealthSeverity.Critical : HealthSeverity.Healthy;
+        }
 
         /// <summary>
         /// Threads band: work-queue starvation Critical; >= 20 runnable-waiting or under 10% workers available
@@ -639,7 +643,12 @@ namespace PerformanceMonitor.Common
             }
 
             long magnitude = (criticals * 100L) + (warnings * 10L);
-            long incidents = Math.Min(m.BlockingCount + m.DeadlockCount, 99);
+            /* An unmeasured count contributes nothing, which is what keeps the whole Unknown arm
+               rank-neutral: the magnitude terms above already skip Unknown exactly as they skip Healthy,
+               so a card that gained an Unknown where it used to claim Healthy scores identically and
+               cannot move in the worst-first ranking. Pinned by
+               UnmeasuredMetricsAreNotHealthyTests. */
+            long incidents = Math.Min((m.BlockingCount ?? 0) + (m.DeadlockCount ?? 0), 99);
             return bandRank + magnitude + incidents;
         }
 

@@ -166,21 +166,6 @@ public partial class MainWindow
             return;
         }
 
-        /* #3236: the per-server cadence samples the dot's stale cutoff honors — the SAME derivation the
-           Overview cards and the service's fleet reader band with, so all three keep saying one thing
-           about one server. Failure-isolated separately from the freshness read above: dots on the flat
-           floor beat no dots. */
-        Dictionary<int, List<PerformanceMonitor.Common.CollectorCadenceSample>> cadenceSamples;
-        try
-        {
-            cadenceSamples = await _dataService.GetCollectorCadenceSamplesAsync();
-        }
-        catch (Exception ex)
-        {
-            ViewerLogger.Warn("ServerStatus", $"cadence-sample read failed, dots band on the flat threshold: {ex.Message}");
-            cadenceSamples = new Dictionary<int, List<PerformanceMonitor.Common.CollectorCadenceSample>>();
-        }
-
         var nowUtc = DateTime.UtcNow;
         var servers = _fleet.All;
 
@@ -189,7 +174,7 @@ public partial class MainWindow
         foreach (var s in servers)
         {
             DateTime? last = freshness.TryGetValue(s.ServerId, out var t) ? t : null;
-            s.ApplyFreshness(last, nowUtc, EffectiveStaleThreshold(last, s.ServerId, cadenceSamples));
+            s.ApplyFreshness(last, nowUtc);
 
             if (last.HasValue && (newest is null || last.Value > newest.Value))
             {
@@ -212,22 +197,6 @@ public partial class MainWindow
                 ? "Collection: Active"
                 : $"Collection: {FormatAge(age)} ago";
         }
-    }
-
-    /// <summary>
-    /// One server's stale cutoff (#3236) from this refresh's cadence samples: the shared
-    /// <see cref="PerformanceMonitor.Common.ServerHealthClassifier.EffectiveStaleThreshold"/> where the
-    /// server has a last collection and samples, the flat floor otherwise. One helper for the sidebar dots
-    /// and the Overview cards, so the two surfaces cannot resolve the same server to different numbers.
-    /// </summary>
-    private static TimeSpan EffectiveStaleThreshold(
-        DateTime? lastCollectionUtc,
-        int serverId,
-        Dictionary<int, List<PerformanceMonitor.Common.CollectorCadenceSample>> cadenceSamples)
-    {
-        return lastCollectionUtc is DateTime lastCollection && cadenceSamples.TryGetValue(serverId, out var samples)
-            ? PerformanceMonitor.Common.ServerHealthClassifier.EffectiveStaleThreshold(lastCollection, samples)
-            : PerformanceMonitor.Common.ServerHealthThresholds.StaleThreshold;
     }
 
     /// <summary>

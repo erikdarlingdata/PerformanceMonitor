@@ -1424,22 +1424,6 @@ public partial class MainWindow : Window
 
         var service = _dataService;
         var nowUtc = DateTime.UtcNow;
-
-        /* #3236: this refresh's per-server cadence samples, read ONCE for the whole grid — each card's
-           stale cutoff honors its collectors' own schedules instead of the flat two-minute floor, so a
-           server legitimately collecting every 5 minutes stops banding amber for the back half of every
-           window. Failure-isolated: with no samples every card bands on the floor, the pre-#3236 reading. */
-        Dictionary<int, List<PerformanceMonitor.Common.CollectorCadenceSample>> cadenceSamples;
-        try
-        {
-            cadenceSamples = await service.GetCollectorCadenceSamplesAsync();
-        }
-        catch (Exception ex)
-        {
-            ViewerLogger.Warn("Overview", $"cadence-sample read failed, freshness bands on the flat threshold: {ex.Message}");
-            cadenceSamples = new Dictionary<int, List<PerformanceMonitor.Common.CollectorCadenceSample>>();
-        }
-
         /* #3016: pool-many lanes, not fleet-many reads — see the inventory overlay in FinOpsTab.Loaders.
            A fleet wider than the pool used to render SHORT here rather than slowly: the per-server catch
            below turned each pool-exhaustion failure into an absent card, so the panel a fleet is watched
@@ -1465,7 +1449,11 @@ public partial class MainWindow : Window
                        coverage apart from a quiet SQL Server fleet: v_deadlocks holds the SQL Server
                        extended-event capture and nothing else. */
                     summary.IsPostgres = server.IsPostgres;
-                    summary.ApplyFreshness(nowUtc, EffectiveStaleThreshold(summary.LastCollectionTime, server.ServerId, cadenceSamples));
+                    /* #3267: and the Aurora half of the same discriminator, for the CPU row. Both are
+                       stamped from the one registry row, so a card cannot end up claiming Aurora-ness the
+                       engine token does not support. */
+                    summary.IsAurora = server.IsAurora;
+                    summary.ApplyFreshness(nowUtc);
                     found.Add(summary);
                 }
                 catch

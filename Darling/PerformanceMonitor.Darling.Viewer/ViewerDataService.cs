@@ -97,6 +97,14 @@ public sealed class DarlingServer : INotifyPropertyChanged
     public bool IsPostgres => MonitoredEngineKind.IsPostgres(EngineKind);
 
     /// <summary>
+    /// True only when the store says this target is Amazon Aurora PostgreSQL specifically. Same asymmetry as
+    /// <see cref="IsPostgres"/>. Read for the Overview card's CPU row (#3267): instance CPU comes from
+    /// Performance Insights, which <c>PgCpuUtilizationCollector.AppliesTo</c> gates to Aurora, so this is
+    /// what separates "no reading yet" from "this build collects no instance CPU here at all".
+    /// </summary>
+    public bool IsAurora => MonitoredEngineKind.IsAurora(EngineKind);
+
+    /// <summary>
     /// How the engine reads in the per-server header, or null when the store makes no claim - in which case
     /// the header shows NO engine label rather than "SQL Server", because the tabs such a server gets are a
     /// default rather than a finding. An unrecognised token renders as the raw token: the describer's
@@ -163,10 +171,9 @@ public sealed class DarlingServer : INotifyPropertyChanged
 
     private bool _collectionStale;
 
-    /// <summary>Warning (amber) state: the newest collection has lagged past this server's stale threshold —
-    /// cadence-aware where samples exist, the flat <see cref="ServerHealthThresholds.StaleThreshold"/> floor
-    /// otherwise (#3236). Freshness only, and named for it — a collector that is failing is a different
-    /// axis, reported by the Collection Health tab (#3098).</summary>
+    /// <summary>Warning (amber) state: the newest collection has lagged past
+    /// <see cref="ServerHealthThresholds.StaleThreshold"/>. Freshness only, and named for it — a collector that
+    /// is failing is a different axis, reported by the Collection Health tab (#3098).</summary>
     public bool CollectionStale
     {
         get => _collectionStale;
@@ -265,15 +272,11 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// <para>This method used to set two flags out of three by hand and drop the awaiting marker on the floor.
     /// Nothing about a block of assignments makes a missing one visible, which is why the flags now arrive as
     /// a single value (#2473).</para>
-    ///
-    /// <para><paramref name="staleThreshold"/> is this server's own stale cutoff (#3236) — required, not
-    /// defaulted, for the reason <see cref="ServerSummaryItem.ApplyFreshness"/> gives: the dot and the card
-    /// must band off the same number, and a silently defaulted flat value is how they would stop.</para>
     /// </summary>
-    public void ApplyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc, TimeSpan staleThreshold)
+    public void ApplyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc)
     {
         var flags = ServerCollectionStatusRules.FlagsFor(
-            ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, nowUtc, staleThreshold));
+            ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, nowUtc));
         IsOnline = flags.IsOnline;
         CollectionStale = flags.CollectionStale;
         AwaitingFirstCollection = flags.AwaitingFirstCollection;

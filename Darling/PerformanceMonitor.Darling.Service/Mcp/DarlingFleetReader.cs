@@ -17,6 +17,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -31,9 +32,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// refresh; that does not scale to a 500-server central store. Because Darling keys every row by
 /// <c>server_id</c> in ONE Postgres database, this reader instead runs a BOUNDED set of cross-server aggregates
 /// (one <c>DISTINCT ON (server_id)</c> latest-snapshot read per metric, one <c>GROUP BY server_id</c> windowed
-/// count per incident source, one cross-server collection-health aggregate, and the #3236 pair — the sparse
-/// schedule overrides plus a per-(server, collector) newest-run aggregate — feeding the cadence-aware stale
-/// threshold) — a fixed ~11 round-trips regardless of fleet size — then assembles the per-server cards in C#.</para>
+/// count per incident source, one cross-server collection-health aggregate) — a fixed ~9 round-trips regardless
+/// of fleet size — then assembles the per-server cards in C#.</para>
 ///
 /// <para><b>Banding lives once.</b> Every band (per-metric severity, the card's overall band, collection
 /// freshness, the fleet band + worst-first score) comes from <see cref="ServerHealthClassifier"/> in
@@ -138,6 +138,49 @@ SELECT DISTINCT ON (server_id)
 FROM v_cpu_utilization_stats
 ORDER BY server_id, collection_time DESC, sample_time DESC";
 
+    /// <summary>Latest instance CPU per PostgreSQL/Aurora target — the newest Performance Insights sample
+    /// per server, within the freshness bound. $1 the freshness cutoff (naive UTC).
+    ///
+    /// <para><b>Why a second CPU read rather than a wider first one</b> (#3267). <see cref="FleetCpuSql"/>
+    /// reads <c>v_cpu_utilization_stats</c>, which the SQL Server ring-buffer collector writes and a
+    /// PostgreSQL target never has a row in; instance CPU for those targets lands in
+    /// <c>collect.pg_cpu_utilization</c> from the AWS API (#2719), a different table with different
+    /// columns. Nothing joins them and nothing should — the two carry different detail (see
+    /// <see cref="FleetCpuSource"/>) and the SQL Server path is deliberately untouched.</para>
+    ///
+    /// <para><b>Both predicates are load-bearing, and they are not the same predicate.</b>
+    /// <c>collection_time</c> is the hypertable's partition dimension, so it is the one that lets
+    /// TimescaleDB chunk-exclude — the same reasoning as <see cref="FleetLastCollectionSql"/>, and the
+    /// mistake to avoid is a bare <c>DISTINCT ON</c> that reads this table's whole retained history on
+    /// every fleet call. <c>sample_time</c> is what the reading is ABOUT, and it is the honest freshness
+    /// test: a cycle backfills up to <c>RdsCpuIngestor.LookbackWindow</c> of points under one
+    /// <c>collection_time</c>, so a row inside the collection bound can still carry a sample older than
+    /// it. Unlike the SQL Server arm, comparing <c>sample_time</c> to a store-derived instant is
+    /// frame-correct here: Performance Insights stamps its data points in UTC and the ingestor stores them
+    /// naive-UTC unchanged, where the ring buffer's <c>sample_time</c> is the monitored server's LOCAL wall
+    /// clock (see <c>LatestCpuReadShapeSqlTests</c> for what a bound on that one costs).</para>
+    ///
+    /// <para><b>Falling out of this read is the correct answer, unlike
+    /// <see cref="FleetLastCollectionSql"/>'s 48 hours.</b> That read's value is "when did we last see this
+    /// server", which a long-dark server must still report or its card drops out entirely. A CPU LEVEL is
+    /// the opposite: a four-hour-old reading is not this server's CPU now, and the card says so by carrying
+    /// null and banding Unknown. The bound is <c>DarlingPgCpuUtilizationReader.Freshness</c> — three times
+    /// the collector's own 5-minute cadence, so two missed cycles are tolerated — and it is that constant
+    /// rather than a new number so the card and the High CPU alert agree on what "current" means.</para>
+    ///
+    /// <para><c>cpu_percent IS NOT NULL</c> because Performance Insights returns a data point with a null
+    /// value for a period it has no sample for, and the ingestor stores it; the newest row is not
+    /// necessarily the newest MEASUREMENT.</para></summary>
+    public const string FleetPgCpuSql = @"
+SELECT DISTINCT ON (server_id)
+    server_id,
+    cpu_percent
+FROM pg_cpu_utilization
+WHERE collection_time >= $1
+AND   sample_time >= $1
+AND   cpu_percent IS NOT NULL
+ORDER BY server_id, collection_time DESC, sample_time DESC";
+
     /// <summary>Latest total server memory + buffer pool (MB) per server. $ none.</summary>
     public const string FleetMemorySql = @"
 SELECT DISTINCT ON (server_id)
@@ -239,27 +282,6 @@ FROM v_collection_log
 WHERE collection_time >= $1
 GROUP BY server_id";
 
-    /// <summary>Newest run of ANY status per (server, collector) — the raw side of the per-server
-    /// cadence-aware stale threshold (#3236): each enabled scheduled collector's newest row, beside its
-    /// effective cadence, decides how long the newest collection may age before the card bands Warning
-    /// (<see cref="ServerHealthClassifier.EffectiveStaleThreshold"/>). Any status on purpose — freshness is
-    /// the rows-are-landing axis, and a collector erroring on schedule is still landing rows; the failures
-    /// band on the collector axis. Same 48-hour bound as <see cref="FleetLastCollectionSql"/>, for the same
-    /// chunk-exclusion reason and so the two reads describe the same span. $1 window start.</summary>
-    public const string FleetCollectorCadenceSql = @"
-SELECT server_id, collector_name, MAX(collection_time) AS last_run_time
-FROM v_collection_log
-WHERE collection_time >= $1
-GROUP BY server_id, collector_name";
-
-    /// <summary>The sparse schedule-override rows the cadence-aware stale threshold resolves through
-    /// (#3236) — the same SELECT <c>StoreConfigProvider.ReadScheduleOverridesAsync</c> feeds the worker's
-    /// scheduling from, so the threshold honors EXACTLY the schedule the sweep actually runs on: per-server
-    /// override &gt; fleet-wide override (<c>server_id</c> NULL) &gt; the <c>CollectorScheduleDefaults</c>
-    /// code default, per column, via <see cref="StoreConfigProvider.ResolveSchedule"/>. $ none.</summary>
-    public const string FleetScheduleOverridesSql =
-        "SELECT server_id, collector_name, frequency_minutes, retention_days, enabled FROM config_collector_schedules";
-
     /// <summary>Cross-server per-collector 7-day health aggregate — one row per (server, collector) pair carrying
     /// the columns the shared <c>CollectorHealth.HealthStatus</c> banding needs, so the caller counts each
     /// server's FAILING collectors exactly as the per-server Collection Health tab does. $1 window start (the
@@ -334,13 +356,13 @@ GROUP BY server_id, collector_name";
         var servers = await ReadServersAsync(postgres, cancellationToken);
 
         var cpu = await ReadCpuAsync(postgres, cancellationToken);
+        var pgCpu = await ReadPgCpuAsync(postgres, now, cancellationToken);
         var memory = await ReadMemoryAsync(postgres, cancellationToken);
         var memoryPressure = await ReadMemoryPressureAsync(postgres, cancellationToken);
         var threads = await ReadThreadsAsync(postgres, cancellationToken);
         var blocking = await ReadBlockingAsync(postgres, windowStartUtc, windowEndUtc, cancellationToken);
         var deadlocks = await ReadDeadlocksAsync(postgres, windowStartUtc, windowEndUtc, cancellationToken);
         var lastCollection = await ReadLastCollectionAsync(postgres, now, cancellationToken);
-        var cadenceSamples = await ReadCollectorCadenceSamplesAsync(postgres, now, cancellationToken);
         var failingCollectors = await ReadFailingCollectorCountsAsync(postgres, now, cancellationToken);
         var tags = await ReadTagsAsync(postgres, cancellationToken);
         var tagForest = await ReadTagForestAsync(postgres, cancellationToken);
@@ -349,6 +371,9 @@ GROUP BY server_id, collector_name";
         foreach (var server in servers)
         {
             cpu.TryGetValue(server.ServerId, out var c);
+            /* Not TryGetValue into a double: a miss must stay null, because null is the reading
+               ("no current instance CPU") and 0.0 would be a measurement. */
+            double? pg = pgCpu.TryGetValue(server.ServerId, out var pgValue) ? pgValue : null;
             memory.TryGetValue(server.ServerId, out var m);
             memoryPressure.TryGetValue(server.ServerId, out var mp);
             threads.TryGetValue(server.ServerId, out var t);
@@ -364,28 +389,35 @@ GROUP BY server_id, collector_name";
             DateTime? lastColl = lastCollection.TryGetValue(server.ServerId, out var lastCollValue)
                 ? lastCollValue
                 : null;
-            cadenceSamples.TryGetValue(server.ServerId, out var serverCadenceSamples);
             failingCollectors.TryGetValue(server.ServerId, out var collectors);
             tags.TryGetValue(server.ServerId, out var serverTags);
 
-            cards.Add(BuildCard(server, c, m, mp, t, b, deadlock, lastColl, serverCadenceSamples, collectors, serverTags, now));
+            cards.Add(BuildCard(server, c, pg, m, mp, t, b, deadlock, lastColl, collectors, serverTags, now));
         }
 
         return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest);
     }
 
     /// <summary>Builds one pre-banded card from a server's raw cross-server reads (pure — the reduction the WPF
-    /// <c>ServerSummaryItem</c> does, minus the brushes, over the shared classifier).</summary>
-    private static FleetServerCard BuildCard(
+    /// <c>ServerSummaryItem</c> does, minus the brushes, over the shared classifier).
+    ///
+    /// <para><b>Internal, not private</b>, for the reason <see cref="BuildRollup"/> is public: this is the
+    /// step that decides what a card CLAIMS, so it is worth asserting without a store. #3267 was a defect in
+    /// exactly this reduction — a whole engine's cards carrying null where a reading existed — and the only
+    /// tests that could see it before were the live-Postgres ones. A caller with no interest in a given
+    /// metric passes <c>default</c> for its row, which is why those types never have to be NAMED in a test
+    /// — they are internal only because CS0051 requires every parameter type of an internal method to be
+    /// at least as accessible as it.</para></summary>
+    internal static FleetServerCard BuildCard(
         FleetServerRow server,
         CpuRow cpu,
+        double? instanceCpuPercent,
         MemoryRow memory,
         MemoryPressureRow pressure,
         ThreadsRow threads,
         BlockingRow blocking,
         DeadlockRow deadlock,
         DateTime? lastCollection,
-        List<CollectorCadenceSample>? cadenceSamples,
         CollectorCounts collectors,
         List<FleetTag>? tags,
         DateTime now)
@@ -399,7 +431,19 @@ GROUP BY server_id, collector_name";
 
         var cpuPercent = cpu.SqlCpu;
         var otherCpu = cpu.OtherCpu;
-        var totalCpu = cpuPercent.HasValue ? cpuPercent.Value + (otherCpu ?? 0) : (double?)null;
+
+        /* Per-server target ENGINE (#2530), the axis the platform flags below cannot express: they are all
+           derived from a SQL Server SERVERPROPERTY, which a PostgreSQL target does not have. Read up here
+           rather than beside ClassifyPlatform because the CPU source classification needs it. */
+        var (isPostgres, isAurora) = ClassifyEngineKind(server.EngineKind);
+
+        /* One expression for "total non-idle host CPU, from whichever collector has it" (#3267), shared with
+           the viewer's card so the two cannot drift on the fallback. cpuPercent stays the SQL-Server-process
+           share and is NOT filled from the PostgreSQL arm: Performance Insights publishes only the host
+           total, so there is no per-process split to claim, and cpu_source says which arm answered rather
+           than leaving a consumer to infer it from which fields are null. */
+        var totalCpu = FleetCpuProvenance.TotalNonIdleCpuPercent(cpuPercent, otherCpu, instanceCpuPercent);
+        var cpuSource = FleetCpuProvenance.ClassifyCpuSource(cpuPercent, instanceCpuPercent, isPostgres, isAurora);
         var cpuForAlert = totalCpu ?? cpuPercent;
 
         var availableThreads = threads.TotalThreads.HasValue
@@ -409,13 +453,23 @@ GROUP BY server_id, collector_name";
         var hasMemoryPressure = pressure.WaiterCount > 0 || pressure.TimeoutCount > 0 || pressure.ForcedCount > 0;
         var maxBlockedSeconds = maxBlockingWaitMs / 1000.0;
 
+        /* The three DMV-sourced readings, with "not measured" expressed as null for an engine that has no
+           row in the views behind them (#3272). The reads above produced zeros for such a target, and a
+           zero here argued Healthy — a green dot for a metric nothing measured. The published COUNTS are
+           left exactly as they are: #3017's deadlock_source and the fleet coverage block explain a total
+           built out of those zeros, and nulling them would make the total's own denominator unreadable.
+           It is the BAND that stops claiming health. */
+        var memoryPressureForBand = ServerMetricSources.DmvSourced(hasMemoryPressure, isPostgres);
+        var blockingForBand = ServerMetricSources.DmvSourced(blockingCount, isPostgres);
+        var deadlocksForBand = ServerMetricSources.DmvSourced(deadlockCount, isPostgres);
+
         var metrics = new ServerHealthMetrics
         {
             CpuPercentForAlert = cpuForAlert,
-            HasMemoryPressure = hasMemoryPressure,
-            BlockingCount = blockingCount,
+            HasMemoryPressure = memoryPressureForBand,
+            BlockingCount = blockingForBand,
             MaxBlockedSeconds = maxBlockedSeconds,
-            DeadlockCount = deadlockCount,
+            DeadlockCount = deadlocksForBand,
             TotalThreads = threads.TotalThreads,
             AvailableThreads = availableThreads,
             ThreadsWaitingForCpu = threads.RunnableTasks,
@@ -425,15 +479,8 @@ GROUP BY server_id, collector_name";
 
         /* Freshness -> the card's collection state, through the SAME mapping the WPF card and the sidebar
            row use (#2473). It was a hand-written copy of ApplyFreshness that happened to agree; the copy on
-           the sidebar row happened not to, which is the argument for none of them writing it out. The stale
-           cutoff is the server's own (#3236) — each enabled collector's newest run against its effective
-           cadence — so a target whose collectors legitimately run every 5 minutes no longer bands Warning
-           on any snapshot landing in the back half of that window. */
-        var staleThreshold = lastCollection is DateTime lastCollectionValue
-            ? ServerHealthClassifier.EffectiveStaleThreshold(
-                lastCollectionValue, cadenceSamples ?? (IEnumerable<CollectorCadenceSample>)Array.Empty<CollectorCadenceSample>())
-            : ServerHealthThresholds.StaleThreshold;
-        var freshness = ServerHealthClassifier.ClassifyFreshness(lastCollection, now, staleThreshold);
+           the sidebar row happened not to, which is the argument for none of them writing it out. */
+        var freshness = ServerHealthClassifier.ClassifyFreshness(lastCollection, now);
         var flags = ServerCollectionStatusRules.FlagsFor(freshness);
         var isOnline = flags.IsOnline;
         var awaitingFirstCollection = flags.AwaitingFirstCollection;
@@ -446,10 +493,6 @@ GROUP BY server_id, collector_name";
            measure's appliesTo against — see ClassifyPlatform for the edition mapping and why AWS RDS / msdb are
            deliberately not surfaced. */
         var (isAzureSqlDb, isAzureManagedInstance) = ClassifyPlatform(server.EngineEdition);
-
-        /* Per-server target ENGINE (#2530), the axis the platform flags above cannot express: they are all
-           derived from a SQL Server SERVERPROPERTY, which a PostgreSQL target does not have. */
-        var (isPostgres, isAurora) = ClassifyEngineKind(server.EngineKind);
 
         return new FleetServerCard
         {
@@ -470,11 +513,12 @@ GROUP BY server_id, collector_name";
             AwaitingFirstCollection = awaitingFirstCollection,
             CollectionStale = collectionStale,
             LastCollectionTime = lastCollection,
-            StaleThresholdMinutes = staleThreshold.TotalMinutes,
             CpuPercent = cpuPercent,
             OtherProcessCpuPercent = otherCpu,
             TotalCpuPercent = totalCpu,
             CpuSeverity = ServerHealthClassifier.CpuSeverity(cpuForAlert),
+            InstanceCpuPercent = instanceCpuPercent,
+            CpuSource = cpuSource,
             MemoryMb = memory.MemoryMb,
             BufferPoolMb = memory.BufferPoolMb,
             GrantedMemoryMb = pressure.GrantedMemoryMb,
@@ -482,13 +526,13 @@ GROUP BY server_id, collector_name";
             MemoryTimeoutCount = pressure.TimeoutCount,
             MemoryForcedCount = pressure.ForcedCount,
             HasMemoryPressure = hasMemoryPressure,
-            MemorySeverity = ServerHealthClassifier.MemorySeverity(hasMemoryPressure),
+            MemorySeverity = ServerHealthClassifier.MemorySeverity(memoryPressureForBand),
             BlockingCount = blockingCount,
             MaxBlockingWaitMs = maxBlockingWaitMs,
-            BlockingSeverity = ServerHealthClassifier.BlockingSeverity(blockingCount, maxBlockedSeconds),
+            BlockingSeverity = ServerHealthClassifier.BlockingSeverity(blockingForBand, maxBlockedSeconds),
             DeadlockCount = deadlockCount,
             DeadlockLastSeen = deadlock.LastSeen,
-            DeadlockSeverity = ServerHealthClassifier.DeadlockSeverity(deadlockCount),
+            DeadlockSeverity = ServerHealthClassifier.DeadlockSeverity(deadlocksForBand),
             DeadlockCollectorBand = collectors.DeadlockBand,
             TotalThreads = threads.TotalThreads,
             CurrentWorkers = threads.CurrentWorkers,
@@ -787,6 +831,27 @@ GROUP BY server_id, collector_name";
         return map;
     }
 
+    /// <summary>The newest current Performance Insights CPU reading per PostgreSQL/Aurora target (#3267).
+    /// Keyed by <c>server_id</c> with a plain <c>double</c> value and no entry for a server without one, so
+    /// the caller's miss is an absent key rather than a zero — see the call site.</summary>
+    private static async Task<Dictionary<int, double>> ReadPgCpuAsync(NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var map = new Dictionary<int, double>();
+        await using var command = postgres.CreateCommand(FleetPgCpuSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        /* Naive UTC at the bind, matching every other comparison against the store's naive `timestamp`
+           columns: Kind=Utc is not rejected, Npgsql infers `timestamptz` and PostgreSQL zone-shifts it. */
+        command.Parameters.AddWithValue(
+            DateTime.SpecifyKind(nowUtc - DarlingPgCpuUtilizationReader.Freshness, DateTimeKind.Unspecified));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            map[reader.GetInt32(0)] = Convert.ToDouble(reader.GetValue(1));
+        }
+
+        return map;
+    }
+
     private static async Task<Dictionary<int, MemoryRow>> ReadMemoryAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         var map = new Dictionary<int, MemoryRow>();
@@ -897,93 +962,6 @@ GROUP BY server_id, collector_name";
         return map;
     }
 
-    /// <summary>
-    /// Per-server <see cref="CollectorCadenceSample"/> lists for the cadence-aware stale threshold (#3236):
-    /// each enabled scheduled collector's newest run beside the cadence the store actually schedules it on.
-    /// Shared with <c>list_servers</c> so the fleet card and the discovery row cannot band the same server's
-    /// freshness differently — the #2473 lesson, applied before the drift exists this time.
-    /// </summary>
-    internal static async Task<Dictionary<int, List<CollectorCadenceSample>>> ReadCollectorCadenceSamplesAsync(
-        NpgsqlDataSource postgres, DateTime now, CancellationToken cancellationToken = default)
-    {
-        var overrides = await ReadScheduleOverridesAsync(postgres, cancellationToken);
-
-        var map = new Dictionary<int, List<CollectorCadenceSample>>();
-        await using var command = postgres.CreateCommand(FleetCollectorCadenceSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        AddTimestamp(command, DateTime.SpecifyKind(now.AddHours(-48), DateTimeKind.Unspecified));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            if (reader.IsDBNull(2))
-            {
-                continue;
-            }
-
-            var serverId = reader.GetInt32(0);
-            var sample = BuildCadenceSample(reader.GetString(1), reader.GetDateTime(2), serverId, overrides);
-            if (sample is not CollectorCadenceSample value)
-            {
-                continue;
-            }
-
-            if (!map.TryGetValue(serverId, out var list))
-            {
-                list = new List<CollectorCadenceSample>();
-                map[serverId] = list;
-            }
-
-            list.Add(value);
-        }
-
-        return map;
-    }
-
-    /// <summary>
-    /// One (server, collector, newest run) row resolved to a cadence sample, or null when the collector must
-    /// not vouch for the server's freshness: unknown to this build's <see cref="CollectorScheduleDefaults"/>
-    /// (a store written by a newer build — <see cref="StoreConfigProvider.ResolveSchedule"/> would throw on
-    /// it, and a schedule this build cannot know is not one it can band against), disabled on this server's
-    /// effective schedule (a cadence nothing runs on), or on-load (<c>FrequencyMinutes == 0</c> — those run
-    /// on connects, not on the loop this band watches). Every exclusion falls toward the flat floor, which
-    /// is the direction that still bands a genuinely quiet server.
-    /// </summary>
-    internal static CollectorCadenceSample? BuildCadenceSample(
-        string collectorName, DateTime lastRunUtc, int serverId, IReadOnlyList<ScheduleOverride> overrides)
-    {
-        if (!CollectorScheduleDefaults.All.ContainsKey(collectorName))
-        {
-            return null;
-        }
-
-        var effective = StoreConfigProvider.ResolveSchedule(collectorName, serverId, overrides);
-        if (!effective.Enabled || effective.FrequencyMinutes <= 0)
-        {
-            return null;
-        }
-
-        return new CollectorCadenceSample(lastRunUtc, effective.FrequencyMinutes);
-    }
-
-    private static async Task<List<ScheduleOverride>> ReadScheduleOverridesAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
-    {
-        var overrides = new List<ScheduleOverride>();
-        await using var command = postgres.CreateCommand(FleetScheduleOverridesSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            overrides.Add(new ScheduleOverride(
-                reader.IsDBNull(0) ? null : reader.GetInt32(0),
-                reader.GetString(1),
-                reader.IsDBNull(2) ? null : reader.GetInt32(2),
-                reader.IsDBNull(3) ? null : reader.GetInt32(3),
-                reader.GetBoolean(4)));
-        }
-
-        return overrides;
-    }
-
     /// <summary>Reads the cross-server 7-day collector health and counts each server's HEALTHY / FAILING
     /// collectors through the shared <see cref="CollectorHealth.HealthStatus"/> banding.</summary>
     private static async Task<Dictionary<int, CollectorCounts>> ReadFailingCollectorCountsAsync(
@@ -1034,19 +1012,19 @@ GROUP BY server_id, collector_name";
 
     /* ─────────────────────────── raw-read carriers (internal) ─────────────────────────── */
 
-    private readonly record struct FleetServerRow(int ServerId, string DisplayName, string ServerName, int? EngineEdition, string? EngineKind, bool IsSilenced);
-    private readonly record struct CpuRow(double? SqlCpu, double? OtherCpu);
-    private readonly record struct MemoryRow(double? MemoryMb, double? BufferPoolMb);
-    private readonly record struct MemoryPressureRow(long WaiterCount, long TimeoutCount, long ForcedCount, double? GrantedMemoryMb);
-    private readonly record struct ThreadsRow(int? TotalThreads, int? CurrentWorkers, int RunnableTasks, long WorkQueue);
-    private readonly record struct BlockingRow(int XeCount, long XeMaxWait, int DmvCount, long DmvMaxWait);
-    private readonly record struct DeadlockRow(int Count, DateTime? LastSeen);
+    internal readonly record struct FleetServerRow(int ServerId, string DisplayName, string ServerName, int? EngineEdition, string? EngineKind, bool IsSilenced);
+    internal readonly record struct CpuRow(double? SqlCpu, double? OtherCpu);
+    internal readonly record struct MemoryRow(double? MemoryMb, double? BufferPoolMb);
+    internal readonly record struct MemoryPressureRow(long WaiterCount, long TimeoutCount, long ForcedCount, double? GrantedMemoryMb);
+    internal readonly record struct ThreadsRow(int? TotalThreads, int? CurrentWorkers, int RunnableTasks, long WorkQueue);
+    internal readonly record struct BlockingRow(int XeCount, long XeMaxWait, int DmvCount, long DmvMaxWait);
+    internal readonly record struct DeadlockRow(int Count, DateTime? LastSeen);
     /// <param name="DeadlockBand">The <c>deadlocks</c> collector's own 7-day band for this server, or null
     /// when that collector left no row in the health window at all (#3017). Null and
     /// <see cref="CollectorHealthClassifier.NeverRun"/> mean the same thing to a reader and take the same
     /// action, but they arrive differently: null is the absent GROUP, NEVER_RUN would be a present group with
     /// no runs in it.</param>
-    private readonly record struct CollectorCounts(int Healthy, int Failing, string? DeadlockBand = null);
+    internal readonly record struct CollectorCounts(int Healthy, int Failing, string? DeadlockBand = null);
 }
 
 /// <summary>
@@ -1139,22 +1117,17 @@ public sealed class FleetServerCard
     [JsonPropertyName("awaiting_first_collection")] public bool AwaitingFirstCollection { get; init; }
 
     /// <summary>
-    /// The newest collection has lagged past this server's stale threshold without being old enough to call
-    /// the server dark — <see cref="ServerFreshness.Stale"/>, from
+    /// The newest collection has lagged past <see cref="ServerHealthThresholds.StaleThreshold"/> without being
+    /// old enough to call the server dark — <see cref="ServerFreshness.Stale"/>, from
     /// <see cref="ServerCollectionStatusRules.FlagsFor"/>. It is what bands an otherwise-calm card Warning.
-    /// The threshold is the server's own (#3236): each enabled collector's newest run against its effective
-    /// cadence (<see cref="ServerHealthClassifier.EffectiveStaleThreshold"/>), never the flat two-minute
-    /// floor alone — 14 healthy Aurora targets on a legitimate 5-minute <c>pg_cpu_utilization</c> rhythm
-    /// banded Warning together on that floor.
     ///
     /// <para><b>Derivable from this same payload, which is the point.</b> The flag is a function of
-    /// <c>last_collection</c> against the roll-up's <c>generated_at</c> and this card's own
-    /// <c>stale_threshold_minutes</c>, and <c>status</c> reads <c>"Warning"</c> whenever it is true on a
-    /// reachable server. A reader who cannot check a field's name against its population has to trust the
-    /// name, and #3098 measured what that costs on this one: two agents drew four wrong conclusions from it
-    /// in a single day, one of them a retracted claim about WHEN a cluster of collector errors happened.
-    /// Every field on this card that cannot be recomputed from the card is one more that has to be
-    /// trusted.</para>
+    /// <c>last_collection</c> against the roll-up's <c>generated_at</c>, and <c>status</c> reads
+    /// <c>"Warning"</c> whenever it is true on a reachable server. A reader who cannot check a field's name
+    /// against its population has to trust the name, and #3098 measured what that costs on this one: two
+    /// agents drew four wrong conclusions from it in a single day, one of them a retracted claim about WHEN a
+    /// cluster of collector errors happened. Every field on this card that cannot be recomputed from the card
+    /// is one more that has to be trusted.</para>
     ///
     /// <para><b>Not an error signal, and there are two that are.</b> <c>failed_collector_count</c> counts
     /// collectors currently failing and <c>collector_severity</c> bands it. Those and this one disagree
@@ -1164,18 +1137,33 @@ public sealed class FleetServerCard
     [JsonPropertyName("collection_stale")] public bool CollectionStale { get; init; }
     [JsonPropertyName("last_collection")] public DateTime? LastCollectionTime { get; init; }
 
-    /// <summary>
-    /// The stale cutoff <see cref="CollectionStale"/> was decided against, in minutes — what keeps that flag
-    /// recomputable from the card now that the threshold is per-server (#3236): stale is
-    /// <c>generated_at - last_collection</c> past this, on a card that is not Offline. The flat two-minute
-    /// floor when no enabled scheduled collector has a recent run; otherwise the age at which the last
-    /// current collector's own <c>2 x cadence</c> window expires.
-    /// </summary>
-    [JsonPropertyName("stale_threshold_minutes")] public double StaleThresholdMinutes { get; init; }
-
+    /// <summary>SQL Server's OWN share of host CPU, from the ring buffer. Null on Azure SQL DB and on every
+    /// PostgreSQL target: Performance Insights reports the host total and no per-process breakdown, so there
+    /// is no value to put here and filling it from the total would claim an attribution nothing measured.
+    /// <see cref="CpuSource"/> says which arm answered — do not infer it from this field being null.</summary>
     [JsonPropertyName("cpu_percent")] public double? CpuPercent { get; init; }
+
+    /// <summary>Non-database CPU on the host, from the ring buffer. Null wherever <see cref="CpuPercent"/>
+    /// is, and additionally on SQL Server on Linux before 2025 CU1 (<c>SystemIdle</c> reports 0 there, so
+    /// the host share is not derivable).</summary>
     [JsonPropertyName("other_process_cpu_percent")] public double? OtherProcessCpuPercent { get; init; }
+
+    /// <summary>Total non-idle host CPU — the quantity <see cref="CpuSeverity"/> bands, and the one field
+    /// that is populated on BOTH engines (#3267). SQL Server's ring buffer reaches it as
+    /// <c>sqlserver + other_process</c>; a PostgreSQL/Aurora target's is Performance Insights'
+    /// <c>os.cpuUtilization.total.avg</c> verbatim.</summary>
     [JsonPropertyName("total_cpu_percent")] public double? TotalCpuPercent { get; init; }
+
+    /// <summary>The Performance Insights instance reading on its own (#2719/#3267) — the same number
+    /// <see cref="TotalCpuPercent"/> carries on a PostgreSQL target, published separately so a consumer can
+    /// see the raw per-source value without unpicking the fallback. Null on every SQL Server target.</summary>
+    [JsonPropertyName("instance_cpu_percent")] public double? InstanceCpuPercent { get; init; }
+
+    /// <summary>Which collector produced this card's CPU number, and when there is none, which of the two
+    /// reasons (#3267). The default arm is <see cref="FleetCpuSource.NotCollected"/>, so a card built
+    /// without either reading claims nothing rather than sitting at an arm that means "measured".</summary>
+    [JsonPropertyName("cpu_source")] public FleetCpuSource CpuSource { get; init; }
+
     [JsonPropertyName("cpu_severity")] public HealthSeverity CpuSeverity { get; init; }
 
     [JsonPropertyName("memory_mb")] public double? MemoryMb { get; init; }
@@ -1235,10 +1223,13 @@ public sealed class FleetServerCard
     internal ServerHealthMetrics ToHealthMetrics() => new()
     {
         CpuPercentForAlert = TotalCpuPercent ?? CpuPercent,
-        HasMemoryPressure = HasMemoryPressure,
-        BlockingCount = BlockingCount,
+        /* Re-derived from IsPostgres rather than read back off the published counts, because those are
+           deliberately left as zeros (#3017) — reading them here would hand the ranking a measurement the
+           card's own severity says it does not have. */
+        HasMemoryPressure = ServerMetricSources.DmvSourced(HasMemoryPressure, IsPostgres),
+        BlockingCount = ServerMetricSources.DmvSourced(BlockingCount, IsPostgres),
         MaxBlockedSeconds = MaxBlockingWaitMs / 1000.0,
-        DeadlockCount = DeadlockCount,
+        DeadlockCount = ServerMetricSources.DmvSourced(DeadlockCount, IsPostgres),
         TotalThreads = TotalThreads,
         AvailableThreads = AvailableThreads,
         ThreadsWaitingForCpu = ThreadsWaitingForCpu,

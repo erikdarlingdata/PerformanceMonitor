@@ -206,7 +206,7 @@ public sealed class ViewerServerSummaryDisplayTests
     {
         /* Never-collected is DISTINCT from Offline: during a slow fleet bootstrap a queued server
            must not render the red "data stopped" overlay (24-server field incident, 2026-07-17). */
-        Assert.Equal(ServerFreshness.NeverCollected, ServerSummaryItem.ClassifyFreshness(null, Now, ServerHealthThresholds.StaleThreshold));
+        Assert.Equal(ServerFreshness.NeverCollected, ServerSummaryItem.ClassifyFreshness(null, Now));
     }
 
     [Theory]
@@ -223,14 +223,14 @@ public sealed class ViewerServerSummaryDisplayTests
     public void ClassifyFreshness_BandsByAge(int ageSeconds, ServerFreshness expected)
     {
         var lastCollection = Now.AddSeconds(-ageSeconds);
-        Assert.Equal(expected, ServerSummaryItem.ClassifyFreshness(lastCollection, Now, ServerHealthThresholds.StaleThreshold));
+        Assert.Equal(expected, ServerSummaryItem.ClassifyFreshness(lastCollection, Now));
     }
 
     [Fact]
     public void ApplyFreshness_Fresh_IsOnline()
     {
         var item = new ServerSummaryItem { LastCollectionTime = Now.AddSeconds(-30) };
-        item.ApplyFreshness(Now, ServerHealthThresholds.StaleThreshold);
+        item.ApplyFreshness(Now);
         Assert.True(item.IsOnline);
         Assert.False(item.CollectionStale);
         Assert.False(item.IsOffline);
@@ -241,7 +241,7 @@ public sealed class ViewerServerSummaryDisplayTests
     public void ApplyFreshness_Stale_IsWarning()
     {
         var item = new ServerSummaryItem { LastCollectionTime = Now.AddMinutes(-5) };
-        item.ApplyFreshness(Now, ServerHealthThresholds.StaleThreshold);
+        item.ApplyFreshness(Now);
         Assert.True(item.IsOnline);
         Assert.True(item.CollectionStale);
         Assert.False(item.IsOffline);
@@ -252,14 +252,14 @@ public sealed class ViewerServerSummaryDisplayTests
     public void ApplyFreshness_Offline_ShowsOverlay()
     {
         var offlineByAge = new ServerSummaryItem { LastCollectionTime = Now.AddMinutes(-31) };
-        offlineByAge.ApplyFreshness(Now, ServerHealthThresholds.StaleThreshold);
+        offlineByAge.ApplyFreshness(Now);
         Assert.False(offlineByAge.IsOnline);
         Assert.True(offlineByAge.IsOffline);
         Assert.Equal("Offline", offlineByAge.StatusDisplay);
 
         /* No collection EVER is not an outage — it renders as the amber awaiting state. */
         var neverCollected = new ServerSummaryItem { LastCollectionTime = null };
-        neverCollected.ApplyFreshness(Now, ServerHealthThresholds.StaleThreshold);
+        neverCollected.ApplyFreshness(Now);
         Assert.Null(neverCollected.IsOnline);
         Assert.False(neverCollected.IsOffline);
         Assert.True(neverCollected.AwaitingFirstCollection);
@@ -268,7 +268,7 @@ public sealed class ViewerServerSummaryDisplayTests
 
         /* And a later real collection clears the awaiting state through the same path. */
         neverCollected.LastCollectionTime = Now.AddSeconds(-30);
-        neverCollected.ApplyFreshness(Now, ServerHealthThresholds.StaleThreshold);
+        neverCollected.ApplyFreshness(Now);
         Assert.False(neverCollected.AwaitingFirstCollection);
         Assert.True(neverCollected.IsOnline);
         Assert.Equal("Online", neverCollected.StatusDisplay);
@@ -339,11 +339,11 @@ public sealed class ViewerServerSummaryDisplayTests
     public void CardBorderBrush_RedForDeadlock_DefaultOtherwise()
     {
         var deadlocked = new ServerSummaryItem { DeadlockCount = 1, LastCollectionTime = Now };
-        deadlocked.ApplyFreshness(Now, ServerHealthThresholds.StaleThreshold);
+        deadlocked.ApplyFreshness(Now);
         Assert.Equal("#FFE57373", deadlocked.CardBorderBrush.Color.ToString());
 
         var calm = new ServerSummaryItem { LastCollectionTime = Now };
-        calm.ApplyFreshness(Now, ServerHealthThresholds.StaleThreshold);
+        calm.ApplyFreshness(Now);
         Assert.Equal("#FF2A2D35", calm.CardBorderBrush.Color.ToString());
     }
 
@@ -557,11 +557,11 @@ public sealed class ViewerServerSummaryDisplayTests
         {
             TotalThreads = 512, CurrentWorkers = 100, RequestsWaitingForThreads = 1, LastCollectionTime = Now,
         };
-        threadsCritical.ApplyFreshness(Now, ServerHealthThresholds.StaleThreshold);
+        threadsCritical.ApplyFreshness(Now);
         Assert.Equal("#FFE57373", threadsCritical.CardBorderBrush.Color.ToString());
 
         var collectorsWarning = new ServerSummaryItem { FailedCollectorCount = 1, LastCollectionTime = Now };
-        collectorsWarning.ApplyFreshness(Now, ServerHealthThresholds.StaleThreshold);
+        collectorsWarning.ApplyFreshness(Now);
         Assert.Equal("#FFFFD54F", collectorsWarning.CardBorderBrush.Color.ToString());
     }
 
@@ -708,7 +708,7 @@ public sealed class ViewerW2aLivePostgresTests
 
             var summary = await viewer.GetServerSummaryAsync(SummaryServerId, "Summary E2E");
             summary.ServerName = ServerName;
-            summary.ApplyFreshness(DateTime.UtcNow, ServerHealthThresholds.StaleThreshold);
+            summary.ApplyFreshness(DateTime.UtcNow);
 
             Assert.Equal(42.0, summary.CpuPercent);
             Assert.Equal(8.0, summary.OtherProcessCpuPercent);

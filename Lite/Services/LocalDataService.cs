@@ -33,21 +33,6 @@ public partial class LocalDataService
     }
 
     /// <summary>
-    /// #3236: the app-installed lookup from a storage server id to that server's effective per-collector
-    /// cadences — collector name → <c>FrequencyMinutes</c>, for the ENABLED, scheduled
-    /// (<c>FrequencyMinutes &gt; 0</c>) collectors only — off the live <c>ScheduleManager</c>, which this
-    /// data-only service cannot reference. Installed ONCE at startup rather than passed per call, because
-    /// the freshness band is stamped where the summary is BUILT precisely so it cannot depend on which
-    /// caller asked (see <see cref="GetServerSummaryAsync"/>); a per-call parameter would hand every
-    /// caller that decision back. Null — never installed, or no server matches the id — means the summary
-    /// bands on the flat <see cref="PerformanceMonitor.Common.ServerHealthThresholds.StaleThreshold"/>
-    /// floor, the pre-#3236 reading. A Lite install on the shipped Low-Impact preset runs EVERY collector
-    /// at 5+ minutes, so without this the Last Collect row read "(stale)" for three of every five minutes
-    /// on a perfectly healthy server.
-    /// </summary>
-    public Func<int, IReadOnlyDictionary<string, int>?>? EffectiveCadenceLookup { get; set; }
-
-    /// <summary>
     /// Creates and opens a DuckDB connection wrapped in a read lock.
     /// The lock prevents CHECKPOINT and compaction from reorganizing the database file
     /// while this connection is reading from it.
