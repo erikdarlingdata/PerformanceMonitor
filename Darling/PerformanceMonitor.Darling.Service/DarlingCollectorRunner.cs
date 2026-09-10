@@ -1096,8 +1096,8 @@ public sealed class DarlingCollectorRunner
         /* The engine's provider, resolved ONCE for both branches. It used to be resolved only inside the
            per-database branch, and the branch below opened a hardcoded SqlConnection — so every collector
            that does NOT fan out per database was handed a SQL Server connection whatever the target was.
-           Six of the seven PostgreSQL collectors take that path (only pg_autovacuum_stats fans out), and
-           SqlClient rejects Npgsql's keywords while parsing the connection string, before any query runs:
+           Six of the seven PostgreSQL collectors then shipping took that path (only pg_autovacuum_stats
+           fanned out), and SqlClient rejects Npgsql's keywords while parsing the connection string, before any query runs:
            "Keyword not supported: 'host'". Worse, an ArgumentException is neither SqlException nor
            PostgresException, so it missed BOTH classification arms in DarlingWorker and recorded a raw
            ERROR every sweep forever — including for all three Tier 0 outage predictors. */
@@ -4627,8 +4627,8 @@ RETURNING s.state_key";
     /// The connection for a collector that reads the server as a whole — engine-resolved from the probed
     /// target, never constructed directly.
     /// <para>Extracted so it can be PINNED by test. This is the exact seam that broke: the non-per-database
-    /// branch built a <c>SqlConnection</c> literally, so six of the seven PostgreSQL collectors got a SQL
-    /// Server connection and failed in the connection-string parser before running a query. Both engines'
+    /// branch built a <c>SqlConnection</c> literally, so six of the seven PostgreSQL collectors then
+    /// shipping got a SQL Server connection and failed in the connection-string parser before running a query. Both engines'
     /// providers were already correct and individually tested — nothing asserted that the RUNNER asked them.
     /// A test that opens nothing and only checks the returned TYPE is enough to catch it, which is why it is
     /// worth having.</para>
