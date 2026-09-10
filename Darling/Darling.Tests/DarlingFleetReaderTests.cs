@@ -152,34 +152,6 @@ public sealed class DarlingFleetReaderSqlTests
     }
 
     /// <summary>
-    /// #3236: the per-(server, collector) newest-run aggregate the cadence-aware stale threshold reads —
-    /// windowed like <see cref="DarlingFleetReader.FleetLastCollectionSql"/> (same chunk-exclusion
-    /// argument), grouped per collector, and with NO status filter: freshness is the rows-are-landing axis,
-    /// and a collector erroring on schedule is still landing rows.
-    /// </summary>
-    [Fact]
-    public void FleetCollectorCadenceSql_PerCollectorNewestRun_Windowed_AnyStatus()
-    {
-        var sql = DarlingFleetReader.FleetCollectorCadenceSql;
-        Assert.Contains("FROM v_collection_log", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY server_id, collector_name", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("status", sql, StringComparison.OrdinalIgnoreCase);
-    }
-
-    /// <summary>
-    /// #3236: the override read matches the worker's own (<c>StoreConfigProvider.ReadScheduleOverridesAsync</c>)
-    /// column-for-column, so the threshold resolves through EXACTLY the schedule the sweep runs on.
-    /// </summary>
-    [Fact]
-    public void FleetScheduleOverridesSql_MatchesTheWorkersOwnRead()
-    {
-        Assert.Equal(
-            "SELECT server_id, collector_name, frequency_minutes, retention_days, enabled FROM config_collector_schedules",
-            DarlingFleetReader.FleetScheduleOverridesSql);
-    }
-
-    /// <summary>
     /// The read-only fleet-tag join (#2020): every (server, tag) assignment, joined to the tag for its name and
     /// stored colour, ordered so a card's pills are stable. Bare table names resolve through the store's
     /// search_path to the config-schema tag tables, the same way FleetServersSql reads servers / config_mute_rules.
@@ -222,8 +194,6 @@ public sealed class DarlingFleetReaderSqlTests
     [InlineData(nameof(DarlingFleetReader.FleetDeadlockSql))]
     [InlineData(nameof(DarlingFleetReader.FleetLastCollectionSql))]
     [InlineData(nameof(DarlingFleetReader.FleetCollectionHealthSql))]
-    [InlineData(nameof(DarlingFleetReader.FleetCollectorCadenceSql))]
-    [InlineData(nameof(DarlingFleetReader.FleetScheduleOverridesSql))]
     public void EveryFleetSql_IsPgDialect_NoTSql(string constName)
     {
         var sql = (string)typeof(DarlingFleetReader).GetField(constName, BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
@@ -824,68 +794,4 @@ public sealed class DarlingFleetReaderLivePostgresTests
             await cleanup.ExecuteNonQueryAsync(ct);
         }
     }
-}
-
-/// <summary>
-/// #3236: the per-row voucher decision behind the cadence-aware stale threshold —
-/// <see cref="DarlingFleetReader.BuildCadenceSample"/>, pure over (collector, newest run, server, the
-/// sparse overrides). The resolution is <c>StoreConfigProvider.ResolveSchedule</c>'s (per-server &gt;
-/// fleet-wide &gt; code default), so these pin that the threshold honors the schedule the sweep actually
-/// runs — and that every exclusion (disabled, on-load, a collector this build has never heard of) falls
-/// toward the flat floor rather than widening anything.
-/// </summary>
-public sealed class DarlingFleetCadenceSampleTests
-{
-    private static readonly DateTime LastRun = new(2026, 9, 6, 12, 0, 0, DateTimeKind.Unspecified);
-    private static readonly System.Collections.Generic.List<PerformanceMonitor.Darling.Service.ScheduleOverride> NoOverrides = new();
-
-    [Fact]
-    public void NoOverrides_ResolvesTheCodeDefaultCadence()
-    {
-        var sample = DarlingFleetReader.BuildCadenceSample("pg_cpu_utilization", LastRun, serverId: 7, NoOverrides);
-
-        Assert.Equal(new CollectorCadenceSample(LastRun, 5), sample);
-    }
-
-    [Fact]
-    public void APerServerOverride_WinsOverAFleetWideOne()
-    {
-        var overrides = new System.Collections.Generic.List<PerformanceMonitor.Darling.Service.ScheduleOverride>
-        {
-            new(null, "pg_wait_stats", 10, null, true),
-            new(7, "pg_wait_stats", 30, null, true),
-        };
-
-        Assert.Equal(
-            new CollectorCadenceSample(LastRun, 30),
-            DarlingFleetReader.BuildCadenceSample("pg_wait_stats", LastRun, serverId: 7, overrides));
-
-        /* A different server sees only the fleet layer. */
-        Assert.Equal(
-            new CollectorCadenceSample(LastRun, 10),
-            DarlingFleetReader.BuildCadenceSample("pg_wait_stats", LastRun, serverId: 8, overrides));
-    }
-
-    [Fact]
-    public void ADisabledCollector_VouchesForNothing()
-    {
-        var overrides = new System.Collections.Generic.List<PerformanceMonitor.Darling.Service.ScheduleOverride>
-        {
-            new(7, "pg_wait_stats", null, null, false),
-        };
-
-        Assert.Null(DarlingFleetReader.BuildCadenceSample("pg_wait_stats", LastRun, serverId: 7, overrides));
-    }
-
-    [Fact]
-    public void AnOnLoadCollector_VouchesForNothing() =>
-        /* server_config's default FrequencyMinutes is 0: it runs on connects, not on the loop this
-           band watches. */
-        Assert.Null(DarlingFleetReader.BuildCadenceSample("server_config", LastRun, serverId: 7, NoOverrides));
-
-    [Fact]
-    public void ACollectorThisBuildDoesNotKnow_VouchesForNothing() =>
-        /* A store written by a newer build: no default row means no schedule this build can band
-           against — and no KeyNotFoundException out of the resolver, which indexes the defaults. */
-        Assert.Null(DarlingFleetReader.BuildCadenceSample("pg_collector_from_the_future", LastRun, serverId: 7, NoOverrides));
 }

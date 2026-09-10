@@ -417,11 +417,10 @@ public sealed class ServerSummaryItem
     public System.Collections.Generic.IReadOnlyList<ServerTagPill> TagPills { get; set; } =
         System.Array.Empty<ServerTagPill>();
 
-    /// <summary>Warning (amber) state: the newest collection has lagged past this server's stale threshold —
-    /// cadence-aware where the loader supplied samples, the flat
-    /// <see cref="ServerHealthThresholds.StaleThreshold"/> floor otherwise (#3236). Freshness only —
-    /// collectors that are failing are counted by <see cref="FailedCollectorCount"/> and banded by
-    /// <see cref="CollectorSeverity"/>, and the two axes disagree routinely and correctly (#3098).</summary>
+    /// <summary>Warning (amber) state: the newest collection has lagged past
+    /// <see cref="ServerHealthThresholds.StaleThreshold"/>. Freshness only — collectors that are failing are
+    /// counted by <see cref="FailedCollectorCount"/> and banded by <see cref="CollectorSeverity"/>, and the two
+    /// axes disagree routinely and correctly (#3098).</summary>
     public bool CollectionStale { get; set; }
 
     /// <summary>
@@ -775,16 +774,13 @@ public sealed class ServerSummaryItem
     }
 
     /// <summary>
-    /// The viewer's status derivation (#1262): classify how fresh the newest collection is, against this
-    /// server's own stale cutoff (#3236) — <see cref="ServerHealthClassifier.EffectiveStaleThreshold"/>
-    /// over the cadence samples <c>ViewerDataService.GetCollectorCadenceSamplesAsync</c> reads, or the flat
-    /// <see cref="ServerHealthThresholds.StaleThreshold"/> when the caller has none. Pure over
-    /// (last-collection, now, threshold) so it can be pinned without a store. Both instants are UTC (the
-    /// store is naive UTC; <paramref name="nowUtc"/> is <see cref="DateTime.UtcNow"/>), so the subtraction
-    /// is a true elapsed-time regardless of Kind.
+    /// The viewer's status derivation (#1262): classify how fresh the newest collection is. Pure over
+    /// (last-collection, now) so it can be pinned without a store. Both instants are UTC (the store is
+    /// naive UTC; <paramref name="nowUtc"/> is <see cref="DateTime.UtcNow"/>), so the subtraction is a
+    /// true elapsed-time regardless of Kind.
     /// </summary>
-    public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc, TimeSpan staleThreshold) =>
-        ServerHealthClassifier.ClassifyFreshness(lastCollectionUtc, nowUtc, staleThreshold);
+    public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc) =>
+        ServerHealthClassifier.ClassifyFreshness(lastCollectionUtc, nowUtc);
 
     /// <summary>
     /// Maps the freshness band onto the card's three status flags, taking the live-ping's place: Fresh →
@@ -796,15 +792,10 @@ public sealed class ServerSummaryItem
     /// row and the service's fleet reader. It was written out here in longhand, and the sidebar's longhand
     /// copy set two of the three flags and dropped <c>AwaitingFirstCollection</c> — an omission that is
     /// invisible in a block of assignments and impossible when the three arrive together (#2473).</para>
-    ///
-    /// <para><paramref name="staleThreshold"/> is REQUIRED rather than defaulted (#3236): every caller must
-    /// decide which cutoff this server bands on — the cadence-aware one where samples exist, the flat
-    /// <see cref="ServerHealthThresholds.StaleThreshold"/> where they do not — because a defaulted flat
-    /// value is exactly the silent drift that had the fleet card and this card answering differently.</para>
     /// </summary>
-    public void ApplyFreshness(DateTime nowUtc, TimeSpan staleThreshold)
+    public void ApplyFreshness(DateTime nowUtc)
     {
-        var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, nowUtc, staleThreshold));
+        var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, nowUtc));
         IsOnline = flags.IsOnline;
         CollectionStale = flags.CollectionStale;
         AwaitingFirstCollection = flags.AwaitingFirstCollection;

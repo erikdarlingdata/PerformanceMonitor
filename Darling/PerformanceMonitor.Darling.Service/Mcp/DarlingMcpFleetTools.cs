@@ -38,12 +38,7 @@ public sealed class DarlingMcpFleetTools
         "blocking, deadlocks, worker threads, and collector health, each with a Healthy/Warning/Critical band), " +
         "plus a rollup — counts by band, cross-server blocking and deadlock totals, and a worst-first 'needs " +
         "attention' ranking. Use this first to decide which server to drill into, then call the per-server tools. " +
-        "This cross-server view is unique to the central store. A card's collection_stale flag is cadence-aware: " +
-        "a server bands stale only when every enabled collector is overdue against its OWN effective schedule " +
-        "(twice its cadence, floored at 2 minutes), so a target whose collectors legitimately run every 5 " +
-        "minutes is not stale 4 minutes after its last collection. stale_threshold_minutes on each card is the " +
-        "cutoff that card was decided against — collection_stale is exactly generated_at minus last_collection " +
-        "exceeding it on a card that is not Offline.")]
+        "This cross-server view is unique to the central store.")]
     public static async Task<string> GetFleetOverview(
         NpgsqlDataSource postgres,
         [Description("Hours of blocking/deadlock history the per-server cards and fleet totals window over. Default 1.")] int hours_back = 1)
