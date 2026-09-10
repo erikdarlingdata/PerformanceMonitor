@@ -21,18 +21,20 @@ using PerformanceMonitor.Darling.Storage;
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
-/// The MCP surface for MEASURED index bloat and for column distribution statistics — the two PostgreSQL
+/// The MCP surface for ESTIMATED index bloat and for column distribution statistics — the two PostgreSQL
 /// reads that answer "why is this plan shaped like that", paired with the <c>pg_index_bloat</c> and
 /// <c>pg_column_stats</c> collectors (#2629).
 ///
 /// <para>
-/// <c>get_pg_index_bloat</c> is the measured counterpart of <c>get_pg_table_bloat</c>, and the difference
-/// is the whole point: table bloat is ESTIMATED from statistics and is suppressed when those statistics
-/// cannot be trusted, while this reads <c>pgstatindex</c>, which walks the index. That costs real I/O, so
-/// the collector measures a bounded slice per cycle, ROTATES that slice down the size order, and LABELS
-/// the rest rather than dropping them — a row carrying <c>skipped_reason</c> is a real index that was not
-/// measured, not a healthy one, and the reason distinguishes an index that is DEFERRED to a later cycle
-/// from one that is over the measurement ceiling and never measured at all (#3153).
+/// <c>get_pg_index_bloat</c> and <c>get_pg_table_bloat</c> are now the same KIND of read: both estimate
+/// from catalog statistics and both suppress the figure when the statistics cannot support one. #3234
+/// changed index bloat from a <c>pgstatindex</c> census to that shape, because walking every page of every
+/// index is the analogue of <c>DETAILED</c> index physical stats on SQL Server and nobody schedules
+/// <c>DETAILED</c> against production. A row carrying <c>skipped_reason</c> therefore has NO answer rather
+/// than a healthy one, and the reason separates the remediable — a never-analyzed parent, invisible column
+/// widths — from the structural, being a PARTIAL or DEDUPLICATED index that no statistics model can reach
+/// at any grant or freshness. Those are what <c>exact_measurement_command</c> is for, and it is the
+/// <c>pgstatindex</c> call this tool used to make on a schedule.
 /// </para>
 ///
 /// <para><b>Row counts differ from <c>get_pg_index_usage</c> by design</b> (#3158):

@@ -22,8 +22,8 @@ namespace Darling.Tests;
 /// (#3153) — the read-side half of rotation, and the half that decides whether rotation is visible to an
 /// operator at all.
 ///
-/// <para><b>Why this needed its own test.</b> The collector now measures a rotating slice, so every index
-/// gets a row on every cycle and most of those rows are labels. The read took
+/// <para><b>Why this needed its own test.</b> When it was written the collector measured a rotating
+/// slice, so every index got a row on every cycle and most of those rows were labels. The read took
 /// <c>DISTINCT ON (index identity) ... ORDER BY collection_time DESC</c> — the newest ROW — which is the
 /// newest LABEL for any index the current cycle passed over. Measured on a two-cycle store: an index
 /// measured at 72.5% density with 194 MB estimated reclaimable came back the next day with no density, no

@@ -932,12 +932,17 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
-    /// Measured index bloat (#2561), under index usage — the two are halves of one question.
+    /// Estimated index bloat (#3234), under index usage — the two are halves of one question.
     ///
-    /// <para>The note leads with RECLAIMABLE BYTES rather than a worst-density figure, because density
-    /// alone ranks the wrong thing: a tiny index at 20% looks alarming and is worth kilobytes. It also has
-    /// to say that a healthy index measures near 90 rather than 100, or the first person to read the density
-    /// column concludes every index in the fleet is 10% bloated.</para>
+    /// <para>The note leads with RECLAIMABLE BYTES rather than a worst-percentage figure, because a
+    /// percentage ranks the wrong thing: a tiny index at 20% looks alarming and is worth kilobytes. It also
+    /// has to state the accuracy, because the estimate is close enough to choose which index to act on and
+    /// not close enough to justify a REINDEX on its own — the Exact Measurement column is for that.</para>
+    ///
+    /// <para>The density caveat is still carried, but only for the rows that have one: a healthy index
+    /// measures near 90 rather than 100, so the first person to read that column would otherwise conclude
+    /// every index in the fleet is 10% bloated. Since #3234 those are the older exact rows still inside
+    /// retention, which is why the note distinguishes them rather than describing one kind of row.</para>
     /// </summary>
     private async Task LoadPgIndexBloatAsync(DateTime startUtc, DateTime endUtc)
     {

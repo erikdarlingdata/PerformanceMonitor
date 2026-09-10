@@ -4567,9 +4567,11 @@
                     </DataGrid.Columns>
                 </DataGrid>
 
-                <!-- #2561 index bloat, MEASURED via pgstatindex rather than estimated. Sits under index
-                     usage because the two are halves of one question: is this index earning its keep, and
-                     is it wasting space doing it. Ranked by reclaimable BYTES, never by density. -->
+                <!-- Index bloat, ESTIMATED from catalog statistics since #3234 with no page read. Sits
+                     under index usage because the two are halves of one question: is this index earning
+                     its keep, and is it wasting space doing it. Ranked by reclaimable BYTES, never by a
+                     percentage. The Exact Measurement column carries the pgstatindex call this panel used
+                     to be built on. -->
                 <TextBlock Grid.Row="7" x:Name="PgIndexBloatNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 <DataGrid Grid.Row="8" x:Name="PgIndexBloatGrid" Style="{StaticResource DarkGrid}"
