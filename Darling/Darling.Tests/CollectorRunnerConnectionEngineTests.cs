@@ -27,8 +27,8 @@ namespace Darling.Tests;
 ///
 /// <para><b>What this exists to catch.</b> The runner had two paths: the per-database branch resolved
 /// <c>TargetProviders.For(target)</c> correctly, and the branch serving everything else did
-/// <c>new SqlConnection(server.ConnectionString)</c> literally. Six of the seven PostgreSQL collectors take
-/// the second path — only <c>pg_autovacuum_stats</c> fans out — so they were handed a SQL Server connection.
+/// <c>new SqlConnection(server.ConnectionString)</c> literally. Six of the seven PostgreSQL collectors then
+/// shipping took the second path — only <c>pg_autovacuum_stats</c> fanned out — so they were handed a SQL Server connection.
 /// SqlClient rejects Npgsql's keywords while PARSING the connection string, before any query runs
 /// ("Keyword not supported: 'host'"), and the resulting <c>ArgumentException</c> is neither
 /// <c>SqlException</c> nor <c>PostgresException</c>, so it missed both fault-classification arms and recorded

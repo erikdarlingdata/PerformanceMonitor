@@ -293,6 +293,78 @@ public sealed class ReadmeDerivedCountPinTests
     }
 
     /// <summary>
+    /// The "What gets collected" table names EVERY PostgreSQL collector, in both directions (#3261). It sat
+    /// at 12 of 27 across five collector waves with every check green, because nothing failed when a
+    /// collector shipped without a row — the exact defect this file exists for, one resolution finer than
+    /// a count.
+    ///
+    /// <para>A bespoke fact rather than a <see cref="SetPins"/> entry, and the reason is the shared
+    /// mutation proof: <see cref="EveryPin_ReportsAnInjectedDrift"/> drops the FIRST occurrence of each
+    /// member's backticked name inside the span, and several collector names legitimately appear inside
+    /// OTHER rows before their own — <c>pg_replication_slots</c> is a SOURCE of <c>pg_xmin_horizon</c>,
+    /// whose row sits above its own. Dropping that occurrence would leave extraction intact and the shared
+    /// proof would report this pin as vacuous when it is not. So this fact carries its own drift proof,
+    /// one that deletes a whole ROW instead of a token.</para>
+    /// </summary>
+    [Fact]
+    public void WhatGetsCollectedTable_NamesEveryPostgresCollector()
+    {
+        var readme = ReadReadme();
+        var span = WhatGetsCollectedSpan(readme);
+
+        var expected = CollectorCatalog.All
+            .Where(c => c.TargetEngine == CollectorTargetEngine.PostgreSql)
+            .Select(c => c.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        var actual = RowLeadingNames(span);
+
+        var missing = expected.Except(actual, StringComparer.Ordinal)
+            .OrderBy(v => v, StringComparer.Ordinal).ToArray();
+        var extra = actual.Except(expected, StringComparer.Ordinal)
+            .OrderBy(v => v, StringComparer.Ordinal).ToArray();
+
+        Assert.True(missing.Length == 0,
+            "the What-gets-collected table: the collector catalog ships " + string.Join(", ", missing)
+            + ", which Darling/README.md's table has no row for. Add the row — a collector the inventory "
+            + "documentation does not name is one nobody installing this product knows they are running.");
+
+        Assert.True(extra.Length == 0,
+            "the What-gets-collected table: Darling/README.md has a row for " + string.Join(", ", extra)
+            + ", which is not a PostgreSQL collector in the catalog. Remove the row or fix its name.");
+
+        /* The drift proof: deleting one collector's whole row must surface as a missing member. The victim
+           is a name that appears in no other row's cells, so the proof stays about the ROW being read. */
+        var victimLine = span.Split('\n')
+            .First(l => l.StartsWith("| `pg_wraparound_stats`", StringComparison.Ordinal));
+        var mutated = span.Replace(victimLine, string.Empty, StringComparison.Ordinal);
+        Assert.NotEqual(span, mutated);
+        Assert.DoesNotContain("pg_wraparound_stats", RowLeadingNames(mutated));
+    }
+
+    /// <summary>The table's rows: everything between the header row and the paragraph after the table.</summary>
+    private static string WhatGetsCollectedSpan(string readme)
+    {
+        var match = Regex.Match(
+            readme,
+            @"\| Collector \| Source \| Cadence / retention \| Why it exists \|(.+?)\r?\n\r?\nThe two Aurora-only collectors",
+            RegexOptions.Singleline);
+
+        Assert.True(match.Success,
+            "Darling/README.md no longer contains the What-gets-collected table in the pinned shape "
+            + "(its header row, then rows, then a blank line, then the 'The two Aurora-only collectors' "
+            + "paragraph). It restates the catalog's PostgreSQL roster, so keep it parseable — a reworded "
+            + "header or a moved table has to fail here rather than quietly stop being checked.");
+
+        return match.Groups[1].Value;
+    }
+
+    /// <summary>Each row's FIRST cell — the collector the row is about, never a name inside its prose.</summary>
+    private static IReadOnlySet<string> RowLeadingNames(string span) =>
+        Regex.Matches(span, @"(?m)^\| `([a-z0-9_]+)`")
+            .Select(m => m.Groups[1].Value)
+            .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>
     /// Non-vacuity, the way <see cref="CiClusterWorkerSizingTests.ParsedSettings_Comparison_FailsOnAnInjectedDrift"/>
     /// does it: mutate a COPY of the README so each pinned number is wrong, and require the identical
     /// extraction to REPORT the mutation. If any of these passed, that pin's regex matched nothing and its
