@@ -502,7 +502,10 @@ SELECT
     /// PASS line (<c>DarlingCliCommands.FormatProbeLine</c>) and the <c>add_servers</c> MCP tool's detail
     /// text, which previously each formatted their own and could drift.
     /// <para>The engine decides what is worth saying. A SQL Server target reports version, edition and
-    /// msdb access, because msdb access gates three collectors. A PostgreSQL target has none of those,
+    /// msdb access, because msdb access gates three collectors — except Azure SQL Database, which has no
+    /// SQL Agent and no real msdb surface, so either msdb clause would claim a capability the platform
+    /// cannot have. Edition 5 reports the Agent surface as not applicable instead, matching the dispatch
+    /// gate that already keeps the Agent family off those targets (#3237). A PostgreSQL target has none of those,
     /// so it reports version, writer-vs-reader, Aurora-vs-not — and then the number that actually
     /// answers "will this target give me what I expect", which is how many of the PostgreSQL collectors
     /// clear the gate. A stock-PostgreSQL reader clears three of seven, and finding that out at
@@ -517,8 +520,12 @@ SELECT
             var edition = string.IsNullOrEmpty(probe.EngineEditionDescription)
                 ? DescribeEngineEdition(probe.EngineEdition)
                 : probe.EngineEditionDescription;
-            var msdb = probe.HasMsdbAccess ? "msdb access: yes" : "msdb access: NO (failed-job alerts unavailable)";
-            return $"SQL major version {probe.MajorVersion}, {edition}, {msdb}";
+            var agentClause = probe.IsAzureSqlDb
+                ? "Agent surface: not applicable (Azure SQL Database)"
+                : probe.HasMsdbAccess
+                    ? "msdb access: yes"
+                    : "msdb access: NO (failed-job alerts unavailable)";
+            return $"SQL major version {probe.MajorVersion}, {edition}, {agentClause}";
         }
 
         var target = probe.ToTargetInfo();
