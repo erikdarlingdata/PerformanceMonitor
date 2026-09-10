@@ -245,14 +245,67 @@ namespace PerformanceMonitor.Common
     public static class ServerHealthThresholds
     {
         /// <summary>
-        /// The fastest scheduled collector's cadence (wait_stats / cpu_utilization / memory_stats etc. all run
-        /// every minute), so MAX(collection_time) tracks a one-minute rhythm on a healthy server. Freshness bands
-        /// are multiples of this.
+        /// The cadence the flat freshness bands ASSUME, which is the fastest cadence the shipped defaults and
+        /// the Aggressive and Balanced presets actually schedule (wait_stats / cpu_utilization / memory_stats
+        /// and sixteen siblings run every minute), so MAX(collection_time) tracks a one-minute rhythm there.
+        /// It is an assumption about configuration, not a fact about every server: the Low-Impact preset's
+        /// fastest ENABLED collector runs every 5 minutes, and a store schedule override can set any cadence.
+        /// A surface that knows the server's own schedule derives its cutoff from that instead, through
+        /// <see cref="ServerHealthClassifier.EffectiveStaleThreshold"/> (#3236).
         /// </summary>
         public static readonly TimeSpan CollectorCadence = TimeSpan.FromMinutes(1);
 
-        /// <summary>Older than twice the cadence = the collection has visibly lagged (Warning).</summary>
+        /// <summary>
+        /// Older than twice the cadence = the collection has visibly lagged (Warning). This is the FLOOR: no
+        /// derived cutoff is ever tighter than it, so a one-minute fleet bands exactly as it always has, and a
+        /// caller with no schedule data bands on it alone.
+        /// </summary>
         public static readonly TimeSpan StaleThreshold = TimeSpan.FromTicks(CollectorCadence.Ticks * 2);
+
+        /// <summary>
+        /// How many of the server's own fastest cadence intervals may elapse before the collection has visibly
+        /// lagged. One missed cycle is scheduling jitter; two is a lag a human would call visible, whatever the
+        /// cadence. This is the multiplier <see cref="StaleThreshold"/> has always applied to the assumed
+        /// one-minute default, named so the derived cutoff uses the same grace rather than a second number
+        /// that can drift from it.
+        /// </summary>
+        public const int StaleCadenceGraceMultiplier = 2;
+
+        /// <summary>
+        /// The stale cutoff for a server whose fastest ENABLED scheduled collector runs every
+        /// <paramref name="fastestEnabledFrequencyMinutes"/> minutes: that cadence times
+        /// <see cref="StaleCadenceGraceMultiplier"/>, floored at <see cref="StaleThreshold"/> and capped so the
+        /// amber band cannot vanish.
+        ///
+        /// <para><b>Why the cap.</b> <see cref="ServerFreshness.Offline"/> is checked FIRST and is flat
+        /// (<see cref="OfflineThreshold"/>, the #2794 contract with the alert engine), so a cutoff at or past it
+        /// leaves no age that can band <see cref="ServerFreshness.Stale"/> at all: the amber band would be
+        /// silently deleted rather than widened. The cap reserves <see cref="StaleThreshold"/>'s own width ahead
+        /// of the Offline band, which is the narrowest amber window the flat rule ever produced, so Stale stays
+        /// reachable for every schedule. No shipped preset reaches it: the widest is Low-Impact's 5-minute
+        /// fastest cadence, giving 10 minutes against a 28-minute cap. A schedule that DOES reach it is one
+        /// whose healthy inter-collection gap approaches the Offline window, so its Offline band is unreliable
+        /// for the same reason; this cap keeps the freshness ladder honest and makes no claim to fix that.</para>
+        ///
+        /// <para>A cadence of 0 or less (on-load, disabled, or unknown to this build) yields the floor, because
+        /// such a collector runs on nothing this band watches.</para>
+        /// </summary>
+        public static TimeSpan StaleThresholdForFastestCadence(int fastestEnabledFrequencyMinutes)
+        {
+            if (fastestEnabledFrequencyMinutes <= 0)
+            {
+                return StaleThreshold;
+            }
+
+            var derived = TimeSpan.FromMinutes((double)fastestEnabledFrequencyMinutes * StaleCadenceGraceMultiplier);
+            if (derived < StaleThreshold)
+            {
+                return StaleThreshold;
+            }
+
+            var cap = OfflineThreshold - StaleThreshold;
+            return derived > cap ? cap : derived;
+        }
 
         /// <summary>
         /// The ONE default for "collection has stopped", shared by the display's Offline band and the alert
@@ -328,11 +381,25 @@ namespace PerformanceMonitor.Common
     public static class ServerHealthClassifier
     {
         /// <summary>
-        /// Classify how fresh the newest collection is. Pure over (last-collection, now). Both instants are UTC
-        /// (the store is naive UTC; <paramref name="nowUtc"/> is <see cref="DateTime.UtcNow"/>), so the
-        /// subtraction is a true elapsed-time regardless of Kind.
+        /// Classify how fresh the newest collection is against the FLAT default cutoff, for callers with no
+        /// schedule data, whose behavior is unchanged. A caller that knows the server's own schedule passes
+        /// <see cref="EffectiveStaleThreshold"/>'s answer to the three-argument overload instead (#3236).
+        /// Pure over (last-collection, now). Both instants are UTC (the store is naive UTC;
+        /// <paramref name="nowUtc"/> is <see cref="DateTime.UtcNow"/>), so the subtraction is a true
+        /// elapsed-time regardless of Kind.
         /// </summary>
-        public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc)
+        public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc) =>
+            ClassifyFreshness(lastCollectionUtc, nowUtc, ServerHealthThresholds.StaleThreshold);
+
+        /// <summary>
+        /// <see cref="ClassifyFreshness(DateTime?, DateTime)"/> with the server's own stale cutoff in place of
+        /// the flat default (#3236). The <see cref="ServerFreshness.Offline"/> band is deliberately NOT
+        /// schedule-relative and is checked FIRST: 30 minutes is the #2794 contract shared with the alert
+        /// engine's Collection Stopped window. <see cref="ServerHealthThresholds.StaleThresholdForFastestCadence"/>
+        /// caps <paramref name="staleThreshold"/> below it so the amber band stays reachable whatever the
+        /// schedule.
+        /// </summary>
+        public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc, TimeSpan staleThreshold)
         {
             if (!lastCollectionUtc.HasValue)
             {
@@ -345,12 +412,54 @@ namespace PerformanceMonitor.Common
                 return ServerFreshness.Offline;
             }
 
-            if (age > ServerHealthThresholds.StaleThreshold)
+            if (age > staleThreshold)
             {
                 return ServerFreshness.Stale;
             }
 
             return ServerFreshness.Fresh;
+        }
+
+        /// <summary>
+        /// The one stale cutoff for a server, derived from the cadences its own schedule runs (#3236): the
+        /// FASTEST enabled scheduled cadence, reduced through
+        /// <see cref="ServerHealthThresholds.StaleThresholdForFastestCadence"/>.
+        ///
+        /// <para><b>Why the fastest and not the slowest.</b> The band is a claim about
+        /// <c>MAX(collection_time)</c>, which advances whenever ANY collector lands a row, so on a healthy
+        /// server it tracks the fastest cadence enabled on it. The slowest collector cannot pace that maximum,
+        /// and letting it set the cutoff would widen the window by its cadence while measuring nothing about
+        /// whether rows are landing: a server carrying one daily collector would stop banding for a day.</para>
+        ///
+        /// <para><b>The failure direction.</b> Callers pass only ENABLED, SCHEDULED cadences: a disabled
+        /// collector's cadence is not a schedule anything runs on, and an on-load collector
+        /// (<c>FrequencyMinutes == 0</c>) runs on connects rather than the loop this band watches. Both are
+        /// excluded by the caller, and an empty or null sequence yields exactly the flat
+        /// <see cref="ServerHealthThresholds.StaleThreshold"/> — today's behavior, and the direction that still
+        /// bands a quiet server.</para>
+        /// </summary>
+        public static TimeSpan EffectiveStaleThreshold(IEnumerable<int> enabledScheduledCadenceMinutes)
+        {
+            if (enabledScheduledCadenceMinutes is null)
+            {
+                return ServerHealthThresholds.StaleThreshold;
+            }
+
+            var fastest = 0;
+            foreach (var cadenceMinutes in enabledScheduledCadenceMinutes)
+            {
+                if (cadenceMinutes <= 0)
+                {
+                    continue;
+                }
+
+                if (fastest == 0 || cadenceMinutes < fastest)
+                {
+                    fastest = cadenceMinutes;
+                }
+            }
+
+            return ServerHealthThresholds.StaleThresholdForFastestCadence(fastest);
         }
 
         /// <summary>CPU band on total non-idle CPU: >= 95% Critical, >= 80% Warning; no snapshot Unknown.</summary>
