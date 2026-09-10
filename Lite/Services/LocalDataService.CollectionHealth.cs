@@ -118,7 +118,10 @@ SELECT
     -- no index at all; and it reads sys.master_files, so it still sees databases the monitoring login
     -- cannot ENTER — which is exactly the case being diagnosed. database_id > 4 excludes the system
     -- databases, tempdb included: the size collector takes every ONLINE database, so a bare row check
-    -- would be true on every server alive.
+    -- would be true on every server alive. A NULL database_id is an Azure sibling row (#2643/#3262):
+    -- sys.resource_stats carries no id, and it bills only USER databases, so those rows are inventory
+    -- too — without the IS NULL arm a master-connected Azure target with fifty user databases would
+    -- read as having none.
     --
     -- The inventory window is the health read's OWN ($2) — no second parameter, and an inventory that
     -- aged out says nothing rather than something stale. Uncorrelated, so both engines evaluate it
@@ -131,7 +134,7 @@ SELECT
                  FROM v_database_size_stats
                  WHERE server_id = $1
                  AND   collection_time >= $2
-                 AND   database_id > 4
+                 AND   (database_id > 4 OR database_id IS NULL)
              )
         THEN 1
         ELSE 0

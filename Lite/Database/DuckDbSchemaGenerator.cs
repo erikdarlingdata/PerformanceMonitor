@@ -232,11 +232,14 @@ public static class DuckDbSchemaGenerator
             ["running_jobs.successful_run_count"] = "NOT NULL",
             ["running_jobs.is_running_long"] = "NOT NULL",
             ["database_size_stats.database_name"] = "NOT NULL",
-            ["database_size_stats.database_id"] = "NOT NULL",
-            ["database_size_stats.file_id"] = "NOT NULL",
+            /* database_id / file_id / physical_name are deliberately NULLABLE (#3262): the Azure
+               sibling arm (#2643) reads sys.resource_stats, which has per-DATABASE sizes and no
+               per-file breakdown, so a sibling row honestly carries NULL for all three. NOT NULL
+               here would fail the appender on the first sibling row and lose the whole batch --
+               the same shape as #1591's server_properties hardware columns. Schema v57 drops the
+               constraint on existing databases. */
             ["database_size_stats.file_type_desc"] = "NOT NULL",
             ["database_size_stats.file_name"] = "NOT NULL",
-            ["database_size_stats.physical_name"] = "NOT NULL",
             ["database_size_stats.total_size_mb"] = "NOT NULL",
             ["index_object_stats.database_name"] = "NOT NULL",
             ["index_object_stats.database_id"] = "NOT NULL",
