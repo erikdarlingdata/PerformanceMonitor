@@ -167,12 +167,10 @@ public sealed class FleetCardCollectionStaleNamesItsPopulationTests
     }
 
     /// <summary>
-    /// The reader's whole derivation, in the lines that are all of it: resolve this server's own stale
-    /// cutoff from its collectors' cadences (#3236), classify the newest collection's age against it,
-    /// explode that band into the shared flags, take the flag, put it on the card. There is no error count
-    /// in the chain, no <c>collection_log</c> STATUS read (the cadence samples are timestamps and
-    /// schedules, never outcomes), and no use of the roll-up's published window — which is why the card's
-    /// <c>window_start</c> / <c>window_end</c> never bounded it.
+    /// The reader's whole derivation, in the four lines that are all of it: classify the newest collection's
+    /// age, explode that band into the shared flags, take the flag, put it on the card. There is no error
+    /// count in the chain, no <c>collection_log</c> read, and no use of the roll-up's published window — which
+    /// is why the card's <c>window_start</c> / <c>window_end</c> never bounded it.
     /// </summary>
     [Fact]
     public void TheMcpCard_DerivesTheFlagFromFreshnessAndNothingElse()
@@ -181,15 +179,11 @@ public sealed class FleetCardCollectionStaleNamesItsPopulationTests
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingFleetReader.cs");
 
         Assert.Contains(
-            "var freshness = ServerHealthClassifier.ClassifyFreshness(lastCollection, now, staleThreshold);\n"
+            "var freshness = ServerHealthClassifier.ClassifyFreshness(lastCollection, now);\n"
           + "        var flags = ServerCollectionStatusRules.FlagsFor(freshness);",
             reader, StringComparison.Ordinal);
         Assert.Contains("var collectionStale = flags.CollectionStale;", reader, StringComparison.Ordinal);
         Assert.Contains("CollectionStale = collectionStale,", reader, StringComparison.Ordinal);
-
-        /* #3236: and the cutoff itself comes from the SHARED reducer over the server's cadence samples —
-           a reader-local derivation here would be a second ladder, which is the #2473 shape. */
-        Assert.Contains("ServerHealthClassifier.EffectiveStaleThreshold(", reader, StringComparison.Ordinal);
 
         /* And the field is published under the name that derivation earns. */
         Assert.Contains(
@@ -216,7 +210,6 @@ public sealed class FleetCardCollectionStaleNamesItsPopulationTests
             IsOnline = true,
             CollectionStale = true,
             LastCollectionTime = new DateTime(2026, 9, 6, 11, 50, 0, DateTimeKind.Unspecified),
-            StaleThresholdMinutes = 2,
             FailedCollectorCount = 0,
             HealthyCollectorCount = 39,
             CollectorSeverity = HealthSeverity.Healthy,
@@ -226,9 +219,6 @@ public sealed class FleetCardCollectionStaleNamesItsPopulationTests
 
         JsonAssert.Contains("\"collection_stale\": true", json);
         JsonAssert.Contains("\"last_collection\": \"2026-09-06T11:50:00\"", json);
-        /* #3236: the cutoff the flag was decided against rides on the card — with a per-server threshold,
-           last_collection + generated_at alone no longer recompute the flag; the three together do. */
-        JsonAssert.Contains("\"stale_threshold_minutes\": 2", json);
         JsonAssert.Contains("\"status\": \"Warning\"", json);
 
         /* The error axis is still published, and still separately — the flag was renamed, not merged into

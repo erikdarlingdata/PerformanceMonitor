@@ -34,7 +34,7 @@ public sealed class ViewerServerChromeTests
         var now = DateTime.UtcNow;
         var server = Server();
 
-        server.ApplyFreshness(now.AddSeconds(-30), now, ServerHealthThresholds.StaleThreshold);
+        server.ApplyFreshness(now.AddSeconds(-30), now);
 
         Assert.True(server.IsOnline);
         Assert.False(server.CollectionStale);
@@ -48,7 +48,7 @@ public sealed class ViewerServerChromeTests
         var server = Server();
 
         /* Older than 2x the 1-minute collector cadence but not yet offline (< 15 min). */
-        server.ApplyFreshness(now.AddMinutes(-5), now, ServerHealthThresholds.StaleThreshold);
+        server.ApplyFreshness(now.AddMinutes(-5), now);
 
         Assert.True(server.IsOnline);
         Assert.True(server.CollectionStale);
@@ -62,7 +62,7 @@ public sealed class ViewerServerChromeTests
         var server = Server();
 
         /* -31: exactly 30 minutes is the shared collection-stopped boundary and bands Stale (strict >, #2794). */
-        server.ApplyFreshness(now.AddMinutes(-31), now, ServerHealthThresholds.StaleThreshold);
+        server.ApplyFreshness(now.AddMinutes(-31), now);
 
         Assert.False(server.IsOnline);
         Assert.Equal("Offline", server.DotStatus);
@@ -79,7 +79,7 @@ public sealed class ViewerServerChromeTests
            freshness call, one panel over. The dot now says what the card says. */
         var server = Server();
 
-        server.ApplyFreshness(null, DateTime.UtcNow, ServerHealthThresholds.StaleThreshold);
+        server.ApplyFreshness(null, DateTime.UtcNow);
 
         Assert.Null(server.IsOnline);
         Assert.True(server.AwaitingFirstCollection);
@@ -96,7 +96,7 @@ public sealed class ViewerServerChromeTests
             if (e.PropertyName is nameof(DarlingServer.DotStatus)) changed++;
         };
 
-        server.ApplyFreshness(DateTime.UtcNow, DateTime.UtcNow, ServerHealthThresholds.StaleThreshold);
+        server.ApplyFreshness(DateTime.UtcNow, DateTime.UtcNow);
 
         Assert.True(changed > 0);
     }
