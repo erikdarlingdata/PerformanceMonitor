@@ -170,9 +170,9 @@ public sealed class CreationTimeClockFrameDisciplineTests
 
         /* And the de-skew regex must actually recognise both dialects, or the site census above passes
            by finding nothing rather than by the sites being present. */
-        Assert.True(DeSkew.IsMatch("creation_time - make_interval(mins => svr.offset_minutes) AS creation_time_utc,"));
-        Assert.True(DeSkew.IsMatch("creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,"));
-        Assert.False(DeSkew.IsMatch("        creation_time,"));
+        Assert.Matches(DeSkew, "creation_time - make_interval(mins => svr.offset_minutes) AS creation_time_utc,");
+        Assert.Matches(DeSkew, "creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,");
+        Assert.DoesNotMatch(DeSkew, "        creation_time,");
     }
 
     /* ── Source location. Resolved by walking up from this file, the way the sibling scans do. ── */

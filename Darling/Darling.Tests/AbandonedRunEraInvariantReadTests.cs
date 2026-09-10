@@ -62,8 +62,8 @@ public sealed class AbandonedRunEraInvariantReadTests
     [Fact]
     public void TheLikePattern_IsTheNoteFormat_WithTheBudgetHoleWidened() =>
         Assert.Equal(
-            EnumeratedCollectorDriver.WholeCycleBudgetNoteFormat.Replace("{0}", "%", StringComparison.Ordinal),
-            EnumeratedCollectorDriver.WholeCycleBudgetNoteSqlPattern);
+            EnumeratedCollectorDriver.WholeCycleBudgetNoteSqlPattern,
+            EnumeratedCollectorDriver.WholeCycleBudgetNoteFormat.Replace("{0}", "%", StringComparison.Ordinal));
 
     /// <summary>
     /// Why the match is a pattern at all: the budget is INTERPOLATED into the message and the shipped values

@@ -168,7 +168,7 @@ public sealed class OperatorRemediationGateTests
 
         /* Positive control: the shapes really do produce blockers, so an empty-blockers projection
            cannot make this pass by making every case eligible. */
-        Assert.Empty(blocking.Where(v => v.Blockers.Count == 0));
+        Assert.DoesNotContain(blocking, v => v.Blockers.Count == 0);
 
         foreach (var verdict in blocking)
         {

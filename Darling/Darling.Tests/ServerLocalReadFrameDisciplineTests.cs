@@ -340,18 +340,18 @@ public sealed class ServerLocalReadFrameDisciplineTests
 
         /* PgDeSkew and LiteRowDeSkew must actually recognise the fix, or the site census above passes by
            finding nothing rather than by the sites being there. */
-        Assert.True(PgDeSkew.IsMatch("dte.event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc,"));
-        Assert.False(PgDeSkew.IsMatch("            dte.event_time,"));
-        Assert.False(PgDeSkew.IsMatch("dte.event_time >= $2 + make_interval(mins => svr.offset_minutes)"));
-        Assert.True(LiteRowDeSkew.IsMatch("reader.GetDateTime(0).AddMinutes(-offset);"));
-        Assert.False(LiteRowDeSkew.IsMatch("reader.GetDateTime(0);"));
+        Assert.Matches(PgDeSkew, "dte.event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc,");
+        Assert.DoesNotMatch(PgDeSkew, "            dte.event_time,");
+        Assert.DoesNotMatch(PgDeSkew, "dte.event_time >= $2 + make_interval(mins => svr.offset_minutes)");
+        Assert.Matches(LiteRowDeSkew, "reader.GetDateTime(0).AddMinutes(-offset);");
+        Assert.DoesNotMatch(LiteRowDeSkew, "reader.GetDateTime(0);");
 
         /* TimeColumnAssignment: the alias-on-left form, and the projections it must not mistake for one. */
         Assert.Equal(
             "ft.StartTime,",
             TimeColumnAssignment("event_time").Match("    event_time = ft.StartTime,").Groups[1].Value);
-        Assert.False(TimeColumnAssignment("event_time").IsMatch("    x.event_time,"));
-        Assert.False(TimeColumnAssignment("deadlock_time").IsMatch("    b.deadlock_time,"));
+        Assert.DoesNotMatch(TimeColumnAssignment("event_time"), "    x.event_time,");
+        Assert.DoesNotMatch(TimeColumnAssignment("deadlock_time"), "    b.deadlock_time,");
     }
 
     /* ───────────────────────── plumbing ───────────────────────── */
