@@ -289,6 +289,61 @@ public sealed class DarlingEmptyEnumerationInventoryTests
     }
 
     [Fact]
+    public async Task AnAzureSiblingRowIsInventoryDespiteItsNullDatabaseId_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live sibling-inventory test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            /* #3262: on a master-connected Azure target the only evidence of user databases is the
+               sibling rows (#2643), and those deliberately carry NULL database_id — sys.resource_stats
+               has no id to give. They are user databases by construction (the view bills only user
+               databases, and the connected database is excluded by the arm), so the screen admits them
+               through its IS NULL arm; without it this target read as having no user databases at all. */
+            await SeedLogAsync(connection, ct, "query_store", MinutesAgo(30), EnumeratedCollectorDriver.EmptyEnumerationMessage);
+            await SeedLogAsync(connection, ct, "query_store", MinutesAgo(20), EnumeratedCollectorDriver.EmptyEnumerationMessage);
+            await SeedSiblingSizeAsync(connection, ct, "testdb1", MinutesAgo(25));
+
+            var qualified = EnumeratedCollectorDriver.EmptyEnumerationMessage
+                + " (all 2 runs, " + CollectorHealthClassifier.HasUserDatabasesQualifier + ")";
+
+            await using (var viewer = new ViewerDataService(cs!))
+            {
+                var queryStore = (await viewer.GetCollectionHealthAsync(ServerId, ct))
+                    .Single(h => h.CollectorName == "query_store");
+
+                Assert.True(queryStore.TargetHasUserDatabases);
+                Assert.Equal(qualified, queryStore.NoteFormatted);
+            }
+
+            await using (var postgres = NpgsqlDataSource.Create(cs!))
+            {
+                var health = await DarlingDataReader.GetCollectionHealthAsync(
+                    postgres, ServerId, DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-7)), ct);
+
+                Assert.True(health.Single(h => h.CollectorName == "query_store").TargetHasUserDatabases);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
+    [Fact]
     public async Task AnInventoryOutsideTheWindowAnotherServersOrSystemOnlySaysNothing_AgainstDevPostgres()
     {
         var cs = ConnectionString;
@@ -449,6 +504,19 @@ INSERT INTO database_size_stats
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTimeUtc), serverId ?? ServerId, ServerName,
             databaseName, databaseId, 1, "ROWS", databaseName + "_data", "C:\\data\\" + databaseName + ".mdf", 128.00m);
+
+    /// <summary>The Azure sibling shape (#2643): NULL database_id / file_id / physical_name, a file_name
+    /// that says it is a whole database, and a real size — exactly what the arm projects.</summary>
+    private static async Task SeedSiblingSizeAsync(
+        NpgsqlConnection connection, CancellationToken ct,
+        string databaseName, DateTime collectionTimeUtc) =>
+        await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO database_size_stats
+    (collection_id, collection_time, server_id, server_name, database_name, database_id,
+     file_id, file_type_desc, file_name, physical_name, total_size_mb)
+VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, $7, NULL, $8)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTimeUtc), ServerId, ServerName,
+            databaseName, "ROWS", "(whole database)", 23.00m);
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {

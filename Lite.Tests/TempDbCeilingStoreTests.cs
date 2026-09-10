@@ -44,7 +44,10 @@ public sealed class TempDbCeilingStoreTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public void TheSchemaVersionMovedWithTheColumn()
     {
-        Assert.Equal(56, DuckDbInitializer.CurrentSchemaVersion);
+        /* At LEAST 56, not exactly: pinning the current version makes every later migration fail
+           this test for a column it never touched. What matters here is that the version moved
+           past the rung that adds the column, so an existing database cannot sit below it. */
+        Assert.True(DuckDbInitializer.CurrentSchemaVersion >= 56);
 
         var ddl = DuckDbSchemaGenerator.CreateTable(PerformanceMonitor.Collectors.TempDbStatsCollector.Instance);
         Assert.Contains("max_size_mb DECIMAL(18,2)", ddl, System.StringComparison.Ordinal);

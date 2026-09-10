@@ -143,12 +143,24 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
     /// keeps every permission-free column instead of losing the entire row — which only works if the
     /// columns can hold NULL. <see cref="DuckDbInitializer"/>'s v48 migration drops the constraint on
     /// existing databases.</para>
+    ///
+    /// <para>#3262 / schema v57: <c>database_size_stats.database_id</c>, <c>file_id</c> and
+    /// <c>physical_name</c> dropped NOT NULL. The Azure sibling arm (#2643) reads
+    /// <c>sys.resource_stats</c>, which carries per-DATABASE sizes with no per-file breakdown, so a
+    /// sibling row deliberately holds NULL in all three — the reader now passes those NULLs through
+    /// instead of dying on the cast, and the store has to accept them. Darling's Postgres store
+    /// always held these columns nullable; this brings Lite's DuckDB store to the same shape.
+    /// <see cref="DuckDbInitializer"/>'s v57 migration drops the constraint on existing
+    /// databases.</para>
     /// </summary>
     private static readonly HashSet<string> IntentionalStorageDivergences = new(StringComparer.Ordinal)
     {
         "server_properties.cpu_count",
         "server_properties.hyperthread_ratio",
         "server_properties.physical_memory_mb",
+        "database_size_stats.database_id",
+        "database_size_stats.file_id",
+        "database_size_stats.physical_name",
     };
 
     /// <summary>

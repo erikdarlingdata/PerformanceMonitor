@@ -246,6 +246,28 @@ public sealed class EmptyEnumerationInventoryTests : IClassFixture<SharedDuckDbF
     }
 
     [Fact]
+    public async Task An_Azure_Sibling_Row_Is_Inventory_Despite_Its_Null_Database_Id()
+    {
+        var service = new LocalDataService(_duckDb);
+
+        /* #3262: on a master-connected Azure target the only evidence of user databases is the sibling
+           rows (#2643), and those deliberately carry NULL database_id — sys.resource_stats has no id to
+           give. They are user databases by construction (the view bills only user databases, and the
+           connected database is excluded by the arm), so the screen admits them through its IS NULL arm;
+           without it this target read as having no user databases at all. */
+        await SeedLogAsync("query_store", MinutesAgo(30), EnumeratedCollectorDriver.EmptyEnumerationMessage);
+        await SeedLogAsync("query_store", MinutesAgo(20), EnumeratedCollectorDriver.EmptyEnumerationMessage);
+        await SeedSiblingSizeAsync("testdb1", MinutesAgo(25));
+
+        var row = await ReadAsync(service, "query_store");
+
+        Assert.True(row.TargetHasUserDatabases);
+        Assert.Equal(
+            EnumeratedCollectorDriver.EmptyEnumerationMessage + " (all 2 runs, " + CollectorHealthClassifier.HasUserDatabasesQualifier + ")",
+            row.NoteFormatted);
+    }
+
+    [Fact]
     public async Task An_Inventory_Older_Than_The_Health_Window_Says_Nothing()
     {
         var service = new LocalDataService(_duckDb);
@@ -372,4 +394,15 @@ INSERT INTO database_size_stats
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             _nextId++, collectionTimeUtc, serverId ?? ServerId, "TestSrv", databaseName, databaseId,
             1, "ROWS", databaseName + "_data", "C:\\data\\" + databaseName + ".mdf", 128.00m);
+
+    /// <summary>The Azure sibling shape (#2643): NULL database_id / file_id / physical_name, a file_name
+    /// that says it is a whole database, and a real size — exactly what the arm projects.</summary>
+    private async Task SeedSiblingSizeAsync(string databaseName, DateTime collectionTimeUtc) =>
+        await ExecAsync(@"
+INSERT INTO database_size_stats
+    (collection_id, collection_time, server_id, server_name, database_name, database_id,
+     file_id, file_type_desc, file_name, physical_name, total_size_mb)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            _nextId++, collectionTimeUtc, ServerId, "TestSrv", databaseName, null,
+            null, "ROWS", "(whole database)", null, 23.00m);
 }

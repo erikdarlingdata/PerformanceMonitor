@@ -125,6 +125,55 @@ public class AgedDatabaseMigrationTests : IDisposable
         Assert.Equal(1L, Convert.ToInt64(await countCmd.ExecuteScalarAsync()));
     }
 
+    /// <summary>
+    /// v57 (#3262) drops NOT NULL from database_size_stats.database_id / file_id / physical_name so the
+    /// Azure sibling rows (#2643) — which deliberately carry NULL in all three — can actually be stored.
+    /// Same #2748 dependency trap as v48: any prior startup persisted idx_database_size_stats_time, and
+    /// DuckDB's ALTER COLUMN refuses on a table with ANY index, so the rung has to drop it first. Seeds
+    /// that exact precondition and asserts the upgrade both completes AND a sibling-shaped row is
+    /// actually insertable afterward, not merely that nothing threw.
+    /// </summary>
+    [Fact]
+    public async Task UpgradeFromV56_DropsDatabaseSizeStatsNotNull_EvenWithAPreExistingIndex()
+    {
+        using (var seed = new DuckDBConnection($"Data Source={_dbPath}"))
+        {
+            await seed.OpenAsync();
+            await ExecAsync(seed, "CREATE TABLE schema_version (version INTEGER NOT NULL)");
+            await ExecAsync(seed, "INSERT INTO schema_version VALUES (56)");
+            await ExecAsync(seed, @"CREATE TABLE database_size_stats (
+                server_id INTEGER NOT NULL,
+                collection_time TIMESTAMP NOT NULL,
+                database_name VARCHAR NOT NULL,
+                database_id INTEGER NOT NULL,
+                file_id INTEGER NOT NULL,
+                file_type_desc VARCHAR NOT NULL,
+                file_name VARCHAR NOT NULL,
+                physical_name VARCHAR NOT NULL,
+                total_size_mb DECIMAL(19,2) NOT NULL
+            )");
+            await ExecAsync(seed, "INSERT INTO database_size_stats VALUES (1, current_timestamp, 'master', 1, 1, 'ROWS', 'data_0', 'data_0.mdf', 4.00)");
+            /* The real dependent object: DuckDbSchemaGenerator.CreateIndex's default case for
+               database_size_stats is exactly this index/column shape. */
+            await ExecAsync(seed, "CREATE INDEX idx_database_size_stats_time ON database_size_stats(server_id, collection_time)");
+        }
+
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        using var verify = new DuckDBConnection($"Data Source={_dbPath}");
+        await verify.OpenAsync();
+
+        /* The real assertion: a sibling-shaped row (NULL database_id / file_id / physical_name, real
+           name and size) must actually be insertable now — this is what the appender writes the moment
+           sys.resource_stats has rows for a master-connected Azure target. */
+        await ExecAsync(verify, "INSERT INTO database_size_stats VALUES (1, current_timestamp, 'testdb1', NULL, NULL, 'ROWS', '(whole database)', NULL, 23.00)");
+
+        using var countCmd = verify.CreateCommand();
+        countCmd.CommandText = "SELECT COUNT(*) FROM database_size_stats WHERE database_id IS NULL AND file_id IS NULL AND physical_name IS NULL";
+        Assert.Equal(1L, Convert.ToInt64(await countCmd.ExecuteScalarAsync()));
+    }
+
     private static async Task ExecAsync(DuckDBConnection connection, string sql)
     {
         using var cmd = connection.CreateCommand();

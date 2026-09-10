@@ -44,13 +44,19 @@ public sealed class DatabaseSizeStatsCollector : CollectorDefinitionBase<Databas
     {
     }
 
+    /// <summary>
+    /// <c>DatabaseId</c>, <c>FileId</c> and <c>PhysicalName</c> are nullable because the Azure
+    /// sibling arm (#2643) deliberately emits them as NULL: <c>sys.resource_stats</c> has no
+    /// per-file breakdown, so a sibling row carries a database name and a total size and honestly
+    /// nothing else. Both stores hold the columns nullable (#3262).
+    /// </summary>
     public readonly record struct Row(
         string DatabaseName,
-        int DatabaseId,
-        int FileId,
+        int? DatabaseId,
+        int? FileId,
         string FileTypeDesc,
         string FileName,
-        string PhysicalName,
+        string? PhysicalName,
         decimal TotalSizeMb,
         decimal? UsedSizeMb,
         decimal? AutoGrowthMb,
@@ -441,13 +447,17 @@ OPTION(RECOMPILE);";
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* Ordinals 1, 2 and 5 are NULL on every Azure sibling row (#2643's arm omits what
+               sys.resource_stats cannot measure), and an unguarded read here killed the whole
+               collection — master's own rows included — the moment the first sibling row appeared
+               (#3262). */
             rows.Add(new Row(
                 reader.GetString(0),
-                Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture),
-                Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture),
+                reader.IsDBNull(1) ? null : Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture),
+                reader.IsDBNull(2) ? null : Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture),
                 reader.GetString(3),
                 reader.GetString(4),
-                reader.GetString(5),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
                 reader.GetDecimal(6),
                 reader.IsDBNull(7) ? null : reader.GetDecimal(7),
                 reader.IsDBNull(8) ? null : reader.GetDecimal(8),
