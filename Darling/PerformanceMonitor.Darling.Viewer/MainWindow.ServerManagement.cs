@@ -166,6 +166,20 @@ public partial class MainWindow
             return;
         }
 
+        /* #3236: the sparse schedule-override rows the per-server stale cutoff resolves through. A failed
+           read leaves the list empty, which resolves to the flat floor — the prior behaviour, and the
+           direction that still bands a quiet server rather than hiding one. */
+        List<CollectorScheduleRow> scheduleOverrides;
+        try
+        {
+            scheduleOverrides = await _dataService.GetCollectorSchedulesAsync();
+        }
+        catch (Exception ex)
+        {
+            ViewerLogger.Warn("ServerStatus", $"schedule read failed, banding on the flat threshold: {ex.Message}");
+            scheduleOverrides = new List<CollectorScheduleRow>();
+        }
+
         var nowUtc = DateTime.UtcNow;
         var servers = _fleet.All;
 
@@ -174,7 +188,10 @@ public partial class MainWindow
         foreach (var s in servers)
         {
             DateTime? last = freshness.TryGetValue(s.ServerId, out var t) ? t : null;
-            s.ApplyFreshness(last, nowUtc);
+            /* #3236: the sidebar dot bands on the server's own cutoff, the same one the Overview card and
+               get_fleet_overview use, so the three cannot disagree about one server (#2473). */
+            s.ApplyFreshness(last, nowUtc, PerformanceMonitor.Common.ServerHealthClassifier.EffectiveStaleThreshold(
+                new[] { CollectorScheduleOverlay.FastestEnabledCadenceMinutes(scheduleOverrides, s.ServerId, s.IsPostgres) }));
 
             if (last.HasValue && (newest is null || last.Value > newest.Value))
             {

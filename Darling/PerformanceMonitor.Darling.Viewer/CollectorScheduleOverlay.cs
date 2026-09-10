@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -71,6 +72,49 @@ public static class CollectorScheduleOverlay
 
     /// <summary>True when the store holds any override row for this server (the editor's "custom vs. use
     /// default" initial state).</summary>
+    /// <summary>
+    /// The fastest cadence, in minutes, that any collector ENABLED and SCHEDULED for this server runs on —
+    /// the input <see cref="ServerHealthClassifier.EffectiveStaleThreshold"/> reduces to the server's stale
+    /// cutoff (#3236). Built on <see cref="BuildEffectiveSchedule"/> so the viewer's freshness band reads the
+    /// SAME effective schedule its own schedule editor shows, rather than a second resolution of the same
+    /// override rows.
+    ///
+    /// <para>Excludes collectors for the other engine (a PostgreSQL target must not inherit the SQL Server
+    /// collectors' one-minute cadences), disabled collectors (a cadence nothing runs on — this is why the
+    /// Low-Impact preset answers 5 and not 1, since <c>long_query_completions</c> keeps a one-minute default
+    /// there but ships opt-in, #1496), and on-load collectors, which run on connects rather than the loop
+    /// this band watches. Returns 0 when nothing qualifies, which maps to the flat floor.</para>
+    /// </summary>
+    public static int FastestEnabledCadenceMinutes(
+        IReadOnlyList<CollectorScheduleRow> allOverrides, int serverId, bool isPostgres)
+    {
+        var target = new CollectorTargetInfo
+        {
+            Engine = isPostgres ? CollectorTargetEngine.PostgreSql : CollectorTargetEngine.SqlServer,
+        };
+
+        var fastest = 0;
+        foreach (var item in BuildEffectiveSchedule(allOverrides, serverId))
+        {
+            if (!item.Enabled || item.FrequencyMinutes <= 0)
+            {
+                continue;
+            }
+
+            if (!CollectorCatalog.EngineMatches(item.Name, target))
+            {
+                continue;
+            }
+
+            if (fastest == 0 || item.FrequencyMinutes < fastest)
+            {
+                fastest = item.FrequencyMinutes;
+            }
+        }
+
+        return fastest;
+    }
+
     public static bool ServerHasOverride(IReadOnlyList<CollectorScheduleRow> allOverrides, int serverId)
     {
         ArgumentNullException.ThrowIfNull(allOverrides);

@@ -265,10 +265,10 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// Nothing about a block of assignments makes a missing one visible, which is why the flags now arrive as
     /// a single value (#2473).</para>
     /// </summary>
-    public void ApplyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc)
+    public void ApplyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc, TimeSpan staleThreshold)
     {
         var flags = ServerCollectionStatusRules.FlagsFor(
-            ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, nowUtc));
+            ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, nowUtc, staleThreshold));
         IsOnline = flags.IsOnline;
         CollectionStale = flags.CollectionStale;
         AwaitingFirstCollection = flags.AwaitingFirstCollection;

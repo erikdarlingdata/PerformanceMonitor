@@ -1423,6 +1423,19 @@ public partial class MainWindow : Window
         }
 
         var service = _dataService;
+
+        /* #3236: read once for the whole fleet, not once per card — the per-server stale cutoff resolves
+           from these rows. An empty list on failure resolves to the flat floor, the prior behaviour. */
+        List<CollectorScheduleRow> scheduleOverrides;
+        try
+        {
+            scheduleOverrides = await service.GetCollectorSchedulesAsync();
+        }
+        catch (Exception ex)
+        {
+            ViewerLogger.Warn("Overview", $"schedule read failed, banding on the flat threshold: {ex.Message}");
+            scheduleOverrides = new List<CollectorScheduleRow>();
+        }
         var nowUtc = DateTime.UtcNow;
         /* #3016: pool-many lanes, not fleet-many reads — see the inventory overlay in FinOpsTab.Loaders.
            A fleet wider than the pool used to render SHORT here rather than slowly: the per-server catch
@@ -1449,7 +1462,11 @@ public partial class MainWindow : Window
                        coverage apart from a quiet SQL Server fleet: v_deadlocks holds the SQL Server
                        extended-event capture and nothing else. */
                     summary.IsPostgres = server.IsPostgres;
-                    summary.ApplyFreshness(nowUtc);
+                    /* #3236: the server's own stale cutoff, from the effective schedule the editor shows.
+                       The flat threshold assumes a one-minute fastest cadence, which the Low-Impact preset's
+                       5-minute floor makes false. */
+                    summary.ApplyFreshness(nowUtc, PerformanceMonitor.Common.ServerHealthClassifier.EffectiveStaleThreshold(
+                        new[] { CollectorScheduleOverlay.FastestEnabledCadenceMinutes(scheduleOverrides, server.ServerId, server.IsPostgres) }));
                     found.Add(summary);
                 }
                 catch

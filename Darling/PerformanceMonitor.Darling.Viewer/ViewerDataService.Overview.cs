@@ -779,8 +779,8 @@ public sealed class ServerSummaryItem
     /// naive UTC; <paramref name="nowUtc"/> is <see cref="DateTime.UtcNow"/>), so the subtraction is a
     /// true elapsed-time regardless of Kind.
     /// </summary>
-    public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc) =>
-        ServerHealthClassifier.ClassifyFreshness(lastCollectionUtc, nowUtc);
+    public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc, TimeSpan staleThreshold) =>
+        ServerHealthClassifier.ClassifyFreshness(lastCollectionUtc, nowUtc, staleThreshold);
 
     /// <summary>
     /// Maps the freshness band onto the card's three status flags, taking the live-ping's place: Fresh →
@@ -793,9 +793,9 @@ public sealed class ServerSummaryItem
     /// copy set two of the three flags and dropped <c>AwaitingFirstCollection</c> — an omission that is
     /// invisible in a block of assignments and impossible when the three arrive together (#2473).</para>
     /// </summary>
-    public void ApplyFreshness(DateTime nowUtc)
+    public void ApplyFreshness(DateTime nowUtc, TimeSpan staleThreshold)
     {
-        var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, nowUtc));
+        var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, nowUtc, staleThreshold));
         IsOnline = flags.IsOnline;
         CollectionStale = flags.CollectionStale;
         AwaitingFirstCollection = flags.AwaitingFirstCollection;

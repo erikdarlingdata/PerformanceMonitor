@@ -188,6 +188,40 @@ public class ScheduleManager
     /// Returns the schedule for a specific server.
     /// If the server has an override, returns those collectors; otherwise returns a copy of the default.
     /// </summary>
+    /// <summary>
+    /// The fastest cadence, in minutes, that any collector ENABLED and SCHEDULED in
+    /// <paramref name="schedules"/> runs on — the input
+    /// <c>ServerHealthClassifier.EffectiveStaleThreshold</c> reduces to a server's stale cutoff (#3236).
+    /// Disabled collectors are excluded because their cadence is a schedule nothing runs on, which is why
+    /// the Low-Impact preset answers 5 and not 1: <c>long_query_completions</c> keeps a one-minute default
+    /// there but ships opt-in (#1496). On-load collectors (frequency 0) run on connects rather than the
+    /// loop this band watches. Returns 0 when nothing qualifies, which maps to the flat floor. No engine
+    /// filter: Lite monitors SQL Server only, so every collector in its schedule applies.
+    /// </summary>
+    public static int FastestEnabledCadenceMinutes(IReadOnlyList<CollectorSchedule> schedules)
+    {
+        if (schedules is null)
+        {
+            return 0;
+        }
+
+        var fastest = 0;
+        foreach (var schedule in schedules)
+        {
+            if (!schedule.Enabled || schedule.FrequencyMinutes <= 0)
+            {
+                continue;
+            }
+
+            if (fastest == 0 || schedule.FrequencyMinutes < fastest)
+            {
+                fastest = schedule.FrequencyMinutes;
+            }
+        }
+
+        return fastest;
+    }
+
     public IReadOnlyList<CollectorSchedule> GetSchedulesForServer(string serverId)
     {
         lock (_lock)

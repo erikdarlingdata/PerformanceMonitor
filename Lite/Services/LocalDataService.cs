@@ -27,10 +27,19 @@ public partial class LocalDataService
 {
     private readonly DuckDbInitializer _duckDb;
 
-    public LocalDataService(DuckDbInitializer duckDb)
+    /// <summary>
+    /// <paramref name="schedules"/> is optional and supplies the per-install effective schedule the
+    /// collection-freshness band derives its cutoff from (#3236). A null manager bands on the flat
+    /// <c>ServerHealthThresholds.StaleThreshold</c>, which is the prior behaviour — the direction that still
+    /// bands a quiet server rather than hiding one.
+    /// </summary>
+    public LocalDataService(DuckDbInitializer duckDb, ScheduleManager? schedules = null)
     {
         _duckDb = duckDb;
+        _schedules = schedules;
     }
+
+    private readonly ScheduleManager? _schedules;
 
     /// <summary>
     /// Creates and opens a DuckDB connection wrapped in a read lock.

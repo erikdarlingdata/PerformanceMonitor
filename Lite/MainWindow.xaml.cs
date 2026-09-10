@@ -237,8 +237,11 @@ public partial class MainWindow : Window
                minimize hid it. ??= so a repeated Loaded can't double-subscribe (static SystemEvents). */
             _resumeGuard ??= new WindowResumeGuard(this, RestoreFromTray);
 
-            // Initialize data service for overview
-            _dataService = new LocalDataService(_databaseInitializer);
+            /* The schedule manager rides along so the Overview card's collection-freshness band derives
+               its cutoff from this install's schedule rather than the flat one-minute assumption (#3236).
+               Without it the band falls back to the flat threshold, which is what read stale for three
+               minutes in every five under the Low-Impact preset. */
+            _dataService = new LocalDataService(_databaseInitializer, _scheduleManager);
 
             /* #1812: the adapter's snapshot-freshness bound needs the server's EFFECTIVE running_jobs
                cadence. The adapter keys servers by the deterministic int hash; ScheduleManager keys by
