@@ -18,7 +18,9 @@ namespace Darling.Tests;
 /// three fuller history SQL reads' shape + parameterization, the row models' delta / average / total
 /// derivations, the metric-selector chart projection, and the row → window-parameter mapping (which fields
 /// identify the double-clicked item, and when a row can't open a window). Pure logic + SQL pins only — no live
-/// Postgres, and nothing here touches <see cref="ViewerTimeHelper"/>'s process-wide statics.
+/// Postgres, and nothing here mutates <see cref="ViewerTimeHelper"/>'s process-wide statics (the execution-stamp
+/// display pin READS them, deriving its expected through the row's own renderer — the unserialized display
+/// classes' pattern).
 /// </summary>
 public sealed class ViewerHistoryWindowTests
 {
@@ -140,6 +142,23 @@ public sealed class ViewerHistoryWindowTests
         var row = new ViewerQueryStoreHistoryRow { ExecutionCount = 25, AvgDurationMs = 4, AvgCpuTimeMs = 2 };
         Assert.Equal(100.0, row.TotalDurationMs, precision: 6);
         Assert.Equal(50.0, row.TotalCpuMs, precision: 6);
+    }
+
+    [Fact]
+    public void QueryStoreHistoryRow_ExecutionTimesLocal_ConvertStoredNaiveUtc_EmptyForNull()
+    {
+        /* The drill-down history row carries the same naive-UTC query_store_stats stamps as the Query
+           Store tab row and renders them through the same stored-UTC conversion (#3207) — pinned the same
+           way (#3253): expected derived through the same ForDisplay the renderer uses, because a pinned
+           literal only holds where the conversion is the identity (a UTC machine). Distinct inputs, so
+           First wired to Last (or the reverse) fails. */
+        var firstUtc = new DateTime(2026, 7, 1, 9, 30, 15, DateTimeKind.Unspecified);
+        var lastUtc = new DateTime(2026, 7, 2, 21, 5, 59, DateTimeKind.Unspecified);
+        var row = new ViewerQueryStoreHistoryRow { FirstExecutionTime = firstUtc, LastExecutionTime = lastUtc };
+        Assert.Equal(ViewerTimeHelper.ForDisplay(firstUtc).ToString("yyyy-MM-dd HH:mm:ss"), row.FirstExecutionTimeLocal);
+        Assert.Equal(ViewerTimeHelper.ForDisplay(lastUtc).ToString("yyyy-MM-dd HH:mm:ss"), row.LastExecutionTimeLocal);
+        Assert.Equal("", new ViewerQueryStoreHistoryRow().FirstExecutionTimeLocal);
+        Assert.Equal("", new ViewerQueryStoreHistoryRow().LastExecutionTimeLocal);
     }
 
     // ── Metric-selector chart projection (each window's GetMetricValue switch) ──
