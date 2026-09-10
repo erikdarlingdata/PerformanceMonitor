@@ -698,9 +698,7 @@ public sealed class PgColumnStatsCoverageTests
         var stripped = CSharpSourceWalker.StripCommentsAndStrings(source);
         var declarations = Declarations(stripped, member).ToList();
 
-        Assert.Equal(1, declarations.Count);
-
-        var at = declarations[0];
+        var at = Assert.Single(declarations);
         var open = stripped.IndexOf('{', at);
         var semicolon = stripped.IndexOf(';', at);
 
@@ -758,9 +756,7 @@ public sealed class PgColumnStatsCoverageTests
         var stripped = CSharpSourceWalker.StripCommentsAndStrings(ReadSource(relativePath));
         var declarations = Declarations(stripped, member).ToList();
 
-        Assert.Equal(1, declarations.Count);
-
-        var at = declarations[0];
+        var at = Assert.Single(declarations);
         var open = stripped.IndexOf('{', at);
         var arrow = stripped.IndexOf("=>", at, StringComparison.Ordinal);
         var stops = new[] { open, arrow }.Where(i => i > at).ToArray();

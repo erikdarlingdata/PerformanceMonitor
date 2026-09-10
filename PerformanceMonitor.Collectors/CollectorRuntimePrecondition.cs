@@ -69,11 +69,25 @@ public static class CollectorRuntimePrecondition
 
     /// <summary>
     /// The <c>collection_log</c> status the runners use for every NON-FATAL degradation — a denied grant, a
-    /// source object or extension that does not exist, a feature the platform does not implement or that a
-    /// parameter group has switched off. One bucket with three meanings, which is why the message quotes the
-    /// stored explanation instead of expanding the status word itself.
+    /// source object that does not exist, a feature the platform does not implement or that a parameter
+    /// group has switched off. One bucket with several meanings, which is why the message quotes the
+    /// stored explanation instead of expanding the status word itself. Since #3240 a missing extension a
+    /// collector DECLARES no longer lands here — that case has its own status
+    /// (<see cref="ExtensionMissingStatus"/>), because its remedy is never a grant.
     /// </summary>
     public const string DegradedStatus = "PERMISSIONS";
+
+    /// <summary>
+    /// The <c>collection_log</c> status meaning a PostgreSQL extension the collector DECLARES
+    /// (<c>ICollectorSchemaInfo.RequiredPgExtensions</c>) is not installed where the collector connects, so
+    /// the run degraded to a named non-fatal skip (#3240). Split out of <see cref="DegradedStatus"/>
+    /// because these rows were banding <c>NO_PERMISSIONS</c> and hinting at <c>pg_monitor</c>, while the
+    /// only remedy is <c>CREATE EXTENSION</c> (after <c>shared_preload_libraries</c> where the declaration
+    /// says so) — and an optional extension left uninstalled is a legitimate resting state, not a broken
+    /// grant. The stored message names the extension; this status is what lets the health surfaces band it
+    /// apart.
+    /// </summary>
+    public const string ExtensionMissingStatus = "EXTENSION_MISSING";
 
     /// <summary>
     /// The closing sentence every precondition message ends on. One copy, for the same reason
@@ -153,14 +167,26 @@ public static class CollectorRuntimePrecondition
                    ConnectScopedEpilogue;
         }
 
+        if (string.Equals(status, ExtensionMissingStatus, StringComparison.OrdinalIgnoreCase))
+        {
+            return $"The {collectorName} collector is running against {serverName} but the PostgreSQL " +
+                   $"extension it reads is not installed there: its last run{observed} was recorded as a " +
+                   $"named non-fatal skip, so {CapturePathOf(collectorName)} is not being stored.{said} " +
+                   "The stored sentence names the extension and the database to create it in — installing " +
+                   "it is the remedy, and no grant will change this. An optional extension left " +
+                   "uninstalled is also a legitimate resting state; the skip simply keeps that choice " +
+                   "visible. " +
+                   PreconditionEpilogue;
+        }
+
         if (string.Equals(status, DegradedStatus, StringComparison.OrdinalIgnoreCase))
         {
             return $"The {collectorName} collector is running against {serverName} but cannot read its " +
                    $"source: its last run{observed} was recorded as a non-fatal skip rather than a failure, " +
                    $"so {CapturePathOf(collectorName)} is not being stored.{said} Act on that sentence — it " +
-                   "is what the monitored server itself answered, and it distinguishes the three states this " +
-                   "one status carries: a grant the login was refused, a source object or extension that was " +
-                   "never created, and a feature the platform does not implement or has switched off. " +
+                   "is what the monitored server itself answered, and it distinguishes the states this " +
+                   "one status carries: a grant the login was refused, a source object that does not exist " +
+                   "on this target, and a feature the platform does not implement or has switched off. " +
                    PreconditionEpilogue;
         }
 

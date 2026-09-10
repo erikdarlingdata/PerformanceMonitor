@@ -79,6 +79,38 @@ public sealed class CollectorRuntimePreconditionTests
     }
 
     /// <summary>
+    /// #3240: an EXTENSION_MISSING run is a precondition too — the same absent-extension state that used to
+    /// ride the PERMISSIONS bucket, now under its own status — and losing it from this vocabulary would
+    /// regress the MCP miss for exactly the five sources the issue names. The stored sentence (which names
+    /// the extension) is quoted, never re-authored, and the standard epilogue holds: these collectors retry
+    /// every cycle, so satisfying the precondition needs nothing restarted on the monitoring side.
+    /// </summary>
+    [Fact]
+    public void AnExtensionMissingRun_IsReportedAsAPrecondition_QuotingTheStoredSentence()
+    {
+        const string stored =
+            "relation \"public.pg_buffercache\" does not exist (SQLSTATE 42P01) — the pg_buffercache "
+            + "extension this collector reads is not installed on this target.";
+
+        var message = CollectorRuntimePrecondition.CollectionOutcomeMessage(
+            Server, "pg_buffer_usage", CollectorRuntimePrecondition.ExtensionMissingStatus, stored,
+            new DateTime(2026, 9, 8, 9, 30, 0, DateTimeKind.Utc));
+
+        Assert.NotNull(message);
+        Assert.Contains(Server, message, StringComparison.Ordinal);
+        Assert.Contains("pg_buffer_usage", message, StringComparison.Ordinal);
+        Assert.Contains("pg_buffercache", message, StringComparison.Ordinal);
+        Assert.Contains("extension", message, StringComparison.Ordinal);
+        Assert.Contains("no grant", message, StringComparison.Ordinal);
+        Assert.Contains("2026-09-08 09:30:00Z", message, StringComparison.Ordinal);
+
+        /* The re-derived epilogue, not the connect-scoped one: CREATE EXTENSION needs no monitoring-side
+           restart to be picked up. */
+        Assert.Contains("re-derives it on EVERY call", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("read once when the service connects", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Every OTHER status answers null and means it. This is the non-greediness that keeps the new word from
     /// swallowing the three that already work: SUCCESS is the read's <c>empty</c>, ERROR is collection
     /// health's business, and YIELDED is the lock-timeout guard doing its job on a server that is contended

@@ -175,7 +175,7 @@ public static class DataGridRowMarks
             return;
         }
 
-        var mark = item.Tag as string switch
+        var mark = (item.Tag as string) switch
         {
             nameof(DataGridRowMark.Done) => DataGridRowMark.Done,
             nameof(DataGridRowMark.ToDo) => DataGridRowMark.ToDo,
@@ -206,7 +206,7 @@ public static class DataGridRowMarks
         }
     }
 
-    private static Brush Frozen(Color color)
+    private static SolidColorBrush Frozen(Color color)
     {
         var brush = new SolidColorBrush(color);
         brush.Freeze();

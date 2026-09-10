@@ -208,6 +208,35 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// #3236: a server's whole effective schedule — collector name → cadence minutes for the ENABLED,
+    /// scheduled collectors — for the Overview card's cadence-aware stale band
+    /// (<see cref="LocalDataService.EffectiveCadenceLookup"/>). Same hash-match as
+    /// <see cref="ResolveCollectorCadenceForAlerts"/>: the store keys servers by the deterministic int
+    /// hash, ScheduleManager by the connection GUID. Null for an unknown server — the band then uses the
+    /// flat floor, which is the reading it always had.
+    /// </summary>
+    private Dictionary<string, int>? ResolveEffectiveCadencesForFreshness(int serverId)
+    {
+        var server = _serverManager.GetAllServers().FirstOrDefault(s =>
+            RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)) == serverId);
+        if (server is null)
+        {
+            return null;
+        }
+
+        var cadences = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var schedule in _scheduleManager.GetSchedulesForServer(server.Id))
+        {
+            if (schedule.Enabled && schedule.FrequencyMinutes > 0)
+            {
+                cadences[schedule.Name] = schedule.FrequencyMinutes;
+            }
+        }
+
+        return cadences;
+    }
+
+    /// <summary>
     /// The engine's live-msdb failed-jobs fetcher. Failure outcomes aren't part of the collected
     /// running_jobs snapshot, so this queries the monitored server directly at alert-check time via
     /// the collector's connection path (async SqlClient, already off the UI thread; MFA

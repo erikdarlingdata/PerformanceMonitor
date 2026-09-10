@@ -26,7 +26,9 @@ namespace Darling.Tests;
 public sealed class NothingReadBandsTests
 {
     /// <summary>
-    /// STOPPED and NO_PERMISSIONS are the two the field produces. NEVER_RUN is in the set on MEANING rather
+    /// STOPPED, NO_PERMISSIONS and (since #3240, on PostgreSQL targets) EXTENSION_MISSING are the ones the
+    /// field produces — an extension-missing collector skipped every attempt, so nothing of its is in any
+    /// total either. NEVER_RUN is in the set on MEANING rather
     /// than on reachability: it is <c>totalRuns == 0</c>, which a GROUP BY over a run log cannot currently
     /// produce (no rows, no group), but that is a property of the QUERY and not of the band. A later outer
     /// join against the collector catalog — the natural way to make a never-invoked collector visible at all
@@ -36,6 +38,7 @@ public sealed class NothingReadBandsTests
     /// </summary>
     [Theory]
     [InlineData(CollectorHealthClassifier.NoPermissions)]
+    [InlineData(CollectorHealthClassifier.ExtensionMissing)]
     [InlineData(CollectorHealthClassifier.Stopped)]
     [InlineData(CollectorHealthClassifier.NeverRun)]
     public void ABandThatReadNothing_IsInTheSet(string band)
@@ -66,7 +69,7 @@ public sealed class NothingReadBandsTests
     /// narrowed without a decision reaching them.
     /// </summary>
     [Fact]
-    public void TheSetIsExactly_TheThreeBandsThatReadNothing()
+    public void TheSetIsExactly_TheBandsThatReadNothing()
     {
         Assert.Equal(
             ReadNothing.OrderBy(b => b, StringComparer.Ordinal).ToArray(),
@@ -100,8 +103,8 @@ public sealed class NothingReadBandsTests
             .ToList();
 
         /* The precondition, named so a reflection change reports itself instead of turning this into a
-           vacuous pass over an empty sequence. */
-        Assert.Equal(7, bands.Count);
+           vacuous pass over an empty sequence. 8 since #3240 added EXTENSION_MISSING. */
+        Assert.Equal(8, bands.Count);
 
         var decided = ReadNothing.Concat(DidRead).ToHashSet(StringComparer.Ordinal);
 
@@ -118,6 +121,7 @@ public sealed class NothingReadBandsTests
     [
         CollectorHealthClassifier.NeverRun,
         CollectorHealthClassifier.NoPermissions,
+        CollectorHealthClassifier.ExtensionMissing,
         CollectorHealthClassifier.Stopped,
     ];
 

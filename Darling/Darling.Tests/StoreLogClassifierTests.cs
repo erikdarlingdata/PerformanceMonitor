@@ -476,7 +476,7 @@ public class StoreLogClassifierTests
         Assert.Equal(entries, unclassified.Sum(g => g.Occurrences));
 
         /* And the repeats really did land in the untexted fold row rather than anywhere else. */
-        var fold = Assert.Single(unclassified.Where(g => g.MessageText is null));
+        var fold = Assert.Single(unclassified, g => g.MessageText is null);
         Assert.Equal(Distinct - StoreLogClassifier.MaxRetainedGroupsPerClass - 1 + RepeatsOfTheLast, fold.Occurrences);
     }
 

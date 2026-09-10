@@ -90,10 +90,13 @@ SELECT
     -- status re-check is load-bearing rather than belt-and-braces: when no failing run in the window
     -- carried text, error_rank = 1 falls through to the newest row of ANY class, and without it a
     -- SUCCESS row's note could surface here as a fake last error.
-    MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error,
+    -- #3240: EXTENSION_MISSING is in the exemplar set for twin-parity with Darling's reads — its stored
+    -- sentence IS the remedy there. Lite's SQL Server collectors never write the status, so on this SKU
+    -- the branch is inert.
+    MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) AS last_error,
     -- The newest failure OUTRIGHT, text or not: when did this last FAIL is about the run, not the
     -- message. It can only name a different row than last_error if a failure was written with no text.
-    MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN collection_time END) AS last_error_time,
+    MAX(CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN collection_time END) AS last_error_time,
     SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
     -- YIELDED = the 1s LOCK_TIMEOUT guard fired (#1805): deliberate, benign for collection,
     -- counted apart from errors because clustering here is a signal about the TARGET's lock
@@ -118,7 +121,10 @@ SELECT
     -- no index at all; and it reads sys.master_files, so it still sees databases the monitoring login
     -- cannot ENTER — which is exactly the case being diagnosed. database_id > 4 excludes the system
     -- databases, tempdb included: the size collector takes every ONLINE database, so a bare row check
-    -- would be true on every server alive.
+    -- would be true on every server alive. A NULL database_id is an Azure sibling row (#2643/#3262):
+    -- sys.resource_stats carries no id, and it bills only USER databases, so those rows are inventory
+    -- too — without the IS NULL arm a master-connected Azure target with fifty user databases would
+    -- read as having none.
     --
     -- The inventory window is the health read's OWN ($2) — no second parameter, and an inventory that
     -- aged out says nothing rather than something stale. Uncorrelated, so both engines evaluate it
@@ -131,7 +137,7 @@ SELECT
                  FROM v_database_size_stats
                  WHERE server_id = $1
                  AND   collection_time >= $2
-                 AND   database_id > 4
+                 AND   (database_id > 4 OR database_id IS NULL)
              )
         THEN 1
         ELSE 0
@@ -183,7 +189,12 @@ SELECT
     -- The denominator's partner, and the honest half of a cost/output pair: 12 rows over 3 of 79,333
     -- runs is a different collector from 12 rows over all of them. get_pg_blocking already reports
     -- captures_with_blocking beside captures_total off this same rows_collected > 0 test.
-    SUM(CASE WHEN rows_collected > 0 THEN 1 ELSE 0 END) AS runs_with_rows
+    SUM(CASE WHEN rows_collected > 0 THEN 1 ELSE 0 END) AS runs_with_rows,
+    -- #3240: runs skipped because a PostgreSQL extension the collector DECLARES is not installed — the
+    -- EXTENSION_MISSING status Darling's fault mapper split out of PERMISSIONS. Lite's SQL Server
+    -- collectors never write it, so this counts 0 on this SKU; selected anyway because the two health
+    -- reads are ordinal twins and the shared classifier takes the count. APPENDED, read positionally.
+    SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count
 FROM
 (
     -- #1855: rank each class of message newest-first so the two exemplar columns above can take the
@@ -220,7 +231,7 @@ FROM
         ROW_NUMBER() OVER
         (
             PARTITION BY collector_name
-            ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS') THEN error_message END) IS NULL,
+            ORDER BY (CASE WHEN status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) IS NULL,
                      collection_time DESC,
                      error_message DESC
         ) AS error_rank,
@@ -288,7 +299,10 @@ ORDER BY collector_name";
                    Convert: DuckDB widens SUM over an INTEGER column to HUGEINT, which arrives as a
                    BigInteger and which Convert.ToInt64 cannot take. */
                 RowsStored = reader.IsDBNull(22) ? 0 : ToInt64(reader.GetValue(22)),
-                RunsWithRows = reader.IsDBNull(23) ? 0 : ToInt64(reader.GetValue(23))
+                RunsWithRows = reader.IsDBNull(23) ? 0 : ToInt64(reader.GetValue(23)),
+                /* Appended (#3240), for the same reason every column before it was. Always 0 on this
+                   SKU — SQL Server collectors never write EXTENSION_MISSING. */
+                ExtensionMissingCount = reader.IsDBNull(24) ? 0 : ToInt64(reader.GetValue(24))
             });
         }
 
@@ -487,6 +501,12 @@ public class CollectorHealthRow
     public DateTime? LastErrorTime { get; set; }
     public long PermissionDeniedCount { get; set; }
 
+    /// <summary>Runs skipped because a PostgreSQL extension the collector declares is not installed
+    /// (#3240) — Darling's <c>EXTENSION_MISSING</c> status. Always 0 on this SKU (SQL Server collectors
+    /// never write it); carried because the shared classifier takes the count and the two SKUs' health
+    /// reads are ordinal twins.</summary>
+    public long ExtensionMissingCount { get; set; }
+
     /// <summary>
     /// The newest PERMISSIONS instant in the window (#3010) - what dates <see cref="LastError"/>.
     /// Distinct from <see cref="LastErrorTime"/>, a MAX over ERROR and PERMISSIONS together, which
@@ -630,7 +650,7 @@ public class CollectorHealthRow
         CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
 
     public string HealthStatus => CollectorHealthClassifier.Classify(
-        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, AbandonedCount,
+        TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
         HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName));
 
     public string AvgDurationFormatted => AvgDurationMs < 1000

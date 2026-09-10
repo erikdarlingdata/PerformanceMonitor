@@ -111,6 +111,40 @@ WHERE server_id = $1";
             }
         }
 
+        /* #3236: each enabled scheduled collector's newest run beside its effective cadence — what lets
+           the stale band honor the schedule this install actually runs instead of the flat two-minute
+           floor. Any status on purpose: freshness is the rows-are-landing axis, and a collector erroring
+           on schedule still lands rows; failures band on the collector axis (#3098). 48-hour bound to
+           match the Darling readers — a collector quiet longer than that vouches for nothing anyway. */
+        var cadenceSamples = new List<CollectorCadenceSample>();
+        if (lastCollection.HasValue && EffectiveCadenceLookup?.Invoke(serverId) is { } cadences)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+SELECT collector_name, MAX(collection_time)
+FROM v_collection_log
+WHERE server_id = $1
+AND   collection_time >= $2
+GROUP BY collector_name";
+            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddHours(-48) });
+            using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                if (!reader.IsDBNull(0)
+                    && !reader.IsDBNull(1)
+                    && cadences.TryGetValue(reader.GetString(0), out var frequencyMinutes)
+                    && frequencyMinutes > 0)
+                {
+                    cadenceSamples.Add(new CollectorCadenceSample(reader.GetDateTime(1), frequencyMinutes));
+                }
+            }
+        }
+
+        var staleThreshold = lastCollection.HasValue
+            ? ServerHealthClassifier.EffectiveStaleThreshold(lastCollection.Value, cadenceSamples)
+            : ServerHealthThresholds.StaleThreshold;
+
         var summary = new ServerSummaryItem
         {
             DisplayName = displayName,
@@ -127,8 +161,10 @@ WHERE server_id = $1";
            place a ServerSummaryItem is built: the two MCP reads call this method too, and a band only the
            Overview applied would be a fact that depended on which caller asked. The clock is handed in
            rather than read inside the band, so the classification stays a pure function of
-           (last collection, now) — the shape the viewer's ApplyFreshness already has. */
-        summary.ApplyCollectionFreshness(DateTime.UtcNow);
+           (last collection, now, threshold) — the shape the viewer's ApplyFreshness already has. The
+           threshold is stamped from the SAME place for the same reason (#3236): the cadence lookup is
+           installed on this service once, so the band cannot depend on which caller asked. */
+        summary.ApplyCollectionFreshness(DateTime.UtcNow, staleThreshold);
         return summary;
     }
 }
@@ -312,14 +348,27 @@ public class ServerSummaryItem
     public ServerFreshness? CollectionFreshness { get; set; }
 
     /// <summary>
-    /// Stamp <see cref="CollectionFreshness"/> from this card's own <see cref="LastCollectionTime"/>. Pure
-    /// over (last collection, now): both instants are UTC (the DuckDB store is naive UTC and
-    /// <paramref name="nowUtc"/> is <see cref="DateTime.UtcNow"/>), so the subtraction inside the classifier
-    /// is a true elapsed time regardless of Kind. Stamped rather than computed on read so the band cannot
-    /// change between the row's brush binding and the tooltip that explains it.
+    /// The stale cutoff <see cref="CollectionFreshness"/> was banded against (#3236) — this server's own,
+    /// from <see cref="ServerHealthClassifier.EffectiveStaleThreshold"/> over its enabled collectors'
+    /// newest runs and effective cadences, or the flat floor when no cadence lookup is installed. Stamped
+    /// beside the band so the tooltip quotes the number the band was actually decided by, never a constant
+    /// that stopped being the rule.
     /// </summary>
-    public void ApplyCollectionFreshness(DateTime nowUtc) =>
-        CollectionFreshness = ServerHealthClassifier.ClassifyFreshness(LastCollectionTime, nowUtc);
+    public TimeSpan StaleThreshold { get; set; } = ServerHealthThresholds.StaleThreshold;
+
+    /// <summary>
+    /// Stamp <see cref="CollectionFreshness"/> from this card's own <see cref="LastCollectionTime"/>,
+    /// against this server's own stale cutoff (#3236). Pure over (last collection, now, threshold): both
+    /// instants are UTC (the DuckDB store is naive UTC and <paramref name="nowUtc"/> is
+    /// <see cref="DateTime.UtcNow"/>), so the subtraction inside the classifier is a true elapsed time
+    /// regardless of Kind. Stamped rather than computed on read so the band cannot change between the
+    /// row's brush binding and the tooltip that explains it.
+    /// </summary>
+    public void ApplyCollectionFreshness(DateTime nowUtc, TimeSpan staleThreshold)
+    {
+        StaleThreshold = staleThreshold;
+        CollectionFreshness = ServerHealthClassifier.ClassifyFreshness(LastCollectionTime, nowUtc, staleThreshold);
+    }
 
     /// <summary>
     /// The Last Collect row. Names its band in words when the collection is not current, because a colour
@@ -368,15 +417,17 @@ public class ServerSummaryItem
     /// axis it is about, in words, on the row the band is on. It is deliberately NOT folded into the status
     /// word: see the note on <see cref="CardStatus"/>.</para>
     ///
-    /// <para>The thresholds are read from <see cref="ServerHealthThresholds"/> rather than typed, so the
-    /// sentence cannot come to disagree with the band it is explaining.</para>
+    /// <para>The thresholds are read from the STAMPED <see cref="StaleThreshold"/> and the shared
+    /// <see cref="ServerHealthThresholds"/> rather than typed, so the sentence cannot come to disagree
+    /// with the band it is explaining — including when the cutoff is this server's own cadence-aware one
+    /// (#3236) rather than the flat two-minute floor.</para>
     /// </summary>
     public string? CollectionFreshnessTooltip => CollectionFreshness switch
     {
         ServerFreshness.Fresh =>
-            $"Collection is current — something landed within the last {Minutes(ServerHealthThresholds.StaleThreshold)}.",
+            $"Collection is current — something landed within the last {Minutes(StaleThreshold)}.",
         ServerFreshness.Stale =>
-            $"Collection is stale — nothing has landed for over {Minutes(ServerHealthThresholds.StaleThreshold)}.\n" +
+            $"Collection is stale — nothing has landed for over {Minutes(StaleThreshold)}.\n" +
             "This is about collection stopping, not about the server's metrics: the connection check can " +
             "still be passing and no collector reporting an error.",
         ServerFreshness.Offline =>

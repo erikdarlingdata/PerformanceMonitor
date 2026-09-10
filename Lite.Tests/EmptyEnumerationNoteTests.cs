@@ -187,7 +187,10 @@ public class EmptyEnumerationNoteTests
            re-check on the rank-1 row. It is the SAME claim: the column can only ever be filled from a
            failing run. Without the re-check the rank falls through to the newest row of any class when
            no failure carried text, and a SUCCESS row's note would land here. */
-        Assert.Contains("MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error", source);
+        /* EXTENSION_MISSING joined the failing-status set with #3240 for twin-parity with Darling's
+           reads (Lite's SQL Server collectors never write it, so the branch is inert on this SKU).
+           Still a STATUS gate — the broadening this pin refuses is to message PRESENCE. */
+        Assert.Contains("MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) AS last_error", source);
         Assert.DoesNotContain("error_message IS NOT NULL", source);
     }
 

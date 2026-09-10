@@ -234,7 +234,9 @@ public sealed class CollectionOutputBesideCostTests
             .Select(p => p.Name!)
             .ToArray();
 
-        Assert.Equal(9, parameters.Length);
+        /* 10 since #3240 added extensionMissingCount — a run-class count like the two beside it, not an
+           output or denial-currency term, which is what this pin refuses. */
+        Assert.Equal(10, parameters.Length);
         Assert.DoesNotContain(parameters, p => p.Contains("rows", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(parameters, p => p.Contains("output", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(parameters, p => p.Contains("denied", StringComparison.OrdinalIgnoreCase)

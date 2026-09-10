@@ -193,7 +193,7 @@ public sealed class AlertReadFailureSurfaceTests
     /// could not fail no matter how torn the write was.</para>
     /// </summary>
     [Fact]
-    public void TheNewestFailuresFactsAreNeverABlendOfTwo()
+    public async Task TheNewestFailuresFactsAreNeverABlendOfTwo()
     {
         const string Key = "500";
         const int WritesPerWriter = 200_000;
@@ -263,7 +263,7 @@ public sealed class AlertReadFailureSurfaceTests
             }
         }
 
-        Task.WaitAll(writers);
+        await Task.WhenAll(writers);
 
         /* Guaranteed rather than hoped for: the bucket was seeded, so the first iteration observed a
            complete trio whatever the scheduler did. */
@@ -1761,7 +1761,8 @@ public sealed class AlertReadFailureSurfaceTests
             .GetMethod("Classify", BindingFlags.Public | BindingFlags.Static);
 
         Assert.NotNull(classify);
-        Assert.Equal(9, classify!.GetParameters().Length);
+        /* 10 since #3240 added extensionMissingCount — a run-class count, not an alert-read term. */
+        Assert.Equal(10, classify!.GetParameters().Length);
         Assert.DoesNotContain(
             "alert",
             string.Join("|", classify.GetParameters().Select(p => p.Name)),

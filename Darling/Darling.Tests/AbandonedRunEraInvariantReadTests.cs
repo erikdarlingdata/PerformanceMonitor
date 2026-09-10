@@ -62,8 +62,8 @@ public sealed class AbandonedRunEraInvariantReadTests
     [Fact]
     public void TheLikePattern_IsTheNoteFormat_WithTheBudgetHoleWidened() =>
         Assert.Equal(
-            EnumeratedCollectorDriver.WholeCycleBudgetNoteFormat.Replace("{0}", "%", StringComparison.Ordinal),
-            EnumeratedCollectorDriver.WholeCycleBudgetNoteSqlPattern);
+            EnumeratedCollectorDriver.WholeCycleBudgetNoteSqlPattern,
+            EnumeratedCollectorDriver.WholeCycleBudgetNoteFormat.Replace("{0}", "%", StringComparison.Ordinal));
 
     /// <summary>
     /// Why the match is a pattern at all: the budget is INTERPOLATED into the message and the shipped values
@@ -107,12 +107,12 @@ public sealed class AbandonedRunEraInvariantReadTests
     public void AStatusOnlyCount_BandsTheFixtureHealthy_WhichIsTheUndercount()
     {
         Assert.Equal(CollectorHealthClassifier.Healthy, CollectorHealthClassifier.Classify(
-            totalRuns: 205, successCount: 204, errorCount: 0, permissionDeniedCount: 0, abandonedCount: 1,
-            hoursSinceLastSuccess: 0.1, hoursSinceLastRun: 0.1, frequencyMinutes: 1, isOnLoad: false));
+            totalRuns: 205, successCount: 204, errorCount: 0, permissionDeniedCount: 0, extensionMissingCount: 0,
+            abandonedCount: 1, hoursSinceLastSuccess: 0.1, hoursSinceLastRun: 0.1, frequencyMinutes: 1, isOnLoad: false));
 
         Assert.Equal(CollectorHealthClassifier.Warning, CollectorHealthClassifier.Classify(
-            totalRuns: 205, successCount: 202, errorCount: 0, permissionDeniedCount: 0, abandonedCount: 3,
-            hoursSinceLastSuccess: 0.1, hoursSinceLastRun: 0.1, frequencyMinutes: 1, isOnLoad: false));
+            totalRuns: 205, successCount: 202, errorCount: 0, permissionDeniedCount: 0, extensionMissingCount: 0,
+            abandonedCount: 3, hoursSinceLastSuccess: 0.1, hoursSinceLastRun: 0.1, frequencyMinutes: 1, isOnLoad: false));
     }
 
     /* ---------------- live: the two-era window, against a real store ---------------- */

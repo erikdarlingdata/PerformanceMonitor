@@ -1898,7 +1898,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         Assert.Equal(ClockFrame.ServerLocal, Renderers.Single(r => r.Renderer == "FormatServerClock").Expects);
         Assert.Equal(ClockFrame.Utc, Renderers.Single(r => r.Renderer == "FormatServerTime").Expects);
         Assert.Equal(ClockFrame.Utc, Renderers.Single(r => r.Renderer == "FormatStoredUtc").Expects);
-        Assert.Single(Renderers.Where(r => r.Expects == ClockFrame.ServerLocal));
+        Assert.Single(Renderers, r => r.Expects == ClockFrame.ServerLocal);
     }
 
     /// <summary>

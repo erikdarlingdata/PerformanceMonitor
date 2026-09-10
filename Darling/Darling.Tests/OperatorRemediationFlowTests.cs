@@ -448,7 +448,7 @@ public sealed class OperatorRemediationFlowTests
     public void TheFlowAndTheSelfReviewShareOneDefinitionOfBetter()
     {
         Assert.Equal(
-            ForcePlanBotSettings.Default.NetBenefitRatio,
-            OperatorRemediationFlow.MaterialChangeRatio);
+            OperatorRemediationFlow.MaterialChangeRatio,
+            ForcePlanBotSettings.Default.NetBenefitRatio);
     }
 }

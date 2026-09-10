@@ -240,6 +240,12 @@ public partial class MainWindow : Window
             // Initialize data service for overview
             _dataService = new LocalDataService(_databaseInitializer);
 
+            /* #3236: the Overview card's stale band honors the schedule this install actually runs — a
+               Low-Impact preset runs EVERY collector at 5+ minutes, and on the flat two-minute floor that
+               read "(stale)" for three of every five minutes on a healthy server. Installed on the
+               service, not passed by a caller, so the band cannot depend on which caller asked. */
+            _dataService.EffectiveCadenceLookup = ResolveEffectiveCadencesForFreshness;
+
             /* #1812: the adapter's snapshot-freshness bound needs the server's EFFECTIVE running_jobs
                cadence. The adapter keys servers by the deterministic int hash; ScheduleManager keys by
                the connection GUID — the same hash-match FetchFailedJobsForAlertAsync already does. */

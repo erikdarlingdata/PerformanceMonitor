@@ -151,7 +151,11 @@ public sealed class DarlingEmptyEnumerationNoteTests
         })
         {
             var source = ReadRepoFile(relative);
-            Assert.Contains("MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS') THEN error_message END) AS last_error", source);
+            /* EXTENSION_MISSING joined the failing-status set with #3240: its stored sentence IS the
+               remedy (the extension, named), so keeping it out would band a collector EXTENSION_MISSING
+               beside a blank Last Error. Still a STATUS gate — the broadening this pin refuses is to
+               message PRESENCE, and that refusal is unchanged. */
+            Assert.Contains("MAX(CASE WHEN error_rank = 1 AND status IN ('ERROR', 'PERMISSIONS', 'EXTENSION_MISSING') THEN error_message END) AS last_error", source);
             Assert.DoesNotContain("error_message IS NOT NULL", source);
         }
     }

@@ -52,24 +52,182 @@ public class PostgresFaultOutcomeTests
         Assert.Equal("PERMISSIONS", status);
         Assert.Contains("pg_monitor", explanation, StringComparison.Ordinal);
         Assert.Contains("42501", explanation, StringComparison.Ordinal);
+
+        /* #3240 must not widen: a genuine grant refusal on a collector that DECLARES an extension is
+           still a grant refusal — the declaration routes only the missing-OBJECT fault. */
+        Assert.Equal("PERMISSIONS", DarlingWorker.PostgresFaultOutcome(Pg("42501"), "pg_buffer_usage").Status);
+
+        /* And the general sentence stays general: pg_monitor genuinely covers this collector, and the
+           #3239 log-reader grant pair named here would send an operator widening a role for nothing. */
+        Assert.DoesNotContain("pg_read_server_files", explanation, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// The case this wiring exists for. pg_statement_stats against a database where the extension was
-    /// never created raises 42P01 on every single cycle; before this it logged ERROR every minute forever.
-    /// It must degrade quietly AND say plainly that it is not a grant problem, or the PERMISSIONS status
-    /// sends someone hunting for a GRANT that will not help.
+    /// #3239: the two self-hosted log readers are the exception the general pg_monitor sentence used to
+    /// deny to their faces. Reading the log with pg_read_file needs the pg_read_server_files role AND an
+    /// explicit EXECUTE grant — measured on #2566, the role alone does NOT carry it, because the
+    /// function's ACL is postgres=X/postgres — so the old hint told this exact failure to go check a
+    /// role that was granted and covers nothing here. The EXECUTE half is a per-database catalog fact,
+    /// so the hint names the database the way #2638's extension sentence does: measured on the 20260910
+    /// dogfood soak, the pair issued in the wrong database leaves a failure identical to no grant at all.
+    /// </summary>
+    [Theory]
+    [InlineData("pg_deadlocks")]
+    [InlineData("pg_plan_capture")]
+    public void ALogReaderDenialNamesTheGrantPairAndTheDatabaseItMustBeIssuedIn(string collectorName)
+    {
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42501", "permission denied for function pg_read_file"), collectorName, "appdb");
+
+        /* Still the non-fatal-degradation bucket — #3239 changes the sentence, not the classification. */
+        Assert.Equal("PERMISSIONS", status);
+
+        /* The pair, with every pg_read_file signature spelled out so the fix is paste-able. */
+        Assert.Contains("pg_read_server_files", explanation, StringComparison.Ordinal);
+        Assert.Contains(
+            "GRANT EXECUTE ON FUNCTION pg_read_file(text), pg_read_file(text, bigint, bigint), "
+            + "pg_read_file(text, bigint, bigint, boolean)",
+            explanation, StringComparison.Ordinal);
+
+        /* The per-database nuance, with the database named. */
+        Assert.Contains("database 'appdb'", explanation, StringComparison.Ordinal);
+        Assert.Contains("DIFFERENT database on the same cluster", explanation, StringComparison.Ordinal);
+
+        /* And it must not repeat the sentence this fixes. */
+        Assert.DoesNotContain("covers every collector", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An unknown connected database degrades to a phrase rather than inventing a name — the same rule
+    /// the ObjectMissing arm's WhereToCreateIt follows.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ALogReaderDenialFallsBackWhenTheDatabaseIsUnknown(string? connectedDatabase)
+    {
+        var (_, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42501"), "pg_deadlocks", connectedDatabase);
+
+        Assert.Contains("the database this collector connects to", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("''", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The UNDECLARED arm: a missing object on a collector that declares no extension dependency keeps
+    /// the original degradation — quiet, PERMISSIONS, and saying plainly that it is not a grant problem.
+    /// This is the version-gated-relation shape and the extension-nothing-declares shape, where the code
+    /// cannot name the absent thing and the generic sentence is the honest one.
     /// </summary>
     [Theory]
     [InlineData("42P01")]
     [InlineData("42883")]
     public void AMissingObjectDegradesQuietlyAndSaysItIsNotAGrant(string sqlState)
     {
-        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(Pg(sqlState), "pg_statement_stats");
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(Pg(sqlState), PlainCollector);
 
         Assert.Equal("PERMISSIONS", status);
         Assert.Contains("NOT a missing grant", explanation, StringComparison.Ordinal);
         Assert.Contains("CREATE EXTENSION", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3240, the case that issue is about. A missing object on a collector that DECLARES the extension
+    /// it reads (<see cref="ICollectorSchemaInfo.RequiredPgExtensions"/>, #3191) is not ambiguous: the
+    /// absent thing is that extension, so the run records EXTENSION_MISSING — never PERMISSIONS, whose
+    /// health band hints at pg_monitor — and the sentence names the extension and the CREATE EXTENSION
+    /// that fixes it. Pinned per named source: these are the collectors a stock self-hosted PostgreSQL
+    /// without optional extensions fails every cycle (pg_index_bloat left the set when #3235 removed its
+    /// pgstattuple dependency — see the regression pin below).
+    /// </summary>
+    [Theory]
+    [InlineData("pg_buffer_usage", "pg_buffercache", "42P01")]
+    [InlineData("pg_kernel_stats", "pg_stat_kcache", "42883")]
+    [InlineData("pg_predicate_stats", "pg_qualstats", "42883")]
+    [InlineData("pg_statement_stats", "pg_stat_statements", "42P01")]
+    [InlineData("pg_wait_sampling", "pg_wait_sampling", "42P01")]
+    public void ADeclaredExtensionsAbsence_RecordsExtensionMissing_AndNamesTheExtension(
+        string collectorName, string extensionName, string sqlState)
+    {
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(Pg(sqlState), collectorName);
+
+        Assert.Equal(CollectorRuntimePrecondition.ExtensionMissingStatus, status);
+        Assert.Equal("EXTENSION_MISSING", status);
+        Assert.Contains(extensionName, explanation, StringComparison.Ordinal);
+        Assert.Contains($"CREATE EXTENSION {extensionName}", explanation, StringComparison.Ordinal);
+        Assert.Contains("NOT a missing grant", explanation, StringComparison.Ordinal);
+        Assert.Contains(sqlState, explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Both SQLSTATEs reach the declared arm — the issue's five sources presented as a mix of 42P01
+    /// (missing relation) and 42883 (missing function), and the seam is the declaration, not the code.
+    /// </summary>
+    [Theory]
+    [InlineData("42P01")]
+    [InlineData("42883")]
+    public void BothMissingObjectSqlStates_ReachTheDeclaredArm(string sqlState)
+    {
+        Assert.Equal(
+            CollectorRuntimePrecondition.ExtensionMissingStatus,
+            DarlingWorker.PostgresFaultOutcome(Pg(sqlState), "pg_buffer_usage").Status);
+    }
+
+    /// <summary>
+    /// The preload half of the remedy: for a declaration whose install kind is SharedPreloadLibraries
+    /// the sentence has to say the module needs shared_preload_libraries and a restart FIRST, because a
+    /// CREATE EXTENSION issued before that is inert and the operator concludes the fix does not work. A
+    /// CreateExtension-only declaration must NOT get that sentence — sending someone to schedule a
+    /// restart that pg_buffercache does not need is the same wrong-remedy defect pointed the other way.
+    /// </summary>
+    [Fact]
+    public void TheExtensionSentence_CarriesTheRestartCost_ExactlyWhenDeclared()
+    {
+        var preloaded = DarlingWorker.PostgresFaultOutcome(Pg("42883"), "pg_kernel_stats").Explanation;
+        var createOnly = DarlingWorker.PostgresFaultOutcome(Pg("42P01"), "pg_buffer_usage").Explanation;
+
+        Assert.Contains("shared_preload_libraries", preloaded, StringComparison.Ordinal);
+        Assert.DoesNotContain("shared_preload_libraries", createOnly, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The seam is the DECLARATION, derived over the whole catalog rather than a hand-list that goes
+    /// stale in the passing direction: every PostgreSQL collector that declares an extension routes its
+    /// missing-object fault to EXTENSION_MISSING, and every one that declares none keeps PERMISSIONS.
+    /// A new dependent collector gets the right classification by declaring, with no edit here.
+    /// </summary>
+    [Fact]
+    public void EveryPostgresCollector_RoutesItsMissingObjectFault_ByItsDeclaration()
+    {
+        var postgresCollectors = System.Linq.Enumerable.ToArray(
+            System.Linq.Enumerable.Where(
+                CollectorCatalog.All, d => d.TargetEngine == CollectorTargetEngine.PostgreSql));
+
+        Assert.NotEmpty(postgresCollectors);
+
+        foreach (var definition in postgresCollectors)
+        {
+            var expected = definition.RequiredPgExtensions.Count > 0
+                ? CollectorRuntimePrecondition.ExtensionMissingStatus
+                : "PERMISSIONS";
+
+            Assert.Equal(expected, DarlingWorker.PostgresFaultOutcome(Pg("42P01"), definition.Name).Status);
+        }
+    }
+
+    /// <summary>
+    /// pg_index_bloat was in #3240's field table and is deliberately NOT pinned to the new status: #3235
+    /// rewrote it to estimate from catalog statistics, its query no longer calls pgstatindex, and its
+    /// declaration is empty — so its 42883 cannot occur, and if some other object went missing the
+    /// generic sentence is the honest one. If it ever regains a dependency, declaring it flips this via
+    /// the derived pin above.
+    /// </summary>
+    [Fact]
+    public void PgIndexBloat_DeclaresNoExtension_SoItsMissingObjectStaysGeneric()
+    {
+        Assert.Empty(CollectorCatalog.Find("pg_index_bloat")!.RequiredPgExtensions);
+        Assert.Equal("PERMISSIONS", DarlingWorker.PostgresFaultOutcome(Pg("42883"), "pg_index_bloat").Status);
     }
 
     /// <summary>
@@ -86,14 +244,22 @@ public class PostgresFaultOutcomeTests
     [InlineData("42883")]
     public void AMissingObjectNamesTheDatabaseItIsMissingFrom(string sqlState)
     {
+        /* pg_buffer_usage declares pg_buffercache, so this rides the #3240 arm — which must KEEP #2638's
+           property: the database is named, and the exact statement to run there is spelled out. */
         var (_, explanation) = DarlingWorker.PostgresFaultOutcome(Pg(sqlState), "pg_buffer_usage", "appdb");
 
         Assert.Contains("database 'appdb'", explanation, StringComparison.Ordinal);
-        Assert.Contains("CREATE EXTENSION in 'appdb'", explanation, StringComparison.Ordinal);
+        Assert.Contains("CREATE EXTENSION pg_buffercache in database 'appdb'", explanation, StringComparison.Ordinal);
 
         /* The half that makes the name worth printing: it says the extension may exist elsewhere on the
            same cluster, which is the situation the message used to leave someone to discover alone. */
         Assert.Contains("DIFFERENT database on the same cluster", explanation, StringComparison.Ordinal);
+
+        /* And the undeclared arm keeps #2638's naming too — the two arms degrade the same way. */
+        var (_, generic) = DarlingWorker.PostgresFaultOutcome(Pg(sqlState), PlainCollector, "appdb");
+        Assert.Contains("database 'appdb'", generic, StringComparison.Ordinal);
+        Assert.Contains("CREATE EXTENSION in 'appdb'", generic, StringComparison.Ordinal);
+        Assert.Contains("DIFFERENT database on the same cluster", generic, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -106,10 +272,14 @@ public class PostgresFaultOutcomeTests
     [InlineData("   ")]
     public void AnUnknownDatabaseFallsBackRatherThanGuessing(string? connectedDatabase)
     {
-        var (_, explanation) = DarlingWorker.PostgresFaultOutcome(Pg("42P01"), "pg_buffer_usage", connectedDatabase);
+        /* Both arms: the declared one (pg_buffer_usage) and the generic one (PlainCollector). */
+        var (_, declared) = DarlingWorker.PostgresFaultOutcome(Pg("42P01"), "pg_buffer_usage", connectedDatabase);
+        var (_, generic) = DarlingWorker.PostgresFaultOutcome(Pg("42P01"), PlainCollector, connectedDatabase);
 
-        Assert.Contains("in the connected database", explanation, StringComparison.Ordinal);
-        Assert.DoesNotContain("database ''", explanation, StringComparison.Ordinal);
+        Assert.Contains("in the connected database", declared, StringComparison.Ordinal);
+        Assert.DoesNotContain("database ''", declared, StringComparison.Ordinal);
+        Assert.Contains("in the connected database", generic, StringComparison.Ordinal);
+        Assert.DoesNotContain("database ''", generic, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -201,8 +371,10 @@ public class PostgresFaultOutcomeTests
     }
 
     /// <summary>
-    /// Every non-ERROR status the mapper can emit must be one the store already understands. Inventing a
-    /// sixth would break the dashboards, health bands and self-alerts that read this column.
+    /// Every non-ERROR status the mapper can emit must be one the store's readers understand. Inventing a
+    /// status no health read counts would break the dashboards, health bands and self-alerts that read
+    /// this column — EXTENSION_MISSING is in the set because #3240 taught every banding read to count it,
+    /// which is the bar a new value has to clear before this list may grow.
     /// </summary>
     [Theory]
     [InlineData("42501")]
@@ -214,9 +386,12 @@ public class PostgresFaultOutcomeTests
     [InlineData("XX000")]
     public void OnlyEverEmitsAStatusTheStoreAlreadyUnderstands(string sqlState)
     {
-        var status = DarlingWorker.PostgresFaultOutcome(Pg(sqlState), PlainCollector).Status;
+        var understood = new[] { "SUCCESS", "PERMISSIONS", "EXTENSION_MISSING", "ERROR", "SESSION_MISSING", "YIELDED" };
 
-        Assert.Contains(status, new[] { "SUCCESS", "PERMISSIONS", "ERROR", "SESSION_MISSING", "YIELDED" });
+        Assert.Contains(DarlingWorker.PostgresFaultOutcome(Pg(sqlState), PlainCollector).Status, understood);
+
+        /* And through the declared arm, which is the one that emits the newest member. */
+        Assert.Contains(DarlingWorker.PostgresFaultOutcome(Pg(sqlState), "pg_buffer_usage").Status, understood);
     }
 
     /// <summary>

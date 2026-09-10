@@ -272,6 +272,17 @@ public sealed class TestConnectServer
     [JsonPropertyName("name")]
     public string Name { get; set; } = "";
 
+    /// <summary>
+    /// Which engine to probe: <c>"sqlserver"</c> (default) or <c>"postgres"</c> — the same tokens, position
+    /// and omitted-means-SQL-Server contract as <c>MonitoredServer.Engine</c>, which is what the service
+    /// deserializes this into (#3244). Non-null with the SQL Server default so every request the dialogs can
+    /// build today says its engine explicitly; a future PostgreSQL-authoring dialog sets this same field, and
+    /// the probe's reply then answers in that engine's version vocabulary rather than being guessed at —
+    /// <c>17</c> is a real major in both engines, so a guess would be silently believed.
+    /// </summary>
+    [JsonPropertyName("engine")]
+    public string Engine { get; set; } = "sqlserver";
+
     [JsonPropertyName("host")]
     public string Host { get; set; } = "";
 

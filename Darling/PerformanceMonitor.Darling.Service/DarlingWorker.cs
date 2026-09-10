@@ -6185,11 +6185,77 @@ LIMIT 1";
               + $"so run CREATE EXTENSION in '{connectedDatabase}'. ";
 
     /// <summary>
+    /// The self-hosted log readers (#3239). Their dispatch entries send Aurora and RDS to the log-API
+    /// ingestors, so a target-side PostgresException under either name comes from the pg_read_file route.
+    /// </summary>
+    private static bool ReadsServerLogWithPgReadFile(string collectorName)
+        => collectorName is "pg_deadlocks" or "pg_plan_capture";
+
+    /// <summary>
+    /// Where the pg_read_file grants have to be issued, named when we know it (#3239) — function ACLs are
+    /// per-database catalogs, the same fact <see cref="WhereToCreateIt"/> names for extensions. Measured
+    /// on the 20260910 dogfood soak: the pair issued in the wrong database leaves a failure identical to
+    /// no grant at all.
+    /// </summary>
+    private static string WhereToGrantIt(string? connectedDatabase)
+        => string.IsNullOrWhiteSpace(connectedDatabase)
+            ? "in the database this collector connects to."
+            : $"in database '{connectedDatabase}', the one this collector connects to — issued in a "
+              + "DIFFERENT database on the same cluster, they change nothing here.";
+
+    /// <summary>
+    /// The extensions <paramref name="collectorName"/> declares it cannot run without
+    /// (<see cref="ICollectorSchemaInfo.RequiredPgExtensions"/>, #3191) — the seam #3240's classification
+    /// consults. Empty for a collector the catalog does not know, which keeps an unknown name on the
+    /// generic missing-object arm rather than inventing a dependency for it.
+    /// </summary>
+    private static IReadOnlyList<PgExtensionDependency> RequiredExtensionsOf(string collectorName) =>
+        CollectorCatalog.Find(collectorName)?.RequiredPgExtensions ?? Array.Empty<PgExtensionDependency>();
+
+    /// <summary>
+    /// The sentence an <c>EXTENSION_MISSING</c> row carries (#3240): the raw error, the DECLARED extension
+    /// by name, the exact <c>CREATE EXTENSION</c> to run and where (#2638's per-database caution kept — an
+    /// extension installed in a different database on the same cluster is invisible from here), and the
+    /// <c>shared_preload_libraries</c> restart when the declaration says installing costs one. Ends on the
+    /// same retry promise the generic arm makes, because it is the same machinery: the collector retries
+    /// every cycle and starts collecting on the first one after the extension exists.
+    /// </summary>
+    private static string ExtensionMissingExplanation(
+        PostgresException ex, IReadOnlyList<PgExtensionDependency> required, string? connectedDatabase)
+    {
+        var names = string.Join(", ", required.Select(r => r.ExtensionName));
+        var create = string.Join("; ", required.Select(r => $"CREATE EXTENSION {r.ExtensionName}"));
+        var noun = required.Count == 1 ? "extension" : "extensions";
+
+        var where = string.IsNullOrWhiteSpace(connectedDatabase)
+            ? $"run {create} in the connected database (extensions are per-database). "
+            : $"run {create} in database '{connectedDatabase}', which is the one this collector connects "
+              + "to — an extension installed in a DIFFERENT database on the same cluster is invisible "
+              + "from here. ";
+
+        var preload = required.Any(r => r.InstallKind == PgExtensionInstallKind.SharedPreloadLibraries)
+            ? $"The module also has to be in shared_preload_libraries first, which takes a server restart "
+              + "(a parameter-group change plus a reboot on Aurora/RDS) and leaves it inert until then "
+              + "whatever else is installed. "
+            : string.Empty;
+
+        return $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the {names} {noun} this collector reads is "
+            + "not installed on this target. This is NOT a missing grant, and no GRANT will change it: "
+            + where
+            + preload
+            + "Recorded as a named non-fatal skip rather than an error so it does not fill the log every "
+            + "cycle; the collector retries every cycle and starts collecting on the first one after the "
+            + $"{noun} exists.";
+    }
+    /// <summary>
     /// Maps a PostgreSQL fault to a collection_log status plus the sentence an operator needs.
-    /// <para>The store has five statuses and none of them is "this feature is not installed", so the
-    /// non-fatal-degradation bucket (PERMISSIONS) carries those cases and the MESSAGE distinguishes them —
-    /// the same division the Azure service-objective hint already uses. Returning "ERROR" means "let the
-    /// general handler have it", which keeps the genuinely unexpected loud.</para>
+    /// <para>PERMISSIONS is the non-fatal-degradation bucket for the cases whose absent thing the code
+    /// cannot name — a denied grant, an undeclared missing object, a disabled feature — and the MESSAGE
+    /// distinguishes them, the same division the Azure service-objective hint already uses. A missing
+    /// object on a collector that DECLARES the extension it reads is not one of those: since #3240 it gets
+    /// its own <c>EXTENSION_MISSING</c> status, so the health surfaces can band it apart from a grant
+    /// problem instead of hinting at <c>pg_monitor</c>. Returning "ERROR" means "let the general handler
+    /// have it", which keeps the genuinely unexpected loud.</para>
     /// </summary>
     internal static (string Status, string Explanation) PostgresFaultOutcome(
         PostgresException ex, string collectorName, string? connectedDatabase = null)
@@ -6199,9 +6265,37 @@ LIMIT 1";
 
         return fault switch
         {
+            /* #3239: the two self-hosted log readers are the exception the general sentence below used to
+               deny to their faces. Reading the log with pg_read_file needs the pg_read_server_files role
+               AND an explicit EXECUTE grant — measured on #2566, the role alone does NOT carry it, because
+               the function's ACL is postgres=X/postgres — and the EXECUTE half lives in each database's
+               own catalog, so the grants only count in the database this collector connects to. The old
+               hint said pg_monitor covers everything, which sent an operator in a circle: the product's
+               own changelog knew better. */
+            CollectorTargetFault.Permissions when ReadsServerLogWithPgReadFile(collectorName) => ("PERMISSIONS",
+                $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — this collector reads the server log with "
+                + "pg_read_file(), which pg_monitor does NOT cover. The monitoring login needs BOTH the "
+                + "pg_read_server_files role AND an explicit GRANT EXECUTE ON FUNCTION pg_read_file(text), "
+                + "pg_read_file(text, bigint, bigint), pg_read_file(text, bigint, bigint, boolean) — the "
+                + "role alone does not carry EXECUTE, because the function's ACL is postgres=X/postgres. "
+                + "EXECUTE grants live in each database's own catalog, so issue them "
+                + WhereToGrantIt(connectedDatabase)),
+
             CollectorTargetFault.Permissions => ("PERMISSIONS",
                 $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the monitoring login lacks a grant this "
                 + "source needs. pg_monitor covers every collector here; check that it is granted."),
+
+            /* #3240: a missing source object on a collector that DECLARES its extension dependency
+               (ICollectorSchemaInfo.RequiredPgExtensions, #3191) is not ambiguous — the absent thing is
+               that extension, installing it is the remedy, and no grant changes anything. Recorded under
+               its own status so Collection Health bands it EXTENSION_MISSING rather than NO_PERMISSIONS
+               with a pg_monitor hint, and the sentence names the extension instead of describing the
+               error's shape. Undeclared sources keep the arm below: a version-gated relation, or an
+               extension-owned object nothing declares, still presents as 42P01/42883, and for those the
+               generic sentence is the honest one. */
+            CollectorTargetFault.ObjectMissing when RequiredExtensionsOf(collectorName) is { Count: > 0 } required =>
+                (CollectorRuntimePrecondition.ExtensionMissingStatus,
+                    ExtensionMissingExplanation(ex, required, connectedDatabase)),
 
             /* 42P01 / 42883: the relation or function is not there. Overwhelmingly an extension that was
                never created in the connected database rather than anything to do with privileges. */
