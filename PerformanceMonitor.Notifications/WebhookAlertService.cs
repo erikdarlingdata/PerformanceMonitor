@@ -161,7 +161,8 @@ public class WebhookAlertService
                window (a distinct fingerprint is not throttled by an unrelated prior incident); stamp
                every candidate key only after a successful post. Seeds the webhook last-sent time from
                the alert log on first touch per key (#1145), unless the store is null (no seeding). No
-               incidents -> the metric-level fallback key (today's behavior). */
+               incidents -> the metric-level fallback key (today's behavior). WHETHER to post only;
+               #3313's filter below decides WHICH incidents the post contains. */
             var decision = await _cooldown.EvaluateAsync(
                 serverId, metricName, context?.Incidents,
                 TimeSpan.FromMinutes(_settings.EmailCooldownMinutes));
@@ -173,28 +174,36 @@ public class WebhookAlertService
 
             bool sent = false;
 
+            /* #3313: the decision above says the alert posts; this says WHICH of its incidents the card
+               contains. Rendering all of them re-delivered fingerprints that were still inside their own
+               window and had gone out minutes earlier, riding along on whichever sibling was fresh. Applied
+               ONCE for the whole fan-out, like triageUrl below and for the same reason: four channels
+               describing the same firing must not disagree about what it covers. Resolves the prose too,
+               against the UNFILTERED context — see IncidentDeliveryFilter for why that basis is the only
+               correct one. #3297's null-when-redundant behaviour is unchanged. */
+            var render = IncidentDeliveryFilter.ForDelivery(context, detailText, decision.DeliverableDedupKeys);
+            var renderContext = render.Context;
+            var prose = render.Prose;
+
             /* #2710: the triage-page link, computed ONCE for the whole fan-out so all four channels carry
                the SAME URL for the same firing. Keyed by (server, metric, now, dedup key) rather than an
                alert-history id, because the history row is written AFTER delivery — the page resolves the
                row on read. Null (base URL unset/invalid) means every channel omits the link; delivery is
                never gated on it. The dedup key uses the same serverId-else-serverName identity the generic
-               channel's {{dedup_key}} token uses, so link, token, and PagerDuty all correlate. */
+               channel's {{dedup_key}} token uses, so link, token, and PagerDuty all correlate — and it
+               reads the RENDERED incidents, so the anchor names an incident the card actually shows. */
             var triageUrl = TriageLink.Build(
                 _settings.TriageBaseUrl, serverName, metricName, DateTime.UtcNow,
-                DerivePagerDutyDedupKey(string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, context));
-
-            /* #3297: null when the alert carries no prose, or when its prose is only a flattening of the
-               structured context every channel below already renders. */
-            var prose = AlertDetailText.ProseForDelivery(detailText, context);
+                DerivePagerDutyDedupKey(string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, renderContext));
 
             if (TeamsConfigured)
             {
-                sent |= await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl, prose, displayName);
+                sent |= await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, displayName);
             }
 
             if (SlackConfigured)
             {
-                sent |= await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl, prose, displayName);
+                sent |= await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, displayName);
             }
 
             if (GenericConfigured)
@@ -202,12 +211,12 @@ public class WebhookAlertService
                 /* Generic webhook: the payload's "metric" field is a machine key an automation correlates on,
                    so it stays the immutable metric name — the display name is a human-title concern only, and
                    this channel has no title. The prose detail DOES go, because it is alert content. */
-                sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl, prose);
+                sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose);
             }
 
             if (PagerDutyConfigured)
             {
-                sent |= await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl, prose, displayName);
+                sent |= await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, displayName);
             }
 
             if (sent)

@@ -111,6 +111,45 @@ public class AlertIncidentRenderTests
             f => f.GetProperty("value").GetString() == "bbb");
     }
 
+    /// <summary>
+    /// #3313: the delivery filter's output renders correctly on every shared surface. The filter removes a
+    /// stale incident's item and appends a one-line footer; this pins that all four renderers — Teams facts,
+    /// Slack fields, and the two independently-built email bodies — show the surviving fingerprint and the
+    /// footer, and none of them shows the stale one.
+    ///
+    /// <para>Lite and Darling share these builders, so a delivery pin on one SKU's service says nothing
+    /// about whether the other's renderers handle the shape. Read from the filter's own constants rather
+    /// than a copy of its text: a footer whose wording changed while this pin kept passing against the old
+    /// string would be asserting nothing.</para>
+    /// </summary>
+    [Fact]
+    public void AFilteredContext_RendersItsSurvivorAndFooter_OnEveryVehicle()
+    {
+        var ctx = new AlertContext();
+        AlertIncidentRenderer.Apply(ctx, new[]
+        {
+            new AlertIncident("stale-fingerprint", new[] { "SalesDb.dbo.Orders" }),
+            new AlertIncident("fresh-fingerprint", new[] { "SalesDb.dbo.Shipments" })
+        });
+
+        var render = IncidentDeliveryFilter.ForDelivery(ctx, null, new[] { "fresh-fingerprint" });
+        var filtered = render.Context;
+        Assert.Equal(1, render.SuppressedIncidentCount);
+
+        var teams = WebhookAlertService.BuildTeamsPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: filtered);
+        var slack = WebhookAlertService.BuildSlackPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: filtered);
+        var (html, plain) = EmailTemplateBuilder.BuildAlertEmail(
+            "Deadlocks Detected", "S1", "2", "n/a", 15, Branding, filtered);
+
+        foreach (var vehicle in new[] { teams, slack, html, plain })
+        {
+            Assert.Contains("fresh-fingerprint", vehicle);
+            Assert.DoesNotContain("stale-fingerprint", vehicle);
+            Assert.Contains(IncidentDeliveryFilter.OtherIncidentsHeading, vehicle);
+            Assert.Contains(IncidentDeliveryFilter.OtherIncidentsLabel, vehicle);
+        }
+    }
+
     [Fact]
     public void DedupKey_RendersOnTeamsSlackAndBothEmailBodies()
     {

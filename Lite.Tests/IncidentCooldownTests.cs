@@ -151,6 +151,70 @@ public class IncidentCooldownTests
         Assert.True((await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("A"), Window)).ShouldSend);
     }
 
+    /* ─────────────── #3313: the per-fingerprint verdicts, not only their reduction ─────────────── */
+
+    /// <summary>
+    /// #3313: the decision reports WHICH fingerprints were outside their own window, not only that one of
+    /// them was. The "send if ANY is fresh" reduction above is the right answer to "does this post" and was
+    /// the only answer available, so the channel builders rendered the whole incident set — including the
+    /// ones still inside their own window, already delivered minutes earlier.
+    ///
+    /// <para>Reported as a member of the same decision rather than left to a second call: the cooldown
+    /// evicts, seeds from history and stamps, so a render evaluating freshness for itself would not be
+    /// asking the same question the send decision answered. Consumed by
+    /// <c>IncidentDeliveryFilter.ForDelivery</c>; the render side is pinned in
+    /// <c>Darling.Tests.IncidentDeliveryFilterTests</c>.</para>
+    /// </summary>
+    [Fact]
+    public async Task Decision_NamesOnlyTheFingerprintsOutsideTheirOwnWindow()
+    {
+        var cd = NoSeed();
+
+        var a = await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("A"), Window);
+        cd.Stamp(a);
+        Assert.Equal(new[] { "A" }, a.DeliverableDedupKeys);
+
+        // Summary {A (in cooldown), B (fresh)}: posts because B is fresh, but only B is deliverable.
+        var summary = await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("A", "B"), Window);
+        Assert.True(summary.ShouldSend);
+        Assert.Equal(2, summary.Keys.Count);           // both keys are still stamped on success (#1154)
+        Assert.Equal(new[] { "B" }, summary.DeliverableDedupKeys);
+    }
+
+    /// <summary>
+    /// The metric-level fallback reports null, not an empty list. Empty would read as "no incident is
+    /// deliverable" and blank every CPU / memory / poison-wait / tempdb / failed-job card, plus the #2109 AG
+    /// database alerts — none of which carries a fingerprint at all.
+    /// </summary>
+    [Fact]
+    public async Task Decision_ReportsNoDeliverableSet_WhenThereAreNoFingerprints()
+    {
+        var cd = NoSeed();
+
+        Assert.Null((await cd.EvaluateAsync("1", "High CPU", null, Window)).DeliverableDedupKeys);
+        Assert.Null((await cd.EvaluateAsync("1", "High CPU", new List<AlertIncident>(), Window)).DeliverableDedupKeys);
+    }
+
+    /// <summary>
+    /// A stamped-and-suppressed alert reports an EMPTY deliverable set, which is the state the null above
+    /// has to stay distinguishable from. Unreachable through a send (ShouldSend is false, so nothing
+    /// renders), and pinned for exactly that reason: it is the only pairing of the two members a renderer
+    /// must never see, so nothing else would notice the two collapsing into one value.
+    /// </summary>
+    [Fact]
+    public async Task Decision_ReportsAnEmptyDeliverableSet_WhenEveryFingerprintIsSuppressed()
+    {
+        var cd = NoSeed();
+
+        var first = await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("A", "B"), Window);
+        cd.Stamp(first);
+
+        var again = await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("A", "B"), Window);
+        Assert.False(again.ShouldSend);
+        Assert.NotNull(again.DeliverableDedupKeys);
+        Assert.Empty(again.DeliverableDedupKeys!);
+    }
+
     [Fact]
     public async Task Eviction_DropsKeysPastTwiceWindow_KeepsDictBounded()
     {
