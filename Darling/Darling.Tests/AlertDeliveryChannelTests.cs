@@ -586,7 +586,7 @@ public sealed class AlertDeliveryChannelTests
     /// <c>prose</c> from the same single resolution in the fan-out as the three checked here.</para>
     /// </summary>
     [Fact]
-    public async Task TheDeliverer_PutsDetailTextOnTheWire_ForEveryRedirectableWebhookChannel()
+    public async Task TheDeliverer_PutsDetailTextOnTheWire_OnEmailAndEveryRedirectableWebhookChannel()
     {
         /* The #3296 alert's own detail, shortened. The marker is the operator action the reporter had to
            work out for themselves because no channel delivered it. */
@@ -595,11 +595,17 @@ public sealed class AlertDeliveryChannelTests
             "--backfill-rollups operator action, then RESTART the service.";
 
         using var endpoint = new CapturingWebhookEndpoint();
+        using var smtp = new CapturingSmtpEndpoint();
 
         var config = new DarlingConfig();
         config.Webhooks.TeamsUrl = endpoint.Url;
         config.Webhooks.SlackUrl = endpoint.Url;
         config.Webhooks.GenericUrl = endpoint.Url;
+        config.Smtp.Host = "127.0.0.1";
+        config.Smtp.Port = smtp.Port;
+        config.Smtp.UseSsl = false;
+        config.Smtp.From = "monitor@example.invalid";
+        config.Smtp.To = "operator@example.invalid";
 
         var settings = new DarlingAlertSettings(config);
         var history = new DiscardingHistoryStore();
@@ -619,6 +625,29 @@ public sealed class AlertDeliveryChannelTests
         Assert.Equal(3, bodies.Count);
         Assert.All(bodies, body => Assert.Contains("--backfill-rollups", body, StringComparison.Ordinal));
         Assert.All(bodies, body => Assert.Contains("RESTART the service", body, StringComparison.Ordinal));
+
+        /* And email, which is the channel #3296 actually reported and therefore the one that must not be
+           covered only at the payload builder. Both MIME parts: the HTML and plain-text bodies are built by
+           two different methods and a repair to one says nothing about the other. */
+        var message = Assert.Single(smtp.Messages);
+        Assert.Contains("--backfill-rollups", message, StringComparison.Ordinal);
+        Assert.Contains("RESTART the service", message, StringComparison.Ordinal);
+        /* TWICE: once in the text/plain part, once in the text/html one. A single occurrence would mean one
+           of the two bodies lost it, which the pre-#3297 code would have reported as a clean pass on the
+           other. */
+        Assert.Equal(2, CountOccurrences(message, "--backfill-rollups"));
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        int count = 0, index = 0;
+        while ((index = haystack.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += needle.Length;
+        }
+
+        return count;
     }
 
     /// <summary>
@@ -735,6 +764,172 @@ public sealed class AlertDeliveryChannelTests
             }
 
             return 0;
+        }
+
+        public void Dispose()
+        {
+            _stop.Cancel();
+            _listener.Stop();
+            try
+            {
+                _accepting.Wait(TimeSpan.FromSeconds(5));
+            }
+            catch (AggregateException) { /* the cancellation above */ }
+
+            _stop.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// A loopback SMTP sink that records the DATA of each message posted to it, quoted-printable soft line
+    /// breaks removed so an assertion on a phrase cannot fail because MIME wrapped it at column 76.
+    /// <para>Exists because email is the only channel with no interception point short of the protocol:
+    /// there is no builder-returns-the-payload seam between <c>EmailSendCore</c> and the wire. Without it a
+    /// mutation that drops the detail on the way to the email template alone passes every other pin — which
+    /// is exactly the defect #3296 reported, so leaving that one hop unpinned was not an option.</para>
+    /// </summary>
+    private sealed class CapturingSmtpEndpoint : IDisposable
+    {
+        private readonly TcpListener _listener;
+        private readonly List<string> _messages = new();
+        private readonly CancellationTokenSource _stop = new();
+        private readonly Task _accepting;
+
+        public CapturingSmtpEndpoint()
+        {
+            _listener = new TcpListener(IPAddress.Loopback, 0);
+            _listener.Start();
+            Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
+            _accepting = Task.Run(AcceptLoopAsync);
+        }
+
+        public int Port { get; }
+
+        /// <summary>Safe to read once the send has been awaited; see the webhook endpoint's note.</summary>
+        public IReadOnlyList<string> Messages => _messages;
+
+        private async Task AcceptLoopAsync()
+        {
+            try
+            {
+                while (!_stop.IsCancellationRequested)
+                {
+                    using var client = await _listener.AcceptTcpClientAsync(_stop.Token);
+                    using var stream = client.GetStream();
+                    using var reader = new StreamReader(stream, Encoding.UTF8, false, 8192, leaveOpen: true);
+                    using var writer = new StreamWriter(stream, new UTF8Encoding(false), 8192, leaveOpen: true) { AutoFlush = true, NewLine = "\r\n" };
+
+                    await writer.WriteLineAsync("220 localhost ESMTP capture");
+
+                    var data = new StringBuilder();
+                    var inData = false;
+                    string? line;
+                    while ((line = await reader.ReadLineAsync(_stop.Token)) is not null)
+                    {
+                        if (inData)
+                        {
+                            if (line == ".")
+                            {
+                                _messages.Add(DecodeMimeText(data.ToString()));
+                                data.Clear();
+                                inData = false;
+                                await writer.WriteLineAsync("250 OK queued");
+                                continue;
+                            }
+
+                            /* Transparency: a body line starting with '.' arrives doubled. CRLF explicitly,
+                               not AppendLine: MIME line endings are CRLF by the spec the parsing below
+                               depends on, and Environment.NewLine is LF on the platform this is written on. */
+                            data.Append(line.StartsWith("..", StringComparison.Ordinal) ? line.Substring(1) : line).Append("\r\n");
+                            continue;
+                        }
+
+                        if (line.StartsWith("EHLO", StringComparison.OrdinalIgnoreCase) ||
+                            line.StartsWith("HELO", StringComparison.OrdinalIgnoreCase))
+                        {
+                            /* No extensions advertised, so the client never tries STARTTLS or AUTH. */
+                            await writer.WriteLineAsync("250 localhost");
+                        }
+                        else if (line.StartsWith("DATA", StringComparison.OrdinalIgnoreCase))
+                        {
+                            inData = true;
+                            await writer.WriteLineAsync("354 End data with <CRLF>.<CRLF>");
+                        }
+                        else if (line.StartsWith("QUIT", StringComparison.OrdinalIgnoreCase))
+                        {
+                            await writer.WriteLineAsync("221 Bye");
+                            break;
+                        }
+                        else
+                        {
+                            await writer.WriteLineAsync("250 OK");
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException) { /* Dispose */ }
+            catch (IOException) { /* client went away */ }
+            catch (SocketException) { /* listener stopped */ }
+            catch (ObjectDisposedException) { /* listener stopped */ }
+        }
+
+        /// <summary>
+        /// Returns the DECODED text of every MIME part, concatenated. Both transfer encodings this message
+        /// actually uses are handled — .NET picks base64 for the utf-8 plain-text alternate view and
+        /// quoted-printable for the us-ascii HTML one — because an assertion against the raw DATA would be
+        /// asserting against an encoding choice rather than against the delivered words.
+        /// </summary>
+        private static string DecodeMimeText(string raw)
+        {
+            var boundary = System.Text.RegularExpressions.Regex.Match(raw, @"boundary=(\S+)");
+            if (!boundary.Success)
+            {
+                return DecodeQuotedPrintable(raw);
+            }
+
+            var parts = raw.Split("--" + boundary.Groups[1].Value, StringSplitOptions.None);
+            var decoded = new StringBuilder();
+
+            foreach (var part in parts.Skip(1))
+            {
+                var split = part.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+                if (split < 0)
+                {
+                    continue;
+                }
+
+                var headers = part.Substring(0, split);
+                var body = part.Substring(split + 4);
+
+                decoded.Append(headers.Contains("base64", StringComparison.OrdinalIgnoreCase)
+                    ? Encoding.UTF8.GetString(Convert.FromBase64String(
+                        new string(body.Where(c => !char.IsWhiteSpace(c)).ToArray())))
+                    : DecodeQuotedPrintable(body)).Append("\r\n");
+            }
+
+            return decoded.ToString();
+        }
+
+        /// <summary>Drops soft line breaks ("=" at end of line) and decodes "=XX" octets.</summary>
+        private static string DecodeQuotedPrintable(string raw)
+        {
+            var unfolded = raw.Replace("=\r\n", "", StringComparison.Ordinal).Replace("=\n", "", StringComparison.Ordinal);
+            var sb = new StringBuilder(unfolded.Length);
+
+            for (int i = 0; i < unfolded.Length; i++)
+            {
+                if (unfolded[i] == '=' && i + 2 < unfolded.Length &&
+                    Uri.IsHexDigit(unfolded[i + 1]) && Uri.IsHexDigit(unfolded[i + 2]))
+                {
+                    sb.Append((char)Convert.ToInt32(unfolded.Substring(i + 1, 2), 16));
+                    i += 2;
+                    continue;
+                }
+
+                sb.Append(unfolded[i]);
+            }
+
+            return sb.ToString();
         }
 
         public void Dispose()
