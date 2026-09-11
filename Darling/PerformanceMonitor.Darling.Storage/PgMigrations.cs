@@ -172,6 +172,7 @@ public static class PgMigrations
         new Migration(113, "remediation-credential-and-actor", V113Sql),
         new Migration(114, "pg-index-bloat-estimate-columns", V114Sql),
         new Migration(115, "pg-cpu-capacity-headroom", V115Sql),
+        new Migration(116, "custom-alert-core", V116Sql),
     };
 
     /// <summary>
@@ -251,6 +252,62 @@ ALTER TABLE collect.pg_cpu_utilization
     ADD COLUMN IF NOT EXISTS acu_utilization_percent double precision,
     ADD COLUMN IF NOT EXISTS serverless_capacity_acu double precision,
     ADD COLUMN IF NOT EXISTS max_configured_acu double precision;";
+
+    /// <summary>
+    /// V116 — the custom-alerting core (#3285): two NEW config-plane tables, added additively exactly like
+    /// V31's <c>custom_views</c> and V32's fleet tags.
+    ///
+    /// <para><c>custom_alert_rules</c> is the user-authored rule: a jsonb <c>definition</c> (a Scalar compose
+    /// metric spec + predicate + hysteresis + scope, validated by the compose <c>TryParsePanel</c> authority
+    /// plus a thin rule validator), an <c>enabled</c> flag the evaluator filters on, and the same
+    /// optimistic-concurrency <c>version</c> + audit columns as <c>custom_views</c>. Qualified <c>config.</c>
+    /// because the migrate session's <c>search_path</c> puts <c>collect</c> first (mirrors V31); no secret
+    /// columns, so no <c>ViewerRestrictedConfigTables</c> carve.</para>
+    ///
+    /// <para><b>NO <c>config_bump_version</c> trigger</b>, deliberately and for the same reason as
+    /// <c>custom_views</c>: the config-version reload beacon re-reads only the fixed <c>DarlingConfig</c> view
+    /// and would NOT load this table anyway, and a bump would force a needless fleet-wide
+    /// <c>ReloadFromStoreAsync</c> on every threshold tweak. The <c>CustomAlertEvaluator</c> reads enabled
+    /// rules directly on its own sweep.</para>
+    ///
+    /// <para><c>custom_alert_state</c> is the per-<c>(rule_id, server_id)</c> evaluation state the shared
+    /// <c>AlertPersistenceGate</c> needs and that no existing state shape offers: a resettable
+    /// <c>consecutive_breaches</c>/<c>consecutive_clears</c> pair (the edge-trigger watermark is a single int
+    /// with no resettable counter; <c>incident_occurrences</c> is a replace-the-set accumulator).
+    /// <c>rule_version</c> is stamped so a threshold edit (which bumps the rule's version) resets the streak
+    /// rather than firing a stale count against a new bar; <c>firing</c>/<c>fired_severity</c> track the open
+    /// incident so a resolve can be emitted and a Warning→Critical transition detected; <c>next_due_at</c>
+    /// carries per-rule cadence. The FK to <c>custom_alert_rules</c> with <c>ON DELETE CASCADE</c> is the
+    /// teardown: deleting a rule drops its state rows (the evaluator force-resolves any open incident first).
+    /// Written by the evaluator on the owner pool; no viewer/mcp grant until the editor surfaces firing
+    /// status.</para>
+    /// </summary>
+    private const string V116Sql = @"
+CREATE TABLE IF NOT EXISTS config.custom_alert_rules (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name text NOT NULL UNIQUE,
+    definition jsonb NOT NULL,
+    description text,
+    enabled boolean NOT NULL DEFAULT TRUE,
+    version integer NOT NULL DEFAULT 1,
+    created_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    updated_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    updated_by text
+);
+
+CREATE TABLE IF NOT EXISTS config.custom_alert_state (
+    rule_id bigint NOT NULL REFERENCES config.custom_alert_rules (id) ON DELETE CASCADE,
+    server_id integer NOT NULL,
+    rule_version integer NOT NULL,
+    consecutive_breaches integer NOT NULL DEFAULT 0,
+    consecutive_clears integer NOT NULL DEFAULT 0,
+    firing boolean NOT NULL DEFAULT FALSE,
+    fired_severity text,
+    last_evaluated_at timestamp,
+    next_due_at timestamp,
+    updated_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    PRIMARY KEY (rule_id, server_id)
+);";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
