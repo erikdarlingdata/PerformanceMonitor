@@ -542,8 +542,8 @@ public sealed class AlertEngine
                    server-name prefix. The numerics are REQUIRED, not optional (#1830): the ported
                    no-numerics form left the history stores parsing "87% (Total CPU)", which fails on
                    the parenthesized label, so every High CPU row stored current_value 0 in Lite AND
-                   Darling while the toast/email/webhook text stayed correct. HasValue is guaranteed
-                   here — cpuExceeded requires it. */
+                   Darling while the toast/email/webhook text stayed correct. alertCpuValue.HasValue is
+                   guaranteed here — the null arm above returns. */
                 await FireAsync(new AlertOutcome(
                     key, serverName, "High CPU",
                     $"{alertCpuValue:F0}% ({cpuMetricLabel})",
