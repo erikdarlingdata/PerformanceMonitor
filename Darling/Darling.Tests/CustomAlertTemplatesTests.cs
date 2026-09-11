@@ -81,7 +81,7 @@ public sealed class CustomAlertTemplatesTests
 
         Assert.Equal(CustomAlertTemplates.All.Count, templates.Count);
 
-        var toolKeys = templates.Select(t => (string?)((JsonObject)t!)["key"]).ToHashSet(StringComparer.Ordinal);
+        var toolKeys = templates.Select(t => (string)((JsonObject)t!)["key"]!).ToHashSet(StringComparer.Ordinal);
         Assert.Equal(CustomAlertTemplates.All.Select(t => t.Key).ToHashSet(StringComparer.Ordinal), toolKeys);
 
         foreach (var entry in templates)

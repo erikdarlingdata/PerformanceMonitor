@@ -38,12 +38,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// BEFORE persistence on create and on any update that carries a new definition, so a stored rule always
 /// parses.</para>
 ///
-/// <para><b>Evaluate-now is deliberately absent.</b> A faithful test-now would have to reproduce
-/// <see cref="CustomAlertEvaluator"/>'s per-server scalar run (its window, rollup routing, and scalar
-/// extraction) and then its predicate, which either couples this class to the evaluator or forks a divergent
-/// copy of it. Both are ruled out here; the clean home for an evaluate-now is a shared seam on the evaluator
-/// itself, tracked as a follow-up. To see a rule's current metric value in the meantime, run its
-/// <c>metric</c> panel through the custom-view <c>run_custom_view_panel</c> tool.</para>
+/// <para><b>Evaluate-now.</b> <see cref="TestCustomAlertRule"/> (#3299) reports a rule's CURRENT value on each
+/// in-scope server and whether it WOULD breach right now, delivering and persisting nothing. It does not fork
+/// the evaluator: it runs the SAME shared per-server scalar seam the sweep uses
+/// (<see cref="CustomAlertEvaluator.EvaluateScalarNowAsync"/> + <see cref="CustomAlertEvaluator.ClassifyTestValue"/>),
+/// so a test value can never diverge from what the running rule sees. What a one-shot cannot reproduce is the
+/// rule's hysteresis and per-server streak, so a breach here means "true this instant", not "has fired".</para>
 ///
 /// <para><b>Security.</b> These tools connect (like every MCP tool) as the least-privilege <c>mcp</c> role,
 /// which is granted INSERT/UPDATE/DELETE on ONLY <c>config.custom_alert_rules</c> (see
@@ -67,7 +67,7 @@ public sealed class DarlingMcpCustomAlertTools
         {
             var store = new CustomAlertRuleStore(postgres);
             var rules = await store.ListAsync();
-            return BuildSummariesNode(rules).ToJsonString(McpHelpers.JsonOptions);
+            return DarlingWebEndpoints.BuildRuleSummariesNode(rules).ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
@@ -89,7 +89,7 @@ public sealed class DarlingMcpCustomAlertTools
             var store = new CustomAlertRuleStore(postgres);
             var result = await store.GetAsync(rule_id);
             return result is CustomAlertRuleResult.Ok ok && ok.Rule is not null
-                ? BuildFullRuleNode(ok.Rule).ToJsonString(McpHelpers.JsonOptions)
+                ? DarlingWebEndpoints.BuildFullRuleNode(ok.Rule).ToJsonString(McpHelpers.JsonOptions)
                 : Outcome("not_found", $"No custom alert rule with id {rule_id}.");
         }
         catch (Exception ex)
@@ -152,7 +152,7 @@ public sealed class DarlingMcpCustomAlertTools
             var result = await store.CreateAsync(name, description, definition, enabled, DarlingWebEndpoints.McpEditorPrincipal);
             return result switch
             {
-                CustomAlertRuleResult.Ok ok => BuildFullRuleNode(ok.Rule!).ToJsonString(McpHelpers.JsonOptions),
+                CustomAlertRuleResult.Ok ok => DarlingWebEndpoints.BuildFullRuleNode(ok.Rule!).ToJsonString(McpHelpers.JsonOptions),
                 CustomAlertRuleResult.Conflict conflict => Outcome("conflict", conflict.Message),
                 CustomAlertRuleResult.Invalid invalid => Outcome("invalid", invalid.Message),
                 _ => Outcome("error", "Could not create the rule."),
@@ -220,7 +220,7 @@ public sealed class DarlingMcpCustomAlertTools
                 DarlingWebEndpoints.McpEditorPrincipal);
             return result switch
             {
-                CustomAlertRuleResult.Ok ok => BuildFullRuleNode(ok.Rule!).ToJsonString(McpHelpers.JsonOptions),
+                CustomAlertRuleResult.Ok ok => DarlingWebEndpoints.BuildFullRuleNode(ok.Rule!).ToJsonString(McpHelpers.JsonOptions),
                 CustomAlertRuleResult.NotFound => Outcome("not_found", $"No custom alert rule with id {rule_id}."),
                 CustomAlertRuleResult.Conflict conflict => Outcome("conflict", conflict.Message),
                 CustomAlertRuleResult.Invalid invalid => Outcome("invalid", invalid.Message),
@@ -404,45 +404,6 @@ public sealed class DarlingMcpCustomAlertTools
         }
 
         return Task.FromResult(new JsonObject { ["templates"] = templates }.ToJsonString(McpHelpers.JsonOptions));
-    }
-
-    /// <summary>The full single-rule wire shape (definition embedded as JSON, NOT an escaped string) - mirrors
-    /// <see cref="DarlingWebEndpoints.BuildFullViewNode"/>, adding the <c>enabled</c> column that alert rules
-    /// carry and views do not. Returned by get / create / update.</summary>
-    private static JsonObject BuildFullRuleNode(CustomAlertRule rule) => new()
-    {
-        ["id"] = rule.Id,
-        ["name"] = rule.Name,
-        ["description"] = rule.Description,
-        ["definition"] = JsonNode.Parse(rule.DefinitionJson),
-        ["enabled"] = rule.Enabled,
-        ["version"] = rule.Version,
-        ["created_at"] = rule.CreatedAt,
-        ["updated_at"] = rule.UpdatedAt,
-        ["updated_by"] = rule.UpdatedBy,
-    };
-
-    /// <summary>The bare-array list wire shape (no definition body) - mirrors
-    /// <see cref="DarlingWebEndpoints.BuildSummariesNode"/>, carrying <c>enabled</c> so the list can show a
-    /// paused rule without fetching each full definition.</summary>
-    private static JsonArray BuildSummariesNode(IReadOnlyList<CustomAlertRuleSummary> rules)
-    {
-        var array = new JsonArray();
-        foreach (var rule in rules)
-        {
-            array.Add(new JsonObject
-            {
-                ["id"] = rule.Id,
-                ["name"] = rule.Name,
-                ["description"] = rule.Description,
-                ["enabled"] = rule.Enabled,
-                ["version"] = rule.Version,
-                ["updated_at"] = rule.UpdatedAt,
-                ["updated_by"] = rule.UpdatedBy,
-            });
-        }
-
-        return array;
     }
 
     /// <summary>A small <c>{status, message}</c> envelope for a non-data write outcome (conflict / invalid /
