@@ -943,6 +943,17 @@ public partial class ViewerServerTab
     /// measures near 90 rather than 100, so the first person to read that column would otherwise conclude
     /// every index in the fleet is 10% bloated. Since #3234 those are the older exact rows still inside
     /// retention, which is why the note distinguishes them rather than describing one kind of row.</para>
+    ///
+    /// <para><b>What the grid shows is not what the server has, and the note says so with figures (#3278).</b>
+    /// Rows with no answer sort FIRST — deliberately, since the index nobody can model is the likeliest big
+    /// win — so a grid capped at <see cref="PgGridRowLimit"/> shows 100% answerless rows whenever they
+    /// outnumber the cap, structurally rather than by chance. Counting the visible ones cannot detect that.
+    /// <see cref="PgIndexBloatCoverage"/> answers it from a separate population query and this panel prints
+    /// the verdict, the same one <c>get_pg_index_bloat</c> prints (#3278).</para>
+    ///
+    /// <para><b>Printed on the POPULATED path as well.</b> A partial view is the same defect one degree
+    /// weaker — the grid ranks what it was given and cannot show what was withheld — so the coverage
+    /// sentence rides both branches rather than being an empty-state message.</para>
     /// </summary>
     private async Task LoadPgIndexBloatAsync(DateTime startUtc, DateTime endUtc)
     {
@@ -957,6 +968,13 @@ public partial class ViewerServerTab
 
         PgIndexBloatGrid.ItemsSource = rows;
 
+        /* The SAME classifier the MCP tool calls, deliberately (#3278). The panel and the tool answering
+           the same question differently is how a defect gets fixed in one surface and left in the other,
+           and every figure that makes this answer a POPULATION figure rather than a page one is in there -
+           so neither surface authors it. */
+        var coverage = await _dataService.GetPgIndexBloatCoverageAsync(
+            _server.ServerId, endUtc, rows.Count);
+
         var reclaimable = 0L;
         foreach (var r in rows)
         {
@@ -969,10 +987,13 @@ public partial class ViewerServerTab
         var exactly = rows.Count(r => r.SkippedReason is null && !r.IsEstimate);
 
         PgIndexBloatNote.Text = rows.Count == 0
-            ? "Nothing recorded. This panel needs the pg_stats column widths, which pg_monitor alone does "
-              + "not confer - see the runbook step under \u201cThe one grant pg_monitor does not cover\u201d. "
-              + "Only B-TREE indexes are covered. When it does record, it records EVERY btree at any size, "
-              + "which is why its index count exceeds the usage panel's."
+            /* The verdict rather than a guess at the cause. This note used to assert the missing pg_stats
+               grant outright, which is a diagnosis the panel had no evidence for and is wrong wherever the
+               collector simply has not run - measured on a live target, 3 of its 7 runs in a week errored,
+               one on a 300-second command deadline that stored nothing. */
+            ? "Nothing recorded in this window. That is NOT the same as no bloat. Only B-TREE indexes are "
+              + "covered, and when this does record it records EVERY btree at any size, which is why its "
+              + "index count exceeds the usage panel's. " + coverage.Message
             : $"ESTIMATED from catalog statistics - no index page is read. About {reclaimable:N0} bytes "
               + $"look reclaimable across {rows.Count:N0} index(es), and that is what the grid is ranked "
               + "by: a percentage ranks the wrong thing, since a tiny index at 20% is worth kilobytes next "
@@ -988,12 +1009,15 @@ public partial class ViewerServerTab
                     + "is not the same as a walk that found no leaf pages."
                   : string.Empty)
               + (skipped > 0
-                  ? $"  {skipped:N0} index(es) have NO answer in this window and are listed FIRST with "
-                    + "their reason: their bloat is unknown rather than zero. Read the reason - a "
-                    + "never-analyzed parent needs an ANALYZE and invisible column widths need the "
-                    + "pg_read_all_data grant, while a PARTIAL or DEDUPLICATED index cannot be modelled at "
-                    + "any grant or statistics freshness and needs the exact command instead."
-                  : string.Empty);
+                  ? $"  {skipped:N0} of the index(es) SHOWN have no answer and are listed FIRST with their "
+                    + "reason: their bloat is unknown rather than zero. That is a count of this grid, not "
+                    + "of the server - they sort first, so a grid at its row cap shows them and not the "
+                    + "answers behind them."
+                  : string.Empty)
+              /* On the POPULATED path too, and last. A grid ranking four answered indexes while six
+                 thousand are withheld reads as a ranking of the server, and the rows themselves show no
+                 difference - which is how three independent readers got this surface wrong in one night. */
+              + "  " + coverage.Message;
     }
 
     /// <summary>

@@ -463,8 +463,24 @@ public sealed partial class ViewerDataService
     /// <summary>Storage tab - MEASURED b-tree index bloat (#2561), latest per index. Ranked by estimated
     /// reclaimable BYTES rather than by density, because a small index at 40% density is worth nothing next
     /// to a large one at 70%. Indexes too large to measure sort to the TOP: unknown is not zero, and they
-    /// are the likeliest big win.</summary>
+    /// are the likeliest big win. This returns the ROWS only; what the row count MEANS about the server is
+    /// <see cref="GetPgIndexBloatCoverageAsync"/>, and a caller that prints one without the other is back to
+    /// letting a page of answerless rows read as a coverage claim.</summary>
     public Task<List<DarlingPgIndexBloatReader.PgIndexBloatRow>> GetPgIndexBloatAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
         DarlingPgIndexBloatReader.GetPgIndexBloatAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+
+    /// <summary>Storage tab - what share of this server's btree footprint pg_index_bloat actually has an
+    /// answer for (#3278), by count AND by bytes, with the suppressed remainder broken down by reason and
+    /// ranked by bytes. A separate population-level query, so the grid's own row cap cannot reach it: rows
+    /// with no answer sort FIRST, which makes a capped grid 100% of them whenever they outnumber the cap.
+    /// The same classifier <c>get_pg_index_bloat</c> calls, over the same evidence, so the panel and the tool
+    /// cannot give one operator two answers.
+    /// <para>Takes the window END only, mirroring the reader: coverage is a CURRENT state of the target, so
+    /// there is no start to honour and no start is accepted. A parameter passed and ignored would let the
+    /// panel look as though its own window governed this answer.</para></summary>
+    public Task<PgIndexBloatCoverageVerdict> GetPgIndexBloatCoverageAsync(
+        int serverId, DateTime endUtc, int returnedRows, CancellationToken cancellationToken = default) =>
+        DarlingPgIndexBloatReader.GetCoverageVerdictAsync(
+            _dataSource, serverId, endUtc, returnedRows, cancellationToken);
 }
