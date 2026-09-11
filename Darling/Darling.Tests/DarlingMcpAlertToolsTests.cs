@@ -747,6 +747,11 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
         await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config_notification (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
 
         var originalThreshold = Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT cpu_threshold_percent FROM config_alert_settings WHERE id = 1"));
+        /* #3314: captured for the same reason as the threshold — these two are SINGLETONS the whole store
+           shares, and the delivery cooldown now governs channel volume for every later test and every later
+           run on a reused database. */
+        var originalFireCooldown = Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT cooldown_minutes FROM config_alert_settings WHERE id = 1"));
+        var originalDeliveryCooldown = Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT email_cooldown_minutes FROM config_notification WHERE id = 1"));
         var versionBefore = Convert.ToInt64(await ScalarAsync(connection, ct, "SELECT config_version FROM config_service WHERE id = 1"));
         var newThreshold = originalThreshold == 91 ? 71 : 91;                 // a distinct, in-range value
         var muteTag = "mcp_alert_write_e2e_" + Guid.NewGuid().ToString("N");  // own-scoped cleanup tag
@@ -768,6 +773,46 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             Assert.Equal(newThreshold, Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT cpu_threshold_percent FROM config_alert_settings WHERE id = 1")));
             var versionAfter = Convert.ToInt64(await ScalarAsync(connection, ct, "SELECT config_version FROM config_service WHERE id = 1"));
             Assert.True(versionAfter > versionBefore, "config_version should self-bump on a config_alert_settings write");
+
+            /* #3314: the delivery cooldown round-trips THROUGH THE STORE, and through the OTHER table. The
+               shape pins prove the parser routes it; only this proves the two-table write executes, that the
+               value lands in config_notification, and that a read straight afterwards reports what was
+               written. Both spellings are exercised, since the alias exists so an existing config keeps
+               working and an alias nobody writes with is an alias nobody has tested. */
+            foreach (var (body, expected) in new[]
+            {
+                ("{\"delivery\":{\"cooldown_minutes\":37}}", 37),
+                ("{\"email_cooldown_minutes\":41}", 41),
+            })
+            {
+                var cooldown = await DarlingMcpAlertTools.UpdateAlertSettings(postgres, body);
+                Assert.Equal("updated", DarlingMcpTestData.StatusOf(cooldown));
+                using var doc = JsonDocument.Parse(cooldown);
+                Assert.Equal(expected, doc.RootElement.GetProperty("settings").GetProperty("delivery").GetProperty("cooldown_minutes").GetInt32());
+                Assert.Contains("email_cooldown_minutes", doc.RootElement.GetProperty("updated_fields").EnumerateArray().Select(e => e.GetString()));
+                Assert.Equal(expected, Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT email_cooldown_minutes FROM config_notification WHERE id = 1")));
+            }
+
+            /* One body spanning BOTH tables: two UPDATE statements in one transaction, and both land. A
+               partial application is the failure this transaction exists to prevent, and a same-table-only
+               body could never expose it. */
+            var spanning = await DarlingMcpAlertTools.UpdateAlertSettings(
+                postgres, $"{{\"cooldown_minutes\":7,\"delivery\":{{\"cooldown_minutes\":53}}}}");
+            Assert.Equal("updated", DarlingMcpTestData.StatusOf(spanning));
+            Assert.Equal(7, Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT cooldown_minutes FROM config_alert_settings WHERE id = 1")));
+            Assert.Equal(53, Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT email_cooldown_minutes FROM config_notification WHERE id = 1")));
+
+            /* Out of range on either spelling, and both spellings at once, write NOTHING. */
+            foreach (var rejected in new[]
+            {
+                "{\"delivery\":{\"cooldown_minutes\":121}}",
+                "{\"email_cooldown_minutes\":0}",
+                "{\"email_cooldown_minutes\":60,\"delivery\":{\"cooldown_minutes\":60}}",
+            })
+            {
+                Assert.Equal("invalid", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.UpdateAlertSettings(postgres, rejected)));
+                Assert.Equal(53, Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT email_cooldown_minutes FROM config_notification WHERE id = 1")));
+            }
 
             /* An unknown field writes NOTHING (validated before the UPDATE). */
             Assert.Equal("invalid", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.UpdateAlertSettings(postgres, "{\"cpu\":{\"bogus\":1}}")));
@@ -801,7 +846,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
                run on a reused database — reading a CPU threshold this test invented. */
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
             {
-                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "UPDATE config_alert_settings SET cpu_threshold_percent = $1 WHERE id = 1", originalThreshold);
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "UPDATE config_alert_settings SET cpu_threshold_percent = $1, cooldown_minutes = $2 WHERE id = 1", originalThreshold, originalFireCooldown);
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "UPDATE config_notification SET email_cooldown_minutes = $1 WHERE id = 1", originalDeliveryCooldown);
                 await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM config_mute_rules WHERE reason = $1", muteTag);
             });
         }

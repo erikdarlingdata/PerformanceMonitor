@@ -420,7 +420,17 @@ public sealed class DarlingMcpAlertTools
                 }
 
                 var setClause = string.Join(", ", forTable.Select((u, i) => $"{u.Column} = ${i + 1}"));
-                await using var command = new NpgsqlCommand($"UPDATE {table} SET {setClause} WHERE id = 1", connection, transaction);
+                /* Constructed two-arg on the store connection with the transaction ASSIGNED, not passed as a
+                   third ctor argument. McpReadCommandTimeoutTests classifies every command on this surface as
+                   addressing the store or a monitored TARGET, and the three-arg
+                   new NpgsqlCommand(sql, connection, transaction) form is the monitored-target shape (the
+                   HypoPG experiment's, bounded by a server-side SET LOCAL rather than by McpCommandDeadlines).
+                   Widening that allowlist to admit a transaction would have let a real target command take a
+                   store bound, so the store command takes the shape the guard already recognises. The SQL is
+                   hoisted to a local for the same reason: the recognised form's first argument is an
+                   identifier. */
+                var sql = $"UPDATE {table} SET {setClause} WHERE id = 1";
+                await using var command = new NpgsqlCommand(sql, connection) { Transaction = transaction };
                 command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                 foreach (var target in forTable)
                 {
