@@ -66,6 +66,8 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
     /// <see cref="IFindingAlertSender"/>: dispatches a composed analysis-finding alert.
     /// Lite's cadence — one combined alert-history row written unconditionally, carrying the
     /// numeric severity/threshold and the detail text — so no separate fallback row is needed.
+    /// <para>The channels get <see cref="FindingAlert.DeliveredProse"/> and the row gets
+    /// <c>DetailText</c>: two destinations, two values. See <see cref="FindingAlert"/>.</para>
     /// </summary>
     public async Task SendFindingAlertAsync(FindingAlert alert)
     {
@@ -77,17 +79,22 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
         try
         {
             /* Findings are never muted here — the pipeline's mute filter dropped muted
-               stories before they became findings (Lite passes muted: false identically). */
+               stories before they became findings (Lite passes muted: false identically).
+               DeliveredProse, not DetailText: an analysis finding's prose restates the structured
+               context the channels already render, so delivering both prints the Diagnosis facts
+               twice. The persisted value below is unaffected. */
             var result = await _core.TrySendAsync(
                 alert.MetricName, alert.ServerName, alert.CurrentValue, alert.ThresholdValue,
-                alert.ServerId, alert.Context, attemptChannels: true, detailText: alert.DetailText);
+                alert.ServerId, alert.Context, attemptChannels: true, detailText: alert.DeliveredProse);
 
             /* trayChannelPresent: false — the headless service has no tray; see DarlingAlertDeliverer. */
             var delivery = AlertDelivery.FromFanout(result, muted: false, trayChannelPresent: false);
 
             /* Always log the alert, regardless of channel status — the structured context
                persists as JSON alongside the flat detail_text, the numeric severity/threshold
-               in the double columns (Lite's shape). */
+               in the double columns (Lite's shape). DetailText in full here whatever the channels
+               were handed: this column is what the MCP reader, the triage endpoint and the Viewer's
+               detail pane render, and what the mute pre-fill parses. */
             string? contextJson = alert.Context is not null ? AlertContextSerializer.Serialize(alert.Context) : null;
             await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
                 alert.ServerId, alert.ServerName, alert.MetricName,

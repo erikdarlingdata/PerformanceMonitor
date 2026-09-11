@@ -287,7 +287,18 @@ public sealed class AnalysisNotificationService
                     context,
                     lead.Severity,
                     threshold,
-                    FindingMessageFormatter.DetailText(lead, threshold)));
+                    FindingMessageFormatter.DetailText(lead, threshold),
+                    /* The prose is not delivered, and the row still persists it. DetailText and
+                       BuildContext's "Diagnosis" item are two renderings of the SAME values — story,
+                       severity, notify threshold, confidence, fact count, database, window — so a channel
+                       that renders the structured context and the prose prints every one of them twice.
+                       They differ in labels ("Facts in chain" vs "Facts", one combined severity line vs
+                       two fields) and in the window separator, so the textual equality in
+                       AlertDetailText.ProseForDelivery cannot see that they are the same facts; the
+                       producer has to say so. Delivery is the only half suppressed: DetailText remains
+                       config_alert_log.detail_text, which is the sole copy of these facts on the surfaces
+                       that render no structured context, and the input the mute pre-fill parses. */
+                    DeliverDetailText: false));
 
                 /* Always raise the tray balloon for a notify-worthy incident (user choice), the
                    same visible signal threshold alerts already pop — so a local-only user with no

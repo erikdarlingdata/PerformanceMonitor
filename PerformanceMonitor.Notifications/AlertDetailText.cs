@@ -74,18 +74,29 @@ public static class AlertDetailText
     /// The prose a channel should render, or null when there is none to add.
     /// <para>
     /// Every engine alert's detail text IS <see cref="Flatten"/> of its own context — <c>AlertEngine</c>
-    /// builds it that way at eleven fire sites — so rendering both would print the same content twice in
-    /// the alerts that already read correctly (blocking, deadlocks, long-running queries, low disk, jobs).
-    /// Suppressing on that equality keeps those deliveries byte-for-byte unchanged while the prose-only
-    /// alerts gain their detail. It is not the same as suppressing whenever a context is present: the
-    /// #2109 AG database alerts carry BOTH a structured context and independent prose naming the
-    /// <c>SET HADR RESUME</c> remedy, and that prose must still be delivered.
+    /// builds each <c>detailText</c> local that way, via <c>AlertContextBuilders.ContextToDetailText</c> —
+    /// so rendering both would print the same content twice in the alerts that already read correctly
+    /// (blocking, deadlocks, long-running queries, low disk, jobs). Suppressing on that equality keeps
+    /// those deliveries byte-for-byte unchanged while the prose-only alerts gain their detail. It is not
+    /// the same as suppressing whenever a context is present: the #2109 AG database alerts carry BOTH a
+    /// structured context and independent prose naming the <c>SET HADR RESUME</c> remedy, and that prose
+    /// must still be delivered.
     /// </para>
     /// <para>
     /// Compared against the shared <see cref="Flatten"/> rather than a local reimplementation, so the two
     /// texts are equal by construction. Should they ever disagree anyway, the alert is delivered twice —
     /// visible and harmless — rather than having its remedy dropped again, which is the failure this whole
     /// path exists to stop.
+    /// </para>
+    /// <para>
+    /// <b>Textual equality is not the only reason a prose is redundant, and this function only sees that
+    /// one.</b> A producer that formats the same facts as its own context under different labels defeats
+    /// the comparison while delivering pure duplication — <c>FindingMessageFormatter</c> does exactly
+    /// that, its <c>DetailText</c> and its <c>Diagnosis</c> item being two renderings of one set of
+    /// values. Widening the comparison to "every fact in the context appears somewhere in the prose"
+    /// would drop the #2109 remedy above, which is the one case this gate was built NOT to drop. So that
+    /// second kind of redundancy is declared by the producer instead, on
+    /// <c>FindingAlert.DeliverDetailText</c>, and resolved before a channel is reached.
     /// </para>
     /// </summary>
     public static string? ProseForDelivery(string? detailText, AlertContext? context)
