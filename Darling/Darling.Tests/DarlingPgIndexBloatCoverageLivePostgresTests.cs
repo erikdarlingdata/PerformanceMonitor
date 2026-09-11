@@ -131,16 +131,21 @@ public sealed class DarlingPgIndexBloatCoverageLivePostgresTests
             Assert.False(
                 verdict.Arm == PgIndexBloatCoverageArm.Undetermined,
                 "the coverage census answered Undetermined over a store that was just seeded with a "
-                + "SUCCESS run and five indexes. GetCoverageVerdictAsync swallows read failures by design, "
+                + "SUCCESS run and six indexes. GetCoverageVerdictAsync swallows read failures by design, "
                 + "so this is what a census that does not PARSE looks like from the outside: check "
                 + "CoverageEvidenceSql against the live store. Census: " + verdict.Census);
 
             Assert.Equal(PgIndexBloatCoverageArm.PartialCoverage, verdict.Arm);
 
-            /* ARM 2: ONE ROW PER INDEX. Five distinct indexes seeded across two cycles - ten rows - and the
-               population is five. Ten would be the denominator error that makes coverage look better than
-               it is. */
-            Assert.Equal(5, verdict.Candidates.IndexCount);
+            /* ARM 2: ONE ROW PER INDEX. Six distinct indexes, eleven rows across two cycles, and the
+               population is SIX - the denominator error that flatters coverage would report eleven.
+
+               Derived below as well as stated: the literal is what a reader checks the fixture against, and
+               the identity is what catches a fixture edit that changes the population without changing the
+               literal. Writing the literal from memory got it wrong once already. */
+            Assert.Equal(6, verdict.Candidates.IndexCount);
+            Assert.Equal(
+                DistinctSeededIndexes, verdict.Candidates.IndexCount);
 
             /* ARM 3: the tie-break. shipments_pkey's newest row carries a reason and its older row carries
                an exact measurement, and it counts as EXACTLY MEASURED - the same row the grid shows. */
@@ -217,6 +222,13 @@ public sealed class DarlingPgIndexBloatCoverageLivePostgresTests
                 });
         }
     }
+
+    /// <summary>
+    /// Distinct (database, schema, table, index) tuples the fixture seeds: five written on both cycles plus
+    /// <c>shipments_pkey</c>, which is written once per cycle with a DIFFERENT outcome each time. Named so
+    /// the population assertion above has something to check besides a number somebody typed.
+    /// </summary>
+    private const int DistinctSeededIndexes = 6;
 
     /// <summary>A trusted ESTIMATE row: no reason, and a modelled tuple width, which is the provenance
     /// discriminator the reader keys <c>measurement_kind</c> on.</summary>
