@@ -407,7 +407,13 @@ public sealed class DarlingMcpAlertTools
                merged state that half-landed, with no indication which half. The statement order is FIXED
                rather than the grouping's hash order, so two concurrent tools can never take the two singleton
                rows in opposite orders. Both tables carry a bump trigger, so either statement alone is enough
-               to make the service reload. */
+               to make the service reload.
+
+               NEITHER statement touches modified_at, matching what this tool has always done to
+               config_alert_settings. Both Viewer upserts do bump it, and the asymmetry is deliberate: nothing
+               reads modified_at — it is in no viewer projection, no payload and no decision — and bumping it
+               on config_notification would mean granting mcp UPDATE on a SECOND column of a table holding
+               bearer secrets, to maintain a value with no reader. */
             await using var connection = await postgres.OpenConnectionAsync();
             await using var transaction = await connection.BeginTransactionAsync();
 
