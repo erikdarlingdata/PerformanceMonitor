@@ -70,6 +70,13 @@ public sealed class EmailSendCore
     /// When false (Lite's muted case) neither email nor webhook is attempted; the caller
     /// still records its row from the all-false result.
     /// </param>
+    /// <param name="detailText">
+    /// #3297: the alert's flat prose detail — the same text the caller records as the history row's
+    /// <c>detail_text</c> and the viewer, the MCP reader and the triage page all show. Passed on to the
+    /// email template and the webhook fan-out so the channels carry the alert's remedy and not only its
+    /// number. Optional so the deprecated Dashboard shell, which has no detail text to give, keeps
+    /// compiling; every live caller has one.
+    /// </param>
     /// <param name="displayName">
     /// Human-facing name to render in the subject/body/webhook titles in place of
     /// <paramref name="metricName"/> (a custom alert rule's name). Null/empty keeps
@@ -84,6 +91,7 @@ public sealed class EmailSendCore
         string serverId,
         AlertContext? context,
         bool attemptChannels,
+        string? detailText = null,
         string? displayName = null)
     {
         bool emailAttempted = false;
@@ -119,7 +127,8 @@ public sealed class EmailSendCore
                 var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
                 var subject = $"[SQL Monitor Alert] {titleName} on {serverName}";
                 var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
-                    metricName, serverName, currentValue, thresholdValue, _settings.EmailCooldownMinutes, _branding, context, displayName);
+                    metricName, serverName, currentValue, thresholdValue, _settings.EmailCooldownMinutes, _branding, context,
+                    detailText, displayName);
 
                 try
                 {
@@ -159,7 +168,7 @@ public sealed class EmailSendCore
         if (attemptChannels)
         {
             webhookSent = await _webhookAlertService.TrySendWebhookAlertsAsync(
-                metricName, serverName, currentValue, thresholdValue, serverId, context, displayName);
+                metricName, serverName, currentValue, thresholdValue, serverId, context, detailText, displayName);
         }
 
         return new EmailFanoutResult(emailAttempted, emailSent, sendError, webhookSent, anyChannelConfigured);

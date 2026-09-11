@@ -241,6 +241,47 @@ public class PagerDutyWebhookTests
         Assert.NotNull(payload);
     }
 
+    /* ---------------- #3297: the alert's prose detail ---------------- */
+
+    /// <summary>
+    /// #3297: <c>BuildPagerDutyCustomDetails</c> already flattened <see cref="AlertContext.Details"/> — the
+    /// STRUCTURED collection — which is why this channel looked like it might already carry the detail. It
+    /// did not: an alert's <c>DetailText</c> is a separate field, and a prose-only self-alert took the
+    /// empty-Details branch that reduces custom_details to <c>{"Sent by": ...}</c>.
+    /// <para>custom_details rather than <c>summary</c>: PD-CEF caps summary at 1024 characters and it is the
+    /// one-line headline PD pages on, while custom_details is the table view and what most downstream
+    /// integrations read — the placement #2710 already chose for the triage link.</para>
+    /// </summary>
+    [Fact]
+    public void BuildPagerDutyPayload_ProseDetail_RidesInCustomDetails()
+    {
+        const string prose =
+            "Store query_stats retention [1072] is HELD PAUSED by the rollup-coverage gate. Run the " +
+            "--backfill-rollups operator action, then RESTART the service.";
+
+        var payload = WebhookAlertService.BuildPagerDutyPayload(
+            "Retention Held", "Monitor Store", "9.6x its 4 days horizon", "2.0x", Branding, "rk",
+            detailText: prose);
+
+        var customDetails = JsonDocument.Parse(payload).RootElement
+            .GetProperty("payload").GetProperty("custom_details");
+
+        Assert.Equal(prose, customDetails.GetProperty("Details").GetString());
+    }
+
+    /// <summary>A prose-free alert keeps the pre-#3297 custom_details shape — no empty key is ever sent.</summary>
+    [Fact]
+    public void BuildPagerDutyPayload_OmitsTheDetailsKey_WhenTheAlertCarriesNoProse()
+    {
+        var payload = WebhookAlertService.BuildPagerDutyPayload(
+            "High CPU", "SRV1", "95%", "90%", Branding, "rk");
+
+        var customDetails = JsonDocument.Parse(payload).RootElement
+            .GetProperty("payload").GetProperty("custom_details");
+
+        Assert.False(customDetails.TryGetProperty("Details", out _));
+    }
+
     /* ---------------- Fan-out (TrySendWebhookAlertsAsync) ---------------- */
 
     [Fact]

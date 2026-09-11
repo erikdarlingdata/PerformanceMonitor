@@ -70,9 +70,5 @@ That output is the authority, and it is generated from the parser that actually 
 
 ## Known rough edges
 
-- **The alert's email does not carry any of the above.** The alert writes a detail block naming the
-  `--backfill-rollups` remedy and the do-not-arm warning; the viewer and the MCP surface show it and the
-  email template never receives it. #3297.
 - **The 2.0x and 4.0x thresholds are not tunable.** They are compile-time constants rather than
-  `config_alert_settings` rows, which makes this the one alert that cannot be adjusted in Settings. Also
-  #3297.
+  `config_alert_settings` rows, which makes this the one alert that cannot be adjusted in Settings. #3297.

@@ -12,6 +12,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -233,6 +234,32 @@ internal sealed class DarlingSelfAlertEvaluator
     /// which is why both sides now read one symbol.</para>
     /// </summary>
     internal const string StoreServerLabel = "Monitor Store";
+
+    /* Custom-alert-rule health edge state (#3304). FLEET-level like disk pressure (the rules are a fleet
+       concept, not per-server), so a single fixed sentinel key. Standing condition (the AG-Sync-Fell-Behind /
+       Collection-Stopped idiom): active flag + cooldown re-fire while ANY custom rule is broken or never-firing,
+       one resolution when all rules are healthy again. The report itself is rebuilt each check by the
+       CustomAlertEvaluator; this evaluator only decides fire/hold/resolve and renders the (already-sanitized)
+       rule list. */
+    private readonly ConcurrentDictionary<string, bool> _activeCustomRuleHealth = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastCustomRuleHealthAlert = new();
+
+    /// <summary>The fixed key for the fleet-level custom-alert-rule-health edge (not a real server); non-numeric
+    /// so the deliverer's #1236 int.TryParse override no-ops on it exactly like <see cref="DiskKey"/>.</summary>
+    private const string CustomRuleHealthKey = "customalerts";
+
+    /// <summary>The alert metric name the custom-alert-rule-health self-alert fires under (#3304). A WEBHOOK
+    /// AUTOMATION KEY like its siblings, so it is a const and must stay stable across releases. Classified as a
+    /// count metric by <c>AlertMetricClassifier</c> (the value is the number of unhealthy rules).</summary>
+    internal const string CustomRuleHealthMetric = "Custom Alert Rules Unhealthy";
+
+    /// <summary>The resolution title recorded when every custom rule is healthy again. Carries a recognized
+    /// resolution suffix ("Recovered") so the shared <c>AlertMetricClassifier.IsResolution</c> styles it green.</summary>
+    internal const string CustomRuleHealthResolvedMetric = "Custom Alert Rules Recovered";
+
+    /// <summary>How many unhealthy rules the aggregated alert lists by name before eliding the rest — a pg_*
+    /// rename can break many rules at once, and the whole point is ONE bounded alert, not a wall of text.</summary>
+    private const int MaxListedUnhealthyRules = 20;
 
     /* Compression-job self-heal edge state (#1581). FLEET-level like disk pressure (one shared store), but
        MULTI-keyed by job_id (a store has many compression policy jobs). The state is the re-arm-once/escalate
@@ -1514,6 +1541,137 @@ internal sealed class DarlingSelfAlertEvaluator
         }
     }
 
+    /* ---------------- custom-alert-rule health (fleet-level, polled — #3304) ---------------- */
+
+    /// <summary>
+    /// Isolating wrapper for the fleet-level custom-alert-rule-health self-alert (#3304), mirroring
+    /// <see cref="EvaluateDiskPressureAsync"/>: a throwing seam (e.g. a mute rule's <c>Matches()</c>) is
+    /// contained here so it can never stop the worker's fleet-global maintenance pass. The worker calls THIS;
+    /// tests call the isolated <see cref="ApplyCustomRuleHealthAsync"/> directly.
+    /// </summary>
+    public async Task EvaluateCustomRuleHealthAsync(CustomAlertHealthReport report, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyCustomRuleHealthAsync(report, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: this method is handed its evidence (the report)
+               as a parameter and performs no store read — the catch covers the apply/deliver half, exactly
+               like the sibling store self-alert wrappers. The read that BUILDS the report lives in
+               CustomAlertEvaluator, outside this alert-pass census. */
+            _logger?.LogError("Custom-alert rule-health self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Edge-applies the fleet-level "some custom alert rules are broken or never firing" condition from the
+    /// <see cref="CustomAlertHealthReport"/> the <see cref="CustomAlertEvaluator"/> builds: fire once on entry,
+    /// re-fire only after the alert cooldown while any rule stays unhealthy, and write ONE resolution row when
+    /// every rule is healthy again (the Collection-Stopped standing-condition edge shape). ONE alert aggregates
+    /// ALL unhealthy rules — a <c>pg_*</c> rename can break many at once, and one-alert-per-rule would be an
+    /// alert storm. Gated on the master alerts switch. The rule names/errors in the report are ALREADY
+    /// newline-stripped + length-capped by the evaluator, and the detail NEVER contains the compiled SQL — only
+    /// the rule id/name and the catalog parse error. Internal (tested directly, like the sibling Apply methods)
+    /// with a recording deliverer + a controllable clock.
+    /// </summary>
+    internal async Task ApplyCustomRuleHealthAsync(CustomAlertHealthReport report, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled || report is null)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (report.HasIssues)
+        {
+            _activeCustomRuleHealth[CustomRuleHealthKey] = true;
+
+            /* Standing condition: fire on entry, re-fire only per cooldown while unhealthy. The CURRENT report
+               is rendered each time, so a rule that breaks later shows up on the next re-fire. */
+            if (CooldownElapsed(_lastCustomRuleHealthAlert, CustomRuleHealthKey, now))
+            {
+                _lastCustomRuleHealthAlert[CustomRuleHealthKey] = now;
+                var (shortMessage, detail) = RenderCustomRuleHealth(report);
+                await FireAsync(
+                    CustomRuleHealthKey, StoreServerLabel, CustomRuleHealthMetric,
+                    currentValue: report.TotalIssues.ToString(CultureInfo.InvariantCulture),
+                    thresholdValue: "0",
+                    detail: detail,
+                    severity: AlertSeverityLevel.Warning,
+                    shortMessage: shortMessage,
+                    /* The count of unhealthy rules is a genuine whole number (AlertMetricClassifier renders it
+                       as a count); the healthy bound is 0. */
+                    numericCurrentValue: report.TotalIssues,
+                    numericThresholdValue: 0,
+                    cancellationToken);
+            }
+        }
+        else if (_activeCustomRuleHealth.TryRemove(CustomRuleHealthKey, out var was) && was)
+        {
+            _lastCustomRuleHealthAlert.TryRemove(CustomRuleHealthKey, out _);
+            await RecordResolutionAsync(new AlertResolution(
+                CustomRuleHealthKey, StoreServerLabel, CustomRuleHealthMetric,
+                CustomRuleHealthResolvedMetric,
+                "All custom alert rules compile and are firing-eligible again"), cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Renders the aggregated health alert's one-line summary and its multi-line <c>detail_text</c> from an
+    /// (already-sanitized) report. Each rule occupies its own line led by <c>"- Rule &lt;id&gt;"</c>, which
+    /// cannot be read as a mute-context label by <see cref="AlertMuteContext.PopulateFromDetailText"/>; the list
+    /// is capped at <see cref="MaxListedUnhealthyRules"/> with a "+N more" tail so one <c>pg_*</c> rename cannot
+    /// produce an unbounded body. The compiled SQL is never included — only the rule id/name and the reason.
+    /// </summary>
+    private static (string ShortMessage, string Detail) RenderCustomRuleHealth(CustomAlertHealthReport report)
+    {
+        var shortMessage = string.Create(CultureInfo.InvariantCulture,
+            $"{report.TotalIssues} custom alert rule(s) need attention: {report.BrokenRules.Count} no longer compile, {report.NeverFiringRules.Count} armed but never fire");
+
+        var sb = new StringBuilder();
+        sb.Append(shortMessage).Append('.');
+
+        var listed = 0;
+        void AppendSection(string heading, IReadOnlyList<CustomAlertRuleHealthIssue> issues)
+        {
+            if (issues.Count == 0 || listed >= MaxListedUnhealthyRules)
+            {
+                return;
+            }
+
+            sb.Append('\n').Append(heading).Append(':');
+            foreach (var issue in issues)
+            {
+                if (listed >= MaxListedUnhealthyRules)
+                {
+                    break;
+                }
+
+                /* Leading "- Rule <id>" never matches a PopulateFromDetailText label; name/reason are pre-sanitized. */
+                sb.Append("\n- Rule ").Append(issue.RuleId.ToString(CultureInfo.InvariantCulture))
+                  .Append(" \"").Append(issue.RuleName).Append("\": ").Append(issue.Reason);
+                listed++;
+            }
+        }
+
+        AppendSection("Broken (will not fire)", report.BrokenRules);
+        AppendSection("Armed but never fires", report.NeverFiringRules);
+
+        var remaining = report.TotalIssues - listed;
+        if (remaining > 0)
+        {
+            sb.Append("\n+ ").Append(remaining.ToString(CultureInfo.InvariantCulture)).Append(" more (see the service log).");
+        }
+
+        return (shortMessage, sb.ToString());
+    }
+
     /* ---------------- compression-job self-heal (fleet-level, polled — #1581) ---------------- */
 
     /// <summary>
@@ -1885,11 +2043,15 @@ internal sealed class DarlingSelfAlertEvaluator
                                 : "The gate is working as designed - it will not let retention drop history a " +
                                   "rollup has never materialized - but the hold has lasted long enough to cost " +
                                   "real disk. ") +
-                            "The policy arms ITSELF once its consumer covers everything raw holds; what is " +
-                            "missing is the backfill, which is the --backfill-rollups operator action. Do NOT " +
-                            "arm the policy by hand: the history it holds exists nowhere else, so arming drops " +
-                            "the only copy, which is precisely what the gate prevents. Check the service log at " +
-                            "startup for the 'HELD PAUSED' line naming which consumer is short.",
+                            "The policy arms ITSELF once its consumer covers everything raw holds, but it " +
+                            "arms at STARTUP rather than the moment coverage catches up - EnsureRetentionPoliciesAsync " +
+                            "runs on the service start path and nowhere else. So the remedy is two steps, and the " +
+                            "second is not optional: run the --backfill-rollups operator action, then RESTART the " +
+                            "service. Skip the restart and the backfill will have worked while this alert keeps " +
+                            "firing, which reads like the backfill failed. Do NOT arm the policy by hand: the " +
+                            "history it holds exists nowhere else, so arming drops the only copy, which is " +
+                            "precisely what the gate prevents. Check the service log at startup for the " +
+                            "'HELD PAUSED' line naming which consumer is short.",
                         severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
                         shortMessage: $"{label} held at {ratio:F1}x its {policy.DropAfter} horizon",
                         numericCurrentValue: Math.Round(ratio, 2),

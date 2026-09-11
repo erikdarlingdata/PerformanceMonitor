@@ -360,7 +360,7 @@ public sealed class AlertReadFailureSurfaceTests
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
         (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 13, 4),
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 5, 7),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 5, 8),
     };
 
     /// <summary>
@@ -419,6 +419,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Alert resolution callback failed"] = "the delivery path",
         ["Connection-change self-alert delivery failed"] = "the delivery path",
         ["Store disk-pressure self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
+        ["Custom-alert rule-health self-alert failed"] = "handed its evidence (the report) as a parameter; the report-building read is in CustomAlertEvaluator, outside this census",
         ["Store runtime upgrade self-alert failed"] = "handed its evidence as parameters",
         ["Compression-job health self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Store-job cadence self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
@@ -518,7 +519,7 @@ public sealed class AlertReadFailureSurfaceTests
         /* The whole-tree totals, so a site MOVED between the scoped regions still has to be re-counted by
            a person rather than netting out silently. */
         Assert.Equal(CountedSites, totalCounted);
-        Assert.Equal(18, totalExempt);
+        Assert.Equal(19, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

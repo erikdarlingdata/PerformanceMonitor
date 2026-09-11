@@ -2137,4 +2137,42 @@ public sealed class AlertEngineTests
         Assert.Equal(PerformanceMonitor.Notifications.AlertSeverityLevel.Critical, o.Severity);
         Assert.Contains("no baseline", o.ShortMessage);
     }
+
+    /// <summary>
+    /// #3297 delivers this alert's detail block on every channel, which makes a fact stated under two
+    /// labels a thing an operator reads twice rather than a harmless internal duplication. The pending
+    /// case is where that is easy to reintroduce: <c>Expected State</c> already IS "(no baseline yet)"
+    /// whenever the baseline is missing, so a second field restating it looks like new information while
+    /// adding none.
+    ///
+    /// <para>An occurrence COUNT rather than a field-name list: a list would pass while the same fact
+    /// arrived under a label nobody thought to enumerate, which is the failure this is guarding.</para>
+    /// </summary>
+    [Fact]
+    public async Task DatabaseState_PendingCriticalFirstObservation_StatesTheMissingBaselineOnce()
+    {
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "SUSPECT", ExpectedState = "" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var detail = Assert.Single(h.Deliverer.Outcomes).DetailText!;
+
+        Assert.Contains("no baseline", detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, CountOccurrences(detail, "baseline"));
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        int count = 0, index = 0;
+        while ((index = haystack.IndexOf(needle, index, StringComparison.OrdinalIgnoreCase)) >= 0)
+        {
+            count++;
+            index += needle.Length;
+        }
+
+        return count;
+    }
 }

@@ -872,6 +872,119 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }
 
+    /* ---------------- custom-alert-rule health edge (#3304) ---------------- */
+
+    private static CustomAlertHealthReport HealthReport(int broken, int neverFiring)
+    {
+        var b = Enumerable.Range(1, broken)
+            .Select(i => new CustomAlertRuleHealthIssue(i, $"broken {i}", "invalid metric: unknown measure 'x'"))
+            .ToList();
+        var n = Enumerable.Range(100, neverFiring)
+            .Select(i => new CustomAlertRuleHealthIssue(i, $"nofire {i}", "armed but scoped only to servers that are not currently monitored, so it never evaluates"))
+            .ToList();
+        return new CustomAlertHealthReport(b, n);
+    }
+
+    [Fact]
+    public async Task CustomRuleHealth_ManyBroken_AggregatesToOneAlert_AndNeverEmitsTheCompiledSql()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCustomRuleHealthAsync(HealthReport(broken: 3, neverFiring: 0), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);   // ONE alert for all three, not one-per-rule
+        Assert.Equal(DarlingSelfAlertEvaluator.CustomRuleHealthMetric, fired.MetricName);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.Equal("customalerts", fired.ServerKey);      // fleet sentinel key, not a real server_id
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, fired.ServerName);
+        Assert.Equal("3", fired.CurrentValue);              // the count of unhealthy rules
+        Assert.Contains("Rule 1", fired.DetailText);
+        Assert.Contains("Rule 3", fired.DetailText);
+        // The detail carries the rule id/name + reason, NEVER the compiled SQL.
+        Assert.DoesNotContain("SELECT", fired.DetailText!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CustomRuleHealth_ListsNeverFiringRules_UnderTheirOwnHeading()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCustomRuleHealthAsync(HealthReport(broken: 0, neverFiring: 2), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("Armed but never fires", fired.DetailText);
+        Assert.Contains("not currently monitored", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task CustomRuleHealth_Resolves_WhenEveryRuleHealthyAgain()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCustomRuleHealthAsync(HealthReport(2, 0), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);          // the fire routes through the (recording) deliverer, not history
+
+        // All healthy now: ONE resolution row, no additional fire.
+        await e.ApplyCustomRuleHealthAsync(CustomAlertHealthReport.Empty, Ct);
+        Assert.Single(h.Deliverer.Outcomes);      // unchanged
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.CustomRuleHealthResolvedMetric, resolution.MetricName);
+
+        // A second all-healthy sweep is idempotent — the edge already cleared.
+        await e.ApplyCustomRuleHealthAsync(CustomAlertHealthReport.Empty, Ct);
+        Assert.Single(h.History.Records);
+    }
+
+    [Fact]
+    public async Task CustomRuleHealth_Disabled_DoesNothing()
+    {
+        var h = new Harness();
+        h.Settings.AlertsEnabled = false;
+        var e = h.Build();
+
+        await e.ApplyCustomRuleHealthAsync(HealthReport(3, 1), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task CustomRuleHealth_StandingCondition_ReFiresOnlyAfterCooldown()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCustomRuleHealthAsync(HealthReport(1, 0), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        // Inside the 5-minute cooldown: no re-fire (fire once on entry, not every sweep).
+        h.Now = h.Now.AddMinutes(1);
+        await e.ApplyCustomRuleHealthAsync(HealthReport(1, 0), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        // Cooldown elapsed, still unhealthy: re-fires the standing reminder.
+        h.Now = h.Now.AddMinutes(5);
+        await e.ApplyCustomRuleHealthAsync(HealthReport(2, 0), Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task CustomRuleHealth_CapsTheListedRules_ButTheCountReflectsAll()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCustomRuleHealthAsync(HealthReport(broken: 30, neverFiring: 0), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("more", fired.DetailText!, StringComparison.OrdinalIgnoreCase);  // "+N more" tail
+        Assert.Equal("30", fired.CurrentValue);   // the count is not truncated by the list cap
+    }
+
     [Fact]
     public async Task DiskPressure_Recovery_ClearsTheWorseningWatermark_SoTheNextBreachIsFresh()
     {
@@ -2389,6 +2502,34 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         Assert.Equal(DarlingSelfAlertEvaluator.RetentionHoldMetric, fired.MetricName);
         Assert.Equal("retentionhold:1072", fired.ServerKey);  /* prefixed so it never parses as a server_id */
         Assert.Contains("held at 4.5x", fired.ShortMessage, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3297: the detail names WHEN the policy arms. It said the policy "arms ITSELF once its consumer covers
+    /// everything raw holds" and stopped there, which is true and one step short:
+    /// <c>TimescaleSupport.EnsureRetentionPoliciesAsync</c> is the only thing that arms a held policy and it
+    /// has exactly one call site, the service startup path. So arming happens on the next service START, not
+    /// when coverage catches up. An operator following the old wording runs the backfill, watches the hourly
+    /// Critical keep firing, and concludes the backfill failed — which is what happened on #3296, where the
+    /// reporter's own sequence included the restart and ours did not. Pinned here rather than only in
+    /// <c>docs/retention-hold-runbook.md</c> because the alert is what an operator sees first, and now that
+    /// every channel delivers the detail (#3297) it is what most of them will see at all.
+    /// </summary>
+    [Fact]
+    public async Task RetentionHeld_TheDetail_NamesTheRestartAsPartOfTheRemedy()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+
+        var detail = Assert.Single(h.Deliverer.Outcomes).DetailText!;
+        Assert.Contains("--backfill-rollups", detail, StringComparison.Ordinal);
+        Assert.Contains("RESTART", detail, StringComparison.Ordinal);
+        /* The reason the restart is not optional, so a future edit cannot drop it to a bare instruction. */
+        Assert.Contains("STARTUP", detail, StringComparison.Ordinal);
+        /* And the do-not-arm warning it must never displace. */
+        Assert.Contains("Do NOT", detail, StringComparison.Ordinal);
     }
 
     [Fact]

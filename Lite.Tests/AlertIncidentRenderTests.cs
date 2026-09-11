@@ -181,4 +181,74 @@ public class AlertIncidentRenderTests
         var teams = WebhookAlertService.BuildTeamsPayload("Low Disk Space", "S1", "5%", "10%", Branding, context: ctx);
         Assert.DoesNotContain("\"name\":\"Resource\"", teams);
     }
+
+    /// <summary>
+    /// #3297, the constraint the fix had to satisfy to be safe: an ENGINE alert's detail text is
+    /// <see cref="AlertDetailText.Flatten"/> of its own context, built that way at every
+    /// <c>AlertEngine</c> fire site. So carrying the detail text on top of the structured render would
+    /// print the same content twice on every channel — a regression in precisely the alerts that already
+    /// read correctly (blocking, deadlocks), which are the ones populating a structured context.
+    /// <para>Asserted by counting a marker from the flattened text rather than comparing whole payloads,
+    /// because every builder stamps <c>DateTime.UtcNow</c> and a byte comparison would be a clock race.
+    /// One marker in, one marker out, on all four channels and both email bodies.</para>
+    /// </summary>
+    [Fact]
+    public void AnEngineAlertsFlattenedDetail_IsNotRenderedTwice_OnAnyChannel()
+    {
+        const string Marker = "SalesDB.dbo.Orders";
+        var ctx = new AlertContext();
+        AlertIncidentRenderer.Apply(ctx, new[] { new AlertIncident("fingerprint-abc", new[] { Marker }) });
+        var flattened = AlertDetailText.Flatten(ctx)!;
+        Assert.Contains(Marker, flattened, StringComparison.Ordinal);
+
+        static int Count(string haystack, string needle)
+        {
+            int n = 0, i = 0;
+            while ((i = haystack.IndexOf(needle, i, StringComparison.Ordinal)) >= 0) { n++; i += needle.Length; }
+            return n;
+        }
+
+        var teamsWithout = WebhookAlertService.BuildTeamsPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx);
+        var teamsWith = WebhookAlertService.BuildTeamsPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx, detailText: flattened);
+        Assert.Equal(Count(teamsWithout, Marker), Count(teamsWith, Marker));
+
+        var slackWithout = WebhookAlertService.BuildSlackPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx);
+        var slackWith = WebhookAlertService.BuildSlackPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx, detailText: flattened);
+        Assert.Equal(Count(slackWithout, Marker), Count(slackWith, Marker));
+
+        var pdWithout = WebhookAlertService.BuildPagerDutyPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, "rk", context: ctx);
+        var pdWith = WebhookAlertService.BuildPagerDutyPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, "rk", context: ctx, detailText: flattened);
+        Assert.Equal(Count(pdWithout, Marker), Count(pdWith, Marker));
+
+        var genericWithout = WebhookAlertService.BuildGenericPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx);
+        var genericWith = WebhookAlertService.BuildGenericPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx, detailText: flattened);
+        Assert.Equal(Count(genericWithout, Marker), Count(genericWith, Marker));
+
+        var (htmlWithout, plainWithout) = EmailTemplateBuilder.BuildAlertEmail("Deadlocks Detected", "S1", "2", "n/a", 15, Branding, ctx);
+        var (htmlWith, plainWith) = EmailTemplateBuilder.BuildAlertEmail("Deadlocks Detected", "S1", "2", "n/a", 15, Branding, ctx, flattened);
+        Assert.Equal(Count(htmlWithout, Marker), Count(htmlWith, Marker));
+        Assert.Equal(Count(plainWithout, Marker), Count(plainWith, Marker));
+    }
+
+    /// <summary>
+    /// The complement, so the pin above cannot be satisfied by a channel that simply ignores the detail
+    /// text: an alert carrying prose the context does NOT already say adds that prose on every channel.
+    /// A pin that only ever asserts an absence is green whether the feature exists or not.
+    /// </summary>
+    [Fact]
+    public void IndependentProse_IsAdded_OnEveryChannel()
+    {
+        const string Prose = "Run the --backfill-rollups operator action, then RESTART the service.";
+        var ctx = new AlertContext();
+        AlertIncidentRenderer.Apply(ctx, new[] { new AlertIncident("fingerprint-abc", new[] { "SalesDB.dbo.Orders" }) });
+
+        Assert.Contains(Prose, WebhookAlertService.BuildTeamsPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx, detailText: Prose), StringComparison.Ordinal);
+        Assert.Contains(Prose, WebhookAlertService.BuildSlackPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx, detailText: Prose), StringComparison.Ordinal);
+        Assert.Contains(Prose, WebhookAlertService.BuildPagerDutyPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, "rk", context: ctx, detailText: Prose), StringComparison.Ordinal);
+        Assert.Contains(Prose, WebhookAlertService.BuildGenericPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx, detailText: Prose), StringComparison.Ordinal);
+
+        var (html, plain) = EmailTemplateBuilder.BuildAlertEmail("Deadlocks Detected", "S1", "2", "n/a", 15, Branding, ctx, Prose);
+        Assert.Contains(System.Net.WebUtility.HtmlEncode(Prose), html, StringComparison.Ordinal);
+        Assert.Contains(Prose, plain, StringComparison.Ordinal);
+    }
 }

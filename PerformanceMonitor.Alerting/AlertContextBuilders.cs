@@ -773,20 +773,13 @@ public static class AlertContextBuilders
     /// <summary>
     /// Flattens an <see cref="AlertContext"/> into the plain-text detail block persisted in alert
     /// history and rendered in plain-text notification bodies. Null when there is nothing to render.
+    /// <para>The implementation lives in <see cref="AlertDetailText.Flatten"/>, in the Notifications
+    /// project, because the delivery channels there decide whether an alert's prose detail adds anything
+    /// over its structured context by comparing against this exact text — and that project cannot
+    /// reference this one. Kept as the name every fire site already calls.</para>
     /// </summary>
-    public static string? ContextToDetailText(AlertContext? context)
-    {
-        if (context == null || context.Details.Count == 0) return null;
-        var sb = new System.Text.StringBuilder();
-        foreach (var detail in context.Details)
-        {
-            if (sb.Length > 0) sb.AppendLine();
-            sb.AppendLine(detail.Heading);
-            foreach (var (label, value) in detail.Fields)
-                sb.AppendLine($"  {label}: {value}");
-        }
-        return sb.ToString().TrimEnd();
-    }
+    public static string? ContextToDetailText(AlertContext? context) =>
+        AlertDetailText.Flatten(context);
 
     /// <summary>
     /// Collapses newlines to spaces, trims, and truncates to <paramref name="maxLength"/> with a

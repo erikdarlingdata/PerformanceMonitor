@@ -63,7 +63,8 @@ public class EmailAlertService : IFindingAlertSender
         try
         {
             var result = await _core.TrySendAsync(
-                metricName, serverName, currentValue, thresholdValue, serverId.ToString(), context, attemptChannels: !muted);
+                metricName, serverName, currentValue, thresholdValue, serverId.ToString(), context, attemptChannels: !muted,
+                detailText: detailText);
 
             /* trayChannelPresent: true — LiteAlertDeliverer.DeliverAsync shows a styled balloon for every
                non-muted alert on the same call that reaches here, so a stored "tray" really does mean a

@@ -816,7 +816,7 @@
                 </Grid>
                 <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
                     <Run Text="Placeholders (each is JSON-escaped when substituted): "/>
-                    <Run FontFamily="Consolas" Text="{}{{metric}} {{server}} {{value}} {{threshold}} {{severity}} {{context}} {{timestamp}}"/>
+                    <Run FontFamily="Consolas" Text="{}{{metric}} {{server}} {{value}} {{threshold}} {{severity}} {{context}} {{detail}} {{timestamp}}"/>
                 </TextBlock>
                 <TextBlock Margin="20,4,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
                     <Run Text="Automation placeholders — the first two substitute RAW JSON values (use them unquoted, e.g. &quot;context&quot;: {{context_json}}): "/>
