@@ -7,7 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Reflection;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
@@ -320,6 +323,152 @@ public sealed class BuiltinAlertPersistenceRungTests
         Assert.True(body.Length > 1500, $"the sliced body is only {body.Length} chars, which cannot be this method");
 
         return body;
+    }
+
+    /// <summary>
+    /// Every comment that cites this rung's NUMBER cites the right one.
+    ///
+    /// <para>A rung number in prose is a frozen claim, and this branch froze the wrong one: #3315 landed
+    /// V117 first, this rung renumbered to V118, and five comments across both SKUs kept saying V117 —
+    /// three of which review found and two of which it did not. The repo leans on exactly these citations
+    /// to check Lite/Darling parity, so a wrong one sends the next person to the wrong rung.</para>
+    ///
+    /// <para>Derived from <see cref="StorageVersion.SchemaVersion"/> rather than compared against a
+    /// literal, so a future renumber reds this instead of leaving silent copies. Scoped to the comment
+    /// BLOCKS that name this table — the first spelling of this pin matched every rung citation in the same
+    /// files and flagged nine correct ones for other rungs, which is a check that cannot be left on.</para>
+    /// </summary>
+    [Fact]
+    public void EveryCommentCitingThisRungsNumber_CitesTheRealOne()
+    {
+        /* Two keys because the subject is named two ways across these blocks, and only one file uses the
+           table name in its comment — DuckDbInitializer names it in a log string and its comment says
+           "persistence-gate state". Keying on the table name alone made the floor below fail, which is how
+           that was found rather than assumed. */
+        var keys = new[] { "alert_persistence_state", "persistence-gate state" };
+        var rung = $"V{StorageVersion.SchemaVersion}";
+        var wrong = new Regex(@"\bV(\d+)\b", RegexOptions.CultureInvariant);
+
+        var files = new[]
+        {
+            Path.Combine("Lite", "Database", "Schema.cs"),
+            Path.Combine("Lite", "Database", "DuckDbInitializer.cs"),
+            Path.Combine("Lite", "Services", "DuckDbAlertHistoryStore.cs"),
+            Path.Combine("Lite", "Services", "LiteAlertStateStore.cs"),
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "PgAlertStateStore.cs"),
+        };
+
+        var stale = new List<string>();
+        var blocksAboutThisTable = 0;
+        var citations = 0;
+
+        foreach (var relative in files)
+        {
+            var source = RepoFile.ReadRepoFileLf(relative);
+
+            /* The scan has to SEE the file, or every check below passes over nothing. */
+            Assert.Contains("alert_persistence_state", source, StringComparison.Ordinal);
+
+            foreach (var block in CommentBlocks(source))
+            {
+                if (!keys.Any(k => block.Contains(k, StringComparison.Ordinal)))
+                {
+                    continue;
+                }
+
+                blocksAboutThisTable++;
+
+                foreach (Match m in wrong.Matches(block))
+                {
+                    citations++;
+                    /* A V-number inside a block about THIS table has to be this table's rung. Other rungs
+                       are cited freely in these files and are none of this pin's business, which is why the
+                       scope is the block rather than the file. */
+                    if (m.Value != rung)
+                    {
+                        stale.Add($"{relative}: cites {m.Value}, expected {rung}");
+                    }
+                }
+            }
+        }
+
+        /* The floor that makes the emptiness mean something, and it is MEASURED rather than assumed: each
+           of the five files carries exactly one such block with exactly one citation in it. Stated as a
+           floor rather than an equality so adding a citation does not red this, while deleting the blocks
+           or breaking the scan still does. */
+        Assert.True(
+            blocksAboutThisTable >= files.Length,
+            $"only {blocksAboutThisTable} comment blocks about this rung's table found across "
+          + $"{files.Length} files, so this pin is not reading what it claims to read");
+
+        Assert.True(
+            citations >= files.Length,
+            $"only {citations} rung citations found in those blocks, so the equality below is over nothing");
+
+        Assert.True(
+            stale.Count == 0,
+            $"{stale.Count} comment(s) cite the wrong rung for config.alert_persistence_state: "
+          + string.Join(" | ", stale));
+    }
+
+    /// <summary>
+    /// The contiguous comment blocks of a source file — <c>///</c> runs and <c>/* … */</c> blocks — so a
+    /// citation can be attributed to the thing its own block is about rather than to whatever happens to
+    /// share the file.
+    /// </summary>
+    private static IEnumerable<string> CommentBlocks(string sourceLf)
+    {
+        var current = new List<string>();
+        var inBlock = false;
+
+        foreach (var line in sourceLf.Split('\n'))
+        {
+            var trimmed = line.TrimStart();
+            var isDoc = trimmed.StartsWith("///", StringComparison.Ordinal);
+
+            if (inBlock)
+            {
+                current.Add(line);
+                if (line.Contains("*/", StringComparison.Ordinal))
+                {
+                    inBlock = false;
+                    yield return string.Join("\n", current);
+                    current.Clear();
+                }
+
+                continue;
+            }
+
+            if (trimmed.StartsWith("/*", StringComparison.Ordinal) && !line.Contains("*/", StringComparison.Ordinal))
+            {
+                if (current.Count > 0)
+                {
+                    yield return string.Join("\n", current);
+                    current.Clear();
+                }
+
+                inBlock = true;
+                current.Add(line);
+                continue;
+            }
+
+            if (isDoc || (trimmed.StartsWith("/*", StringComparison.Ordinal) && line.Contains("*/", StringComparison.Ordinal)))
+            {
+                current.Add(line);
+                continue;
+            }
+
+            if (current.Count > 0)
+            {
+                yield return string.Join("\n", current);
+                current.Clear();
+            }
+        }
+
+        if (current.Count > 0)
+        {
+            yield return string.Join("\n", current);
+        }
     }
 
     /// <summary>

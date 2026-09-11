@@ -181,7 +181,7 @@ public sealed class LiteAlertStateStore : IAlertStateStore
 
     /// <summary>
     /// #3282: the built-in persistence-gate record, over <c>config_alert_persistence_state</c> — Lite's twin
-    /// of Darling's V117 table, so the shared engine's CPU gate behaves the same on both SKUs. Wrapped in
+    /// of Darling's V118 table, so the shared engine's CPU gate behaves the same on both SKUs. Wrapped in
     /// <c>Task.Run</c> like every other method here: DuckDB.NET's I/O is synchronous under its async facade
     /// and the engine runs on the WPF dispatcher, so an unwrapped call is a UI hitch (#1202).
     /// </summary>
