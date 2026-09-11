@@ -72,6 +72,19 @@ public sealed class IncidentDeliveryFilterTests
         var footer = Assert.Single(
             render.Context.Details, d => d.Heading == IncidentDeliveryFilter.OtherIncidentsHeading);
         Assert.Contains(footer.Fields, f => f.Value == Footer);
+
+        /* The same batch with the stale fingerprint LAST. Position is not identity, and a filter that
+           reduced over the ordered list rather than testing set membership would be right on exactly one
+           of the two orders — a mutation of the cooldown's own ordered reduction survived the single-order
+           form of this fixture, which is why both are asserted here too. */
+        var flipped = new AlertContext();
+        AlertIncidentRenderer.Apply(flipped, Incidents().Reverse().ToList());
+
+        var flippedRender = IncidentDeliveryFilter.ForDelivery(flipped, null, new[] { Fresh });
+
+        Assert.Equal(1, flippedRender.SuppressedIncidentCount);
+        Assert.Equal(Fresh, Assert.Single(flippedRender.Context!.Incidents!).DedupKey);
+        Assert.DoesNotContain(flippedRender.Context.Details, DedupKeyIs(Stale));
     }
 
     /// <summary>

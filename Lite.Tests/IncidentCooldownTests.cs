@@ -179,6 +179,14 @@ public class IncidentCooldownTests
         Assert.True(summary.ShouldSend);
         Assert.Equal(2, summary.Keys.Count);           // both keys are still stamped on success (#1154)
         Assert.Equal(new[] { "B" }, summary.DeliverableDedupKeys);
+
+        /* And with the fresh one FIRST. Both members are reductions over an ordered key list, so a
+           last-one-wins or first-one-wins reduction is right on exactly one of the two orders — measured,
+           not theoretical: writing this assertion is what caught a mutation of the ShouldSend reduction
+           that the single-order form above passed. */
+        var reversed = await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("B", "A"), Window);
+        Assert.True(reversed.ShouldSend);
+        Assert.Equal(new[] { "B" }, reversed.DeliverableDedupKeys);
     }
 
     /// <summary>
