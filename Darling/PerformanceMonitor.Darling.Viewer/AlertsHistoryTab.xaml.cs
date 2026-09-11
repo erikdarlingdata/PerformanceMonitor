@@ -460,7 +460,10 @@ public partial class AlertsHistoryTab : UserControl
             ServerName = item.ServerName,
             MetricName = item.MetricName
         };
-        context.PopulateFromDetailText(item.DetailText);
+        /* #3309: pass the metric name so a custom alert ("Custom:<id>") skips detail_text pre-fill parsing -
+           a custom rule has no Database/Wait Type/Job/Query dimension to pre-fill, and its user-authored name
+           must not be able to forge a mute-context label line. */
+        context.PopulateFromDetailText(item.DetailText, item.MetricName);
 
         await CreateMuteRuleAsync(context);
     }

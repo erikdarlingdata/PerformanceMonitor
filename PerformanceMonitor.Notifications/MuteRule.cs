@@ -113,9 +113,18 @@ public class AlertMuteContext
     /// Query values may span multiple lines and use variant labels
     /// (Blocked Query, Blocking Query, Victim SQL).
     /// </summary>
-    public void PopulateFromDetailText(string? detailText)
+    /// <param name="metricName">The alert's metric name, when known. A custom alert rule
+    /// (<c>"Custom:&lt;id&gt;"</c>) has no Database/Wait Type/Job/Query dimension, so its detail_text is
+    /// NOT parsed for a mute-context pre-fill (#3309); omit or pass null for built-in alerts to parse as before.</param>
+    public void PopulateFromDetailText(string? detailText, string? metricName = null)
     {
         if (string.IsNullOrEmpty(detailText)) return;
+
+        /* #3309: a custom alert rule ("Custom:<id>") carries NO Database/Wait Type/Job/Query dimension. Its
+           detail_text is the user-authored rule name/description, so DMV-label parsing it for a mute-context
+           pre-fill is meaningless AND is the vector by which a crafted single-line name (e.g. "Database: master")
+           could forge a label line. Skip it for custom alerts; their mute context is ServerName + MetricName. */
+        if (metricName is not null && metricName.StartsWith("Custom:", StringComparison.Ordinal)) return;
 
         System.Text.StringBuilder? queryBuilder = null;
         var lines = detailText.Split('\n');

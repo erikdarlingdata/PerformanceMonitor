@@ -169,4 +169,46 @@ public class CustomAlertDisplayNameTests
 
         Assert.Equal("CPU pressure", outcome.DetailText);
     }
+
+    // ─────────────────── #3309: the single-line-label residual, closed at the mute pre-fill ───────────────────
+
+    /// <summary>
+    /// #3309: a rule literally NAMED with a leading mute-label ("Database: master") produces a ONE-line
+    /// detail_text that does lead with "Database: " — the residual the slice-1 sanitizer (which only defeats
+    /// MULTI-line injection) cannot close on its own. A custom alert has no database dimension, so the
+    /// mute-from-history pre-fill now skips parsing entirely when the metric is "Custom:&lt;id&gt;", closing it.
+    /// </summary>
+    [Fact]
+    public void PopulateFromDetailText_CustomMetric_SkipsParsing_SoASingleLineLabelNameCannotForgeAField()
+    {
+        var outcome = CustomAlertEvaluator.BuildFireOutcome(
+            Rule(42, "Database: master"), Definition(),
+            serverKey: "7", serverDisplayName: "PROD01",
+            value: 1500, severity: AlertSeverityLevel.Warning, muted: false);
+
+        var ctx = new AlertMuteContext();
+        ctx.PopulateFromDetailText(outcome.DetailText, outcome.MetricName); // metric is "Custom:42"
+
+        Assert.Null(ctx.DatabaseName); // skipped: a custom alert has no database dimension to pre-fill
+        Assert.Null(ctx.WaitType);
+        Assert.Null(ctx.JobName);
+        Assert.Null(ctx.QueryText);
+    }
+
+    /// <summary>
+    /// The guard is METRIC-GATED, not blanket: a built-in alert (any non-"Custom:" metric, or none supplied)
+    /// still pre-fills from its structured detail_text exactly as before, so #3309 never regresses built-in muting.
+    /// </summary>
+    [Fact]
+    public void PopulateFromDetailText_BuiltInMetric_StillParses()
+    {
+        var ctx = new AlertMuteContext();
+        ctx.PopulateFromDetailText("Database: master", "High CPU");
+        Assert.Equal("master", ctx.DatabaseName);
+
+        // The legacy single-argument call (no metric) is unchanged.
+        var legacy = new AlertMuteContext();
+        legacy.PopulateFromDetailText("Database: master");
+        Assert.Equal("master", legacy.DatabaseName);
+    }
 }
