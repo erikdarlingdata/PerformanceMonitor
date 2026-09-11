@@ -115,7 +115,8 @@ public sealed class EmailSendCore
             /* #1154: per-fingerprint cooldown. Send if any incident in this alert is outside its
                window (a distinct fingerprint is not throttled by an unrelated prior incident);
                stamp every candidate key only after a successful send. Seeds from the alert log on
-               first touch per key (#981). No incidents -> the metric-level fallback key (today's behavior). */
+               first touch per key (#981). No incidents -> the metric-level fallback key (today's behavior).
+               WHETHER to send only; #3313's filter below decides WHICH incidents the email contains. */
             var decision = await _cooldown.EvaluateAsync(
                 serverId, metricName, context?.Incidents,
                 TimeSpan.FromMinutes(_settings.EmailCooldownMinutes));
@@ -124,15 +125,21 @@ public sealed class EmailSendCore
             {
                 emailAttempted = true;
 
+                /* #3313: render only the incidents outside their own window. Email keys off THIS path's own
+                   cooldown, not the webhook's: the two channels hold separate key spaces (see the keyPrefix
+                   on each IncidentCooldown), so an email that failed to send last cycle left its key
+                   unstamped and its incident is still owed a delivery even where the webhook's is not. */
+                var render = IncidentDeliveryFilter.ForDelivery(context, detailText, decision.DeliverableDedupKeys);
+
                 var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
                 var subject = $"[SQL Monitor Alert] {titleName} on {serverName}";
                 var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
-                    metricName, serverName, currentValue, thresholdValue, _settings.EmailCooldownMinutes, _branding, context,
-                    detailText, displayName);
+                    metricName, serverName, currentValue, thresholdValue, _settings.EmailCooldownMinutes, _branding,
+                    render.Context, render.Prose, displayName);
 
                 try
                 {
-                    await SendEmailAsync(_settings, subject, htmlBody, plainTextBody, context);
+                    await SendEmailAsync(_settings, subject, htmlBody, plainTextBody, render.Context);
                     emailSent = true;
                     _cooldown.Stamp(decision);
 
@@ -163,7 +170,9 @@ public sealed class EmailSendCore
             }
         }
 
-        /* Webhook notifications (Teams / Slack) — independent of email */
+        /* Webhook notifications (Teams / Slack) — independent of email, and handed the UNFILTERED context:
+           it owns its own cooldown key space and applies its own #3313 filter from its own decision. Passing
+           email's filtered copy would make one channel's send history govern the other's card. */
         bool webhookSent = false;
         if (attemptChannels)
         {
