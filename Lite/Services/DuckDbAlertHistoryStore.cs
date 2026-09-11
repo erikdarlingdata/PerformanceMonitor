@@ -528,6 +528,133 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)";
         }
     }
 
+    /// <summary>
+    /// #3282: loads one subject's built-in persistence-gate record from <c>config_alert_persistence_state</c>
+    /// — the Lite twin of Darling's V117 table. Returns null when there is no row, which the engine reads as
+    /// "no memory" and arms the gate from zero.
+    ///
+    /// <para>Null on failure too, deliberately. A load failure cannot resurrect a <c>firing</c> bit it did
+    /// not read, so the worst outcome is the streak rebuilding over the next few samples — a delay, never a
+    /// re-announcement of an incident the user already has open.</para>
+    /// </summary>
+    public async Task<(int Breaches, int Clears, bool Firing, DateTime? LastObservedSampleUtc)?>
+        LoadAlertPersistenceAsync(int serverId, string metricName)
+    {
+        try
+        {
+            var duckDb = _duckDb;
+            if (duckDb == null)
+            {
+                var dbPath = App.DatabasePath;
+                if (string.IsNullOrEmpty(dbPath)) return null;
+                duckDb = new DuckDbInitializer(dbPath);
+            }
+
+            using var readLock = duckDb.AcquireReadLock();
+            using var connection = duckDb.CreateConnection();
+            await connection.OpenAsync();
+
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+SELECT consecutive_breaches, consecutive_clears, firing, last_observed_sample_at
+FROM config_alert_persistence_state
+WHERE server_id = $1
+AND   metric_name = $2";
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
+
+            using var reader = await command.ExecuteReaderAsync();
+            if (!await reader.ReadAsync())
+            {
+                return null;
+            }
+
+            return (
+                Convert.ToInt32(reader.GetValue(0)),
+                Convert.ToInt32(reader.GetValue(1)),
+                Convert.ToBoolean(reader.GetValue(2)),
+                reader.IsDBNull(3) ? (DateTime?)null : Convert.ToDateTime(reader.GetValue(3)));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Alerts", $"Could not load the alert persistence gate ({metricName}): {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// #3282: upserts one subject's persistence-gate record.
+    ///
+    /// <para>DELETE-then-INSERT rather than <c>INSERT OR REPLACE</c>, and that is the point rather than a
+    /// style choice: the partial-column <c>INSERT OR REPLACE</c> used on
+    /// <c>config_edge_trigger_watermarks</c> resets every unlisted column to its default, which is precisely
+    /// why this state could not live on that table. Naming every column on one statement here would work
+    /// today and would silently zero whatever a later column adds, so the shape that cannot rot is the one
+    /// that writes the whole row. One transaction, because a delete that commits without its insert is a
+    /// subject that forgot it had an incident open.</para>
+    ///
+    /// <para>Failures are absorbed like the watermark writes: the gate has already decided this observation
+    /// from the engine's in-memory record, so a dropped write costs the streak across a restart and never an
+    /// alert.</para>
+    /// </summary>
+    public async Task SaveAlertPersistenceAsync(
+        int serverId, string metricName, int breaches, int clears, bool firing, DateTime? lastObservedSampleUtc)
+    {
+        try
+        {
+            var duckDb = _duckDb;
+            if (duckDb == null)
+            {
+                var dbPath = App.DatabasePath;
+                if (string.IsNullOrEmpty(dbPath)) return;
+                duckDb = new DuckDbInitializer(dbPath);
+            }
+
+            using var writeLock = duckDb.AcquireWriteLock();
+            using var connection = duckDb.CreateConnection();
+            await connection.OpenAsync();
+            using var transaction = connection.BeginTransaction();
+
+            using (var prune = connection.CreateCommand())
+            {
+                prune.Transaction = transaction;
+                prune.CommandText = @"
+DELETE FROM config_alert_persistence_state
+WHERE server_id = $1
+AND   metric_name = $2";
+                prune.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                prune.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
+                await prune.ExecuteNonQueryAsync();
+            }
+
+            using (var insert = connection.CreateCommand())
+            {
+                insert.Transaction = transaction;
+                insert.CommandText = @"
+INSERT INTO config_alert_persistence_state
+    (server_id, metric_name, consecutive_breaches, consecutive_clears, firing, last_observed_sample_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)";
+                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
+                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = breaches });
+                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = clears });
+                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = firing });
+                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter
+                {
+                    Value = lastObservedSampleUtc.HasValue ? lastObservedSampleUtc.Value : (object)DBNull.Value,
+                });
+                insert.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
+                await insert.ExecuteNonQueryAsync();
+            }
+
+            transaction.Commit();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Alerts", $"Could not persist the alert persistence gate ({metricName}): {ex.Message}");
+        }
+    }
+
     /* The failed-Agent-job watermark shares the edge-trigger table but is time-based, not a count:
        it holds the newest already-alerted failure's server-local run time (stored in watermark_time,
        not the INTEGER watermark column). One reserved metric_name row per server. */

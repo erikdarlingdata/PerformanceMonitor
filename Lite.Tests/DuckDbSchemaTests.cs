@@ -160,8 +160,10 @@ public class DuckDbSchemaTests : IDisposable
            (#1962 per-server state a collector's own rows cannot produce), plan_correction
            (#1952 automatic plan correction), pvs_stats (#1951 ADR persistent version store),
            the database-state alert's database_states collector + config_database_state_expected
-           control table, and the fleet-tag tables server_tags + server_tag_map (#2020 2b-i). */
-        Assert.Equal(54, tableCount);
+           control table, the fleet-tag tables server_tags + server_tag_map (#2020 2b-i), and
+           config_alert_persistence_state (#3282's built-in persistence-gate state, the twin of
+           Darling's config.alert_persistence_state). */
+        Assert.Equal(55, tableCount);
     }
 
     [Fact]

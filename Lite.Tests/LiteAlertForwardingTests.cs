@@ -201,6 +201,21 @@ public class LiteAlertForwardingTests : IDisposable
                     ? states
                     : new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal));
 
+
+        /* #3282: REAL persistence, not a no-op — the gate's whole point is that it survives a restart, and
+           a fake that forgot the record would let a broken seed path pass. Keyed like both real stores. */
+        public Dictionary<(string Key, string Metric), AlertPersistenceRecord> Persistence { get; } = new();
+        public List<(string Key, string Metric, AlertPersistenceRecord Record)> SavedPersistence { get; } = new();
+
+        public Task<AlertPersistenceRecord?> LoadAlertPersistenceAsync(string serverKey, string metricName) =>
+            Task.FromResult(Persistence.TryGetValue((serverKey, metricName), out var r) ? (AlertPersistenceRecord?)r : null);
+
+        public Task SaveAlertPersistenceAsync(string serverKey, string metricName, AlertPersistenceRecord record)
+        {
+            Persistence[(serverKey, metricName)] = record;
+            SavedPersistence.Add((serverKey, metricName, record));
+            return Task.CompletedTask;
+        }
         public Task SaveIncidentOccurrencesAsync(string serverKey, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states)
         {
             var replacement = new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal);
@@ -264,10 +279,20 @@ public class LiteAlertForwardingTests : IDisposable
         public DateTime? FailedJobWatermark() =>
             StateStore.FailedJobWatermarks.TryGetValue(Key, out var w) ? w : (DateTime?)null;
 
+        /* #3282: distinct, increasing CPU sample instants by default — the realistic case, and the only
+           default that does not quietly put every test on a degraded path (see the same helper in
+           AlertEngineTests for the two ways a fixed or null default would lie). */
+        private static int s_sampleTick;
+
+        /// <summary>The instant distinct sample times are counted from — only the ordering matters.</summary>
+        public static readonly DateTime SampleBase = new(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
+
         public static AlertServerSnapshot Snapshot(
             double? sqlCpu = null, double? totalCpu = null,
-            bool isOnline = true, bool isAzureSqlDb = false, bool suppressed = false) =>
-            new(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed);
+            bool isOnline = true, bool isAzureSqlDb = false, bool suppressed = false,
+            DateTime? cpuSampleTime = null) =>
+            new(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed,
+                cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick)));
     }
 
     /// <summary>Everything except the named check off, so a scenario pins exactly one alert.</summary>
@@ -310,6 +335,94 @@ public class LiteAlertForwardingTests : IDisposable
        1. CPU fire → resolve strings (old MainWindow.AlertEngine.cs:64-116)
        ===================================================================================== */
 
+    /// <summary>
+    /// Drives <paramref name="samples"/> sweeps with DISTINCT, increasing CPU sample instants — one #3282
+    /// gate observation per call. Returns the last instant so a caller can continue the sequence.
+    /// </summary>
+    private static async Task<DateTime> DriveCpuAsync(
+        AlertEngine engine, double? sqlCpu, double? totalCpu, int samples, DateTime from)
+    {
+        var at = from;
+        for (var i = 0; i < samples; i++)
+        {
+            at = at.AddMinutes(1);
+            await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: sqlCpu, totalCpu: totalCpu, cpuSampleTime: at));
+        }
+
+        return at;
+    }
+
+    /// <summary>The suppressed twin — suppression is evaluate-but-don't-deliver, so the gate still
+    /// advances and a pin about suppression has to drive enough samples to reach the bar.</summary>
+    private static async Task<DateTime> DriveCpuSuppressedAsync(
+        AlertEngine engine, double? sqlCpu, double? totalCpu, int samples, DateTime from)
+    {
+        var at = from;
+        for (var i = 0; i < samples; i++)
+        {
+            at = at.AddMinutes(1);
+            await engine.EvaluateServerAsync(
+                Harness.Snapshot(sqlCpu: sqlCpu, totalCpu: totalCpu, suppressed: true, cpuSampleTime: at));
+        }
+
+        return at;
+    }
+
+    [Fact]
+    public async Task Cpu_OneSampleOverTheBar_DoesNotFire_OnLiteEither()
+    {
+        /* The #3282 defect on the LITE side specifically. AlertEngine is shared, so the arithmetic is
+           covered by AlertEngineTests — what this pins is that Lite reaches the same behaviour through
+           its own snapshot and its own IAlertStateStore, which is the standing trap on every shared seam
+           here: a change landed only Darling-side leaves Lite reading a permanently-empty value. */
+        DisableAllChecks();
+        App.AlertCpuEnabled = true;
+        var h = new Harness();
+        var engine = h.Build();
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: AlertEngine.CpuBreachSamples - 1, from: Harness.SampleBase.AddMinutes(1));
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task Cpu_LiteStateStore_PersistsTheStreakUnderTheSharedMetricName()
+    {
+        /* Lite's InMemoryStateStore stands in for LiteAlertStateStore over DuckDB. What matters is that
+           the engine writes the gate's record through the SEAM on the Lite path at all, and under the same
+           (server, metric) key Darling uses — so the two SKUs' rows are the same subject and a future
+           cross-store reader sees one shape. */
+        DisableAllChecks();
+        App.AlertCpuEnabled = true;
+        var h = new Harness();
+
+        await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples - 1, from: Harness.SampleBase);
+
+        var persisted = Assert.Single(h.StateStore.Persistence);
+        Assert.Equal(AlertEngine.CpuPersistenceMetric, persisted.Key.Metric);
+        Assert.Equal(AlertEngine.CpuBreachSamples - 1, persisted.Value.State.ConsecutiveBreaches);
+        Assert.False(persisted.Value.State.Firing);
+        Assert.NotNull(persisted.Value.LastObservedSampleUtc);
+    }
+
+    [Fact]
+    public async Task Cpu_LiteSchemaCarriesThePersistenceTable()
+    {
+        /* The Lite half of the store parity, asserted against the generator rather than a live DuckDB:
+           #3282 is useless on Lite if the table the state store writes does not exist. */
+        Assert.Contains(
+            "config_alert_persistence_state",
+            PerformanceMonitorLite.Database.Schema.CreateAlertPersistenceStateTable,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            PerformanceMonitorLite.Database.Schema.CreateAlertPersistenceStateTable,
+            PerformanceMonitorLite.Database.Schema.GetAllTableStatements());
+
+        await Task.CompletedTask;
+    }
+
     [Fact]
     public async Task Cpu_FireAndResolve_CarriesTheOldLoopsExactStrings()
     {
@@ -318,8 +431,11 @@ public class LiteAlertForwardingTests : IDisposable
         var h = new Harness();
         var engine = h.Build();
 
-        /* Fire: Total mode uses TotalCpuPercent (:65 CpuPercentForAlert → Total). */
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 92));
+        /* Fire: Total mode uses TotalCpuPercent (:65 CpuPercentForAlert → Total), after
+           AlertEngine.CpuBreachSamples distinct samples over the bar (#3282 — one is no longer an
+           incident, on either SKU). The delivered STRINGS are what this test is about and they are
+           unchanged. */
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 92, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("High CPU", fired.MetricName);
@@ -338,9 +454,10 @@ public class LiteAlertForwardingTests : IDisposable
         Assert.Equal(80d, fired.NumericThresholdValue);
         Assert.False(fired.Muted);
 
-        /* Resolve: :110-113 — exact title + message strings, Success-severity tray-only toast. */
+        /* Resolve: :110-113 — exact title + message strings, Success-severity tray-only toast, after
+           AlertEngine.CpuClearSamples consecutive clears. */
         h.Now = h.Now.AddMinutes(6);
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 10, totalCpu: 12));
+        await DriveCpuAsync(engine, sqlCpu: 10, totalCpu: 12, samples: AlertEngine.CpuClearSamples, from: at);
 
         var res = Assert.Single(h.Resolutions);
         Assert.Equal("CPU Resolved", res.Title);
@@ -357,7 +474,7 @@ public class LiteAlertForwardingTests : IDisposable
         var h = new Harness();
 
         /* SqlOnly compares CpuPercent (90), not Total (95) — :65 CpuPercentForAlert → SqlOnly. */
-        await h.Build().EvaluateServerAsync(Harness.Snapshot(sqlCpu: 90, totalCpu: 95));
+        await DriveCpuAsync(h.Build(), sqlCpu: 90, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("90% (SQL CPU)", fired.CurrentValue);
@@ -435,7 +552,11 @@ public class LiteAlertForwardingTests : IDisposable
         var engine = h.Build();
         h.Adapter.Blocking.Add(BlockingRow(51));
 
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 95, totalCpu: 99, suppressed: true));
+        /* CpuBreachSamples distinct samples, all suppressed (#3282 — the CPU gate advances under
+           suppression, exactly like the blocking gate, because suppression is evaluate-but-don't-deliver.
+           Driving only one sample would leave this pin unable to distinguish "suppressed" from "the streak
+           never reached the bar", which is the thing it exists to check). */
+        var at = await DriveCpuSuppressedAsync(engine, sqlCpu: 95, totalCpu: 99, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
 
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Empty(h.Resolutions);
@@ -443,7 +564,10 @@ public class LiteAlertForwardingTests : IDisposable
            persisted; when the user un-acknowledges, the same lingering report still alerts. */
         Assert.Empty(h.StateStore.SavedEdge);
 
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 95, totalCpu: 99));
+        /* One UNsuppressed sample is enough for CPU now: the gate is already firing from the suppressed
+           streak above, so this is the standing-condition delivery rather than a fresh rising edge — which
+           is the suppressed-gates-still-advance semantics this test is about. */
+        await DriveCpuAsync(engine, sqlCpu: 95, totalCpu: 99, samples: 1, from: at);
         Assert.Equal(2, h.Deliverer.Outcomes.Count); /* CPU + blocking both fire once unsuppressed */
     }
 
@@ -461,13 +585,13 @@ public class LiteAlertForwardingTests : IDisposable
         var h = new Harness { Muted = true };
         var engine = h.Build();
 
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 92));
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 92, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.True(fired.Muted);
         /* The cooldown was stamped even when muted (:76-78) — no second delivery inside it. */
         h.Now = h.Now.AddMinutes(2);
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 92));
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 92, samples: 1, from: at);
         Assert.Single(h.Deliverer.Outcomes);
     }
 

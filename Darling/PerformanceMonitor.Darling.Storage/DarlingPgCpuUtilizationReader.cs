@@ -100,6 +100,75 @@ public static class DarlingPgCpuUtilizationReader
             reader.IsDBNull(4) ? null : reader.GetDouble(4));
     }
 
+    /// <summary>
+    /// The most samples one persistence-gate pass will consume (#3282). Performance Insights is queried at
+    /// a 60-second period and <c>pg_cpu_utilization</c> is collected every five minutes, so a normal batch
+    /// is about five samples; <see cref="Freshness"/> bounds how far back the pass looks, and this bounds
+    /// how many rows it will carry out of that window if the collector caught up after a longer gap. The
+    /// gate's counters saturate at their thresholds, so a larger batch could not change the outcome — this
+    /// only stops one pass reading an unbounded list.
+    /// </summary>
+    public const int GateBatchLimit = 32;
+
+    internal const string SamplesSinceSql = """
+        SELECT sample_time, cpu_percent, acu_utilization_percent, serverless_capacity_acu, max_configured_acu
+        FROM pg_cpu_utilization
+        WHERE server_id = $1
+        AND   sample_time > $2
+        AND   cpu_percent IS NOT NULL
+        ORDER BY sample_time
+        LIMIT $3
+        """;
+
+    /// <summary>
+    /// Every reading newer than <paramref name="afterUtc"/>, OLDEST FIRST, for the High CPU persistence
+    /// gate (#3282).
+    ///
+    /// <para><b>Why the gate cannot just re-read the latest row here, the way the SQL Server side does.</b>
+    /// On SQL Server the alert sweep (30 s) is faster than the sample (about 60 s), so every sample is seen
+    /// by at least one sweep and "latest row, counted once" loses nothing. Performance Insights is the
+    /// opposite shape: <c>pg_cpu_utilization</c> is a five-minute collector ingesting 60-second data points,
+    /// so five samples land at once and four of every five would never be counted. Requiring three
+    /// consecutive breaching samples would then take three BATCHES — about fifteen minutes — which is a
+    /// saturation event reported long after it mattered. Reading the batch makes three samples mean three
+    /// minutes on both engines, which is also what lets one threshold keep meaning one thing across them.</para>
+    ///
+    /// <para><paramref name="afterUtc"/> is floored at <c>nowUtc - <see cref="Freshness"/></c>: a subject
+    /// with no memory, or one whose collector was away for an hour, considers only readings recent enough to
+    /// describe "right now" — the same bound <see cref="GetLatestAsync"/> applies, so the gate and the
+    /// single-reading path agree on what counts as current.</para>
+    /// </summary>
+    public static async Task<System.Collections.Generic.List<CpuSample>> GetSamplesSinceAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime? afterUtc, DateTime nowUtc,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        var floor = nowUtc - Freshness;
+        var after = afterUtc.HasValue && afterUtc.Value > floor ? afterUtc.Value : floor;
+
+        var samples = new System.Collections.Generic.List<CpuSample>();
+        await using var command = postgres.CreateCommand(SamplesSinceSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        /* Naive UTC at the bind, like every other comparison against the naive `timestamp` columns. */
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(after, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(GateBatchLimit);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            samples.Add(new CpuSample(
+                DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
+                reader.GetDouble(1),
+                reader.IsDBNull(2) ? null : reader.GetDouble(2),
+                reader.IsDBNull(3) ? null : reader.GetDouble(3),
+                reader.IsDBNull(4) ? null : reader.GetDouble(4)));
+        }
+
+        return samples;
+    }
+
     internal const string HistorySql = """
         SELECT sample_time, cpu_percent, acu_utilization_percent, serverless_capacity_acu, max_configured_acu
         FROM pg_cpu_utilization

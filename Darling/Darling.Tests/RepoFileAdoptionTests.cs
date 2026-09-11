@@ -110,6 +110,7 @@ public sealed class RepoFileAdoptionTests
     /// </summary>
     private static readonly string[] s_lfReaders =
     {
+        "BuiltinAlertPersistenceRungTests.cs",
         "ChartWindowDomainTests.cs",
         "DarlingPathFilterGateTests.cs",
         "FleetCardCollectionStaleNamesItsPopulationTests.cs",

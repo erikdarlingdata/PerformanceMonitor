@@ -179,6 +179,43 @@ public sealed class LiteAlertStateStore : IAlertStateStore
         return Task.Run(() => _store.SaveIncidentOccurrencesAsync(serverId, metricName, rows));
     }
 
+    /// <summary>
+    /// #3282: the built-in persistence-gate record, over <c>config_alert_persistence_state</c> — Lite's twin
+    /// of Darling's V117 table, so the shared engine's CPU gate behaves the same on both SKUs. Wrapped in
+    /// <c>Task.Run</c> like every other method here: DuckDB.NET's I/O is synchronous under its async facade
+    /// and the engine runs on the WPF dispatcher, so an unwrapped call is a UI hitch (#1202).
+    /// </summary>
+    public Task<AlertPersistenceRecord?> LoadAlertPersistenceAsync(string serverKey, string metricName)
+    {
+        var serverId = ParseServerKey(serverKey);
+        return Task.Run(async () =>
+        {
+            var row = await _store.LoadAlertPersistenceAsync(serverId, metricName);
+            if (row is null)
+            {
+                return (AlertPersistenceRecord?)null;
+            }
+
+            return new AlertPersistenceRecord(
+                new PersistenceState(row.Value.Breaches, row.Value.Clears, row.Value.Firing),
+                row.Value.LastObservedSampleUtc);
+        });
+    }
+
+    /// <summary>#3282: upserts the persistence-gate record — see the store method for why it writes the
+    /// whole row rather than an <c>INSERT OR REPLACE</c> over a partial column list.</summary>
+    public Task SaveAlertPersistenceAsync(string serverKey, string metricName, AlertPersistenceRecord record)
+    {
+        var serverId = ParseServerKey(serverKey);
+        return Task.Run(() => _store.SaveAlertPersistenceAsync(
+            serverId,
+            metricName,
+            record.State.ConsecutiveBreaches,
+            record.State.ConsecutiveClears,
+            record.State.Firing,
+            record.LastObservedSampleUtc));
+    }
+
     private static int ParseServerKey(string serverKey) =>
         int.Parse(serverKey, CultureInfo.InvariantCulture);
 }

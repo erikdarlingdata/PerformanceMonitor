@@ -17,8 +17,10 @@ namespace Darling.Tests;
 
 /// <summary>
 /// V116 / #3285: the custom-alert core rung (config.custom_alert_rules + config.custom_alert_state). The
-/// "I am the top rung" claims live on <see cref="MuteRuleReloadBeaconTests"/> (V117); this rung is strictly
-/// below the top, and its probe arm has to keep reporting 116 for a store migrated exactly this far.
+/// "I am the top rung" claims live on whichever rung is currently top — <see cref="MuteRuleReloadBeaconTests"/>
+/// took them from here at V117 and <see cref="BuiltinAlertPersistenceRungTests"/> holds them at V118. This
+/// rung is strictly below the top either way, and its probe arm has to keep reporting 116 for a store
+/// migrated exactly this far.
 /// </summary>
 public sealed class CustomAlertCoreMigrationTests
 {

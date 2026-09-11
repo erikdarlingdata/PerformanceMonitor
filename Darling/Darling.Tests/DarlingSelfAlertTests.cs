@@ -2129,14 +2129,26 @@ public sealed class DarlingSelfAlertTests
             logger: null,
             utcNow: () => now);
 
-        /* Fire: total CPU 90 >= 80. */
-        await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 90, 90, false, false), Ct);
+        /* Fire: total CPU 90 >= 80, held for AlertEngine.CpuBreachSamples distinct samples (#3282 — one
+           sample over the bar is no longer an incident). */
+        var sampleAt = new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
+        for (var i = 0; i < AlertEngine.CpuBreachSamples; i++)
+        {
+            sampleAt = sampleAt.AddMinutes(1);
+            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 90, 90, false, false, sampleAt), Ct);
+        }
+
         Assert.Single(deliverer.Outcomes);
         Assert.Empty(history.Records); /* no resolution yet */
 
-        /* Clear: CPU back below threshold => the engine emits a resolution => a history row is written. */
+        /* Clear: CPU back below threshold for AlertEngine.CpuClearSamples distinct samples => the engine
+           emits a resolution => a history row is written. */
         now = now.AddMinutes(1);
-        await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 10, 10, false, false), Ct);
+        for (var i = 0; i < AlertEngine.CpuClearSamples; i++)
+        {
+            sampleAt = sampleAt.AddMinutes(1);
+            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 10, 10, false, false, sampleAt), Ct);
+        }
         var resolved = Assert.Single(history.Records);
         Assert.Equal("CPU Resolved", resolved.MetricName);
         Assert.Equal(AlertDelivery.ChannelNotApplicable, resolved.NotificationType);
@@ -2194,6 +2206,21 @@ public sealed class DarlingSelfAlertTests
                 new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal));
 
         public Task SaveIncidentOccurrencesAsync(string serverKey, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states) => Task.CompletedTask;
+
+        /* #3282: real, for the same reason the other two fakes are. These tests drive the SELF-alert paths
+           and never the CPU check, so nothing here reads it back — but a stub that answered "no memory" to
+           a load and swallowed every save is indistinguishable from the seam being wired wrong, and this
+           class already has one stub-shaped no-op above that had to be justified in a comment. */
+        public Dictionary<(string Key, string Metric), AlertPersistenceRecord> Persistence { get; } = new();
+
+        public Task<AlertPersistenceRecord?> LoadAlertPersistenceAsync(string serverKey, string metricName) =>
+            Task.FromResult(Persistence.TryGetValue((serverKey, metricName), out var r) ? (AlertPersistenceRecord?)r : null);
+
+        public Task SaveAlertPersistenceAsync(string serverKey, string metricName, AlertPersistenceRecord record)
+        {
+            Persistence[(serverKey, metricName)] = record;
+            return Task.CompletedTask;
+        }
     }
 
     /* ---------------- live collection_log reads (gated on DARLING_TEST_PG) ---------------- */

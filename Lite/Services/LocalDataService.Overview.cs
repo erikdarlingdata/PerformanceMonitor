@@ -26,6 +26,7 @@ public partial class LocalDataService
 
         double? cpuPercent = null;
         double? otherProcessCpuPercent = null;
+        DateTime? cpuSampleTime = null;
         double? memoryMb = null;
         int blockingCount = 0;
         int deadlockCount = 0;
@@ -48,6 +49,11 @@ LIMIT 1";
                 cpuPercent = reader.IsDBNull(0) ? null : ToDouble(reader.GetValue(0));
                 otherProcessCpuPercent = reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1));
                 lastCollection = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
+                /* #3282: the SAME value, kept under its own name because the two have different jobs.
+                   lastCollection is overwritten below by the collection_log read and is freshness display;
+                   this one is the CPU persistence gate's observation identity and must stay the instant of
+                   the CPU reading these percentages came from. */
+                cpuSampleTime = lastCollection;
             }
         }
 
@@ -117,6 +123,7 @@ WHERE server_id = $1";
             ServerId = serverId,
             CpuPercent = cpuPercent,
             OtherProcessCpuPercent = otherProcessCpuPercent,
+            CpuSampleTime = cpuSampleTime,
             MemoryMb = memoryMb,
             BlockingCount = blockingCount,
             DeadlockCount = deadlockCount,
@@ -269,6 +276,14 @@ public class ServerSummaryItem
     public double? CpuPercent { get; set; }
     /// <summary>Non-SQL-Server CPU on the host (computed as 100 - SystemIdle - ProcessUtilization). NULL on Azure SQL DB.</summary>
     public double? OtherProcessCpuPercent { get; set; }
+
+    /// <summary>
+    /// The <c>sample_time</c> of the CPU reading <see cref="CpuPercent"/> came from (#3282) — the shared
+    /// engine's persistence-gate observation identity, NOT display data. Distinct from
+    /// <see cref="LastCollectionTime"/>, which is the newest collection of anything and is what the
+    /// freshness band is computed from.
+    /// </summary>
+    public DateTime? CpuSampleTime { get; set; }
     /// <summary>Total non-idle CPU on the host = sql_server + other_process. Tracks closer to OS user+system counters.</summary>
     public double? TotalCpuPercent =>
         CpuPercent.HasValue ? CpuPercent.Value + (OtherProcessCpuPercent ?? 0) : null;

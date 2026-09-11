@@ -359,7 +359,7 @@ public sealed class AlertReadFailureSurfaceTests
     /// </summary>
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
-        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 13, 4),
+        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 13, 5),
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 5, 8),
     };
 
@@ -416,6 +416,7 @@ public sealed class AlertReadFailureSurfaceTests
     {
         ["Could not load incident occurrences"] = "bookkeeping about an alert, not the condition read it is judged on",
         ["Could not persist incident occurrences"] = "a write",
+        ["Could not persist the CPU persistence gate"] = "a write (#3282); the gate has already decided the observation from its in-memory record, so a dropped save costs the streak across a restart and never an alert - the seeding LOAD beside it is the read, and it is counted",
         ["Alert resolution callback failed"] = "the delivery path",
         ["Connection-change self-alert delivery failed"] = "the delivery path",
         ["Store disk-pressure self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
@@ -519,7 +520,7 @@ public sealed class AlertReadFailureSurfaceTests
         /* The whole-tree totals, so a site MOVED between the scoped regions still has to be re-counted by
            a person rather than netting out silently. */
         Assert.Equal(CountedSites, totalCounted);
-        Assert.Equal(19, totalExempt);
+        Assert.Equal(20, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

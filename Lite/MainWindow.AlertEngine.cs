@@ -82,7 +82,11 @@ public partial class MainWindow : Window
             SqlCpuPercent: summary.CpuPercent,
             TotalCpuPercent: summary.TotalCpuPercent,
             IsAzureSqlDb: connStatus?.SqlEngineEdition == 5,
-            Suppressed: suppressPopups);
+            Suppressed: suppressPopups,
+            /* #3282: the gate counts breaching CPU SAMPLES rather than sweeps. Lite's sweep is the
+               30-second overview timer and the ring-buffer sample behind CpuPercent advances about once a
+               minute, so without the instant one sample would fill the streak on its own. */
+            CpuSampleTimeUtc: summary.CpuSampleTime);
 
         AlertSweepResult sweep;
         try
