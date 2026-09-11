@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -53,6 +54,20 @@ public sealed class CustomAlertEvaluator
 
     private readonly TimeSpan _cacheTtl;
     private volatile IReadOnlyList<ParsedRule> _cache = Array.Empty<ParsedRule>();
+
+    /// <summary>Broken rules found at the last cache refresh — re-parsed against the live catalog and no longer
+    /// compiling. Surfaced (aggregated) as a service self-health alert (#3304). Refreshed alongside
+    /// <see cref="_cache"/> in <see cref="GetEnabledRulesAsync"/>.</summary>
+    private volatile IReadOnlyList<CustomAlertRuleHealthIssue> _brokenRules = Array.Empty<CustomAlertRuleHealthIssue>();
+
+    /// <summary>Per-rule UTC instant the current unbroken no-data streak began (#3304). An in-memory heuristic —
+    /// set the first time a rule returns no data, cleared the moment ANY in-scope server returns a value, so a
+    /// rule with data anywhere never accrues. A rule whose entry is older than <see cref="NoDataFlagWindow"/> is
+    /// flagged "armed but never fires" (an always-NULL measure, or a dead collector). Deliberately NOT persisted:
+    /// a restart simply restarts the window, which is the right bias for an integrity heuristic (no false alarm
+    /// across a restart) and keeps the slice migration-free.</summary>
+    private readonly ConcurrentDictionary<long, DateTime> _noDataSinceUtc = new();
+
     private DateTime _cacheRefreshedUtc = DateTime.MinValue;
 
     private sealed record ParsedRule(CustomAlertRule Row, CustomAlertRuleDefinition Definition);
@@ -87,6 +102,22 @@ public sealed class CustomAlertEvaluator
     /// <summary>An abuse bound on the description portion of the rendered <c>detail_text</c> (the column is
     /// unbounded text; the name has its own <see cref="CustomAlertRuleStore.MaxNameLength"/> bound).</summary>
     private const int MaxDetailDescriptionLength = 500;
+
+    /// <summary>Length cap on a broken-rule catalog error / never-firing reason before it enters the aggregated
+    /// self-health alert's detail_text — the same newline-strip + cap discipline as the rule name, since the
+    /// error can echo a user-supplied measure key.</summary>
+    private const int MaxHealthReasonLength = 300;
+
+    /// <summary>
+    /// How long a rule must produce NO data (across every in-scope server, continuously) before it is flagged
+    /// "armed but never fires" (#3304). Chosen as a DURATION rather than a raw sweep count so it is independent
+    /// of fleet size and per-rule cadence: a count would trip a large all-servers rule in a single sweep (many
+    /// no-data evaluations at once) and would flag a just-created rule before its first window filled. At the
+    /// ~60s custom-alert cadence this is ~20 minutes of continuous no-data — long enough to ride out a transient
+    /// collector gap or a rule still awaiting its first sample, short enough to surface a permanently-NULL
+    /// measure (ACU headroom on a provisioned instance) or a dead collector within the hour.
+    /// </summary>
+    internal static readonly TimeSpan NoDataFlagWindow = TimeSpan.FromMinutes(20);
 
     /// <summary>
     /// Makes a user-authored rule name/description safe to render in a notification title and to write into
@@ -224,9 +255,16 @@ public sealed class CustomAlertEvaluator
         if (value is null)
         {
             // No-data: freeze the streak, just reschedule. Never a breach, never a clear.
+            // #3304: remember when this rule's unbroken no-data run began (earliest instant kept) so the
+            // fleet-global health check can flag a rule that is armed but has produced no data for too long.
+            _noDataSinceUtc.GetOrAdd(row.Id, now);
             await _stateStore.SaveAsync(row.Id, serverId, state with { LastEvaluatedAt = now, NextDueAt = nextDue }, cancellationToken);
             return;
         }
+
+        // #3304: any real value clears the no-data run; a rule with data on even one in-scope server is
+        // firing-eligible and must never be flagged as never-firing.
+        _noDataSinceUtc.TryRemove(row.Id, out _);
 
         var breaching = def.IsBreaching(value.Value);
         var evaluation = AlertPersistenceGate.Evaluate(state.Persistence, breaching, def.BreachSamples, def.ClearSamples);
@@ -381,24 +419,168 @@ public sealed class CustomAlertEvaluator
         }
 
         var rows = await _ruleStore.ListEnabledAsync(cancellationToken);
-        var parsed = new List<ParsedRule>(rows.Count);
-        foreach (var rowItem in rows)
-        {
-            var (definition, error) = CustomAlertRuleDefinition.TryParse(rowItem.DefinitionJson);
-            if (error is not null || definition is null)
-            {
-                // A rule nobody ever "opens" must not fail silently: log it. (The self-health surface
-                // that raises this as an alert is a follow-up slice.)
-                _logger.LogWarning("Custom alert rule {Id} '{Name}' will NOT fire — its definition no longer validates: {Error}",
-                    rowItem.Id, rowItem.Name, error);
-                continue;
-            }
+        var (parsedPairs, broken) = ClassifyRules(rows);
 
-            parsed.Add(new ParsedRule(rowItem, definition));
+        foreach (var b in broken)
+        {
+            // #3304: a rule nobody ever "opens" must not fail silently. It is both logged here AND surfaced as
+            // an aggregated service self-health alert (BuildHealthReportAsync -> DarlingSelfAlertEvaluator).
+            _logger.LogWarning("Custom alert rule {Id} '{Name}' will NOT fire: {Reason}", b.RuleId, b.RuleName, b.Reason);
+        }
+
+        var parsed = parsedPairs.Select(p => new ParsedRule(p.Row, p.Definition)).ToList();
+
+        // Drop no-data bookkeeping for rules that are gone (disabled/deleted) or now broken, so the in-memory
+        // map tracks only the currently-parsed, evaluable set and cannot grow without bound.
+        var liveIds = new HashSet<long>(parsed.Select(p => p.Row.Id));
+        foreach (var id in _noDataSinceUtc.Keys)
+        {
+            if (!liveIds.Contains(id))
+            {
+                _noDataSinceUtc.TryRemove(id, out _);
+            }
         }
 
         _cache = parsed;
+        _brokenRules = broken;
         _cacheRefreshedUtc = DateTime.UtcNow;
         return _cache;
     }
+
+    /// <summary>
+    /// Re-parses every enabled rule against the LIVE <see cref="MeasureCatalog"/> (via
+    /// <see cref="CustomAlertRuleDefinition.TryParse"/>) and splits the rows into the ones that still compile
+    /// and the ones that no longer do (#3304, Component 4 step 0 "compile-check on load"). A broken rule is not
+    /// silently skipped: it is returned as a <see cref="CustomAlertRuleHealthIssue"/> carrying the sanitized
+    /// name + the sanitized catalog error (NEVER any compiled SQL — the error is the parser/validator message).
+    /// Pure and static so the drift-surfacing is unit-testable without a store.
+    /// </summary>
+    internal static (
+        List<(CustomAlertRule Row, CustomAlertRuleDefinition Definition)> Parsed,
+        List<CustomAlertRuleHealthIssue> Broken) ClassifyRules(IReadOnlyList<CustomAlertRule> rows)
+    {
+        var parsed = new List<(CustomAlertRule, CustomAlertRuleDefinition)>(rows.Count);
+        var broken = new List<CustomAlertRuleHealthIssue>();
+        foreach (var row in rows)
+        {
+            var (definition, error) = CustomAlertRuleDefinition.TryParse(row.DefinitionJson);
+            if (error is not null || definition is null)
+            {
+                broken.Add(new CustomAlertRuleHealthIssue(
+                    row.Id,
+                    SanitizeDisplayText(row.Name, CustomAlertRuleStore.MaxNameLength),
+                    SanitizeDisplayText(error ?? "its definition no longer validates", MaxHealthReasonLength)));
+                continue;
+            }
+
+            parsed.Add((row, definition));
+        }
+
+        return (parsed, broken);
+    }
+
+    /// <summary>
+    /// Classifies whether a rule that DOES compile is nonetheless "armed but never fires" (#3304) — the two
+    /// cases that pass the compile-check yet can never deliver: a rule scoped to specific servers that are not
+    /// currently monitored (so it never evaluates), and a rule that has produced no data for longer than
+    /// <see cref="NoDataFlagWindow"/> (an always-NULL measure, or a dead collector). Returns the issue, or null
+    /// when the rule is firing-eligible. Pure so both cases are unit-testable with controlled inputs.
+    /// </summary>
+    internal static CustomAlertRuleHealthIssue? ClassifyNeverFiring(
+        CustomAlertRule row, CustomAlertRuleDefinition definition, string sanitizedName,
+        IReadOnlyCollection<string> monitoredStorageNames, DateTime? noDataSinceUtc, DateTime nowUtc)
+    {
+        // A server-scoped rule whose named servers are not currently monitored never enters any server's
+        // applicable set, so it is evaluated zero times, so it can never fire. (An "all"-scoped rule always
+        // applies to whatever fleet exists, so an empty fleet is not a per-rule defect and is not flagged.)
+        if (definition.ScopeMode == CustomAlertScopeMode.Servers && !monitoredStorageNames.Any(definition.AppliesTo))
+        {
+            return new CustomAlertRuleHealthIssue(
+                row.Id, sanitizedName,
+                "armed but scoped only to servers that are not currently monitored, so it never evaluates");
+        }
+
+        // Produced no data continuously for longer than the window: an always-NULL measure for every in-scope
+        // server (e.g. ACU headroom on a provisioned instance) or a collector that is not producing rows.
+        if (noDataSinceUtc is DateTime since && nowUtc - since >= NoDataFlagWindow)
+        {
+            return new CustomAlertRuleHealthIssue(
+                row.Id, sanitizedName,
+                $"armed but has produced no data for over {(int)NoDataFlagWindow.TotalMinutes} minutes; the measure may be NULL for every in-scope server, or their collector is not producing rows");
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Builds the fleet-global custom-alert-rule health report (#3304): the broken rules found at the last
+    /// cache refresh, plus every compiling rule that is "armed but never fires" (0-server scope, or no data for
+    /// <see cref="NoDataFlagWindow"/>). Refreshes the rule cache first (respecting its TTL). The caller
+    /// (<c>DarlingWorker</c>) hands the report to <see cref="DarlingSelfAlertEvaluator.EvaluateCustomRuleHealthAsync"/>,
+    /// which raises ONE aggregated self-health alert. Returns NULL (not an empty report) when the rule load
+    /// fails, so the caller HOLDS the standing alert rather than resolving it on a transient store blip — an
+    /// empty report would read as "all healthy" and clear a real broken-rule alert.
+    /// </summary>
+    public async Task<CustomAlertHealthReport?> BuildHealthReportAsync(
+        IReadOnlyCollection<string> monitoredStorageNames, CancellationToken cancellationToken)
+    {
+        IReadOnlyList<ParsedRule> parsed;
+        try
+        {
+            parsed = await GetEnabledRulesAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Load failed: return null so the caller leaves the standing alert as-is (hold), never resolves
+            // it on uncertainty. (This evaluator's store reads sit outside #3013's counted alert-pass census,
+            // like its sibling EvaluateServerAsync/RunScalarAsync catches.)
+            _logger.LogWarning("Custom alert rule-health check: rule load failed: {Message}", ex.Message);
+            return null;
+        }
+
+        var now = DateTime.UtcNow;
+        var neverFiring = new List<CustomAlertRuleHealthIssue>();
+        foreach (var (row, def) in parsed)
+        {
+            var since = _noDataSinceUtc.TryGetValue(row.Id, out var s) ? s : (DateTime?)null;
+            var issue = ClassifyNeverFiring(
+                row, def, SanitizeDisplayText(row.Name, CustomAlertRuleStore.MaxNameLength),
+                monitoredStorageNames, since, now);
+            if (issue is not null)
+            {
+                neverFiring.Add(issue);
+            }
+        }
+
+        return new CustomAlertHealthReport(_brokenRules, neverFiring);
+    }
+}
+
+/// <summary>One unhealthy custom-alert rule for the #3304 self-health surface: its id, its sanitized name, and
+/// a sanitized human reason (a catalog parse error, or why it never fires). All strings are newline-stripped +
+/// length-capped so they are safe to render into the aggregated alert's <c>detail_text</c>.</summary>
+public sealed record CustomAlertRuleHealthIssue(long RuleId, string RuleName, string Reason);
+
+/// <summary>
+/// The fleet-global custom-alert-rule health snapshot (#3304): rules that no longer compile
+/// (<see cref="BrokenRules"/>) and compiling rules that can never fire (<see cref="NeverFiringRules"/>).
+/// <see cref="DarlingSelfAlertEvaluator"/> raises ONE aggregated self-alert when this has any issues and
+/// resolves it when it clears.
+/// </summary>
+public sealed record CustomAlertHealthReport(
+    IReadOnlyList<CustomAlertRuleHealthIssue> BrokenRules,
+    IReadOnlyList<CustomAlertRuleHealthIssue> NeverFiringRules)
+{
+    public static readonly CustomAlertHealthReport Empty =
+        new(Array.Empty<CustomAlertRuleHealthIssue>(), Array.Empty<CustomAlertRuleHealthIssue>());
+
+    /// <summary>Total unhealthy rules across both categories.</summary>
+    public int TotalIssues => BrokenRules.Count + NeverFiringRules.Count;
+
+    /// <summary>True when at least one rule is broken or never-firing.</summary>
+    public bool HasIssues => TotalIssues > 0;
 }
