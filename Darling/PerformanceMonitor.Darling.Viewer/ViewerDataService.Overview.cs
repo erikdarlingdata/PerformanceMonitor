@@ -885,6 +885,11 @@ public sealed class ServerSummaryItem
     public ServerHealthMetrics ToHealthMetrics() => new()
     {
         CpuPercentForAlert = CpuPercentForAlert,
+        /* #3281: the three travel together. Without them <see cref="OverallMetricSeverity"/> and the
+           worst-first score fall back to percent-of-allocated while <see cref="CpuSeverity"/> bands the
+           ceiling, so the CPU dot goes green and this card's own border still turns red. */
+        CapacityUtilizationPercent = AcuUtilizationPercent,
+        CpuSource = CpuSource,
         HasMemoryPressure = MemoryPressureForBand,
         BlockingCount = BlockingCountForBand,
         MaxBlockedSeconds = MaxBlockedSeconds,

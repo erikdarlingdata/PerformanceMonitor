@@ -1284,6 +1284,12 @@ public sealed class FleetServerCard
     internal ServerHealthMetrics ToHealthMetrics() => new()
     {
         CpuPercentForAlert = TotalCpuPercent ?? CpuPercent,
+        /* #3281: the three travel together, because the band reads the capacity figure on the Performance
+           Insights arm and the source is what decides which. Omitting them here would leave the CPU DOT
+           banded on the ceiling while the overall band and the fleet score fell back to
+           percent-of-allocated — a card contradicting itself, and a routine scale-up ranked as maxed out. */
+        CapacityUtilizationPercent = AcuUtilizationPercent,
+        CpuSource = CpuSource,
         /* Re-derived from IsPostgres rather than read back off the published counts, because those are
            deliberately left as zeros (#3017) — reading them here would hand the ranking a measurement the
            card's own severity says it does not have. */

@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using Amazon.PI.Model;
+using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -290,6 +291,186 @@ public sealed class PgCpuCapacityHeadroomTests
         Assert.Equal(typeof(FleetCpuSource), parameters[2].ParameterType);
     }
 
+    /// <summary>
+    /// The per-metric dot is half a card. The OVERALL band paints its border and the fleet score orders the
+    /// worst-first list, and both go through <c>ToHealthMetrics()</c> — a SECOND
+    /// <see cref="ServerHealthMetrics"/> construction site on each of the two surfaces, in the same file as
+    /// the first.
+    ///
+    /// <para>Asserted because a bundle built without the capacity figure falls through to the raw
+    /// percent-of-allocated reading, so the measured sample's CPU dot goes green while the card's own
+    /// border turns red and the fleet ranking still treats a routine scale-up as maxed out. A card that
+    /// contradicts itself on one screen is the failure #3272 fixed for three other metrics.</para>
+    /// </summary>
+    [Fact]
+    public void TheOverallBandAndTheFleetScore_ReadTheCapacityFigureToo()
+    {
+        var measured = Card(
+            MonitoredEngineKind.AuroraPostgres, instanceCpu: 100.0, acuUtilization: 33.33, maxConfiguredAcu: 12.0);
+        var viewer = ViewerCard(
+            MonitoredEngineKind.AuroraPostgres, instanceCpu: 100.0, acuUtilization: 33.33, maxConfiguredAcu: 12.0);
+
+        Assert.Equal(
+            HealthSeverity.Healthy,
+            ServerHealthClassifier.OverallMetricSeverity(measured.ToHealthMetricsValue));
+        Assert.Equal(HealthSeverity.Healthy, viewer.OverallMetricSeverity);
+
+        /* And the RANKING: a routine scale-up must not outrank a genuinely idle instance. Compared against
+           an idle card rather than against a literal, because the score's own terms are not this pin's
+           subject — what is, is that the two cards are indistinguishable to it. */
+        var idle = Card(
+            MonitoredEngineKind.AuroraPostgres, instanceCpu: 0.0, acuUtilization: 0.0, maxConfiguredAcu: 12.0);
+
+        Assert.Equal(
+            ServerHealthClassifier.FleetHealthScore(idle.Band, idle.ToHealthMetricsValue),
+            ServerHealthClassifier.FleetHealthScore(measured.Band, measured.ToHealthMetricsValue));
+        /* Through the viewer's own shipped entry point, so what is asserted is the score the Overview's
+           worst-first list really orders on. */
+        Assert.Equal(
+            FleetRollup.FleetHealthScore(
+                ViewerCard(MonitoredEngineKind.AuroraPostgres, instanceCpu: 0.0, acuUtilization: 0.0)),
+            FleetRollup.FleetHealthScore(viewer));
+
+        /* At the CEILING the same path must still escalate, so this is not a mute button on the rollup. */
+        var pinned = Card(
+            MonitoredEngineKind.AuroraPostgres, instanceCpu: 100.0, acuUtilization: 99.0, maxConfiguredAcu: 12.0);
+
+        Assert.Equal(
+            HealthSeverity.Critical,
+            ServerHealthClassifier.OverallMetricSeverity(pinned.ToHealthMetricsValue));
+        Assert.Equal(
+            HealthSeverity.Critical,
+            ViewerCard(MonitoredEngineKind.AuroraPostgres, instanceCpu: 100.0, acuUtilization: 99.0)
+                .OverallMetricSeverity);
+    }
+
+    /// <summary>
+    /// The category repair, not the instance: <b>every</b> metric bundle in production code that carries a
+    /// CPU reading also carries the capacity figure and the source.
+    ///
+    /// <para>This is the check that would have caught the defect above.
+    /// <see cref="FleetCardPostgresCpuTests.TheOnlyTwoSurfacesThatBandCpu_BothReachTheSharedDecision"/>
+    /// censuses FILES, and both missed construction sites sat in the two files that census already
+    /// approved — so a per-file scan reported a clean tree while half the sites in it were wrong. The unit
+    /// of the invariant is the INITIALIZER.</para>
+    ///
+    /// <para>Production code only. A test bundle that sets a bare <c>CpuPercentForAlert</c> is exercising
+    /// the fixed-capacity arm on purpose and the default source is the right one for it; forcing the
+    /// spelling there would be churn without an invariant behind it.</para>
+    /// </summary>
+    [Fact]
+    public void EveryProductionMetricBundleWithACpuReading_AlsoCarriesTheCapacityAndTheSource()
+    {
+        var scanned = 0;
+        var bundles = 0;
+        var offenders = new List<string>();
+
+        foreach (var file in Directory.EnumerateFiles(RepoFile.Root, "*.cs", SearchOption.AllDirectories))
+        {
+            var segments = file.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+            if (segments.Contains("bin") || segments.Contains("obj")
+                || segments.Any(s => s.EndsWith(".Tests", StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            scanned++;
+            var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(file));
+            var name = Path.GetFileName(file);
+
+            foreach (var initializer in MetricBundleInitializers(code))
+            {
+                bundles++;
+
+                if (!initializer.Contains(nameof(ServerHealthMetrics.CapacityUtilizationPercent), StringComparison.Ordinal)
+                    || !initializer.Contains(nameof(ServerHealthMetrics.CpuSource), StringComparison.Ordinal))
+                {
+                    offenders.Add(name);
+                }
+            }
+        }
+
+        /* Both floors, because the scan IS the enforcement: a tree it cannot read, or a bundle count it
+           cannot find, satisfies an empty offender list for a reason unrelated to the invariant. */
+        Assert.True(scanned > 200, $"the sweep read only {scanned} production .cs file(s)");
+        Assert.True(bundles >= 3, $"the sweep found only {bundles} CPU-carrying metric bundle(s)");
+
+        /* Named rather than counted: the whole value of this pin is telling the next person WHICH
+           initializer, and "found 2" would send them back to the scan instead of to the file. */
+        var named = offenders.Distinct().OrderBy(f => f, StringComparer.Ordinal).ToArray();
+
+        Assert.True(
+            named.Length == 0,
+            "these production metric bundles carry a CPU reading with no capacity figure and no source "
+          + "beside it, so they band percent-of-allocated: " + string.Join(", ", named));
+    }
+
+    /// <summary>
+    /// Every object-initializer body in stripped source that ASSIGNS
+    /// <see cref="ServerHealthMetrics.CpuPercentForAlert"/>, brace matched outward from the assignment.
+    ///
+    /// <para><b>Keyed on the member, not on the type name, and that is the whole point.</b> A scan for
+    /// <c>new ServerHealthMetrics</c> finds one of the three production sites: the other two are
+    /// target-typed <c>ToHealthMetrics() =&gt; new() { ... }</c>, where the type appears only in the return
+    /// signature. That is precisely why both survived a review and a file-level census. The member is
+    /// declared on exactly one type, so an initializer assigning it IS this bundle however it is
+    /// spelled.</para>
+    ///
+    /// <para>The declaration itself is excluded by requiring an <c>=</c> that is not <c>=&gt;</c>, and a
+    /// READ is excluded by refusing a preceding <c>.</c> — the same receiver rule
+    /// <c>RepoFileAdoptionTests</c>'s call regex uses, and for the same reason.</para>
+    /// </summary>
+    private static IEnumerable<string> MetricBundleInitializers(string code)
+    {
+        foreach (var match in AssignsCpuReading.Matches(code).Cast<System.Text.RegularExpressions.Match>())
+        {
+            /* Outward to the enclosing initializer: back to the nearest unmatched `{`, then forward to
+               the `}` that closes it. */
+            var depth = 0;
+            var open = -1;
+
+            for (var i = match.Index; i >= 0; i--)
+            {
+                if (code[i] == '}')
+                {
+                    depth++;
+                }
+                else if (code[i] == '{' && depth-- == 0)
+                {
+                    open = i;
+                    break;
+                }
+            }
+
+            if (open < 0)
+            {
+                continue;
+            }
+
+            depth = 0;
+
+            for (var i = open; i < code.Length; i++)
+            {
+                if (code[i] == '{')
+                {
+                    depth++;
+                }
+                else if (code[i] == '}' && --depth == 0)
+                {
+                    yield return code[open..(i + 1)];
+                    break;
+                }
+            }
+        }
+    }
+
+    /// <summary>An ASSIGNMENT of the CPU reading in an initializer: no preceding <c>.</c> (which would make
+    /// it a read), and an <c>=</c> that is not the <c>=&gt;</c> of an expression-bodied property.</summary>
+    private static readonly System.Text.RegularExpressions.Regex AssignsCpuReading = new(
+        @"(?<![\w.])CpuPercentForAlert\s*=(?!>)",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
     /* ─────────────────────── the alert reads the same figure ─────────────────────── */
 
     /// <summary>
@@ -410,6 +591,73 @@ public sealed class PgCpuCapacityHeadroomTests
                 sample.ServerlessCapacityAcu,
                 sample.MaxConfiguredAcu,
             });
+    }
+
+    /// <summary>
+    /// When Performance Insights rejects the request SHAPE, the CPU metric is asked for ALONE — so the
+    /// worst case on an instance class with no ACU concept is exactly today's behaviour, not the loss of
+    /// <c>cpu_percent</c> as well.
+    ///
+    /// <para>This ingestor's dispatch is on <c>RdsEndpoint.TryParse</c> succeeding and NOT on
+    /// <c>PgCpuUtilizationCollector.AppliesTo</c>, so every Aurora and every plain RDS PostgreSQL target
+    /// reaches it, provisioned as well as serverless. PI rejects an unknown metric name with
+    /// <see cref="InvalidArgumentException"/>, and that failure is TOTAL — the whole call, so the whole
+    /// cycle for that target. The measured fleet is 153 of 153 serverless, so whether PI treats "not
+    /// applicable to this resource" that way cannot be settled by observation from here; the retry makes
+    /// the answer not matter.</para>
+    ///
+    /// <para><b>The second half is what makes this a pin rather than a retry.</b> An authorization refusal
+    /// must NOT earn a retry: it is a different fault, the runner classifies it as PERMISSIONS, and a
+    /// blanket catch would spend a second call on it and blur the two. Asserted by attempt COUNT, which is
+    /// the only thing that can tell "propagated" from "retried and then propagated".</para>
+    /// </summary>
+    [Fact]
+    public async Task WhenPerformanceInsightsRejectsTheRequestShape_TheCpuMetricIsAskedForAlone()
+    {
+        var asked = new List<IReadOnlyList<string>>();
+
+        var answered = await RdsCpuIngestor.WithCapacityFallbackAsync(metrics =>
+        {
+            asked.Add(metrics);
+
+            return metrics.Count > 1
+                ? throw new InvalidArgumentException("The specified metric is not a known metric")
+                : Task.FromResult("answered");
+        });
+
+        Assert.Equal("answered", answered);
+        Assert.Equal(2, asked.Count);
+
+        /* First the four, then the one — and the one is the CPU metric, not merely a shorter list. */
+        Assert.Equal(RdsCpuIngestor.RequestedMetrics, asked[0]);
+        Assert.Equal(new[] { "os.cpuUtilization.total.avg" }, asked[1].ToArray());
+        Assert.Equal(RdsCpuIngestor.CpuOnlyMetrics, asked[1]);
+
+        /* An authorization refusal is a DIFFERENT fault and is not retried: one attempt, then out, so the
+           runner still classifies it as PERMISSIONS instead of seeing a second call's failure. */
+        var refused = new List<IReadOnlyList<string>>();
+
+        await Assert.ThrowsAsync<NotAuthorizedException>(() =>
+            RdsCpuIngestor.WithCapacityFallbackAsync<string>(metrics =>
+            {
+                refused.Add(metrics);
+                throw new NotAuthorizedException("not authorized to perform pi:GetResourceMetrics");
+            }));
+
+        Assert.Single(refused);
+
+        /* And a rejection that survives the retry propagates rather than being swallowed into an empty
+           window, which would read downstream as "PI answered and had nothing". */
+        var twice = 0;
+
+        await Assert.ThrowsAsync<InvalidArgumentException>(() =>
+            RdsCpuIngestor.WithCapacityFallbackAsync<string>(_ =>
+            {
+                twice++;
+                throw new InvalidArgumentException("still rejected");
+            }));
+
+        Assert.Equal(2, twice);
     }
 
     /// <summary>

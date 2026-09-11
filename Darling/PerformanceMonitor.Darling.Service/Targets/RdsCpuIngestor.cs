@@ -96,6 +96,57 @@ public sealed class RdsCpuIngestor
         MaxConfiguredAcuMetric,
     };
 
+    /// <summary>
+    /// What is asked for when Performance Insights rejects the request SHAPE: the CPU metric alone, the one
+    /// every instance class this ingestor reaches publishes. See
+    /// <see cref="WithCapacityFallbackAsync{T}"/> for why that retry exists at all.
+    /// </summary>
+    internal static readonly IReadOnlyList<string> CpuOnlyMetrics = new[] { CpuMetric };
+
+    /// <summary>
+    /// Runs the Performance Insights request with ONE retry on <see cref="CpuOnlyMetrics"/> when the service
+    /// rejects the request shape.
+    ///
+    /// <para><b>Why: the capacity metrics do not apply to every instance class that reaches this
+    /// ingestor.</b> Dispatch is on <see cref="RdsEndpoint.TryParse"/> succeeding and NOT on
+    /// <c>PgCpuUtilizationCollector.AppliesTo</c> — that gate is documented as not consulted here — so every
+    /// Aurora AND every plain RDS PostgreSQL target arrives, provisioned as well as serverless. If
+    /// Performance Insights answers "not applicable to this resource" the way it answers an unknown metric
+    /// name, the four-metric request raises and the WHOLE call fails, taking <c>cpu_percent</c> with it on
+    /// every cycle for that target. Losing the capacity columns there is the intended cost — the band reads
+    /// Unknown — but losing the CPU reading alongside them is a regression, and this is what bounds the
+    /// worst case to exactly the behaviour of a CPU-only request.</para>
+    ///
+    /// <para><b>Keyed on the exception TYPE, not on its message.</b> PI's text for an unknown metric is
+    /// "The specified metric is not a known metric" and does not say which one, so a message match would be
+    /// a guess about a string. <see cref="InvalidArgumentException"/> means the request itself was
+    /// malformed, and it is a different type from <c>NotAuthorizedException</c> and
+    /// <c>InternalServiceErrorException</c> — so an authorization refusal and a transient service fault
+    /// still reach the runner's classification unchanged, and are not spent on a second call.</para>
+    ///
+    /// <para><b>It is correct whichever way PI behaves</b>, which is the point: this fleet is 153 of 153
+    /// serverless, so the question cannot be settled by observation from here, and a shape that needs the
+    /// answer would be resting on a guess.</para>
+    ///
+    /// <para>Generic over the response and driven through a delegate so the decision is assertable without
+    /// an AWS client, a store or a connection — what matters is WHICH metric list is asked for second, and
+    /// which faults do not earn a retry at all.</para>
+    /// </summary>
+    internal static async Task<T> WithCapacityFallbackAsync<T>(
+        Func<IReadOnlyList<string>, Task<T>> request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        try
+        {
+            return await request(RequestedMetrics);
+        }
+        catch (InvalidArgumentException)
+        {
+            return await request(CpuOnlyMetrics);
+        }
+    }
+
     private readonly NpgsqlDataSource _postgres;
     private readonly Func<string, IAmazonRDS> _rdsClientFactory;
     private readonly Func<string, IAmazonPI> _piClientFactory;
@@ -172,21 +223,23 @@ public sealed class RdsCpuIngestor
 
             using var pi = _piClientFactory(parsed.Region);
 
-            var response = await pi.GetResourceMetricsAsync(
-                new GetResourceMetricsRequest
-                {
-                    ServiceType = ServiceType.RDS,
-                    Identifier = dbiResourceId,
-                    /* All four names in one call — see RequestedMetrics for why that is the whole cost of
-                       #3281's fix, and for why the os.general. prefix cannot be paraphrased. */
-                    MetricQueries = RequestedMetrics
-                        .Select(metric => new Amazon.PI.Model.MetricQuery { Metric = metric })
-                        .ToList(),
-                    StartTime = startTime,
-                    EndTime = now,
-                    PeriodInSeconds = 60,
-                },
-                cancellationToken);
+            /* All four names in one call — see RequestedMetrics for why that is the whole cost of #3281's
+               fix, and for why the os.general. prefix cannot be paraphrased — degrading to the CPU metric
+               alone if the service rejects the shape, per WithCapacityFallbackAsync. */
+            var response = await WithCapacityFallbackAsync(metrics =>
+                pi.GetResourceMetricsAsync(
+                    new GetResourceMetricsRequest
+                    {
+                        ServiceType = ServiceType.RDS,
+                        Identifier = dbiResourceId,
+                        MetricQueries = metrics
+                            .Select(metric => new Amazon.PI.Model.MetricQuery { Metric = metric })
+                            .ToList(),
+                        StartTime = startTime,
+                        EndTime = now,
+                        PeriodInSeconds = 60,
+                    },
+                    cancellationToken));
 
             /* Absent and empty mean the same thing coming out of PI — no sample in this window — and the
                caller already names that outcome ("no new Performance Insights CPU samples this cycle"), so
