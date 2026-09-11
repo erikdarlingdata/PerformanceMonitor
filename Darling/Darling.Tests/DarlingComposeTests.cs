@@ -211,6 +211,126 @@ public sealed class DarlingComposeTests
         Assert.Contains(MeasureCatalog.Measures, m => m.Kind == MeasureKind.Ratio);
     }
 
+    /* ─────────────────── PostgreSQL measure pins (#3285) ─────────────────── */
+
+    /// <summary>Every measure whose source is a PostgreSQL collector table (the #3285 additions).</summary>
+    private static IReadOnlyList<ComposeMeasure> PostgresMeasures() =>
+        MeasureCatalog.Measures.Where(m => m.SourceTable.StartsWith("pg_", StringComparison.Ordinal)).ToList();
+
+    [Fact]
+    public void PostgresMeasures_ArePresent_AcrossTheKeyCollectors()
+    {
+        /* Non-vacuous: the PG pins below must have something to pin. A representative spread proves the
+           slice actually covers the collectors the feature targets rather than one token table. */
+        var pg = PostgresMeasures();
+        Assert.NotEmpty(pg);
+        var sources = pg.Select(m => m.SourceTable).ToHashSet(StringComparer.Ordinal);
+        Assert.Contains("pg_wait_stats", sources);
+        Assert.Contains("pg_statement_stats", sources);
+        Assert.Contains("pg_cpu_utilization", sources);
+        Assert.Contains("pg_wraparound_stats", sources);
+        Assert.Contains("pg_replication_stats", sources);
+        Assert.Contains("pg_session_states", sources);
+    }
+
+    [Fact]
+    public void EveryPostgresMeasure_IsPinnedToItsCollectorSchema()
+    {
+        var payload = PayloadColumnsByTable();
+        var pg = PostgresMeasures();
+        Assert.NotEmpty(pg);
+        foreach (var measure in pg)
+        {
+            Assert.True(payload.ContainsKey(measure.SourceTable),
+                $"pg measure '{measure.Key}' names source '{measure.SourceTable}', which is not a collector table.");
+            var columns = payload[measure.SourceTable];
+
+            /* Every PG measure is a column-backed scalar. No Delta/PerEvent/Ratio was authored for PostgreSQL:
+               PG sources have no CAGG rollup (ComposeSourceRouter is SQL-only) and only two of them store a
+               delta column, so the honest archetypes are Cumulative (delta-backed) and Gauge. */
+            Assert.Equal(MeasureKind.Scalar, measure.Kind);
+            Assert.True(measure.Archetype is MeasureArchetype.Gauge or MeasureArchetype.Cumulative,
+                $"pg measure '{measure.Key}' has unexpected archetype {measure.Archetype}.");
+            Assert.True(measure.Column is not null && columns.Contains(measure.Column),
+                $"pg measure '{measure.Key}' column '{measure.Column}' is not a payload column of '{measure.SourceTable}'.");
+
+            if (measure.Archetype == MeasureArchetype.Cumulative)
+            {
+                Assert.True(measure.DeltaColumn is not null && columns.Contains(measure.DeltaColumn),
+                    $"cumulative pg measure '{measure.Key}' delta column '{measure.DeltaColumn}' is not a payload column of '{measure.SourceTable}'.");
+                /* Only pg_wait_stats and pg_statement_stats ship paired delta_* columns; a Cumulative measure
+                   on any other PG source would be aggregating a column the collector does not store. */
+                Assert.True(measure.SourceTable is "pg_wait_stats" or "pg_statement_stats",
+                    $"pg measure '{measure.Key}' is Cumulative on '{measure.SourceTable}', which stores no delta column.");
+            }
+            else
+            {
+                /* The grain-trap guard, reinforced for the PG set: a gauge (including a raw cumulative counter
+                   exposed as one) has no aggregation column and never offers SUM. */
+                Assert.Null(measure.AggregationColumn);
+                Assert.DoesNotContain(ComposeAggregate.Sum, measure.ValidAggs);
+            }
+        }
+    }
+
+    [Fact]
+    public void EveryPostgresMeasure_SurfacesOnlyForPostgresTargets()
+    {
+        /* The appliesTo requirement, pinned at the GATE the catalog node reads (design D4): a PG measure's
+           owning collector must be excluded from every SQL Server target by the engine half of the dispatch
+           gate, and must apply on a PostgreSQL/Aurora target. Asserted through CollectorCatalog.AppliesTo -
+           the full dispatch gate, which EngineMatches PostgreSQL and never SQL Server - rather than through
+           the collector's raw AppliesTo override, because a PG collector gated `=> true` returns true for a
+           SQL Server target when the engine half is skipped. */
+        var collectorByTable = CollectorCatalog.All.ToDictionary(c => c.TargetTable, StringComparer.Ordinal);
+
+        var sqlServer = new CollectorTargetInfo
+        {
+            Engine = CollectorTargetEngine.SqlServer, SqlMajorVersion = 16, HasMsdbAccess = true,
+        };
+        /* A modern Aurora writer clears every PG gate at once: IsAurora (pg_wait_stats/pg_cpu_utilization),
+           the PG16/PG14 version floors (pg_io_stats/pg_write_stats), and the !in-recovery gates
+           (pg_autovacuum_stats/pg_index_*_stats/pg_table_bloat_stats). */
+        var auroraWriter = new CollectorTargetInfo
+        {
+            Engine = CollectorTargetEngine.PostgreSql, IsAurora = true,
+            PostgresMajorVersion = 17, PostgresVersionNum = 170_005, IsInRecovery = false,
+        };
+
+        var pg = PostgresMeasures();
+        Assert.NotEmpty(pg);
+        foreach (var measure in pg)
+        {
+            Assert.True(collectorByTable.TryGetValue(measure.SourceTable, out var collector),
+                $"pg measure '{measure.Key}' source '{measure.SourceTable}' is not a collector table.");
+
+            Assert.False(CollectorCatalog.EngineMatches(collector!, sqlServer),
+                $"pg measure '{measure.Key}' source '{measure.SourceTable}' engine gate must exclude SQL Server.");
+            Assert.False(CollectorCatalog.AppliesTo(collector!, sqlServer),
+                $"pg measure '{measure.Key}' source '{measure.SourceTable}' must not apply to a SQL Server target.");
+            Assert.True(CollectorCatalog.AppliesTo(collector!, auroraWriter),
+                $"pg measure '{measure.Key}' source '{measure.SourceTable}' must apply to a modern Aurora writer.");
+        }
+    }
+
+    [Fact]
+    public void PgCpuUtilization_ExposesAcuSaturationAndAttributionMeasures()
+    {
+        /* #3283/#3285: acu_utilization_percent is the honest saturation gauge (100% = the configured ACU
+           ceiling is reached), cpu_percent is percent of currently-allocated capacity and attribution-only.
+           Both are Gauges on the pg_cpu_utilization collector. */
+        var acu = MeasureCatalog.Measure("pg_acu_utilization_pct");
+        var cpu = MeasureCatalog.Measure("pg_cpu_pct");
+        Assert.NotNull(acu);
+        Assert.NotNull(cpu);
+        Assert.Equal("pg_cpu_utilization", acu!.SourceTable);
+        Assert.Equal("pg_cpu_utilization", cpu!.SourceTable);
+        Assert.Equal("acu_utilization_percent", acu.Column);
+        Assert.Equal("cpu_percent", cpu.Column);
+        Assert.Equal(MeasureArchetype.Gauge, acu.Archetype);
+        Assert.Equal(MeasureArchetype.Gauge, cpu.Archetype);
+    }
+
     /* ─────────────────────────── the compose spec validator ─────────────────────────── */
 
     private static JsonObject PanelJson(string json) => (JsonObject)JsonNode.Parse(json)!;
