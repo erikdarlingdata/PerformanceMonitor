@@ -21,7 +21,7 @@ public readonly record struct ProcPlaceholderId(int DatabaseId, int ObjectId);
 
 /// <summary>
 /// Resolution of SQL Server's <c>Proc [Database Id = N Object Id = M]</c> placeholder to
-/// <c>schema.object</c> (#3307).
+/// <c>database.schema.object</c> (#3307).
 ///
 /// <para>SQL Server writes that placeholder into a process's <c>&lt;inputbuf&gt;</c> whenever the batch it
 /// is running is a stored procedure invoked as an RPC rather than submitted as text — so a deadlock or a
@@ -33,8 +33,15 @@ public readonly record struct ProcPlaceholderId(int DatabaseId, int ObjectId);
 ///
 /// <para><b>The technique is ported from <c>sp_HumanEventsBlockViewer</c> and <c>sp_BlitzLock</c></b>, which
 /// resolve it identically: match the placeholder, take the two ids out of the text, and project
-/// <c>OBJECT_SCHEMA_NAME</c> + <c>'.'</c> + <c>OBJECT_NAME</c>. Two deliberate departures, both because
-/// this is the C# side of the same idea rather than the T-SQL one:</para>
+/// <c>OBJECT_SCHEMA_NAME</c> + <c>'.'</c> + <c>OBJECT_NAME</c>. Three deliberate departures:</para>
+///
+/// <para><b>The name is three-part, not two.</b> Those two procedures each report on the database they
+/// run in, where a database prefix would be noise. This reports on a fleet, and everything else in the
+/// same alert names an object in three parts: the incident's Involved Objects field
+/// (<c>AlertIncidentRenderTests</c> pins <c>SalesDB.dbo.Orders</c>), the deadlock graph's own
+/// <c>keylock/@objectname</c>, and — on a live production graph for exactly this defect — the graph's own
+/// <c>frame/@procname</c>. So two parts is what would make this field the odd one out, which is the thing
+/// the references' qualification was for.</para>
 ///
 /// <para>The references' <c>LIKE N'Proc |[Database Id = %' ESCAPE N'|'</c> needs the <c>ESCAPE</c> because
 /// <c>[</c> opens a character class in <c>LIKE</c> — without it the predicate is a range expression that
@@ -87,6 +94,7 @@ public static class ProcPlaceholder
 SELECT
     database_id = ids.database_id,
     object_id = ids.object_id,
+    database_name = DB_NAME(ids.database_id),
     schema_name = OBJECT_SCHEMA_NAME(ids.object_id, ids.database_id),
     object_name = OBJECT_NAME(ids.object_id, ids.database_id)
 FROM
@@ -211,13 +219,15 @@ OPTION(RECOMPILE);";
     }
 
     /// <summary>
-    /// Reads the lookup's result set into a pair-to-<c>schema.object</c> map, positionally — the reader
-    /// contract on this seam is by ordinal, and the collectors' test fake throws from <c>GetName</c>
-    /// deliberately.
+    /// Reads the lookup's result set into a pair-to-<c>database.schema.object</c> map, positionally — the
+    /// reader contract on this seam is by ordinal, and the collectors' test fake throws from
+    /// <c>GetName</c> deliberately.
     ///
-    /// <para>A pair whose schema or object name came back NULL or empty is simply ABSENT from the map, so
-    /// there is no partial name for <see cref="Resolve"/> to fall for. This is the one place a NULL could
-    /// have been concatenated into a blanked field.</para>
+    /// <para>A pair missing ANY of the three parts is simply ABSENT from the map, so there is no partial
+    /// name for <see cref="Resolve"/> to fall for. This is the one place a NULL could have been
+    /// concatenated into a blanked field. All three fail together in practice — naming a database, its
+    /// schema and its object all need the same access to it — so the all-or-nothing rule costs no
+    /// coverage and leaves exactly one outcome to reason about.</para>
     /// </summary>
     public static async ValueTask<Dictionary<ProcPlaceholderId, string>> ReadResolutionsAsync(
         DbDataReader reader,
@@ -229,31 +239,33 @@ OPTION(RECOMPILE);";
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            if (reader.IsDBNull(0) || reader.IsDBNull(1) || reader.IsDBNull(2) || reader.IsDBNull(3))
+            if (reader.IsDBNull(0) || reader.IsDBNull(1)
+                || reader.IsDBNull(2) || reader.IsDBNull(3) || reader.IsDBNull(4))
             {
                 continue;
             }
 
-            var schemaName = reader.GetString(2);
-            var objectName = reader.GetString(3);
+            var databaseName = reader.GetString(2);
+            var schemaName = reader.GetString(3);
+            var objectName = reader.GetString(4);
 
-            if (schemaName.Length == 0 || objectName.Length == 0)
+            if (databaseName.Length == 0 || schemaName.Length == 0 || objectName.Length == 0)
             {
                 continue;
             }
 
             resolved[new ProcPlaceholderId(reader.GetInt32(0), reader.GetInt32(1))] =
-                schemaName + "." + objectName;
+                databaseName + "." + schemaName + "." + objectName;
         }
 
         return resolved;
     }
 
     /// <summary>
-    /// The resolved <c>schema.object</c> when <paramref name="text"/> is a placeholder the lookup answered
-    /// for, and <paramref name="text"/> UNCHANGED otherwise — not blank, and never "unknown". Schema
-    /// qualified because the same alert's Involved Objects field already renders that way, so an
-    /// unqualified procedure would be the odd field out in its own message.
+    /// The resolved <c>database.schema.object</c> when <paramref name="text"/> is a placeholder the lookup
+    /// answered for, and <paramref name="text"/> UNCHANGED otherwise — not blank, and never "unknown".
+    /// Three-part because that is how every other object name in the same alert renders (see the class
+    /// remarks), so anything shorter would be the odd field out in its own message.
     /// </summary>
     public static string? Resolve(string? text, IReadOnlyDictionary<ProcPlaceholderId, string> resolved)
     {

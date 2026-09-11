@@ -34,9 +34,14 @@ namespace Lite.Tests;
 ///
 /// <para>The third detail is the regression risk: <c>NULL + N'.' + NULL</c> is NULL in T-SQL, so a
 /// reference-faithful server-side concatenation BLANKS the field for a procedure the monitoring login
-/// cannot see. This port projects the two names separately and drops any pair missing either, so
+/// cannot see. This port projects the parts separately and drops any pair missing one, so
 /// <see cref="Resolve_KeepsTheRawPlaceholder_WhenTheLookupCannotAnswer"/> can require the object id to
 /// survive.</para>
+///
+/// <para>The resolved name is THREE-part, where both references produce two. Those two procedures report
+/// on the database they run in; this reports on a fleet, and
+/// <see cref="TheQualificationMatchesEveryOtherObjectNameInTheSameAlert"/> pins the comparison that
+/// decides it.</para>
 /// </summary>
 public sealed class ProcPlaceholderResolutionTests
 {
@@ -175,8 +180,9 @@ public sealed class ProcPlaceholderResolutionTests
         Assert.NotNull(query);
         Assert.Empty(query!.Parameters);
 
-        /* Schema-qualified, and the two names projected SEPARATELY — never concatenated on the server,
-           where a NULL from either would blank the whole field. */
+        /* All three parts projected SEPARATELY — never concatenated on the server, where a NULL from any
+           of them would blank the whole field. */
+        Assert.Contains("database_name = DB_NAME(ids.database_id)", query.Text, StringComparison.Ordinal);
         Assert.Contains("schema_name = OBJECT_SCHEMA_NAME(ids.object_id, ids.database_id)", query.Text, StringComparison.Ordinal);
         Assert.Contains("object_name = OBJECT_NAME(ids.object_id, ids.database_id)", query.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("+ N'.' +", query.Text, StringComparison.Ordinal);
@@ -197,33 +203,57 @@ public sealed class ProcPlaceholderResolutionTests
     [Fact]
     public async Task ReadResolutionsAsync_DropsAPairMissingEitherHalf()
     {
-        /* The blanking guard, exercised on every route a half-answer can arrive by. Both references
-           concatenate server-side, so each of these rows would have produced NULL there and emptied the
-           field the on-call engineer reads first. */
+        /* The blanking guard, exercised on every route a partial answer can arrive by — one row per part,
+           NULL and empty. Both references concatenate server-side, so each of these rows would have
+           produced NULL there and emptied the field the on-call engineer reads first. */
         using var reader = new FakeCollectorDataReader(
-            new object[] { 7, 1790404501, "dbo", "OrderInsert" },
-            new object[] { 8, 11, DBNull.Value, "Orphan" },
-            new object[] { 8, 12, "dbo", DBNull.Value },
-            new object[] { 8, 13, "", "Empty" },
-            new object[] { 8, 14, "dbo", "" },
-            new object[] { DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value });
+            new object[] { 7, 1790404501, "salesdb", "dbo", "OrderInsert" },
+            new object[] { 8, 10, DBNull.Value, "dbo", "NoDatabase" },
+            new object[] { 8, 11, "salesdb", DBNull.Value, "NoSchema" },
+            new object[] { 8, 12, "salesdb", "dbo", DBNull.Value },
+            new object[] { 8, 13, "", "dbo", "EmptyDatabase" },
+            new object[] { 8, 14, "salesdb", "", "EmptySchema" },
+            new object[] { 8, 15, "salesdb", "dbo", "" },
+            new object[] { DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value });
 
         var resolved = await ProcPlaceholder.ReadResolutionsAsync(reader, CancellationToken.None);
 
         Assert.Equal(new[] { new ProcPlaceholderId(7, 1790404501) }, resolved.Keys.ToArray());
-        Assert.Equal("dbo.OrderInsert", resolved[new ProcPlaceholderId(7, 1790404501)]);
+        Assert.Equal("salesdb.dbo.OrderInsert", resolved[new ProcPlaceholderId(7, 1790404501)]);
     }
 
     [Fact]
-    public void Resolve_RewritesThePlaceholder_SchemaQualified()
+    public void Resolve_RewritesThePlaceholder_FullyQualified()
     {
         var resolved = new Dictionary<ProcPlaceholderId, string>
         {
-            [new ProcPlaceholderId(7, 1790404501)] = "dbo.OrderInsert",
+            [new ProcPlaceholderId(7, 1790404501)] = "salesdb.dbo.OrderInsert",
         };
 
-        Assert.Equal("dbo.OrderInsert", ProcPlaceholder.Resolve(Placeholder, resolved));
-        Assert.Equal("dbo.OrderInsert", ProcPlaceholder.Resolve(Bom + Placeholder, resolved));
+        Assert.Equal("salesdb.dbo.OrderInsert", ProcPlaceholder.Resolve(Placeholder, resolved));
+        Assert.Equal("salesdb.dbo.OrderInsert", ProcPlaceholder.Resolve(Bom + Placeholder, resolved));
+    }
+
+    [Fact]
+    public async Task TheQualificationMatchesEveryOtherObjectNameInTheSameAlert()
+    {
+        /* WHY three parts rather than the references' two, stated as a comparison rather than a
+           preference. An incident's Involved Objects field is three-part — AlertIncidentRenderTests pins
+           "SalesDB.dbo.Orders" — and it is built from the deadlock graph's own keylock/@objectname, which
+           the engine writes three-part. The graph writes a PROCEDURE three-part too, in
+           frame/@procname. So a two-part Victim SQL is what would make this field the odd one out in its
+           own message, which is the thing the references' qualification was for.
+
+           If this is ever reduced to two parts, it should be because the alert's other object names were
+           reduced too — and then this pin is the thing that says so. */
+        using var reader = new FakeCollectorDataReader(
+            new object[] { 7, 1790404501, "salesdb", "dbo", "OrderInsert" });
+        var resolved = await ProcPlaceholder.ReadResolutionsAsync(reader, CancellationToken.None);
+
+        var name = ProcPlaceholder.Resolve(Placeholder, resolved);
+
+        Assert.Equal(3, name!.Split('.').Length);
+        Assert.Equal("salesdb.dbo.OrderInsert", name);
     }
 
     [Fact]
@@ -293,16 +323,16 @@ public sealed class ProcPlaceholderResolutionTests
         Assert.NotNull(supplemental);
         Assert.Contains("(7, 1790404501)", supplemental!.Text, StringComparison.Ordinal);
 
-        using var lookup = new FakeCollectorDataReader(new object[] { 7, 1790404501, "dbo", "OrderInsert" });
+        using var lookup = new FakeCollectorDataReader(new object[] { 7, 1790404501, "salesdb", "dbo", "OrderInsert" });
         await DeadlocksCollector.Instance.ApplySupplementalAsync(rows, lookup, context, CancellationToken.None);
 
-        Assert.Equal("dbo.OrderInsert", row.VictimSqlText);
+        Assert.Equal("salesdb.dbo.OrderInsert", row.VictimSqlText);
 
         /* And it is what gets STORED — victim_sql_text is payload ordinal 2, which is the field the
            alert renders. */
         var writer = new RecordingCollectorRowWriter();
         DeadlocksCollector.Instance.WritePayload(row, writer, context);
-        Assert.Equal("dbo.OrderInsert", writer.Values[2]);
+        Assert.Equal("salesdb.dbo.OrderInsert", writer.Values[2]);
     }
 
     [Fact]
@@ -315,7 +345,7 @@ public sealed class ProcPlaceholderResolutionTests
         var rows = await DeadlocksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
         /* The target answered, and answered NULL — the object is gone or the login cannot see it. */
-        using var lookup = new FakeCollectorDataReader(new object[] { 7, 1790404501, DBNull.Value, DBNull.Value });
+        using var lookup = new FakeCollectorDataReader(new object[] { 7, 1790404501, DBNull.Value, DBNull.Value, DBNull.Value });
         await DeadlocksCollector.Instance.ApplySupplementalAsync(rows, lookup, context, CancellationToken.None);
 
         var writer = new RecordingCollectorRowWriter();
@@ -357,12 +387,12 @@ public sealed class ProcPlaceholderResolutionTests
             context.ProcPlaceholderIds);
 
         using var lookup = new FakeCollectorDataReader(
-            new object[] { 7, 1790404501, "dbo", "OrderInsert" },
-            new object[] { 7, 42, "sales", "Reprice" });
+            new object[] { 7, 1790404501, "salesdb", "dbo", "OrderInsert" },
+            new object[] { 7, 42, "salesdb", "sales", "Reprice" });
         await DeadlocksCollector.Instance.ApplySupplementalAsync(rows, lookup, context, CancellationToken.None);
 
         Assert.Equal(
-            new[] { "dbo.OrderInsert", "sales.Reprice", "DELETE dbo.t;", "dbo.OrderInsert" },
+            new[] { "salesdb.dbo.OrderInsert", "salesdb.sales.Reprice", "DELETE dbo.t;", "salesdb.dbo.OrderInsert" },
             rows.Select(r => r.VictimSqlText).ToArray());
     }
 
@@ -401,12 +431,12 @@ public sealed class ProcPlaceholderResolutionTests
 
         /* The blocker resolves; the blocked side's object is one the login cannot see. */
         using var lookup = new FakeCollectorDataReader(
-            new object[] { 7, 1790404501, DBNull.Value, DBNull.Value },
-            new object[] { 7, 42, "sales", "Reprice" });
+            new object[] { 7, 1790404501, DBNull.Value, DBNull.Value, DBNull.Value },
+            new object[] { 7, 42, "salesdb", "sales", "Reprice" });
         await BlockedProcessReportCollector.Instance.ApplySupplementalAsync(rows, lookup, context, CancellationToken.None);
 
         Assert.Equal(Placeholder, row.BlockedSqlText);
-        Assert.Equal("sales.Reprice", row.BlockingSqlText);
+        Assert.Equal("salesdb.sales.Reprice", row.BlockingSqlText);
     }
 
     [Fact]
