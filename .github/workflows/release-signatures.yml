@@ -1,0 +1,50 @@
+name: Release signatures
+
+# #3288: every executable `vpk pack` GENERATES shipped unsigned on v3.6.0 and v3.7.0 while the
+# app payload was signed, and nothing noticed for two releases. The reader that found it lives in
+# .github/scripts/verify_release_signatures.py; this workflow exists so that reader cannot rot
+# unnoticed, and so a published release can be audited on demand without a local checkout.
+#
+# It deliberately does NOT run inside the release job. The release guard belongs there, checks
+# local files before upload, and lands with the fix — see the script's own docstring. This one
+# answers "what did we actually publish", which needs the release to exist first.
+on:
+  pull_request:
+    paths:
+      - '.github/scripts/verify_release_signatures.py'
+      - '.github/workflows/release-signatures.yml'
+    branches: [dev, main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to audit (e.g. v3.7.0). Leave blank to self-test only.'
+        required: false
+        type: string
+
+concurrency:
+  group: release-signatures-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The only step that can fail on a pull request. It needs no network and no release, and
+      # it is what keeps the reader honest: six mutations of the PE parse were each confirmed to
+      # turn it red, including one that reported every file as signed — the failure mode that
+      # would otherwise be indistinguishable from the fix having landed.
+      - name: Self-test the signature reader
+        run: python3 .github/scripts/verify_release_signatures.py --self-test
+
+      # Manual only, because it requires a published release. Exits 1 while #3288 is open, which
+      # is the correct answer and the reason this is not wired to anything that gates a merge.
+      - name: Audit a published release
+        if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 .github/scripts/verify_release_signatures.py "${{ inputs.tag }}"
