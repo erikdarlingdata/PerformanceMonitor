@@ -141,7 +141,8 @@ public class WebhookAlertService
         string currentValue,
         string thresholdValue,
         string serverId = "",
-        AlertContext? context = null)
+        AlertContext? context = null,
+        string? displayName = null)
     {
         try
         {
@@ -173,22 +174,24 @@ public class WebhookAlertService
 
             if (TeamsConfigured)
             {
-                sent |= await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl);
+                sent |= await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl, displayName);
             }
 
             if (SlackConfigured)
             {
-                sent |= await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl);
+                sent |= await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl, displayName);
             }
 
             if (GenericConfigured)
             {
+                /* Generic webhook: the payload's "metric" field is a machine key an automation correlates on,
+                   so it stays the immutable metric name — the display name is a human-title concern only. */
                 sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl);
             }
 
             if (PagerDutyConfigured)
             {
-                sent |= await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl);
+                sent |= await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl, displayName);
             }
 
             if (sent)
@@ -300,11 +303,12 @@ public class WebhookAlertService
         string currentValue,
         string thresholdValue,
         AlertContext? context,
-        string? triageUrl)
+        string? triageUrl,
+        string? displayName = null)
     {
         try
         {
-            var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl);
+            var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl, displayName: displayName);
             var error = await PostWebhookAsync(_settings.TeamsWebhookUrl, payload, _settings.TeamsProxyAddress);
 
             if (error != null)
@@ -391,9 +395,13 @@ public class WebhookAlertService
         AlertBranding branding,
         bool isTest = false,
         AlertContext? context = null,
-        string? triageUrl = null)
+        string? triageUrl = null,
+        string? displayName = null)
     {
         var (hexColor, badgeText, emoji) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
+        /* Title/summary show the human name when present; ForMetric above stays on the immutable metric
+           name (the severity key), and a null/empty display name renders the metric name unchanged. */
+        var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
         var themeColor = hexColor.TrimStart('#');
         var utcNow = DateTime.UtcNow;
         var localNow = DateTime.Now;
@@ -469,7 +477,7 @@ public class WebhookAlertService
 
         var title = isTest
             ? $"{emoji} TEST — {metricName}"
-            : $"{emoji} {badgeText} — {metricName}";
+            : $"{emoji} {badgeText} — {titleName}";
 
         var sections = new List<object>
         {
@@ -490,7 +498,7 @@ public class WebhookAlertService
 
         var summary = isTest
             ? "[SQL Monitor] Test Notification"
-            : $"[SQL Monitor] {badgeText}: {metricName} on {serverName}";
+            : $"[SQL Monitor] {badgeText}: {titleName} on {serverName}";
 
         /* #2710: the OpenUri action carries its schema keys as REAL "@type" (a Dictionary, because a C#
            @-identifier only escapes the keyword — the existing card's `@type` serializes as "type", a
@@ -537,11 +545,12 @@ public class WebhookAlertService
         string currentValue,
         string thresholdValue,
         AlertContext? context,
-        string? triageUrl)
+        string? triageUrl,
+        string? displayName = null)
     {
         try
         {
-            var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl);
+            var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl, displayName: displayName);
             var error = await PostWebhookAsync(_settings.SlackWebhookUrl, payload, _settings.SlackProxyAddress);
 
             if (error != null)
@@ -589,15 +598,18 @@ public class WebhookAlertService
         AlertBranding branding,
         bool isTest = false,
         AlertContext? context = null,
-        string? triageUrl = null)
+        string? triageUrl = null,
+        string? displayName = null)
     {
         var (hexColor, badgeText, emoji) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
+        /* Human name in the header when present; ForMetric above keeps the immutable metric-name key. */
+        var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
         var utcNow = DateTime.UtcNow;
         var localNow = DateTime.Now;
 
         var title = isTest
             ? $"{emoji} TEST — {metricName}"
-            : $"{emoji} {badgeText} — {metricName}";
+            : $"{emoji} {badgeText} — {titleName}";
 
         var blocks = new List<object>
         {
@@ -1171,7 +1183,8 @@ public class WebhookAlertService
         string thresholdValue,
         string serverId,
         AlertContext? context,
-        string? triageUrl)
+        string? triageUrl,
+        string? displayName = null)
     {
         try
         {
@@ -1182,7 +1195,7 @@ public class WebhookAlertService
 
             var payload = BuildPagerDutyPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
-                _settings.PagerDutyRoutingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl);
+                _settings.PagerDutyRoutingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl, displayName: displayName);
 
             var endpoint = PagerDutyEndpoint(_settings.PagerDutyUseEuRegion);
             var error = await PostWebhookAsync(endpoint, payload, _settings.PagerDutyProxyAddress);
@@ -1237,17 +1250,21 @@ public class WebhookAlertService
         AlertContext? context = null,
         string? dedupKey = null,
         string? serverId = null,
-        string? triageUrl = null)
+        string? triageUrl = null,
+        string? displayName = null)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var severity = MapToPagerDutySeverity(badgeText);
+        /* The PD summary (the incident title) shows the human name when present; severity above and the
+           dedup_key below stay on the immutable metric name so correlation/dedup are rename-safe. */
+        var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
         var utcNow = DateTime.UtcNow;
 
         /* PD-CEF caps summary at 1024 chars — no truncation needed given the source strings, but document
            the constraint matching this codebase's habit of documenting limits even when unreachable. */
         var summary = isTest
             ? "Webhook configuration verified"
-            : $"{metricName} on {serverName}: {currentValue} (threshold {thresholdValue})";
+            : $"{titleName} on {serverName}: {currentValue} (threshold {thresholdValue})";
 
         var source = isTest
             ? branding.EditionName

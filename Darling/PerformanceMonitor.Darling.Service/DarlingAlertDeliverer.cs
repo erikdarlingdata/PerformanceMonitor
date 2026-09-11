@@ -143,10 +143,13 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
             context.SeverityOverride ??= outcome.Severity;
         }
 
-        /* Lite's EmailAlertService.cs:65-66 — muted alerts skip both channels but still record below. */
+        /* Lite's EmailAlertService.cs:65-66 — muted alerts skip both channels but still record below.
+           outcome.DisplayName (a custom rule's human name, or null for built-ins) renders in the
+           subject/body/webhook titles in place of the "Custom:<id>" metric name; the metric name stays the
+           cooldown/history/mute key. */
         var result = await _core.TrySendAsync(
             outcome.MetricName, outcome.ServerName, currentValue, outcome.ThresholdValue,
-            outcome.ServerKey, context, attemptChannels: !outcome.Muted);
+            outcome.ServerKey, context, attemptChannels: !outcome.Muted, displayName: outcome.DisplayName);
 
         /* trayChannelPresent: false — this is the HEADLESS service. It has no tray icon and no toast
            code, so the taxonomy's "tray" fallback (which is Lite's, and truthful there) would assert a UI
