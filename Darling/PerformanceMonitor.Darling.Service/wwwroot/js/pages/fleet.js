@@ -592,8 +592,15 @@ export function metricBands(c) {
 
   const cpuValue =
     c.total_cpu_percent != null || c.cpu_percent != null ? fmtPct(c.total_cpu_percent ?? c.cpu_percent) : "n/a";
+  /* #3281: on a serverless PostgreSQL target cpuValue above is percent of the capacity CURRENTLY ALLOCATED,
+     which is NOT what cpu_severity banded — so the detail names the figure that did, and the ceiling it is a
+     fraction of. Without it the chip reads a green 100% and the band looks broken. */
   const cpuDetail =
-    c.cpu_percent != null
+    c.acu_utilization_percent != null
+      ? "ACU " +
+        fmtPct(c.acu_utilization_percent) +
+        (c.max_configured_acu != null ? " of " + c.max_configured_acu + " configured" : "")
+      : c.cpu_percent != null
       ? "SQL " + fmtPct(c.cpu_percent) + (c.other_process_cpu_percent != null ? " · other " + fmtPct(c.other_process_cpu_percent) : "")
       : null;
 

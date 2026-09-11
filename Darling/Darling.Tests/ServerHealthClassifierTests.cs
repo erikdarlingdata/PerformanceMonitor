@@ -43,6 +43,10 @@ public sealed class ServerHealthClassifierTests
 
     /* ── per-metric bands ── */
 
+    /// <summary>The ring-buffer arm, whose reading is a fraction of a FIXED host and so is banded
+    /// directly. #3281 left these cutoffs and this arm untouched; what it changed is which percentage the
+    /// Performance Insights arm hands to the same ladder — see
+    /// <c>PgCpuCapacityHeadroomTests</c>.</summary>
     [Theory]
     [InlineData(40.0, HealthSeverity.Healthy)]
     [InlineData(79.0, HealthSeverity.Healthy)]
@@ -51,11 +55,15 @@ public sealed class ServerHealthClassifierTests
     [InlineData(95.0, HealthSeverity.Critical)]
     [InlineData(100.0, HealthSeverity.Critical)]
     public void CpuSeverity_BandsOnTotalCpu(double cpu, HealthSeverity expected) =>
-        Assert.Equal(expected, ServerHealthClassifier.CpuSeverity(cpu));
+        Assert.Equal(
+            expected,
+            ServerHealthClassifier.CpuSeverity(cpu, null, FleetCpuSource.RingBuffer));
 
     [Fact]
     public void CpuSeverity_NoData_IsUnknown() =>
-        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.CpuSeverity(null));
+        Assert.Equal(
+            HealthSeverity.Unknown,
+            ServerHealthClassifier.CpuSeverity(null, null, FleetCpuSource.NotCollected));
 
     [Theory]
     [InlineData(false, HealthSeverity.Healthy)]

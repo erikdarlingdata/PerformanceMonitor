@@ -170,11 +170,19 @@ ORDER BY server_id, collection_time DESC, sample_time DESC";
     ///
     /// <para><c>cpu_percent IS NOT NULL</c> because Performance Insights returns a data point with a null
     /// value for a period it has no sample for, and the ingestor stores it; the newest row is not
-    /// necessarily the newest MEASUREMENT.</para></summary>
+    /// necessarily the newest MEASUREMENT.</para>
+    ///
+    /// <para><b>The capacity columns come off the SAME row, and are deliberately not filtered on</b>
+    /// (#3281). <c>acu_utilization_percent</c> is what the CPU band actually reads, so a second
+    /// <c>IS NOT NULL</c> on it would silently drop a whole card's CPU reading in order to find an older
+    /// row that happened to have a capacity sample — trading a current measurement for a stale one. A NULL
+    /// capacity on the newest CPU row is the honest answer and bands Unknown.</para></summary>
     public const string FleetPgCpuSql = @"
 SELECT DISTINCT ON (server_id)
     server_id,
-    cpu_percent
+    cpu_percent,
+    acu_utilization_percent,
+    max_configured_acu
 FROM pg_cpu_utilization
 WHERE collection_time >= $1
 AND   sample_time >= $1
@@ -371,9 +379,10 @@ GROUP BY server_id, collector_name";
         foreach (var server in servers)
         {
             cpu.TryGetValue(server.ServerId, out var c);
-            /* Not TryGetValue into a double: a miss must stay null, because null is the reading
-               ("no current instance CPU") and 0.0 would be a measurement. */
-            double? pg = pgCpu.TryGetValue(server.ServerId, out var pgValue) ? pgValue : null;
+            /* A miss leaves default(PgCpuRow) — three nulls, which is the reading ("no current instance
+               CPU, and no capacity sample") and not a measurement. TryGetValue into a double would have
+               left 0.0, which is why the row is a struct of nullables rather than three plain doubles. */
+            pgCpu.TryGetValue(server.ServerId, out var pg);
             memory.TryGetValue(server.ServerId, out var m);
             memoryPressure.TryGetValue(server.ServerId, out var mp);
             threads.TryGetValue(server.ServerId, out var t);
@@ -411,7 +420,7 @@ GROUP BY server_id, collector_name";
     internal static FleetServerCard BuildCard(
         FleetServerRow server,
         CpuRow cpu,
-        double? instanceCpuPercent,
+        PgCpuRow pgCpu,
         MemoryRow memory,
         MemoryPressureRow pressure,
         ThreadsRow threads,
@@ -442,6 +451,7 @@ GROUP BY server_id, collector_name";
            share and is NOT filled from the PostgreSQL arm: Performance Insights publishes only the host
            total, so there is no per-process split to claim, and cpu_source says which arm answered rather
            than leaving a consumer to infer it from which fields are null. */
+        var instanceCpuPercent = pgCpu.InstanceCpuPercent;
         var totalCpu = FleetCpuProvenance.TotalNonIdleCpuPercent(cpuPercent, otherCpu, instanceCpuPercent);
         var cpuSource = FleetCpuProvenance.ClassifyCpuSource(cpuPercent, instanceCpuPercent, isPostgres, isAurora);
         var cpuForAlert = totalCpu ?? cpuPercent;
@@ -466,6 +476,11 @@ GROUP BY server_id, collector_name";
         var metrics = new ServerHealthMetrics
         {
             CpuPercentForAlert = cpuForAlert,
+            /* #3281: the band reads percent of the CONFIGURED ceiling on the Performance Insights arm,
+               because cpuForAlert there is percent of an allocation that moves. The source is what decides
+               which, so it travels with the two numbers rather than being re-derived. */
+            CapacityUtilizationPercent = pgCpu.AcuUtilizationPercent,
+            CpuSource = cpuSource,
             HasMemoryPressure = memoryPressureForBand,
             BlockingCount = blockingForBand,
             MaxBlockedSeconds = maxBlockedSeconds,
@@ -516,8 +531,11 @@ GROUP BY server_id, collector_name";
             CpuPercent = cpuPercent,
             OtherProcessCpuPercent = otherCpu,
             TotalCpuPercent = totalCpu,
-            CpuSeverity = ServerHealthClassifier.CpuSeverity(cpuForAlert),
+            CpuSeverity = ServerHealthClassifier.CpuSeverity(
+                cpuForAlert, pgCpu.AcuUtilizationPercent, cpuSource),
             InstanceCpuPercent = instanceCpuPercent,
+            AcuUtilizationPercent = pgCpu.AcuUtilizationPercent,
+            MaxConfiguredAcu = pgCpu.MaxConfiguredAcu,
             CpuSource = cpuSource,
             MemoryMb = memory.MemoryMb,
             BufferPoolMb = memory.BufferPoolMb,
@@ -672,9 +690,23 @@ GROUP BY server_id, collector_name";
 
         var parts = new List<string>();
 
-        if (c.CpuSeverity >= HealthSeverity.Warning && c.TotalCpuPercent.HasValue)
+        /* The figure that DECIDED the band, not the one beside it (#3281). On a serverless PostgreSQL
+           target the band comes from percent of the configured ACU ceiling, so naming the raw CPU here
+           would put "CPU 100%" against a card banded off 96% capacity — two numbers, neither explaining
+           the other. The capacity clause is shared with the viewer's own reason line so the two surfaces
+           cannot say it differently. */
+        if (c.CpuSeverity >= HealthSeverity.Warning)
         {
-            parts.Add($"CPU {c.TotalCpuPercent.Value:F0}%");
+            var clause = FleetCpuProvenance.CapacityBandClause(c.AcuUtilizationPercent, c.CpuSource);
+
+            if (clause is not null)
+            {
+                parts.Add(clause);
+            }
+            else if (c.TotalCpuPercent.HasValue)
+            {
+                parts.Add($"CPU {c.TotalCpuPercent.Value:F0}%");
+            }
         }
 
         if (c.ThreadsSeverity >= HealthSeverity.Warning)
@@ -831,12 +863,13 @@ GROUP BY server_id, collector_name";
         return map;
     }
 
-    /// <summary>The newest current Performance Insights CPU reading per PostgreSQL/Aurora target (#3267).
-    /// Keyed by <c>server_id</c> with a plain <c>double</c> value and no entry for a server without one, so
-    /// the caller's miss is an absent key rather than a zero — see the call site.</summary>
-    private static async Task<Dictionary<int, double>> ReadPgCpuAsync(NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
+    /// <summary>The newest current Performance Insights reading per PostgreSQL/Aurora target (#3267/#3281)
+    /// — the raw CPU and, from the same row, the capacity headroom the band reads. No entry for a server
+    /// without one, so the caller's miss is an absent key rather than a zero; within an entry each figure
+    /// is independently nullable, so a card can have a current CPU reading and no capacity sample.</summary>
+    private static async Task<Dictionary<int, PgCpuRow>> ReadPgCpuAsync(NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
     {
-        var map = new Dictionary<int, double>();
+        var map = new Dictionary<int, PgCpuRow>();
         await using var command = postgres.CreateCommand(FleetPgCpuSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         /* Naive UTC at the bind, matching every other comparison against the store's naive `timestamp`
@@ -846,7 +879,10 @@ GROUP BY server_id, collector_name";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            map[reader.GetInt32(0)] = Convert.ToDouble(reader.GetValue(1));
+            map[reader.GetInt32(0)] = new PgCpuRow(
+                reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1)),
+                reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(3) ? null : Convert.ToDouble(reader.GetValue(3)));
         }
 
         return map;
@@ -1014,6 +1050,17 @@ GROUP BY server_id, collector_name";
 
     internal readonly record struct FleetServerRow(int ServerId, string DisplayName, string ServerName, int? EngineEdition, string? EngineKind, bool IsSilenced);
     internal readonly record struct CpuRow(double? SqlCpu, double? OtherCpu);
+
+    /// <summary>One PostgreSQL/Aurora target's newest current Performance Insights row (#3281). One struct
+    /// rather than three maps so a call site cannot pick up the CPU and drop the capacity that qualifies
+    /// it, and its <c>default</c> is three nulls — which classifies as "nothing was read".</summary>
+    /// <param name="InstanceCpuPercent"><c>os.cpuUtilization.total.avg</c>, percent of the capacity
+    /// CURRENTLY ALLOCATED.</param>
+    /// <param name="AcuUtilizationPercent">Percent of the CONFIGURED ceiling — the figure the band
+    /// reads.</param>
+    /// <param name="MaxConfiguredAcu">The configured ACU ceiling, for the card's detail line.</param>
+    internal readonly record struct PgCpuRow(
+        double? InstanceCpuPercent, double? AcuUtilizationPercent, double? MaxConfiguredAcu);
     internal readonly record struct MemoryRow(double? MemoryMb, double? BufferPoolMb);
     internal readonly record struct MemoryPressureRow(long WaiterCount, long TimeoutCount, long ForcedCount, double? GrantedMemoryMb);
     internal readonly record struct ThreadsRow(int? TotalThreads, int? CurrentWorkers, int RunnableTasks, long WorkQueue);
@@ -1148,16 +1195,35 @@ public sealed class FleetServerCard
     /// the host share is not derivable).</summary>
     [JsonPropertyName("other_process_cpu_percent")] public double? OtherProcessCpuPercent { get; init; }
 
-    /// <summary>Total non-idle host CPU — the quantity <see cref="CpuSeverity"/> bands, and the one field
-    /// that is populated on BOTH engines (#3267). SQL Server's ring buffer reaches it as
-    /// <c>sqlserver + other_process</c>; a PostgreSQL/Aurora target's is Performance Insights'
-    /// <c>os.cpuUtilization.total.avg</c> verbatim.</summary>
+    /// <summary>Total non-idle host CPU, the one field populated on BOTH engines (#3267). SQL Server's ring
+    /// buffer reaches it as <c>sqlserver + other_process</c>; a PostgreSQL/Aurora target's is Performance
+    /// Insights' <c>os.cpuUtilization.total.avg</c> verbatim.
+    ///
+    /// <para><b>It is what <see cref="CpuSeverity"/> bands only on the SQL Server arm</b> (#3281). On the
+    /// Performance Insights arm this figure is percent of the capacity CURRENTLY ALLOCATED, which on
+    /// Aurora Serverless v2 moves — 100% here is routinely a scale-up rather than saturation — so the band
+    /// reads <see cref="AcuUtilizationPercent"/> instead. This value stays published unchanged because it
+    /// answers a real question ("was a core pinned"); it is just not the saturation signal.</para></summary>
     [JsonPropertyName("total_cpu_percent")] public double? TotalCpuPercent { get; init; }
 
     /// <summary>The Performance Insights instance reading on its own (#2719/#3267) — the same number
     /// <see cref="TotalCpuPercent"/> carries on a PostgreSQL target, published separately so a consumer can
     /// see the raw per-source value without unpicking the fallback. Null on every SQL Server target.</summary>
     [JsonPropertyName("instance_cpu_percent")] public double? InstanceCpuPercent { get; init; }
+
+    /// <summary>Percent of the CONFIGURED capacity ceiling in use — Aurora Serverless v2's
+    /// <c>os.general.acuUtilization.avg</c> (#3281), and the figure <see cref="CpuSeverity"/> bands on the
+    /// Performance Insights arm. Null on every SQL Server target, and null on a PostgreSQL target
+    /// Performance Insights returned no capacity sample for, where the band reads Unknown rather than
+    /// claiming health it never measured.</summary>
+    [JsonPropertyName("acu_utilization_percent")] public double? AcuUtilizationPercent { get; init; }
+
+    /// <summary>The cluster's configured ACU ceiling at this reading —
+    /// <c>os.general.maxConfiguredAcu.avg</c> (#3281). Published so a consumer can state the headroom in
+    /// ACUs rather than only as a percentage, and because it is the answer to "so raise what": a serverless
+    /// instance genuinely at its ceiling is fixed by the ceiling, not by the workload. Null wherever
+    /// <see cref="AcuUtilizationPercent"/> is.</summary>
+    [JsonPropertyName("max_configured_acu")] public double? MaxConfiguredAcu { get; init; }
 
     /// <summary>Which collector produced this card's CPU number, and when there is none, which of the two
     /// reasons (#3267). The default arm is <see cref="FleetCpuSource.NotCollected"/>, so a card built
@@ -1223,6 +1289,12 @@ public sealed class FleetServerCard
     internal ServerHealthMetrics ToHealthMetrics() => new()
     {
         CpuPercentForAlert = TotalCpuPercent ?? CpuPercent,
+        /* #3281: the three travel together, because the band reads the capacity figure on the Performance
+           Insights arm and the source is what decides which. Omitting them here would leave the CPU DOT
+           banded on the ceiling while the overall band and the fleet score fell back to
+           percent-of-allocated — a card contradicting itself, and a routine scale-up ranked as maxed out. */
+        CapacityUtilizationPercent = AcuUtilizationPercent,
+        CpuSource = CpuSource,
         /* Re-derived from IsPostgres rather than read back off the published counts, because those are
            deliberately left as zeros (#3017) — reading them here would hand the ranking a measurement the
            card's own severity says it does not have. */

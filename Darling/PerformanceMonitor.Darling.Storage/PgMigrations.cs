@@ -171,6 +171,7 @@ public static class PgMigrations
         new Migration(112, "collector-stall-wait-probes", V112Sql),
         new Migration(113, "remediation-credential-and-actor", V113Sql),
         new Migration(114, "pg-index-bloat-estimate-columns", V114Sql),
+        new Migration(115, "pg-cpu-capacity-headroom", V115Sql),
     };
 
     /// <summary>
@@ -221,6 +222,35 @@ ALTER TABLE collect.pg_index_bloat
 DELETE FROM collect.collector_state
 WHERE collector_name = 'pg_index_bloat'
 AND   state_key LIKE 'rotate:%';";
+
+    /// <summary>
+    /// V115 — the capacity-headroom columns on <c>collect.pg_cpu_utilization</c> (#3281).
+    ///
+    /// <para><b>Why <c>cpu_percent</c> alone was not enough.</b> It holds Performance Insights'
+    /// <c>os.cpuUtilization.total.avg</c>, which is percent of the capacity CURRENTLY ALLOCATED. On Aurora
+    /// Serverless v2 that allocation is re-sized continuously, so a one-vCPU instance reads exactly 100%
+    /// whenever one core stays busy for a minute — the routine trigger for scaling up. Measured at one such
+    /// minute on a production instance: 4 of 12 configured ACUs in use, 33% of the ceiling. Both consumers
+    /// banded the 100% as an incident, and the fleet it was measured on is <b>153 of 153</b> serverless, so
+    /// there was no population the old reading was correct on.</para>
+    ///
+    /// <para>Nullable with no DEFAULT and no backfill, matching every column-adding rung here: PI holds no
+    /// history this store can reach for the minutes already recorded, and a 0 would claim measured headroom
+    /// for a window nobody measured. A NULL here bands Unknown, never Healthy — which is also what an
+    /// instance class with no ACU concept at all produces, and the reason the band refuses to guess.</para>
+    ///
+    /// <para>Column-for-column identical to what <see cref="PgSchemaGenerator"/> generates from
+    /// <see cref="PgCpuUtilizationCollector.PayloadColumns"/>, so V106's own text carries the same three
+    /// columns for a store created fresh — pinned by
+    /// <c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c>. The two texts are
+    /// not forced to agree by anything but that test, and a drift between them is a permanent invisible
+    /// split between stores created before and after this rung.</para>
+    /// </summary>
+    private const string V115Sql = @"
+ALTER TABLE collect.pg_cpu_utilization
+    ADD COLUMN IF NOT EXISTS acu_utilization_percent double precision,
+    ADD COLUMN IF NOT EXISTS serverless_capacity_acu double precision,
+    ADD COLUMN IF NOT EXISTS max_configured_acu double precision;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
@@ -3007,6 +3037,10 @@ CREATE INDEX IF NOT EXISTS idx_pg_deadlocks_time
     /// rung above. See <see cref="PgCpuUtilizationCollector"/>'s own doc comment for why this collector has
     /// no SQL route at all: every row here arrives through the RDS/Performance Insights API, never a
     /// database connection.
+    ///
+    /// <para>The three capacity columns below arrived at V115 (#3281) and are written into this text as
+    /// well, so a store created fresh from this rung gets them without waiting for the ALTER — which is
+    /// what keeps the rung identical to the generated schema. V115 is what an existing store applies.</para>
     /// </summary>
     private const string V106Sql = @"
 CREATE TABLE IF NOT EXISTS collect.pg_cpu_utilization (
@@ -3015,7 +3049,10 @@ CREATE TABLE IF NOT EXISTS collect.pg_cpu_utilization (
     server_id integer NOT NULL,
     server_name text NOT NULL,
     sample_time timestamp,
-    cpu_percent double precision
+    cpu_percent double precision,
+    acu_utilization_percent double precision,
+    serverless_capacity_acu double precision,
+    max_configured_acu double precision
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_cpu_utilization_time
