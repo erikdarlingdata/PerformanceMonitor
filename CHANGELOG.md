@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **User-authored custom alert rules** ([#3285]) - a threshold alert on any compose-catalog measure, the companion to the custom notebooks: choose a source, measure, aggregate and window, a comparison with Warning/Critical thresholds, N-sample hysteresis and a server/tag scope, and the service evaluates it on its own sweep and delivers through the existing plumbing (cooldown, mute rules, Summary/per-event, email and webhooks) - for SQL Server and PostgreSQL metrics alike. Rules are authored over MCP (`create_custom_alert_rule` / `update` / `delete` / `get` / `list` / `validate_custom_alert_rule`, plus `test_custom_alert_rule` to see a rule's current value and would-fire verdict on each in-scope server without delivering); the compose catalog gained the PostgreSQL measures for all 20 PG collector tables, gated so a measure only offers on the server types that collect it, which makes PostgreSQL targets both alertable and chartable. Notifications show the rule's name rather than an internal id; a rule that no longer compiles or can never fire (scoped to no monitored server, or an always-NULL measure) is surfaced as one aggregated service self-health alert; and disabling or deleting a rule force-resolves any open incident. This release ships the evaluation engine and the MCP authoring surface; a visual web editor is a follow-up.
+
 ### Fixed
 
 - **A deadlock or blocked-process report whose statement sat inside a stored procedure now names the procedure** ([#3307]) - SQL Server emits an unresolved `Proc [Database Id = N Object Id = M]` placeholder in `inputbuf`, and neither collector attempted to resolve it, so the alert named the object the deadlock fought over but not the code that lost. Both collectors now resolve it to `database.schema.object` with one batched lookup per collection cycle - three-part, matching how `Involved Objects` already qualifies names - and keep the raw placeholder when the object has been dropped or the monitoring login cannot see its database, so a failed lookup degrades to today's output rather than to a half-built name. The parse and the lookup are C#-side: the XML shredding the resolution hangs off already happens locally, and the monitored server is asked only for an object name.
@@ -3644,4 +3648,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#3288]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3288
 [#3281]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3281
 [#3278]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3278
+[#3285]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3285
 [#3307]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3307
