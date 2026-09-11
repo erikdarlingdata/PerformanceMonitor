@@ -77,6 +77,12 @@ public sealed class EmailSendCore
     /// number. Optional so the deprecated Dashboard shell, which has no detail text to give, keeps
     /// compiling; every live caller has one.
     /// </param>
+    /// <param name="displayName">
+    /// Human-facing name to render in the subject/body/webhook titles in place of
+    /// <paramref name="metricName"/> (a custom alert rule's name). Null/empty keeps
+    /// <paramref name="metricName"/> — built-in alerts render exactly as before. The cooldown key,
+    /// severity, and dedup all stay on <paramref name="metricName"/>.
+    /// </param>
     public async Task<EmailFanoutResult> TrySendAsync(
         string metricName,
         string serverName,
@@ -85,7 +91,8 @@ public sealed class EmailSendCore
         string serverId,
         AlertContext? context,
         bool attemptChannels,
-        string? detailText = null)
+        string? detailText = null,
+        string? displayName = null)
     {
         bool emailAttempted = false;
         bool emailSent = false;
@@ -117,10 +124,11 @@ public sealed class EmailSendCore
             {
                 emailAttempted = true;
 
-                var subject = $"[SQL Monitor Alert] {metricName} on {serverName}";
+                var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
+                var subject = $"[SQL Monitor Alert] {titleName} on {serverName}";
                 var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
                     metricName, serverName, currentValue, thresholdValue, _settings.EmailCooldownMinutes, _branding, context,
-                    detailText);
+                    detailText, displayName);
 
                 try
                 {
@@ -160,7 +168,7 @@ public sealed class EmailSendCore
         if (attemptChannels)
         {
             webhookSent = await _webhookAlertService.TrySendWebhookAlertsAsync(
-                metricName, serverName, currentValue, thresholdValue, serverId, context, detailText);
+                metricName, serverName, currentValue, thresholdValue, serverId, context, detailText, displayName);
         }
 
         return new EmailFanoutResult(emailAttempted, emailSent, sendError, webhookSent, anyChannelConfigured);

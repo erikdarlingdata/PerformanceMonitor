@@ -140,6 +140,11 @@ public class WebhookAlertService
     /// and for the same reason — all four channels must carry the same text for the same firing, and a
     /// per-channel resolution would be four places for one of them to drift or be forgotten.
     /// </param>
+    /// <param name="displayName">
+    /// #3303: the human-facing name a custom rule carries, rendered in the Teams/Slack titles and the
+    /// PagerDuty summary in place of <paramref name="metricName"/>. Null/empty (every built-in alert)
+    /// renders the metric name unchanged. Never reaches the generic channel — see that branch below.
+    /// </param>
     public async Task<bool> TrySendWebhookAlertsAsync(
         string metricName,
         string serverName,
@@ -147,7 +152,8 @@ public class WebhookAlertService
         string thresholdValue,
         string serverId = "",
         AlertContext? context = null,
-        string? detailText = null)
+        string? detailText = null,
+        string? displayName = null)
     {
         try
         {
@@ -183,22 +189,25 @@ public class WebhookAlertService
 
             if (TeamsConfigured)
             {
-                sent |= await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl, prose);
+                sent |= await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl, prose, displayName);
             }
 
             if (SlackConfigured)
             {
-                sent |= await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl, prose);
+                sent |= await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl, prose, displayName);
             }
 
             if (GenericConfigured)
             {
+                /* Generic webhook: the payload's "metric" field is a machine key an automation correlates on,
+                   so it stays the immutable metric name — the display name is a human-title concern only, and
+                   this channel has no title. The prose detail DOES go, because it is alert content. */
                 sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl, prose);
             }
 
             if (PagerDutyConfigured)
             {
-                sent |= await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl, prose);
+                sent |= await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl, prose, displayName);
             }
 
             if (sent)
@@ -311,11 +320,13 @@ public class WebhookAlertService
         string thresholdValue,
         AlertContext? context,
         string? triageUrl,
-        string? detailText)
+        string? detailText,
+        string? displayName = null)
     {
         try
         {
-            var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl, detailText: detailText);
+            var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
+                detailText: detailText, displayName: displayName);
             var error = await PostWebhookAsync(_settings.TeamsWebhookUrl, payload, _settings.TeamsProxyAddress);
 
             if (error != null)
@@ -407,10 +418,14 @@ public class WebhookAlertService
         bool isTest = false,
         AlertContext? context = null,
         string? triageUrl = null,
-        string? detailText = null)
+        string? detailText = null,
+        string? displayName = null)
     {
         var (hexColor, badgeText, emoji) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var prose = AlertDetailText.ProseForDelivery(detailText, context);
+        /* Title/summary show the human name when present; ForMetric above stays on the immutable metric
+           name (the severity key), and a null/empty display name renders the metric name unchanged. */
+        var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
         var themeColor = hexColor.TrimStart('#');
         var utcNow = DateTime.UtcNow;
         var localNow = DateTime.Now;
@@ -493,7 +508,7 @@ public class WebhookAlertService
 
         var title = isTest
             ? $"{emoji} TEST — {metricName}"
-            : $"{emoji} {badgeText} — {metricName}";
+            : $"{emoji} {badgeText} — {titleName}";
 
         var sections = new List<object>
         {
@@ -514,7 +529,7 @@ public class WebhookAlertService
 
         var summary = isTest
             ? "[SQL Monitor] Test Notification"
-            : $"[SQL Monitor] {badgeText}: {metricName} on {serverName}";
+            : $"[SQL Monitor] {badgeText}: {titleName} on {serverName}";
 
         /* #2710: the OpenUri action carries its schema keys as REAL "@type" (a Dictionary, because a C#
            @-identifier only escapes the keyword — the existing card's `@type` serializes as "type", a
@@ -562,11 +577,13 @@ public class WebhookAlertService
         string thresholdValue,
         AlertContext? context,
         string? triageUrl,
-        string? detailText)
+        string? detailText,
+        string? displayName = null)
     {
         try
         {
-            var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl, detailText: detailText);
+            var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
+                detailText: detailText, displayName: displayName);
             var error = await PostWebhookAsync(_settings.SlackWebhookUrl, payload, _settings.SlackProxyAddress);
 
             if (error != null)
@@ -618,16 +635,19 @@ public class WebhookAlertService
         bool isTest = false,
         AlertContext? context = null,
         string? triageUrl = null,
-        string? detailText = null)
+        string? detailText = null,
+        string? displayName = null)
     {
         var (hexColor, badgeText, emoji) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var prose = AlertDetailText.ProseForDelivery(detailText, context);
+        /* Human name in the header when present; ForMetric above keeps the immutable metric-name key. */
+        var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
         var utcNow = DateTime.UtcNow;
         var localNow = DateTime.Now;
 
         var title = isTest
             ? $"{emoji} TEST — {metricName}"
-            : $"{emoji} {badgeText} — {metricName}";
+            : $"{emoji} {badgeText} — {titleName}";
 
         var blocks = new List<object>
         {
@@ -1253,7 +1273,8 @@ public class WebhookAlertService
         string serverId,
         AlertContext? context,
         string? triageUrl,
-        string? detailText)
+        string? detailText,
+        string? displayName = null)
     {
         try
         {
@@ -1265,7 +1286,7 @@ public class WebhookAlertService
             var payload = BuildPagerDutyPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
                 _settings.PagerDutyRoutingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl,
-                detailText: detailText);
+                detailText: detailText, displayName: displayName);
 
             var endpoint = PagerDutyEndpoint(_settings.PagerDutyUseEuRegion);
             var error = await PostWebhookAsync(endpoint, payload, _settings.PagerDutyProxyAddress);
@@ -1325,17 +1346,21 @@ public class WebhookAlertService
         string? dedupKey = null,
         string? serverId = null,
         string? triageUrl = null,
-        string? detailText = null)
+        string? detailText = null,
+        string? displayName = null)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var severity = MapToPagerDutySeverity(badgeText);
+        /* The PD summary (the incident title) shows the human name when present; severity above and the
+           dedup_key below stay on the immutable metric name so correlation/dedup are rename-safe. */
+        var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
         var utcNow = DateTime.UtcNow;
 
         /* PD-CEF caps summary at 1024 chars — no truncation needed given the source strings, but document
            the constraint matching this codebase's habit of documenting limits even when unreachable. */
         var summary = isTest
             ? "Webhook configuration verified"
-            : $"{metricName} on {serverName}: {currentValue} (threshold {thresholdValue})";
+            : $"{titleName} on {serverName}: {currentValue} (threshold {thresholdValue})";
 
         var source = isTest
             ? branding.EditionName

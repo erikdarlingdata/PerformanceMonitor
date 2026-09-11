@@ -44,6 +44,15 @@ namespace PerformanceMonitor.Alerting;
 /// that the other display fields don't carry; interactive hosts render it as
 /// <c>$"{ServerName}: {ShortMessage}"</c>, headless hosts may log or ignore it.
 /// </param>
+/// <param name="DisplayName">
+/// Human-facing name rendered in notification titles/subjects INSTEAD of <paramref name="MetricName"/>,
+/// or null/empty for built-in alerts — which keep rendering <paramref name="MetricName"/> unchanged
+/// (byte-identical to before this field existed). Custom alert rules key history / mute / cooldown on the
+/// immutable <paramref name="MetricName"/> (<c>"Custom:&lt;id&gt;"</c>, rename-safe) but set this to the
+/// rule's (newline-stripped, length-capped) name so a human sees the name, not <c>Custom:42</c>. Every
+/// render site falls back to <paramref name="MetricName"/> whenever this is null or empty; the metric name
+/// stays the severity / cooldown / dedup key everywhere.
+/// </param>
 public sealed record AlertOutcome(
     string ServerKey,
     string ServerName,
@@ -56,7 +65,8 @@ public sealed record AlertOutcome(
     double? NumericThresholdValue,
     bool Muted,
     AlertSeverityLevel? Severity,
-    string? ShortMessage = null);
+    string? ShortMessage = null,
+    string? DisplayName = null);
 
 /// <summary>
 /// The record-and-send seam for the Phase-5 shared alert engine: the engine evaluates conditions

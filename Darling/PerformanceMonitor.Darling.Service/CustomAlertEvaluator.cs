@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -82,6 +83,65 @@ public sealed class CustomAlertEvaluator
     /// name, so a rename does not orphan history or break mute rules.</summary>
     public static string MetricNameFor(long ruleId) =>
         "Custom:" + ruleId.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>An abuse bound on the description portion of the rendered <c>detail_text</c> (the column is
+    /// unbounded text; the name has its own <see cref="CustomAlertRuleStore.MaxNameLength"/> bound).</summary>
+    private const int MaxDetailDescriptionLength = 500;
+
+    /// <summary>
+    /// Makes a user-authored rule name/description safe to render in a notification title and to write into
+    /// the <c>detail_text</c> that the viewer's mute-from-history pre-fill
+    /// (<see cref="AlertMuteContext.PopulateFromDetailText"/>) later parses. That parser splits
+    /// <c>detail_text</c> on <c>'\n'</c> and reads any line beginning with a <c>"Database: "</c> /
+    /// <c>"Query: "</c> / <c>"Wait Type: "</c> / <c>"Job Name: "</c> label into a mute pattern, so a crafted
+    /// name carrying <c>"\nDatabase: master"</c> could forge a mute-context field and spoof the pre-fill.
+    /// Collapsing every line break and control character (CR/LF/TAB/NEL and the Unicode line/paragraph
+    /// separators) to a single space guarantees the value stays one line that cannot begin a forged label
+    /// line, and the length cap bounds the other half of the problem. Runs of whitespace collapse and the
+    /// result is trimmed; returns "" for null/blank input so a render site falls back to the metric name.
+    /// </summary>
+    public static string SanitizeDisplayText(string? value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value) || maxLength <= 0)
+        {
+            return string.Empty;
+        }
+
+        var builder = new StringBuilder(Math.Min(value.Length, maxLength));
+        var pendingSpace = false;
+        foreach (var ch in value)
+        {
+            var isBreakOrControl =
+                ch < ' ' || ch == (char)0x7F || ch == (char)0x85 || ch == '\u2028' || ch == '\u2029';
+
+            if (isBreakOrControl || ch == ' ')
+            {
+                // Defer whitespace: emitted only before the next real char (drops leading + trailing runs).
+                pendingSpace = builder.Length > 0;
+                continue;
+            }
+
+            if (pendingSpace)
+            {
+                if (builder.Length >= maxLength)
+                {
+                    break;
+                }
+
+                builder.Append(' ');
+                pendingSpace = false;
+            }
+
+            if (builder.Length >= maxLength)
+            {
+                break;
+            }
+
+            builder.Append(ch);
+        }
+
+        return builder.ToString();
+    }
 
     /// <summary>Evaluates every enabled rule applicable to one server. Failure-isolated per rule.</summary>
     public async Task EvaluateServerAsync(int serverId, string storageName, string displayName, CancellationToken cancellationToken)
@@ -233,39 +293,69 @@ public sealed class CustomAlertEvaluator
         var serverKey = serverId.ToString(CultureInfo.InvariantCulture);
         var muted = _isAlertMuted?.Invoke(new AlertMuteContext { ServerName = displayName, MetricName = metricName }) ?? false;
 
+        await _deliverer.DeliverAsync(
+            BuildFireOutcome(row, def, serverKey, displayName, value, severity, muted),
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Builds the <see cref="AlertOutcome"/> for one custom-rule fire — pure (no I/O), so the display-name
+    /// wiring, the detail_text sanitization/separator, and the metric key are unit-testable without a store.
+    /// The user-authored name/description are newline-stripped + length-capped (<see cref="SanitizeDisplayText"/>);
+    /// the sanitized name rides <see cref="AlertOutcome.DisplayName"/> (rendered in titles/subjects) while
+    /// <c>metric_name = "Custom:&lt;id&gt;"</c> stays the immutable history / mute / cooldown key.
+    /// </summary>
+    /// <param name="serverDisplayName">The monitored server's display name (<see cref="AlertOutcome.ServerName"/>).</param>
+    public static AlertOutcome BuildFireOutcome(
+        CustomAlertRule row, CustomAlertRuleDefinition def, string serverKey, string serverDisplayName,
+        double value, AlertSeverityLevel severity, bool muted)
+    {
+        var metricName = MetricNameFor(row.Id);
         var currentText = value.ToString("0.###", CultureInfo.InvariantCulture);
         var thresholdValue = severity == AlertSeverityLevel.Critical && def.CriticalThreshold is double critical
             ? critical
             : def.WarnThreshold;
         var thresholdText = string.Create(CultureInfo.InvariantCulture, $"{def.OpSymbol} {thresholdValue:0.###}");
-        var shortMessage = string.Create(CultureInfo.InvariantCulture,
-            $"{row.Name}: {def.MeasureDisplayName} {currentText} (threshold {thresholdText})");
-        var detail = string.IsNullOrWhiteSpace(row.Description) ? row.Name : $"{row.Name} — {row.Description}";
 
-        await _deliverer.DeliverAsync(
-            new AlertOutcome(
-                serverKey,
-                displayName,
-                metricName,
-                currentText,
-                thresholdText,
-                Context: null,
-                DetailText: detail,
-                NumericCurrentValue: value,
-                NumericThresholdValue: thresholdValue,
-                Muted: muted,
-                Severity: severity,
-                ShortMessage: shortMessage),
-            cancellationToken);
+        /* Sanitize the user-authored name/description before they enter any rendered string or the persisted
+           detail_text: strip every line break + control char and cap the length so a crafted name cannot
+           forge a "Database:"/"Query:" label line that the mute-from-history pre-fill would parse
+           (AlertMuteContext.PopulateFromDetailText). safeName also rides AlertOutcome.DisplayName so the
+           delivery layer renders the human name instead of the "Custom:<id>" metric key. */
+        var safeName = SanitizeDisplayText(row.Name, CustomAlertRuleStore.MaxNameLength);
+        var safeDescription = SanitizeDisplayText(row.Description, MaxDetailDescriptionLength);
+        var shortMessage = string.Create(CultureInfo.InvariantCulture,
+            $"{safeName}: {def.MeasureDisplayName} {currentText} (threshold {thresholdText})");
+        /* Plain " - " separator (never an em dash — a style tell to keep out of delivered text). */
+        var detail = safeDescription.Length == 0 ? safeName : $"{safeName} - {safeDescription}";
+
+        return new AlertOutcome(
+            serverKey,
+            serverDisplayName,
+            metricName,
+            currentText,
+            thresholdText,
+            Context: null,
+            DetailText: detail,
+            NumericCurrentValue: value,
+            NumericThresholdValue: thresholdValue,
+            Muted: muted,
+            Severity: severity,
+            ShortMessage: shortMessage,
+            DisplayName: safeName);
     }
 
     private async Task DeliverResolveAsync(CustomAlertRule row, int serverId, string displayName, double value)
     {
         var metricName = MetricNameFor(row.Id);
         var serverKey = serverId.ToString(CultureInfo.InvariantCulture);
-        var title = row.Name + " Resolved";
+        /* Same sanitization as the fire path: the resolution's Title becomes the history row's metric_name
+           and its Message becomes detail_text, so a crafted rule name must be newline-stripped + capped here
+           too or it re-opens the mute-pre-fill spoof on the recovery row. */
+        var safeName = SanitizeDisplayText(row.Name, CustomAlertRuleStore.MaxNameLength);
+        var title = safeName + " Resolved";
         var message = string.Create(CultureInfo.InvariantCulture,
-            $"{displayName}: {row.Name} back within threshold (now {value:0.###})");
+            $"{displayName}: {safeName} back within threshold (now {value:0.###})");
 
         _logger.LogInformation("{Line}", AlertFiringLog.Resolved(displayName, title, message));
 
