@@ -51,6 +51,11 @@ public sealed class IncidentCooldown
     /// never starts the cooldown. Sends when AT LEAST ONE candidate key is fresh (outside the window); a
     /// successful send then stamps EVERY candidate key, so an in-cooldown incident that rode along on a
     /// fresh sibling has its timer refreshed and never re-alerts standalone next cycle.
+    /// <para>#3313: the per-fingerprint verdicts the "at least one" reduction is computed FROM are reported
+    /// as <see cref="Decision.DeliverableDedupKeys"/>, because "rode along on a fresh sibling" is the
+    /// behaviour that made an already-delivered incident reappear on the next card. The reduction stays —
+    /// posting is still all-or-nothing per alert — but the render no longer has to treat it as the only
+    /// answer available.</para>
     /// </summary>
     public async Task<Decision> EvaluateAsync(
         string serverId, string metricName, IReadOnlyList<AlertIncident>? incidents, TimeSpan window)
@@ -61,6 +66,9 @@ public sealed class IncidentCooldown
         var keys = BuildKeys(serverId, metricName, incidents);
 
         bool anyFresh = false;
+        bool fingerprinted = false;
+        var deliverable = new List<string>(keys.Count);
+
         foreach (var (key, dedupKey) in keys)
         {
             if (_seedLastSentUtc is not null && !_cooldowns.ContainsKey(key))
@@ -70,11 +78,23 @@ public sealed class IncidentCooldown
                     _cooldowns.TryAdd(key, lastSent.Value);
             }
 
-            if (!_cooldowns.TryGetValue(key, out var last) || now - last >= window)
+            var fresh = !_cooldowns.TryGetValue(key, out var last) || now - last >= window;
+            if (fresh)
                 anyFresh = true;
+
+            if (dedupKey is not null)
+            {
+                fingerprinted = true;
+                if (fresh)
+                    deliverable.Add(dedupKey);
+            }
         }
 
-        return new Decision(anyFresh, keys.Select(k => k.Key).ToList(), now);
+        /* null, not empty, on the metric-level fallback: "this alert has no fingerprints to filter" and
+           "every one of its fingerprints is in cooldown" are different answers, and the render has to be
+           able to tell them apart (an empty list would read as "show nothing"). */
+        return new Decision(
+            anyFresh, keys.Select(k => k.Key).ToList(), now, fingerprinted ? deliverable : null);
     }
 
     /// <summary>
@@ -126,5 +146,18 @@ public sealed class IncidentCooldown
     internal int TrackedKeyCount => _cooldowns.Count;
 
     /// <summary>The send decision plus the candidate keys to stamp on a successful send.</summary>
-    public sealed record Decision(bool ShouldSend, IReadOnlyList<string> Keys, DateTime EvaluatedAtUtc);
+    /// <param name="DeliverableDedupKeys">
+    /// #3313: the #1140 dedup fingerprints that were OUTSIDE their own window — the incidents a channel
+    /// should render, as opposed to the whole set the alert happens to carry. <c>null</c> when the alert
+    /// carried no fingerprint and was evaluated on the metric-level fallback key, which is "nothing to
+    /// filter" rather than "nothing to show". Fed to <see cref="IncidentDeliveryFilter.ForDelivery"/>.
+    /// <para>A member of the same value as <see cref="ShouldSend"/> rather than a second call the caller
+    /// has to remember to make: the two answers come from one pass over one key set, and a render deciding
+    /// freshness for itself could disagree with the decision that let it post.</para>
+    /// </param>
+    public sealed record Decision(
+        bool ShouldSend,
+        IReadOnlyList<string> Keys,
+        DateTime EvaluatedAtUtc,
+        IReadOnlyList<string>? DeliverableDedupKeys);
 }

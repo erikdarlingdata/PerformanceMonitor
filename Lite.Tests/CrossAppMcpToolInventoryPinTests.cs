@@ -229,7 +229,8 @@ public sealed class CrossAppMcpToolInventoryPinTests
            config.custom_alert_rules in the central Postgres store; get_custom_alert_rule / list_custom_alert_rules
            read them back; validate_custom_alert_rule checks a definition against the same compose catalog the
            Custom Views tools draw from, without saving; test_custom_alert_rule (#3299) evaluates a rule's metric
-           now on each in-scope server and reports whether it would breach, without delivering or persisting).
+           now on each in-scope server and reports whether it would breach, without delivering or persisting;
+           list_custom_alert_templates (#3285 Component 7) lists the code-defined starter rule templates).
            Darling-ONLY by architecture, the same kind of entry as the Custom Views + alert-tuning tools above
            rather than a "not ported yet": custom alert rules are a central-store feature the headless service
            evaluates on its sweep, and Lite (a single-instance WPF app over local DuckDB with no central,
@@ -241,6 +242,7 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "delete_custom_alert_rule",
         "validate_custom_alert_rule",
         "test_custom_alert_rule",
+        "list_custom_alert_templates",
     };
 
     [Fact]

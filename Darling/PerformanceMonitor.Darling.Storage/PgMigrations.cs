@@ -173,7 +173,8 @@ public static class PgMigrations
         new Migration(114, "pg-index-bloat-estimate-columns", V114Sql),
         new Migration(115, "pg-cpu-capacity-headroom", V115Sql),
         new Migration(116, "custom-alert-core", V116Sql),
-        new Migration(117, "builtin-alert-persistence", V117Sql),
+        new Migration(117, "mute-rules-reload-beacon", V117Sql),
+        new Migration(118, "builtin-alert-persistence", V118Sql),
     };
 
     /// <summary>
@@ -311,7 +312,38 @@ CREATE TABLE IF NOT EXISTS config.custom_alert_state (
 );";
 
     /// <summary>
-    /// V117 — the BUILT-IN alert catalog's persistence-gate state (#3282). One additive config-plane table,
+    /// V117 — <c>config.config_mute_rules</c> joins the <c>config_version</c> reload beacon (#3315).
+    ///
+    /// <para>The mute rules the alert engine honors live in the service's in-memory
+    /// <c>MuteRuleService</c> cache, and the only thing that re-<c>LoadAsync()</c>es that cache is a
+    /// <c>config_version</c> change. So a mute rule that lands in the table without bumping the beacon is
+    /// persisted and inert: the store agrees the rule exists, <c>get_mute_rules</c> lists it, and the
+    /// evaluator keeps delivering matching alerts until something unrelated happens to bump the beacon or
+    /// the service restarts. There is no upper bound on that window and nothing reports it — an operator
+    /// mutes a firing alert, is told it is muted, and the pages continue.</para>
+    ///
+    /// <para><b>A trigger rather than a bump at each write site</b>, which is what makes this cover the
+    /// writers nobody enumerated: the MCP tools (<c>create_mute_rule</c> / <c>delete_mute_rule</c>, which
+    /// construct their own <c>PgMuteRuleStore</c> and never touch the live service), the Viewer's Manage
+    /// Mute Rules surface, the tray Snooze, <c>PgMuteRuleStore.DeleteExpiredAsync</c>, and hand-written SQL
+    /// all reach the same table. <c>AFTER INSERT OR UPDATE OR DELETE</c> because DELETE is the direction
+    /// that costs most — an operator un-mutes, believes alerting is restored, and a stale cache keeps
+    /// suppressing.</para>
+    ///
+    /// <para>Statement-level, sharing V17's <c>config.config_bump_version()</c> function verbatim, so this
+    /// is the fifth instance of an established shape rather than a new mechanism: same SECURITY INVOKER
+    /// beacon UPDATE, and the <c>mcp</c> role's existing column-level
+    /// <c>UPDATE (config_version, updated_at) ON config.config_service</c> grant (provisioned for the
+    /// <c>config_alert_settings</c> trigger) is exactly what this one needs, so no grant moves.
+    /// <c>DROP TRIGGER IF EXISTS</c> first, matching V17's idiom, so a replay is a harmless no-op.</para>
+    /// </summary>
+    private const string V117Sql = @"
+DROP TRIGGER IF EXISTS trg_bump_mute_rules ON config.config_mute_rules;
+CREATE TRIGGER trg_bump_mute_rules
+    AFTER INSERT OR UPDATE OR DELETE ON config.config_mute_rules
+    FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
+
+    /// V118 — the BUILT-IN alert catalog's persistence-gate state (#3282). One additive config-plane table,
     /// the twin of V116's <c>custom_alert_state</c> for alerts nobody authored.
     ///
     /// <para><b>Why a separate table rather than the custom one.</b> <c>custom_alert_state</c> is keyed
@@ -339,7 +371,7 @@ CREATE TABLE IF NOT EXISTS config.custom_alert_state (
     /// <c>GRANT … ON ALL TABLES IN SCHEMA config</c> after migration — and no viewer/mcp read yet: the
     /// service's alert pass is the only consumer.</para>
     /// </summary>
-    private const string V117Sql = @"
+    private const string V118Sql = @"
 CREATE TABLE IF NOT EXISTS config.alert_persistence_state (
     server_id integer NOT NULL,
     metric_name text NOT NULL,

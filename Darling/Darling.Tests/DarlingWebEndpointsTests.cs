@@ -84,8 +84,9 @@ public sealed class DarlingWebEndpointsTests
     {
         /* The six original non-read tools (analyze_server, the mute write, the four analyze_*_plan), the eight
            Custom Views tools (#1599 + describe_custom_view_catalog) served by /api/views + /api/compose/run +
-           /api/catalog, the seven custom-alert-rule tools (#3285 — create/update/delete write, get/list/validate
-           read against the compose catalog, and test_custom_alert_rule (#3299) evaluate-now, none a
+           /api/catalog, the eight custom-alert-rule tools (#3285 — create/update/delete write, get/list/validate
+           read against the compose catalog, test_custom_alert_rule (#3299) evaluate-now, and
+           list_custom_alert_templates (#3285 Component 7) starter templates, none a
            /api/read/{tool} mirror), the three alert-tuning WRITE tools, and the two server-onboarding WRITE tools
            (add_servers / remove_server) — all with no /api/read/{tool} 1:1 mirror, like mute_analysis_finding. */
         Assert.Equal(
@@ -94,7 +95,7 @@ public sealed class DarlingWebEndpointsTests
                 "add_servers", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
                 "analyze_server", "create_custom_alert_rule", "create_custom_view", "create_mute_rule", "delete_custom_alert_rule",
                 "delete_custom_view", "delete_mute_rule", "describe_custom_view_catalog", "get_custom_alert_rule", "get_custom_view",
-                "list_custom_alert_rules", "list_custom_views", "mute_analysis_finding", "remove_server", "run_custom_view_panel",
+                "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "mute_analysis_finding", "remove_server", "run_custom_view_panel",
                 "test_custom_alert_rule", "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "validate_custom_alert_rule", "validate_custom_view",
             },
             DarlingWebEndpoints.ExcludedToolNames.OrderBy(n => n, StringComparer.Ordinal).ToArray());

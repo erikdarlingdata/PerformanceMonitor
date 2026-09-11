@@ -114,10 +114,16 @@ WHERE id = 1";
     /// <summary>
     /// Touches <c>config_service</c> to bump the <c>config_version</c> reload beacon WITHOUT changing any flag
     /// (mirrors the service's <c>reload</c> command SQL) — the self-bump trigger increments the beacon, so the
-    /// worker re-reads the store and re-<c>LoadAsync()</c>es its caches on the next sweep. This is how a write
-    /// to a <c>config.*</c> table that carries NO statement-level bump trigger — notably
-    /// <c>config_mute_rules</c> (F16): its rules live in the service's in-memory <c>MuteRuleService</c> cache,
-    /// reloaded only on the beacon — still takes effect live. A no-op on an unseeded store (zero rows).
+    /// worker re-reads the store and re-<c>LoadAsync()</c>es its caches on the next sweep — the only thing that
+    /// makes a write to a <c>config.*</c> table without its own statement-level bump trigger take effect live.
+    /// A no-op on an unseeded store (zero rows).
+    ///
+    /// <para>The mute-rule writers below call this even though <c>config_mute_rules</c> carries
+    /// <c>trg_bump_mute_rules</c> (V117), which bumps the beacon for every writer of that table including
+    /// them. The two bumps collapse into one reload — the worker compares <c>config_version</c> to its
+    /// watermark and reloads once per change it observes, not once per increment — so the redundancy costs
+    /// nothing, and the viewer keeps signalling explicitly rather than inferring the trigger's presence from
+    /// a store whose version it does not check before writing.</para>
     /// </summary>
     public const string ConfigReloadSignalSql =
         "UPDATE config_service SET updated_at = (now() AT TIME ZONE 'UTC') WHERE id = 1";

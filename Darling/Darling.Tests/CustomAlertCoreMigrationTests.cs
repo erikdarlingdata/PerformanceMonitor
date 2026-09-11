@@ -17,21 +17,21 @@ namespace Darling.Tests;
 
 /// <summary>
 /// V116 / #3285: the custom-alert core rung (config.custom_alert_rules + config.custom_alert_state). The
-/// "I am the top rung" claims have moved on to <see cref="BuiltinAlertPersistenceRungTests"/> (V117), the
-/// way this rung took them from <see cref="PgCpuCapacityHeadroomTests"/> (V115). What stays here is this
-/// rung's own identity and its probe arm, which must keep mapping a store migrated to EXACTLY 116 to 116
-/// rather than letting it fall through.
+/// "I am the top rung" claims live on whichever rung is currently top — <see cref="MuteRuleReloadBeaconTests"/>
+/// took them from here at V117 and <see cref="BuiltinAlertPersistenceRungTests"/> holds them at V118. This
+/// rung is strictly below the top either way, and its probe arm has to keep reporting 116 for a store
+/// migrated exactly this far.
 /// </summary>
 public sealed class CustomAlertCoreMigrationTests
 {
     private const int RungVersion = 116;
     private const int PreviousVersion = 115;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe.</summary>
     private const int ProbeOrdinal = 91;
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
@@ -41,7 +41,8 @@ public sealed class CustomAlertCoreMigrationTests
 
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.True(RungVersion <= StorageVersion.SchemaVersion);
+        /* V117 (#3315) is the top rung, so the "== SchemaVersion" claim lives there. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
@@ -65,7 +66,7 @@ public sealed class CustomAlertCoreMigrationTests
     }
 
     [Fact]
-    public void TheProbeMapsAStoreAtExactlyThisRungToThisRung()
+    public void TheProbeMapsAStoreMigratedExactlyThisFarToThisRung()
     {
         Assert.Contains(
             "table_name = 'custom_alert_rules'",
@@ -75,23 +76,29 @@ public sealed class CustomAlertCoreMigrationTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, System.StringComparison.Ordinal);
         Assert.Contains("hasCustomAlertCore", viewer, System.StringComparison.Ordinal);
 
+        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
+
         var method = typeof(ViewerDataService)
             .GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* Every sentinel from this one DOWN is present and everything NEWER is absent — a store migrated
-           to exactly this rung, which must map to exactly this rung rather than falling through. Built by
-           reflection so the arity tracks the signature as later rungs land. */
-        var atThisRung = Enumerable.Repeat((object)true, arity).ToArray();
+        /* Not the top rung any more, so this sentinel is not the last argument. */
+        Assert.True(ProbeOrdinal < arity - 1);
+
+        /* A store migrated to exactly V116 — this rung's sentinel true and every LATER sentinel false —
+           maps to 116. Future-proof against further rungs: it turns off everything above this ordinal. */
+        var toThisRung = Enumerable.Repeat((object)true, arity).ToArray();
         for (var i = ProbeOrdinal + 1; i < arity; i++)
         {
-            atThisRung[i] = false;
+            toThisRung[i] = false;
         }
 
-        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
+        Assert.Equal(RungVersion, (int)method.Invoke(null, toThisRung)!);
 
-        /* One rung behind: this sentinel absent too reports 115 (the previous rung). */
-        atThisRung[ProbeOrdinal] = false;
-        Assert.Equal(PreviousVersion, (int)method.Invoke(null, atThisRung)!);
+        /* One rung behind: this sentinel AND every later one false must report 115. Without it the arm
+           above could be satisfied by an unconditional return and nothing would notice. */
+        var behind = (object[])toThisRung.Clone();
+        behind[ProbeOrdinal] = false;
+        Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
     }
 }

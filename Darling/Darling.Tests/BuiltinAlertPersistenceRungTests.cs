@@ -18,18 +18,18 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// V117 / #3282: the built-in alert catalog's persistence-gate state (config.alert_persistence_state).
-/// This carries the "I am the top rung" claims that moved off <see cref="CustomAlertCoreMigrationTests"/>
-/// (V116) when this rung landed — a fully-migrated store must map to EXACTLY this version, or the viewer's
+/// V118 / #3282: the built-in alert catalog's persistence-gate state (config.alert_persistence_state).
+/// This carries the "I am the top rung" claims that moved off <see cref="MuteRuleReloadBeaconTests"/>
+/// (V117) when this rung landed — a fully-migrated store must map to EXACTLY this version, or the viewer's
 /// connect-time gate refuses a store that is actually current.
 /// </summary>
 public sealed class BuiltinAlertPersistenceRungTests
 {
-    private const int RungVersion = 117;
-    private const int PreviousVersion = 116;
+    private const int RungVersion = 118;
+    private const int PreviousVersion = 117;
 
     /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
-    private const int ProbeOrdinal = 92;
+    private const int ProbeOrdinal = 93;
 
     [Fact]
     public void TheRungIsRegisteredAtTheTopOfADenseLadder()
