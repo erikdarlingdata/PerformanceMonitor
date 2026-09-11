@@ -209,34 +209,50 @@ public sealed class BuiltinAlertPersistenceRungTests
     }
 
     /// <summary>
-    /// An incident that OPENS AND CLOSES inside one pass delivers nothing. Reachable only on the
-    /// PostgreSQL side and only because of how the metric arrives: Performance Insights is sampled every
-    /// 60 seconds while <c>pg_cpu_utilization</c> is a five-minute collector, so one batch can hold a whole
-    /// three-minute excursion that had already ended before the data was handed over.
+    /// AT MOST ONE EDGE PER PASS, which is the invariant that makes a whole defect class unreachable
+    /// rather than guarded.
     ///
-    /// <para>This is the defect the batch read introduced and it had to be closed rather than accepted:
-    /// without it the falling edge is delivered on its own, which is a recovery notice for a message
-    /// nobody received. Delivering both instead would be the unactionable pair the issue was filed about,
-    /// for an excursion nobody could have looked at. The same call <c>CustomAlertEvaluator</c> makes on the
-    /// same gate — it resolves only an incident that was actually delivered.</para>
+    /// <para>The batch read introduced it. Accumulating a batch's edges into flags and deciding at the end
+    /// compresses a SEQUENCE into a summary, and that lost an edge twice: first a fire and a resolve for
+    /// the same incident flattening into "both happened", then — the review catch — a pre-existing
+    /// incident's resolve being overwritten by a later, unrelated fire in the same batch, so nobody heard
+    /// that the incident they had open was over. Confirmed reachable at seven samples
+    /// (CpuClearSamples + CpuBreachSamples + CpuClearSamples), well inside the batch limit and the
+    /// freshness window, i.e. one restart or one collector gap.</para>
+    ///
+    /// <para>Stopping at the first edge makes both instances impossible, and makes this pass the same
+    /// shape as AlertEngine's SQL Server twin: one observation, one edge, the fire and resolve arms
+    /// mutually exclusive by construction. So what is pinned is the <c>break</c> and the absence of the
+    /// accumulators — a reintroduced flag is the return of the category.</para>
     /// </summary>
     [Fact]
-    public void AnIncidentThatOpensAndClosesInOnePass_DeliversNothing()
+    public void ThePassStopsAtTheFirstEdge_SoNoEdgeSequenceIsEverFlattened()
     {
         var body = EvaluatePgCpuBody();
 
-        Assert.Contains("if (fired && resolved)", body, StringComparison.Ordinal);
+        /* The edge is taken and the loop stops. */
+        Assert.Contains("if (evaluation.Outcome != PersistenceOutcome.None)", body, StringComparison.Ordinal);
+        var edge = body.IndexOf("if (evaluation.Outcome != PersistenceOutcome.None)", StringComparison.Ordinal);
+        var close = body.IndexOf("\n            }", edge, StringComparison.Ordinal);
+        Assert.True(close > edge, "the edge arm's end was not found, so this pin would read nothing");
+        Assert.Contains("break;", body[edge..close], StringComparison.Ordinal);
 
-        /* The guard has to sit BEFORE both delivery arms, or it guards nothing. */
-        var guard = body.IndexOf("if (fired && resolved)", StringComparison.Ordinal);
-        var fire = body.IndexOf("if (record.State.Firing && breaching)", StringComparison.Ordinal);
-        var resolve = body.IndexOf("else if (resolved)", StringComparison.Ordinal);
-        Assert.True(guard >= 0 && fire > guard, "the same-pass guard must precede the fire arm");
-        Assert.True(resolve > guard, "the same-pass guard must precede the resolve arm");
+        /* And the accumulators are GONE. Either one coming back is the category returning, because both
+           lost edges were produced by exactly this shape. */
+        Assert.DoesNotContain("bool fired = false", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("bool resolved = false", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("fired && resolved", body, StringComparison.Ordinal);
 
-        /* And it must not skip the state write, or the streak it just completed would be replayed. */
+        /* The two arms read the ONE edge, so they cannot both run. */
+        Assert.Contains("else if (outcome == PersistenceOutcome.Resolve)", body, StringComparison.Ordinal);
+
+        /* One more route to the same loss, closed by the same break: an edge taken but not persisted would
+           be replayed or skipped depending on which side of the save it fell. The save is after the loop
+           and before both arms, so the state at the edge is committed whatever the arms do. */
         var save = body.IndexOf("stateStore.SaveAlertPersistenceAsync", StringComparison.Ordinal);
-        Assert.True(save >= 0 && save < guard, "the state save must happen before the same-pass early return");
+        var fire = body.IndexOf("if (record.State.Firing && breaching)", StringComparison.Ordinal);
+        Assert.True(save > edge, "the state save must come after the loop that takes the edge");
+        Assert.True(fire > save, "the state save must come before the delivery arms");
     }
 
     /// <summary>

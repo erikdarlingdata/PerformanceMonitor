@@ -3628,8 +3628,27 @@ public sealed class DarlingWorker : BackgroundService
             readClock.Restart();
 
             var record = priorRecord;
-            bool fired = false;
-            bool resolved = false;
+
+            /* AT MOST ONE EDGE PER PASS. The loop stops at the first Fire or Resolve and leaves the rest of
+               the batch for the next sweep, 30 seconds later (s_alertSweepInterval) — not the collector's
+               five minutes, which is what makes this cheap.
+
+               This is a STRUCTURAL fix rather than a guard, and it replaces one. Accumulating the batch's
+               edges into flags and deciding at the end loses information, and it lost it twice: a fire and
+               a resolve for the same incident flattened into "both happened", and then — the review catch —
+               a pre-existing incident's resolve overwritten by a later, unrelated fire in the same batch,
+               so the operator never heard that the incident they had open was over. Two instances, one
+               category: a SEQUENCE of edges compressed into a summary. Stopping at the first edge makes the
+               category unreachable instead of guarding its members, and it makes this pass the same shape as
+               AlertEngine's SQL Server twin, where one sweep is one observation and the fire and resolve
+               arms are mutually exclusive by construction.
+
+               The cost is stated rather than hidden: after a restart or a collector gap, a whole excursion
+               can arrive as a fire and then a resolve one sweep apart. That is what happened — the condition
+               did hold for CpuBreachSamples samples and did then clear — and reporting both is the only
+               option that cannot drop an edge, which is the property that failed twice. In steady state the
+               30-second sweep sees each sample on its own and this never arises. */
+            var outcome = PersistenceOutcome.None;
             DarlingPgCpuUtilizationReader.CpuSample? lastCounted = null;
             double? lastCapacityPercent = null;
 
@@ -3667,14 +3686,10 @@ public sealed class DarlingWorker : BackgroundService
                 lastCounted = sample;
                 lastCapacityPercent = capacityPercent;
 
-                if (evaluation.Outcome == PersistenceOutcome.Fire)
+                if (evaluation.Outcome != PersistenceOutcome.None)
                 {
-                    fired = true;
-                    resolved = false;
-                }
-                else if (evaluation.Outcome == PersistenceOutcome.Resolve)
-                {
-                    resolved = true;
+                    outcome = evaluation.Outcome;
+                    break;
                 }
             }
 
@@ -3688,25 +3703,6 @@ public sealed class DarlingWorker : BackgroundService
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
             bool breaching = lastCapacityPercent.HasValue
                 && lastCapacityPercent.Value >= alertSettings.CpuThresholdPercent;
-
-            if (fired && resolved)
-            {
-                /* The incident OPENED AND CLOSED inside one pass. Reachable only here and only because of
-                   how this metric arrives: Performance Insights is sampled every 60 seconds but
-                   pg_cpu_utilization is a five-minute collector, so a batch can hold CpuBreachSamples
-                   breaches followed by CpuClearSamples clears — a genuine three-minute excursion that had
-                   already ended before the data was handed over.
-
-                   Nothing is delivered, which is the same call CustomAlertEvaluator makes on the same gate:
-                   it resolves only an incident that was actually delivered. The alternative shapes are both
-                   worse. A resolve alone is a recovery notice for a message nobody received. A fire and a
-                   resolve microseconds apart is the unactionable pair #3282 was filed about, and there was
-                   no instant at which anyone could have looked at this one. The excursion is not lost — it
-                   is in pg_cpu_utilization, which is where a reader would go for a condition that has
-                   already ended. The full cycle is already persisted by the save above, so the next
-                   excursion fires normally. */
-                return;
-            }
 
             if (record.State.Firing && breaching)
             {
@@ -3768,7 +3764,7 @@ public sealed class DarlingWorker : BackgroundService
                     cancellationToken);
                 readClock.Restart();
             }
-            else if (resolved)
+            else if (outcome == PersistenceOutcome.Resolve)
             {
                 /* The falling edge is the gate's, after CpuClearSamples consecutive clears, rather than the
                    first sample under the bar. It still says which of the two happened rather than claiming
