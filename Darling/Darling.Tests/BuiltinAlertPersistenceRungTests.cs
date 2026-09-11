@@ -170,9 +170,28 @@ public sealed class BuiltinAlertPersistenceRungTests
         Assert.DoesNotContain("breachSamples: 3", body, StringComparison.Ordinal);
         Assert.DoesNotContain("clearSamples: 2", body, StringComparison.Ordinal);
 
-        /* The batch read, and NOT the single-latest read it replaced. */
+        /* TWO READS, TWO ROLES, and the roles are what is pinned rather than which names appear.
+           The first spelling of this pin asserted GetLatestAsync was ABSENT, which encoded "the batch
+           replaced it" — and that was the wrong property. The gate counts new samples, so it reads the
+           batch. The standing-condition REMINDER asks whether the condition is still there, which is a
+           different question and has to be answerable on a sweep that brought no new sample: the sweep is
+           30 seconds and the collector is five minutes, so most sweeps bring none. Asserting a name's
+           absence made a parity break look correct — the reminder's cadence silently capped at the
+           collector interval instead of the configured cooldown (review catch). */
         Assert.Contains("GetSamplesSinceAsync", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("GetLatestAsync", body, StringComparison.Ordinal);
+
+        /* The gate's observation is the batch's sample, never the fallback reading. */
+        var gate = body.IndexOf("AlertPersistenceGate.Evaluate", StringComparison.Ordinal);
+        var fallback = body.IndexOf("GetLatestAsync", StringComparison.Ordinal);
+        Assert.True(fallback > gate, "the latest-reading fallback must sit AFTER the gate loop, so it cannot advance the gate");
+
+        /* And it is reached only when the batch brought nothing AND an incident is open — it exists for
+           the reminder, not as a second way to observe. */
+        Assert.Contains("if (!lastCapacityPercent.HasValue && record.State.Firing)", body, StringComparison.Ordinal);
+
+        /* breaching is computed AFTER the fallback, or the fallback informs nothing. */
+        var breaching = body.IndexOf("bool breaching = lastCapacityPercent.HasValue", StringComparison.Ordinal);
+        Assert.True(breaching > fallback, "breaching must be computed after the fallback that populates it");
 
         /* It persists through the same seam under the same subject key, so a restart does not re-announce
            an open incident and the two engines' rows are one shape. */

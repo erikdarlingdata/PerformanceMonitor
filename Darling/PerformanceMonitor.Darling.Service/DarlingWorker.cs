@@ -3701,6 +3701,41 @@ public sealed class DarlingWorker : BackgroundService
             }
 
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
+
+            /* THE REMINDER'S LEVEL IS THE LATEST KNOWN READING, not only a reading new to this pass — the
+               two are different questions and only the gate cares about newness.
+
+               The batch is empty on most sweeps by design: the sweep is 30 seconds and pg_cpu_utilization
+               is a five-minute collector, so about nine sweeps in ten see no new sample. Deriving
+               `breaching` from the batch alone therefore skipped the standing-condition reminder on those
+               sweeps, which capped its cadence at the COLLECTOR interval instead of the configured
+               cooldown. Masked at the default 15-minute cooldown, silent at any cooldown shorter than five
+               minutes, and a parity break with AlertEngine.CheckCpuAsync — which computes `breaching`
+               unconditionally from the latest reading every sweep — of exactly the kind the comment below
+               claims does not exist. Review catch; the pre-batch code had this property for free because it
+               re-read the latest reading every sweep, and the batch rewrite dropped it on this engine only.
+
+               So: fall back to that same single-latest read when the batch brought nothing, and use it for
+               the reminder decision ONLY. It never advances the gate and never moves the observed-sample
+               watermark, because it is not a new observation — it is the answer to "is the condition still
+               standing". At most one store read per sweep either way, which is what the pre-batch code
+               cost. And it is the read with the 15-minute freshness bound, so a collector that stops does
+               not leave the reminder firing forever on an hours-old reading. */
+            if (!lastCapacityPercent.HasValue && record.State.Firing)
+            {
+                var standing = await DarlingPgCpuUtilizationReader.GetLatestAsync(
+                    _postgres, runtime.ServerId, now, cancellationToken);
+                readClock.Restart();
+                if (standing is not null)
+                {
+                    lastCapacityPercent = FleetCpuProvenance.CpuBandInputPercent(
+                        standing.CpuPercent, standing.AcuUtilizationPercent, FleetCpuSource.PerformanceInsights);
+                    lastCounted = new DarlingPgCpuUtilizationReader.CpuSample(
+                        standing.SampleTimeUtc, standing.CpuPercent, standing.AcuUtilizationPercent,
+                        standing.ServerlessCapacityAcu, standing.MaxConfiguredAcu);
+                }
+            }
+
             bool breaching = lastCapacityPercent.HasValue
                 && lastCapacityPercent.Value >= alertSettings.CpuThresholdPercent;
 
