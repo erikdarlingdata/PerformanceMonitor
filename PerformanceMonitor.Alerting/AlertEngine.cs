@@ -1743,25 +1743,20 @@ public sealed class AlertEngine
                    different labels, which since #3297 delivers every channel the same facts twice — the
                    fields are the canonical copy per #2109, so the restatement is what goes. The one thing
                    the prose said that the fields did not (no baseline yet) is a field now. */
-                var stateContext = new AlertContext();
-                stateContext.Details.Add(new AlertDetailItem
+                var stateFields = new List<(string Label, string Value)>
                 {
-                    Heading = dbName,
-                    Fields = pending
-                        ? new()
-                        {
-                            ("Database", dbName),
-                            ("Current State", stateText),
-                            ("Expected State", expectedText),
-                            ("Baseline", "none — first observed in a critical state")
-                        }
-                        : new()
-                        {
-                            ("Database", dbName),
-                            ("Current State", stateText),
-                            ("Expected State", expectedText)
-                        }
-                });
+                    ("Database", dbName),
+                    ("Current State", stateText),
+                    ("Expected State", expectedText)
+                };
+
+                if (pending)
+                {
+                    stateFields.Add(("Baseline", "none — first observed in a critical state"));
+                }
+
+                var stateContext = new AlertContext();
+                stateContext.Details.Add(new AlertDetailItem { Heading = dbName, Fields = stateFields });
 
                 var detailText = AlertContextBuilders.ContextToDetailText(stateContext);
 
