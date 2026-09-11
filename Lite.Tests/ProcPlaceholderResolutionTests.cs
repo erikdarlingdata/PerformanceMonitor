@@ -129,6 +129,10 @@ public sealed class ProcPlaceholderResolutionTests
     [InlineData("Proc [Database Id = 7 Object Identifier = 1790404501]")]
     [InlineData("Proc [Database Id =  7 Object Id = 1790404501]")]
     [InlineData("proc [database id = 7 object id = 1790404501]")]
+    /* Text that merely OPENS with the placeholder. Resolve replaces the WHOLE input, so over-matching
+       here would silently discard whatever followed instead of declining. */
+    [InlineData("Proc [Database Id = 7 Object Id = 1790404501] and then some")]
+    [InlineData("Proc [Database Id = 7 Object Id = 1790404501x")]
     [InlineData("")]
     [InlineData(null)]
     public void TryParse_DeclinesAnythingThatIsNotTheShape(string? text)

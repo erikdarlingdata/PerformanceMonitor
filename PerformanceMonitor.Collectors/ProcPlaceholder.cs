@@ -121,7 +121,8 @@ OPTION(RECOMPILE);";
     /// complaining. Both arms carry a fixture.</para>
     ///
     /// <para>The object id may be negative (system objects), the database id never is. Anything that is not
-    /// the full shape returns false and leaves the text alone, rather than the references' behaviour of
+    /// the full shape — INCLUDING text that merely opens with it and carries something after the closing
+    /// bracket — returns false and leaves the text alone, rather than the references' behaviour of
     /// matching on the prefix and then letting an implicit int conversion decide.</para>
     /// </summary>
     public static bool TryParse(string? text, out ProcPlaceholderId id)
@@ -135,7 +136,7 @@ OPTION(RECOMPILE);";
 
         var rest = text.AsSpan();
         var lead = 0;
-        while (lead < rest.Length && IsLeadingNoise(rest[lead]))
+        while (lead < rest.Length && IsIgnorablePadding(rest[lead]))
         {
             lead++;
         }
@@ -164,6 +165,31 @@ OPTION(RECOMPILE);";
         if (!TakeInteger(ref rest, allowSign: true, out var objectId))
         {
             return false;
+        }
+
+        /* The closing bracket AND nothing but padding after it, which is what the doc comment's "full
+           shape" claim needs to be true. Without this the parse returns true for any text that merely
+           OPENS with the placeholder — and Resolve replaces the WHOLE input, so whatever followed would
+           be silently discarded rather than declined. SQL Server writes the placeholder as the entire
+           inputbuf value (space-padded: "]   "), so requiring it costs no coverage. A value truncated
+           before the bracket is still accepted: the ids are the thing being read, and declining would
+           throw away the only answer available. */
+        if (!rest.IsEmpty)
+        {
+            if (rest[0] != ']')
+            {
+                return false;
+            }
+
+            rest = rest[1..];
+
+            for (var i = 0; i < rest.Length; i++)
+            {
+                if (!IsIgnorablePadding(rest[i]))
+                {
+                    return false;
+                }
+            }
         }
 
         id = new ProcPlaceholderId(databaseId, objectId);
@@ -277,10 +303,11 @@ OPTION(RECOMPILE);";
     }
 
     /// <summary>
-    /// What may precede the placeholder: the references' <c>@inputbuf_bom</c> line feed and any other
-    /// whitespace, plus a real byte-order mark, which trimming leaves behind.
+    /// What may surround the placeholder without changing it: the references' <c>@inputbuf_bom</c> line
+    /// feed and any other whitespace, plus a real byte-order mark, which trimming leaves behind. Used on
+    /// both ends — SQL Server leads the value with a newline and pads it with spaces.
     /// </summary>
-    private static bool IsLeadingNoise(char c) => c == '\uFEFF' || char.IsWhiteSpace(c);
+    private static bool IsIgnorablePadding(char c) => c == '\uFEFF' || char.IsWhiteSpace(c);
 
     /// <summary>Consumes the digits (and optional sign) at the head of <paramref name="rest"/>.</summary>
     private static bool TakeInteger(ref ReadOnlySpan<char> rest, bool allowSign, out int value)
