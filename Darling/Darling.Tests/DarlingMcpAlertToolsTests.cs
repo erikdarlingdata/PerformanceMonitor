@@ -292,6 +292,11 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
             .Select(t => SelectedColumnsOf(t).ToArray())
             .ToArray();
 
+        /* A count comparison is satisfied by two empty sets, and an emptied SELECT list is exactly the
+           accident that would produce them -- so each plane is asserted non-empty first. */
+        Assert.Equal(DarlingMcpAlertTools.WritableTables.Length, byTable.Length);
+        Assert.All(byTable, columns => Assert.NotEmpty(columns));
+
         Assert.Equal(
             byTable.Sum(columns => columns.Length),
             byTable.SelectMany(columns => columns).Distinct(StringComparer.Ordinal).Count());
