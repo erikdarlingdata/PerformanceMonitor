@@ -558,68 +558,32 @@ jobs:
           Remove-Item "releases/PerformanceMonitorDarling-$version.zip" -ErrorAction SilentlyContinue
           Compress-Archive -Path 'signed/Darling/*' -DestinationPath "releases/PerformanceMonitorDarling-$version.zip" -Force
 
-      # The Velopack (Setup.exe) path publishes a SEPARATE self-contained build
-      # (publish/Dashboard-velopack, publish/Lite-velopack -- see the "self-contained
-      # for Velopack" steps above) that previously went straight into `vpk pack`
-      # without ever being uploaded to SignPath. Only the framework-dependent trees
-      # used for the legacy ZIPs were signed, so every Setup.exe shipped unsigned
-      # since Velopack packaging was introduced. These steps close that gap by
-      # mirroring the exact upload/sign pattern used for Dashboard/Lite/Installer
-      # above, and vpk pack below now reads from the signed output.
-      - name: Upload Lite (Velopack) for signing
-        if: github.event_name == 'release'
-        id: upload-lite-velopack
-        uses: actions/upload-artifact@v6
-        with:
-          name: Lite-Velopack-unsigned
-          path: publish/Lite-velopack/
-
-      - name: Upload Darling Viewer (Velopack) for signing
-        if: github.event_name == 'release'
-        id: upload-darlingviewer-velopack
-        uses: actions/upload-artifact@v6
-        with:
-          name: DarlingViewer-Velopack-unsigned
-          path: publish/DarlingViewer-velopack/
-
-      - name: Sign Lite (Velopack)
-        if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
-          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
-          project-slug: 'PerformanceMonitor'
-          signing-policy-slug: 'release-signing'
-          artifact-configuration-slug: 'Lite'
-          github-artifact-id: '${{ steps.upload-lite-velopack.outputs.artifact-id }}'
-          wait-for-completion: true
-          output-artifact-directory: 'signed/Lite-Velopack'
-
-      # The remote-seat viewer Setup.exe (#1555) is signed with its OWN 'DarlingViewer' artifact
-      # configuration — the co-located-zip 'Darling' slug signs a service+viewer\ tree layout, which
-      # does not match this self-contained viewer-at-root publish. Like the 'Darling' slug, the
-      # 'DarlingViewer' config (which files get signed) lives outside this repo on signpath.io; until
-      # Erik creates the slug this step fails the release — the standing #1340 SignPath prerequisite.
-      - name: Sign Darling Viewer (Velopack)
-        if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
-          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
-          project-slug: 'PerformanceMonitor'
-          signing-policy-slug: 'release-signing'
-          artifact-configuration-slug: 'DarlingViewer'
-          github-artifact-id: '${{ steps.upload-darlingviewer-velopack.outputs.artifact-id }}'
-          wait-for-completion: true
-          output-artifact-directory: 'signed/DarlingViewer-Velopack'
-
+      # #3288: the Velopack payload is no longer signed here. `vpk pack` signs it itself via
+      # --signTemplate, which is the ONLY way to reach the three executables Velopack GENERATES
+      # after packing -- the portable launcher stub, Update.exe and Setup.exe. Those cannot be
+      # signed afterwards: re-signing a file inside a .nupkg changes that package's bytes, which
+      # invalidates the SHA256 and Size recorded in releases.<channel>.json and patched against
+      # by delta packages. Two pre-pack rounds were removed here; --signParallel 50 makes the
+      # in-pack signing two invocations per product, so the release goes from 4 approvals to 6.
       - name: Create Velopack releases (Lite + Darling Viewer)
         if: github.event_name == 'release'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.VERSION }}
+          # Consumed by .github/scripts/sign-batch.ps1, which vpk invokes per batch.
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORG_ID: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
+          SIGNPATH_PROJECT_SLUG: 'PerformanceMonitor'
+          SIGNPATH_POLICY_SLUG: 'release-signing'
+          # A repository variable rather than a literal: the artifact configuration for a flat
+          # batch of PE files is created on signpath.io, and a step naming a slug that does not
+          # exist fails the release -- the standing lesson from the DarlingViewer slug.
+          SIGNPATH_CONFIG_SLUG: ${{ vars.SIGNPATH_CONFIG_SLUG }}
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:SIGNPATH_CONFIG_SLUG)) {
+            throw 'SIGNPATH_CONFIG_SLUG repository variable is not set; set it to the batch artifact configuration slug before cutting a release.'
+          }
           # Pin vpk to the Velopack library version (keep in sync with the Velopack
           # PackageReference in PerformanceMonitorLite.csproj).
           dotnet tool install -g vpk --version 1.2.0
@@ -628,13 +592,13 @@ jobs:
 
           # Lite: download previous + pack (from the SIGNED velopack output, not the raw publish dir)
           vpk download github --repoUrl https://github.com/${{ github.repository }} --channel lite -o releases/velopack-lite --token $env:GH_TOKEN
-          vpk pack -u PerformanceMonitorLite -v $env:VERSION -p signed/Lite-Velopack -e PerformanceMonitorLite.exe -o releases/velopack-lite --channel lite
+          vpk pack -u PerformanceMonitorLite -v $env:VERSION -p publish/Lite-velopack -e PerformanceMonitorLite.exe -o releases/velopack-lite --channel lite --signParallel 50 --signTemplate "pwsh -NoProfile -File $env:GITHUB_WORKSPACE\.github\scripts\sign-batch.ps1 {{file...}}"
 
           # Darling Viewer remote-seat installer (#1555): download previous + pack (from the SIGNED
           # velopack output). Its own 'darlingviewer' channel/delta feed, separate from the co-located
           # viewer inside PerformanceMonitorDarling-*.zip (which stays plain-zip only).
           vpk download github --repoUrl https://github.com/${{ github.repository }} --channel darlingviewer -o releases/velopack-darlingviewer --token $env:GH_TOKEN
-          vpk pack -u PerformanceMonitorDarlingViewer -v $env:VERSION -p signed/DarlingViewer-Velopack -e PerformanceMonitor.Darling.Viewer.exe -o releases/velopack-darlingviewer --channel darlingviewer
+          vpk pack -u PerformanceMonitorDarlingViewer -v $env:VERSION -p publish/DarlingViewer-velopack -e PerformanceMonitor.Darling.Viewer.exe -o releases/velopack-darlingviewer --channel darlingviewer --signParallel 50 --signTemplate "pwsh -NoProfile -File $env:GITHUB_WORKSPACE\.github\scripts\sign-batch.ps1 {{file...}}"
 
       - name: Generate checksums
         if: github.event_name == 'release'
@@ -659,6 +623,17 @@ jobs:
             [Text.UTF8Encoding]::new($false))
           Write-Host "Checksums:"
           $checksums | ForEach-Object { Write-Host $_ }
+
+      # #3288's guard, and it lands WITH the fix rather than before it: on the pre-fix tree it
+      # fails immediately, because ten executables per release were unsigned. It walks the
+      # artifacts on disk -- including the executables INSIDE the zips and nupkgs, which is
+      # where the launcher stub and Update.exe live -- so it needs no network and no published
+      # release. `vpk pack` does not check that --signTemplate signed anything, so without this
+      # a template that silently declined would publish exactly what #3288 published twice.
+      - name: Assert every published executable is signed
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: python3 .github/scripts/verify_release_signatures.py --verify-dir releases
 
       - name: Upload release assets
         if: github.event_name == 'release'
