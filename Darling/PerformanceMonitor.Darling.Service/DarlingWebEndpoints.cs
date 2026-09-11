@@ -61,7 +61,11 @@ public static class DarlingWebEndpoints
     /// vocabulary that <c>describe_custom_view_catalog</c> mirrors), not a <c>/api/read/{tool}</c> query-string mirror;
     /// and the alert-tuning tools (<c>update_alert_settings</c> / <c>create_mute_rule</c> / <c>delete_mute_rule</c>)
     /// WRITE the alert config, and the server-onboarding tools (<c>add_servers</c> / <c>remove_server</c>) WRITE the
-    /// monitored-server registry, so — like <c>mute_analysis_finding</c> — they have no read endpoint.</summary>
+    /// monitored-server registry, so — like <c>mute_analysis_finding</c> — they have no read endpoint. The
+    /// custom-alert-rule tools (#3285) are the same disposition as the Custom Views tools: <c>create</c> /
+    /// <c>update</c> / <c>delete</c> write <c>config.custom_alert_rules</c> and <c>get</c> / <c>list</c> /
+    /// <c>validate_custom_alert_rule</c> read/validate against the compose catalog, none a <c>/api/read/{tool}</c>
+    /// mirror.</summary>
     public static readonly IReadOnlySet<string> ExcludedToolNames = new HashSet<string>(StringComparer.Ordinal)
     {
         "analyze_server",
@@ -83,6 +87,12 @@ public static class DarlingWebEndpoints
         "delete_mute_rule",
         "add_servers",
         "remove_server",
+        "create_custom_alert_rule",
+        "get_custom_alert_rule",
+        "list_custom_alert_rules",
+        "update_custom_alert_rule",
+        "delete_custom_alert_rule",
+        "validate_custom_alert_rule",
     };
 
     /// <summary>The window (hours) the fleet card blocking / deadlock counts default to — the WPF Overview's window.</summary>
