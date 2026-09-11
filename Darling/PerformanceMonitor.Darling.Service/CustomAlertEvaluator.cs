@@ -296,24 +296,39 @@ public sealed class CustomAlertEvaluator
         await _stateStore.SaveAsync(row.Id, serverId, newState, cancellationToken);
     }
 
-    private async Task<double?> RunScalarAsync(
+    private Task<double?> RunScalarAsync(
         CustomAlertRuleDefinition def, string storageName, DateTime now, RollupAvailability rollups, RollupCoverage coverage,
-        int composedSeconds, CancellationToken cancellationToken)
-    {
-        var end = now;
-        var start = now.AddHours(-def.WindowHours);
-        var context = new ComposeRunContext(
-            new[] { storageName }, start, end, ComposeRunContext.NoVariables, rollups, now, coverage);
+        int composedSeconds, CancellationToken cancellationToken) =>
+        EvaluateScalarNowAsync(_viewer, def, storageName, now, rollups, coverage, composedSeconds, _logger, cancellationToken);
 
-        var (compiled, compileError) = ComposeCompiler.Compile(def.Plan, context);
+    /// <summary>
+    /// Compiles the rule's Scalar metric scoped to ONE server and reads its current value on the given
+    /// least-privilege pool — the SINGLE shared value computation the sweep and the <c>test_custom_alert_rule</c>
+    /// evaluate-now tool (#3299) both call, so a "would fire" preview can never diverge from what the sweep
+    /// actually computes. Returns null for no-data (an empty window, or an always-NULL measure) AND for a metric
+    /// that no longer compiles (logged); the caller treats null as "no value", never a breach.
+    /// <para><b>Pool discipline (Component 4 R2-SEC):</b> <paramref name="pool"/> MUST be a least-privilege role
+    /// that carries the <c>statement_timeout</c> cap and the secret-column ACL — the worker's dedicated viewer
+    /// pool on the sweep, or the MCP host's mcp-role pool from the tool — NEVER the owner/superuser pool.</para>
+    /// </summary>
+    public static async Task<double?> EvaluateScalarNowAsync(
+        NpgsqlDataSource pool, CustomAlertRuleDefinition definition, string storageName, DateTime nowUtc,
+        RollupAvailability rollups, RollupCoverage coverage, int composedQuerySeconds,
+        ILogger? logger, CancellationToken cancellationToken)
+    {
+        var start = nowUtc.AddHours(-definition.WindowHours);
+        var context = new ComposeRunContext(
+            new[] { storageName }, start, nowUtc, ComposeRunContext.NoVariables, rollups, nowUtc, coverage);
+
+        var (compiled, compileError) = ComposeCompiler.Compile(definition.Plan, context);
         if (compileError is not null || compiled is null)
         {
-            _logger.LogWarning("Custom alert metric failed to compile: {Error}", compileError);
+            logger?.LogWarning("Custom alert metric failed to compile: {Error}", compileError);
             return null;
         }
 
-        await using var command = _viewer.CreateCommand(compiled.Sql);
-        command.CommandTimeout = composedSeconds;
+        await using var command = pool.CreateCommand(compiled.Sql);
+        command.CommandTimeout = composedQuerySeconds;
         foreach (var parameter in compiled.Parameters)
         {
             command.Parameters.Add(parameter);
@@ -321,6 +336,23 @@ public sealed class CustomAlertEvaluator
 
         var scalar = await command.ExecuteScalarAsync(cancellationToken);
         return scalar is null or DBNull ? null : Convert.ToDouble(scalar, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Maps a one-shot scalar value to a would-fire verdict for the evaluate-now tool (#3299): no-data (null)
+    /// and a non-breaching value both return <c>(false, null)</c>; a breaching value returns
+    /// <c>(true, def.SeverityFor(value))</c> — the SAME predicate + severity tier the sweep applies. This is the
+    /// INSTANTANEOUS half only: a real fire also requires the condition to hold across the rule's hysteresis
+    /// (breach/clear samples) and per-server streak, which a one-shot cannot reproduce — the tool states so.
+    /// </summary>
+    public static (bool Breaching, AlertSeverityLevel? Severity) ClassifyTestValue(CustomAlertRuleDefinition definition, double? value)
+    {
+        if (value is not double v || !definition.IsBreaching(v))
+        {
+            return (false, null);
+        }
+
+        return (true, definition.SeverityFor(v));
     }
 
     private async Task DeliverFireAsync(

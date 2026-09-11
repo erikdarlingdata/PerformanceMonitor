@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -255,6 +256,125 @@ public sealed class DarlingMcpCustomAlertTools
         catch (Exception ex)
         {
             return McpHelpers.FormatError("delete_custom_alert_rule", ex);
+        }
+    }
+
+    /// <summary>The caveat every evaluate-now result carries: the one-shot predicate is only half of "would it
+    /// fire" — the running evaluator also gates on hysteresis and per-server streak state.</summary>
+    private const string HysteresisNote =
+        "This evaluates the metric ONCE and applies the predicate right now; it does NOT apply the rule's " +
+        "hysteresis (breachSamples/clearSamples) or per-server streak state, and delivers/persists nothing. " +
+        "So breaching:true means the condition is true this instant (it would start counting toward a fire), " +
+        "not that the rule has fired. A null current_value is no-data and never breaches.";
+
+    [McpServerTool(Name = "test_custom_alert_rule"), Description(
+        "Evaluate-now: for a SAVED rule (rule_id) OR a supplied definition, compiles the rule's metric and reads " +
+        "its CURRENT value on each in-scope monitored server, reporting the value and whether it WOULD breach " +
+        "(and at which severity tier) right now - WITHOUT delivering a notification, writing history, or touching " +
+        "any per-server streak state. Pass EXACTLY ONE of rule_id or definition (definition is validated but not " +
+        "saved, same shape as validate_custom_alert_rule). Returns per-server {server, current_value, breaching, " +
+        "severity}. IMPORTANT: this is the INSTANTANEOUS predicate only - a real alert also requires the " +
+        "condition to persist across the rule's hysteresis (breachSamples/clearSamples) and per-server streak, " +
+        "which a one-shot cannot reproduce, so breaching:true means 'true right now', not 'has fired'. A null " +
+        "current_value is no-data (an empty window, or a measure that is NULL for that server) and never breaches.")]
+    public static async Task<string> TestCustomAlertRule(
+        NpgsqlDataSource postgres,
+        [Description("The id of a SAVED rule to test (from list_custom_alert_rules). Provide this OR definition, not both.")] long? rule_id = null,
+        [Description("A rule definition JSON to test WITHOUT saving it (same shape as validate_custom_alert_rule). Provide this OR rule_id.")] string? definition = null)
+    {
+        try
+        {
+            // Exactly one input: rule_id XOR definition (== is true when both provided or both omitted).
+            if (rule_id.HasValue == (definition is not null))
+            {
+                return Outcome("invalid", "Provide exactly one of rule_id or definition.");
+            }
+
+            long? resolvedId = null;
+            string? ruleName = null;
+            CustomAlertRuleDefinition def;
+
+            if (rule_id.HasValue)
+            {
+                var store = new CustomAlertRuleStore(postgres);
+                var got = await store.GetAsync(rule_id.Value);
+                if (got is not CustomAlertRuleResult.Ok ok || ok.Rule is null)
+                {
+                    return Outcome("not_found", $"No custom alert rule with id {rule_id.Value}.");
+                }
+
+                var (parsedSaved, savedError) = CustomAlertRuleDefinition.TryParse(ok.Rule.DefinitionJson);
+                if (parsedSaved is null || savedError is not null)
+                {
+                    // A drifted saved rule: surface the validator error rather than throwing (test-now on a
+                    // broken rule should say WHY it can't run, the way the health surface flags it).
+                    return Outcome("invalid", $"The saved rule no longer validates: {savedError}");
+                }
+
+                def = parsedSaved;
+                resolvedId = ok.Rule.Id;
+                ruleName = ok.Rule.Name;
+            }
+            else
+            {
+                var (parsed, error) = CustomAlertRuleDefinition.TryParse(definition!);
+                if (parsed is null || error is not null)
+                {
+                    return Outcome("invalid", error ?? "definition is invalid.");
+                }
+
+                def = parsed;
+            }
+
+            // In-scope = the enabled monitored servers the rule applies to (the same AppliesTo the sweep uses).
+            var servers = await DarlingServerResolver.LoadEnabledAsync(postgres);
+            var inScope = servers.Where(s => def.AppliesTo(s.ServerName)).ToList();
+            if (inScope.Count == 0)
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    status = "no_in_scope_servers",
+                    rule_id = resolvedId,
+                    name = ruleName,
+                    note = HysteresisNote,
+                    results = Array.Empty<object>(),
+                }, McpHelpers.JsonOptions);
+            }
+
+            // Resolve the run context ONCE (window availability + the composed-query deadline), then run the
+            // SHARED per-server scalar seam the evaluator's sweep uses, so the value can never diverge. The
+            // mcp-role `postgres` is the least-privilege pool (statement_timeout + ACL) — never the owner pool.
+            var now = DateTime.UtcNow;
+            var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, CancellationToken.None);
+            var composedSeconds = await McpCommandDeadlines.ResolveComposedQuerySecondsAsync(postgres, CancellationToken.None);
+
+            var results = new List<object>(inScope.Count);
+            foreach (var server in inScope)
+            {
+                var value = await CustomAlertEvaluator.EvaluateScalarNowAsync(
+                    postgres, def, server.ServerName, now, rollups, coverage, composedSeconds, logger: null, CancellationToken.None);
+                var (breaching, severity) = CustomAlertEvaluator.ClassifyTestValue(def, value);
+                results.Add(new
+                {
+                    server = server.DisplayName ?? server.ServerName,
+                    current_value = value,
+                    breaching,
+                    severity = severity?.ToString(),
+                    no_data = value is null,
+                });
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                rule_id = resolvedId,
+                name = ruleName,
+                note = HysteresisNote,
+                results,
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("test_custom_alert_rule", ex);
         }
     }
 
