@@ -303,6 +303,24 @@ public sealed class CollectorContext
     public bool PerItemTextBudgetExceeded { get; set; }
 
     /// <summary>
+    /// <c>Proc [Database Id = N Object Id = M]</c> pairs this cycle's events turned out to need resolved
+    /// (#3307), filled by a definition's read method and read back by its
+    /// <see cref="ICollectorDefinition{TRow}.BuildSupplementalQuery"/>. Those two run against THIS object,
+    /// in that order, on the single-connection path — which is what lets one batched lookup serve every
+    /// event a cycle produced without the definition holding state of its own.
+    ///
+    /// <para>Empty in the common case: only <c>deadlocks</c> and <c>blocked_process_report</c> fill it, and
+    /// only when a captured statement actually came from a procedure invoked as an RPC. An empty list means
+    /// <c>BuildSupplementalQuery</c> returns null and the cycle costs no extra round trip.</para>
+    ///
+    /// <para>The Azure SQL DB per-database path fills it and never drains it — the host runs no
+    /// supplemental there — so those rows keep the raw placeholder. That is the documented degradation
+    /// rather than a separate outcome: <c>OBJECT_NAME</c> cannot read another database's metadata on Azure
+    /// SQL DB anyway, so the lookup would return NULL for exactly the rows the placeholder survives on.</para>
+    /// </summary>
+    public List<ProcPlaceholderId> ProcPlaceholderIds { get; } = new();
+
+    /// <summary>
     /// Milliseconds spent waiting for <c>ExecuteReaderAsync</c> to return for the item just read (#2164),
     /// set by the host around the open. Splits a batch's server time into the part the client cannot
     /// influence and the part it can:

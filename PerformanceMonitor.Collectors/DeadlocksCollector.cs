@@ -26,6 +26,12 @@ namespace PerformanceMonitor.Collectors;
 /// graph XML (parsed in the SQL/read phase — XElement.Parse is expensive and was previously
 /// misattributed as storage time). Session lifecycle (create/start/ensure) stays host-side; the
 /// session name lives here so the reader and the lifecycle can never disagree on it.
+///
+/// <para>#3307: a victim inside a stored procedure arrives as
+/// <c>Proc [Database Id = N Object Id = M]</c> — SQL Server has no batch text to write for an RPC — and
+/// the read notes the ids so <see cref="BuildSupplementalQuery"/> can resolve them to
+/// <c>schema.object</c> in one lookup per cycle. See <see cref="ProcPlaceholder"/> for why the parse is
+/// client-side and what happens when the lookup cannot answer.</para>
 /// </summary>
 public sealed class DeadlocksCollector : CollectorDefinitionBase<DeadlocksCollector.Row>
 {
@@ -316,6 +322,12 @@ OUTER APPLY
             var graphXml = reader.IsDBNull(2) ? null : reader.GetString(2);
             var victim = ExtractVictimFields(graphXml, victimProcessId);
 
+            /* #3307: a victim whose statement came from a procedure invoked as an RPC carries
+               "Proc [Database Id = N Object Id = M]" instead of the procedure name — SQL Server writes
+               the ids because there is no batch text to write. Note the pair here, in the read, and the
+               supplemental below resolves every one the cycle produced in a single lookup. */
+            ProcPlaceholder.Register(victim.SqlText, context.ProcPlaceholderIds);
+
             rows.Add(new Row
             {
                 DeadlockTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0),
@@ -338,6 +350,40 @@ OUTER APPLY
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// One batched <c>OBJECT_SCHEMA_NAME</c>/<c>OBJECT_NAME</c> lookup for every
+    /// <c>Proc [Database Id = N Object Id = M]</c> the cycle's victims turned out to carry (#3307), or null
+    /// when none did — which is most cycles, so the common case pays nothing.
+    ///
+    /// <para>The seam fits the job exactly: the host runs it on the SAME connection right after
+    /// <see cref="ReadAsync"/>, skips it on an empty primary, and isolates its failure — so a monitoring
+    /// login that cannot read the victim's database costs the cycle a debug line and leaves every
+    /// <c>victim_sql_text</c> exactly as the graph wrote it.</para>
+    /// </summary>
+    public override CollectorQuery? BuildSupplementalQuery(CollectorContext context)
+        => ProcPlaceholder.BuildResolutionQuery(context.ProcPlaceholderIds);
+
+    /// <summary>
+    /// Rewrites the placeholder to <c>schema.object</c> for every victim the lookup answered for, and
+    /// leaves the rest alone. A dropped object, or one in a database the monitoring login cannot see,
+    /// comes back NULL and is absent from the map, so the raw placeholder survives — it still names an
+    /// object id someone can resolve by hand, which a blank field or the word "unknown" does not.
+    /// </summary>
+    public override async ValueTask ApplySupplementalAsync(List<Row> rows, DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
+    {
+        var resolved = await ProcPlaceholder.ReadResolutionsAsync(reader, cancellationToken);
+
+        if (resolved.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var row in rows)
+        {
+            row.VictimSqlText = ProcPlaceholder.Resolve(row.VictimSqlText, resolved);
+        }
     }
 
     /// <summary>
