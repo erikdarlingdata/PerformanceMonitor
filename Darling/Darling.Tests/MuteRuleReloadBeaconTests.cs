@@ -9,6 +9,7 @@
 using System;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -109,12 +110,18 @@ public sealed class MuteRuleReloadBeaconTests
     {
         /* pg_trigger, not information_schema.triggers: that view lists only triggers on relations the current
            role owns or holds a non-SELECT privilege on, and the read-only viewer role holds neither here, so
-           it would report this rung absent on a store that is fully migrated. */
-        Assert.Contains(
-            "t.tgname = 'trg_bump_mute_rules'",
-            ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
-        Assert.Contains("FROM pg_trigger t", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("information_schema.triggers", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
+           it would report this rung absent on a store that is fully migrated.
+
+           Read over the probe with its block comments REMOVED, because the sentinel's own comment states
+           that reasoning and so spells the view name this asserts the absence of — the unstripped form finds
+           its own rationale and fails. Same blind spot the V71 arm records from the other direction: the
+           coverage ratchet strips the probe's information_schema LINES but cannot strip a comment, so a
+           prose mention there made a table look read. A text scan over SQL that carries prose has to decide
+           which it is looking at. */
+        var probe = WithoutSqlComments(ViewerDataService.StoreSchemaProbeSql);
+        Assert.Contains("t.tgname = 'trg_bump_mute_rules'", probe, StringComparison.Ordinal);
+        Assert.Contains("FROM pg_trigger t", probe, StringComparison.Ordinal);
+        Assert.DoesNotContain("information_schema.triggers", probe, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
@@ -140,4 +147,13 @@ public sealed class MuteRuleReloadBeaconTests
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
     }
+
+    /// <summary>
+    /// The probe SQL with its block comments removed, so a scan for a catalog name reads the QUERY and
+    /// not the prose beside it. Local and deliberately small: the shared
+    /// <see cref="CSharpSourceWalker"/> strips C# and this is SQL inside a verbatim string, where the
+    /// only comment form the probe uses is the block one.
+    /// </summary>
+    private static string WithoutSqlComments(string sql) =>
+        Regex.Replace(sql, @"/\*.*?\*/", " ", RegexOptions.Singleline);
 }
