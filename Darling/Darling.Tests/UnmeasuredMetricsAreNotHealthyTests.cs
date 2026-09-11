@@ -54,7 +54,7 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
         DarlingFleetReader.BuildCard(
             new DarlingFleetReader.FleetServerRow(1, "t", "t", null, engineKind, false),
             default,
-            null,
+            default,
             default,
             memoryPressure ? new DarlingFleetReader.MemoryPressureRow(3, 0, 0, 128) : default,
             default,

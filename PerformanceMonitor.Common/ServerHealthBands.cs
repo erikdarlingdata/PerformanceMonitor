@@ -288,8 +288,23 @@ namespace PerformanceMonitor.Common
     /// </summary>
     public readonly record struct ServerHealthMetrics
     {
-        /// <summary>Total non-idle CPU the CPU band evaluates (SQL + other-process), or null with no snapshot.</summary>
+        /// <summary>Total non-idle CPU (SQL + other-process, or the Performance Insights instance total),
+        /// or null with no snapshot. It is what the CPU band evaluates only where its denominator is FIXED
+        /// — see <see cref="CapacityUtilizationPercent"/>.</summary>
         public double? CpuPercentForAlert { get; init; }
+
+        /// <summary>Percent of the CONFIGURED capacity ceiling in use (#3281) — Aurora Serverless v2's
+        /// <c>os.general.acuUtilization.avg</c>. The figure the CPU band evaluates when
+        /// <see cref="CpuPercentForAlert"/>'s denominator is an allocation that MOVES, which is every
+        /// instance in the measured fleet. Null where none was recorded, and a null bands Unknown rather
+        /// than Healthy: nothing measured the headroom for that minute.</summary>
+        public double? CapacityUtilizationPercent { get; init; }
+
+        /// <summary>Which collector produced <see cref="CpuPercentForAlert"/> — the fact that decides
+        /// whether its denominator moves, and so which of the two percentages above the band may read
+        /// (#3281). Its default arm is <see cref="FleetCpuSource.NotCollected"/>, so a bundle built by a
+        /// path that sets no reading cannot land on an arm meaning "measured".</summary>
+        public FleetCpuSource CpuSource { get; init; }
 
         /// <summary>True when the resource semaphore shows grant waiters, timeouts, or forced grants;
         /// <c>null</c> when this target has no resource-semaphore source at all (#3272 — every PostgreSQL
@@ -397,40 +412,64 @@ namespace PerformanceMonitor.Common
         }
 
         /// <summary>
-        /// CPU band on total non-idle CPU: &gt;= 95% Critical, &gt;= 80% Warning; no snapshot Unknown.
+        /// CPU band: &gt;= 95% Critical, &gt;= 80% Warning; nothing bandable Unknown. One ladder, applied to
+        /// whichever percentage is a fraction of a capacity that does not move.
         ///
-        /// <para><b>The cutoffs are stated against a QUANTITY, not against a source</b> (#3267), because two
-        /// collectors now produce it. SQL Server's arm is <c>100 - SystemIdle</c> from the
-        /// <c>SCHEDULER_MONITOR</c> ring buffer; a PostgreSQL/Aurora target's is Performance Insights'
-        /// <c>os.cpuUtilization.total.avg</c>. What makes one ladder correct over both is that they are the
-        /// same measurement of the same thing: percent of the host's own CPU capacity that is not idle,
-        /// including processes outside the database engine, averaged over one minute
-        /// (<c>RdsCpuIngestor</c> asks PI for <c>PeriodInSeconds = 60</c>; the ring buffer publishes one
-        /// record a minute). Units, denominator, and averaging window all agree, so 80 means the same
-        /// "the host is approaching saturation" on both.</para>
+        /// <para><b>The cutoffs are stated against a QUANTITY, not against a source</b> (#3267), and
+        /// #3281 is the finding that the quantity was wrong on one of the two arms. SQL Server's arm is
+        /// <c>100 - SystemIdle</c> from the <c>SCHEDULER_MONITOR</c> ring buffer — percent of a FIXED host,
+        /// averaged over one minute, so 80 there means "this host is approaching saturation" and the ladder
+        /// reads it directly.</para>
         ///
-        /// <para>Two things about the PI arm are deliberately recorded rather than assumed. It is the OS
-        /// counter and NOT CloudWatch's <c>CPUUtilization</c>, which reads capacity-relative and runs roomy
-        /// on Aurora Serverless v2 — measured on one instance over one window at 6.8% against PI's 16.8%
-        /// (see <c>PgCpuUtilizationCollector</c>); banding the CloudWatch figure on these cutoffs would
-        /// under-read badly. And on Serverless v2 the denominator is the CURRENT ACU allocation, which
-        /// scales: a high reading there is a true statement that the instance is saturated at its present
-        /// capacity, and the follow-up question is the cluster's max-ACU ceiling rather than the
-        /// workload.</para>
+        /// <para><b>The Performance Insights arm bands on CAPACITY HEADROOM instead.</b> PI's
+        /// <c>os.cpuUtilization.total.avg</c> is percent of the capacity CURRENTLY ALLOCATED, and all 153
+        /// Aurora PostgreSQL instances in the measured fleet are <c>db.serverless</c>, where the allocation
+        /// is re-sized continuously — so a one-vCPU instance reads exactly <c>100.0</c> with <c>idle</c>
+        /// exactly <c>0.0</c> whenever one core stays busy for a minute, which is the routine trigger for
+        /// scaling up. Measured at one such minute: <b>4 of 12 configured ACUs, 33% of the ceiling</b>. The
+        /// ladder therefore reads <c>os.general.acuUtilization.avg</c> on this arm, where 100% means the
+        /// configured ceiling really is reached. Nothing about the raw reading is miscollected and it stays
+        /// collected and shown — it answers "was a core pinned" — it simply is not the saturation
+        /// signal.</para>
+        ///
+        /// <para><b>Where no capacity reading exists the band is Unknown, never Healthy.</b> That is the
+        /// rule #3271 set for this same card, and the fallback-to-raw-CPU shape would silently band
+        /// percent-of-allocated as saturation. It does mean a hypothetical PROVISIONED instance — whose
+        /// raw reading IS a fraction of fixed capacity — bands Unknown rather than on that reading, because
+        /// an absent ACU sample cannot be told apart from a serverless instance PI had no capacity sample
+        /// for; the measured fleet has no such population, and Unknown is the honest reading of "we do not
+        /// know what this percentage is a fraction of".</para>
+        ///
+        /// <para>Which percentage is bandable is <see cref="FleetCpuProvenance.CpuBandInputPercent"/>'s
+        /// decision rather than a branch here, because both cards also report the figure that decided.
+        /// CloudWatch's <c>CPUUtilization</c> is still not the source: measured on one instance over one
+        /// window at 6.8% against PI's 16.8% (see <c>PgCpuUtilizationCollector</c>).</para>
         /// </summary>
-        public static HealthSeverity CpuSeverity(double? cpuPercentForAlert)
+        /// <param name="cpuPercentForAlert">Total non-idle CPU, from whichever collector has it.</param>
+        /// <param name="capacityUtilizationPercent">Percent of the configured capacity ceiling in use, or
+        /// null where none was recorded.</param>
+        /// <param name="cpuSource">Which collector produced the reading. Required rather than defaulted:
+        /// a caller that kept the old single-argument call would compile and silently band a serverless
+        /// instance's percent-of-allocated as saturation again, which is the entire defect.</param>
+        public static HealthSeverity CpuSeverity(
+            double? cpuPercentForAlert,
+            double? capacityUtilizationPercent,
+            FleetCpuSource cpuSource)
         {
-            if (!cpuPercentForAlert.HasValue)
+            var banded = FleetCpuProvenance.CpuBandInputPercent(
+                cpuPercentForAlert, capacityUtilizationPercent, cpuSource);
+
+            if (!banded.HasValue)
             {
                 return HealthSeverity.Unknown;
             }
 
-            if (cpuPercentForAlert >= 95)
+            if (banded >= 95)
             {
                 return HealthSeverity.Critical;
             }
 
-            if (cpuPercentForAlert >= 80)
+            if (banded >= 80)
             {
                 return HealthSeverity.Warning;
             }
@@ -556,7 +595,7 @@ namespace PerformanceMonitor.Common
         /// <summary>The six per-metric card severities, in card row order — the reuse surface for scoring / reasons.</summary>
         public static IEnumerable<HealthSeverity> MetricSeverities(ServerHealthMetrics m)
         {
-            yield return CpuSeverity(m.CpuPercentForAlert);
+            yield return CpuSeverity(m.CpuPercentForAlert, m.CapacityUtilizationPercent, m.CpuSource);
             yield return ThreadsSeverity(m.TotalThreads, m.AvailableThreads, m.ThreadsWaitingForCpu, m.RequestsWaitingForThreads);
             yield return MemorySeverity(m.HasMemoryPressure);
             yield return BlockingSeverity(m.BlockingCount, m.MaxBlockedSeconds);

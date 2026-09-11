@@ -39,6 +39,14 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// watermark would silently reset on every restart and re-store a cycle's worth of already-collected points.
 /// Reading <c>MAX(sample_time)</c> from <c>collect.pg_cpu_utilization</c> costs one indexed query per cycle
 /// and survives a restart the way every other watermark-driven collector already does.</para>
+///
+/// <para><b>Four metric names, one call</b> (#3281). CPU alone is percent of the capacity currently
+/// allocated, which on Aurora Serverless v2 is not a saturation figure, so the capacity-headroom gauge is
+/// collected beside it — and it arrives on the <see cref="GetResourceMetricsRequest"/> this ingestor was
+/// already making, by naming the metrics in the existing <c>MetricQueries</c> list. See
+/// <see cref="RequestedMetrics"/> for the names and why they cannot be paraphrased, and
+/// <see cref="BuildSamples"/> for why four metric queries need the response keyed by metric rather than
+/// flattened.</para>
 /// </summary>
 public sealed class RdsCpuIngestor
 {
@@ -50,7 +58,43 @@ public sealed class RdsCpuIngestor
     /// </summary>
     private static readonly TimeSpan LookbackWindow = TimeSpan.FromMinutes(15);
 
+    /// <summary>Percent of the capacity CURRENTLY ALLOCATED that is not idle. Real, and not a saturation
+    /// signal on a serverless instance class — see <see cref="PgCpuUtilizationCollector"/>.</summary>
     private const string CpuMetric = "os.cpuUtilization.total.avg";
+
+    /// <summary>Percent of the CONFIGURED ACU ceiling in use (#3281) — the capacity-headroom gauge every
+    /// band reads, because 100% of it means the ceiling really is reached.</summary>
+    private const string AcuUtilizationMetric = "os.general.acuUtilization.avg";
+
+    /// <summary>ACU allocated at this minute — <see cref="AcuUtilizationMetric"/>'s numerator.</summary>
+    private const string ServerlessCapacityMetric = "os.general.serverlessDatabaseCapacity.avg";
+
+    /// <summary>The configured ACU ceiling — <see cref="AcuUtilizationMetric"/>'s denominator.</summary>
+    private const string MaxConfiguredAcuMetric = "os.general.maxConfiguredAcu.avg";
+
+    /// <summary>
+    /// Every metric name asked for, in one <c>GetResourceMetrics</c> call — which is what makes #3281's fix
+    /// cost nothing: no new SDK package, no second AWS API, and no IAM change, because the instance
+    /// profile's existing <c>pi:GetResourceMetrics</c> grant already covers all four.
+    ///
+    /// <para><b>The <c>os.general.</c> prefix is exact and is not guessable.</b> <c>os.acuUtilization.avg</c>
+    /// does NOT exist — Performance Insights rejects it with
+    /// <c>InvalidArgumentException: The specified metric is not a known metric</c>, which fails the whole
+    /// call and therefore the whole cycle for that target. All four names above were verified live against a
+    /// production instance before being written here.</para>
+    ///
+    /// <para>Internal so a test can assert that every name requested is a name this collector STORES, and
+    /// the reverse. A name dropped from this list leaves a column that is silently never populated, which
+    /// reads downstream as "the capacity was never measured" — permanently, on every target, with nothing
+    /// failing.</para>
+    /// </summary>
+    internal static readonly IReadOnlyList<string> RequestedMetrics = new[]
+    {
+        CpuMetric,
+        AcuUtilizationMetric,
+        ServerlessCapacityMetric,
+        MaxConfiguredAcuMetric,
+    };
 
     private readonly NpgsqlDataSource _postgres;
     private readonly Func<string, IAmazonRDS> _rdsClientFactory;
@@ -108,7 +152,7 @@ public sealed class RdsCpuIngestor
                 + "readings belong to a server that can be named.");
         }
 
-        List<DataPoint> dataPoints;
+        List<PgCpuUtilizationCollector.Row> samples;
 
         try
         {
@@ -133,7 +177,11 @@ public sealed class RdsCpuIngestor
                 {
                     ServiceType = ServiceType.RDS,
                     Identifier = dbiResourceId,
-                    MetricQueries = new List<Amazon.PI.Model.MetricQuery> { new() { Metric = CpuMetric } },
+                    /* All four names in one call — see RequestedMetrics for why that is the whole cost of
+                       #3281's fix, and for why the os.general. prefix cannot be paraphrased. */
+                    MetricQueries = RequestedMetrics
+                        .Select(metric => new Amazon.PI.Model.MetricQuery { Metric = metric })
+                        .ToList(),
                     StartTime = startTime,
                     EndTime = now,
                     PeriodInSeconds = 60,
@@ -147,14 +195,7 @@ public sealed class RdsCpuIngestor
                RdsLogSource.NewestLogFileAsync for why that branch raises instead. Both collections are null
                rather than empty when the service omits them, and LINQ over either raises
                ArgumentNullException whose whole message is "Value cannot be null. (Parameter 'source')". */
-            dataPoints = (response.MetricList ?? [])
-                .SelectMany(m => m.DataPoints ?? [])
-                /* PI returns a data point with a null Value for a period it has no sample for — nothing to
-                   store, and Value.HasValue is required below so the row is never null-cast. */
-                .Where(p => p.Timestamp.HasValue && p.Value.HasValue
-                    && (!watermark.HasValue || p.Timestamp.Value > watermark.Value))
-                .OrderBy(p => p.Timestamp!.Value)
-                .ToList();
+            samples = BuildSamples(response.MetricList, watermark);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -170,7 +211,7 @@ public sealed class RdsCpuIngestor
                 ex.Message, RdsLogUnavailableException.IsAuthorizationRefusal(ex), ex);
         }
 
-        if (dataPoints.Count == 0)
+        if (samples.Count == 0)
         {
             /* READ, and it held nothing new. PI answered — the caller's "no new Performance Insights CPU
                samples this cycle" is a true statement here, which is exactly why the not-reached branch
@@ -179,8 +220,84 @@ public sealed class RdsCpuIngestor
         }
 
         return RdsIngestOutcome.Read(
-            await WriteAsync(serverId, storageName, dataPoints, cancellationToken));
+            await WriteAsync(serverId, storageName, samples, cancellationToken));
     }
+
+    /// <summary>
+    /// One stored row per minute Performance Insights returned a CPU sample for, with the three capacity
+    /// metrics from the SAME minute attached (#3281).
+    ///
+    /// <para><b>Keyed by metric name rather than flattened.</b> Four metric queries come back as four
+    /// <c>MetricList</c> entries whose data points carry no metric of their own, so flattening them into
+    /// one sequence — which is correct for a single metric query — would store four unlabelled values
+    /// per minute as four CPU readings.</para>
+    ///
+    /// <para><b>The row's identity is the CPU sample, and that is deliberate.</b> A minute PI has a
+    /// capacity reading for but no CPU reading produces no row. The reason is the resume watermark: it is
+    /// <c>MAX(sample_time)</c>, so a capacity-only row would advance it past a CPU point that arrived one
+    /// cycle later and retire that point unread. The cost of the choice is
+    /// bounded and self-describing instead: <c>acu_utilization_percent</c> stays NULL for a minute PI had no
+    /// capacity sample for, and a NULL there bands Unknown, never Healthy.</para>
+    ///
+    /// <para>Internal and static so the grouping is assertable without a store, an AWS client or a
+    /// connection — it is the step that decides which value lands in which column.</para>
+    /// </summary>
+    internal static List<PgCpuUtilizationCollector.Row> BuildSamples(
+        IEnumerable<MetricKeyDataPoints>? metricList, DateTime? watermark)
+    {
+        var byMetric = new Dictionary<string, Dictionary<DateTime, double>>(StringComparer.Ordinal);
+
+        foreach (var metric in metricList ?? [])
+        {
+            var name = metric?.Key?.Metric;
+
+            if (name is null)
+            {
+                continue;
+            }
+
+            if (!byMetric.TryGetValue(name, out var points))
+            {
+                points = new Dictionary<DateTime, double>();
+                byMetric[name] = points;
+            }
+
+            foreach (var point in metric!.DataPoints ?? [])
+            {
+                /* PI returns a data point with a null Value for a period it has no sample for. Nothing is
+                   recorded for it, so the column stays NULL — never a 0, which for a capacity ratio would
+                   read as measured headroom. */
+                if (point.Timestamp.HasValue && point.Value.HasValue)
+                {
+                    points[point.Timestamp.Value] = point.Value.Value;
+                }
+            }
+        }
+
+        if (!byMetric.TryGetValue(CpuMetric, out var cpu))
+        {
+            return [];
+        }
+
+        return cpu
+            .Where(p => !watermark.HasValue || p.Key > watermark.Value)
+            .OrderBy(p => p.Key)
+            .Select(p => new PgCpuUtilizationCollector.Row(
+                DateTime.SpecifyKind(p.Key, DateTimeKind.Utc),
+                p.Value,
+                ValueAt(byMetric, AcuUtilizationMetric, p.Key),
+                ValueAt(byMetric, ServerlessCapacityMetric, p.Key),
+                ValueAt(byMetric, MaxConfiguredAcuMetric, p.Key)))
+            .ToList();
+    }
+
+    /// <summary>One metric's value at one minute, or null where PI had no sample for that pairing. Null
+    /// rather than 0 for <see cref="BuildSamples"/>'s reason.</summary>
+    private static double? ValueAt(
+        Dictionary<string, Dictionary<DateTime, double>> byMetric, string metric, DateTime timestamp) =>
+        byMetric.TryGetValue(metric, out var points) && points.TryGetValue(timestamp, out var value)
+            ? value
+            : null;
 
     /// <summary>Identical resolution to <see cref="RdsLogSource"/>'s own — kept as a separate copy rather
     /// than shared, matching this codebase's existing precedent of each RDS-API ingestor owning its own
@@ -243,7 +360,7 @@ public sealed class RdsCpuIngestor
     private async Task<int> WriteAsync(
         int serverId,
         string storageName,
-        IReadOnlyList<DataPoint> dataPoints,
+        IReadOnlyList<PgCpuUtilizationCollector.Row> samples,
         CancellationToken cancellationToken)
     {
         var definition = PgCpuUtilizationCollector.Instance;
@@ -288,7 +405,7 @@ public sealed class RdsCpuIngestor
 
                 writer.Importer = importer;
 
-                foreach (var point in dataPoints)
+                foreach (var sample in samples)
                 {
                     await importer.StartRowAsync(cancellationToken);
 
@@ -302,9 +419,10 @@ public sealed class RdsCpuIngestor
                           .Value(storageName);
 
                     writer.BeginPayload();
+                    /* Already fully formed by BuildSamples, including the Kind the store contract needs —
+                       the payload writer is the one place the column order lives. */
                     definition.WritePayload(
-                        new PgCpuUtilizationCollector.Row(
-                            DateTime.SpecifyKind(point.Timestamp!.Value, DateTimeKind.Utc), point.Value),
+                        sample,
                         writer,
                         NullContext(serverId, storageName, collectionTime));
                     writer.EndPayload(definition.PayloadColumns.Count);

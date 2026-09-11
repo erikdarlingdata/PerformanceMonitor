@@ -13,8 +13,10 @@ namespace PerformanceMonitor.Common;
 /// (#3267). Serialized as its STRING name (the fleet DTOs' <c>JsonStringEnumConverter</c>), so a consumer
 /// switches on a word rather than on an ordinal a reordering would move underneath it.
 ///
-/// <para><b>Why a number needs this beside it.</b> The band is the same ladder either way
-/// (<see cref="ServerHealthClassifier.CpuSeverity"/> over total non-idle host CPU), but the two read arms
+/// <para><b>Why a number needs this beside it.</b> It is not cosmetic provenance: the arm decides which
+/// percentage <see cref="ServerHealthClassifier.CpuSeverity"/> may band at all, because the two arms'
+/// readings are fractions of different things (#3281 — see
+/// <see cref="FleetCpuProvenance.CpuBandInputPercent"/>). The two read arms also
 /// carry different DETAIL: the ring buffer splits SQL Server's own CPU from the rest of the host, and
 /// Performance Insights reports only the total, so <c>cpu_percent</c> / <c>other_process_cpu_percent</c>
 /// are legitimately null on a card whose <c>total_cpu_percent</c> is a real measurement. Without this a
@@ -39,9 +41,11 @@ public enum FleetCpuSource
     /// <c>CpuUtilizationCollector</c>.</summary>
     RingBuffer,
 
-    /// <summary>AWS Performance Insights' <c>os.cpuUtilization.total.avg</c> (#2719) — a host-level OS
-    /// counter, so the same quantity the ring-buffer arm's total is, but with no per-process split to
-    /// publish beside it.
+    /// <summary>AWS Performance Insights' <c>os.cpuUtilization.total.avg</c> (#2719) — an OS counter with
+    /// no per-process split to publish beside it, and <b>not</b> the same quantity the ring-buffer arm's
+    /// total is: it is percent of the capacity CURRENTLY ALLOCATED, which on the serverless instance class
+    /// this whole fleet runs moves continuously (#3281). That is why this arm bands on
+    /// <c>acu_utilization_percent</c> instead — see <see cref="FleetCpuProvenance.CpuBandInputPercent"/>.
     ///
     /// <para>This arm means a Performance Insights reading is PRESENT, and in this build only an Aurora
     /// PostgreSQL target produces one: <c>PgCpuUtilizationCollector.AppliesTo</c> gates the ingest on
@@ -133,4 +137,44 @@ public static class FleetCpuProvenance
         ringBufferCpuPercent.HasValue
             ? ringBufferCpuPercent.Value + (otherProcessCpuPercent ?? 0)
             : instanceCpuPercent;
+
+    /// <summary>
+    /// The percentage a CPU band may actually be computed FROM, and null where this target has none
+    /// (#3281).
+    ///
+    /// <para><b>A CPU figure has to be banded against the capacity it is a fraction OF.</b> The ring
+    /// buffer's total is a fraction of a fixed host, so it is already the saturation figure and the ladder
+    /// reads it straight. Performance Insights' <c>os.cpuUtilization.total</c> is a fraction of the
+    /// capacity CURRENTLY ALLOCATED to the instance — and every Aurora PostgreSQL instance in the measured
+    /// fleet is <c>db.serverless</c>, where that allocation is re-sized continuously. A one-vCPU instance
+    /// there reads exactly <c>100.0</c> with <c>idle</c> exactly <c>0.0</c> whenever one core stays busy
+    /// for a minute, which is the routine trigger for scaling UP. Measured at such a minute: 4 of 12
+    /// configured ACUs in use. <c>os.general.acuUtilization.avg</c> is the fraction-of-the-CEILING gauge,
+    /// so that arm bands on it — and 100% of THAT is a real incident.</para>
+    ///
+    /// <para><b>No capacity reading means "not measured", not "fine".</b> Falling back to the raw CPU here
+    /// is the tempting shape and it is precisely the defect: it silently bands percent-of-allocated as
+    /// saturation, on every target and every minute Performance Insights had no capacity sample for.
+    /// Returning null is
+    /// what makes the band read Unknown — and a card must not claim health for something it never
+    /// measured, which is the rule #3271 established for this same card.</para>
+    ///
+    /// <para><b>Shared because three surfaces need the same answer.</b> Both cards band on it, and each
+    /// also has to report WHICH figure put a server in its band: a reason line naming the raw CPU beside a
+    /// band computed from the ceiling is how a reader concludes the band is broken. See
+    /// <c>ServerHealthClassifier.CpuSeverity</c>, which is the only place the cutoffs live.</para>
+    /// </summary>
+    /// <param name="totalNonIdleCpuPercent"><see cref="TotalNonIdleCpuPercent"/>'s result for this card.</param>
+    /// <param name="capacityUtilizationPercent">Percent of the configured capacity ceiling in use
+    /// (<c>collect.pg_cpu_utilization.acu_utilization_percent</c>), or null where none was recorded.</param>
+    /// <param name="source">Which collector produced the CPU reading — the fact that says whether its
+    /// denominator moves. Derived through <see cref="ClassifyCpuSource"/>, so no caller holds a second
+    /// spelling of "is this one capacity-relative".</param>
+    public static double? CpuBandInputPercent(
+        double? totalNonIdleCpuPercent,
+        double? capacityUtilizationPercent,
+        FleetCpuSource source) =>
+        source == FleetCpuSource.PerformanceInsights
+            ? capacityUtilizationPercent
+            : totalNonIdleCpuPercent;
 }

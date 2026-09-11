@@ -75,7 +75,9 @@ LIMIT 1";
     /// the viewer share the shape and the <c>DarlingPgCpuUtilizationReader.Freshness</c> constant rather
     /// than each picking a staleness window.</para></summary>
     public const string ServerSummaryPgCpuSql = @"
-SELECT cpu_percent
+SELECT cpu_percent,
+       acu_utilization_percent,
+       max_configured_acu
 FROM pg_cpu_utilization
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -186,6 +188,8 @@ WHERE server_id = $1";
         double? cpuPercent = null;
         double? otherProcessCpuPercent = null;
         double? instanceCpuPercent = null;
+        double? acuUtilizationPercent = null;
+        double? maxConfiguredAcu = null;
         double? memoryMb = null;
         double? bufferPoolMb = null;
         var blockingCount = 0;
@@ -233,6 +237,12 @@ WHERE server_id = $1";
             if (await reader.ReadAsync(cancellationToken))
             {
                 instanceCpuPercent = reader.IsDBNull(0) ? null : Convert.ToDouble(reader.GetValue(0));
+                /* The capacity gauge the CPU band reads on this arm (#3281), and the ceiling it is a
+                   fraction of, from the SAME row so the two describe the same minute. Independently
+                   nullable: a card can have a current CPU reading and no capacity sample, which bands
+                   Unknown rather than Healthy. */
+                acuUtilizationPercent = reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1));
+                maxConfiguredAcu = reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2));
             }
         }
 
@@ -356,6 +366,8 @@ WHERE server_id = $1";
             CpuPercent = cpuPercent,
             OtherProcessCpuPercent = otherProcessCpuPercent,
             InstanceCpuPercent = instanceCpuPercent,
+            AcuUtilizationPercent = acuUtilizationPercent,
+            MaxConfiguredAcu = maxConfiguredAcu,
             MemoryMb = memoryMb,
             BufferPoolMb = bufferPoolMb,
             GrantedMemoryMb = grantedMemoryMb,
@@ -487,10 +499,26 @@ public sealed class ServerSummaryItem
     /// </summary>
     public double? InstanceCpuPercent { get; set; }
 
+    /// <summary>
+    /// Percent of the CONFIGURED capacity ceiling in use — Aurora Serverless v2's
+    /// <c>os.general.acuUtilization.avg</c> (#3281), and what <see cref="CpuSeverity"/> bands on this arm.
+    /// NULL on every SQL Server target, and NULL on a PostgreSQL target Performance Insights returned no
+    /// capacity sample for — where the band reads Unknown rather than claiming health it never measured.
+    /// </summary>
+    public double? AcuUtilizationPercent { get; set; }
+
+    /// <summary>The configured ACU ceiling at this reading (#3281). Carried so
+    /// <see cref="CpuDetail"/> can state the headroom in ACUs beside the percentage, which is what stops a
+    /// green 100% CPU card reading as a contradiction.</summary>
+    public double? MaxConfiguredAcu { get; set; }
+
     /// <summary>Total non-idle CPU on the host — sql_server + other_process where the ring buffer reached
     /// it, else the Performance Insights instance reading (#3267). Tracks OS user+system counters either
     /// way; the fallback lives in <see cref="FleetCpuProvenance"/> so this card and the service's fleet card
-    /// cannot drift on it.</summary>
+    /// cannot drift on it.
+    ///
+    /// <para>On the Performance Insights arm it is percent of the capacity CURRENTLY ALLOCATED and so is
+    /// NOT what the band reads (#3281) — see <see cref="CpuSeverity"/>.</para></summary>
     public double? TotalCpuPercent =>
         FleetCpuProvenance.TotalNonIdleCpuPercent(CpuPercent, OtherProcessCpuPercent, InstanceCpuPercent);
 
@@ -636,13 +664,29 @@ public sealed class ServerSummaryItem
         get
         {
             if (!TotalCpuPercent.HasValue) return "--";
+
+            /* #3281: on the Performance Insights arm the headline is percent of the capacity CURRENTLY
+               ALLOCATED, which is NOT the figure the band read — so the figure that did is shown beside
+               it, in the same parenthetical shape the ring-buffer arm already uses for its own share.
+               Without it a serverless card sits at a green 100% and the reader concludes the band is
+               broken. The headline stays the raw reading because it answers a real question. */
+            if (AcuUtilizationPercent.HasValue)
+            {
+                return $"{TotalCpuPercent:F0}% (ACU {AcuUtilizationPercent:F0}%)";
+            }
+
             if (!CpuPercent.HasValue || !OtherProcessCpuPercent.HasValue) return $"{TotalCpuPercent:F0}%";
             return $"{TotalCpuPercent:F0}% (SQL {CpuPercent:F0}%)";
         }
     }
 
-    /// <summary>The non-SQL host CPU alongside the headline (the Dashboard's CPU detail), when known.</summary>
-    public string CpuDetail => OtherProcessCpuPercent.HasValue ? $"Other: {OtherProcessCpuPercent:F0}%" : "";
+    /// <summary>The detail under the CPU headline: the capacity the reading is a fraction of on a
+    /// serverless target (#3281 — "ACU 33% of 12 configured", the sentence that makes a green 100%
+    /// headline make sense), else the non-SQL host CPU (the Dashboard's CPU detail), when known.</summary>
+    public string CpuDetail =>
+        AcuUtilizationPercent.HasValue && MaxConfiguredAcu.HasValue
+            ? $"ACU {AcuUtilizationPercent:F0}% of {MaxConfiguredAcu:0.#} configured"
+            : OtherProcessCpuPercent.HasValue ? $"Other: {OtherProcessCpuPercent:F0}%" : "";
 
     public string MemoryDisplay => MemoryMb.HasValue ? $"{MemoryMb / 1024.0:F1} GB" : "--";
 
@@ -782,8 +826,12 @@ public sealed class ServerSummaryItem
     // ── Per-metric severity bands (delegated to the SHARED ServerHealthClassifier — one place for the
     //    thresholds; this card keeps only the brush mapping) ────────────────────────────────────────────
 
-    /// <summary>CPU band — total non-idle CPU: >= 95% Critical, >= 80% Warning.</summary>
-    public HealthSeverity CpuSeverity => ServerHealthClassifier.CpuSeverity(CpuPercentForAlert);
+    /// <summary>CPU band: &gt;= 95% Critical, &gt;= 80% Warning — over total non-idle CPU where that is a
+    /// fraction of fixed capacity, and over <see cref="AcuUtilizationPercent"/> where it is not (#3281).
+    /// Through the SAME shared classifier the service's fleet card calls, so the two cannot disagree about
+    /// which figure a server was banded on.</summary>
+    public HealthSeverity CpuSeverity =>
+        ServerHealthClassifier.CpuSeverity(CpuPercentForAlert, AcuUtilizationPercent, CpuSource);
 
     /// <summary>True when the resource semaphore shows grant waiters, timeouts, or forced grants. The raw
     /// reading, unqualified by whether there was anything to read — see

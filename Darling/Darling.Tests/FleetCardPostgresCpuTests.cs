@@ -52,11 +52,13 @@ public sealed class FleetCardPostgresCpuTests
         string? engineKind,
         double? ringBufferSqlCpu = null,
         double? ringBufferOtherCpu = null,
-        double? instanceCpu = null) =>
+        double? instanceCpu = null,
+        double? acuUtilization = null,
+        double? maxConfiguredAcu = null) =>
         DarlingFleetReader.BuildCard(
             new DarlingFleetReader.FleetServerRow(1, "pg-1", "pg-1", null, engineKind, false),
             new DarlingFleetReader.CpuRow(ringBufferSqlCpu, ringBufferOtherCpu),
-            instanceCpu,
+            new DarlingFleetReader.PgCpuRow(instanceCpu, acuUtilization, maxConfiguredAcu),
             default,
             default,
             default,
@@ -71,7 +73,9 @@ public sealed class FleetCardPostgresCpuTests
         string? engineKind,
         double? ringBufferSqlCpu = null,
         double? ringBufferOtherCpu = null,
-        double? instanceCpu = null)
+        double? instanceCpu = null,
+        double? acuUtilization = null,
+        double? maxConfiguredAcu = null)
     {
         var card = new ServerSummaryItem
         {
@@ -80,6 +84,8 @@ public sealed class FleetCardPostgresCpuTests
             CpuPercent = ringBufferSqlCpu,
             OtherProcessCpuPercent = ringBufferOtherCpu,
             InstanceCpuPercent = instanceCpu,
+            AcuUtilizationPercent = acuUtilization,
+            MaxConfiguredAcu = maxConfiguredAcu,
             IsPostgres = MonitoredEngineKind.IsPostgres(engineKind),
             IsAurora = MonitoredEngineKind.IsAurora(engineKind),
             LastCollectionTime = Now.AddSeconds(-30),
@@ -95,25 +101,35 @@ public sealed class FleetCardPostgresCpuTests
     /// and a real band where it used to get null and Unknown. Red against the unfixed reader, which had no
     /// route for this value to arrive by at all.
     ///
-    /// <para>87% is chosen inside the Warning band rather than a comfortable 20%, because a fix that
-    /// delivered the number but left it out of <see cref="ServerHealthMetrics.CpuPercentForAlert"/> would
-    /// pass a value-only assertion and still leave the card uncoloured — which is most of what the issue is
-    /// about.</para>
+    /// <para>The banded figure is 87% of the CONFIGURED ACU ceiling, not 87% CPU — #3281 moved which
+    /// percentage this ladder reads, because the raw reading is percent of an allocation that moves. It is
+    /// chosen inside the Warning band rather than at a comfortable 20% because a fix that delivered the
+    /// number but left it out of <see cref="ServerHealthMetrics.CpuPercentForAlert"/> /
+    /// <see cref="ServerHealthMetrics.CapacityUtilizationPercent"/> would pass a value-only assertion and
+    /// still leave the card uncoloured — which is most of what #3267 was about. The raw CPU is deliberately
+    /// 100 here: a card banded off the raw reading would read Critical on it.</para>
     /// </summary>
     [Fact]
     public void AnAuroraTargetWithAPerformanceInsightsReading_CarriesTheNumberAndTheBand()
     {
-        var card = Card(MonitoredEngineKind.AuroraPostgres, instanceCpu: 87);
+        var card = Card(
+            MonitoredEngineKind.AuroraPostgres, instanceCpu: 100, acuUtilization: 87, maxConfiguredAcu: 12);
 
-        Assert.Equal(87, card.TotalCpuPercent);
-        Assert.Equal(87, card.InstanceCpuPercent);
+        Assert.Equal(100, card.TotalCpuPercent);
+        Assert.Equal(100, card.InstanceCpuPercent);
+        Assert.Equal(87, card.AcuUtilizationPercent);
+        Assert.Equal(12, card.MaxConfiguredAcu);
         Assert.Equal(HealthSeverity.Warning, card.CpuSeverity);
         Assert.Equal(FleetCpuSource.PerformanceInsights, card.CpuSource);
 
         /* And it reaches the card's OVERALL band, which is what puts it in the worst-first ranking at all. */
         Assert.Equal(HealthSeverity.Warning, card.OverallMetricSeverity);
         Assert.Equal(FleetHealthBand.Warning, card.Band);
-        Assert.Contains("CPU 87%", DarlingFleetReader.BuildReason(card), StringComparison.Ordinal);
+
+        /* The reason names the figure that DECIDED, and not the raw CPU sitting beside it (#3281). */
+        var reason = DarlingFleetReader.BuildReason(card);
+        Assert.Contains("Capacity 87% of configured ACU", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("CPU 100%", reason, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -125,7 +141,7 @@ public sealed class FleetCardPostgresCpuTests
     [Fact]
     public void ThePerProcessSplitStaysNull_BecausePerformanceInsightsDoesNotPublishOne()
     {
-        var card = Card(MonitoredEngineKind.AuroraPostgres, instanceCpu: 87);
+        var card = Card(MonitoredEngineKind.AuroraPostgres, instanceCpu: 87, acuUtilization: 30);
 
         Assert.Null(card.CpuPercent);
         Assert.Null(card.OtherProcessCpuPercent);
@@ -141,7 +157,7 @@ public sealed class FleetCardPostgresCpuTests
     [Fact]
     public void AnIdleInstanceAndAnUnreadableOne_AreNotTheSameCard()
     {
-        var idle = Card(MonitoredEngineKind.AuroraPostgres, instanceCpu: 0);
+        var idle = Card(MonitoredEngineKind.AuroraPostgres, instanceCpu: 0, acuUtilization: 0);
         var unread = Card(MonitoredEngineKind.Postgres);
 
         Assert.Equal(0d, idle.TotalCpuPercent);
@@ -245,24 +261,33 @@ public sealed class FleetCardPostgresCpuTests
     /// same everywhere, and #3267 IS that defect for CPU: one surface read a source the other did not.
     /// </summary>
     [Theory]
-    [InlineData(MonitoredEngineKind.AuroraPostgres, null, null, 96.0)]
-    [InlineData(MonitoredEngineKind.AuroraPostgres, null, null, 87.0)]
-    [InlineData(MonitoredEngineKind.AuroraPostgres, null, null, 12.0)]
-    [InlineData(MonitoredEngineKind.AuroraPostgres, null, null, 0.0)]
-    [InlineData(MonitoredEngineKind.AuroraPostgres, null, null, null)]
-    [InlineData(MonitoredEngineKind.Postgres, null, null, null)]
-    [InlineData(MonitoredEngineKind.SqlServer, 60.0, 40.0, null)]
-    [InlineData(MonitoredEngineKind.SqlServer, 40.0, null, null)]
-    [InlineData(MonitoredEngineKind.SqlServer, null, null, null)]
+    [InlineData(MonitoredEngineKind.AuroraPostgres, null, null, 96.0, null)]
+    [InlineData(MonitoredEngineKind.AuroraPostgres, null, null, 87.0, null)]
+    [InlineData(MonitoredEngineKind.AuroraPostgres, null, null, 12.0, null)]
+    [InlineData(MonitoredEngineKind.AuroraPostgres, null, null, 0.0, null)]
+    [InlineData(MonitoredEngineKind.AuroraPostgres, null, null, null, null)]
+    /* And the same combinations WITH a capacity reading, which is the figure the band now reads (#3281):
+       the raw CPU is held at 100 across all four so the only thing moving is the capacity, and the two
+       surfaces have to move together. Without these rows the theory would pass while one surface banded on
+       the raw CPU and the other on the ceiling — the exact drift #2473 forbids. */
+    [InlineData(MonitoredEngineKind.AuroraPostgres, null, null, 100.0, 96.0)]
+    [InlineData(MonitoredEngineKind.AuroraPostgres, null, null, 100.0, 87.0)]
+    [InlineData(MonitoredEngineKind.AuroraPostgres, null, null, 100.0, 33.3)]
+    [InlineData(MonitoredEngineKind.AuroraPostgres, null, null, 100.0, 0.0)]
+    [InlineData(MonitoredEngineKind.Postgres, null, null, null, null)]
+    [InlineData(MonitoredEngineKind.SqlServer, 60.0, 40.0, null, null)]
+    [InlineData(MonitoredEngineKind.SqlServer, 40.0, null, null, null)]
+    [InlineData(MonitoredEngineKind.SqlServer, null, null, null, null)]
     public void BothCpuBandingSurfaces_AgreeOnTheSameServer(
-        string? engineKind, double? sqlCpu, double? otherCpu, double? instanceCpu)
+        string? engineKind, double? sqlCpu, double? otherCpu, double? instanceCpu, double? acuUtilization)
     {
-        var fleet = Card(engineKind, sqlCpu, otherCpu, instanceCpu);
-        var viewer = ViewerCard(engineKind, sqlCpu, otherCpu, instanceCpu);
+        var fleet = Card(engineKind, sqlCpu, otherCpu, instanceCpu, acuUtilization, maxConfiguredAcu: 12);
+        var viewer = ViewerCard(engineKind, sqlCpu, otherCpu, instanceCpu, acuUtilization, maxConfiguredAcu: 12);
 
         Assert.Equal(fleet.TotalCpuPercent, viewer.TotalCpuPercent);
         Assert.Equal(fleet.CpuSeverity, viewer.CpuSeverity);
         Assert.Equal(fleet.CpuSource, viewer.CpuSource);
+        Assert.Equal(fleet.AcuUtilizationPercent, viewer.AcuUtilizationPercent);
     }
 
     /// <summary>

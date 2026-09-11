@@ -3432,6 +3432,29 @@ public sealed class DarlingWorker : BackgroundService
     /// distinguishes "total server" from "just sqlserver.exe", a SQL-Server-only distinction PI's
     /// <c>os.cpuUtilization.total.avg</c> has no equivalent split for — it is already the one instance-level
     /// number this engine has.
+    ///
+    /// <para><b>It thresholds CAPACITY HEADROOM, not <c>cpu_percent</c></b> (#3281). <c>cpu_percent</c> is
+    /// percent of the capacity CURRENTLY ALLOCATED, and every Aurora PostgreSQL instance in the measured
+    /// fleet is <c>db.serverless</c>, where a one-vCPU instance reads exactly 100% whenever one core stays
+    /// busy for a minute — the routine trigger for scaling up. Measured cost of thresholding that: 39 of
+    /// the last 50 alerts on the PostgreSQL store were High CPU / CPU Resolved pairs minutes apart, firing
+    /// at 100% and resolving at 17-26%, across five targets in about eleven hours; at the minute one fired
+    /// the instance held 4 of 12 configured ACUs. <c>acu_utilization_percent</c> is percent of the
+    /// CONFIGURED ceiling, so the operator's threshold means what it says against it.</para>
+    ///
+    /// <para><b>No capacity reading does not fire, and does not fall back to the raw CPU.</b> The fallback
+    /// is the tempting shape and it silently arms a threshold against percent-of-allocated. Not firing matches
+    /// the card, which bands Unknown on the same absence (<c>ServerHealthClassifier.CpuSeverity</c>) — the
+    /// two consumers share the metric, so they have to share the rule. The cost is stated rather than
+    /// hidden: a PROVISIONED Aurora PostgreSQL instance, whose raw reading IS a fraction of fixed capacity,
+    /// would not be alerted on, because an absent ACU sample cannot be told apart from a serverless
+    /// instance Performance Insights had no capacity sample for. The measured fleet has no such
+    /// instance.</para>
+    ///
+    /// <para>The metric NAMES are "High CPU" / "CPU Resolved", the SQL Server strings, for the parity
+    /// reason above: a mute rule, history filter or dashboard keyed on them means the same condition on
+    /// either engine. The rendered text names the figure that crossed and what it is a fraction of, so a
+    /// reader is never left inferring either.</para>
     /// </summary>
     private async Task EvaluatePgCpuAsync(
         ServerRuntime runtime, AlertServerSnapshot snapshot, DarlingConfig config, CancellationToken cancellationToken)
@@ -3460,7 +3483,21 @@ public sealed class DarlingWorker : BackgroundService
 
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
             var wasActive = _activePgCpuAlert.TryGetValue(key, out var activeBefore) && activeBefore;
-            var exceeded = reading is not null && reading.CpuPercent >= alertSettings.CpuThresholdPercent;
+
+            /* #3281: percent of the CONFIGURED ACU ceiling, which is what the threshold means — reached
+               through the SAME shared decision the two fleet cards band on, so the alert and the card
+               cannot disagree about which figure puts a server in trouble. Always the Performance Insights
+               arm, because this evaluator exists only for PostgreSQL targets.
+
+               Read out into a local rather than compared inline: a lifted `double? >= int` is quietly
+               false on null, and "no capacity sample" deserves to be a named state rather than an
+               arithmetic accident. */
+            var capacityPercent = reading is null
+                ? null
+                : FleetCpuProvenance.CpuBandInputPercent(
+                    reading.CpuPercent, reading.AcuUtilizationPercent, FleetCpuSource.PerformanceInsights);
+            var exceeded = capacityPercent.HasValue
+                && capacityPercent.Value >= alertSettings.CpuThresholdPercent;
             _activePgCpuAlert[key] = exceeded;
 
             if (exceeded)
@@ -3479,29 +3516,43 @@ public sealed class DarlingWorker : BackgroundService
                     MetricName = metricName,
                 }) ?? false;
 
+                /* The ACU line only when both halves were sampled: "N of M ACU" with either missing
+                   would be a fabricated pair, and the percentage above already carries the answer. */
+                var allocation = reading!.ServerlessCapacityAcu.HasValue && reading.MaxConfiguredAcu.HasValue
+                    ? $"  Allocated: {reading.ServerlessCapacityAcu:0.#} of {reading.MaxConfiguredAcu:0.#} ACU\n"
+                    : string.Empty;
+
                 await _alertDeliverer.DeliverAsync(
                     new AlertOutcome(
                         key,
                         snapshot.ServerName,
                         metricName,
-                        $"{reading!.CpuPercent:F0}%",
+                        $"{capacityPercent!.Value:F0}%",
                         $"{alertSettings.CpuThresholdPercent}%",
                         Context: null,
-                        DetailText: $"  Total CPU: {reading.CpuPercent:F0}%\n  Threshold: {alertSettings.CpuThresholdPercent}%",
-                        NumericCurrentValue: reading.CpuPercent,
+                        /* Both figures, each labelled with what it is a fraction OF — the whole defect
+                           #3281 names is a reader taking one for the other. */
+                        DetailText: $"  Capacity: {capacityPercent.Value:F0}% of configured ACU\n"
+                            + allocation
+                            + $"  Instance CPU: {reading.CpuPercent:F0}% of currently allocated capacity\n"
+                            + $"  Threshold: {alertSettings.CpuThresholdPercent}%",
+                        NumericCurrentValue: capacityPercent.Value,
                         NumericThresholdValue: alertSettings.CpuThresholdPercent,
                         Muted: muted,
                         Severity: null,
-                        ShortMessage: $"Total CPU at {reading.CpuPercent:F0}% (threshold: {alertSettings.CpuThresholdPercent}%)"),
+                        ShortMessage: $"Capacity at {capacityPercent.Value:F0}% of configured ACU "
+                            + $"(threshold: {alertSettings.CpuThresholdPercent}%)"),
                     cancellationToken);
                 readClock.Restart();
             }
             else if (wasActive)
             {
+                /* Edge-triggered, so this has to fire even when the capacity reading went away — and it
+                   says which of the two happened rather than claiming a recovery it did not measure. */
                 await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, "CPU Resolved",
-                    reading is null
-                        ? $"{snapshot.ServerName}: CPU back below threshold"
-                        : $"{snapshot.ServerName}: Total CPU back to {reading.CpuPercent:F0}%");
+                    capacityPercent.HasValue
+                        ? $"{snapshot.ServerName}: capacity back to {capacityPercent.Value:F0}% of configured ACU"
+                        : $"{snapshot.ServerName}: no current capacity reading, so the alert is cleared");
             }
         }
         catch (OperationCanceledException)
