@@ -457,4 +457,64 @@ public class GenericWebhookTests
         Assert.DoesNotContain("incidents_json", WebhookAlertService.DefaultGenericBodyTemplate, System.StringComparison.Ordinal);
         Assert.DoesNotContain("dedup_key", WebhookAlertService.DefaultGenericBodyTemplate, System.StringComparison.Ordinal);
     }
+
+    /* ---------------- #3297: the alert's prose detail ---------------- */
+
+    private const string Prose =
+        "Store query_stats retention [1072] is HELD PAUSED by the rollup-coverage gate. Run the " +
+        "--backfill-rollups operator action, then RESTART the service.";
+
+    /// <summary>
+    /// #3297: the discrete <c>{{detail}}</c> token, for a template that needs the prose on its own —
+    /// mapped into a ticket body field rather than mixed in with the flattened structure.
+    /// </summary>
+    [Fact]
+    public void DetailToken_SubstitutesTheProse_AndIsEmptyWhenTheAlertHasNone()
+    {
+        const string template = """{"detail": "{{detail}}"}""";
+
+        var withProse = WebhookAlertService.BuildGenericPayload(
+            "Retention Held", "Monitor Store", "9.6x", "2.0x", Branding, bodyTemplate: template, detailText: Prose);
+        Assert.Equal(Prose, JsonDocument.Parse(withProse).RootElement.GetProperty("detail").GetString());
+
+        /* No prose ⇒ the token renders empty and the template stays well-formed, the {{triage_url}} shape. */
+        var without = WebhookAlertService.BuildGenericPayload(
+            "Retention Held", "Monitor Store", "9.6x", "2.0x", Branding, bodyTemplate: template);
+        Assert.Equal("", JsonDocument.Parse(without).RootElement.GetProperty("detail").GetString());
+    }
+
+    /// <summary>
+    /// The load-bearing half for this channel: <c>{{context}}</c> leads with the prose. A new token alone
+    /// would have fixed nothing for anyone — the shipped default template carries <c>{{context}}</c> and so
+    /// does every template an operator has already saved, and none of them can reference a token that did
+    /// not exist when they were written. This is what makes the fix arrive with no operator action.
+    /// <para>A prose-only self-alert used to render <c>{{context}}</c> as the bare "Sent by ..."
+    /// boilerplate: the whole alert body reduced to a signature.</para>
+    /// </summary>
+    [Fact]
+    public void ContextToken_LeadsWithTheProse_SoTheDefaultTemplateCarriesIt()
+    {
+        var payload = WebhookAlertService.BuildGenericPayload(
+            "Retention Held", "Monitor Store", "9.6x", "2.0x", Branding, detailText: Prose);
+
+        var context = JsonDocument.Parse(payload).RootElement.GetProperty("context").GetString()!;
+        Assert.StartsWith(Prose, context, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("Sent by", context, System.StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The prose goes through the same JSON escaping every other string token does — it is alert data, and
+    /// a quote in it would otherwise terminate the literal early exactly as a server name would.
+    /// </summary>
+    [Fact]
+    public void DetailWithAQuote_DoesNotBreakOutOfTheJsonStringLiteral()
+    {
+        const string template = """{"detail": "{{detail}}"}""";
+        const string hostile = """Run --backfill-rollups"; DROP TABLE x; --""";
+
+        var payload = WebhookAlertService.BuildGenericPayload(
+            "Retention Held", "Monitor Store", "9.6x", "2.0x", Branding, bodyTemplate: template, detailText: hostile);
+
+        Assert.Equal(hostile, JsonDocument.Parse(payload).RootElement.GetProperty("detail").GetString());
+    }
 }

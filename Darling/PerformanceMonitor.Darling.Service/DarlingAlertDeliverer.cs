@@ -146,7 +146,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
         /* Lite's EmailAlertService.cs:65-66 — muted alerts skip both channels but still record below. */
         var result = await _core.TrySendAsync(
             outcome.MetricName, outcome.ServerName, currentValue, outcome.ThresholdValue,
-            outcome.ServerKey, context, attemptChannels: !outcome.Muted);
+            outcome.ServerKey, context, attemptChannels: !outcome.Muted, detailText: detailText);
 
         /* trayChannelPresent: false — this is the HEADLESS service. It has no tray icon and no toast
            code, so the taxonomy's "tray" fallback (which is Lite's, and truthful there) would assert a UI

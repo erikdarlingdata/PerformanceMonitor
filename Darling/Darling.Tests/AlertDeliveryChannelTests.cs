@@ -10,7 +10,13 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.CompilerServices;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
@@ -556,4 +562,206 @@ public sealed class AlertDeliveryChannelTests
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
         => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", ".."));
+
+    /* ─────────────── #3297: the detail text reaches the WIRE, not just the payload builder ─────────────── */
+
+    /// <summary>
+    /// #3297: <see cref="AlertOutcome.DetailText"/> reached the history store, the Viewer, the MCP reader and
+    /// the triage endpoint — and no delivery channel. <c>WebhookAlertService</c> held zero references to it
+    /// across all 1,534 lines, and the email template's detail section was gated on
+    /// <see cref="AlertContext.Details"/>, a different and STRUCTURED field, which a self-alert leaves null.
+    /// So an operator whose only channel was email received a metric name, a value, a threshold and two
+    /// timestamps, with the remedy discarded — reported from the field on #3296.
+    ///
+    /// <para>This drives the WHOLE Darling path — <see cref="DarlingAlertDeliverer.DeliverAsync"/> through the
+    /// shared send core, the fan-out, and each channel's payload builder — and asserts against the bytes that
+    /// actually left the process. Deliberately not a payload-builder assertion: the defect was never in a
+    /// builder, it was that nothing passed the text TO one, and a builder-level pin is green on a fan-out
+    /// that drops the argument. There is no dogfooding path here (no email configured on any of the three
+    /// stores, and no webhook channel until one is stood up), so a test is the only instrument.</para>
+    ///
+    /// <para>Three requests: Teams, Slack and the generic channel all point at the one loopback endpoint.
+    /// PagerDuty is absent because its endpoint is the hardcoded Events v2 URL and cannot be redirected —
+    /// its builder is pinned in <c>Lite.Tests.PagerDutyWebhookTests</c> instead, and it takes the same
+    /// <c>prose</c> from the same single resolution in the fan-out as the three checked here.</para>
+    /// </summary>
+    [Fact]
+    public async Task TheDeliverer_PutsDetailTextOnTheWire_ForEveryRedirectableWebhookChannel()
+    {
+        /* The #3296 alert's own detail, shortened. The marker is the operator action the reporter had to
+           work out for themselves because no channel delivered it. */
+        const string Prose =
+            "Store query_stats retention [1072] is HELD PAUSED by the rollup-coverage gate. Run the " +
+            "--backfill-rollups operator action, then RESTART the service.";
+
+        using var endpoint = new CapturingWebhookEndpoint();
+
+        var config = new DarlingConfig();
+        config.Webhooks.TeamsUrl = endpoint.Url;
+        config.Webhooks.SlackUrl = endpoint.Url;
+        config.Webhooks.GenericUrl = endpoint.Url;
+
+        var settings = new DarlingAlertSettings(config);
+        var history = new DiscardingHistoryStore();
+        var webhooks = new WebhookAlertService(
+            settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
+        var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
+
+        /* A self-alert: Context null, prose in DetailText. The shape the defect hid in. */
+        await deliverer.DeliverAsync(
+            new AlertOutcome(
+                "retentionhold:1072", "Monitor Store", "Retention Held", "9.6x its 4 days horizon", "2.0x",
+                Context: null, DetailText: Prose, NumericCurrentValue: 9.6, NumericThresholdValue: 2.0,
+                Muted: false, Severity: AlertSeverityLevel.Critical),
+            TestContext.Current.CancellationToken);
+
+        var bodies = endpoint.Bodies;
+        Assert.Equal(3, bodies.Count);
+        Assert.All(bodies, body => Assert.Contains("--backfill-rollups", body, StringComparison.Ordinal));
+        Assert.All(bodies, body => Assert.Contains("RESTART the service", body, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A loopback endpoint that records the bodies posted to it. <see cref="System.Net.Sockets.TcpListener"/>
+    /// rather than <c>HttpListener</c> on purpose: HttpListener wants a URL ACL on Windows, and the four
+    /// lines of HTTP a webhook POST needs are cheaper than that dependency. The same choice
+    /// <c>NpgsqlRootCertificateValidationTests</c> and <c>DarlingStoreUpgradeTests</c> already make.
+    /// </summary>
+    private sealed class CapturingWebhookEndpoint : IDisposable
+    {
+        private readonly TcpListener _listener;
+        private readonly List<string> _bodies = new();
+        private readonly CancellationTokenSource _stop = new();
+        private readonly Task _accepting;
+
+        public CapturingWebhookEndpoint()
+        {
+            _listener = new TcpListener(IPAddress.Loopback, 0);
+            _listener.Start();
+            Url = $"http://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}/hook";
+            _accepting = Task.Run(AcceptLoopAsync);
+        }
+
+        public string Url { get; }
+
+        /// <summary>
+        /// Safe to read without synchronization once the send has been awaited: each body is appended before
+        /// its response is written, and the sender awaits every response in turn.
+        /// </summary>
+        public IReadOnlyList<string> Bodies => _bodies;
+
+        private async Task AcceptLoopAsync()
+        {
+            try
+            {
+                while (!_stop.IsCancellationRequested)
+                {
+                    using var client = await _listener.AcceptTcpClientAsync(_stop.Token);
+                    using var stream = client.GetStream();
+                    _bodies.Add(await ReadRequestBodyAsync(stream));
+
+                    var response = Encoding.ASCII.GetBytes(
+                        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    await stream.WriteAsync(response, _stop.Token);
+                    await stream.FlushAsync(_stop.Token);
+                }
+            }
+            catch (OperationCanceledException) { /* Dispose */ }
+            catch (System.Net.Sockets.SocketException) { /* listener stopped */ }
+            catch (ObjectDisposedException) { /* listener stopped */ }
+        }
+
+        /// <summary>Reads headers to the blank line, then exactly Content-Length bytes of body.</summary>
+        private static async Task<string> ReadRequestBodyAsync(NetworkStream stream)
+        {
+            var buffer = new byte[16 * 1024];
+            var received = new List<byte>(capacity: 16 * 1024);
+            int headerEnd;
+
+            while ((headerEnd = IndexOfHeaderEnd(received)) < 0)
+            {
+                var read = await stream.ReadAsync(buffer);
+                if (read == 0)
+                {
+                    return Encoding.UTF8.GetString(received.ToArray());
+                }
+
+                received.AddRange(new ArraySegment<byte>(buffer, 0, read));
+            }
+
+            var headers = Encoding.ASCII.GetString(received.ToArray(), 0, headerEnd);
+            var contentLength = ParseContentLength(headers);
+            var bodyStart = headerEnd + 4;
+
+            while (received.Count - bodyStart < contentLength)
+            {
+                var read = await stream.ReadAsync(buffer);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                received.AddRange(new ArraySegment<byte>(buffer, 0, read));
+            }
+
+            var body = received.ToArray();
+            var available = Math.Min(contentLength, body.Length - bodyStart);
+            return Encoding.UTF8.GetString(body, bodyStart, Math.Max(0, available));
+        }
+
+        private static int IndexOfHeaderEnd(List<byte> bytes)
+        {
+            for (int i = 0; i + 3 < bytes.Count; i++)
+            {
+                if (bytes[i] == (byte)'\r' && bytes[i + 1] == (byte)'\n' &&
+                    bytes[i + 2] == (byte)'\r' && bytes[i + 3] == (byte)'\n')
+                {
+                    return i;
+                }
+            }
+
+            return -1;
+        }
+
+        private static int ParseContentLength(string headers)
+        {
+            foreach (var line in headers.Split("\r\n", StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase) &&
+                    int.TryParse(line.AsSpan("Content-Length:".Length).Trim(), out var length))
+                {
+                    return length;
+                }
+            }
+
+            return 0;
+        }
+
+        public void Dispose()
+        {
+            _stop.Cancel();
+            _listener.Stop();
+            try
+            {
+                _accepting.Wait(TimeSpan.FromSeconds(5));
+            }
+            catch (AggregateException) { /* the cancellation above */ }
+
+            _stop.Dispose();
+        }
+    }
+
+    private sealed class DiscardingHistoryStore : IAlertHistoryStore
+    {
+        public Task RecordAlertAsync(AlertHistoryRecord record) => Task.CompletedTask;
+
+        public Task<DateTime?> GetLastEmailSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
+            Task.FromResult<DateTime?>(null);
+
+        public Task<DateTime?> GetLastWebhookSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
+            Task.FromResult<DateTime?>(null);
+
+        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
+            Task.FromResult<DateTime?>(null);
+    }
 }

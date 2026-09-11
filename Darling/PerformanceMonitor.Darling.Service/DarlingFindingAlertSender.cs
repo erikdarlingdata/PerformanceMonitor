@@ -80,7 +80,7 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
                stories before they became findings (Lite passes muted: false identically). */
             var result = await _core.TrySendAsync(
                 alert.MetricName, alert.ServerName, alert.CurrentValue, alert.ThresholdValue,
-                alert.ServerId, alert.Context, attemptChannels: true);
+                alert.ServerId, alert.Context, attemptChannels: true, detailText: alert.DetailText);
 
             /* trayChannelPresent: false — the headless service has no tray; see DarlingAlertDeliverer. */
             var delivery = AlertDelivery.FromFanout(result, muted: false, trayChannelPresent: false);

@@ -21,9 +21,20 @@ internal static class EmailTemplateBuilder
 {
     private const string FontStack = "-apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
 
+    /* An alert can now open the Details section on its prose alone, with no structured items behind it,
+       so the plain-text builder's item loop needs something to iterate when there is no context at all. */
+    private static readonly System.Collections.Generic.List<AlertDetailItem> EmptyDetails = new();
+
     /// <summary>
     /// Builds both HTML and plain-text bodies for an alert email.
     /// </summary>
+    /// <param name="detailText">
+    /// #3297: the alert's flat prose detail — what happened, what it costs, and the operator action that
+    /// clears it. Rendered into BOTH bodies, as the lead of the Details section. Gated through
+    /// <see cref="AlertDetailText.ProseForDelivery"/> so an engine alert whose detail text is just a
+    /// flattening of <paramref name="context"/> is not printed twice; null (and a prose-free alert) renders
+    /// exactly the pre-#3297 email.
+    /// </param>
     public static (string HtmlBody, string PlainTextBody) BuildAlertEmail(
         string metricName,
         string serverName,
@@ -31,17 +42,20 @@ internal static class EmailTemplateBuilder
         string thresholdValue,
         int emailCooldownMinutes,
         AlertBranding branding,
-        AlertContext? context = null)
+        AlertContext? context = null,
+        string? detailText = null)
     {
         var utcNow = DateTime.UtcNow;
         var localNow = DateTime.Now;
         var (accentColor, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
+        var prose = AlertDetailText.ProseForDelivery(detailText, context);
 
         var html = BuildHtmlBody(metricName, serverName, currentValue,
-            thresholdValue, utcNow, localNow, accentColor, badgeText, branding, context: context, emailCooldownMinutes: emailCooldownMinutes);
+            thresholdValue, utcNow, localNow, accentColor, badgeText, branding, context: context, emailCooldownMinutes: emailCooldownMinutes,
+            prose: prose);
 
         var plain = BuildPlainTextBody(metricName, serverName, currentValue,
-            thresholdValue, utcNow, localNow, emailCooldownMinutes, branding, context);
+            thresholdValue, utcNow, localNow, emailCooldownMinutes, branding, context, prose);
 
         return (html, plain);
     }
@@ -78,7 +92,8 @@ internal static class EmailTemplateBuilder
         AlertBranding branding,
         bool isTest = false,
         AlertContext? context = null,
-        int emailCooldownMinutes = 15)
+        int emailCooldownMinutes = 15,
+        string? prose = null)
     {
         var sb = new StringBuilder(2048);
 
@@ -137,10 +152,12 @@ internal static class EmailTemplateBuilder
         sb.Append("</table>");
         sb.Append("</td></tr>");
 
-        /* Detail section (blocking chains, deadlock participants) */
-        if (context?.Details?.Count > 0)
+        /* Detail section: the alert's prose detail (#3297) leads, then the structured items (blocking
+           chains, deadlock participants). Either can be absent — a self-alert has only the prose, an
+           engine alert only the structure — so the section renders when EITHER is present. */
+        if (prose is not null || context?.Details?.Count > 0)
         {
-            AppendDetailSection(sb, context);
+            AppendDetailSection(sb, context, prose);
         }
 
         /* Attachment note */
@@ -186,13 +203,30 @@ internal static class EmailTemplateBuilder
         sb.Append("</tr>");
     }
 
-    private static void AppendDetailSection(StringBuilder sb, AlertContext context)
+    private static void AppendDetailSection(StringBuilder sb, AlertContext? context, string? prose)
     {
         /* Separator + heading */
         sb.Append("<tr><td style=\"padding:0 24px;\"><table role=\"presentation\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" width=\"100%\"><tr><td style=\"height:1px;background-color:#404040;font-size:0;line-height:0;\">&nbsp;</td></tr></table></td></tr>");
         sb.Append("<tr><td style=\"padding:12px 24px 4px 24px;\">");
         sb.Append($"<span style=\"font-family:{FontStack};font-size:13px;font-weight:600;color:#E4E6EB;letter-spacing:0.5px;\">DETAILS</span>");
         sb.Append("</td></tr>");
+
+        /* #3297: the prose first, in the same paragraph treatment the advice items below get. It is the
+           actionable half of the alert, so it reads before the drill-down rather than after it. */
+        if (prose is not null)
+        {
+            sb.Append("<tr><td style=\"padding:2px 24px 8px 24px;\">");
+            foreach (var para in prose.Replace("\r\n", "\n", StringComparison.Ordinal).Split("\n\n", StringSplitOptions.RemoveEmptyEntries))
+            {
+                sb.Append($"<p style=\"margin:0 0 8px 0;font-family:{FontStack};font-size:13px;color:#E0E0E0;line-height:1.5;\">{WebUtility.HtmlEncode(para)}</p>");
+            }
+            sb.Append("</td></tr>");
+        }
+
+        if (context?.Details is null)
+        {
+            return;
+        }
 
         foreach (var item in context.Details)
         {
@@ -267,7 +301,8 @@ internal static class EmailTemplateBuilder
         DateTime localNow,
         int emailCooldownMinutes,
         AlertBranding branding,
-        AlertContext? context = null)
+        AlertContext? context = null,
+        string? prose = null)
     {
         var sb = new StringBuilder();
         sb.Append($"{branding.EditionName} Alert\r\n");
@@ -279,10 +314,22 @@ internal static class EmailTemplateBuilder
         sb.Append($"Time (UTC): {utcNow:yyyy-MM-dd HH:mm:ss}\r\n");
         sb.Append($"Time (Local): {localNow:yyyy-MM-dd HH:mm:ss}\r\n");
 
-        if (context?.Details?.Count > 0)
+        /* The HTML body's Details section, in parallel (BuildHtmlBody / AppendDetailSection): the #3297
+           prose leads, the structured items follow, and either half alone still opens the section. The two
+           bodies are maintained together — a change to one must touch the other. */
+        if (prose is not null || context?.Details?.Count > 0)
         {
             sb.Append($"\r\n--- Details ---\r\n");
-            foreach (var item in context.Details)
+
+            if (prose is not null)
+            {
+                foreach (var para in prose.Replace("\r\n", "\n", StringComparison.Ordinal).Split("\n\n", StringSplitOptions.RemoveEmptyEntries))
+                {
+                    sb.Append($"\r\n  {para}\r\n");
+                }
+            }
+
+            foreach (var item in context?.Details ?? EmptyDetails)
             {
                 sb.Append($"\r\n  {item.Heading}\r\n");
 

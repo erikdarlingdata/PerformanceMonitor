@@ -446,6 +446,43 @@ public class AlertContextBuildersTests
 
         var expected = string.Join(Environment.NewLine, "H1", "  A: 1", "", "H2", "  B: 2");
         Assert.Equal(expected, AlertContextBuilders.ContextToDetailText(context));
+
+        /* #3297: the implementation moved to the Notifications project, because the delivery channels there
+           decide whether an alert's prose adds anything over its structured context by comparing against
+           this exact text — and they cannot reference this project. One implementation, so the comparison
+           cannot drift away from the text it compares to. */
+        Assert.Equal(expected, AlertDetailText.Flatten(context));
+    }
+
+    /// <summary>
+    /// #3297's gate, which is what keeps the fix from printing every engine alert twice. Every engine
+    /// alert's detail text IS <see cref="AlertDetailText.Flatten"/> of its own context —
+    /// <c>AlertEngine</c> builds it that way at every fire site — so the channels suppress prose on that
+    /// equality and the alerts that already read correctly (blocking, deadlocks) are unchanged.
+    /// </summary>
+    [Fact]
+    public void ProseForDelivery_SuppressesAFlattenedContext_AndKeepsIndependentProse()
+    {
+        var context = new AlertContext();
+        context.Details.Add(new AlertDetailItem { Heading = "H1", Fields = new() { ("A", "1") } });
+
+        /* The engine path: detail text derived from the context. Nothing to add. */
+        var flattened = AlertContextBuilders.ContextToDetailText(context)!;
+        Assert.Null(AlertDetailText.ProseForDelivery(flattened, context));
+        Assert.Null(AlertDetailText.ProseForDelivery(flattened + "\r\n  ", context));
+
+        /* The #2109 AG-database path: a structured context AND hand-written prose naming the remedy.
+           Suppressing whenever a context is present would drop exactly this. */
+        Assert.Equal(
+            "Resume it with ALTER DATABASE SET HADR RESUME.",
+            AlertDetailText.ProseForDelivery("Resume it with ALTER DATABASE SET HADR RESUME.", context));
+
+        /* The self-alert path: prose, no context at all. */
+        Assert.Equal("do the thing", AlertDetailText.ProseForDelivery("do the thing", null));
+
+        /* Nothing is nothing, however it is spelled. */
+        Assert.Null(AlertDetailText.ProseForDelivery(null, context));
+        Assert.Null(AlertDetailText.ProseForDelivery("   ", context));
     }
 
     [Fact]

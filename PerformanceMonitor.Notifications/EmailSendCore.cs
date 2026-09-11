@@ -70,6 +70,13 @@ public sealed class EmailSendCore
     /// When false (Lite's muted case) neither email nor webhook is attempted; the caller
     /// still records its row from the all-false result.
     /// </param>
+    /// <param name="detailText">
+    /// #3297: the alert's flat prose detail — the same text the caller records as the history row's
+    /// <c>detail_text</c> and the viewer, the MCP reader and the triage page all show. Passed on to the
+    /// email template and the webhook fan-out so the channels carry the alert's remedy and not only its
+    /// number. Optional so the deprecated Dashboard shell, which has no detail text to give, keeps
+    /// compiling; every live caller has one.
+    /// </param>
     public async Task<EmailFanoutResult> TrySendAsync(
         string metricName,
         string serverName,
@@ -77,7 +84,8 @@ public sealed class EmailSendCore
         string thresholdValue,
         string serverId,
         AlertContext? context,
-        bool attemptChannels)
+        bool attemptChannels,
+        string? detailText = null)
     {
         bool emailAttempted = false;
         bool emailSent = false;
@@ -111,7 +119,8 @@ public sealed class EmailSendCore
 
                 var subject = $"[SQL Monitor Alert] {metricName} on {serverName}";
                 var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
-                    metricName, serverName, currentValue, thresholdValue, _settings.EmailCooldownMinutes, _branding, context);
+                    metricName, serverName, currentValue, thresholdValue, _settings.EmailCooldownMinutes, _branding, context,
+                    detailText);
 
                 try
                 {
@@ -151,7 +160,7 @@ public sealed class EmailSendCore
         if (attemptChannels)
         {
             webhookSent = await _webhookAlertService.TrySendWebhookAlertsAsync(
-                metricName, serverName, currentValue, thresholdValue, serverId, context);
+                metricName, serverName, currentValue, thresholdValue, serverId, context, detailText);
         }
 
         return new EmailFanoutResult(emailAttempted, emailSent, sendError, webhookSent, anyChannelConfigured);

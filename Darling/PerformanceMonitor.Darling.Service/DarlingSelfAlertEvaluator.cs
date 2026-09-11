@@ -1885,11 +1885,15 @@ internal sealed class DarlingSelfAlertEvaluator
                                 : "The gate is working as designed - it will not let retention drop history a " +
                                   "rollup has never materialized - but the hold has lasted long enough to cost " +
                                   "real disk. ") +
-                            "The policy arms ITSELF once its consumer covers everything raw holds; what is " +
-                            "missing is the backfill, which is the --backfill-rollups operator action. Do NOT " +
-                            "arm the policy by hand: the history it holds exists nowhere else, so arming drops " +
-                            "the only copy, which is precisely what the gate prevents. Check the service log at " +
-                            "startup for the 'HELD PAUSED' line naming which consumer is short.",
+                            "The policy arms ITSELF once its consumer covers everything raw holds, but it " +
+                            "arms at STARTUP rather than the moment coverage catches up - EnsureRetentionPoliciesAsync " +
+                            "runs on the service start path and nowhere else. So the remedy is two steps, and the " +
+                            "second is not optional: run the --backfill-rollups operator action, then RESTART the " +
+                            "service. Skip the restart and the backfill will have worked while this alert keeps " +
+                            "firing, which reads like the backfill failed. Do NOT arm the policy by hand: the " +
+                            "history it holds exists nowhere else, so arming drops the only copy, which is " +
+                            "precisely what the gate prevents. Check the service log at startup for the " +
+                            "'HELD PAUSED' line naming which consumer is short.",
                         severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
                         shortMessage: $"{label} held at {ratio:F1}x its {policy.DropAfter} horizon",
                         numericCurrentValue: Math.Round(ratio, 2),

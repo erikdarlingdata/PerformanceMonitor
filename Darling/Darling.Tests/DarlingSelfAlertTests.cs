@@ -2391,6 +2391,34 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         Assert.Contains("held at 4.5x", fired.ShortMessage, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3297: the detail names WHEN the policy arms. It said the policy "arms ITSELF once its consumer covers
+    /// everything raw holds" and stopped there, which is true and one step short:
+    /// <c>TimescaleSupport.EnsureRetentionPoliciesAsync</c> is the only thing that arms a held policy and it
+    /// has exactly one call site, the service startup path. So arming happens on the next service START, not
+    /// when coverage catches up. An operator following the old wording runs the backfill, watches the hourly
+    /// Critical keep firing, and concludes the backfill failed — which is what happened on #3296, where the
+    /// reporter's own sequence included the restart and ours did not. Pinned here rather than only in
+    /// <c>docs/retention-hold-runbook.md</c> because the alert is what an operator sees first, and now that
+    /// every channel delivers the detail (#3297) it is what most of them will see at all.
+    /// </summary>
+    [Fact]
+    public async Task RetentionHeld_TheDetail_NamesTheRestartAsPartOfTheRemedy()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+
+        var detail = Assert.Single(h.Deliverer.Outcomes).DetailText!;
+        Assert.Contains("--backfill-rollups", detail, StringComparison.Ordinal);
+        Assert.Contains("RESTART", detail, StringComparison.Ordinal);
+        /* The reason the restart is not optional, so a future edit cannot drop it to a bare instruction. */
+        Assert.Contains("STARTUP", detail, StringComparison.Ordinal);
+        /* And the do-not-arm warning it must never displace. */
+        Assert.Contains("Do NOT", detail, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task RetentionHeld_TheProductionIncident_ReadsCritical()
     {
