@@ -972,7 +972,7 @@ public sealed class PgCpuCapacityHeadroomTests
     /* ─────────────────────── the rung ─────────────────────── */
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
@@ -982,7 +982,9 @@ public sealed class PgCpuCapacityHeadroomTests
 
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        /* V115 was the top rung when #3281 landed; V116 (#3285) now is, so its "== SchemaVersion" claim
+           moved to CustomAlertCoreMigrationTests. This rung is now strictly below the top. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
@@ -1061,16 +1063,24 @@ public sealed class PgCpuCapacityHeadroomTests
             .GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* V115 is no longer the top rung (V116 / #3285 now is), so its sentinel is no longer the last
+           argument — exactly the handoff this test's comment above anticipated. */
+        Assert.True(ProbeOrdinal < arity - 1);
 
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
+        /* A store migrated to exactly V115 — this rung's sentinel true and every LATER sentinel false —
+           maps to 115. Future-proof against further rungs: it turns off everything above this ordinal. */
+        var toThisRung = Enumerable.Repeat((object)true, arity).ToArray();
+        for (var i = ProbeOrdinal + 1; i < arity; i++)
+        {
+            toThisRung[i] = false;
+        }
 
-        /* One rung behind: every sentinel EXCEPT this one must report 114. Without this the arm above could
-           be satisfied by an unconditional return and nothing would notice. */
-        var allButMine = Enumerable.Repeat((object)true, arity).ToArray();
-        allButMine[ProbeOrdinal] = false;
-        Assert.Equal(PreviousVersion, (int)method.Invoke(null, allButMine)!);
+        Assert.Equal(RungVersion, (int)method.Invoke(null, toThisRung)!);
+
+        /* One rung behind: this sentinel AND every later one false must report 114. */
+        var behind = (object[])toThisRung.Clone();
+        behind[ProbeOrdinal] = false;
+        Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
     }
 
     /* ─────────────────────── helpers ─────────────────────── */
