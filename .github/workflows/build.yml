@@ -576,14 +576,12 @@ jobs:
           SIGNPATH_ORG_ID: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
           SIGNPATH_PROJECT_SLUG: 'PerformanceMonitor'
           SIGNPATH_POLICY_SLUG: 'release-signing'
-          # A repository variable rather than a literal: the artifact configuration for a flat
-          # batch of PE files is created on signpath.io, and a step naming a slug that does not
-          # exist fails the release -- the standing lesson from the DarlingViewer slug.
-          SIGNPATH_CONFIG_SLUG: ${{ vars.SIGNPATH_CONFIG_SLUG }}
+          # The artifact configuration for a flat batch of PE files, declared on signpath.io as
+          # `**/*.exe` and `**/*.dll` with min-matches="0" on both -- a batch is all-exe for the
+          # Setup.exe invocation and mixed for the pack directory, so neither suffix can be
+          # required. sign-batch.ps1 refuses an empty batch for exactly that reason.
+          SIGNPATH_CONFIG_SLUG: 'SignTemplate'
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:SIGNPATH_CONFIG_SLUG)) {
-            throw 'SIGNPATH_CONFIG_SLUG repository variable is not set; set it to the batch artifact configuration slug before cutting a release.'
-          }
           # Pin vpk to the Velopack library version (keep in sync with the Velopack
           # PackageReference in PerformanceMonitorLite.csproj).
           dotnet tool install -g vpk --version 1.2.0
