@@ -127,7 +127,7 @@ public sealed class DarlingMcpAlertTools
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode, and the scheduled-analysis cadence. This is the single global settings row the service hot-swaps in. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, and the scheduled-analysis cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes is the per-alert-fingerprint throttle on the resulting Slack/Teams/PagerDuty/webhook/email post. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]
     public static async Task<string> GetAlertSettings(
         NpgsqlDataSource postgres)
     {
@@ -139,7 +139,17 @@ public sealed class DarlingMcpAlertTools
                     "unavailable",
                     "No alert-settings row is present in the store yet. The service seeds it on startup (or the Viewer's Settings window writes it); until then the service runs on its darling.json defaults.");
 
-            return JsonSerializer.Serialize(BuildAlertSettingsPayload(s), McpHelpers.JsonOptions);
+            /* The delivery cooldown is the one value on config_notification rather than config_alert_settings,
+               so it costs a second read. Absent means the notification row is unseeded, which the service
+               seeds in the SAME pass as the settings row -- so it is the same unseeded control plane the arm
+               above reports, and reporting the shipped 15 instead would state a number nobody wrote. */
+            var deliveryCooldown = await DarlingAlertReader.GetDeliveryCooldownMinutesAsync(postgres);
+            if (deliveryCooldown is null)
+                return McpHelpers.Status(
+                    "unavailable",
+                    "No notification row is present in the store yet, so the delivery cooldown cannot be reported. The service seeds it alongside the alert-settings row on startup (or the Viewer's Settings window writes it); until then the service runs on its darling.json defaults.");
+
+            return JsonSerializer.Serialize(BuildAlertSettingsPayload(s, deliveryCooldown.Value), McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
@@ -155,8 +165,15 @@ public sealed class DarlingMcpAlertTools
     /// set equality between this payload's keys and the columns <c>AlertSettingsSelectSql</c> reads —
     /// <c>EveryColumnRead_IsEmittedByThePayload_AndAcceptedByTheWriter</c>. Adding a key here without the
     /// matching arm in <see cref="BuildAlertSettingsUpdate"/> (or the reverse) fails that test rather than
-    /// shipping.</para></summary>
-    private static object BuildAlertSettingsPayload(DarlingAlertReader.AlertSettingsReadRow s) => new
+    /// shipping.</para>
+    ///
+    /// <para>That set equality is held PER TABLE (#3314). Every key here but one maps to a
+    /// <c>config_alert_settings</c> column; <c>delivery.cooldown_minutes</c> maps to
+    /// <c>config_notification.email_cooldown_minutes</c>, so it is passed in separately rather than read off
+    /// <paramref name="s"/> — a single set equality across both planes would compare a union against one
+    /// table's SELECT list and be satisfiable by drift on either side.</para></summary>
+    private static object BuildAlertSettingsPayload(
+        DarlingAlertReader.AlertSettingsReadRow s, int deliveryCooldownMinutes) => new
     {
         alerts_enabled = s.Enabled,
         notify_connection_changes = s.NotifyConnectionChanges,
@@ -240,7 +257,20 @@ public sealed class DarlingMcpAlertTools
         },
         cooldown_minutes = s.CooldownMinutes,
         excluded_databases = s.ExcludedDatabases,
-        delivery = new { mode = s.DeliveryMode, per_event_max = s.PerEventMax },
+        delivery = new
+        {
+            mode = s.DeliveryMode,
+            per_event_max = s.PerEventMax,
+            /* #3314: the per-fingerprint DELIVERY cooldown -- stored as
+               config_notification.email_cooldown_minutes and, until now, the one alert-engine number no MCP
+               tool reported and none could write, so a headless Slack-only deployment could reach the sole
+               throttle on its channel volume only through the WPF Settings window. Reported HERE, beside
+               mode and per_event_max, because volume is what it governs and that is where someone tuning
+               volume looks -- not under a channel name for a channel they may not have configured.
+               DISTINCT from the top-level cooldown_minutes, which gates AlertEngine's FIRE decision: two
+               stages, two numbers, and only one of them used to be visible. */
+            cooldown_minutes = deliveryCooldownMinutes
+        },
         analysis = new
         {
             enabled = s.AnalysisEnabled,
@@ -322,7 +352,14 @@ public sealed class DarlingMcpAlertTools
         "the Viewer's Settings window enforces — thresholds in range, cpu.mode 'sql'|'total', delivery.mode " +
         "'Summary'|'PerEvent', counts within their bounds; an out-of-range value or an unknown field returns " +
         "{status:\"invalid\", ...} and writes NOTHING. On success the running service hot-reloads the change within " +
-        "one collection sweep. SMTP/webhook delivery credentials are managed separately and cannot be set here " +
+        "one collection sweep. TWO cooldowns are writable and they are different stages: cooldown_minutes gates " +
+        "the engine's FIRE decision, delivery.cooldown_minutes throttles the per-fingerprint post to " +
+        "Slack/Teams/PagerDuty/webhook/email (its stored name, email_cooldown_minutes, is also accepted as a " +
+        "top-level alias, but send only one of the two spellings). For silencing ONE recurring signature for a " +
+        "long stretch, use create_mute_rule instead of a long delivery cooldown: a mute is scoped, expires, is " +
+        "listed by get_mute_rules, and still logs the alert, where the cooldown is global to every fingerprint " +
+        "on every server and no tool reports what it suppressed. SMTP/webhook delivery credentials are managed " +
+        "separately and cannot be set here " +
         "— configure them in the standalone Darling Viewer app's Settings window (Notifications section), which " +
         "connects to this store (including remotely, not just localhost) rather than requiring desktop access to " +
         "this specific box. " +
@@ -362,30 +399,58 @@ public sealed class DarlingMcpAlertTools
 
             /* Only the provided columns are written. Column names are this method's compile-time constants (never
                the caller's input), so interpolating them into the SET list is injection-safe; every VALUE is a
-               bound parameter. The single-row config_version self-bump is left to the config-table trigger. */
-            var setClause = string.Join(", ", updates.Select((u, i) => $"{u.Column} = ${i + 1}"));
-            await using var command = postgres.CreateCommand($"UPDATE config_alert_settings SET {setClause} WHERE id = 1");
-            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            foreach (var (_, param) in updates)
+               bound parameter. The single-row config_version self-bump is left to the config-table trigger.
+
+               ONE STATEMENT PER TABLE, in ONE transaction (#3314): the delivery cooldown lives on
+               config_notification while every other knob is on config_alert_settings, and a partial update is
+               the worst outcome available here -- the caller is told "updated" and the re-read below reports a
+               merged state that half-landed, with no indication which half. The statement order is FIXED
+               rather than the grouping's hash order, so two concurrent tools can never take the two singleton
+               rows in opposite orders. Both tables carry a bump trigger, so either statement alone is enough
+               to make the service reload. */
+            await using var connection = await postgres.OpenConnectionAsync();
+            await using var transaction = await connection.BeginTransactionAsync();
+
+            foreach (var table in WritableTables)
             {
-                command.Parameters.Add(param);
+                var forTable = updates.Where(u => string.Equals(u.Table, table, StringComparison.Ordinal)).ToList();
+                if (forTable.Count == 0)
+                {
+                    continue;
+                }
+
+                var setClause = string.Join(", ", forTable.Select((u, i) => $"{u.Column} = ${i + 1}"));
+                await using var command = new NpgsqlCommand($"UPDATE {table} SET {setClause} WHERE id = 1", connection, transaction);
+                command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                foreach (var target in forTable)
+                {
+                    command.Parameters.Add(target.Param);
+                }
+
+                if (await command.ExecuteNonQueryAsync() == 0)
+                {
+                    /* Rolled back by the transaction's disposal on the early return -- nothing this call
+                       provided is left applied, so the reported failure and the store agree. */
+                    return Outcome("unavailable",
+                        $"No {table} row is present in the store yet (id = 1). The service seeds it on startup (or the Viewer's Settings window writes it); until then there is nothing to update.");
+                }
             }
 
-            var affected = await command.ExecuteNonQueryAsync();
-            if (affected == 0)
-            {
-                return Outcome("unavailable",
-                    "No alert-settings row is present in the store yet (id = 1). The service seeds it on startup (or the Viewer's Settings window writes it); until then there is nothing to update.");
-            }
+            await transaction.CommitAsync();
 
             /* Re-read so the caller sees the authoritative merged state — the write fired the config-table trigger
                that self-bumps config_version, so the running service reloads this within one sweep. */
             var reread = await DarlingAlertReader.GetAlertSettingsAsync(postgres);
+            var rereadCooldown = await DarlingAlertReader.GetDeliveryCooldownMinutesAsync(postgres);
             return JsonSerializer.Serialize(new
             {
                 status = "updated",
+                /* Bare column names, unqualified, even though two tables are now in play: this array is a
+                   consumer API and qualifying the existing entries would redefine every one of them. No
+                   writable column name appears on both tables, so a bare name is still unambiguous --
+                   asserted, not assumed, by WritableColumnNames_DoNotCollideAcrossTheTwoTables. */
                 updated_fields = updates.Select(u => u.Column).ToArray(),
-                settings = reread is null ? null : BuildAlertSettingsPayload(reread)
+                settings = reread is null || rereadCooldown is null ? null : BuildAlertSettingsPayload(reread, rereadCooldown.Value)
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -489,6 +554,20 @@ public sealed class DarlingMcpAlertTools
         }
     }
 
+    /// <summary>The singleton config rows update_alert_settings writes, in the order it writes them — see
+    /// the statement-order note at the write itself. Also the read side's table set: the settings row is
+    /// <see cref="DarlingAlertReader.AlertSettingsSelectSql"/>'s source and the notification row is
+    /// <see cref="DarlingAlertReader.DeliveryCooldownSelectSql"/>'s.</summary>
+    internal static readonly string[] WritableTables = { AlertSettingsTable, NotificationTable };
+
+    internal const string AlertSettingsTable = "config_alert_settings";
+    internal const string NotificationTable = "config_notification";
+
+    /// <summary>The delivery cooldown's stored column name — the wire alias as well as the column, which is
+    /// the whole point of keeping it: <c>delivery.cooldown_minutes</c> is what the tool reports, and this is
+    /// what every existing config file, Settings window and hand-written UPDATE already calls it.</summary>
+    internal const string DeliveryCooldownColumn = "email_cooldown_minutes";
+
     private static string? Trimmed(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     /// <summary>A small {status, message} envelope for a non-data write outcome (invalid / not_found / unavailable)
@@ -505,21 +584,24 @@ public sealed class DarlingMcpAlertTools
     /// nothing — on the FIRST bad value or unknown field (top-level or nested). Column names are this method's
     /// compile-time constants (never the input), so interpolating them into the UPDATE's SET list is injection-safe.
     /// </summary>
-    private static (List<(string Column, NpgsqlParameter Param)> Updates, string? Error) BuildAlertSettingsUpdate(JsonObject body)
+    private static (List<UpdateTarget> Updates, string? Error) BuildAlertSettingsUpdate(JsonObject body)
     {
-        var updates = new List<(string Column, NpgsqlParameter Param)>();
+        var updates = new List<UpdateTarget>();
         string? error = null;
 
         void AddBool(string column, JsonNode? node, string field)
         {
             if (error != null) return;
             if (node is JsonValue v && v.TryGetValue<bool>(out var b))
-                updates.Add((column, new NpgsqlParameter<bool> { TypedValue = b }));
+                updates.Add(new UpdateTarget(AlertSettingsTable, column, field, new NpgsqlParameter<bool> { TypedValue = b }));
             else
                 error = $"'{field}' must be true or false.";
         }
 
-        void AddInt(string column, JsonNode? node, string field, int min, int max)
+        /* `table` defaults to the settings row because all but one column lives there; the delivery
+           cooldown passes NotificationTable. Routing rather than a second parser so every field still
+           validates through one set of adders and one first-error rule. */
+        void AddInt(string column, JsonNode? node, string field, int min, int max, string table = AlertSettingsTable)
         {
             if (error != null) return;
             if (node is JsonValue v && v.TryGetValue<int>(out var i))
@@ -527,7 +609,7 @@ public sealed class DarlingMcpAlertTools
                 if (i < min || i > max)
                     error = $"'{field}' must be an integer between {min} and {max}.";
                 else
-                    updates.Add((column, new NpgsqlParameter<int> { TypedValue = i }));
+                    updates.Add(new UpdateTarget(table, column, field, new NpgsqlParameter<int> { TypedValue = i }));
             }
             else
             {
@@ -547,7 +629,7 @@ public sealed class DarlingMcpAlertTools
                 if (l < min || l > max)
                     error = $"'{field}' must be an integer between {min} and {max}.";
                 else
-                    updates.Add((column, new NpgsqlParameter<long> { TypedValue = l }));
+                    updates.Add(new UpdateTarget(AlertSettingsTable, column, field, new NpgsqlParameter<long> { TypedValue = l }));
             }
             else
             {
@@ -563,7 +645,7 @@ public sealed class DarlingMcpAlertTools
                 if (d < min || d > max)
                     error = $"'{field}' must be a number between {min.ToString("0.0", CultureInfo.InvariantCulture)} and {max.ToString("0.0", CultureInfo.InvariantCulture)}.";
                 else
-                    updates.Add((column, new NpgsqlParameter<double> { TypedValue = d }));
+                    updates.Add(new UpdateTarget(AlertSettingsTable, column, field, new NpgsqlParameter<double> { TypedValue = d }));
             }
             else
             {
@@ -580,7 +662,7 @@ public sealed class DarlingMcpAlertTools
                 if (match == null)
                     error = $"'{field}' must be one of: {string.Join(", ", allowed)}.";
                 else
-                    updates.Add((column, new NpgsqlParameter<string> { TypedValue = match }));
+                    updates.Add(new UpdateTarget(AlertSettingsTable, column, field, new NpgsqlParameter<string> { TypedValue = match }));
             }
             else
             {
@@ -607,7 +689,8 @@ public sealed class DarlingMcpAlertTools
                     }
                 }
 
-                updates.Add((column, new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = array.ToArray() }));
+                updates.Add(new UpdateTarget(AlertSettingsTable, column, field,
+                    new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = array.ToArray() }));
             }
             else
             {
@@ -646,6 +729,13 @@ public sealed class DarlingMcpAlertTools
                 case "notify_connection_down_at_startup": AddBool("notify_connection_down_at_startup", prop.Value, "notify_connection_down_at_startup"); break;
                 case "connection_refire_minutes": AddInt("connection_refire_minutes", prop.Value, "connection_refire_minutes", 0, 1440); break;
                 case "cooldown_minutes": AddInt("cooldown_minutes", prop.Value, "cooldown_minutes", 1, 120); break;
+                /* #3314: the STORED column name, accepted as an alias for delivery.cooldown_minutes so an
+                   existing darling.json key, a hand-written UPDATE, or Lite's settings.json spelling keeps
+                   working against the tool. Not emitted by get_alert_settings -- two wire keys for one
+                   column is its own bug for a client, so the alias is write-only and the canonical name is
+                   the only one that round-trips. Sending both in one body is refused below rather than
+                   letting one silently win. */
+                case DeliveryCooldownColumn: AddInt(DeliveryCooldownColumn, prop.Value, DeliveryCooldownColumn, 1, 120, NotificationTable); break;
                 case "excluded_databases": AddStringArray("excluded_databases", prop.Value, "excluded_databases"); break;
 
                 case "cpu":
@@ -859,6 +949,13 @@ public sealed class DarlingMcpAlertTools
                         {
                             case "mode": AddEnum("delivery_mode", n, "delivery.mode", "Summary", "PerEvent"); break;
                             case "per_event_max": AddInt("per_event_max", n, "delivery.per_event_max", 1, 100); break;
+                            /* #3314. The bound is DarlingAlertSettings' Clamp(..., 1, 120) EXACTLY -- the
+                               same parity the file-growth and AG bounds hold, and for the same reason: a
+                               wider bound here would ACCEPT a value the engine then silently rewrites on
+                               read, which presents to the operator as the setting not sticking. Raising the
+                               ceiling is therefore an engine change across both SKUs, not a bound edit; see
+                               the PR for why long suppression belongs to create_mute_rule instead. */
+                            case "cooldown_minutes": AddInt(DeliveryCooldownColumn, n, "delivery.cooldown_minutes", 1, 120, NotificationTable); break;
                             default: error = $"Unknown field 'delivery.{k}'."; break;
                         }
                     });
@@ -886,6 +983,33 @@ public sealed class DarlingMcpAlertTools
             }
         }
 
+        /* Two accepted keys claiming ONE column. The only pair that can do this today is
+           delivery.cooldown_minutes and its email_cooldown_minutes alias, and both landing in one SET list
+           is a Postgres error (multiple assignments to the same column) -- so refusing it here names the two
+           spellings instead of surfacing a dialect message, and the caller learns which key to drop. Checked
+           over (table, column) because the two planes are written by separate statements. */
+        if (error == null)
+        {
+            var clash = updates
+                .GroupBy(u => (u.Table, u.Column))
+                .FirstOrDefault(g => g.Count() > 1);
+            if (clash != null)
+            {
+                error = $"'{string.Join("' and '", clash.Select(u => u.Field))}' are two names for the same setting "
+                    + $"({clash.Key.Table}.{clash.Key.Column}); send only one of them.";
+            }
+        }
+
         return (updates, error);
     }
+
+    /// <summary>One validated field of a partial update: the TABLE it writes, the column, the wire field
+    /// name it arrived under (for the two-names-one-column message), and the bound parameter.
+    ///
+    /// <para>The table is carried per field because <c>update_alert_settings</c> spans two config tables
+    /// (#3314): all but one column is on the singleton <c>config_alert_settings</c> row, and the delivery
+    /// cooldown is on the singleton <c>config_notification</c> row. Carrying it beats inferring it from the
+    /// column name — an inference that would be correct today and silently wrong the first time a second
+    /// notification knob arrives.</para></summary>
+    private sealed record UpdateTarget(string Table, string Column, string Field, NpgsqlParameter Param);
 }

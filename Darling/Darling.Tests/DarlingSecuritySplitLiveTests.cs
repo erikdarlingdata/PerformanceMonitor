@@ -361,6 +361,24 @@ public sealed class DarlingSecuritySplitLiveTests
             await ExecAsync(owner, "INSERT INTO config.config_alert_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING", ct);
             await ExecAsync(mcp, "UPDATE config.config_alert_settings SET enabled = enabled WHERE id = 1", ct);
 
+            /* #3314: the delivery cooldown, on config_notification rather than config_alert_settings, so
+               update_alert_settings spans two tables. This is the one live check that separates the two ways
+               the write can 42501 — a missing column SELECT and a missing column UPDATE raise the IDENTICAL
+               "permission denied for table config_notification", so a single passing write attempt cannot
+               attribute itself. The read half is asserted by the secret-column loop above (which SELECTs the
+               whole non-secret set, email_cooldown_minutes included); this is the write half, and the
+               sibling-column denials below are what prove the grant is really one column wide rather than
+               the table-wide write it would be easiest to reach for. */
+            await ExecAsync(owner, "INSERT INTO config.config_notification (id) VALUES (1) ON CONFLICT (id) DO NOTHING", ct);
+            await ExecAsync(mcp, "UPDATE config.config_notification SET email_cooldown_minutes = email_cooldown_minutes WHERE id = 1", ct);
+
+            foreach (var sibling in new[] { "smtp_encrypted_password = 'x'", "slack_url = 'x'", "smtp_host = 'x'" })
+            {
+                var siblingDenied = await Assert.ThrowsAsync<PostgresException>(async () =>
+                    await ExecAsync(mcp, $"UPDATE config.config_notification SET {sibling} WHERE id = 1", ct));
+                Assert.Equal("42501", siblingDenied.SqlState);
+            }
+
             /* But mcp is STILL denied a write to a config table it was NOT granted (42501) — config_command is
                the service-credential pivot; the alert-tuning grants did not widen into a schema-wide config write. */
             var stillDenied = await Assert.ThrowsAsync<PostgresException>(async () =>
@@ -546,6 +564,10 @@ GRANT INSERT, UPDATE, DELETE ON config.custom_views TO {McpRole};
 GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO {McpRole};
 GRANT UPDATE ON config.config_alert_settings TO {McpRole};
 GRANT UPDATE (config_version, updated_at) ON config.config_service TO {McpRole};
+-- #3314: the DELIVERY cooldown, the one alert knob stored on config_notification. COLUMN-level, because that
+-- table holds the SMTP password blob and the Teams/Slack/generic webhook URLs and the PagerDuty routing key.
+-- Mirrors DarlingManagedRoles section 8.
+GRANT UPDATE (email_cooldown_minutes) ON config.config_notification TO {McpRole};
 -- The mcp server-onboarding writes (add_servers / remove_server): CRUD on the single config_monitored_servers
 -- table. Mirrors DarlingManagedRoles section 9. The beacon is already covered by the config_service column grant
 -- above (a config_monitored_servers write fires the same SECURITY-INVOKER bump trigger).
