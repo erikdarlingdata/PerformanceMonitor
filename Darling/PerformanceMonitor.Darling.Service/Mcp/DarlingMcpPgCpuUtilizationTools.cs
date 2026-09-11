@@ -75,13 +75,23 @@ public sealed class DarlingMcpPgCpuUtilizationTools
                     /* Averaged over the samples that HAVE a capacity reading, and null when none of them
                        does (#3281). Coalescing the missing ones to 0 first would drag a real figure down
                        toward "plenty of headroom" in exactly the window where the capacity was not
-                       measured — the one direction that must not be invented. */
+                       measured — the one direction that must not be invented.
+
+                       Averaged rather than taken last, on the same terms as cpu_percent above, because a
+                       bucket is one minute and Performance Insights' period is 60 seconds: the normal
+                       bucket holds a single sample, so the mean IS that sample, and a bucket that holds
+                       more is a re-read window where a mean is the honest summary. That applies to the
+                       ceiling too — it is a setting someone can change mid-window, and a mean says so by
+                       landing between the two values instead of silently picking one. */
                     acu_utilization_percent = Rounded(g.Select(r => r.AcuUtilizationPercent)),
                     serverless_capacity_acu = Rounded(g.Select(r => r.ServerlessCapacityAcu)),
                     max_configured_acu = Rounded(g.Select(r => r.MaxConfiguredAcu)),
                     samples_in_bucket = g.Count(),
-                    /* The capacity denominator, reported because the ACU average above is over a SUBSET of
-                       samples_in_bucket. Without it a null or a low figure cannot be told from a thin one. */
+                    /* acu_utilization_percent's own denominator, reported because that average is over a
+                       SUBSET of samples_in_bucket — without it a null or a low figure cannot be told from
+                       a thin one. It counts that column specifically rather than all three: they arrive on
+                       one Performance Insights call at one period, so they are present together in
+                       practice, and the figure a reader bands on is the one whose coverage matters. */
                     capacity_samples_in_bucket = g.Count(r => r.AcuUtilizationPercent.HasValue),
                 });
 
