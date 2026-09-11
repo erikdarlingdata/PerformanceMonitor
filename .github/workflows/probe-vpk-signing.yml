@@ -22,13 +22,18 @@ name: Probe vpk signing invocations
 # invocation. That is the number that decides whether the fix costs one extra approval per
 # product or six.
 on:
+  # A pull_request trigger, not only workflow_dispatch, and the reason is load-bearing: a
+  # workflow that has NEVER run is not registered, and `gh workflow run` answers
+  # "not found on the default branch" for it. Since this repo merges to dev and defaults to
+  # main, a dispatch-only workflow added here could never be dispatched at all -- it would
+  # have to reach main first, which only happens on a release. Running once on its own PR
+  # both answers the question and registers it for later dispatch.
+  pull_request:
+    paths:
+      - '.github/workflows/probe-vpk-signing.yml'
+    branches: [dev, main]
   workflow_dispatch:
     inputs:
-      disable_deep:
-        description: 'Pass --signDisableDeep (pre-signed payload). Run it both ways to compare.'
-        required: false
-        default: false
-        type: boolean
       sign_parallel:
         description: 'Value for --signParallel. Blank = leave it at the default.'
         required: false
@@ -41,6 +46,12 @@ permissions:
 jobs:
   probe:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The whole question is what --signDisableDeep changes about WHICH files vpk asks to
+        # have signed, so both arms always run and are read side by side.
+        disable_deep: [false, true]
     steps:
       - uses: actions/checkout@v5
 
@@ -86,7 +97,7 @@ jobs:
             '--channel', 'probe',
             '--signTemplate', $probeCmd
           )
-          if ('${{ inputs.disable_deep }}' -eq 'true') { $vpkArgs += '--signDisableDeep' }
+          if ('${{ matrix.disable_deep }}' -eq 'true') { $vpkArgs += '--signDisableDeep' }
           if ('${{ inputs.sign_parallel }}' -ne '') { $vpkArgs += @('--signParallel', '${{ inputs.sign_parallel }}') }
           Write-Host "vpk $($vpkArgs -join ' ')"
           & vpk @vpkArgs
@@ -102,7 +113,7 @@ jobs:
           $lines = Get-Content $log
           $invocations = ($lines | Where-Object { $_ -like 'INVOCATION*' }).Count
           $files = $lines | Where-Object { $_ -notlike 'INVOCATION*' } | ForEach-Object { $_.Trim() }
-          Write-Host "=== $invocations template invocation(s) -> $invocations SignPath approval(s) ==="
+          Write-Host "=== --signDisableDeep=${{ matrix.disable_deep }}: $invocations template invocation(s) -> $invocations SignPath approval(s) ==="
           Write-Host ''
           Get-Content $log
           Write-Host ''
