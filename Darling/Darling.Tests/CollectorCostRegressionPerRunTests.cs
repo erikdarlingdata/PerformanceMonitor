@@ -90,7 +90,11 @@ public sealed class CollectorCostRegressionPerRunTests
             await InsertCostAsync(connection, ct, Day0, PerRunSlower,     1000, 300_000);  /* 300 ms/run: 3x   */
 
             var regressions = await DarlingCollectorCostReader.GetCostRegressionsAsync(
-                postgres, Day0.AddDays(-10), baselineFloorMs: 1000, factor: 2.0, ct);
+                /* addedMsFloor 0: this fixture pins the #2846 per-run property in isolation. The #3316
+                   materiality floor has its own adversarial fixture and would otherwise be a second
+                   reason this test could fail. */
+                postgres, Day0.AddDays(-10), baselineFloorMs: 1000, factor: 2.0, addedMsFloor: 0,
+                cancellationToken: ct);
 
             var mine = regressions.Where(r => r.ServerId == ServerId).ToList();
 

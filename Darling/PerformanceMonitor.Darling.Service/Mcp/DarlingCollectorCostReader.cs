@@ -208,6 +208,7 @@ AND   sc.baseline_ms >= $2
 AND   sc.latest_ms_per_run IS NOT NULL
 AND   sc.baseline_ms_per_run IS NOT NULL
 AND   sc.latest_ms_per_run > sc.baseline_ms_per_run * $3
+AND   (sc.latest_ms_per_run - sc.baseline_ms_per_run) * sc.latest_runs >= $4
 ORDER BY (sc.latest_ms_per_run - sc.baseline_ms_per_run) DESC";
 
     /// <summary>#2846: <see cref="LatestMsPerRun"/> and <see cref="BaselineMsPerRun"/> are what the
@@ -224,11 +225,19 @@ ORDER BY (sc.latest_ms_per_run - sc.baseline_ms_per_run) DESC";
         DateTime LatestMetricTime,
         long LatestRuns,
         double LatestMsPerRun,
-        double BaselineMsPerRun);
+        double BaselineMsPerRun)
+    {
+        /// <summary>#3316: the per-run rise multiplied by the volume it is paid on, in ms per day -
+        /// what this regression actually COSTS. Derived from the members rather than carried, so it
+        /// cannot disagree with the parts that explain it, and the query gates on the same
+        /// expression. A truthful per-run doubling on a collector costing 3 ms per run and 305 ms
+        /// per day is 0.16 s here, which is why the ratio alone is not a reason to alert.</summary>
+        public double AddedMsPerDay => (LatestMsPerRun - BaselineMsPerRun) * LatestRuns;
+    }
 
     public static async Task<List<CostRegression>> GetCostRegressionsAsync(
         NpgsqlDataSource postgres, DateTime baselineSinceUtc, long baselineFloorMs, double factor,
-        CancellationToken cancellationToken = default)
+        long addedMsFloor, CancellationToken cancellationToken = default)
     {
         var rows = new List<CostRegression>();
         await using var command = postgres.CreateCommand(RegressionSql);
@@ -236,6 +245,7 @@ ORDER BY (sc.latest_ms_per_run - sc.baseline_ms_per_run) DESC";
         command.Parameters.AddWithValue(baselineSinceUtc);
         command.Parameters.AddWithValue(baselineFloorMs);
         command.Parameters.AddWithValue(factor);
+        command.Parameters.AddWithValue(addedMsFloor);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
