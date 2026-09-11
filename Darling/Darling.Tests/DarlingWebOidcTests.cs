@@ -510,6 +510,18 @@ public sealed class DarlingWebOidcTests
     [InlineData(false, "DELETE", "/api/views/3", false)]        // no delete
     [InlineData(false, "POST", "/api/anything/new", false)]     // a write endpoint added TOMORROW is born gated
     [InlineData(false, "PATCH", "/api/compose/run", false)]     // the compose exception is POST-only
+    // The custom-alert-rule web API (#3285) shadows /api/views: reads open to any seat, writes born gated.
+    [InlineData(true, "POST", "/api/alerts", true)]             // edit seat: create
+    [InlineData(true, "PUT", "/api/alerts/3", true)]            // edit seat: update
+    [InlineData(true, "DELETE", "/api/alerts/3", true)]         // edit seat: delete
+    [InlineData(false, "GET", "/api/alerts", true)]             // viewer: list
+    [InlineData(false, "GET", "/api/alerts/3", true)]           // viewer: get one
+    [InlineData(false, "GET", "/api/alert-templates", true)]    // viewer: browse starter templates
+    [InlineData(false, "POST", "/api/alerts", false)]           // viewer: no create
+    [InlineData(false, "PUT", "/api/alerts/3", false)]          // no update
+    [InlineData(false, "DELETE", "/api/alerts/3", false)]       // no delete
+    [InlineData(false, "POST", "/api/alerts/validate", false)]  // validate is a POST, born gated (NOT compose/run-exempt)
+    [InlineData(false, "POST", "/api/alerts/test", false)]      // evaluate-now is a POST, born gated too
     public void IsRequestAllowed_Matrix(bool canEdit, string method, string path, bool expected)
         => Assert.Equal(expected, DarlingWebSeat.IsRequestAllowed(new DarlingWebSeat("who", canEdit), method, path));
 

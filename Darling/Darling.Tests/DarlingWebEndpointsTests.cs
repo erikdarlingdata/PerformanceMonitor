@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Text.Json.Nodes;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -179,4 +180,51 @@ public sealed class DarlingWebEndpointsTests
     [InlineData(-5, 1)]
     public void ClampRows_BoundsCallerSuppliedRowCounts(int requested, int expected) =>
         Assert.Equal(expected, DarlingWebEndpoints.ClampRows(requested));
+
+    /* ── custom-alert-rule wire-shape builders (#3285): the ONE shape shared by the /api/alerts responses AND
+       the MCP alert tools (get/create/update/list), so the two surfaces cannot drift. ── */
+
+    [Fact]
+    public void BuildFullRuleNode_CarriesEnabled_AndEmbedsTheDefinitionAsAnObject()
+    {
+        var created = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        var updated = new DateTime(2026, 1, 2, 3, 5, 6, DateTimeKind.Utc);
+        var rule = new CustomAlertRule(
+            Id: 7, Name: "PG dead tuples", DefinitionJson: "{\"predicate\":{\"op\":\"gt\",\"warnThreshold\":1000}}",
+            Description: "desc", Enabled: false, Version: 3, CreatedAt: created, UpdatedAt: updated, UpdatedBy: "web");
+
+        var node = DarlingWebEndpoints.BuildFullRuleNode(rule);
+
+        foreach (var key in new[] { "id", "name", "description", "definition", "enabled", "version", "created_at", "updated_at", "updated_by" })
+        {
+            Assert.True(node.ContainsKey(key), "missing key: " + key);
+        }
+
+        Assert.Equal(7L, (long)node["id"]!);
+        Assert.Equal("PG dead tuples", (string)node["name"]!);
+        Assert.False((bool)node["enabled"]!);          // 'enabled' round-trips (the view shape carries no such field)
+        Assert.Equal(3, (int)node["version"]!);
+
+        // The definition is an embedded JSON object (NOT an escaped string), so a client reads its fields directly.
+        var definition = Assert.IsType<JsonObject>(node["definition"]);
+        Assert.Equal("gt", (string)definition["predicate"]!["op"]!);
+    }
+
+    [Fact]
+    public void BuildRuleSummariesNode_IsABareArray_WithEnabled_AndNoDefinitionBody()
+    {
+        var summaries = new List<CustomAlertRuleSummary>
+        {
+            new(Id: 11, Name: "blocking", Description: null, Enabled: true, Version: 2,
+                UpdatedAt: new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc), UpdatedBy: "mcp"),
+        };
+
+        var array = DarlingWebEndpoints.BuildRuleSummariesNode(summaries);
+
+        var only = Assert.IsType<JsonObject>(Assert.Single(array));
+        Assert.Equal(11L, (long)only["id"]!);
+        Assert.Equal("blocking", (string)only["name"]!);
+        Assert.True((bool)only["enabled"]!);
+        Assert.False(only.ContainsKey("definition"));  // the list projection never carries the definition body
+    }
 }

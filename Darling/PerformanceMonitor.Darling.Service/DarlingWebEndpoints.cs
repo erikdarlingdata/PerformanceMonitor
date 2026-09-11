@@ -277,6 +277,7 @@ public static class DarlingWebEndpoints
         }
 
         MapCustomViews(app, postgres);
+        MapCustomAlerts(app, postgres);
 
         /* The per-alert triage page's assembly endpoint (#2710): everything it serves is already reachable
            through the /api/read mirror above — it adds assembly (alert match + anchored sections), not reach. */
@@ -470,6 +471,215 @@ public static class DarlingWebEndpoints
             return outcome.Payload is not null
                 ? JsonNodeResult(outcome.Payload)
                 : ErrorResult(outcome.Error!, outcome.IsServerError ? StatusCodes.Status500InternalServerError : StatusCodes.Status400BadRequest);
+        });
+    }
+
+    /// <summary>
+    /// The custom-alert-rule web API (#3285, Component 7's backend) — the SAME surface the
+    /// <see cref="Mcp.DarlingMcpCustomAlertTools"/> MCP tools expose, mirrored onto HTTP so a web editor (its JS
+    /// deferred) can list / read / create / update / delete / validate / test the user-authored alert rules and
+    /// browse the starter templates. Deliberately a THIN wrapper, never a second implementation: persistence is
+    /// the same <see cref="CustomAlertRuleStore"/>, definition validation the same
+    /// <see cref="CustomAlertRuleDefinition.TryParse"/> authority, delete the same
+    /// <see cref="CustomAlertEvaluator.ResolveAndDeleteRuleAsync"/> (so an open incident is force-resolved before
+    /// the FK cascade drops its state, #3305), templates the same <see cref="CustomAlertTemplates"/>, and
+    /// evaluate-now the same <see cref="Mcp.DarlingMcpCustomAlertTools.TestCustomAlertRule"/> seam — so the web
+    /// and MCP surfaces cannot drift. The routes shadow <see cref="MapCustomViews"/> exactly: the reads are open
+    /// to any seat; the writes (POST/PUT/DELETE, plus the two evaluate POSTs) require <c>application/json</c> (the
+    /// CSRF gate) and are born gated by the host's method-based write gate
+    /// (<see cref="Hosting.DarlingWebSeat.IsRequestAllowed"/> refuses a read-only seat everything unsafe except
+    /// <c>POST /api/compose/run</c>), so a viewer seat gets a 403 on every one of them without this method
+    /// naming the gate. The store/evaluator run on the host's least-privilege VIEWER pool (the same
+    /// <paramref name="postgres"/> the reads and <c>/api/compose/run</c> use — never the owner pool).
+    /// </summary>
+    private static void MapCustomAlerts(WebApplication app, NpgsqlDataSource postgres)
+    {
+        var store = new CustomAlertRuleStore(postgres);
+
+        /* List — a bare array of summaries (no definition), carrying 'enabled'; [] when none. */
+        app.MapGet("/api/alerts", async (HttpContext context) =>
+        {
+            var rules = await store.ListAsync(context.RequestAborted);
+            return JsonNodeResult(BuildRuleSummariesNode(rules));
+        });
+
+        /* Get one — full, including the definition and 'enabled'; 404 when missing. */
+        app.MapGet("/api/alerts/{id:long}", async (HttpContext context, long id) =>
+        {
+            var result = await store.GetAsync(id, context.RequestAborted);
+            return result is CustomAlertRuleResult.Ok ok && ok.Rule is not null
+                ? JsonNodeResult(BuildFullRuleNode(ok.Rule))
+                : AlertNotFoundResult();
+        });
+
+        /* Create — 201 + Location; 400 on a bad body/definition, 409 on a duplicate name. The definition is
+           VALIDATED (CustomAlertRuleDefinition.TryParse — the SAME authority the evaluator applies on load)
+           BEFORE any store hit, so a stored rule always parses. application/json required (CSRF defense). */
+        app.MapPost("/api/alerts", async (HttpContext context) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var (request, bodyError) = await ParseAlertBodyAsync(context);
+            if (request is null)
+            {
+                return ErrorResult(bodyError!, StatusCodes.Status400BadRequest);
+            }
+
+            var (parsed, definitionError) = CustomAlertRuleDefinition.TryParse(request.DefinitionJson);
+            if (parsed is null || definitionError is not null)
+            {
+                return ErrorResult(definitionError ?? "definition is invalid.", StatusCodes.Status400BadRequest);
+            }
+
+            try
+            {
+                var result = await store.CreateAsync(
+                    request.Name, request.Description, request.DefinitionJson, request.Enabled,
+                    updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                return result switch
+                {
+                    CustomAlertRuleResult.Ok ok => CreatedResult(context, $"/api/alerts/{ok.Rule!.Id}", BuildFullRuleNode(ok.Rule)),
+                    CustomAlertRuleResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
+                    CustomAlertRuleResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
+                    _ => ErrorResult("Could not create the alert rule.", StatusCodes.Status500InternalServerError),
+                };
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return ErrorResult($"Error saving alert rule: {ex.Message}", StatusCodes.Status500InternalServerError);
+            }
+        });
+
+        /* Update — 200 on success; 400 bad body/definition, 404 gone, 409 stale-version OR duplicate name. A
+           full replace (the client sends the whole rule it edited), exactly like PUT /api/views: 'version' is
+           required, and a mismatch is a 409, not a silent clobber. application/json required. */
+        app.MapPut("/api/alerts/{id:long}", async (HttpContext context, long id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var (request, bodyError) = await ParseAlertBodyAsync(context);
+            if (request is null)
+            {
+                return ErrorResult(bodyError!, StatusCodes.Status400BadRequest);
+            }
+
+            if (request.Version is not { } expectedVersion)
+            {
+                return ErrorResult("'version' is required for an update (optimistic concurrency).", StatusCodes.Status400BadRequest);
+            }
+
+            var (parsed, definitionError) = CustomAlertRuleDefinition.TryParse(request.DefinitionJson);
+            if (parsed is null || definitionError is not null)
+            {
+                return ErrorResult(definitionError ?? "definition is invalid.", StatusCodes.Status400BadRequest);
+            }
+
+            try
+            {
+                var result = await store.UpdateAsync(
+                    id, request.Name, request.Description, request.DefinitionJson, request.Enabled, expectedVersion,
+                    updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                return result switch
+                {
+                    CustomAlertRuleResult.Ok ok => JsonNodeResult(BuildFullRuleNode(ok.Rule!)),
+                    CustomAlertRuleResult.NotFound => AlertNotFoundResult(),
+                    CustomAlertRuleResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
+                    CustomAlertRuleResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
+                    _ => ErrorResult("Could not update the alert rule.", StatusCodes.Status500InternalServerError),
+                };
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return ErrorResult($"Error saving alert rule: {ex.Message}", StatusCodes.Status500InternalServerError);
+            }
+        });
+
+        /* Delete — 204 on success, 404 when missing. application/json required. Routes through
+           CustomAlertEvaluator.ResolveAndDeleteRuleAsync (NOT store.DeleteAsync): any OPEN incident is
+           force-resolved — a recovery row written to alert history — BEFORE the delete's FK cascade drops the
+           per-server state that says which (rule, server) pairs were firing (#3305), so nothing is left showing
+           as firing forever. The resolve is best-effort inside that method (its own failure isolation), so a
+           resolve blip never blocks the delete the operator asked for. Same call the MCP delete tool makes;
+           logger null here as there (the recovery row still writes; only the service-log line is skipped). */
+        app.MapDelete("/api/alerts/{id:long}", async (HttpContext context, long id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            try
+            {
+                var result = await CustomAlertEvaluator.ResolveAndDeleteRuleAsync(postgres, id, logger: null, context.RequestAborted);
+                return result is CustomAlertRuleResult.Ok ? Results.NoContent() : AlertNotFoundResult();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return ErrorResult($"Error deleting alert rule: {ex.Message}", StatusCodes.Status500InternalServerError);
+            }
+        });
+
+        /* The starter templates (#3325): the SAME code-defined set the list_custom_alert_templates MCP tool
+           returns, byte-identical (wraps that tool), mapped through the shared ToHttpResult exactly as the
+           /api/read/* tool endpoints map their string results. Read-only, touches no store; open to any seat. */
+        app.MapGet("/api/alert-templates", async () =>
+            ToHttpResult(await Mcp.DarlingMcpCustomAlertTools.ListCustomAlertTemplates()));
+
+        /* Validate — dry-run a definition WITHOUT persisting; returns {valid, error}. The definition rides as an
+           embedded JSON object (same as create/update bodies), validated by the SAME
+           CustomAlertRuleDefinition.TryParse authority the MCP validate_custom_alert_rule tool uses, so the two
+           verdicts cannot diverge. A POST (application/json required); born gated like the mutations — an
+           evaluate/validate is an editor affordance, not a read the viewer seat is granted. */
+        app.MapPost("/api/alerts/validate", async (HttpContext context) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var (definitionJson, bodyError) = await ParseDefinitionBodyAsync(context);
+            if (definitionJson is null)
+            {
+                return ErrorResult(bodyError!, StatusCodes.Status400BadRequest);
+            }
+
+            var (parsed, validationError) = CustomAlertRuleDefinition.TryParse(definitionJson);
+            return JsonNodeResult(new JsonObject
+            {
+                ["valid"] = parsed is not null && validationError is null,
+                ["error"] = validationError,
+            });
+        });
+
+        /* Test (evaluate-now) — for a SAVED rule (rule_id) OR a supplied definition, read the metric's CURRENT
+           value on each in-scope server and report whether it WOULD breach right now, delivering/persisting
+           nothing. Wraps the MCP test_custom_alert_rule tool for zero divergence: that method resolves the
+           in-scope servers, runs the SHARED EvaluateScalarNowAsync per-server scalar seam, and applies
+           ClassifyTestValue — all on the pool it is handed, which here is the host's VIEWER pool (exactly as
+           /api/compose/run runs the composer — never the owner pool). rule_id XOR definition is enforced inside
+           the tool; its result is mapped through the shared ToHttpResult like every /api/read/* tool string — the
+           {status,...} envelope (invalid / not_found / no_in_scope_servers) passes through as 200, an unexpected
+           tool error becomes 500. A POST (application/json required); born gated like the mutations. */
+        app.MapPost("/api/alerts/test", async (HttpContext context) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var (ruleId, definitionJson, bodyError) = await ParseAlertTestBodyAsync(context);
+            if (bodyError is not null)
+            {
+                return ErrorResult(bodyError, StatusCodes.Status400BadRequest);
+            }
+
+            return ToHttpResult(await Mcp.DarlingMcpCustomAlertTools.TestCustomAlertRule(postgres, ruleId, definitionJson));
         });
     }
 
@@ -1902,6 +2112,164 @@ public static class DarlingWebEndpoints
         return array;
     }
 
+    /* ── custom-alert-rule body parsing + response building (#3285) ── */
+
+    /// <summary>A parsed alert create/update body: name (required, trimmed), description (optional), the
+    /// definition as raw JSON text (re-serialized from the parsed node), <c>enabled</c> (defaults true when the
+    /// key is absent, matching create's default and a full-replace PUT), and version (present only on updates).
+    /// The definition's STRUCTURE is validated separately by <see cref="CustomAlertRuleDefinition.TryParse"/>.</summary>
+    private sealed record AlertWriteRequest(string Name, string? Description, string DefinitionJson, bool Enabled, int? Version);
+
+    /// <summary>Parses an alert create/update body into an <see cref="AlertWriteRequest"/>, or a caller-facing
+    /// error. Mirrors <see cref="ParseViewBodyAsync"/>, adding the <c>enabled</c> field alert rules carry.</summary>
+    private static async Task<(AlertWriteRequest? Request, string? Error)> ParseAlertBodyAsync(HttpContext context)
+    {
+        JsonNode? root;
+        try
+        {
+            root = await JsonNode.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
+        }
+        catch (JsonException)
+        {
+            return (null, "Request body is not valid JSON.");
+        }
+
+        if (root is not JsonObject obj)
+        {
+            return (null, "Request body must be a JSON object.");
+        }
+
+        var name = TryGetString(obj, "name");
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return (null, "'name' is required.");
+        }
+
+        var description = TryGetString(obj, "description");
+
+        var definitionNode = obj["definition"];
+        if (definitionNode is null)
+        {
+            return (null, "'definition' is required.");
+        }
+
+        var definitionJson = definitionNode.ToJsonString();
+
+        /* Absent 'enabled' defaults true: create's default, and a full-replace PUT of a rule that names no
+           enabled state is an enabled rule (the real full-document editor always sends the field). */
+        var enabled = true;
+        if (obj["enabled"] is JsonValue enabledValue && enabledValue.TryGetValue<bool>(out var e))
+        {
+            enabled = e;
+        }
+
+        int? version = null;
+        if (obj["version"] is JsonValue versionValue && versionValue.TryGetValue<int>(out var v))
+        {
+            version = v;
+        }
+
+        return (new AlertWriteRequest(name.Trim(), description, definitionJson, enabled, version), null);
+    }
+
+    /// <summary>Extracts just the embedded <c>definition</c> object from a body as raw JSON text — the
+    /// <c>POST /api/alerts/validate</c> shape — or a caller-facing error. The definition rides as a JSON object
+    /// (not an escaped string), the same way the create/update bodies carry it.</summary>
+    private static async Task<(string? DefinitionJson, string? Error)> ParseDefinitionBodyAsync(HttpContext context)
+    {
+        JsonNode? root;
+        try
+        {
+            root = await JsonNode.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
+        }
+        catch (JsonException)
+        {
+            return (null, "Request body is not valid JSON.");
+        }
+
+        if (root is not JsonObject obj)
+        {
+            return (null, "Request body must be a JSON object.");
+        }
+
+        var definitionNode = obj["definition"];
+        return definitionNode is null
+            ? (null, "'definition' is required.")
+            : (definitionNode.ToJsonString(), null);
+    }
+
+    /// <summary>Parses a <c>POST /api/alerts/test</c> body into <c>(rule_id, definition)</c> — both optional here
+    /// (the wrapped <see cref="Mcp.DarlingMcpCustomAlertTools.TestCustomAlertRule"/> enforces the rule_id XOR
+    /// definition rule and reports a violation in its envelope). Errors only on a body that is not a JSON object.
+    /// The definition rides as an embedded JSON object, re-serialized to the text the tool parses.</summary>
+    private static async Task<(long? RuleId, string? DefinitionJson, string? Error)> ParseAlertTestBodyAsync(HttpContext context)
+    {
+        JsonNode? root;
+        try
+        {
+            root = await JsonNode.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
+        }
+        catch (JsonException)
+        {
+            return (null, null, "Request body is not valid JSON.");
+        }
+
+        if (root is not JsonObject obj)
+        {
+            return (null, null, "Request body must be a JSON object.");
+        }
+
+        long? ruleId = null;
+        if (obj["rule_id"] is JsonValue ruleIdValue && ruleIdValue.TryGetValue<long>(out var r))
+        {
+            ruleId = r;
+        }
+
+        var definitionNode = obj["definition"];
+        var definitionJson = definitionNode?.ToJsonString();
+
+        return (ruleId, definitionJson, null);
+    }
+
+    /// <summary>The full single-rule wire shape — IDENTICAL to
+    /// <see cref="Mcp.DarlingMcpCustomAlertTools"/>'s (definition embedded as JSON, plus the <c>enabled</c>
+    /// column alert rules carry), so the web GET/POST/PUT and the MCP get/create/update return the same rule
+    /// shape.</summary>
+    internal static JsonObject BuildFullRuleNode(CustomAlertRule rule) => new()
+    {
+        ["id"] = rule.Id,
+        ["name"] = rule.Name,
+        ["description"] = rule.Description,
+        ["definition"] = JsonNode.Parse(rule.DefinitionJson),
+        ["enabled"] = rule.Enabled,
+        ["version"] = rule.Version,
+        ["created_at"] = rule.CreatedAt,
+        ["updated_at"] = rule.UpdatedAt,
+        ["updated_by"] = rule.UpdatedBy,
+    };
+
+    /// <summary>The bare-array list wire shape (no definition body), carrying <c>enabled</c> so the list can
+    /// badge a paused rule without fetching each full definition — mirrors the MCP list surface.</summary>
+    internal static JsonArray BuildRuleSummariesNode(IReadOnlyList<CustomAlertRuleSummary> rules)
+    {
+        var array = new JsonArray();
+        foreach (var rule in rules)
+        {
+            array.Add(new JsonObject
+            {
+                ["id"] = rule.Id,
+                ["name"] = rule.Name,
+                ["description"] = rule.Description,
+                ["enabled"] = rule.Enabled,
+                ["version"] = rule.Version,
+                ["updated_at"] = rule.UpdatedAt,
+                ["updated_by"] = rule.UpdatedBy,
+            });
+        }
+
+        return array;
+    }
+
     /* ── result helpers (JSON body written verbatim, bypassing any serializer naming policy) ── */
 
     private static IResult JsonNodeResult(JsonNode node, int statusCode = StatusCodes.Status200OK) =>
@@ -1918,6 +2286,9 @@ public static class DarlingWebEndpoints
 
     private static IResult NotFoundResult() =>
         ErrorResult("View not found.", StatusCodes.Status404NotFound);
+
+    private static IResult AlertNotFoundResult() =>
+        ErrorResult("Alert rule not found.", StatusCodes.Status404NotFound);
 
     private static IResult UnsupportedMediaTypeResult() =>
         ErrorResult("Content-Type must be application/json.", StatusCodes.Status415UnsupportedMediaType);
