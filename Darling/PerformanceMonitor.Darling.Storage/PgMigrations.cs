@@ -208,6 +208,21 @@ public static class PgMigrations
     /// <c>collection_time</c> and served by <c>idx_pg_index_bloat_time</c>; a ranking index would be a
     /// guess, and this collector has already cost enough unmeasured constants.</para>
     /// </summary>
+    private const string V114Sql = @"
+ALTER TABLE collect.pg_index_bloat
+    ADD COLUMN IF NOT EXISTS index_pages bigint,
+    ADD COLUMN IF NOT EXISTS table_rows bigint,
+    ADD COLUMN IF NOT EXISTS fillfactor integer,
+    ADD COLUMN IF NOT EXISTS est_tuple_bytes bigint,
+    ADD COLUMN IF NOT EXISTS est_leaf_pages bigint,
+    ADD COLUMN IF NOT EXISTS est_bloat_pct double precision,
+    ADD COLUMN IF NOT EXISTS est_reclaimable_bytes bigint,
+    ADD COLUMN IF NOT EXISTS pgstattuple_available boolean;
+
+DELETE FROM collect.collector_state
+WHERE collector_name = 'pg_index_bloat'
+AND   state_key LIKE 'rotate:%';";
+
     /// <summary>
     /// V115 — the capacity-headroom columns on <c>collect.pg_cpu_utilization</c> (#3281).
     ///
@@ -236,21 +251,6 @@ ALTER TABLE collect.pg_cpu_utilization
     ADD COLUMN IF NOT EXISTS acu_utilization_percent double precision,
     ADD COLUMN IF NOT EXISTS serverless_capacity_acu double precision,
     ADD COLUMN IF NOT EXISTS max_configured_acu double precision;";
-
-    private const string V114Sql = @"
-ALTER TABLE collect.pg_index_bloat
-    ADD COLUMN IF NOT EXISTS index_pages bigint,
-    ADD COLUMN IF NOT EXISTS table_rows bigint,
-    ADD COLUMN IF NOT EXISTS fillfactor integer,
-    ADD COLUMN IF NOT EXISTS est_tuple_bytes bigint,
-    ADD COLUMN IF NOT EXISTS est_leaf_pages bigint,
-    ADD COLUMN IF NOT EXISTS est_bloat_pct double precision,
-    ADD COLUMN IF NOT EXISTS est_reclaimable_bytes bigint,
-    ADD COLUMN IF NOT EXISTS pgstattuple_available boolean;
-
-DELETE FROM collect.collector_state
-WHERE collector_name = 'pg_index_bloat'
-AND   state_key LIKE 'rotate:%';";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

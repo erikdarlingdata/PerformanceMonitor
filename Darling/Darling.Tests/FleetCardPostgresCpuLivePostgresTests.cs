@@ -44,6 +44,14 @@ namespace Darling.Tests;
 /// <c>cpu_percent IS NOT NULL</c> returns "no CPU" for a server that has some. And a row outside the
 /// freshness bound carries a value in a DIFFERENT band, so a read whose bound does not work bands the card
 /// Healthy instead of Warning rather than merely reporting a stale number.</para>
+///
+/// <para><b>It also carries #3281's invariant end to end.</b> The answer row holds the shape the fleet
+/// really produces — <c>cpu_percent</c> 100.0 with 87% of the CONFIGURED ACU ceiling in use — so a card
+/// banded off the raw reading reads Critical and one banded off the ceiling reads Warning. A fifth server
+/// has a CURRENT reading and NO capacity sample and must band Unknown: that is the round trip of three new
+/// nullable columns, where a coalesce anywhere in the read path would turn SQL NULL into a measured 0 and
+/// claim headroom nobody measured. Neither is visible to an in-memory fixture, which is the whole reason
+/// this file exists beside the shape pins.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class FleetCardPostgresCpuLivePostgresTests
@@ -54,14 +62,19 @@ public sealed class FleetCardPostgresCpuLivePostgresTests
     private const int SelfHostedServerId = -993_2672;
     private const int AuroraSilentServerId = -993_2673;
     private const int SqlServerServerId = -993_2674;
+    private const int AuroraNoCapacityServerId = -993_2675;
 
     private const string AuroraName = "zz-fleet-pg-cpu-aurora";
     private const string SelfHostedName = "aa-fleet-pg-cpu-selfhosted";
     private const string AuroraSilentName = "mm-fleet-pg-cpu-aurora-silent";
     private const string SqlServerName = "kk-fleet-pg-cpu-sqlserver";
+    private const string AuroraNoCapacityName = "dd-fleet-pg-cpu-aurora-nocapacity";
 
     private static readonly int[] SentinelIds =
-        [AuroraServerId, SelfHostedServerId, AuroraSilentServerId, SqlServerServerId];
+    [
+        AuroraServerId, SelfHostedServerId, AuroraSilentServerId, SqlServerServerId,
+        AuroraNoCapacityServerId,
+    ];
 
     [Fact]
     public async Task TheFleetCardsCarryEachEnginesCpu_AndNameWhichCollectorAnswered()
@@ -87,6 +100,7 @@ public sealed class FleetCardPostgresCpuLivePostgresTests
             await InsertServerAsync(connection, SelfHostedServerId, SelfHostedName, MonitoredEngineKind.Postgres, ct);
             await InsertServerAsync(connection, AuroraSilentServerId, AuroraSilentName, MonitoredEngineKind.AuroraPostgres, ct);
             await InsertServerAsync(connection, SqlServerServerId, SqlServerName, MonitoredEngineKind.SqlServer, ct);
+            await InsertServerAsync(connection, AuroraNoCapacityServerId, AuroraNoCapacityName, MonitoredEngineKind.AuroraPostgres, ct);
 
             /* Every server collected 30 seconds ago, so freshness is Fresh for all four and the CPU row is
                the only thing that varies. Without this they would all band on collection state, which is
@@ -95,21 +109,41 @@ public sealed class FleetCardPostgresCpuLivePostgresTests
             {
                 (AuroraServerId, AuroraName), (SelfHostedServerId, SelfHostedName),
                 (AuroraSilentServerId, AuroraSilentName), (SqlServerServerId, SqlServerName),
+                (AuroraNoCapacityServerId, AuroraNoCapacityName),
             })
             {
                 await InsertCollectionLogAsync(connection, id, name, now.AddSeconds(-30), ct);
             }
 
             /* Trap 1: the newest sample has no value. */
-            await InsertPgCpuAsync(connection, AuroraServerId, AuroraName, now.AddMinutes(-2), now.AddMinutes(-2), null, ct);
-            /* The answer. */
-            await InsertPgCpuAsync(connection, AuroraServerId, AuroraName, now.AddMinutes(-2), now.AddMinutes(-3), 87.0, ct);
-            /* Trap 2: outside DarlingPgCpuUtilizationReader.Freshness, and in the Healthy band. */
-            await InsertPgCpuAsync(connection, AuroraServerId, AuroraName, now.AddMinutes(-90), now.AddMinutes(-90), 12.0, ct);
+            await InsertPgCpuAsync(connection, AuroraServerId, AuroraName,
+                now.AddMinutes(-2), now.AddMinutes(-2), null, null, null, null, ct);
+            /* The answer, in the shape the fleet actually produces (#3281): the raw reading is pinned at
+               100% of the capacity CURRENTLY ALLOCATED while 87% of the CONFIGURED ceiling is in use. A
+               card banded off the raw reading reads Critical here; banded off the ceiling it reads
+               Warning, so the two are not merely different numbers. */
+            await InsertPgCpuAsync(connection, AuroraServerId, AuroraName,
+                now.AddMinutes(-2), now.AddMinutes(-3), 100.0, 87.0, 10.44, 12.0, ct);
+            /* Trap 2: outside DarlingPgCpuUtilizationReader.Freshness, and in the Healthy band on BOTH
+               figures, so neither a bound that fails on the CPU column nor one that fails on the capacity
+               column can look like the answer. */
+            await InsertPgCpuAsync(connection, AuroraServerId, AuroraName,
+                now.AddMinutes(-90), now.AddMinutes(-90), 12.0, 9.0, 1.08, 12.0, ct);
 
             /* Trap 3: a value on ANOTHER server, so a read that lost its per-server key would hand the
                Aurora card 3% and the assertion below would fail rather than pass on a smear. */
-            await InsertPgCpuAsync(connection, AuroraSilentServerId, AuroraSilentName, now.AddMinutes(-90), now.AddMinutes(-90), 3.0, ct);
+            await InsertPgCpuAsync(connection, AuroraSilentServerId, AuroraSilentName,
+                now.AddMinutes(-90), now.AddMinutes(-90), 3.0, 2.0, 0.24, 12.0, ct);
+
+            /* The #3281 invariant, end to end through the store: a CURRENT Performance Insights CPU
+               reading with NO capacity sample beside it. The raw 100.0 is the reading that used to fire
+               the alert, so a band that fell back to it would read Critical here; the honest answer is
+               Unknown, because what is unknown is not the CPU but what the CPU is a fraction of. Live
+               rather than only in the unit matrix because this is the round trip of three new nullable
+               columns: the read has to bring back SQL NULL as C# null without a coalesce anywhere in the
+               path turning it into a measured 0. */
+            await InsertPgCpuAsync(connection, AuroraNoCapacityServerId, AuroraNoCapacityName,
+                now.AddMinutes(-2), now.AddMinutes(-3), 100.0, null, null, null, ct);
 
             /* The SQL Server arm, so "additive only" is asserted against a live read rather than argued. */
             await InsertSqlServerCpuAsync(connection, SqlServerServerId, SqlServerName, now.AddMinutes(-1), 30, 4, ct);
@@ -128,8 +162,13 @@ public sealed class FleetCardPostgresCpuLivePostgresTests
 
             // ── the field case: an Aurora target reports its instance CPU and bands on it ────────────
             var aurora = seeded.Single(c => c.ServerId == AuroraServerId);
-            Assert.Equal(87.0, aurora.InstanceCpuPercent);
-            Assert.Equal(87.0, aurora.TotalCpuPercent);
+            Assert.Equal(100.0, aurora.InstanceCpuPercent);
+            Assert.Equal(100.0, aurora.TotalCpuPercent);
+            /* The capacity figures round-trip from the SAME row as the CPU reading (#3281), which is what
+               makes the band's input and the number beside it describe one minute. */
+            Assert.Equal(87.0, aurora.AcuUtilizationPercent);
+            Assert.Equal(12.0, aurora.MaxConfiguredAcu);
+            /* Banded on the ceiling, so Warning and not the Critical the raw 100.0 would earn. */
             Assert.Equal(HealthSeverity.Warning, aurora.CpuSeverity);
             Assert.Equal(FleetCpuSource.PerformanceInsights, aurora.CpuSource);
             Assert.Equal(FleetHealthBand.Warning, aurora.Band);
@@ -169,6 +208,22 @@ public sealed class FleetCardPostgresCpuLivePostgresTests
             Assert.Equal(HealthSeverity.Unknown, silent.CpuSeverity);
             Assert.Equal(FleetCpuSource.NotCollected, silent.CpuSource);
 
+            // ── an Aurora target with a CURRENT reading and no capacity sample (#3281) ──────────────
+            /* Unknown, never Healthy, and never the Critical the raw reading alone would earn. The source
+               arm still says PerformanceInsights, because a reading WAS collected: the card discloses the
+               gap as "we have CPU and no capacity", not as "we have nothing". */
+            var noCapacity = seeded.Single(c => c.ServerId == AuroraNoCapacityServerId);
+            Assert.Equal(100.0, noCapacity.InstanceCpuPercent);
+            Assert.Equal(100.0, noCapacity.TotalCpuPercent);
+            Assert.Null(noCapacity.AcuUtilizationPercent);
+            Assert.Null(noCapacity.MaxConfiguredAcu);
+            Assert.Equal(HealthSeverity.Unknown, noCapacity.CpuSeverity);
+            Assert.NotEqual(HealthSeverity.Healthy, noCapacity.CpuSeverity);
+            Assert.NotEqual(HealthSeverity.Critical, noCapacity.CpuSeverity);
+            Assert.Equal(FleetCpuSource.PerformanceInsights, noCapacity.CpuSource);
+            /* Unknown does not escalate, so an unmeasured capacity cannot reorder the fleet. */
+            Assert.Equal(FleetHealthBand.Healthy, noCapacity.Band);
+
             // ── the SQL Server path, unchanged ──────────────────────────────────────────────────────
             var sqlServer = seeded.Single(c => c.ServerId == SqlServerServerId);
             Assert.Equal(30.0, sqlServer.CpuPercent);
@@ -187,8 +242,12 @@ public sealed class FleetCardPostgresCpuLivePostgresTests
             Assert.Equal(FleetDeadlockSource.CollectorSilent, sqlServer.DeadlockSource);
 
             /* All four arms present in one call, which is what makes the read's per-server keying and the
-               classification jointly observable rather than one-at-a-time. */
+               classification jointly observable rather than one-at-a-time. Five servers, four arms: the
+               no-capacity card shares the PerformanceInsights arm with the answer card on purpose, because
+               provenance and bandability are separate facts and this fixture holds a case where they
+               disagree. */
             Assert.Equal(4, seeded.Select(c => c.CpuSource).Distinct().Count());
+            Assert.Equal(5, seeded.Count);
 
             bodySucceeded = true;
         }
@@ -223,19 +282,30 @@ VALUES ($1, $2, $3, 'pg_cpu_utilization', $4, 'SUCCESS')", connection);
         await command.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>Seeds one <c>collect.pg_cpu_utilization</c> row. The three capacity values are separate
+    /// parameters with no defaults, so every call site states whether that minute had a capacity sample —
+    /// which is the fact the band turns on (#3281), and a defaulted null would make "no capacity" the
+    /// quiet outcome of forgetting rather than a decision the fixture made.</summary>
     private static async Task InsertPgCpuAsync(
         NpgsqlConnection connection, int serverId, string name,
-        DateTime collectionTime, DateTime sampleTime, double? cpuPercent, CancellationToken ct)
+        DateTime collectionTime, DateTime sampleTime, double? cpuPercent,
+        double? acuUtilizationPercent, double? serverlessCapacityAcu, double? maxConfiguredAcu,
+        CancellationToken ct)
     {
         using var command = new NpgsqlCommand(@"
-INSERT INTO pg_cpu_utilization (collection_id, collection_time, server_id, server_name, sample_time, cpu_percent)
-VALUES ($1, $2, $3, $4, $5, $6)", connection);
+INSERT INTO pg_cpu_utilization
+    (collection_id, collection_time, server_id, server_name, sample_time, cpu_percent,
+     acu_utilization_percent, serverless_capacity_acu, max_configured_acu)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)", connection);
         command.Parameters.AddWithValue(CollectionIdGenerator.Next());
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(name);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(sampleTime, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(cpuPercent ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue(acuUtilizationPercent ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue(serverlessCapacityAcu ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue(maxConfiguredAcu ?? (object)DBNull.Value);
         await command.ExecuteNonQueryAsync(ct);
     }
 
