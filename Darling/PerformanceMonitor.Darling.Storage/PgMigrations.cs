@@ -343,6 +343,7 @@ CREATE TRIGGER trg_bump_mute_rules
     AFTER INSERT OR UPDATE OR DELETE ON config.config_mute_rules
     FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
 
+    /// <summary>
     /// V118 — the BUILT-IN alert catalog's persistence-gate state (#3282). One additive config-plane table,
     /// the twin of V116's <c>custom_alert_state</c> for alerts nobody authored.
     ///
