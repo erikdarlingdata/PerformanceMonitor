@@ -201,7 +201,7 @@ public sealed class ProcPlaceholderResolutionTests
     }
 
     [Fact]
-    public async Task ReadResolutionsAsync_DropsAPairMissingEitherHalf()
+    public async Task ReadResolutionsAsync_DropsAPairMissingAnyPart()
     {
         /* The blanking guard, exercised on every route a partial answer can arrive by — one row per part,
            NULL and empty. Both references concatenate server-side, so each of these rows would have
@@ -308,7 +308,7 @@ public sealed class ProcPlaceholderResolutionTests
     }
 
     [Fact]
-    public async Task Deadlocks_ResolveTheVictimProcedure_SchemaQualified()
+    public async Task Deadlocks_ResolveTheVictimProcedure_FullyQualified()
     {
         var context = MakeContext();
         using var reader = new FakeCollectorDataReader(
