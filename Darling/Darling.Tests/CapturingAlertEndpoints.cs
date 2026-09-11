@@ -19,13 +19,13 @@ using PerformanceMonitor.Notifications;
 
 namespace Darling.Tests;
 
-/// <summary>
-/// The loopback channel endpoints and alert-history doubles the delivery suites drive. Shared rather than
-/// nested per test class because the SMTP one in particular is the only interception point email has short
-/// of the protocol (see its own remarks), and a second copy of a protocol responder is a second thing to
-/// get subtly wrong. Used by <see cref="AlertDeliveryChannelTests"/> (#3169/#3297/#3303) and
-/// <see cref="IncidentDeliveryFilterTests"/> (#3313).
-/// </summary>
+/* The loopback channel endpoints and alert-history doubles the delivery suites drive. Shared rather than
+   nested per test class because the SMTP one in particular is the only interception point email has short of
+   the protocol (see its own remarks), and a second copy of a protocol responder is a second thing to get
+   subtly wrong. Driven by AlertDeliveryChannelTests (#3169/#3297/#3303) and IncidentDeliveryFilterTests
+   (#3313). A block comment rather than an XML doc block: a file-level summary with no member of its own
+   stacks against the first type's, which DocCommentHygieneTests.NoMemberCarriesTwoStackedSummaryBlocks
+   forbids and which CI caught here. */
 /// <summary>
 /// A loopback endpoint that records the bodies posted to it. <see cref="System.Net.Sockets.TcpListener"/>
 /// rather than <c>HttpListener</c> on purpose: HttpListener wants a URL ACL on Windows, and the four
