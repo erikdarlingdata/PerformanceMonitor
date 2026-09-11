@@ -249,7 +249,7 @@ public sealed class IncidentDeliveryFilterTests
         using var smtp = new CapturingSmtpEndpoint();
 
         var history = new SeedingHistoryStore(Stale, DateTime.UtcNow - TimeSpan.FromMinutes(1));
-        var (deliverer, _) = BuildDeliverer(endpoint, smtp, history);
+        var deliverer = BuildDeliverer(endpoint, smtp, history);
 
         var context = TwoIncidents();
         await deliverer.DeliverAsync(Outcome(context), TestContext.Current.CancellationToken);
@@ -287,7 +287,7 @@ public sealed class IncidentDeliveryFilterTests
         using var smtp = new CapturingSmtpEndpoint();
 
         var history = new SeedingHistoryStore(seededDedupKey: null, DateTime.UtcNow);
-        var (deliverer, _) = BuildDeliverer(endpoint, smtp, history);
+        var deliverer = BuildDeliverer(endpoint, smtp, history);
 
         await deliverer.DeliverAsync(Outcome(TwoIncidents()), TestContext.Current.CancellationToken);
 
@@ -323,7 +323,7 @@ public sealed class IncidentDeliveryFilterTests
         using var smtp = new CapturingSmtpEndpoint();
 
         var history = new SeedingHistoryStore(Stale, DateTime.UtcNow - TimeSpan.FromMinutes(1));
-        var (deliverer, _) = BuildDeliverer(endpoint, smtp, history);
+        var deliverer = BuildDeliverer(endpoint, smtp, history);
 
         var context = TwoIncidents();
         await deliverer.DeliverAsync(
@@ -349,7 +349,7 @@ public sealed class IncidentDeliveryFilterTests
         using var smtp = new CapturingSmtpEndpoint();
 
         var history = new SeedingHistoryStore(Stale, DateTime.UtcNow - TimeSpan.FromMinutes(1));
-        var (deliverer, _) = BuildDeliverer(
+        var deliverer = BuildDeliverer(
             endpoint, smtp, history, config => config.Alerts.DeliveryMode = AlertNotificationMode.PerEvent);
 
         await deliverer.DeliverAsync(Outcome(TwoIncidents()), TestContext.Current.CancellationToken);
@@ -392,7 +392,7 @@ public sealed class IncidentDeliveryFilterTests
         context, AlertContextBuilders.ContextToDetailText(context),
         NumericCurrentValue: 2, NumericThresholdValue: 1, Muted: false, Severity: null);
 
-    private static (DarlingAlertDeliverer Deliverer, DarlingAlertSettings Settings) BuildDeliverer(
+    private static DarlingAlertDeliverer BuildDeliverer(
         CapturingWebhookEndpoint endpoint,
         CapturingSmtpEndpoint smtp,
         IAlertHistoryStore history,
@@ -412,7 +412,7 @@ public sealed class IncidentDeliveryFilterTests
         var settings = new DarlingAlertSettings(config);
         var webhooks = new WebhookAlertService(
             settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
-        return (new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance), settings);
+        return new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
     }
 
     private static Predicate<AlertDetailItem> DedupKeyIs(string dedupKey) =>

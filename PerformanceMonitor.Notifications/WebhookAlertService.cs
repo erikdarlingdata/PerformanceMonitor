@@ -138,7 +138,10 @@ public class WebhookAlertService
     /// <param name="detailText">
     /// #3297: the alert's flat prose detail. Resolved ONCE here, the same way <c>triageUrl</c> below is
     /// and for the same reason — all four channels must carry the same text for the same firing, and a
-    /// per-channel resolution would be four places for one of them to drift or be forgotten.
+    /// per-channel resolution would be four places for one of them to drift or be forgotten. #3313 moved
+    /// that resolution INTO <see cref="IncidentDeliveryFilter.ForDelivery"/>, which is still this one
+    /// place: the prose and the rendered incident set are two halves of one answer, and the prose has to
+    /// be resolved against the alert's own context rather than the filtered copy.
     /// </param>
     /// <param name="displayName">
     /// #3303: the human-facing name a custom rule carries, rendered in the Teams/Slack titles and the
