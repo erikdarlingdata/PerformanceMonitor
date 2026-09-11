@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`get_pg_index_bloat` now carries its own coverage denominator, so a limited page cannot read as a coverage claim** ([#3278]) - the read sorts answerless rows first by design, so any limit below the answerless population returned 100% of them, and nothing distinguished "the collector estimated nothing" from "it covers plenty, sorted behind more numerous skips". It now returns a population-level census from a separate query no row limit can reach - candidate btree indexes, trusted against suppressed, and each suppression reason - with BYTES beside every count, because the row and byte rankings of those reasons disagree: one bucket measured second-largest by rows and last by footprint, at 0.0004% of it. The candidate total is derived from its parts, so the published total cannot disagree with the breakdown explaining it. Shipped on the MCP tool, the WPF storage panel and the web dashboard through one classifier.
+
 ## [3.7.0] - 2026-09-10
 
 ### Added
@@ -3632,3 +3638,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#3262]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3262
 [#3267]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3267
 [#3271]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3271
+[#3278]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3278
