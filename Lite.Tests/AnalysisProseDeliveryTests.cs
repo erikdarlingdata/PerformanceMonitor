@@ -21,7 +21,7 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #3313: an analysis finding's Diagnosis facts reached every channel TWICE.
+/// A regression #3302 shipped: an analysis finding's Diagnosis facts reach every channel TWICE.
 ///
 /// <para>#3297 threaded each alert's prose <c>DetailText</c> through to all five delivery channels, gated
 /// on <c>AlertDetailText.ProseForDelivery</c> — which suppresses the prose when it is textually equal to
@@ -202,7 +202,7 @@ public class AnalysisProseDeliveryTests
     /// <summary>
     /// The constraint the whole approach rests on: suppressing at delivery must not change what is
     /// stored. Asserted on the record Lite's real <c>EmailAlertService</c> handed its history store,
-    /// against a frozen literal — the same text, byte for byte, that the pre-#3313 row held.
+    /// against a frozen literal — the same text, byte for byte, that the row held before this change.
     /// </summary>
     [Fact]
     public async Task ThePersistedDetailText_IsUnchanged_ByTheDeliverySuppression()

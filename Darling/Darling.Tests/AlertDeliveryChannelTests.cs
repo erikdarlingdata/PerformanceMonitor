@@ -722,7 +722,7 @@ public sealed class AlertDeliveryChannelTests
         Assert.Equal(2, CountOccurrences(message, "before raising MAXDOP"));
     }
 
-    /* ─────────── #3313: an analysis finding's Diagnosis facts, delivered once and stored in full ─────────── */
+    /* ────── #3302 regression: a finding's Diagnosis facts, delivered once and stored in full ────── */
 
     /// <summary>
     /// The counting marker for the two tests below. It appears exactly ONCE per rendering of the Diagnosis
@@ -773,7 +773,7 @@ public sealed class AlertDeliveryChannelTests
     };
 
     /// <summary>
-    /// #3313, on the wire. <c>FindingMessageFormatter</c> is a third producer of
+    /// The regression, on the wire. <c>FindingMessageFormatter</c> is a third producer of
     /// <c>(Context, DetailText)</c> pairs that #3297 never touched: <c>BuildContext</c> puts story /
     /// severity / notify threshold / confidence / fact count / database / window into a <c>Diagnosis</c>
     /// item, and <c>DetailText</c> formats the same values with different labels and a different window
@@ -872,7 +872,7 @@ public sealed class AlertDeliveryChannelTests
         var body = Assert.Single(endpoint.Bodies);
         Assert.Equal(1, CountOccurrences(body, FindingDatabaseMarker));
 
-        /* And the row kept the prose whole, byte for byte what it held before #3313. */
+        /* And the row kept the prose whole, byte for byte what it held before this change. */
         var record = Assert.Single(history.Records);
         Assert.Equal(PersistedFindingDetailText, record.DetailText);
         Assert.NotNull(record.ContextJson);
