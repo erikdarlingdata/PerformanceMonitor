@@ -196,6 +196,90 @@ def check_archive(url: str, name: str, size: int, include_dlls: bool) -> tuple[l
     return findings, errors
 
 
+def verify_local_files(paths: list[str]) -> int:
+    """Assert every named local file carries a signature. Used as the post-condition of signing.
+
+    This exists because `vpk pack` does NOT verify that its `--signTemplate` actually signed
+    anything: a template that exits 0 without signing leaves packing to complete normally and
+    the release to publish unsigned binaries, which is exactly how #3288 shipped twice. So the
+    signing script asserts the outcome here rather than trusting its own success.
+    """
+    failures, checked = [], 0
+    for path in paths:
+        try:
+            with open(path, "rb") as handle:
+                head = handle.read(HEADER_BYTES)
+            off, length = certificate_table(head)
+        except (OSError, ReadError, struct.error) as exc:
+            failures.append(f"{path}: unreadable as a PE image ({exc})")
+            continue
+        checked += 1
+        if off == 0 or length == 0:
+            failures.append(f"{path}: NO SIGNATURE after signing")
+    for f in failures:
+        print(f"VERIFY FAIL: {f}", file=sys.stderr)
+    if not checked:
+        print("VERIFY FAIL: nothing was checked", file=sys.stderr)
+        return 2
+    if failures:
+        return 1
+    print(f"verified: {checked} file(s) carry a signature")
+    return 0
+
+
+def verify_local_dir(directory: str) -> int:
+    """Assert every executable under `directory`, including inside zips and nupkgs, is signed.
+
+    This is the release guard. It runs on the artifacts as they sit on disk BEFORE upload, so it
+    needs no network and no published release -- the difference between this and the tag mode is
+    only where the bytes come from.
+    """
+    import glob
+    import os
+    import zipfile
+
+    findings: list[Finding] = []
+    for path in sorted(glob.glob(os.path.join(directory, "**", "*"), recursive=True)):
+        if not os.path.isfile(path):
+            continue
+        lower = path.lower()
+        rel = os.path.relpath(path, directory)
+        if lower.endswith(".exe"):
+            try:
+                with open(path, "rb") as handle:
+                    off, length = certificate_table(handle.read(HEADER_BYTES))
+                findings.append(Finding(rel, "", os.path.getsize(path), off != 0 and length != 0))
+            except (OSError, ReadError, struct.error) as exc:
+                print(f"GUARD: cannot read {rel}: {exc}", file=sys.stderr)
+                return 2
+        elif lower.endswith(ARCHIVE_SUFFIXES):
+            try:
+                with zipfile.ZipFile(path) as zf:
+                    for info in zf.infolist():
+                        if not info.filename.lower().endswith(".exe"):
+                            continue
+                        blob = zf.read(info)
+                        off, length = certificate_table(blob)
+                        findings.append(
+                            Finding(rel, info.filename, info.file_size, off != 0 and length != 0)
+                        )
+            except (OSError, zipfile.BadZipFile, ReadError, struct.error) as exc:
+                print(f"GUARD: cannot read {rel}: {exc}", file=sys.stderr)
+                return 2
+
+    if not findings:
+        print(f"GUARD FAIL: no executables found under {directory}", file=sys.stderr)
+        return 2
+    unsigned = [f for f in findings if not f.signed]
+    for f in sorted(findings, key=lambda x: (x.signed, x.label)):
+        print(f"  {'signed  ' if f.signed else 'UNSIGNED'}  {f.label}")
+    print(f"\n{len(findings)} executable(s) checked, {len(unsigned)} unsigned")
+    if unsigned:
+        print(f"GUARD FAIL: {len(unsigned)} unsigned executable(s). See #3288.", file=sys.stderr)
+        return 1
+    return 0
+
+
 def release_assets(tag: str, repo: str, gh: str) -> list[dict]:
     proc = subprocess.run(
         [gh, "api", f"repos/{repo}/releases/tags/{tag}"], capture_output=True, text=True
@@ -294,6 +378,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("tag", nargs="?", help="release tag, e.g. v3.7.0")
     parser.add_argument("--self-test", action="store_true", dest="self_test")
+    parser.add_argument(
+        "--verify-files",
+        nargs="+",
+        metavar="PATH",
+        help="verify local files carry a signature (the signing script's post-condition)",
+    )
+    parser.add_argument(
+        "--verify-dir",
+        metavar="DIR",
+        help="release guard: every .exe under DIR, including inside zips/nupkgs, must be signed",
+    )
     parser.add_argument("--repo", default="erikdarlingdata/PerformanceMonitor")
     parser.add_argument("--gh", default="gh", help="gh executable (use the identity wrapper)")
     parser.add_argument(
@@ -306,8 +401,12 @@ def main() -> int:
 
     if args.self_test:
         return self_test()
+    if args.verify_files:
+        return verify_local_files(args.verify_files)
+    if args.verify_dir:
+        return verify_local_dir(args.verify_dir)
     if not args.tag:
-        parser.error("a release tag is required unless --self-test is given")
+        parser.error("a release tag is required unless --self-test or --verify-files is given")
 
     try:
         report = build_report(args.tag, args.repo, args.gh, args.include_dlls)
