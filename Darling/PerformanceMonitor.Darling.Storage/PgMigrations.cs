@@ -174,6 +174,7 @@ public static class PgMigrations
         new Migration(115, "pg-cpu-capacity-headroom", V115Sql),
         new Migration(116, "custom-alert-core", V116Sql),
         new Migration(117, "mute-rules-reload-beacon", V117Sql),
+        new Migration(118, "builtin-alert-persistence", V118Sql),
     };
 
     /// <summary>
@@ -341,6 +342,47 @@ DROP TRIGGER IF EXISTS trg_bump_mute_rules ON config.config_mute_rules;
 CREATE TRIGGER trg_bump_mute_rules
     AFTER INSERT OR UPDATE OR DELETE ON config.config_mute_rules
     FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
+
+    /// <summary>
+    /// V118 — the BUILT-IN alert catalog's persistence-gate state (#3282). One additive config-plane table,
+    /// the twin of V116's <c>custom_alert_state</c> for alerts nobody authored.
+    ///
+    /// <para><b>Why a separate table rather than the custom one.</b> <c>custom_alert_state</c> is keyed
+    /// <c>(rule_id, server_id)</c> with a foreign key to <c>custom_alert_rules</c> and
+    /// <c>ON DELETE CASCADE</c>; a built-in alert has no rule row to reference, so it has no key there and
+    /// nothing to cascade from. The built-in subject is <c>(server_id, metric_name)</c> — the key the
+    /// engine's other state already uses.</para>
+    ///
+    /// <para><b>And why not columns on <c>config_edge_trigger_watermarks</c></b>, which carries exactly that
+    /// key. Two reasons, each sufficient. That column is one monotonic integer documented as "the highest
+    /// already-alerted rolling-window count", and a resettable pair of counters is not that shape. And Lite's
+    /// twin of the row is written with <c>INSERT OR REPLACE</c> over a PARTIAL column list, which resets
+    /// every unlisted column to its default — a streak living there would zero itself on every fired
+    /// blocking or deadlock alert, i.e. while it was being counted. Same finding V61's
+    /// <c>incident_occurrences</c> was split out for.</para>
+    ///
+    /// <para><c>last_observed_sample_at</c> is the gate's observation identity, not display data. The gate
+    /// counts consecutive breaching SAMPLES and the alert sweep is twice as fast as a CPU sample arrives, so
+    /// without it a re-read of one sample would count as a second observation and "three consecutive
+    /// breaches" would be satisfied inside ninety seconds — shorter than every excursion #3282 measured.</para>
+    ///
+    /// <para>No <c>config_bump_version</c> trigger, like V116: this is evaluator state written every new
+    /// sample, and a reload beacon on it would force a fleet-wide <c>ReloadFromStoreAsync</c> once a minute
+    /// per server. No per-table GRANT either — provisioning re-runs
+    /// <c>GRANT … ON ALL TABLES IN SCHEMA config</c> after migration — and no viewer/mcp read yet: the
+    /// service's alert pass is the only consumer.</para>
+    /// </summary>
+    private const string V118Sql = @"
+CREATE TABLE IF NOT EXISTS config.alert_persistence_state (
+    server_id integer NOT NULL,
+    metric_name text NOT NULL,
+    consecutive_breaches integer NOT NULL DEFAULT 0,
+    consecutive_clears integer NOT NULL DEFAULT 0,
+    firing boolean NOT NULL DEFAULT FALSE,
+    last_observed_sample_at timestamp,
+    updated_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    PRIMARY KEY (server_id, metric_name)
+);";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

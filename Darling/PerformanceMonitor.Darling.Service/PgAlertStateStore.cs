@@ -380,6 +380,95 @@ ON CONFLICT (server_id, metric_name, dedup_key) DO UPDATE SET
         }
     }
 
+    /// <summary>
+    /// #3282: loads one subject's built-in persistence-gate record from the V117
+    /// <c>config.alert_persistence_state</c> table.
+    ///
+    /// <para>Returns null on failure, which the engine reads as "no memory" and arms the gate from zero —
+    /// the same degradation a host with no persistence at all gets. Crucially that is a DELAY (the streak
+    /// rebuilds over the next few samples), never a re-announcement: a load failure cannot resurrect a
+    /// <c>firing</c> bit it did not read, so the worst outcome is one extra fire after the gate refills.</para>
+    /// </summary>
+    public async Task<AlertPersistenceRecord?> LoadAlertPersistenceAsync(string serverKey, string metricName)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync();
+            using var command = new NpgsqlCommand(@"
+SELECT consecutive_breaches, consecutive_clears, firing, last_observed_sample_at
+FROM config.alert_persistence_state
+WHERE server_id = $1
+AND   metric_name = $2", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(ParseServerKey(serverKey));
+            command.Parameters.AddWithValue(metricName);
+
+            await using var reader = await command.ExecuteReaderAsync();
+            if (!await reader.ReadAsync())
+            {
+                return null;
+            }
+
+            /* The sample instant comes back Kind=Unspecified from a `timestamp` column and is naive UTC by
+               the store-wide convention. Deliberately NOT coerced to Kind=Utc: it is only ever COMPARED
+               against the sample instant the alert pass read out of the same store, on the same convention,
+               and a ToUniversalTime() here would shift it by the host's offset — which on a host east of UTC
+               would make every incoming sample look OLDER than the stored one and freeze the gate forever. */
+            return new AlertPersistenceRecord(
+                new PersistenceState(reader.GetInt32(0), reader.GetInt32(1), reader.GetBoolean(2)),
+                reader.IsDBNull(3) ? null : reader.GetDateTime(3));
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Could not load the alert persistence gate ({Metric}): {Message}", metricName, ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// #3282: upserts one subject's persistence-gate record. Same posture as the watermark writes — a
+    /// dropped write costs the streak across a restart, never an alert, because the gate has already
+    /// decided this observation from the engine's in-memory record.
+    /// </summary>
+    public async Task SaveAlertPersistenceAsync(string serverKey, string metricName, AlertPersistenceRecord record)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync();
+            using var command = new NpgsqlCommand(@"
+INSERT INTO config.alert_persistence_state
+    (server_id, metric_name, consecutive_breaches, consecutive_clears, firing, last_observed_sample_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (server_id, metric_name) DO UPDATE SET
+    consecutive_breaches = EXCLUDED.consecutive_breaches,
+    consecutive_clears = EXCLUDED.consecutive_clears,
+    firing = EXCLUDED.firing,
+    last_observed_sample_at = EXCLUDED.last_observed_sample_at,
+    updated_at = EXCLUDED.updated_at", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+            command.Parameters.AddWithValue(ParseServerKey(serverKey));
+            command.Parameters.AddWithValue(metricName);
+            command.Parameters.AddWithValue(record.State.ConsecutiveBreaches);
+            command.Parameters.AddWithValue(record.State.ConsecutiveClears);
+            command.Parameters.AddWithValue(record.State.Firing);
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
+                /* Kind-stripped for the same reason every other timestamp bind here is: Npgsql does NOT
+                   reject Kind=Utc against `timestamp`, it infers timestamptz and PostgreSQL casts into the
+                   SERVER's zone — storing a value offset from the sample instants this is compared against. */
+                Value = record.LastObservedSampleUtc.HasValue
+                    ? Naive(record.LastObservedSampleUtc.Value)
+                    : (object)DBNull.Value,
+            });
+            command.Parameters.AddWithValue(NaiveUtcNow());
+
+            await command.ExecuteNonQueryAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Could not persist the alert persistence gate ({Metric}): {Message}", metricName, ex.Message);
+        }
+    }
+
     /// <summary>Naive-UTC now, Kind-Unspecified — the product's PG timestamp discipline.</summary>
     private static DateTime NaiveUtcNow() =>
         DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);

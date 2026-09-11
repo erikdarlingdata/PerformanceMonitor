@@ -604,8 +604,15 @@ public sealed class PgCpuCapacityHeadroomTests
         Assert.Contains("of currently allocated capacity", body, StringComparison.Ordinal);
 
         /* The metric NAMES are deliberately unchanged, for the engine-parity reason #2719 recorded: a mute
-           rule or history filter built on these strings keeps working across the fix. */
-        Assert.Contains("\"High CPU\"", body, StringComparison.Ordinal);
+           rule or history filter built on these strings keeps working across the fix.
+
+           #3282 made the fire name a REFERENCE to AlertEngine.CpuPersistenceMetric rather than a second
+           literal, which is a stronger form of the same claim: the two engines now use one string by
+           construction instead of two that happen to match, and the persistence-gate row is the same
+           subject on both. The literal itself is pinned where it now lives, in
+           AlertEngineTests.CpuGateDefaults_AreDerivedFromTheSampleCadence. */
+        Assert.Contains("AlertEngine.CpuPersistenceMetric", body, StringComparison.Ordinal);
+        Assert.Equal("High CPU", PerformanceMonitor.Alerting.AlertEngine.CpuPersistenceMetric);
         Assert.Contains("\"CPU Resolved\"", body, StringComparison.Ordinal);
     }
 
@@ -629,7 +636,7 @@ public sealed class PgCpuCapacityHeadroomTests
 
         /* The slice has to be a method, not a fragment: an off-by-one on either bound silently shrinks it
            and every Assert.DoesNotContain above starts passing for the wrong reason. */
-        Assert.Contains("var reading = await DarlingPgCpuUtilizationReader.GetLatestAsync", body, StringComparison.Ordinal);
+        Assert.Contains("await DarlingPgCpuUtilizationReader.GetSamplesSinceAsync", body, StringComparison.Ordinal);
         Assert.True(body.Length > 1500, $"the sliced body is only {body.Length} chars, which cannot be this method");
 
         return body;

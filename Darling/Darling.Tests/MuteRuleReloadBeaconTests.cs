@@ -28,9 +28,11 @@ namespace Darling.Tests;
 /// confirm it — the rule list, the tool's own success reply — reads the TABLE, so they all agree the mute is
 /// in place while matching alerts keep being delivered.</para>
 ///
-/// <para>This class also carries the "I am the top rung" claims, handed over from
-/// <see cref="CustomAlertCoreMigrationTests"/> (V116) when this rung landed: a fully-migrated store must map
-/// to EXACTLY this version, or the viewer's connect-time gate refuses a store that is current.</para>
+/// <para>The "I am the top rung" claims have moved on to <see cref="BuiltinAlertPersistenceRungTests"/>
+/// (V118), the way this rung took them from <see cref="CustomAlertCoreMigrationTests"/> (V116) — the
+/// documented hand-over when a later rung merges. What stays here is this rung's own identity and its probe
+/// arm, which must keep mapping a store migrated to EXACTLY 117 to 117 rather than letting it fall
+/// through.</para>
 /// </summary>
 public sealed class MuteRuleReloadBeaconTests
 {
@@ -51,7 +53,10 @@ public sealed class MuteRuleReloadBeaconTests
 
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+
+        /* V118 (#3282) is the top rung now, so the "== SchemaVersion" claim lives there. Strictly LESS
+           rather than <=, so this cannot silently become the top-rung claim again. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
@@ -127,23 +132,26 @@ public sealed class MuteRuleReloadBeaconTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasMuteRuleReloadBeacon", viewer, StringComparison.Ordinal);
 
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
-
         var method = typeof(ViewerDataService)
             .GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* Not the top rung any more, so this sentinel is not the last argument. */
+        Assert.True(ProbeOrdinal < arity - 1);
 
-        /* Every sentinel true = a fully-migrated store, which must map to exactly this version. Built by
-           reflection so the arity tracks the signature. */
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
+        /* A store migrated to exactly V117 — this rung's sentinel true and every LATER one false — maps to
+           117. Everything above this ordinal is turned off, so further rungs do not have to touch this. */
+        var toThisRung = Enumerable.Repeat((object)true, arity).ToArray();
+        for (var i = ProbeOrdinal + 1; i < arity; i++)
+        {
+            toThisRung[i] = false;
+        }
 
-        /* One rung behind: every sentinel EXCEPT this one reports 116 (the previous top rung). Without this
-           the arm above could be satisfied by an unconditional return and nothing would notice. */
-        var behind = Enumerable.Repeat((object)true, arity).ToArray();
+        Assert.Equal(RungVersion, (int)method.Invoke(null, toThisRung)!);
+
+        /* One rung behind: this sentinel AND every later one false must report 116. Without it the arm
+           above could be satisfied by an unconditional return and nothing would notice. */
+        var behind = (object[])toThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
     }

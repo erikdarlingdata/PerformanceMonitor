@@ -118,6 +118,34 @@ CREATE TABLE IF NOT EXISTS config_edge_trigger_watermarks (
        when the incident ends, but a crash mid-incident strands one, and a stranded row trusted on that
        fingerprint's NEXT incident would decay its already-counted mark to the new window count and report
        the recurrence as nothing new. */
+    /* The BUILT-IN alert catalog's persistence-gate state (#3282), the twin of Darling's
+       config.alert_persistence_state (PgMigrations V117) — same columns, same key. "How long must this
+       condition hold before it counts" for the gauge alerts: consecutive breaching samples so far,
+       consecutive clearing samples so far, and whether an incident is currently open.
+
+       A SEPARATE table rather than columns on config_edge_trigger_watermarks, for the two reasons
+       config_incident_occurrences was split out for and which hold independently here too. That column is
+       one monotonic integer meaning "the highest already-alerted rolling-window count", and a resettable
+       counter pair is not that shape. And the watermark row is written with INSERT OR REPLACE over a
+       PARTIAL column list, which resets every unlisted column to its default — a streak living there would
+       zero itself on every fired blocking or deadlock alert, i.e. exactly while it was being counted.
+
+       last_observed_sample_at is the gate's observation identity, not display data. The gate counts
+       consecutive breaching SAMPLES while the sweep runs twice as often as a CPU sample arrives, so
+       without it a re-read of one sample would count as a second observation and the streak would fill
+       from data that never changed. */
+    public const string CreateAlertPersistenceStateTable = @"
+CREATE TABLE IF NOT EXISTS config_alert_persistence_state (
+    server_id INTEGER NOT NULL,
+    metric_name VARCHAR NOT NULL,
+    consecutive_breaches INTEGER NOT NULL,
+    consecutive_clears INTEGER NOT NULL,
+    firing BOOLEAN NOT NULL,
+    last_observed_sample_at TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (server_id, metric_name)
+)";
+
     public const string CreateIncidentOccurrencesTable = @"
 CREATE TABLE IF NOT EXISTS config_incident_occurrences (
     server_id INTEGER NOT NULL,
@@ -238,6 +266,7 @@ CREATE TABLE IF NOT EXISTS server_tag_map (
         yield return CreateAlertLogTable;
         yield return CreateEdgeTriggerWatermarksTable;
         yield return CreateIncidentOccurrencesTable;
+        yield return CreateAlertPersistenceStateTable;
         yield return CreateCollectorStateTable;
         yield return CreateMuteRulesTable;
         yield return CreateDismissedArchiveAlertsTable;
