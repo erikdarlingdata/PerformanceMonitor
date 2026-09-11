@@ -162,7 +162,13 @@ SELECT server_id, firing FROM custom_alert_state WHERE rule_id = $1";
         command.Parameters.Add(new NpgsqlParameter
         {
             NpgsqlDbType = NpgsqlDbType.Timestamp,
-            Value = (object?)value ?? DBNull.Value,
+            // The store's `timestamp` (without time zone) columns REJECT a Kind=Utc DateTime (Npgsql strictness):
+            // the store convention is naive-UTC. The evaluator passes DateTime.UtcNow, so reinterpret that same
+            // wall-clock as Unspecified before binding — otherwise SaveAsync throws AFTER delivery and the rule
+            // re-fires every sweep instead of firing once and holding. Regression-guarded by CustomAlertStateStoreLiveTests.
+            Value = value.HasValue
+                ? DateTime.SpecifyKind(value.Value, DateTimeKind.Unspecified)
+                : (object)DBNull.Value,
         });
 }
 
