@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **User-authored custom alert rules** ([#3285]) - a threshold alert on any compose-catalog measure, the companion to the custom notebooks: choose a source, measure, aggregate and window, a comparison with Warning/Critical thresholds, N-sample hysteresis and a server/tag scope, and the service evaluates it on its own sweep and delivers through the existing plumbing (cooldown, mute rules, Summary/per-event, email and webhooks) - for SQL Server and PostgreSQL metrics alike. Rules are authored over MCP (`create_custom_alert_rule` / `update` / `delete` / `get` / `list` / `validate_custom_alert_rule`, plus `test_custom_alert_rule` to see a rule's current value and would-fire verdict on each in-scope server without delivering); the compose catalog gained the PostgreSQL measures for all 20 PG collector tables, gated so a measure only offers on the server types that collect it, which makes PostgreSQL targets both alertable and chartable. Notifications show the rule's name rather than an internal id; a rule that no longer compiles or can never fire (scoped to no monitored server, or an always-NULL measure) is surfaced as one aggregated service self-health alert; and disabling or deleting a rule force-resolves any open incident. This release ships the evaluation engine and the MCP authoring surface; a visual web editor is a follow-up.
+
 ### Fixed
 
 - **Analysis-finding alerts no longer render their Diagnosis facts twice on every delivery channel** ([#3302]) - the finding's prose detail restates its own structured context under different labels, so the delivery gate's equality test could not see the duplication: a restatement is not a copy. The producer now DECLARES whether its prose restates its context, and the analysis path declares that it does, so the facts go out once - while a producer whose prose is genuinely its own, such as a remediation string the context does not carry, still delivers it. That declaration is a required member rather than a defaulted one, so a new producer cannot omit it silently, and where it is defaulted it defaults to DELIVERING: a redundant paragraph is cosmetic, while a withheld one discards an operator's only copy of the remedy. `config_alert_log.detail_text` is unchanged, so the MCP reader, the triage page, the Viewer's detail pane and the mute pre-fill all read what they always did.
@@ -3645,5 +3649,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#3288]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3288
 [#3281]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3281
 [#3278]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3278
+[#3285]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3285
 [#3307]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3307
 [#3302]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3302
