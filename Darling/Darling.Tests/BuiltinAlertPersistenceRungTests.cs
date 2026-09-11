@@ -288,6 +288,34 @@ public sealed class BuiltinAlertPersistenceRungTests
     }
 
     /// <summary>
+    /// The README's alert catalog states the sample count, so the number is pinned to the constant rather
+    /// than left as a prose copy of it. A doc that says "3 samples" while the code says something else is
+    /// a stale count with a numeral welded on, and nothing else in the build would notice — the whole
+    /// point of the catalog row is that it is what a user reads before tuning the threshold.
+    /// </summary>
+    [Fact]
+    public void TheReadmeAlertCatalogStatesTheSampleCountItActuallyUses()
+    {
+        var readme = RepoFile.ReadRepoFileLf("README.md");
+
+        var row = readme
+            .Split('\n')
+            .Single(l => l.StartsWith("| **High CPU**", StringComparison.Ordinal));
+
+        Assert.Contains($"held for {AlertEngine.CpuBreachSamples} samples", row, StringComparison.Ordinal);
+        Assert.Contains($"{AlertEngine.CpuBreachSamples} consecutive collected samples", row, StringComparison.Ordinal);
+        Assert.Contains($"{AlertEngine.CpuClearSamples} consecutive samples below it", row, StringComparison.Ordinal);
+
+        /* NUMERALS, not spelled-out words, and this is the reason rather than a style preference: the row
+           first read "three consecutive collected samples", which this pin could not match against the
+           constant. A doc count that cannot be compared to the thing it describes is a count nobody can
+           check. */
+
+        /* And it must not still claim the pre-#3282 rule, which is the sentence a reader would act on. */
+        Assert.DoesNotContain("Fires when total CPU (SQL + other) exceeds the threshold |", row, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The batch read is bounded and floors its lower bound at the freshness window, so a subject with no
     /// memory (or a collector that was away) considers only readings recent enough to describe "right now"
     /// — the same bound the single-reading path applies, so the gate and the card cannot disagree about
