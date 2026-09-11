@@ -93,6 +93,12 @@ public sealed class DarlingWorker : BackgroundService
        this loop's wall time, of which the ~2% that crossed 5 s were the only part that logged anything. */
     private static readonly TimeSpan s_diskCheckInterval = TimeSpan.FromMinutes(5);
 
+    /* The custom-alert-rule health check's cadence (fleet-level, #3304). An integrity heuristic, not an urgent
+       page: it re-parses the enabled rules against the live catalog and flags broken / never-firing rules. Cheap
+       (reads the evaluator's in-memory rule cache + no-data map), 5 minutes is responsive enough to catch a
+       measure drift while the aggregated alert itself is cooldown-limited inside the self-alert evaluator. */
+    private static readonly TimeSpan s_customAlertHealthInterval = TimeSpan.FromMinutes(5);
+
     /* The compression-job self-heal check's cadence (fleet-level, #1581). Compression is a slow archival tier
        and a stuck policy job takes hours to matter, so hourly is ample and cheap (one job_stats read + at most
        one alter_job per stuck job) — no need for the 15s sweep or the 30s alert cadence. */
@@ -422,6 +428,10 @@ public sealed class DarlingWorker : BackgroundService
     /* MinValue = the first sweep after startup evaluates the store disk-pressure self-alert, then every
        s_diskCheckInterval. Fleet-level (one shared store), so it is a single field, not per-server. */
     private DateTime _nextDiskCheckUtc = DateTime.MinValue;
+
+    /* MinValue = the first sweep after startup runs the custom-alert-rule health check (#3304), then every
+       s_customAlertHealthInterval. Fleet-level (the rules are a fleet concept), so a single field. */
+    private DateTime _nextCustomAlertHealthCheckUtc = DateTime.MinValue;
 
     /* MinValue = the first sweep after startup evaluates the compression-job self-heal check (#1581), then
        every s_compressionCheckInterval. Fleet-level (one shared store), so it is a single field, not
@@ -1922,6 +1932,19 @@ public sealed class DarlingWorker : BackgroundService
             {
                 _nextDiskCheckUtc = DateTime.UtcNow.Add(s_diskCheckInterval);
                 await EvaluateStoreDiskPressureAsync(config, stoppingToken);
+            }
+
+            /* #3304: the custom-alert-rule integrity check. A stored rule silently stops compiling when a
+               measure drifts out of the catalog (the incremental pg_* buildout), and a rule can compile yet
+               never fire (scope resolves to no monitored server, or its measure is always-NULL). Nobody
+               "opens" a rule, so a silent gap = an alert an operator believes is armed. Fleet-level, own slow
+               cadence; both evaluators are null on deployments without a viewer pool, and each Evaluate* half
+               is failure-isolated so a throw never stops the fleet loop. */
+            if (_customAlertEvaluator is not null && _selfAlerts is not null
+                && DateTime.UtcNow >= _nextCustomAlertHealthCheckUtc)
+            {
+                _nextCustomAlertHealthCheckUtc = DateTime.UtcNow.Add(s_customAlertHealthInterval);
+                await EvaluateCustomAlertRuleHealthAsync(servers, stoppingToken);
             }
 
             /* #1581: the compression-job self-heal backstop. TimescaleDB compression policy jobs can silently
@@ -4480,6 +4503,32 @@ LIMIT 1";
            per-server EvaluateStoreAlertsAsync. This sweep-loop body has no catch-all of its own, so an
            un-isolated throw here would stop collection for the whole fleet. */
         await _selfAlerts!.EvaluateDiskPressureAsync(freeBytes, totalBytes, storeSizeBytes, cancellationToken);
+    }
+
+    /// <summary>
+    /// #3304: the fleet-level custom-alert-rule integrity check. Asks the <see cref="CustomAlertEvaluator"/> to
+    /// re-parse the enabled rules against the live catalog and flag broken / never-firing ones (the current
+    /// monitored-storage-name set feeds the 0-server-scope case), then hands the report to
+    /// <see cref="DarlingSelfAlertEvaluator.EvaluateCustomRuleHealthAsync"/>, which raises ONE aggregated
+    /// self-health alert. Both halves are failure-isolated internally (BuildHealthReportAsync returns an empty
+    /// report on a load error rather than resolving a standing alert; the Evaluate* wrapper contains a throwing
+    /// mute seam), matching the disk-pressure posture — this sweep-loop body has no catch-all of its own. Only
+    /// called when both evaluators are non-null (guarded at the call site).
+    /// </summary>
+    private async Task EvaluateCustomAlertRuleHealthAsync(List<ServerLoopState> servers, CancellationToken cancellationToken)
+    {
+        var storageNames = servers
+            .Where(s => !s.Retired)
+            .Select(s => s.Config.StorageName)
+            .ToList();
+
+        var report = await _customAlertEvaluator!.BuildHealthReportAsync(storageNames, cancellationToken);
+
+        // Null = the rule load failed this tick; HOLD the standing alert (never resolve on uncertainty).
+        if (report is not null)
+        {
+            await _selfAlerts!.EvaluateCustomRuleHealthAsync(report, cancellationToken);
+        }
     }
 
     /// <summary>
