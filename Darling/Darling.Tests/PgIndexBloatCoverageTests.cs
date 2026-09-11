@@ -978,6 +978,73 @@ public sealed class PgIndexBloatCoverageTests
         count.ToString("N0", Inv) + " holding "
         + (bytes / (double)Gib).ToString("N1", Inv) + " GB";
 
+    /// <summary>
+    /// R2 on the THIRD surface. The web dashboard renders the same read, and before #3278 its populated path
+    /// dropped the server's note entirely — so a web operator got the capped grid and none of the census.
+    ///
+    /// <para>The empty envelope already reached that page: <c>panels.js</c> mounts
+    /// <c>emptyStrip(res.message)</c>, and the MCP tool's empty status carries the census. It was the
+    /// POPULATED path that lost it, which is the path the caveat matters on — a page of answerless rows
+    /// looks like a working read.</para>
+    ///
+    /// <para><b>Read raw, not through the C# walker.</b> These are JavaScript: the walker knows
+    /// <c>@"</c> and <c>"""</c> and does not know single quotes or backticks, so running it here would
+    /// blank the wrong spans. Every existing pin over <c>server-tabs.js</c> reads it raw, and the strings
+    /// asserted below are chosen so no comment in either file can satisfy or defeat one.</para>
+    /// </summary>
+    [Fact]
+    public void TheWebDashboardPrintsTheCensusOnItsPopulatedPathToo()
+    {
+        var renderer = ReadSource("Darling/PerformanceMonitor.Darling.Service/wwwroot/js/panels.js");
+
+        /* The hook exists, is fed from the READ's own response, and renders as a notice. */
+        Assert.Contains("desc.noteKey", renderer, StringComparison.Ordinal);
+        Assert.Contains("noticeStrip(note)", renderer, StringComparison.Ordinal);
+        Assert.Contains("noticeStrip,", renderer, StringComparison.Ordinal);
+
+        /* ON THE POPULATED PATH. The empty and error branches return before the viz runs, so a note read
+           above them would never reach a rendered body - and that is precisely the half that was missing. */
+        var emptyBranch = renderer.IndexOf("res.kind === \"empty\"", StringComparison.Ordinal);
+        var noteRead = renderer.IndexOf("desc.noteKey", StringComparison.Ordinal);
+        var vizCall = renderer.IndexOf("render(res.data, desc)", StringComparison.Ordinal);
+
+        Assert.True(emptyBranch > 0, "panels.js no longer maps the empty envelope");
+        Assert.True(noteRead > 0, "panels.js no longer reads a server-supplied note");
+        Assert.True(vizCall > 0, "panels.js no longer calls the viz");
+        Assert.True(
+            noteRead > emptyBranch,
+            "the note is read ahead of the empty/error branches, where a rendered body it could sit above "
+            + "does not exist yet");
+
+        /* Through getPath, so it is a data lookup rather than a hard-coded key, and rendered as TEXT. */
+        Assert.Contains("getPath(res.data, desc.noteKey)", renderer, StringComparison.Ordinal);
+
+        var tabs = ReadSource(
+            "Darling/PerformanceMonitor.Darling.Service/wwwroot/js/pages/server-tabs.js");
+
+        /* The helper forwards it to the descriptor, or the panel below configures something nothing reads. */
+        Assert.Contains("noteKey = null", tabs, StringComparison.Ordinal);
+        Assert.Contains("span, noteKey }", tabs, StringComparison.Ordinal);
+
+        /* And THIS panel asks for it. Scoped to a window after its own title so a noteKey on some other
+           panel cannot satisfy the claim. */
+        var title = tabs.IndexOf("\"Index Bloat (estimated)\"", StringComparison.Ordinal);
+
+        Assert.True(title > 0, "the index bloat panel's title is gone or renamed");
+
+        var panel = tabs[title..Math.Min(tabs.Length, title + 1_200)];
+
+        Assert.Contains("\"get_pg_index_bloat\"", panel, StringComparison.Ordinal);
+        Assert.Contains("\"note\"", panel, StringComparison.Ordinal);
+
+        /* THE #3234 PROSE IS GONE. This panel told a web operator the collector walks the index and that a
+           missing figure means a per-cycle budget skipped it. Neither has been true since the estimate arm
+           shipped, and a coverage census printed under a title saying "measured" would contradict itself.
+           These two literals appear in no comment in the file. */
+        Assert.DoesNotContain("\"Index Bloat (measured)\"", tabs, StringComparison.Ordinal);
+        Assert.DoesNotContain("measured by walking the index", tabs, StringComparison.Ordinal);
+    }
+
     private static PgIndexBloatSuppressionBucket Bucket(
         PgIndexBloatSuppression reason, long count, long bytes) =>
         new(reason, count, bytes, "stored prose for " + reason);
