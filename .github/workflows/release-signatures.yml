@@ -29,7 +29,7 @@ permissions:
   contents: read
 
 jobs:
-  verify:
+  signatures:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
