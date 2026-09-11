@@ -644,7 +644,14 @@ public sealed class FleetRollup
 
         if (s.CpuSeverity >= HealthSeverity.Warning)
         {
-            parts.Add($"CPU {s.CpuDisplay}");
+            /* #3281: the figure that DECIDED, through the clause the service's own reason line uses. This
+               card's CpuDisplay renders "100% (ACU 87%)" — true, and it leads with the
+               percent-of-allocated reading under a "CPU" label, which is the attribution the band exists
+               to stop a reader making. The fixed-capacity arm keeps the fuller display, which carries the
+               per-process split. */
+            parts.Add(
+                FleetCpuProvenance.CapacityBandClause(s.AcuUtilizationPercent, s.CpuSource)
+                ?? $"CPU {s.CpuDisplay}");
         }
         if (s.ThreadsSeverity >= HealthSeverity.Warning)
         {

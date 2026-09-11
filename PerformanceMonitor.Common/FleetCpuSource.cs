@@ -177,4 +177,34 @@ public static class FleetCpuProvenance
         source == FleetCpuSource.PerformanceInsights
             ? capacityUtilizationPercent
             : totalNonIdleCpuPercent;
+
+    /// <summary>
+    /// The clause a "why is this server in its band" line uses when the band was computed from capacity
+    /// headroom (#3281), and null when it was not — in which case the caller names its own CPU figure, which
+    /// the two surfaces legitimately render differently.
+    ///
+    /// <para><b>One spelling, because a reason line is PROSE and prose drifts silently.</b> Both surfaces
+    /// build a reason from their own card, and the viewer's is built from display STRINGS — so its CPU
+    /// clause read <c>"CPU 100% (ACU 87%)"</c>: true, and leading with the percent-of-allocated figure
+    /// under the one label #3281 exists to stop a reader trusting. Nothing failed, because #2473's rule is
+    /// enforced on BANDS and this is text. The sentence lives here so a third reason line cannot write its
+    /// own.</para>
+    ///
+    /// <para>It names what the percentage is a fraction OF, which is the whole content: "Capacity 87%"
+    /// alone would be one more number a reader has to attribute.</para>
+    /// </summary>
+    public static string? CapacityBandClause(double? capacityUtilizationPercent, FleetCpuSource source) =>
+        source == FleetCpuSource.PerformanceInsights && capacityUtilizationPercent.HasValue
+            ? $"Capacity {capacityUtilizationPercent.Value:F0}% {CapacityDenominator}"
+            : null;
+
+    /// <summary>
+    /// What a capacity percentage is a fraction OF, in the words every surface says it in (#3281).
+    ///
+    /// <para>A constant rather than a literal per surface because it is the load-bearing half of each of
+    /// those sentences — a percentage with no denominator named is one more number a reader has to
+    /// attribute, and attributing it wrongly is the entire defect. The three sentences differ (a ranking
+    /// clause, an alert detail line, an alert summary) and should; the denominator must not.</para>
+    /// </summary>
+    public const string CapacityDenominator = "of configured ACU";
 }

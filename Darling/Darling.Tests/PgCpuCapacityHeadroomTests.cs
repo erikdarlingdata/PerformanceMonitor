@@ -471,6 +471,93 @@ public sealed class PgCpuCapacityHeadroomTests
         @"(?<![\w.])CpuPercentForAlert\s*=(?!>)",
         System.Text.RegularExpressions.RegexOptions.Compiled);
 
+    /// <summary>
+    /// Both surfaces' "why is this server in its band" line names the CAPACITY figure for a serverless
+    /// target, in the same words — and neither leads with the raw reading under a "CPU" label.
+    ///
+    /// <para>The two reason lines are where #2473's rule is easiest to break with nothing failing, because
+    /// the difference is PROSE. The service's line is built from the card's fields; the viewer's is built
+    /// from its display strings, and <c>CpuDisplay</c> legitimately renders
+    /// <c>"100% (ACU 87%)"</c> — true, and it leads with the percent-of-allocated figure under the one
+    /// label #3281 exists to stop a reader trusting.</para>
+    ///
+    /// <para>Asserted as a shared CLAUSE rather than as two equal strings: the fixed-capacity arm's text
+    /// differs between the surfaces on purpose (the viewer's carries the per-process split the service's
+    /// card has no room for), so equality would forbid a difference that is correct.</para>
+    /// </summary>
+    [Fact]
+    public void BothReasonLinesNameTheCapacityFigure_InTheSameWords()
+    {
+        /* Inside the Warning band on the CEILING, so both reason lines have something to say. */
+        var card = Card(
+            MonitoredEngineKind.AuroraPostgres, instanceCpu: 100.0, acuUtilization: 87.0, maxConfiguredAcu: 12.0);
+        var viewer = ViewerCard(
+            MonitoredEngineKind.AuroraPostgres, instanceCpu: 100.0, acuUtilization: 87.0, maxConfiguredAcu: 12.0);
+
+        var clause = FleetCpuProvenance.CapacityBandClause(87.0, FleetCpuSource.PerformanceInsights);
+        Assert.NotNull(clause);
+
+        var serviceReason = DarlingFleetReader.BuildReason(card);
+        var viewerReason = FleetRollup.BuildReason(viewer);
+
+        Assert.Contains(clause!, serviceReason, StringComparison.Ordinal);
+        Assert.Contains(clause!, viewerReason, StringComparison.Ordinal);
+
+        /* And neither leads the CPU clause with the raw reading. "CPU 100%" is the exact framing the issue
+           is about, in both spellings the two surfaces would reach it by. */
+        Assert.DoesNotContain("CPU 100%", serviceReason, StringComparison.Ordinal);
+        Assert.DoesNotContain("CPU 100%", viewerReason, StringComparison.Ordinal);
+        Assert.DoesNotContain("CPU 100% (ACU", viewerReason, StringComparison.Ordinal);
+
+        /* The SQL Server arm still names CPU, so this is not a blanket removal of the word. */
+        var sqlServer = DarlingFleetReader.BuildCard(
+            new DarlingFleetReader.FleetServerRow(2, "sql-1", "sql-1", null, MonitoredEngineKind.SqlServer, false),
+            new DarlingFleetReader.CpuRow(60.0, 30.0),
+            default, default, default, default, default, default,
+            Now.AddSeconds(-30), default, null, Now);
+
+        Assert.Contains("CPU 90%", DarlingFleetReader.BuildReason(sqlServer), StringComparison.Ordinal);
+        Assert.Null(FleetCpuProvenance.CapacityBandClause(null, FleetCpuSource.RingBuffer));
+        Assert.Null(FleetCpuProvenance.CapacityBandClause(87.0, FleetCpuSource.RingBuffer));
+        Assert.Null(FleetCpuProvenance.CapacityBandClause(null, FleetCpuSource.PerformanceInsights));
+    }
+
+    /// <summary>
+    /// The clause is spelled in exactly ONE production file, so a third reason line cannot hand-write its
+    /// own wording and drift again. The census is the repair for the category: the defect this catches was
+    /// two copies of a sentence, one of which nobody updated.
+    /// </summary>
+    [Fact]
+    public void TheCapacityClauseIsSpelledInExactlyOnePlace()
+    {
+        var spellings = new List<string>();
+        var scanned = 0;
+
+        foreach (var file in Directory.EnumerateFiles(RepoFile.Root, "*.cs", SearchOption.AllDirectories))
+        {
+            var segments = file.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+            if (segments.Contains("bin") || segments.Contains("obj")
+                || segments.Any(s => s.EndsWith(".Tests", StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            scanned++;
+
+            /* The RAW text, not stripped: the clause lives inside a string literal, which is exactly what
+               the comment-and-string stripper removes. A stripped scan here would find nothing and read as
+               a clean tree. */
+            if (File.ReadAllText(file).Contains("of configured ACU", StringComparison.Ordinal))
+            {
+                spellings.Add(Path.GetFileName(file));
+            }
+        }
+
+        Assert.True(scanned > 200, $"the sweep read only {scanned} production .cs file(s)");
+        Assert.Equal(new[] { "FleetCpuSource.cs" }, spellings.Distinct().OrderBy(f => f, StringComparer.Ordinal).ToArray());
+    }
+
     /* ─────────────────────── the alert reads the same figure ─────────────────────── */
 
     /// <summary>
@@ -510,7 +597,10 @@ public sealed class PgCpuCapacityHeadroomTests
     {
         var body = EvaluatePgCpuBody();
 
-        Assert.Contains("% of configured ACU", body, StringComparison.Ordinal);
+        /* The denominator through the SHARED constant, not a fourth hand-written copy of the words — the
+           reference is the assertion, because a literal here would pass while drifting. */
+        Assert.Contains("FleetCpuProvenance.CapacityDenominator", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("% of configured ACU", body, StringComparison.Ordinal);
         Assert.Contains("of currently allocated capacity", body, StringComparison.Ordinal);
 
         /* The metric NAMES are deliberately unchanged, for the engine-parity reason #2719 recorded: a mute

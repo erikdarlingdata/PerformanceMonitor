@@ -693,15 +693,20 @@ GROUP BY server_id, collector_name";
         /* The figure that DECIDED the band, not the one beside it (#3281). On a serverless PostgreSQL
            target the band comes from percent of the configured ACU ceiling, so naming the raw CPU here
            would put "CPU 100%" against a card banded off 96% capacity — two numbers, neither explaining
-           the other. Same shared decision the band itself reads. */
-        var bandedCpu = FleetCpuProvenance.CpuBandInputPercent(
-            c.TotalCpuPercent, c.AcuUtilizationPercent, c.CpuSource);
-
-        if (c.CpuSeverity >= HealthSeverity.Warning && bandedCpu.HasValue)
+           the other. The capacity clause is shared with the viewer's own reason line so the two surfaces
+           cannot say it differently. */
+        if (c.CpuSeverity >= HealthSeverity.Warning)
         {
-            parts.Add(c.CpuSource == FleetCpuSource.PerformanceInsights
-                ? $"Capacity {bandedCpu.Value:F0}% of configured ACU"
-                : $"CPU {bandedCpu.Value:F0}%");
+            var clause = FleetCpuProvenance.CapacityBandClause(c.AcuUtilizationPercent, c.CpuSource);
+
+            if (clause is not null)
+            {
+                parts.Add(clause);
+            }
+            else if (c.TotalCpuPercent.HasValue)
+            {
+                parts.Add($"CPU {c.TotalCpuPercent.Value:F0}%");
+            }
         }
 
         if (c.ThreadsSeverity >= HealthSeverity.Warning)

@@ -3532,7 +3532,8 @@ public sealed class DarlingWorker : BackgroundService
                         Context: null,
                         /* Both figures, each labelled with what it is a fraction OF — the whole defect
                            #3281 names is a reader taking one for the other. */
-                        DetailText: $"  Capacity: {capacityPercent.Value:F0}% of configured ACU\n"
+                        DetailText:
+                            $"  Capacity: {capacityPercent.Value:F0}% {FleetCpuProvenance.CapacityDenominator}\n"
                             + allocation
                             + $"  Instance CPU: {reading.CpuPercent:F0}% of currently allocated capacity\n"
                             + $"  Threshold: {alertSettings.CpuThresholdPercent}%",
@@ -3540,7 +3541,8 @@ public sealed class DarlingWorker : BackgroundService
                         NumericThresholdValue: alertSettings.CpuThresholdPercent,
                         Muted: muted,
                         Severity: null,
-                        ShortMessage: $"Capacity at {capacityPercent.Value:F0}% of configured ACU "
+                        ShortMessage:
+                            $"Capacity at {capacityPercent.Value:F0}% {FleetCpuProvenance.CapacityDenominator} "
                             + $"(threshold: {alertSettings.CpuThresholdPercent}%)"),
                     cancellationToken);
                 readClock.Restart();
@@ -3551,7 +3553,8 @@ public sealed class DarlingWorker : BackgroundService
                    says which of the two happened rather than claiming a recovery it did not measure. */
                 await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, "CPU Resolved",
                     capacityPercent.HasValue
-                        ? $"{snapshot.ServerName}: capacity back to {capacityPercent.Value:F0}% of configured ACU"
+                        ? $"{snapshot.ServerName}: capacity back to {capacityPercent.Value:F0}% "
+                            + FleetCpuProvenance.CapacityDenominator
                         : $"{snapshot.ServerName}: no current capacity reading, so the alert is cleared");
             }
         }
