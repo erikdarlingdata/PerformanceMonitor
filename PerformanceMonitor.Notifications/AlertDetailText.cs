@@ -20,6 +20,20 @@ namespace PerformanceMonitor.Notifications;
 /// retention held) carry only the prose and fire with <c>context: null</c>, so a channel that renders only
 /// the structured collection delivers a metric name, a value and a threshold with the remedy discarded.
 /// </para>
+/// <para>
+/// <b>Scope against the never-on-a-webhook T-SQL rule.</b> That rule
+/// (<c>WebhookAlertService.RedactForWebhook</c>, and the per-channel <c>IsCodeBlock</c> substitution) targets
+/// GENERATED remediation payloads: <see cref="AlertDetailItem.IsCodeBlock"/> bodies and
+/// <see cref="AlertDetailItem.Remediation"/> actions built by <c>FactRemediation</c> — multi-statement
+/// scripts, two of the seven shapes destructive, carrying a two-sided risk-disclosure header that has to be
+/// read before the script is run. The prose here is none of those: it is authored per alert, and where it
+/// names a command at all (the #2109 AG alerts' <c>SET HADR RESUME</c>) the command IS the recovery action
+/// and the sentence IS the alert. Redacting it would deliver "see email or the in-app dialog" to an operator
+/// whose only channel is the one being redacted, which is the #3296 defect over again.
+/// <para>A generated command never reaches this text, which is what makes the boundary hold. That is a
+/// checked fact, not an author's habit — see
+/// <c>Lite.Tests.AnalysisNotificationTests.TheGeneratedRemediationCommand_RidesOnlyInTheCodeBlockItem_NeverInTheProseDetailText</c>.</para>
+/// </para>
 /// </summary>
 public static class AlertDetailText
 {

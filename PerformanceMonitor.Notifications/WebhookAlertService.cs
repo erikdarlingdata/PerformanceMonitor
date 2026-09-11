@@ -985,6 +985,10 @@ public class WebhookAlertService
     /// can see a remediation EXISTS) but carry the hint as their body and no <c>Remediation</c> payload; the
     /// typed payload is likewise stripped from every item defensively. Returns a COPY — the same context
     /// instance flows on to the other channels, and mutating it here would redact their email too.
+    /// <para>#3297: this covers the STRUCTURED context, which is the whole of what it has ever protected —
+    /// generated <c>FactRemediation</c> payloads. An alert's flat prose detail is delivered verbatim and
+    /// deliberately; see <see cref="AlertDetailText"/> for why, and for the pin that keeps a generated
+    /// command out of it.</para>
     /// </summary>
     private static AlertContext RedactForWebhook(AlertContext context)
     {
