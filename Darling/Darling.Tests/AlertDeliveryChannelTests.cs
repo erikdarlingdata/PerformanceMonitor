@@ -638,6 +638,89 @@ public sealed class AlertDeliveryChannelTests
         Assert.Equal(2, CountOccurrences(message, "--backfill-rollups"));
     }
 
+    /// <summary>
+    /// #3297 and #3303 arrived at this seam from opposite directions in the same week — the alert's prose
+    /// detail and a custom rule's human display name — and every signature from
+    /// <see cref="DarlingAlertDeliverer"/> down to each payload builder gained one parameter from each. Both
+    /// are <c>string?</c>, so nothing about losing one, or transposing the pair, is a compile error.
+    ///
+    /// <para>Each side's own suite covers its payload BUILDERS. Neither covers the three hops between the
+    /// deliverer and those builders with the OTHER field also present, because neither side had both fields
+    /// to pass. This drives the whole path once with both set and reads the bytes that left the process, so
+    /// "both survived" is measured at the hops the merge conflict was actually in rather than inferred from
+    /// the builders being intact.</para>
+    ///
+    /// <para>Bodies are identified by a channel-native marker, never by arrival order. And the generic
+    /// channel's exemption is asserted here rather than assumed: it carries the prose (alert content) but
+    /// keeps the immutable metric name, because <c>{{metric}}</c> is the key an automation correlates on and
+    /// that channel renders no title.</para>
+    /// </summary>
+    [Fact]
+    public async Task TheDeliverer_CarriesBothTheProseAndTheDisplayName_ThroughTheOneFanOut()
+    {
+        const string Prose =
+            "Signal wait time has exceeded its ceiling for 15 minutes. Check for a runaway parallel query "
+            + "before raising MAXDOP.";
+        const string DisplayName = "Signal wait % high";
+        const string MetricKey = "Custom:42";
+
+        using var endpoint = new CapturingWebhookEndpoint();
+        using var smtp = new CapturingSmtpEndpoint();
+
+        var config = new DarlingConfig();
+        config.Webhooks.TeamsUrl = endpoint.Url;
+        config.Webhooks.SlackUrl = endpoint.Url;
+        config.Webhooks.GenericUrl = endpoint.Url;
+        config.Smtp.Host = "127.0.0.1";
+        config.Smtp.Port = smtp.Port;
+        config.Smtp.UseSsl = false;
+        config.Smtp.From = "monitor@example.invalid";
+        config.Smtp.To = "operator@example.invalid";
+
+        var settings = new DarlingAlertSettings(config);
+        var history = new DiscardingHistoryStore();
+        var webhooks = new WebhookAlertService(
+            settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
+        var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
+
+        /* A custom-rule fire, the shape CustomAlertEvaluator.BuildFireOutcome produces: Context null, the
+           rule's prose in DetailText, the rule's name in DisplayName, "Custom:<id>" as the metric key. */
+        await deliverer.DeliverAsync(
+            new AlertOutcome(
+                "custom:42", "PROD01", MetricKey, "1500", ">= 1000",
+                Context: null, DetailText: Prose, NumericCurrentValue: 1500, NumericThresholdValue: 1000,
+                Muted: false, Severity: AlertSeverityLevel.Warning,
+                ShortMessage: null, DisplayName: DisplayName),
+            TestContext.Current.CancellationToken);
+
+        var bodies = endpoint.Bodies;
+        Assert.Equal(3, bodies.Count);
+
+        /* The prose is alert CONTENT, so every channel carries it. */
+        Assert.All(bodies, body => Assert.Contains(Prose, body, StringComparison.Ordinal));
+
+        /* The display name is a TITLE concern, so the two card channels carry it. */
+        var teams = Assert.Single(bodies, b => b.Contains("themeColor", StringComparison.Ordinal));
+        Assert.Contains(DisplayName, teams, StringComparison.Ordinal);
+        Assert.DoesNotContain(MetricKey, teams, StringComparison.Ordinal);
+
+        var slack = Assert.Single(bodies, b => b.Contains("\"blocks\"", StringComparison.Ordinal));
+        Assert.Contains(DisplayName, slack, StringComparison.Ordinal);
+        Assert.DoesNotContain(MetricKey, slack, StringComparison.Ordinal);
+
+        /* And the generic channel keeps the machine key instead. */
+        var generic = Assert.Single(bodies, b => b.Contains("\"metric\"", StringComparison.Ordinal));
+        Assert.Contains(MetricKey, generic, StringComparison.Ordinal);
+        Assert.DoesNotContain(DisplayName, generic, StringComparison.Ordinal);
+
+        /* Email is the channel #3296 was reported from, and its subject is where #3303's name shows. Both
+           MIME parts again, so losing either body fails. */
+        var message = Assert.Single(smtp.Messages);
+        Assert.Contains(DisplayName, message, StringComparison.Ordinal);
+        Assert.Contains("before raising MAXDOP", message, StringComparison.Ordinal);
+        Assert.Equal(2, CountOccurrences(message, "before raising MAXDOP"));
+    }
+
     private static int CountOccurrences(string haystack, string needle)
     {
         int count = 0, index = 0;
