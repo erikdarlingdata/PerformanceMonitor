@@ -838,8 +838,8 @@ public sealed class AlertDeliveryChannelTests
 
     /// <summary>
     /// The constraint the whole approach rests on. The obvious repair — make
-    /// <c>FindingMessageFormatter.DetailText</c> the flattening of its own context, as the thirteen
-    /// <c>AlertEngine</c> fire sites do — would change <c>config_alert_log.detail_text</c> for every
+    /// <c>FindingMessageFormatter.DetailText</c> the flattening of its own context, as every
+    /// <c>AlertEngine</c> fire site does — would change <c>config_alert_log.detail_text</c> for every
     /// analysis row, and that column is read by the MCP alert reader, the triage endpoint and the Viewer's
     /// detail pane, and PARSED by <c>AlertMuteContext.PopulateFromDetailText</c> for the mute pre-fill.
     /// So the suppression is at delivery only, and that this is true of the STORED value is asserted here

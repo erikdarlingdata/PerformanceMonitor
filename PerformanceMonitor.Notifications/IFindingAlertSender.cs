@@ -56,7 +56,7 @@ public interface IFindingAlertSender
 /// <c>AlertMuteContext.PopulateFromDetailText</c> for the mute pre-fill. <see cref="DeliveredProse"/> is
 /// what a delivery CHANNEL renders. Separating them is what lets a producer whose prose merely restates
 /// its own structured context stop delivering the same facts twice without changing a persisted column
-/// that five reading surfaces depend on.
+/// that every one of those surfaces depends on.
 /// </para>
 /// </summary>
 /// <param name="DeliverDetailText">
