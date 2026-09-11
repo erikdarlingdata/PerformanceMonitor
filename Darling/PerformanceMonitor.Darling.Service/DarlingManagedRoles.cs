@@ -713,9 +713,12 @@ GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
 --    gated-live tests would never catch it (they connect as the owner). A COLUMN-level grant lets mcp bump the
 --    reload beacon but NOT flip paused / capture_plans / mcp_enabled / mcp_port. The targets exist here because
 --    provisioning runs AFTER migration; a recreated table re-grants on the next start (self-heal).
---    TWO triggers rest on that beacon grant, not one: config_mute_rules carries trg_bump_mute_rules
---    (V117 / #3315), so a create_mute_rule / delete_mute_rule write bumps the beacon as mcp as well.
---    Narrowing the grant to the alert-settings path 42501s every mute write -- it is the same column UPDATE.
+--    EVERY mcp-writable beacon-triggered table rests on that one grant, not the alert-settings path alone:
+--    config_mute_rules carries trg_bump_mute_rules (V117 / #3315) and config_monitored_servers carries
+--    trg_bump_monitored_servers (section 9), so create_mute_rule / delete_mute_rule and add_servers /
+--    remove_server bump the beacon as mcp too. Narrowing the grant to update_alert_settings 42501s all of
+--    them -- one column UPDATE serves every trigger. Re-derive the set from which mcp-writable tables carry a
+--    bump trigger rather than from a count recorded here, which a later rung ages out without changing it.
 GRANT INSERT, UPDATE, DELETE ON {config}.config_mute_rules TO {mcp};
 GRANT UPDATE ON {config}.config_alert_settings TO {mcp};
 GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {mcp};
