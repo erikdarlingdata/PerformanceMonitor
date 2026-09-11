@@ -137,8 +137,8 @@ public sealed class DarlingPgIndexBloatCoverageLivePostgresTests
 
             Assert.Equal(PgIndexBloatCoverageArm.PartialCoverage, verdict.Arm);
 
-            /* ARM 2: ONE ROW PER INDEX. Six distinct indexes, eleven rows across two cycles, and the
-               population is SIX - the denominator error that flatters coverage would report eleven.
+            /* ARM 2: ONE ROW PER INDEX. Six distinct indexes, twelve rows across two cycles, and the
+               population is SIX - the denominator error that flatters coverage would report twelve.
 
                Derived below as well as stated: the literal is what a reader checks the fixture against, and
                the identity is what catches a fixture edit that changes the population without changing the
