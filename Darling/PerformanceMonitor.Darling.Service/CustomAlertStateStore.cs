@@ -71,6 +71,23 @@ SELECT server_id, firing FROM custom_alert_state WHERE rule_id = $1";
     /// $1 rule_id, $2 server_id.</summary>
     public const string DeleteSql = "DELETE FROM custom_alert_state WHERE rule_id = $1 AND server_id = $2";
 
+    /// <summary>The FIRING (server_id, resolved server name) subjects of one rule (#3305), for force-resolving an
+    /// open incident on the delete path BEFORE the FK cascade drops the state. The name is the monitored-server
+    /// registry's, falling back to the id when the server itself is already gone. $1 rule_id.</summary>
+    public const string ListFiringWithNamesSql = @"
+SELECT s.server_id, COALESCE(m.name, s.server_id::text)
+FROM custom_alert_state s
+LEFT JOIN config_monitored_servers m ON m.server_id = s.server_id
+WHERE s.rule_id = $1 AND s.firing = TRUE";
+
+    /// <summary>Every state row joined to its rule's name + enabled flag (#3305 reconcile). Rows of a DELETED
+    /// rule are absent (the FK cascade already dropped them), so this reaches only DISABLED rules (to force-resolve
+    /// + clean) and enabled rules whose servers may have left scope.</summary>
+    public const string ListAllWithRuleSql = @"
+SELECT s.rule_id, s.server_id, s.firing, r.name, r.enabled
+FROM custom_alert_state s
+JOIN custom_alert_rules r ON r.id = s.rule_id";
+
     /// <summary>
     /// Loads one subject's state for the rule at <paramref name="currentRuleVersion"/>. Returns
     /// <see cref="CustomAlertRuleState.Fresh"/> when no row exists. When the stored <c>rule_version</c> differs
@@ -158,6 +175,39 @@ SELECT server_id, firing FROM custom_alert_state WHERE rule_id = $1";
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    /// <summary>Lists the FIRING subjects of one rule with a resolved server name (#3305 delete path). $1 rule_id.</summary>
+    public async Task<IReadOnlyList<(int ServerId, string ServerName)>> ListFiringWithNamesAsync(
+        long ruleId, CancellationToken cancellationToken = default)
+    {
+        var rows = new List<(int, string)>();
+        await using var command = _dataSource.CreateCommand(ListFiringWithNamesSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = ruleId });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add((reader.GetInt32(0), reader.GetString(1)));
+        }
+
+        return rows;
+    }
+
+    /// <summary>Lists every state row joined to its rule's name + enabled flag (#3305 reconcile).</summary>
+    public async Task<IReadOnlyList<CustomAlertStateRow>> ListAllWithRuleAsync(CancellationToken cancellationToken = default)
+    {
+        var rows = new List<CustomAlertStateRow>();
+        await using var command = _dataSource.CreateCommand(ListAllWithRuleSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new CustomAlertStateRow(
+                reader.GetInt64(0), reader.GetInt32(1), reader.GetBoolean(2), reader.GetString(3), reader.GetBoolean(4)));
+        }
+
+        return rows;
+    }
+
     private static void AddNullableTimestamp(NpgsqlCommand command, DateTime? value) =>
         command.Parameters.Add(new NpgsqlParameter
         {
@@ -189,3 +239,8 @@ public sealed record CustomAlertRuleState(
     public static CustomAlertRuleState Fresh(int ruleVersion) =>
         new(PersistenceState.Initial, ruleVersion, null, null, null);
 }
+
+/// <summary>One <c>custom_alert_state</c> row joined to its rule's name + enabled flag — the #3305 reconcile's
+/// unit of work: whether this (rule, server) subject should be torn down (rule disabled, or server out of scope)
+/// and, if it is <see cref="Firing"/>, force-resolved first.</summary>
+public sealed record CustomAlertStateRow(long RuleId, int ServerId, bool Firing, string RuleName, bool RuleEnabled);

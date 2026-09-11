@@ -1945,6 +1945,11 @@ public sealed class DarlingWorker : BackgroundService
             {
                 _nextCustomAlertHealthCheckUtc = DateTime.UtcNow.Add(s_customAlertHealthInterval);
                 await EvaluateCustomAlertRuleHealthAsync(servers, stoppingToken);
+
+                /* #3305: on the same cadence, reconcile persisted state — force-resolve + clean the state of
+                   disabled rules (which the enabled-only sweep would orphan) and of servers that have left a
+                   rule's scope. Deleted rules are resolved on the delete path (their state cascades away). */
+                await ReconcileCustomAlertStateAsync(servers, stoppingToken);
             }
 
             /* #1581: the compression-job self-heal backstop. TimescaleDB compression policy jobs can silently
@@ -4510,10 +4515,10 @@ LIMIT 1";
     /// re-parse the enabled rules against the live catalog and flag broken / never-firing ones (the current
     /// monitored-storage-name set feeds the 0-server-scope case), then hands the report to
     /// <see cref="DarlingSelfAlertEvaluator.EvaluateCustomRuleHealthAsync"/>, which raises ONE aggregated
-    /// self-health alert. Both halves are failure-isolated internally (BuildHealthReportAsync returns an empty
-    /// report on a load error rather than resolving a standing alert; the Evaluate* wrapper contains a throwing
-    /// mute seam), matching the disk-pressure posture — this sweep-loop body has no catch-all of its own. Only
-    /// called when both evaluators are non-null (guarded at the call site).
+    /// self-health alert. Both halves are failure-isolated internally (BuildHealthReportAsync returns null on a
+    /// load error and this method then HOLDS the standing alert rather than resolving it; the Evaluate* wrapper
+    /// contains a throwing mute seam), matching the disk-pressure posture — this sweep-loop body has no catch-all
+    /// of its own. Only called when both evaluators are non-null (guarded at the call site).
     /// </summary>
     private async Task EvaluateCustomAlertRuleHealthAsync(List<ServerLoopState> servers, CancellationToken cancellationToken)
     {
@@ -4529,6 +4534,24 @@ LIMIT 1";
         {
             await _selfAlerts!.EvaluateCustomRuleHealthAsync(report, cancellationToken);
         }
+    }
+
+    /// <summary>
+    /// #3305: the fleet-level custom-alert-state reconcile. Force-resolves and cleans the persisted state of
+    /// DISABLED rules (whose open incidents the evaluator's enabled-only sweep would otherwise orphan forever)
+    /// and of servers that have left a rule's scope. Deleted rules are handled on the delete path instead
+    /// (their state cascades away). Hands the evaluator the current fleet — server id → (storage name for the
+    /// scope check, display name for the recovery row); a server absent from it has left monitoring. Runs on
+    /// the fleet-global health cadence; the evaluator's method is failure-isolated per row so this never stops
+    /// the sweep. Only called when the custom-alert evaluator is non-null (guarded at the call site).
+    /// </summary>
+    private async Task ReconcileCustomAlertStateAsync(List<ServerLoopState> servers, CancellationToken cancellationToken)
+    {
+        var monitored = servers
+            .Where(s => !s.Retired)
+            .ToDictionary(s => s.Config.ServerId, s => (s.Config.StorageName, s.Config.DisplayName));
+
+        await _customAlertEvaluator!.ReconcileStateAsync(monitored, cancellationToken);
     }
 
     /// <summary>

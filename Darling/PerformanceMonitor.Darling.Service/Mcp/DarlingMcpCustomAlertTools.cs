@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -234,16 +235,19 @@ public sealed class DarlingMcpCustomAlertTools
     [McpServerTool(Name = "delete_custom_alert_rule"), Description(
         "Deletes a saved custom alert rule by id. Returns {status:\"deleted\", rule_id:N} on success, or " +
         "{status:\"not_found\", ...} when no rule has that id. This is permanent, and it also drops the rule's " +
-        "accumulated per-server alert state (an open incident is torn down without delivering a resolve; " +
-        "disable the rule instead with update_custom_alert_rule enabled=false to keep its state).")]
+        "accumulated per-server alert state. Any OPEN incident for the rule is force-resolved first (a recovery " +
+        "row is written to alert history) so nothing is left showing as firing forever. To pause a rule without " +
+        "deleting it, set enabled=false with update_custom_alert_rule (its open incidents are resolved too).")]
     public static async Task<string> DeleteCustomAlertRule(
         NpgsqlDataSource postgres,
         [Description("The id of the rule to delete (from list_custom_alert_rules).")] long rule_id)
     {
         try
         {
-            var store = new CustomAlertRuleStore(postgres);
-            var result = await store.DeleteAsync(rule_id);
+            // #3305: resolve any open incident (write the recovery row) BEFORE the delete's FK cascade drops the
+            // state that says which (rule, server) pairs were firing. No logger on the MCP surface — the recovery
+            // row still writes; only the (optional) service-log line is skipped.
+            var result = await CustomAlertEvaluator.ResolveAndDeleteRuleAsync(postgres, rule_id, logger: null, CancellationToken.None);
             return result is CustomAlertRuleResult.Ok
                 ? JsonSerializer.Serialize(new { status = "deleted", rule_id }, McpHelpers.JsonOptions)
                 : Outcome("not_found", $"No custom alert rule with id {rule_id}.");
