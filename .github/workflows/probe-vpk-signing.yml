@@ -33,12 +33,6 @@ on:
       - '.github/workflows/probe-vpk-signing.yml'
     branches: [dev, main]
   workflow_dispatch:
-    inputs:
-      sign_parallel:
-        description: 'Value for --signParallel. Blank = leave it at the default.'
-        required: false
-        default: ''
-        type: string
 
 permissions:
   contents: read
@@ -49,9 +43,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The whole question is what --signDisableDeep changes about WHICH files vpk asks to
-        # have signed, so both arms always run and are read side by side.
-        disable_deep: [false, true]
+        # --signDisableDeep is NOT a Windows option: vpk 1.2.0 answers "Unrecognized command
+        # or argument" for it, and the string in the assembly belongs to the macOS variant.
+        # The axis that matters is batch size: vpk invokes the template once per batch and
+        # each invocation is one SignPath approval. Default is 10, and 2000 is rejected, so
+        # this brackets the accepted range. 0 means "omit the flag" (the default).
+        sign_parallel: [0, 35, 50, 100]
     steps:
       - uses: actions/checkout@v5
 
@@ -97,11 +94,15 @@ jobs:
             '--channel', 'probe',
             '--signTemplate', $probeCmd
           )
-          if ('${{ matrix.disable_deep }}' -eq 'true') { $vpkArgs += '--signDisableDeep' }
-          if ('${{ inputs.sign_parallel }}' -ne '') { $vpkArgs += @('--signParallel', '${{ inputs.sign_parallel }}') }
+          if ('${{ matrix.sign_parallel }}' -ne '0') { $vpkArgs += @('--signParallel', '${{ matrix.sign_parallel }}') }
           Write-Host "vpk $($vpkArgs -join ' ')"
-          & vpk @vpkArgs
+          & vpk @vpkArgs 2>&1 | Tee-Object -Variable vpkOut
           Write-Host "vpk exit: $LASTEXITCODE"
+          # Never let a rejected argument look like a zero-invocation result.
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host '=== vpk FAILED; its output above is the reason ==='
+            exit 0
+          }
 
       # The answer. Printed rather than uploaded, so reading the job log is the whole workflow.
       - name: Report what vpk asked to be signed
@@ -113,7 +114,7 @@ jobs:
           $lines = Get-Content $log
           $invocations = ($lines | Where-Object { $_ -like 'INVOCATION*' }).Count
           $files = $lines | Where-Object { $_ -notlike 'INVOCATION*' } | ForEach-Object { $_.Trim() }
-          Write-Host "=== --signDisableDeep=${{ matrix.disable_deep }}: $invocations template invocation(s) -> $invocations SignPath approval(s) ==="
+          Write-Host "=== --signParallel=${{ matrix.sign_parallel }}: $invocations template invocation(s) -> $invocations SignPath approval(s) ==="
           Write-Host ''
           Get-Content $log
           Write-Host ''
