@@ -225,6 +225,21 @@ public sealed class AlertEngineTests
                     ? states
                     : new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal));
 
+
+        /* #3282: REAL persistence, not a no-op — the gate's whole point is that it survives a restart, and
+           a fake that forgot the record would let a broken seed path pass. Keyed like both real stores. */
+        public Dictionary<(string Key, string Metric), AlertPersistenceRecord> Persistence { get; } = new();
+        public List<(string Key, string Metric, AlertPersistenceRecord Record)> SavedPersistence { get; } = new();
+
+        public Task<AlertPersistenceRecord?> LoadAlertPersistenceAsync(string serverKey, string metricName) =>
+            Task.FromResult(Persistence.TryGetValue((serverKey, metricName), out var r) ? (AlertPersistenceRecord?)r : null);
+
+        public Task SaveAlertPersistenceAsync(string serverKey, string metricName, AlertPersistenceRecord record)
+        {
+            Persistence[(serverKey, metricName)] = record;
+            SavedPersistence.Add((serverKey, metricName, record));
+            return Task.CompletedTask;
+        }
         public Task SaveIncidentOccurrencesAsync(string serverKey, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states)
         {
             /* Replace-the-set, exactly like both real stores: whatever arrives IS the metric's state, so an
@@ -306,10 +321,26 @@ public sealed class AlertEngineTests
             utcNow: () => Now,
             readFailures: ReadFailures);
 
+        /* #3282: every snapshot gets a DISTINCT, increasing CPU sample instant unless the test says
+           otherwise, because that is the realistic case — the sweep sees a new ring-buffer sample each
+           time — and because the alternative default would be dishonest in both directions. A fixed
+           instant would make every sweep a stale re-read and silently freeze the CPU gate in tests that
+           are not about the gate; a null would put them on the no-sample-instant DEGRADATION path while
+           reading like the normal one. Tests that want a stale re-read pass the same instant twice, and
+           the one test about the null path passes it explicitly. */
+        private static int s_sampleTick;
+
         public static AlertServerSnapshot Snapshot(
             double? sqlCpu = null, double? totalCpu = null,
-            bool isOnline = true, bool isAzureSqlDb = false, bool suppressed = false) =>
-            new(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed);
+            bool isOnline = true, bool isAzureSqlDb = false, bool suppressed = false,
+            DateTime? cpuSampleTime = null, bool noCpuSampleTime = false) =>
+            new(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed,
+                noCpuSampleTime
+                    ? null
+                    : cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick)));
+
+        /// <summary>The instant distinct sample times are counted from — arbitrary, only the ordering matters.</summary>
+        public static readonly DateTime SampleBase = new(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
     }
 
     private static BlockedProcessAlertRow BlockingRow(
@@ -1669,8 +1700,13 @@ public sealed class AlertEngineTests
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        await engine.EvaluateServerAsync(new AlertServerSnapshot("101", "SRV-A", true, 70, 90, false, false));
-        await engine.EvaluateServerAsync(new AlertServerSnapshot("202", "SRV-B", true, 70, 90, false, false));
+        /* #3282: CpuBreachSamples distinct samples per server, since High CPU no longer fires on one. */
+        for (var i = 1; i <= AlertEngine.CpuBreachSamples; i++)
+        {
+            var at = Harness.SampleBase.AddMinutes(i);
+            await engine.EvaluateServerAsync(new AlertServerSnapshot("101", "SRV-A", true, 70, 90, false, false, at));
+            await engine.EvaluateServerAsync(new AlertServerSnapshot("202", "SRV-B", true, 70, 90, false, false, at));
+        }
 
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
         Assert.Equal(new[] { "101", "202" }, h.Deliverer.Outcomes.Select(o => o.ServerKey).ToArray());

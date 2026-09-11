@@ -139,7 +139,18 @@ public sealed class AlertEngine
 
     /* Active-condition flags driving the resolved/cleared transitions —
        Lite's MainWindow.xaml.cs:78-89. */
-    private readonly ConcurrentDictionary<string, bool> _activeCpuAlert = new();
+
+    /* #3282: CPU's active flag is GONE from this family and replaced by the persistence gate's record,
+       which carries the same "an incident is open" bit plus the streak that earned it. Two reasons it
+       could not stay a bool here. It has to survive a restart — an in-memory flag meant the first
+       post-restart sweep over a standing condition re-announced an incident the operator already had open
+       — and the streak has to live in the same value as the flag, because a caller that can advance one
+       without the other is a caller that can lose a signal.
+
+       Seeded once per key from IAlertStateStore alongside the watermarks, then written through on change.
+       The cache is authoritative WITHIN the process: EvaluateServerAsync serializes per server, so the
+       read-modify-write below cannot interleave for one key. */
+    private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _cpuPersistence = new();
     private readonly ConcurrentDictionary<string, bool> _activeBlockingAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeBlockingWaitAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeDeadlockAlert = new();
@@ -352,6 +363,18 @@ public sealed class AlertEngine
             {
                 _lastAlertedFailedJobTime[key] = failedJob.Value;
             }
+
+            /* #3282: the CPU persistence gate's record, seeded here for the same reason the watermarks
+               are — so the first post-restart sweep knows an incident is already open (and does not
+               re-announce it) and resumes the streak instead of restarting it. A store with no row hands
+               back null and the subject starts at AlertPersistenceRecord.Initial, which is also what a
+               host with no persistence gets; either way the gate arms from zero rather than misfiring. */
+            readClock.Restart();
+            var cpuPersistence = await _stateStore.LoadAlertPersistenceAsync(key, CpuPersistenceMetric);
+            if (cpuPersistence.HasValue)
+            {
+                _cpuPersistence[key] = cpuPersistence.Value;
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -368,6 +391,50 @@ public sealed class AlertEngine
 
     /* ---------------- CPU (Lite AlertEngine.cs:62-114) ---------------- */
 
+    /// <summary>
+    /// Consecutive breaching CPU SAMPLES required before High CPU is an incident (#3282). Three, which is
+    /// about three minutes: the SQL Server figure comes off the SCHEDULER_MONITOR ring buffer, whose
+    /// entries are about a minute apart (<c>CpuUtilizationCollector</c>'s own #2749 note measures "a real
+    /// ~60s gap to the next"), and the <c>cpu_utilization</c> collector is scheduled every minute.
+    ///
+    /// <para><b>Derived from the measured excursion lengths, not picked.</b> Every High CPU / CPU Resolved
+    /// pair delivered on a 42-server fleet in the 24 hours to 2026-09-11 was between 42 and 147 seconds
+    /// long, median 87 s; the worst of them held at or above the 80% bar for exactly two consecutive
+    /// one-minute samples before falling back to a 20% baseline. #3282 measured the same shape
+    /// independently (55 s and 87 s on SQL Server, a 30-second pair, and one target at 99% back to 23%
+    /// inside two minutes). Three samples is therefore the first bar above all of it, and the shortest
+    /// excursion that could still be TRUE when a human opens the message — which is the only thing that
+    /// makes a CPU page actionable rather than archaeology.</para>
+    ///
+    /// <para>Deliberately a constant rather than a setting, following <c>PostgresAlertEvaluator</c>'s
+    /// stated position for its own thresholds: the product adds configuration when someone wants a
+    /// different number, not speculatively, and a knob here means a new <c>config_alert_settings</c>
+    /// column, a migration, a required <see cref="IAlertEngineSettings"/> member, Settings-window work and
+    /// MCP plumbing. Half of that is worse than none: #3314 is open precisely because a
+    /// delivery-governing number exists in the store and is unreachable from
+    /// <c>get_alert_settings</c>/<c>update_alert_settings</c>, and adding a second such number is the one
+    /// outcome to avoid. Public so it can be cited and pinned, and so raising it is a one-line diff.</para>
+    /// </summary>
+    public const int CpuBreachSamples = 3;
+
+    /// <summary>
+    /// Consecutive clearing CPU samples required to resolve an open High CPU incident (#3282). Two, and
+    /// deliberately fewer than <see cref="CpuBreachSamples"/>: the two costs are not symmetric. A late
+    /// resolve leaves a stale open incident, which is mildly annoying; an early resolve announces a
+    /// recovery that the next sample contradicts, and a resolve/fire pair is exactly the noise this issue
+    /// exists to remove. Two is the smallest value that survives one sample dipping under the bar during a
+    /// real saturation event (#3282's "fired at 99% and resolved to 23% within two minutes" is that shape);
+    /// three would hold incidents open a further minute and buy nothing.
+    /// </summary>
+    public const int CpuClearSamples = 2;
+
+    /// <summary>
+    /// The (server, metric) key the CPU gate's state is persisted under. The SAME string the mute context,
+    /// the history row and the resolve all use, so an operator reading <c>config_alert_log</c> and an
+    /// operator reading the persistence table are looking at one metric, not two spellings of it.
+    /// </summary>
+    public const string CpuPersistenceMetric = "High CPU";
+
     private async Task CheckCpuAsync(
         AlertServerSnapshot snapshot, string key, string serverName,
         DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
@@ -379,13 +446,75 @@ public sealed class AlertEngine
             ? (snapshot.TotalCpuPercent ?? snapshot.SqlCpuPercent)
             : snapshot.SqlCpuPercent;
         string cpuMetricLabel = _settings.CpuAlertMode == CpuAlertMode.TotalServer ? "Total CPU" : "SQL CPU"; /* :64 */
-        bool cpuExceeded = _settings.CpuEnabled
-            && alertCpuValue.HasValue
-            && alertCpuValue.Value >= _settings.CpuThresholdPercent;                /* :65-67 */
 
-        if (cpuExceeded)
+        if (!_settings.CpuEnabled)
         {
-            _activeCpuAlert[key] = true;                                            /* :71 */
+            /* The disabled case is not an observation and never was: flipping the feature off is not the
+               CPU recovering, so the gate is left exactly as it stands and no resolve is announced (the
+               pre-#3282 code reached the same outcome through its own _settings.CpuEnabled guard on the
+               resolve arm). Re-enabling resumes from the streak that was there. */
+            return;
+        }
+
+        if (!alertCpuValue.HasValue)
+        {
+            /* NO-DATA FREEZES THE GATE — never a breach, never a clear. The pre-#3282 code fell through to
+               its resolve arm here, so a CPU sample that simply went missing announced a recovery nobody
+               measured, rendered "<server>: Total CPU back to %" because the value it interpolated was
+               null. Freezing is the same call CustomAlertEvaluator makes on a null scalar, and the same
+               reason every per-check catch in this class logs and skips: resolving on absent evidence
+               fabricates a recovery exactly as firing on it fabricates an alert. */
+            return;
+        }
+
+        var priorRecord = _cpuPersistence.TryGetValue(key, out var cached) ? cached : AlertPersistenceRecord.Initial;
+
+        /* An observation counts only when it is a sample this subject has not counted yet. The sweep runs
+           on s_alertSweepInterval (30 s) while the ring-buffer sample behind alertCpuValue advances about
+           once a minute, so without this the SAME sample would advance the streak on consecutive sweeps
+           and CpuBreachSamples would be reached inside 90 seconds — shorter than every excursion #3282
+           measured, i.e. the defect intact behind a gate that looked like it fixed it.
+
+           A null sample instant counts every sweep instead (see AlertServerSnapshot.CpuSampleTimeUtc): the
+           persistence is then weaker, but the alert still fires, and silence is the one failure a monitoring
+           product cannot distinguish from health.
+
+           Where two samples land between sweeps the older one is skipped, so a sustained excursion can need
+           one extra sample to reach the bar. That undercounts and therefore UNDER-fires, which is the
+           correct direction for an alert that pages — the same reasoning PostgresAlertEvaluator's
+           poison-wait window states for its own partial coverage. */
+        bool freshSample = !snapshot.CpuSampleTimeUtc.HasValue
+            || !priorRecord.LastObservedSampleUtc.HasValue
+            || snapshot.CpuSampleTimeUtc.Value > priorRecord.LastObservedSampleUtc.Value;
+
+        bool breaching = alertCpuValue.Value >= _settings.CpuThresholdPercent;      /* :65-67 */
+        var outcome = PersistenceOutcome.None;
+
+        if (freshSample)
+        {
+            var evaluation = AlertPersistenceGate.Evaluate(
+                priorRecord.State, breaching, CpuBreachSamples, CpuClearSamples);
+            outcome = evaluation.Outcome;
+
+            var nextRecord = new AlertPersistenceRecord(
+                evaluation.State, snapshot.CpuSampleTimeUtc ?? priorRecord.LastObservedSampleUtc);
+
+            /* Value equality on the record is what makes the write skippable: on the vast majority of
+               sweeps nothing about the subject moved, and a store write per server per sweep would be
+               42 pointless upserts a minute on the measured fleet. */
+            if (!nextRecord.Equals(priorRecord))
+            {
+                _cpuPersistence[key] = nextRecord;
+                await SaveCpuPersistenceAsync(key, nextRecord);
+            }
+        }
+
+        bool incidentOpen = _cpuPersistence.TryGetValue(key, out var current)
+            ? current.State.Firing
+            : priorRecord.State.Firing;
+
+        if (incidentOpen && breaching)
+        {
             if (!suppressed && CooldownElapsed(_lastCpuAlert, key, now, alertCooldown)) /* :72 */
             {
                 var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "High CPU" }; /* :74 */
@@ -410,18 +539,39 @@ public sealed class AlertEngine
                     ShortMessage: $"{cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {_settings.CpuThresholdPercent}%)"), ct);
             }
         }
-        else if (_activeCpuAlert.TryGetValue(key, out var wasCpu) && wasCpu)        /* :101 */
+        else if (outcome == PersistenceOutcome.Resolve)                              /* :101 */
         {
-            _activeCpuAlert[key] = false;                                           /* :103 */
-            /* :107 — resolve announced only while the alert is still enabled and unsuppressed
-               (disabling flips cpuExceeded false; neither means CPU actually recovered). */
-            if (!suppressed && _settings.CpuEnabled)
+            /* The FALLING EDGE now comes from the gate rather than from a single sample dropping under the
+               bar, which is the other half of #3282: the pre-gate code resolved on the first clear sample,
+               so a 93%-for-two-minutes excursion produced a fire and a resolve 147 seconds apart and an
+               operator got both before either meant anything. The gate fires this exactly once, after
+               CpuClearSamples consecutive clears. Still gated on !suppressed, exactly as before. */
+            if (!suppressed)
             {
                 await NotifyResolutionAsync(new AlertResolution(
                     key, serverName, "High CPU",
                     "CPU Resolved",                                                 /* :110 */
                     $"{serverName}: {cpuMetricLabel} back to {alertCpuValue:F0}%"), ct); /* :111 */
             }
+        }
+    }
+
+    /// <summary>
+    /// Persists one server's CPU gate record (#3282), absorbing store failures the way every other state
+    /// write in this class does: the gate has already decided this observation from the in-memory record,
+    /// so a dropped write costs the streak across a restart and never an alert.
+    /// </summary>
+    private async Task SaveCpuPersistenceAsync(string key, AlertPersistenceRecord record)
+    {
+        var writeClock = Stopwatch.StartNew();
+        try
+        {
+            await _stateStore.SaveAlertPersistenceAsync(key, CpuPersistenceMetric, record);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Failed to persist the CPU persistence gate for {ServerKey} after {ElapsedMs} ms: {Message}", key, writeClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "CPU persistence gate save", writeClock.ElapsedMilliseconds);
         }
     }
 

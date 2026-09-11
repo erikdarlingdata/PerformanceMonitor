@@ -201,6 +201,21 @@ public class LiteAlertForwardingTests : IDisposable
                     ? states
                     : new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal));
 
+
+        /* #3282: REAL persistence, not a no-op — the gate's whole point is that it survives a restart, and
+           a fake that forgot the record would let a broken seed path pass. Keyed like both real stores. */
+        public Dictionary<(string Key, string Metric), AlertPersistenceRecord> Persistence { get; } = new();
+        public List<(string Key, string Metric, AlertPersistenceRecord Record)> SavedPersistence { get; } = new();
+
+        public Task<AlertPersistenceRecord?> LoadAlertPersistenceAsync(string serverKey, string metricName) =>
+            Task.FromResult(Persistence.TryGetValue((serverKey, metricName), out var r) ? (AlertPersistenceRecord?)r : null);
+
+        public Task SaveAlertPersistenceAsync(string serverKey, string metricName, AlertPersistenceRecord record)
+        {
+            Persistence[(serverKey, metricName)] = record;
+            SavedPersistence.Add((serverKey, metricName, record));
+            return Task.CompletedTask;
+        }
         public Task SaveIncidentOccurrencesAsync(string serverKey, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states)
         {
             var replacement = new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal);
@@ -264,10 +279,20 @@ public class LiteAlertForwardingTests : IDisposable
         public DateTime? FailedJobWatermark() =>
             StateStore.FailedJobWatermarks.TryGetValue(Key, out var w) ? w : (DateTime?)null;
 
+        /* #3282: distinct, increasing CPU sample instants by default — the realistic case, and the only
+           default that does not quietly put every test on a degraded path (see the same helper in
+           AlertEngineTests for the two ways a fixed or null default would lie). */
+        private static int s_sampleTick;
+
+        /// <summary>The instant distinct sample times are counted from — only the ordering matters.</summary>
+        public static readonly DateTime SampleBase = new(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
+
         public static AlertServerSnapshot Snapshot(
             double? sqlCpu = null, double? totalCpu = null,
-            bool isOnline = true, bool isAzureSqlDb = false, bool suppressed = false) =>
-            new(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed);
+            bool isOnline = true, bool isAzureSqlDb = false, bool suppressed = false,
+            DateTime? cpuSampleTime = null) =>
+            new(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed,
+                cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick)));
     }
 
     /// <summary>Everything except the named check off, so a scenario pins exactly one alert.</summary>

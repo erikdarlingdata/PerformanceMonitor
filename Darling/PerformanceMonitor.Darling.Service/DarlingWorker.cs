@@ -521,12 +521,21 @@ public sealed class DarlingWorker : BackgroundService
        reported by the process that fired it. */
     private readonly ConcurrentDictionary<string, bool> _pgPoisonWaitCooldownSeeded = new(StringComparer.Ordinal);
 
-    /* #2719: same LIVE-STATE shape as Long-Running Query above — CPU is a continuous gauge, so a cooldown
-       timestamp and an active flag are enough; it does not need RollingCountAlertGate, which exists for
+    /* #2719: CPU is a continuous gauge, so it does not need RollingCountAlertGate, which exists for
        rolling-WINDOW COUNTS (Deadlocks/Blocking) where the same event can sit in the window across several
-       sweeps. Mirrors AlertEngine's own _activeCpuAlert/_lastCpuAlert shape for SQL Server's High CPU. */
+       sweeps. The cooldown timestamp stays live-state, mirroring AlertEngine's own _lastCpuAlert.
+
+       #3282: the active flag that used to sit beside it is GONE, replaced by the shared
+       AlertPersistenceGate's record — which carries the same "an incident is open" bit plus the streak
+       that earned it, and is PERSISTED. Both halves of that mattered here. The bool was in-memory only,
+       so a restart over a standing condition re-announced an incident the operator already had open; and
+       the streak has to live in the same value as the flag, because a caller that can advance one without
+       the other is a caller that can lose a signal. Seeded once per key from the same
+       config.alert_persistence_state row AlertEngine's SQL Server twin reads, under the same "High CPU"
+       metric name — the parity #2719 chose for the metric strings means no second row shape is needed. */
     private readonly ConcurrentDictionary<string, DateTime> _lastPgCpuAlert = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, bool> _activePgCpuAlert = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _pgCpuPersistence = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, bool> _pgCpuPersistenceSeeded = new(StringComparer.Ordinal);
 
     /* #2716: none of the Postgres alerts' watermarks above survive a restart — AlertEngine seeds its
        own SQL Server twins of _lastAlertedPgDeadlockCount/_lastAlertedPgBlockingCount from
@@ -3298,11 +3307,12 @@ public sealed class DarlingWorker : BackgroundService
            degrading to (null, null) costs this tick its CPU alert and nothing else. */
         double? sqlCpu = null;
         double? totalCpu = null;
+        DateTime? cpuSampleTime = null;
 
         var cpuReadClock = Stopwatch.StartNew();
         try
         {
-            (sqlCpu, totalCpu) = await ReadLatestCpuAsync(runtime.ServerId, cancellationToken);
+            (sqlCpu, totalCpu, cpuSampleTime) = await ReadLatestCpuAsync(runtime.ServerId, cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -3326,7 +3336,10 @@ public sealed class DarlingWorker : BackgroundService
                 SqlCpuPercent: sqlCpu,
                 TotalCpuPercent: totalCpu,
                 IsAzureSqlDb: runtime.Target.IsAzureSqlDb,
-                Suppressed: false);
+                Suppressed: false,
+                /* #3282: the gate counts breaching SAMPLES, not sweeps — the sweep runs every 30 s and this
+                   sample advances about once a minute, so without the instant a re-read would count twice. */
+                CpuSampleTimeUtc: cpuSampleTime);
 
             await engine.EvaluateServerAsync(snapshot, cancellationToken);
             sweepReadClock.Restart();
@@ -3558,41 +3571,125 @@ public sealed class DarlingWorker : BackgroundService
 
         if (!alertSettings.CpuEnabled)
         {
+            /* Not an observation: turning the feature off is not CPU recovering, so the gate is left
+               exactly as it stands and re-enabling resumes from the streak that was there. */
             return;
         }
 
-        const string metricName = "High CPU";
+        const string metricName = AlertEngine.CpuPersistenceMetric;
         var key = snapshot.ServerKey;
+        var stateStore = new PgAlertStateStore(_postgres, _logger);
 
         var readClock = Stopwatch.StartNew();
         try
         {
             var now = DateTime.UtcNow;
-            var reading = await DarlingPgCpuUtilizationReader.GetLatestAsync(_postgres, runtime.ServerId, now, cancellationToken);
+
+            /* #3282: seed the gate's record once per key, mirroring AlertEngine's own
+               EnsureWatermarksSeededAsync — the same reason #2716 seeds the deadlock/blocking watermarks
+               here. Without it a restart forgets an open incident and the first post-restart pass to fill
+               the streak announces it again.
+
+               The metric name is the shared AlertEngine.CpuPersistenceMetric ("High CPU"), the same string
+               the mute context and the history row use, so this row is the same subject an operator sees in
+               config_alert_log. server_id never collides across engines, so one table serves both. */
+            if (_pgCpuPersistenceSeeded.TryAdd(key, true))
+            {
+                var seeded = await stateStore.LoadAlertPersistenceAsync(key, metricName);
+                readClock.Restart();
+                if (seeded.HasValue)
+                {
+                    _pgCpuPersistence[key] = seeded.Value;
+                }
+            }
+
+            var priorRecord = _pgCpuPersistence.TryGetValue(key, out var cached)
+                ? cached
+                : AlertPersistenceRecord.Initial;
+
+            /* The BATCH of readings this pass has not counted yet, oldest first — not just the latest one.
+               Performance Insights is sampled at a 60-second period while pg_cpu_utilization is a
+               five-minute collector, so roughly five samples arrive together; counting only the newest
+               would discard four in five and make CpuBreachSamples take three batches (~15 minutes)
+               instead of three minutes. See DarlingPgCpuUtilizationReader.GetSamplesSinceAsync. */
+            var samples = await DarlingPgCpuUtilizationReader.GetSamplesSinceAsync(
+                _postgres, runtime.ServerId, priorRecord.LastObservedSampleUtc, now, cancellationToken);
             readClock.Restart();
 
-            var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
-            var wasActive = _activePgCpuAlert.TryGetValue(key, out var activeBefore) && activeBefore;
+            var record = priorRecord;
+            bool fired = false;
+            bool resolved = false;
+            DarlingPgCpuUtilizationReader.CpuSample? lastCounted = null;
+            double? lastCapacityPercent = null;
 
-            /* #3281: percent of the CONFIGURED ACU ceiling, which is what the threshold means — reached
-               through the SAME shared decision the two fleet cards band on, so the alert and the card
-               cannot disagree about which figure puts a server in trouble. Always the Performance Insights
-               arm, because this evaluator exists only for PostgreSQL targets.
-
-               Read out into a local rather than compared inline: a lifted `double? >= int` is quietly
-               false on null, and "no capacity sample" deserves to be a named state rather than an
-               arithmetic accident. */
-            var capacityPercent = reading is null
-                ? null
-                : FleetCpuProvenance.CpuBandInputPercent(
-                    reading.CpuPercent, reading.AcuUtilizationPercent, FleetCpuSource.PerformanceInsights);
-            var exceeded = capacityPercent.HasValue
-                && capacityPercent.Value >= alertSettings.CpuThresholdPercent;
-            _activePgCpuAlert[key] = exceeded;
-
-            if (exceeded)
+            foreach (var sample in samples)
             {
-                var cooldownElapsed = !_lastPgCpuAlert.TryGetValue(key, out var last) || now - last >= cooldown;
+                /* #3281: percent of the CONFIGURED ACU ceiling, which is what the threshold means, reached
+                   through the SAME shared decision the two fleet cards band on. Always the Performance
+                   Insights arm, because this evaluator exists only for PostgreSQL targets.
+
+                   Read out into a local rather than compared inline: a lifted `double? >= int` is quietly
+                   false on null, and "no capacity sample" deserves to be a named state rather than an
+                   arithmetic accident. */
+                var capacityPercent = FleetCpuProvenance.CpuBandInputPercent(
+                    sample.CpuPercent, sample.AcuUtilizationPercent, FleetCpuSource.PerformanceInsights);
+
+                if (!capacityPercent.HasValue)
+                {
+                    /* NO CAPACITY READING FREEZES THE GATE — never a breach, never a clear, and the sample
+                       is not marked as counted so a later re-read of it can still be used if the capacity
+                       column gets backfilled. A missing headroom figure is not a measurement of anything,
+                       and the pre-#3282 code treated it as "not exceeded", which resolved an open incident
+                       on the strength of a reading it never took. Not firing on it was already the rule
+                       (#3281 refuses to fall back to percent-of-allocated); not RESOLVING on it is the
+                       other half of the same rule. */
+                    continue;
+                }
+
+                var evaluation = AlertPersistenceGate.Evaluate(
+                    record.State,
+                    capacityPercent.Value >= alertSettings.CpuThresholdPercent,
+                    AlertEngine.CpuBreachSamples,
+                    AlertEngine.CpuClearSamples);
+
+                record = new AlertPersistenceRecord(evaluation.State, sample.SampleTimeUtc);
+                lastCounted = sample;
+                lastCapacityPercent = capacityPercent;
+
+                /* A batch wide enough to hold CpuBreachSamples breaches AND CpuClearSamples clears can
+                   produce both edges in one pass — a genuine three-minute excursion that had already ended
+                   by the time Performance Insights handed it over. Both are delivered, in that order,
+                   because that is what the gate says happened and because the deliverer writes a
+                   config_alert_log row either way: suppressing the send would leave the channel and the
+                   history disagreeing about the same incident. The volume is damped where it already is,
+                   by the cooldown below and the per-fingerprint delivery cooldown. */
+                if (evaluation.Outcome == PersistenceOutcome.Fire)
+                {
+                    fired = true;
+                    resolved = false;
+                }
+                else if (evaluation.Outcome == PersistenceOutcome.Resolve)
+                {
+                    resolved = true;
+                }
+            }
+
+            if (!record.Equals(priorRecord))
+            {
+                _pgCpuPersistence[key] = record;
+                await stateStore.SaveAlertPersistenceAsync(key, metricName, record);
+                readClock.Restart();
+            }
+
+            var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));
+            bool breaching = lastCapacityPercent.HasValue
+                && lastCapacityPercent.Value >= alertSettings.CpuThresholdPercent;
+
+            if (record.State.Firing && breaching)
+            {
+                var cooldownElapsed = fired
+                    || !_lastPgCpuAlert.TryGetValue(key, out var last)
+                    || now - last >= cooldown;
                 if (!cooldownElapsed)
                 {
                     return;
@@ -3608,7 +3705,8 @@ public sealed class DarlingWorker : BackgroundService
 
                 /* The ACU line only when both halves were sampled: "N of M ACU" with either missing
                    would be a fabricated pair, and the percentage above already carries the answer. */
-                var allocation = reading!.ServerlessCapacityAcu.HasValue && reading.MaxConfiguredAcu.HasValue
+                var reading = lastCounted!;
+                var allocation = reading.ServerlessCapacityAcu.HasValue && reading.MaxConfiguredAcu.HasValue
                     ? $"  Allocated: {reading.ServerlessCapacityAcu:0.#} of {reading.MaxConfiguredAcu:0.#} ACU\n"
                     : string.Empty;
 
@@ -3617,33 +3715,40 @@ public sealed class DarlingWorker : BackgroundService
                         key,
                         snapshot.ServerName,
                         metricName,
-                        $"{capacityPercent!.Value:F0}%",
+                        $"{lastCapacityPercent!.Value:F0}%",
                         $"{alertSettings.CpuThresholdPercent}%",
                         Context: null,
                         /* Both figures, each labelled with what it is a fraction OF — the whole defect
-                           #3281 names is a reader taking one for the other. */
+                           #3281 names is a reader taking one for the other. The sustained-for line is
+                           #3282's: without it a reader cannot tell this from the single-sample alert that
+                           used to arrive here, and "it has been this way for three samples" is most of
+                           what makes the message worth acting on. */
                         DetailText:
-                            $"  Capacity: {capacityPercent.Value:F0}% {FleetCpuProvenance.CapacityDenominator}\n"
+                            $"  Capacity: {lastCapacityPercent.Value:F0}% {FleetCpuProvenance.CapacityDenominator}\n"
                             + allocation
                             + $"  Instance CPU: {reading.CpuPercent:F0}% of currently allocated capacity\n"
-                            + $"  Threshold: {alertSettings.CpuThresholdPercent}%",
-                        NumericCurrentValue: capacityPercent.Value,
+                            + $"  Threshold: {alertSettings.CpuThresholdPercent}%\n"
+                            + $"  Sustained: {AlertEngine.CpuBreachSamples} consecutive samples",
+                        NumericCurrentValue: lastCapacityPercent.Value,
                         NumericThresholdValue: alertSettings.CpuThresholdPercent,
                         Muted: muted,
                         Severity: null,
                         ShortMessage:
-                            $"Capacity at {capacityPercent.Value:F0}% {FleetCpuProvenance.CapacityDenominator} "
+                            $"Capacity at {lastCapacityPercent.Value:F0}% {FleetCpuProvenance.CapacityDenominator} "
                             + $"(threshold: {alertSettings.CpuThresholdPercent}%)"),
                     cancellationToken);
                 readClock.Restart();
             }
-            else if (wasActive)
+            else if (resolved)
             {
-                /* Edge-triggered, so this has to fire even when the capacity reading went away — and it
-                   says which of the two happened rather than claiming a recovery it did not measure. */
+                /* The falling edge is the gate's, after CpuClearSamples consecutive clears, rather than the
+                   first sample under the bar. It still says which of the two happened rather than claiming
+                   a recovery it did not measure — a subject whose capacity readings stopped arriving
+                   altogether never reaches this arm at all now, because a missing reading freezes the gate
+                   instead of clearing it. */
                 await NotifyPgResolutionAsync(key, snapshot.ServerName, metricName, "CPU Resolved",
-                    capacityPercent.HasValue
-                        ? $"{snapshot.ServerName}: capacity back to {capacityPercent.Value:F0}% "
+                    lastCapacityPercent.HasValue
+                        ? $"{snapshot.ServerName}: capacity back to {lastCapacityPercent.Value:F0}% "
                             + FleetCpuProvenance.CapacityDenominator
                         : $"{snapshot.ServerName}: no current capacity reading, so the alert is cleared");
             }
@@ -4429,7 +4534,7 @@ public sealed class DarlingWorker : BackgroundService
     /// same-row-across-offsets behaviour are both pinned by test.</para>
     /// </summary>
     internal const string LatestCpuSql = @"
-SELECT sqlserver_cpu_utilization, other_process_cpu_utilization
+SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time
 FROM cpu_utilization_stats
 WHERE server_id = $1
 ORDER BY collection_time DESC, sample_time DESC
@@ -4441,10 +4546,11 @@ LIMIT 1";
     /// ServerSummaryItem.TotalCpuPercent derivation (:140-141): total = SQL + (other ?? 0),
     /// null when there is no SQL sample (Azure SQL DB stores other as 0; Linux stores NULL).
     /// </summary>
-    private async Task<(double? SqlCpu, double? TotalCpu)> ReadLatestCpuAsync(int serverId, CancellationToken cancellationToken)
+    private async Task<(double? SqlCpu, double? TotalCpu, DateTime? SampleTime)> ReadLatestCpuAsync(int serverId, CancellationToken cancellationToken)
     {
         double? sqlCpu = null;
         double? otherCpu = null;
+        DateTime? sampleTime = null;
 
         await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(
@@ -4456,10 +4562,15 @@ LIMIT 1";
         {
             sqlCpu = reader.IsDBNull(0) ? null : Convert.ToDouble(reader.GetValue(0), CultureInfo.InvariantCulture);
             otherCpu = reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1), CultureInfo.InvariantCulture);
+            /* #3282: the sample's own instant, which is the persistence gate's observation identity. Left
+               Kind=Unspecified as it comes off the naive-UTC `timestamp` column — it is only ever compared
+               against the value this same read stored last sweep, so coercing it to Kind=Utc would shift
+               one side of that comparison by the host's offset and, east of UTC, freeze the gate. */
+            sampleTime = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
         }
 
         double? totalCpu = sqlCpu.HasValue ? sqlCpu.Value + (otherCpu ?? 0) : null;
-        return (sqlCpu, totalCpu);
+        return (sqlCpu, totalCpu, sampleTime);
     }
 
     /// <summary>
