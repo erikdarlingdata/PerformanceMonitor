@@ -731,6 +731,15 @@ public sealed class DarlingMcpHostService : BackgroundService
                    data for a self-test loop. The mcp role carries the narrow INSERT/UPDATE/DELETE grant on ONLY
                    config.custom_views (mirroring viewer's) — never the config pivot or the secret columns. */
                 .WithGeminiCompatibleTools<DarlingMcpCustomViewTools>()
+                /* The custom-alert-rule MANAGEMENT tools (#3285) - the second WRITE surface: list_custom_alert_rules
+                   / get_custom_alert_rule / validate_custom_alert_rule / create_custom_alert_rule /
+                   update_custom_alert_rule / delete_custom_alert_rule. They CRUD the user-authored threshold-alert
+                   rules in config.custom_alert_rules through the SAME CustomAlertRuleStore the web editor uses and the
+                   SAME CustomAlertRuleDefinition.TryParse the CustomAlertEvaluator applies when it loads a rule (no
+                   divergent second impl), validating every definition before it stores. The mcp role carries the
+                   narrow INSERT/UPDATE/DELETE grant on ONLY config.custom_alert_rules (granted under V116), never the
+                   config pivot or the secret columns. */
+                .WithGeminiCompatibleTools<DarlingMcpCustomAlertTools>()
                 /* The server-onboarding WRITE tools — add_servers (BULK) / remove_server: an MCP client can stand up
                    or tear down FLEET monitoring conversationally. The service-side twin of the Viewer's Add / Add-
                    Multiple dialogs: add_servers validates each entry, probes the connection IN-PROCESS (the service
