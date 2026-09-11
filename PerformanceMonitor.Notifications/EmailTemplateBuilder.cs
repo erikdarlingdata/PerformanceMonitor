@@ -24,6 +24,11 @@ internal static class EmailTemplateBuilder
     /// <summary>
     /// Builds both HTML and plain-text bodies for an alert email.
     /// </summary>
+    /// <param name="displayName">
+    /// Human-facing name to show in place of <paramref name="metricName"/> in the visible heading/subject
+    /// (a custom alert rule's name). Null or empty renders <paramref name="metricName"/> unchanged, so
+    /// built-in alerts are byte-identical. Severity/color still derive from <paramref name="metricName"/>.
+    /// </param>
     public static (string HtmlBody, string PlainTextBody) BuildAlertEmail(
         string metricName,
         string serverName,
@@ -31,16 +36,20 @@ internal static class EmailTemplateBuilder
         string thresholdValue,
         int emailCooldownMinutes,
         AlertBranding branding,
-        AlertContext? context = null)
+        AlertContext? context = null,
+        string? displayName = null)
     {
         var utcNow = DateTime.UtcNow;
         var localNow = DateTime.Now;
+        /* Severity/color map on the immutable metric name (AlertSeverity's key); a custom rule's human name
+           only replaces the metric name in the VISIBLE heading, never in ForMetric. */
         var (accentColor, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
+        var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
 
-        var html = BuildHtmlBody(metricName, serverName, currentValue,
+        var html = BuildHtmlBody(titleName, serverName, currentValue,
             thresholdValue, utcNow, localNow, accentColor, badgeText, branding, context: context, emailCooldownMinutes: emailCooldownMinutes);
 
-        var plain = BuildPlainTextBody(metricName, serverName, currentValue,
+        var plain = BuildPlainTextBody(titleName, serverName, currentValue,
             thresholdValue, utcNow, localNow, emailCooldownMinutes, branding, context);
 
         return (html, plain);
