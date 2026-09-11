@@ -402,7 +402,9 @@ public sealed class DarlingMcpAlertTools
         "the alert's exact values (see get_alert_history / get_alert_settings for the names in use); the *_pattern " +
         "fields are case-insensitive substring matches. expires_at is an optional ISO-8601 UTC timestamp after " +
         "which the rule stops applying; omit it for a permanent rule. Returns the stored rule, including its " +
-        "generated id (for delete_mute_rule).")]
+        "generated id (for delete_mute_rule). The running service applies the rule on its next collection " +
+        "sweep, when the write's config_version bump makes it reload its mute cache — so a matching alert " +
+        "already mid-flight can still be delivered once.")]
     public static async Task<string> CreateMuteRule(
         NpgsqlDataSource postgres,
         [Description("Scope the rule to this server (its display name, as get_alert_history reports). Omit for all servers.")] string? server_name = null,
@@ -455,7 +457,9 @@ public sealed class DarlingMcpAlertTools
 
     [McpServerTool(Name = "delete_mute_rule"), Description(
         "Deletes an alert mute rule by its id (from get_mute_rules or create_mute_rule). Returns " +
-        "{status:\"deleted\", rule_id} on success, or {status:\"not_found\"} when no rule has that id. Permanent.")]
+        "{status:\"deleted\", rule_id} on success, or {status:\"not_found\"} when no rule has that id. Permanent. " +
+        "The running service stops honoring the rule on its next collection sweep, when the delete's " +
+        "config_version bump makes it reload its mute cache.")]
     public static async Task<string> DeleteMuteRule(
         NpgsqlDataSource postgres,
         [Description("The id of the mute rule to delete (from get_mute_rules or create_mute_rule).")] string rule_id)
