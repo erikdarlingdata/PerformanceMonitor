@@ -409,6 +409,80 @@ public sealed class CustomAlertEvaluator
         }
     }
 
+    /// <summary>The reason a firing (rule, server) subject is force-resolved when its rule is disabled (#3305).</summary>
+    internal const string TeardownReasonDisabled = "the rule was disabled";
+
+    /// <summary>The reason a firing (rule, server) subject is force-resolved when the server has left the rule's
+    /// scope, or has been removed from monitoring entirely (#3305).</summary>
+    internal const string TeardownReasonOutOfScope = "the server is no longer in the rule's scope";
+
+    /// <summary>The reason a firing (rule, server) subject is force-resolved when the rule is deleted (#3305).</summary>
+    internal const string TeardownReasonDeleted = "the rule was deleted";
+
+    /// <summary>
+    /// Writes ONE recovery/resolution row for a teardown (#3305) — the SAME resolve idiom
+    /// <see cref="DeliverResolveAsync"/> uses (<c>BuildResolutionRecord</c> + <c>AlertFiringLog.Resolved</c>),
+    /// but keyed off an already-known (rule, server) rather than a live evaluation, and stating WHY (deleted /
+    /// disabled / out of scope) rather than a threshold recovery. Static so both the delete path and the sweep
+    /// reconcile can call it. The rule name is newline-stripped + length-capped before it reaches
+    /// <c>detail_text</c>, so a crafted name cannot re-open the mute-from-history spoof on the recovery row.
+    /// Failure-isolated: an audit-row write must never break a delete or a sweep.
+    /// </summary>
+    public static async Task WriteTeardownResolutionAsync(
+        IAlertHistoryStore historyStore, ILogger? logger,
+        long ruleId, string ruleName, int serverId, string serverName, string reason)
+    {
+        var safeName = SanitizeDisplayText(ruleName, CustomAlertRuleStore.MaxNameLength);
+        var metricName = MetricNameFor(ruleId);
+        var title = safeName + " Resolved";
+        var message = string.Create(CultureInfo.InvariantCulture, $"{serverName}: {safeName} resolved because {reason}");
+
+        logger?.LogInformation("{Line}", AlertFiringLog.Resolved(serverName, title, message));
+
+        try
+        {
+            await historyStore.RecordAlertAsync(DarlingSelfAlertEvaluator.BuildResolutionRecord(
+                new AlertResolution(serverId.ToString(CultureInfo.InvariantCulture), serverName, metricName, title, message)));
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning("Could not record custom alert teardown resolution for rule {Rule} on {Server}: {Message}",
+                ruleId, serverName, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Force-resolves any OPEN incident of a rule and then deletes the rule (#3305). Reads the rule (for its
+    /// name) and its firing subjects and writes a recovery row for each BEFORE calling
+    /// <see cref="CustomAlertRuleStore.DeleteAsync"/> — because that delete's FK cascade drops the
+    /// <c>custom_alert_state</c> rows that say which (rule, server) pairs were firing, so the resolve must read
+    /// them first. Static (the MCP delete tool holds only the owner pool, not the singleton evaluator); the
+    /// evaluator's in-memory no-data map is pruned lazily on its next cache refresh. The resolve is best-effort
+    /// (its own failure isolation) so a resolve blip never blocks the delete the operator asked for.
+    /// </summary>
+    public static async Task<CustomAlertRuleResult> ResolveAndDeleteRuleAsync(
+        NpgsqlDataSource postgres, long ruleId, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var ruleStore = new CustomAlertRuleStore(postgres);
+
+        var current = await ruleStore.GetAsync(ruleId, cancellationToken);
+        if (current is CustomAlertRuleResult.Ok ok && ok.Rule is not null)
+        {
+            var stateStore = new CustomAlertStateStore(postgres);
+            var firing = await stateStore.ListFiringWithNamesAsync(ruleId, cancellationToken);
+            if (firing.Count > 0)
+            {
+                var historyStore = new PgAlertHistoryStore(postgres, logger);
+                foreach (var (serverId, serverName) in firing)
+                {
+                    await WriteTeardownResolutionAsync(historyStore, logger, ruleId, ok.Rule.Name, serverId, serverName, TeardownReasonDeleted);
+                }
+            }
+        }
+
+        return await ruleStore.DeleteAsync(ruleId, cancellationToken);
+    }
+
     private async Task<IReadOnlyList<ParsedRule>> GetEnabledRulesAsync(CancellationToken cancellationToken)
     {
         // Lock-free by design: the refresh is an idempotent read of a tiny table, so a rare duplicate
@@ -557,6 +631,119 @@ public sealed class CustomAlertEvaluator
         }
 
         return new CustomAlertHealthReport(_brokenRules, neverFiring);
+    }
+
+    /// <summary>
+    /// Decides whether one persisted (rule, server) state row should be TORN DOWN (#3305): a disabled rule's
+    /// state is orphaned (the evaluator's <c>ListEnabledAsync</c> skips it, so its incident never resolves on its
+    /// own), and an enabled rule's state for a server that has left its scope — or left monitoring entirely
+    /// (<paramref name="serverStorageName"/> null) — is stale. Returns the teardown reason, or null to KEEP the
+    /// row. Conservative on uncertainty: an enabled rule whose definition is not currently in the cache
+    /// (<paramref name="definition"/> null — just enabled, or a stale cache) is left alone rather than torn down.
+    /// Pure so both teardown cases are unit-testable without a store.
+    /// </summary>
+    internal static string? ClassifyStateTeardown(
+        bool ruleEnabled, CustomAlertRuleDefinition? definition, string? serverStorageName)
+    {
+        if (!ruleEnabled)
+        {
+            return TeardownReasonDisabled;
+        }
+
+        if (definition is null)
+        {
+            // Enabled but its definition is not in the cache this pass — don't tear down on uncertainty.
+            return null;
+        }
+
+        if (serverStorageName is null || !definition.AppliesTo(serverStorageName))
+        {
+            return TeardownReasonOutOfScope;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Reconciles <c>custom_alert_state</c> against the live rules + monitored fleet (#3305): force-resolves and
+    /// cleans the state of DISABLED rules and of servers that have left a rule's scope. Deleted rules need no
+    /// handling here — their state cascaded away and their open incidents were resolved on the delete path
+    /// (<see cref="ResolveAndDeleteRuleAsync"/>). Runs on the fleet-global health cadence. Failure-isolated per
+    /// row and at each load, so a bad row or a store blip never stops the sweep (it only ever propagates
+    /// cancellation).
+    /// </summary>
+    /// <param name="monitoredServers">The current fleet: server id → (storage name for the scope check, display
+    /// name for the resolution row). A server absent from this map has left monitoring.</param>
+    public async Task ReconcileStateAsync(
+        IReadOnlyDictionary<int, (string StorageName, string DisplayName)> monitoredServers,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<ParsedRule> parsed;
+        try
+        {
+            parsed = await GetEnabledRulesAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Custom alert reconcile: rule load failed: {Message}", ex.Message);
+            return;
+        }
+
+        var definitionsById = parsed.ToDictionary(p => p.Row.Id, p => p.Definition);
+
+        IReadOnlyList<CustomAlertStateRow> rows;
+        try
+        {
+            rows = await _stateStore.ListAllWithRuleAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Custom alert reconcile: state load failed: {Message}", ex.Message);
+            return;
+        }
+
+        foreach (var row in rows)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var storageName = monitoredServers.TryGetValue(row.ServerId, out var server) ? server.StorageName : null;
+            var definition = definitionsById.TryGetValue(row.RuleId, out var def) ? def : null;
+            var reason = ClassifyStateTeardown(row.RuleEnabled, definition, storageName);
+            if (reason is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                if (row.Firing)
+                {
+                    var serverName = monitoredServers.TryGetValue(row.ServerId, out var s)
+                        ? s.DisplayName
+                        : row.ServerId.ToString(CultureInfo.InvariantCulture);
+                    await WriteTeardownResolutionAsync(_historyStore, _logger, row.RuleId, row.RuleName, row.ServerId, serverName, reason);
+                }
+
+                await _stateStore.DeleteAsync(row.RuleId, row.ServerId, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Custom alert reconcile: teardown of rule {Rule} on server {Server} failed: {Message}",
+                    row.RuleId, row.ServerId, ex.Message);
+            }
+        }
     }
 }
 
