@@ -48,6 +48,19 @@ public class EmailAlertService : IFindingAlertSender
     /// Attempts to send an alert (email + webhook via the shared core) and writes Lite's single
     /// combined <c>config_alert_log</c> row, regardless of email status. Never throws.
     /// </summary>
+    /// <param name="detailText">
+    /// The alert's prose. PERSISTED on the row either way; delivered to the channels only when
+    /// <paramref name="deliverProse"/>.
+    /// </param>
+    /// <param name="deliverProse">
+    /// Whether the channels render <paramref name="detailText"/>. True for every threshold and self
+    /// alert — that is the #3297 fix, and a self-alert's prose is the only thing it carries. The
+    /// analysis-finding path passes false: its prose restates the structured context the channels
+    /// already render (see <see cref="FindingAlert"/>).
+    /// <para>Defaults to TRUE so a caller that never considers it delivers the prose. The two failure
+    /// directions are not symmetric: delivering a redundant paragraph is visible and cosmetic, while
+    /// withholding one discards an operator's only copy of the remedy, which is the #3296 defect.</para>
+    /// </param>
     public async Task TrySendAlertEmailAsync(
         string metricName,
         string serverName,
@@ -58,13 +71,14 @@ public class EmailAlertService : IFindingAlertSender
         double? numericCurrentValue = null,
         double? numericThresholdValue = null,
         bool muted = false,
-        string? detailText = null)
+        string? detailText = null,
+        bool deliverProse = true)
     {
         try
         {
             var result = await _core.TrySendAsync(
                 metricName, serverName, currentValue, thresholdValue, serverId.ToString(), context, attemptChannels: !muted,
-                detailText: detailText);
+                detailText: deliverProse ? detailText : null);
 
             /* trayChannelPresent: true — LiteAlertDeliverer.DeliverAsync shows a styled balloon for every
                non-muted alert on the same call that reaches here, so a stored "tray" really does mean a
@@ -78,7 +92,9 @@ public class EmailAlertService : IFindingAlertSender
                carries both the display text and the optional numerics so no data is lost. The
                structured context is persisted as JSON alongside the flat detail_text so the
                in-app dialog can render the same advice / T-SQL / drill-down shape email and
-               webhooks show (and survive purge of the source findings). */
+               webhooks show (and survive purge of the source findings). detailText in full here
+               whatever the channels were handed — deliverProse governs delivery only, so the
+               column the Alerts tab, the MCP reader and the mute pre-fill read is unaffected. */
             string? contextJson = context is not null ? AlertContextSerializer.Serialize(context) : null;
             await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
                 serverId.ToString(), serverName, metricName,
@@ -107,6 +123,8 @@ public class EmailAlertService : IFindingAlertSender
     /// Lite's cadence — one combined <c>config_alert_log</c> row written unconditionally by
     /// <see cref="TrySendAlertEmailAsync"/>, which already carries the muted/detailText/numeric
     /// params — so no separate fallback row is needed.
+    /// <para>The row persists <c>DetailText</c>; the channels render it only if the producer says
+    /// to. Darling's <c>DarlingFindingAlertSender</c> reads the same declaration.</para>
     /// </summary>
     public Task SendFindingAlertAsync(FindingAlert alert)
     {
@@ -121,6 +139,7 @@ public class EmailAlertService : IFindingAlertSender
             numericCurrentValue: alert.Severity,
             numericThresholdValue: alert.NotifyThreshold,
             muted: false,
-            detailText: alert.DetailText);
+            detailText: alert.DetailText,
+            deliverProse: alert.DeliverDetailText);
     }
 }

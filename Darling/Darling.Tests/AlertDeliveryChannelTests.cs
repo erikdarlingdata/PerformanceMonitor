@@ -18,6 +18,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Viewer;
@@ -721,6 +722,211 @@ public sealed class AlertDeliveryChannelTests
         Assert.Equal(2, CountOccurrences(message, "before raising MAXDOP"));
     }
 
+    /* ────── #3302 regression: a finding's Diagnosis facts, delivered once and stored in full ────── */
+
+    /// <summary>
+    /// The counting marker for the two tests below. It appears exactly ONCE per rendering of the Diagnosis
+    /// facts — as the <c>Database</c> field of the structured item, and as the <c>Database:</c> line of the
+    /// prose — and nowhere else in any payload: not in the metric name (category + hash), not in the
+    /// current value (root fact key + value), not in the thresholds, not in the static advice prose, and
+    /// not in the email subject. So an occurrence count over a delivered body IS the number of times those
+    /// facts arrived.
+    /// </summary>
+    private const string FindingDatabaseMarker = "LedgerArchive_7731";
+
+    /// <summary>
+    /// What <c>config_alert_log.detail_text</c> holds for an analysis row. A frozen list of lines, not a
+    /// re-derivation from <c>FindingMessageFormatter</c> — which this assembly cannot see anyway, the
+    /// Notifications project granting <c>InternalsVisibleTo</c> to Lite and Dashboard but not here. That
+    /// limitation is useful: the expectation cannot follow the code it pins.
+    /// </summary>
+    private static string PersistedFindingDetailText => string.Join(Environment.NewLine, new[]
+    {
+        "  Story: CPU_SPIKE → PLAN_REGRESSION",
+        "  Severity: 1.80 (notify threshold 1.5)",
+        "  Confidence: 0.67",
+        "  Facts in chain: 2",
+        "  Database: " + FindingDatabaseMarker,
+        "  Window: 2026-09-11 01:00:00Z - 2026-09-11 02:00:00Z"
+    });
+
+    /// <summary>
+    /// A realistic <c>cpu_pressure</c> finding with every Diagnosis field populated and a FIXED window, so
+    /// the expected detail text above can be a literal.
+    /// </summary>
+    private static AnalysisFinding CpuFinding() => new()
+    {
+        ServerId = 1,
+        ServerName = "PROD01",
+        Category = "cpu_pressure",
+        StoryPath = "CPU_SPIKE → PLAN_REGRESSION",
+        StoryPathHash = "diag000000000001",
+        IncidentId = string.Empty,
+        Severity = 1.8,
+        Confidence = 0.67,
+        FactCount = 2,
+        RootFactKey = "CPU_SPIKE",
+        RootFactValue = 92.5,
+        DatabaseName = FindingDatabaseMarker,
+        TimeRangeStart = new DateTime(2026, 9, 11, 1, 0, 0, DateTimeKind.Utc),
+        TimeRangeEnd = new DateTime(2026, 9, 11, 2, 0, 0, DateTimeKind.Utc)
+    };
+
+    /// <summary>
+    /// The regression, on the wire. <c>FindingMessageFormatter</c> is a third producer of
+    /// <c>(Context, DetailText)</c> pairs that #3297 never touched: <c>BuildContext</c> puts story /
+    /// severity / notify threshold / confidence / fact count / database / window into a <c>Diagnosis</c>
+    /// item, and <c>DetailText</c> formats the same values with different labels and a different window
+    /// separator. Different text, so <c>AlertDetailText.ProseForDelivery</c>'s equality never fires, so
+    /// every channel rendered those facts twice — on the largest alert category there is.
+    ///
+    /// <para>Driven through the REAL producer rather than a hand-built <c>FindingAlert</c>: the
+    /// declaration under test belongs to <c>AnalysisNotificationService</c>, and a hand-built record
+    /// would assert the arrangement instead of the behaviour. From there it is the whole Darling path —
+    /// <see cref="DarlingFindingAlertSender"/> through the shared send core, the fan-out and each payload
+    /// builder — read off the bytes that left the process.</para>
+    ///
+    /// <para>An occurrence COUNT rather than an absence. Asserting only that the prose is gone would pass
+    /// just as well if the structured context had been dropped instead, which is the opposite defect and
+    /// the more expensive one: the context carries the advice, the remediation T-SQL and the drill-down
+    /// that the prose does not.</para>
+    /// </summary>
+    [Fact]
+    public async Task AnAnalysisFinding_DeliversItsDiagnosisFactsOnce_OnEveryRedirectableChannel()
+    {
+        using var endpoint = new CapturingWebhookEndpoint();
+        using var smtp = new CapturingSmtpEndpoint();
+
+        var config = new DarlingConfig();
+        config.Webhooks.TeamsUrl = endpoint.Url;
+        config.Webhooks.SlackUrl = endpoint.Url;
+        config.Webhooks.GenericUrl = endpoint.Url;
+        config.Smtp.Host = "127.0.0.1";
+        config.Smtp.Port = smtp.Port;
+        config.Smtp.UseSsl = false;
+        config.Smtp.From = "monitor@example.invalid";
+        config.Smtp.To = "operator@example.invalid";
+
+        var settings = new DarlingAlertSettings(config);
+        var sender = new DarlingFindingAlertSender(
+            settings, new DiscardingHistoryStore(),
+            new WebhookAlertService(settings, DarlingAlertDeliverer.Branding,
+                NullLogger<WebhookAlertService>.Instance, new DiscardingHistoryStore()),
+            NullLogger.Instance);
+
+        var notifier = new AnalysisNotificationService(
+            sender, settings, f => f.ServerId.ToString(),
+            NullLogger<AnalysisNotificationService>.Instance);
+
+        await notifier.NotifyAsync(new[] { CpuFinding() });
+
+        var bodies = endpoint.Bodies;
+        Assert.Equal(3, bodies.Count);
+        Assert.All(bodies, body => Assert.Equal(1, CountOccurrences(body, FindingDatabaseMarker)));
+
+        /* Email, and both MIME parts: one occurrence per body, built by two different methods. */
+        var message = Assert.Single(smtp.Messages);
+        Assert.Equal(2, CountOccurrences(message, FindingDatabaseMarker));
+
+        /* The rendering that survived is the STRUCTURED one, which is the copy that carries the advice
+           and the remediation T-SQL. Its own labels, not the prose's, on every channel. */
+        Assert.All(bodies, body => Assert.Contains("Diagnosis", body, StringComparison.Ordinal));
+        Assert.All(bodies, body => Assert.DoesNotContain("Facts in chain", body, StringComparison.Ordinal));
+        Assert.Contains("Diagnosis", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Facts in chain", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The constraint the whole approach rests on. The obvious repair — make
+    /// <c>FindingMessageFormatter.DetailText</c> the flattening of its own context, as every
+    /// <c>AlertEngine</c> fire site does — would change <c>config_alert_log.detail_text</c> for every
+    /// analysis row, and that column is read by the MCP alert reader, the triage endpoint and the Viewer's
+    /// detail pane, and PARSED by <c>AlertMuteContext.PopulateFromDetailText</c> for the mute pre-fill.
+    /// So the suppression is at delivery only, and that this is true of the STORED value is asserted here
+    /// rather than intended: same dispatch, channels configured, the row read off
+    /// <see cref="IAlertHistoryStore"/>.
+    /// </summary>
+    [Fact]
+    public async Task AnAnalysisFinding_PersistsItsProseDetailTextInFull_WhileTheChannelsRenderTheContext()
+    {
+        using var endpoint = new CapturingWebhookEndpoint();
+
+        var config = new DarlingConfig();
+        config.Webhooks.GenericUrl = endpoint.Url;
+
+        var settings = new DarlingAlertSettings(config);
+        var history = new CapturingHistoryStore();
+        var sender = new DarlingFindingAlertSender(
+            settings, history,
+            new WebhookAlertService(settings, DarlingAlertDeliverer.Branding,
+                NullLogger<WebhookAlertService>.Instance, history),
+            NullLogger.Instance);
+
+        var notifier = new AnalysisNotificationService(
+            sender, settings, f => f.ServerId.ToString(),
+            NullLogger<AnalysisNotificationService>.Instance);
+
+        await notifier.NotifyAsync(new[] { CpuFinding() });
+
+        /* The channel saw the facts once. */
+        var body = Assert.Single(endpoint.Bodies);
+        Assert.Equal(1, CountOccurrences(body, FindingDatabaseMarker));
+
+        /* And the row kept the prose whole, byte for byte what it held before this change. */
+        var record = Assert.Single(history.Records);
+        Assert.Equal(PersistedFindingDetailText, record.DetailText);
+        Assert.NotNull(record.ContextJson);
+    }
+
+    /// <summary>
+    /// The other direction, without which the fix is indistinguishable from reverting #3297 for this seam:
+    /// "never deliver a finding's prose" satisfies both tests above. The suppression is the PRODUCER's
+    /// declaration, read off the record, so a producer whose prose carries something its context does not
+    /// still has it delivered — the #2109 AG alerts' <c>SET HADR RESUME</c> being the standing example,
+    /// and the one case <c>AlertDetailText.ProseForDelivery</c> was deliberately built not to drop.
+    ///
+    /// <para>Hand-built here, because no producer in the tree answers <c>true</c> today. That is the point
+    /// of putting the question on the record rather than hardcoding the answer in each sender: the next
+    /// producer gets to answer it, and this is what proves the answer is still read.</para>
+    /// </summary>
+    [Fact]
+    public async Task AFindingWhoseProseIsNotARestatement_IsStillDelivered()
+    {
+        const string Remedy = "Fix the underlying cause, then resume it with ALTER DATABASE [Sales] SET HADR RESUME.";
+
+        using var endpoint = new CapturingWebhookEndpoint();
+
+        var config = new DarlingConfig();
+        config.Webhooks.GenericUrl = endpoint.Url;
+
+        var settings = new DarlingAlertSettings(config);
+        var history = new CapturingHistoryStore();
+        var sender = new DarlingFindingAlertSender(
+            settings, history,
+            new WebhookAlertService(settings, DarlingAlertDeliverer.Branding,
+                NullLogger<WebhookAlertService>.Instance, history),
+            NullLogger.Instance);
+
+        var independent = new FindingAlert(
+            "Analysis: ag_health [indep000]", "PROD01", "AG_DATABASE_SUSPENDED", "1.5", "1",
+            new AlertContext(), 1.8, 1.5, Remedy, DeliverDetailText: true);
+
+        await sender.SendFindingAlertAsync(independent);
+        Assert.Contains("SET HADR RESUME", Assert.Single(endpoint.Bodies), StringComparison.Ordinal);
+
+        /* The same alert declared a restatement: nothing on the wire, everything on the row. */
+        await sender.SendFindingAlertAsync(independent with
+        {
+            MetricName = "Analysis: ag_health [suppress]",
+            DeliverDetailText = false
+        });
+
+        Assert.Equal(2, endpoint.Bodies.Count);
+        Assert.DoesNotContain("SET HADR RESUME", endpoint.Bodies[1], StringComparison.Ordinal);
+        Assert.Equal(2, history.Records.Count);
+        Assert.All(history.Records, r => Assert.Equal(Remedy, r.DetailText));
+    }
+
     private static int CountOccurrences(string haystack, string needle)
     {
         int count = 0, index = 0;
@@ -1027,6 +1233,31 @@ public sealed class AlertDeliveryChannelTests
 
             _stop.Dispose();
         }
+    }
+
+    /// <summary>
+    /// <see cref="DiscardingHistoryStore"/> with the records kept, so a test can read what the row would
+    /// have held. Safe to read after the send has been awaited: <c>SendFindingAlertAsync</c> awaits its
+    /// own <c>RecordAlertAsync</c>.
+    /// </summary>
+    private sealed class CapturingHistoryStore : IAlertHistoryStore
+    {
+        public List<AlertHistoryRecord> Records { get; } = new();
+
+        public Task RecordAlertAsync(AlertHistoryRecord record)
+        {
+            Records.Add(record);
+            return Task.CompletedTask;
+        }
+
+        public Task<DateTime?> GetLastEmailSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
+            Task.FromResult<DateTime?>(null);
+
+        public Task<DateTime?> GetLastWebhookSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
+            Task.FromResult<DateTime?>(null);
+
+        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
+            Task.FromResult<DateTime?>(null);
     }
 
     private sealed class DiscardingHistoryStore : IAlertHistoryStore
