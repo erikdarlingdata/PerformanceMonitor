@@ -1732,26 +1732,38 @@ public sealed class AlertEngine
                 bool isMuted = _isAlertMuted(muteCtx);
                 _lastDatabaseStateAlert[cooldownKey] = now; /* stamped even when muted, like the others */
 
-                var detailText = pending
-                    ? $"  Database: {dbName}\n  Current: {stateText}\n  First observed in a critical state — no baseline established yet."
-                    : $"  Database: {dbName}\n  Expected: {expectedText}\n  Current: {stateText}";
                 var shortMessage = pending
                     ? $"{dbName} first observed {stateText} (no baseline yet)"
                     : $"{dbName} changed to {stateText} (expected {expectedText})";
 
                 /* #2109: the same fields the prose carries, as discrete facts — this alert fired with
-                   Context: null, which left the database name reachable only by parsing the title. */
+                   Context: null, which left the database name reachable only by parsing the title.
+                   #3297: the structured fields are now the ONLY carrier, and the detail text is their
+                   flattening, as at every other engine fire site. The prose used to restate them under
+                   different labels, which since #3297 delivers every channel the same facts twice — the
+                   fields are the canonical copy per #2109, so the restatement is what goes. The one thing
+                   the prose said that the fields did not (no baseline yet) is a field now. */
                 var stateContext = new AlertContext();
                 stateContext.Details.Add(new AlertDetailItem
                 {
                     Heading = dbName,
-                    Fields = new()
-                    {
-                        ("Database", dbName),
-                        ("Current State", stateText),
-                        ("Expected State", expectedText)
-                    }
+                    Fields = pending
+                        ? new()
+                        {
+                            ("Database", dbName),
+                            ("Current State", stateText),
+                            ("Expected State", expectedText),
+                            ("Baseline", "none — first observed in a critical state")
+                        }
+                        : new()
+                        {
+                            ("Database", dbName),
+                            ("Current State", stateText),
+                            ("Expected State", expectedText)
+                        }
                 });
+
+                var detailText = AlertContextBuilders.ContextToDetailText(stateContext);
 
                 await FireAsync(new AlertOutcome(
                     key, serverName, DatabaseStateTokens.MetricName,
@@ -1916,16 +1928,12 @@ public sealed class AlertEngine
                 bool isMuted = _isAlertMuted(muteCtx);
                 _lastForcePlanAlert[cooldownKey] = now; /* stamped even when muted, like the others */
 
-                var detailText =
-                    $"  Database: {failure.DatabaseName}\n" +
-                    $"  Query / Plan: {failure.QueryId} / {failure.PlanId}\n" +
-                    $"  Forcing: {forcingText}\n" +
-                    $"  Reason: {reasonText}\n" +
-                    $"  New failures since last collection: {failure.FailureDelta} (total {failure.TotalFailures})\n" +
-                    "  The query is running on the optimizer's plan, not the forced one.";
-
                 /* #2109 discipline: the same facts the prose carries, as discrete fields, so a consumer
-                   never has to parse the title to learn which plan this is about. */
+                   never has to parse the title to learn which plan this is about.
+                   #3297: and the fields are now the only carrier — the detail text is their flattening, as
+                   at every other engine fire site, rather than a hand-authored restatement that would
+                   deliver the same facts twice on every channel. The consequence the prose stated and the
+                   fields did not is a field now. */
                 var context = new AlertContext();
                 context.Details.Add(new AlertDetailItem
                 {
@@ -1938,9 +1946,12 @@ public sealed class AlertEngine
                         ("Forcing Type", forcingText),
                         ("Failure Reason", reasonText),
                         ("New Failures", failure.FailureDelta.ToString(CultureInfo.InvariantCulture)),
-                        ("Total Failures", failure.TotalFailures.ToString(CultureInfo.InvariantCulture))
+                        ("Total Failures", failure.TotalFailures.ToString(CultureInfo.InvariantCulture)),
+                        ("Effect", "the query is running on the optimizer's plan, not the forced one")
                     }
                 });
+
+                var detailText = AlertContextBuilders.ContextToDetailText(context);
 
                 await FireAsync(new AlertOutcome(
                     key, serverName, ForcePlanTokens.MetricName,

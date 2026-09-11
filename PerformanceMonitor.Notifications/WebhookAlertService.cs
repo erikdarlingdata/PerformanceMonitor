@@ -926,10 +926,25 @@ public class WebhookAlertService
         return s_genericPlaceholders.Replace(template, m => values[m.Groups[1].Value]);
     }
 
-    /* context_json before context: alternation is ordered, and while the closing \}\} would force a
-       backtrack to the right answer anyway, longest-first means correctness never leans on it. */
+    /// <summary>
+    /// Every token <see cref="BuildGenericPayload"/> substitutes, in the order the matcher tries them.
+    /// <para>context_json before context: alternation is ordered, and while the closing <c>}}</c> would
+    /// force a backtrack to the right answer anyway, longest-first means correctness never leans on it.</para>
+    /// <para>A LIST, and the matcher is built from it, because both apps' Settings windows print the token
+    /// set as help text and an operator cannot use a token they never learn exists. That help text has now
+    /// drifted twice — #2710 added <c>triage_url</c> to Darling's list and not Lite's, and #3297 added
+    /// <c>detail</c> to neither — so <c>Lite.Tests.GenericWebhookTests</c> checks both windows against this
+    /// list rather than against a second copy of it that would be free to drift the same way.</para>
+    /// </summary>
+    internal static readonly string[] GenericBodyTokens =
+    {
+        "metric", "server", "value", "threshold", "severity",
+        "context_json", "incidents_json", "dedup_key", "resource_name", "database", "triage_url",
+        "context", "timestamp", "detail"
+    };
+
     private static readonly System.Text.RegularExpressions.Regex s_genericPlaceholders =
-        new(@"\{\{(metric|server|value|threshold|severity|context_json|incidents_json|dedup_key|resource_name|database|triage_url|context|timestamp|detail)\}\}",
+        new(@"\{\{(" + string.Join("|", GenericBodyTokens) + @")\}\}",
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>

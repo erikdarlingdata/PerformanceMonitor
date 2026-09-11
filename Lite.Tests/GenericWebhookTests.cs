@@ -1,5 +1,8 @@
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Net.Http;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Notifications;
@@ -500,6 +503,43 @@ public class GenericWebhookTests
         var context = JsonDocument.Parse(payload).RootElement.GetProperty("context").GetString()!;
         Assert.StartsWith(Prose, context, System.StringComparison.Ordinal);
         Assert.DoesNotContain("Sent by", context, System.StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <b>Every substitutable token is offered to the operator in BOTH apps' Settings help text.</b>
+    /// A token nobody is told about is a token nobody can map into a template, so the help text is part of
+    /// the feature rather than decoration — and it has drifted twice: #2710 added <c>{{triage_url}}</c> to
+    /// Darling's list and not Lite's, and #3297 added <c>{{detail}}</c> to neither. Both were found by
+    /// reading, which is exactly what this replaces.
+    /// <para>Derived from <c>WebhookAlertService.GenericBodyTokens</c>, the same list the matcher is built
+    /// from, so adding a token to the engine and not to the windows fails here. A second hardcoded copy of
+    /// the token names in this test would be free to go stale in the same way the help text did.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("Lite/Windows/SettingsWindow.xaml")]
+    [InlineData("Darling/PerformanceMonitor.Darling.Viewer/SettingsWindow.xaml")]
+    public void EverySubstitutableToken_IsListedInTheSettingsHelpText(string relativePath)
+    {
+        var xaml = File.ReadAllText(Path.Combine(RepoRoot(), relativePath));
+
+        var missing = WebhookAlertService.GenericBodyTokens
+            .Where(token => !xaml.Contains("{{" + token + "}}", System.StringComparison.Ordinal))
+            .ToList();
+
+        Assert.Empty(missing);
+    }
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        /* Locate the repo from this file, the AlertFiringLogTests idiom — no build-output copying. */
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null && !Directory.Exists(Path.Combine(dir, "PerformanceMonitor.Notifications")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
     }
 
     /// <summary>
