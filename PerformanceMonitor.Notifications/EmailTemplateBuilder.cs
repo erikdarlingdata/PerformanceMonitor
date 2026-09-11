@@ -22,8 +22,11 @@ internal static class EmailTemplateBuilder
     private const string FontStack = "-apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
 
     /* An alert can now open the Details section on its prose alone, with no structured items behind it,
-       so the plain-text builder's item loop needs something to iterate when there is no context at all. */
-    private static readonly System.Collections.Generic.List<AlertDetailItem> EmptyDetails = new();
+       so the plain-text builder's item loop needs something to iterate when there is no context at all.
+       An array rather than an empty List: a process-wide static that anything could Add to is a hazard
+       for the sake of nothing, since this is only ever read. */
+    private static readonly System.Collections.Generic.IReadOnlyList<AlertDetailItem> EmptyDetails =
+        System.Array.Empty<AlertDetailItem>();
 
     /// <summary>
     /// Builds both HTML and plain-text bodies for an alert email.
