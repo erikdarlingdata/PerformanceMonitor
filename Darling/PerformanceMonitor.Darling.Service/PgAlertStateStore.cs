@@ -381,7 +381,7 @@ ON CONFLICT (server_id, metric_name, dedup_key) DO UPDATE SET
     }
 
     /// <summary>
-    /// #3282: loads one subject's built-in persistence-gate record from the V117
+    /// #3282: loads one subject's built-in persistence-gate record from the V118
     /// <c>config.alert_persistence_state</c> table.
     ///
     /// <para>Returns null on failure, which the engine reads as "no memory" and arms the gate from zero —
