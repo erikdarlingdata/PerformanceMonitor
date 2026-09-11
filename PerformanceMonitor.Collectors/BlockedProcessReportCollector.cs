@@ -27,6 +27,11 @@ namespace PerformanceMonitor.Collectors;
 /// reallocated page reported once through the payload probe-failure channel. Session lifecycle — including the
 /// blocked-process-threshold sp_configure bootstrap — stays host-side; the session name lives
 /// here so the reader and the lifecycle can never disagree on it.
+///
+/// <para>#3307: either side's statement can arrive as <c>Proc [Database Id = N Object Id = M]</c> — SQL
+/// Server has no batch text to write for an RPC — and the read notes the ids so
+/// <see cref="BuildSupplementalQuery"/> can resolve them to <c>schema.object</c> in one lookup per cycle,
+/// through the same <see cref="ProcPlaceholder"/> helper <c>deadlocks</c> uses.</para>
 /// </summary>
 public sealed class BlockedProcessReportCollector : CollectorDefinitionBase<BlockedProcessReportCollector.Row>
 {
@@ -874,6 +879,12 @@ OUTER APPLY
                advance that database's watermark, re-inserting every cycle. Server-scoped
                platforms keep the parsed currentdbname (CurrentDatabaseName is null there). */
             parsed.DatabaseName = context.CurrentDatabaseName ?? parsed.DatabaseName;
+            /* #3307: either side's statement can have come from a procedure invoked as an RPC, which
+               SQL Server renders as "Proc [Database Id = N Object Id = M]" because there is no batch
+               text. Note both pairs here and the supplemental below resolves every one the cycle
+               produced in a single lookup. */
+            ProcPlaceholder.Register(parsed.BlockedSqlText, context.ProcPlaceholderIds);
+            ProcPlaceholder.Register(parsed.BlockingSqlText, context.ProcPlaceholderIds);
             rows.Add(parsed);
         }
 
@@ -886,6 +897,36 @@ OUTER APPLY
         context.Measure(EventsStoredMeasurement, rows.Count);
 
         return rows;
+    }
+
+    /// <summary>
+    /// One batched <c>OBJECT_SCHEMA_NAME</c>/<c>OBJECT_NAME</c> lookup for every
+    /// <c>Proc [Database Id = N Object Id = M]</c> this cycle's reports carried on either side (#3307), or
+    /// null when none did. Shares <see cref="ProcPlaceholder"/> with <c>deadlocks</c>: both surfaces shred
+    /// <c>&lt;inputbuf&gt;</c> client-side, so one helper genuinely serves both.
+    /// </summary>
+    public override CollectorQuery? BuildSupplementalQuery(CollectorContext context)
+        => ProcPlaceholder.BuildResolutionQuery(context.ProcPlaceholderIds);
+
+    /// <summary>
+    /// Rewrites the placeholder to <c>schema.object</c> on both sides of every report the lookup answered
+    /// for, and leaves the rest alone. A pair the target could not resolve is absent from the map, so its
+    /// raw placeholder survives rather than the field going blank.
+    /// </summary>
+    public override async ValueTask ApplySupplementalAsync(List<Row> rows, DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
+    {
+        var resolved = await ProcPlaceholder.ReadResolutionsAsync(reader, cancellationToken);
+
+        if (resolved.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var row in rows)
+        {
+            row.BlockedSqlText = ProcPlaceholder.Resolve(row.BlockedSqlText, resolved);
+            row.BlockingSqlText = ProcPlaceholder.Resolve(row.BlockingSqlText, resolved);
+        }
     }
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
