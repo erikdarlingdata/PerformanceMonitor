@@ -59,12 +59,16 @@ public static class DarlingPgCpuUtilizationReader
     /// <param name="ServerlessCapacityAcu">ACU allocated at this sample, so the alert can say "4 of 12"
     /// rather than only a percentage.</param>
     /// <param name="MaxConfiguredAcu">The configured ACU ceiling at this sample.</param>
+    /// <remarks>The three capacity members carry no DEFAULT, so every construction site has to state
+    /// them. A defaulted null would let a future reader or test double produce a reading whose capacity is
+    /// absent without saying so — and absent capacity is exactly the state the alert treats as
+    /// "not measured", so it must never be reachable by omission.</remarks>
     public sealed record CpuReading(
         double CpuPercent,
         DateTime SampleTimeUtc,
-        double? AcuUtilizationPercent = null,
-        double? ServerlessCapacityAcu = null,
-        double? MaxConfiguredAcu = null);
+        double? AcuUtilizationPercent,
+        double? ServerlessCapacityAcu,
+        double? MaxConfiguredAcu);
 
     public static async Task<CpuReading?> GetLatestAsync(
         NpgsqlDataSource postgres, int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
@@ -114,9 +118,9 @@ public static class DarlingPgCpuUtilizationReader
     public sealed record CpuSample(
         DateTime SampleTimeUtc,
         double CpuPercent,
-        double? AcuUtilizationPercent = null,
-        double? ServerlessCapacityAcu = null,
-        double? MaxConfiguredAcu = null);
+        double? AcuUtilizationPercent,
+        double? ServerlessCapacityAcu,
+        double? MaxConfiguredAcu);
 
     /// <summary>The served-read side (#2629/#2719's own fix) — every reading in a window, for
     /// <c>get_pg_cpu_utilization</c>. Windowed on <c>collection_time</c> (the ingestor's own cycle time)
