@@ -28,6 +28,7 @@ import {
   errorStrip,
   readErrorStrip,
   emptyStrip,
+  noticeStrip,
   readTool,
   apiGet,
   buildQuery,
@@ -73,7 +74,22 @@ async function loadPanel(desc, body) {
     return;
   }
   try {
-    mount(body, render(res.data, desc));
+    /* A SERVER-SUPPLIED caveat, above the rendered body (#3278). Opt-in: a descriptor without `noteKey` is
+       untouched, which is every panel but the one that needs it.
+
+       The empty envelope already carries the server's sentence through emptyStrip above, so before this the
+       populated path was the ONLY one that dropped it — and that is the path the caveat matters on. A panel
+       whose rows are a capped page of a much larger population looks like it worked; nothing in the rows
+       shows the difference, and a client-authored subtitle cannot carry the figures because it is written
+       before the read. get_pg_index_bloat is the case: its answerless rows sort FIRST by design, so a
+       capped page is 100% of them whenever they outnumber the cap.
+
+       Read through getPath and rendered as TEXT by noticeStrip, so a note is inert markup like every other
+       server value on this page (R4). */
+    const note = desc.noteKey ? getPath(res.data, desc.noteKey) : null;
+    const rendered = render(res.data, desc);
+
+    mount(body, typeof note === "string" && note.trim() ? [noticeStrip(note), rendered] : rendered);
   } catch (e) {
     mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
   }

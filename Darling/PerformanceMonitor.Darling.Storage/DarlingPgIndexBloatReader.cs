@@ -9,6 +9,7 @@
 using System;
 using PerformanceMonitor.Collectors;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -46,6 +47,14 @@ namespace PerformanceMonitor.Darling.Storage;
 /// NULL and reports 0 reclaimable — the index is measured, and what it holds is nothing. Filtering the row
 /// out instead would serve the read successfully while hiding a real index, which is the failure mode that
 /// looks most like a fix.</para>
+///
+/// <para><b>The row list cannot carry its own denominator, so a second read supplies it (#3278).</b> The
+/// unmeasured-first sort above means any <c>LIMIT</c> smaller than the suppressed population returns 100%
+/// suppressed rows — structurally, not by chance — and raising the limit does not help while the suppressed
+/// population is still larger. <see cref="GetCoverageVerdictAsync"/> answers what share of the server has an
+/// answer with its own population-level query, so no page of this read can be mistaken for a coverage claim.
+/// It reports BYTES beside every count, because on the live fleet the row ranking and the byte ranking of the
+/// suppression buckets disagree.</para>
 ///
 /// <para>Shared by the WPF tab and the MCP surface so there is one copy of this SQL, per #2530.</para>
 /// </summary>
@@ -277,6 +286,259 @@ public static class DarlingPgIndexBloatReader
                  index_bytes DESC
         LIMIT $4
         """;
+
+    /// <summary>
+    /// One group of the coverage census: whether the collector produced a run at all, and — for one
+    /// combination of stored reason and provenance — how many indexes and how many index bytes it accounts
+    /// for.
+    /// </summary>
+    /// <param name="EvidenceCollectorRan">
+    /// Whether <c>pg_index_bloat</c> recorded a SUCCEEDING run for this server in the evidence window. A run
+    /// and not a row count, and that distinction is the whole reason this field exists: a run that stored no
+    /// rows is the measurement establishing that the server has no btree index, so collapsing the two makes
+    /// "measured, and there is nothing" indistinguishable from "the collector has not run here".
+    ///
+    /// <para>Repeated on every group because the probe is a single-row relation the groups hang off, which
+    /// is what lets ONE statement carry both a scalar and a variable-length breakdown — and lets a server
+    /// with no rows at all still report whether its collector ran.</para>
+    /// </param>
+    /// <param name="SkippedReason">The collector's stored prose, or null for a trusted index.
+    /// <c>skipped_reason IS NULL</c> is the ONLY trust predicate on this collector: <c>est_tuple_bytes</c>
+    /// is populated on 100% of suppressed rows and <c>est_bloat_pct</c> on 0% of them, so a census keyed on
+    /// either <c>est_</c> column would report complete coverage over a population with none.</param>
+    /// <param name="IsEstimate">This group's PROVENANCE, not its outcome — whether the row came from the
+    /// statistics model or is an older <c>pgstatindex</c> measurement still inside retention. Read only
+    /// alongside <paramref name="SkippedReason"/>, never instead of it.</param>
+    public readonly record struct PgIndexBloatCoverageGroup(
+        bool EvidenceCollectorRan,
+        string? SkippedReason,
+        bool IsEstimate,
+        long IndexCount,
+        long IndexBytes);
+
+    /// <summary>
+    /// <see cref="EnumeratedCollectorDriver.FreshnessSuccessStatuses"/> as a SQL <c>IN</c> list. Built from
+    /// the shared list rather than retyped so the bar for "this collector produced valid evidence" is the
+    /// one the freshness reads and the self-alert evaluator already apply, and so a status added there
+    /// reaches this probe without anybody remembering to come here.
+    ///
+    /// <para>Literal-safe by construction: every element is a compile-time constant in this repo's own
+    /// source, never operator input.</para>
+    /// </summary>
+    private static readonly string EvidenceStatusList = string.Join(
+        ", ",
+        EnumeratedCollectorDriver.FreshnessSuccessStatuses.Select(status => "'" + status + "'"));
+
+    /* THE LATEST ROW PER INDEX, with the SAME tie-break the row read uses - (skipped_reason IS NULL) DESC
+       before collection_time DESC. Not a coincidence and not copied for tidiness: this census decides
+       whether an index counts as answered, and the row read decides what it displays for that index. If the
+       two disagreed about which of an index's rows is current, the census would publish a trusted count the
+       grid beside it contradicts, index by index, with nothing that fails.
+
+       DISTINCT ON is what makes it a POPULATION rather than a history. pg_index_bloat writes every btree on
+       every cycle, so a plain aggregate over a 48-hour window counts each index once per run and would
+       report double the server's index count and double its footprint - a denominator wrong in the
+       direction that makes coverage look better than it is.
+
+       database_name leads the key (#2599): this collector runs once per database and an index name is only
+       unique within one, so without it a shared schema's copies collapse into whichever collected last.
+
+       THE PROBE IS A SINGLE-ROW RELATION THE GROUPS HANG OFF, via LEFT JOIN ... ON true. That is the whole
+       reason one statement can carry a scalar and a variable-length breakdown: a server whose collector ran
+       and stored NOTHING still returns one row carrying the probe, where an inner join would drop exactly
+       the row that separates "no indexes" from "no evidence". EXISTS rather than count(*) because only the
+       zero test is read.
+
+       AND IT COUNTS ONLY RUNS THAT SUCCEEDED, which is not a detail here. Measured on a live Aurora target
+       on 2026-09-10 this collector recorded 7 runs in seven days and 3 of them ERRORED - one a 300-second
+       client-side command deadline that stored nothing at all. An unfiltered probe on a window landing on
+       such a cycle would say "it ran" over zero rows, and the classifier would answer NoCandidates,
+       "nothing to fix", on a server whose collector is timing out. That is this issue's own false innocence
+       relocated into the collector's health. The status set comes from
+       EnumeratedCollectorDriver.FreshnessSuccessStatuses rather than being retyped.
+
+       GROUPING ON THE REASON PROSE, then keying it in C#. The reason is a 250-character paragraph repeated
+       on every row - 2,954 identical copies in the fleet's largest bucket - so grouping first reduces it to
+       at most a dozen rows, and the classifier maps prose to a short stable key with an Unrecognized arm for
+       text this build does not know. Keying in SQL instead would put the marker list in two places.
+
+       $1 server_id, $2 window start, $3 window end. */
+    public static readonly string CoverageEvidenceSql = @"
+WITH latest AS (
+    SELECT DISTINCT ON (database_name, schema_name, table_name, index_name)
+           index_bytes, skipped_reason, est_tuple_bytes
+    FROM pg_index_bloat
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    ORDER BY database_name, schema_name, table_name, index_name,
+             (skipped_reason IS NULL) DESC, collection_time DESC
+),
+probe AS (
+    SELECT EXISTS (
+        SELECT 1
+        FROM collection_log
+        WHERE server_id = $1
+        AND   collector_name = 'pg_index_bloat'
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   status IN (" + EvidenceStatusList + @")
+    ) AS evidence_collector_ran
+),
+grouped AS (
+    SELECT latest.skipped_reason                              AS skipped_reason,
+           (latest.est_tuple_bytes IS NOT NULL)               AS is_estimate,
+           count(*)::bigint                                   AS index_count,
+           COALESCE(sum(latest.index_bytes), 0)::bigint       AS index_bytes
+    FROM latest
+    GROUP BY latest.skipped_reason, (latest.est_tuple_bytes IS NOT NULL)
+)
+SELECT probe.evidence_collector_ran,
+       grouped.skipped_reason,
+       grouped.is_estimate,
+       grouped.index_count,
+       grouped.index_bytes
+FROM probe
+LEFT JOIN grouped ON true";
+
+    /// <summary>
+    /// The coverage verdict for a <c>get_pg_index_bloat</c> read — what share of this server's btree
+    /// footprint has an answer, by count AND by bytes, and the sentence saying so (#3278).
+    ///
+    /// <para>A failed evidence read answers <see cref="PgIndexBloatCoverageArm.Undetermined"/> with its own
+    /// wording rather than throwing, the same rule <c>DarlingRuntimePrecondition</c> follows: this runs to
+    /// EXPLAIN a result the caller already has, and turning that into a read error would replace an
+    /// under-described answer with no answer.</para>
+    ///
+    /// <para><b>No window START, deliberately, and the signature says so by not having one.</b> The evidence
+    /// span is <see cref="EvidenceStart"/> to <paramref name="endUtc"/> whatever window the caller read its
+    /// rows over — see that method for why. An accepted-but-ignored <c>startUtc</c> is worse than an absent
+    /// one: the caller passes a window, reasonably believes it is honoured, and neither the compiler nor the
+    /// answer tells them otherwise. Callers wanting the raw groups over a span of their own have
+    /// <see cref="GetCoverageEvidenceAsync"/>, which takes both ends BECAUSE it uses both.</para>
+    /// </summary>
+    /// <param name="endUtc">The instant the caller's read ENDS at, which the evidence window is anchored on
+    /// so an <c>as_of</c> read is explained by contemporary evidence rather than by today's.</param>
+    /// <param name="returnedRows">How many rows the caller's read returned. Reported as its own labelled
+    /// figure and never divided into a population one.</param>
+    public static async Task<PgIndexBloatCoverageVerdict> GetCoverageVerdictAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime endUtc, int returnedRows,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        try
+        {
+            var groups = await GetCoverageEvidenceAsync(
+                postgres, serverId, EvidenceStart(endUtc), endUtc, cancellationToken);
+
+            var estimated = default(PgIndexBloatTally);
+            var exactlyMeasured = default(PgIndexBloatTally);
+            var suppressed = new List<PgIndexBloatSuppressionBucket>();
+
+            foreach (var group in groups)
+            {
+                var tally = new PgIndexBloatTally(group.IndexCount, group.IndexBytes);
+
+                /* skipped_reason, and nothing else. A group's IsEstimate says where its figure CAME FROM
+                   and never whether there is one - est_tuple_bytes is populated on every suppressed row in
+                   every bucket, so splitting on provenance first would file 6,680 answerless indexes as
+                   estimates. */
+                if (group.SkippedReason is null)
+                {
+                    if (group.IsEstimate)
+                    {
+                        estimated += tally;
+                    }
+                    else
+                    {
+                        exactlyMeasured += tally;
+                    }
+
+                    continue;
+                }
+
+                suppressed.Add(new PgIndexBloatSuppressionBucket(
+                    PgIndexBloatCoverage.Bucket(group.SkippedReason),
+                    group.IndexCount,
+                    group.IndexBytes,
+                    group.SkippedReason));
+            }
+
+            return PgIndexBloatCoverage.Classify(
+                groups.Count > 0 && groups[0].EvidenceCollectorRan,
+                estimated,
+                exactlyMeasured,
+                suppressed,
+                returnedRows);
+        }
+        catch (Exception)
+        {
+            return PgIndexBloatCoverage.EvidenceUnreadable(returnedRows);
+        }
+    }
+
+    /// <summary>
+    /// The evidence lookback: a FIXED span ending where the caller's read ends, independent of how wide a
+    /// window the caller asked its rows over.
+    ///
+    /// <para><b>The read's own window is the wrong window for this, in both directions.</b> A one-hour
+    /// panel window straddles none of a daily collector's runs, so it would report "no evidence" for a
+    /// target measured every day for a week. And a wide one is no better than wasteful: the MCP tool
+    /// defaults to 168 hours, and this census runs on every call whether the result is empty or not, over a
+    /// hypertable where a wider span means more chunks for a figure that describes the present.</para>
+    ///
+    /// <para><b>Because it is not a question about history.</b> What share of this server's indexes are
+    /// modellable is a CURRENT state, and <c>CollectorRuntimePrecondition</c> settled this shape already: it
+    /// consults the LATEST run rather than a window, on the reasoning that a precondition somebody has since
+    /// satisfied must not keep being reported. Averaging a week of candidate counts would answer a question
+    /// nobody asked and cost more to do it.</para>
+    ///
+    /// <para>Anchored on <paramref name="endUtc"/>, so an <c>as_of</c> read gets the evidence contemporary
+    /// with the data it is explaining rather than today's.</para>
+    ///
+    /// <para>The span itself lives on <see cref="PgIndexBloatCoverage.EvidenceHours"/>, not here: it appears
+    /// in the census an operator reads, so the label and the query have to be the same figure and a copy in
+    /// this file is how they stop being. That constant also carries WHY it is two of the collector's
+    /// cadences rather than one.</para>
+    /// </summary>
+    internal static DateTime EvidenceStart(DateTime endUtc) =>
+        endUtc.AddHours(-PgIndexBloatCoverage.EvidenceHours);
+
+    /// <summary>The raw census groups, for callers that want the figures rather than the sentence.</summary>
+    public static async Task<List<PgIndexBloatCoverageGroup>> GetCoverageEvidenceAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        var groups = new List<PgIndexBloatCoverageGroup>();
+        await using var command = postgres.CreateCommand(CoverageEvidenceSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        /* SpecifyKind(Unspecified) at the bind, for the reason the row read below documents: Kind=Utc infers
+           timestamptz and the comparison against these naive columns then resolves at the store session's
+           TimeZone, which east of UTC slides the window off the data. An evidence read that silently
+           returned nothing would answer Undetermined on a server that has the evidence. */
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            groups.Add(new PgIndexBloatCoverageGroup(
+                EvidenceCollectorRan: !reader.IsDBNull(0) && reader.GetBoolean(0),
+                SkippedReason: reader.IsDBNull(1) ? null : reader.GetString(1),
+                /* NULL on the probe-only row a server with no stored rows produces, which is neither
+                   provenance - so it must not default to the estimate arm and be counted as an answer. The
+                   count and bytes are null on that row too, so it contributes nothing either way. */
+                IsEstimate: !reader.IsDBNull(2) && reader.GetBoolean(2),
+                IndexCount: reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                IndexBytes: reader.IsDBNull(4) ? 0 : reader.GetInt64(4)));
+        }
+
+        return groups;
+    }
 
     public static async Task<List<PgIndexBloatRow>> GetPgIndexBloatAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,

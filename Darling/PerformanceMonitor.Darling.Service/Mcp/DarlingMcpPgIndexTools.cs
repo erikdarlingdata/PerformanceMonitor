@@ -46,7 +46,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgIndexTools
 {
-    [McpServerTool(Name = "get_pg_index_bloat"), Description("Gets ESTIMATED PostgreSQL btree index bloat, computed from catalog statistics with NO page reads: how many bytes a REINDEX could plausibly reclaim, the modelled tuple width and leaf-page count it rests on, and the parent row count and fillfactor those came from. Ranked by reclaimable BYTES and never by percentage - a 64 kB index at 20% tops a percentage-ranked list and is worth 50 kB next to a 10 GB index at 45% worth 5.37 GB. Read measurement_kind: 'estimated' rows come from the statistics model, 'measured' rows are older pgstatindex measurements still inside the retention window. Accuracy against pgstatindex ground truth on a live 2,500-index target: median absolute error 2.79 percentage points, p90 6.63. A row with a skipped_reason has NO answer rather than a healthy one - never read a missing estimate as a clean bill of health - and the reason says whether it is remediable: a never-analyzed parent needs an ANALYZE, invisible column widths need the pg_read_all_data grant, while a PARTIAL index and a DEDUPLICATED one (low-cardinality, non-unique) are structurally unmodellable at any grant or statistics freshness and need the exact function instead. Every row carries exact_measurement_command, which is the pgstatindex call for that index: it walks every page, so run it deliberately on the one index you are about to act on rather than on a schedule - the same relationship SQL Server has between LIMITED and DETAILED index physical stats. This is the COMPLETE btree census with no size floor, so it returns MORE rows than get_pg_index_usage, which floors at 64 kB - 2,500 against 1,517 on one measured target. Neither census is missing objects.")]
+    [McpServerTool(Name = "get_pg_index_bloat"), Description("Gets ESTIMATED PostgreSQL btree index bloat, computed from catalog statistics with NO page reads: how many bytes a REINDEX could plausibly reclaim, the modelled tuple width and leaf-page count it rests on, and the parent row count and fillfactor those came from. Ranked by reclaimable BYTES and never by percentage - a 64 kB index at 20% tops a percentage-ranked list and is worth 50 kB next to a 10 GB index at 45% worth 5.37 GB. Read measurement_kind: 'estimated' rows come from the statistics model, 'measured' rows are older pgstatindex measurements still inside the retention window. Accuracy against pgstatindex ground truth on a live 2,500-index target: median absolute error 2.79 percentage points, p90 6.63. A row with a skipped_reason has NO answer rather than a healthy one - never read a missing estimate as a clean bill of health - and the reason says whether it is remediable: a never-analyzed parent needs an ANALYZE, invisible column widths need the pg_read_all_data grant, while a PARTIAL index and a DEDUPLICATED one (low-cardinality, non-unique) are structurally unmodellable at any grant or statistics freshness and need the exact function instead. Every row carries exact_measurement_command, which is the pgstatindex call for that index: it walks every page, so run it deliberately on the one index you are about to act on rather than on a schedule - the same relationship SQL Server has between LIMITED and DETAILED index physical stats. This is the COMPLETE btree census with no size floor, so it returns MORE rows than get_pg_index_usage, which floors at 64 kB - 2,500 against 1,517 on one measured target. Neither census is missing objects. ALWAYS read the coverage field before concluding anything about how much of a server this covers, and never infer that from the rows: answerless rows sort FIRST by design, so any limit smaller than the answerless population returns 100% skipped rows structurally rather than by chance, and raising the limit does not fix it while that population is still larger. coverage comes from a separate population-level query that no limit touches - candidate indexes, trusted versus suppressed, and each suppression reason - and every count carries its BYTES because the two rankings disagree: on a live fleet the reason that is second largest by row count is the SMALLEST by footprint at 0.0004% of it, while the fourth largest by rows is second by bytes at 1.4 TB. Judge the gap by bytes. And skipped_reason IS NULL is the ONLY trust predicate here: est_tuple_bytes is populated on 100% of the rows that have no answer and est_bloat_pct on 0% of them, so filtering on est_tuple_bytes returns every row and reads as complete coverage.")]
     public static async Task<string> GetPgIndexBloat(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -67,18 +67,41 @@ public sealed class DarlingMcpPgIndexTools
             var rows = await DarlingPgIndexBloatReader.GetPgIndexBloatAsync(
                 postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit);
 
+            /* Asked on BOTH paths, not just the empty one (#3278). A returned page that is 100% suppressed
+               rows is the same defect as an unexplained empty and strictly harder to see: the read looks
+               like it worked, and the unmeasured-first sort GUARANTEES that shape whenever the suppressed
+               population exceeds the limit. */
+            PgIndexBloatCoverageVerdict coverage;
+
             if (rows.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_index_bloat")
-                    ?? await DarlingRuntimePrecondition.StatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_index_bloat")
-                    ?? McpHelpers.Status(
-                        "empty",
-                        $"No index bloat measurements for {resolved.ServerName} in the last {hours_back} "
-                        + "hour(s). This collector runs DAILY, so a window shorter than a day can be empty "
-                        + "on a perfectly healthy server — widen it before concluding anything.");
+                /* CAPABILITY, then PRECONDITION, then this read's own miss - the order
+                   CollectorRuntimePrecondition documents, asked in it rather than composed with ?? over
+                   three already-computed values. Computing the LAST of three ranked answers FIRST is how
+                   somebody later reorders the chain and does not notice they have changed which one wins. */
+                var capability = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_index_bloat");
+
+                if (capability != null) return capability;
+
+                var precondition = await DarlingRuntimePrecondition.StatusAsync(
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_index_bloat");
+
+                if (precondition != null) return precondition;
+
+                coverage = await DarlingPgIndexBloatReader.GetCoverageVerdictAsync(
+                    postgres, resolved.ServerId, windowEnd, rows.Count);
+
+                return McpHelpers.Status(
+                    "empty",
+                    $"No index bloat rows for {resolved.ServerName} in the last {hours_back} "
+                    + "hour(s). This collector runs DAILY, so a window shorter than a day can be empty "
+                    + "on a perfectly healthy server — widen it before concluding anything. "
+                    + coverage.Message);
             }
+
+            coverage = await DarlingPgIndexBloatReader.GetCoverageVerdictAsync(
+                postgres, resolved.ServerId, windowEnd, rows.Count);
 
             var truncated = rows.Count >= limit;
             var answered = rows.Count(r => r.SkippedReason is null);
@@ -159,6 +182,43 @@ public sealed class DarlingMcpPgIndexTools
                 answered_count = truncated ? (int?)null : answered,
                 estimated_count = truncated ? (int?)null : estimated,
                 exactly_measured_count = truncated ? (int?)null : measured,
+
+                /* THE POPULATION FIGURES, which the three above are not and were never able to be (#3278).
+                   These come from a separate query over every candidate index on the server, so they are
+                   unaffected by the limit and by the unmeasured-first sort - which is what lets a page of
+                   all-skipped rows stop reading as a coverage claim. Every count carries its BYTES, because
+                   on the live fleet the two rank the suppression buckets differently: the bucket that is
+                   second of five by rows is LAST by footprint at 0.0004% of it. */
+                coverage = new
+                {
+                    /* The arm as its own field, beside the sentence. Automation keys on names rather than
+                       parsing prose, and a caller deciding whether this ranking is safe to act on needs the
+                       partial-coverage answer in a form it can branch on. */
+                    arm = coverage.Arm.ToString(),
+                    evidence_hours = PgIndexBloatCoverage.EvidenceHours,
+                    candidate_index_count = coverage.Candidates.IndexCount,
+                    candidate_index_bytes = coverage.Candidates.IndexBytes,
+                    trusted_index_count = coverage.Trusted.IndexCount,
+                    trusted_index_bytes = coverage.Trusted.IndexBytes,
+                    estimated_index_count = coverage.Estimated.IndexCount,
+                    estimated_index_bytes = coverage.Estimated.IndexBytes,
+                    exactly_measured_index_count = coverage.ExactlyMeasured.IndexCount,
+                    exactly_measured_index_bytes = coverage.ExactlyMeasured.IndexBytes,
+                    /* Ranked by BYTES by the classifier, not here - one ordering, so this payload and the
+                       WPF note cannot present two different "largest cause". */
+                    suppressed_by_reason = coverage.Suppressed.Select(bucket => new
+                    {
+                        reason = bucket.Reason.ToString(),
+                        label = PgIndexBloatCoverage.Label(bucket.Reason),
+                        index_count = bucket.IndexCount,
+                        index_bytes = bucket.IndexBytes,
+                        remedy = PgIndexBloatCoverage.Remedy(bucket.Reason),
+                        /* The collector's stored explanation ONCE per bucket. It is a 250-character
+                           paragraph repeated on every row - 2,954 identical copies in the fleet's largest
+                           bucket - so per-row is where it does not belong. */
+                        detail = bucket.Detail,
+                    }),
+                },
                 note = "These are ESTIMATES from catalog statistics, not measurements: no index page is "
                      + "read. Measured against pgstatindex ground truth on a live 2,500-index target, "
                      + "median absolute error is 2.79 percentage points and p90 is 6.63, which is close "
@@ -191,9 +251,18 @@ public sealed class DarlingMcpPgIndexTools
                            + "which is why estimated_reclaimable_bytes is 0 rather than null."
                          : string.Empty)
                      + (truncated
-                         ? " TRUNCATED at the row limit: there are more indexes than this. Raise the limit "
-                           + "before concluding anything about the server as a whole."
-                         : string.Empty),
+                         ? " TRUNCATED at the row limit: there are more indexes than this, and because rows "
+                           + "with no answer sort FIRST, a page smaller than the answerless population is "
+                           + "100% of them by construction rather than by chance - raising the limit does "
+                           + "not fix that while that population is still larger. Do not infer coverage "
+                           + "from this page; the coverage field below is measured over every candidate "
+                           + "index on the server and needs no limit raised."
+                         : string.Empty)
+                     /* The census on the POPULATED path too, and last so it is the sentence a reader
+                        finishes on. A page that ranks four answered indexes while six thousand are
+                        withheld reads as a ranking of the server, and nothing in the rows themselves shows
+                        the difference. */
+                     + " " + coverage.Message,
                 indexes,
             }, McpHelpers.JsonOptions);
         }

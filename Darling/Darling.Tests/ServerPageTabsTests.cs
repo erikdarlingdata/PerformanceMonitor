@@ -812,7 +812,15 @@ public sealed class ServerPageTabsTests
            moment a comment happened to contain one, which is the shape of check that converts an open question
            into false confidence. The helper THROWS without an emptyText, and every tab is built during the
            DOM-shim run, so a table panel that forgot one cannot reach a browser. */
-        Assert.Contains("function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2)", js, StringComparison.Ordinal);
+        /* The WHOLE signature, so emptyText is asserted to be a declared parameter rather than something
+           read off an options object. #3278 appended `noteKey = null` - an opt-in server-supplied caveat,
+           unrelated to this guard - and the literal is spelled out here rather than truncated at emptyText
+           because a prefix match would stop noticing a parameter inserted BEFORE it. */
+        Assert.Contains(
+            "function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, "
+            + "noteKey = null)",
+            js,
+            StringComparison.Ordinal);
         Assert.Contains(
             "if (!emptyText) throw new Error(\"table(\" + title + \"): a table panel must explain its own empty state.\");",
             js,

@@ -470,9 +470,15 @@ function pivot(rows, { xKey, seriesKey, valueKey }, maxSeries = 8) {
  * opt-in, or daily reads as a fault. Every tab is built during the DOM-shim run, so a missing sentence fails
  * there rather than shipping as a blank rectangle nobody notices.
  */
-function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2) {
+/**
+ * `noteKey` names a field on the READ's own response to render above the rows (#3278) — a caveat the server
+ * computed and the client could not, because a subtitle is written before the read. Optional and absent on
+ * every panel but one: a capped page of rows is normally just the top of a ranking, and a panel whose rows
+ * cannot be read as a population figure is the exception that needs saying so with figures.
+ */
+function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null) {
   if (!emptyText) throw new Error("table(" + title + "): a table panel must explain its own empty state.");
-  return renderPanel({ title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, span });
+  return renderPanel({ title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, span, noteKey });
 }
 
 /**
@@ -2024,19 +2030,28 @@ export const POSTGRES_TABS = [
             "No index of at least 64 KB was recorded on this server, so there is nothing here to judge. This collector runs daily and is gated off on read replicas, where scan counts are the replica's own rather than the writer's.",
         },
       ]),
-      /* #2629: MEASURED index bloat, beside the ESTIMATED table bloat above and the usage counts. The
-         three answer one question in sequence — how much space, is it earning its keep, and is the index
-         itself wasting it — and measured bloat sits last deliberately: it is the only one of the three
-         that is not an estimate, so a reader who has just been warned about estimates meets the real
-         measurement immediately after. */
+      /* #2629: index bloat, beside the table bloat above and the usage counts. The three answer one
+         question in sequence — how much space, is it earning its keep, and is the index itself wasting it.
+
+         #3234 made this an ESTIMATE from catalog statistics; it no longer walks a page, and there is no
+         per-cycle measurement budget to be skipped by. The title, subtitle and empty text all described the
+         old census until #3278 came through here.
+
+         `noteKey` carries the server's coverage census (#3278). It has to come from the read rather than
+         from the subtitle below, because the whole content of it is FIGURES about this server's population
+         — and because this panel's rows are the one set on the page that cannot be read as a coverage
+         claim: answerless rows sort FIRST by design, so a page capped at 25 is 100% of them whenever they
+         outnumber 25, structurally rather than by chance. */
       table(
-        "Index Bloat (measured)",
+        "Index Bloat (estimated)",
         "get_pg_index_bloat",
         { server, hours: ctx.hours, limit: 25 },
         "indexes",
         PG_INDEX_BLOAT_COLUMNS,
-        ctx.label + ", measured by walking the index; a value in Not Measured means the collector's per-cycle budget skipped it",
-        "No index was measured on this server. This collector runs DAILY and measuring walks the index, so a short window or a fresh install is legitimately empty here."
+        ctx.label + ", ESTIMATED from catalog statistics with no page reads; a row with a reason instead of a number has NO answer, not a healthy one",
+        "Nothing recorded for this server. That is not the same as no bloat: this collector runs DAILY, so a short window or a fresh install is legitimately empty here. Read the coverage sentence for which it is.",
+        2,
+        "note"
       ),
     ],
   },

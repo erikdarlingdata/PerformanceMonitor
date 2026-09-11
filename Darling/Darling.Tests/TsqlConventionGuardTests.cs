@@ -1421,6 +1421,12 @@ public sealed class TsqlConventionGuardTests
     [
         "PerformanceMonitor.Collectors/CollectorRuntimePrecondition.cs DescribeObserved",
         "PerformanceMonitor.Collectors/PgColumnStatsCoverage.cs Figure",
+        /* #3278: the same expression-bodied formatter shape as the Figure line above, in the classifier
+           beside it. What each strands is a format fragment and nothing else - Count strands "N0" and
+           Tally strands " holding ", both of which this comment's own list of examples already names.
+           Neither is T-SQL and neither is a tempdb label, so no census reads a site of that kind here. */
+        "PerformanceMonitor.Collectors/PgIndexBloatCoverage.cs Count",
+        "PerformanceMonitor.Collectors/PgIndexBloatCoverage.cs Tally",
         "PerformanceMonitor.Collectors/StallWaitProbe.cs TriggerElapsedFor",
         "PerformanceMonitor.Collectors/StallWaitProbe.cs FitsUnderBudget",
         "PerformanceMonitor.Common/SystemHealthParser.cs GbFromBytes",
