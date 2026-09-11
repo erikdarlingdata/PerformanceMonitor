@@ -16,10 +16,11 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// V116 / #3285: the custom-alert core rung (config.custom_alert_rules + config.custom_alert_state). This
-/// carries the "I am the top rung" claims that moved off <see cref="PgCpuCapacityHeadroomTests"/> (V115) when
-/// this rung landed — a fully-migrated store must map to EXACTLY this version, or the viewer refuses a store
-/// that is actually current.
+/// V116 / #3285: the custom-alert core rung (config.custom_alert_rules + config.custom_alert_state). The
+/// "I am the top rung" claims have moved on to <see cref="BuiltinAlertPersistenceRungTests"/> (V117), the
+/// way this rung took them from <see cref="PgCpuCapacityHeadroomTests"/> (V115). What stays here is this
+/// rung's own identity and its probe arm, which must keep mapping a store migrated to EXACTLY 116 to 116
+/// rather than letting it fall through.
 /// </summary>
 public sealed class CustomAlertCoreMigrationTests
 {
@@ -40,7 +41,7 @@ public sealed class CustomAlertCoreMigrationTests
 
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        Assert.True(RungVersion <= StorageVersion.SchemaVersion);
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
@@ -64,7 +65,7 @@ public sealed class CustomAlertCoreMigrationTests
     }
 
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeMapsAStoreAtExactlyThisRungToThisRung()
     {
         Assert.Contains(
             "table_name = 'custom_alert_rules'",
@@ -74,23 +75,23 @@ public sealed class CustomAlertCoreMigrationTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, System.StringComparison.Ordinal);
         Assert.Contains("hasCustomAlertCore", viewer, System.StringComparison.Ordinal);
 
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
-
         var method = typeof(ViewerDataService)
             .GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* Every sentinel from this one DOWN is present and everything NEWER is absent — a store migrated
+           to exactly this rung, which must map to exactly this rung rather than falling through. Built by
+           reflection so the arity tracks the signature as later rungs land. */
+        var atThisRung = Enumerable.Repeat((object)true, arity).ToArray();
+        for (var i = ProbeOrdinal + 1; i < arity; i++)
+        {
+            atThisRung[i] = false;
+        }
 
-        /* Every sentinel true = a fully-migrated store, which must map to exactly this version. Built by
-           reflection so the arity tracks the signature. */
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
+        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
 
-        /* One rung behind: every sentinel EXCEPT this one reports 115 (the previous top rung). */
-        var behind = Enumerable.Repeat((object)true, arity).ToArray();
-        behind[ProbeOrdinal] = false;
-        Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
+        /* One rung behind: this sentinel absent too reports 115 (the previous rung). */
+        atThisRung[ProbeOrdinal] = false;
+        Assert.Equal(PreviousVersion, (int)method.Invoke(null, atThisRung)!);
     }
 }

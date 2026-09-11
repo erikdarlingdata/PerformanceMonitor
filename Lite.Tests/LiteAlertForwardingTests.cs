@@ -335,6 +335,78 @@ public class LiteAlertForwardingTests : IDisposable
        1. CPU fire → resolve strings (old MainWindow.AlertEngine.cs:64-116)
        ===================================================================================== */
 
+    /// <summary>
+    /// Drives <paramref name="samples"/> sweeps with DISTINCT, increasing CPU sample instants — one #3282
+    /// gate observation per call. Returns the last instant so a caller can continue the sequence.
+    /// </summary>
+    private static async Task<DateTime> DriveCpuAsync(
+        AlertEngine engine, double? sqlCpu, double? totalCpu, int samples, DateTime from)
+    {
+        var at = from;
+        for (var i = 0; i < samples; i++)
+        {
+            at = at.AddMinutes(1);
+            await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: sqlCpu, totalCpu: totalCpu, cpuSampleTime: at));
+        }
+
+        return at;
+    }
+
+    [Fact]
+    public async Task Cpu_OneSampleOverTheBar_DoesNotFire_OnLiteEither()
+    {
+        /* The #3282 defect on the LITE side specifically. AlertEngine is shared, so the arithmetic is
+           covered by AlertEngineTests — what this pins is that Lite reaches the same behaviour through
+           its own snapshot and its own IAlertStateStore, which is the standing trap on every shared seam
+           here: a change landed only Darling-side leaves Lite reading a permanently-empty value. */
+        DisableAllChecks();
+        App.AlertCpuEnabled = true;
+        var h = new Harness();
+        var engine = h.Build();
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: AlertEngine.CpuBreachSamples - 1, from: Harness.SampleBase.AddMinutes(1));
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task Cpu_LiteStateStore_PersistsTheStreakUnderTheSharedMetricName()
+    {
+        /* Lite's InMemoryStateStore stands in for LiteAlertStateStore over DuckDB. What matters is that
+           the engine writes the gate's record through the SEAM on the Lite path at all, and under the same
+           (server, metric) key Darling uses — so the two SKUs' rows are the same subject and a future
+           cross-store reader sees one shape. */
+        DisableAllChecks();
+        App.AlertCpuEnabled = true;
+        var h = new Harness();
+
+        await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples - 1, from: Harness.SampleBase);
+
+        var persisted = Assert.Single(h.StateStore.Persistence);
+        Assert.Equal(AlertEngine.CpuPersistenceMetric, persisted.Key.Metric);
+        Assert.Equal(AlertEngine.CpuBreachSamples - 1, persisted.Value.State.ConsecutiveBreaches);
+        Assert.False(persisted.Value.State.Firing);
+        Assert.NotNull(persisted.Value.LastObservedSampleUtc);
+    }
+
+    [Fact]
+    public async Task Cpu_LiteSchemaCarriesThePersistenceTable()
+    {
+        /* The Lite half of the store parity, asserted against the generator rather than a live DuckDB:
+           #3282 is useless on Lite if the table the state store writes does not exist. */
+        Assert.Contains(
+            "config_alert_persistence_state",
+            PerformanceMonitorLite.Database.Schema.CreateAlertPersistenceStateTable,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            PerformanceMonitorLite.Database.Schema.CreateAlertPersistenceStateTable,
+            PerformanceMonitorLite.Database.Schema.GetAllTableStatements());
+
+        await Task.CompletedTask;
+    }
+
     [Fact]
     public async Task Cpu_FireAndResolve_CarriesTheOldLoopsExactStrings()
     {
@@ -343,8 +415,11 @@ public class LiteAlertForwardingTests : IDisposable
         var h = new Harness();
         var engine = h.Build();
 
-        /* Fire: Total mode uses TotalCpuPercent (:65 CpuPercentForAlert → Total). */
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 92));
+        /* Fire: Total mode uses TotalCpuPercent (:65 CpuPercentForAlert → Total), after
+           AlertEngine.CpuBreachSamples distinct samples over the bar (#3282 — one is no longer an
+           incident, on either SKU). The delivered STRINGS are what this test is about and they are
+           unchanged. */
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 92, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("High CPU", fired.MetricName);
@@ -363,9 +438,10 @@ public class LiteAlertForwardingTests : IDisposable
         Assert.Equal(80d, fired.NumericThresholdValue);
         Assert.False(fired.Muted);
 
-        /* Resolve: :110-113 — exact title + message strings, Success-severity tray-only toast. */
+        /* Resolve: :110-113 — exact title + message strings, Success-severity tray-only toast, after
+           AlertEngine.CpuClearSamples consecutive clears. */
         h.Now = h.Now.AddMinutes(6);
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 10, totalCpu: 12));
+        await DriveCpuAsync(engine, sqlCpu: 10, totalCpu: 12, samples: AlertEngine.CpuClearSamples, from: at);
 
         var res = Assert.Single(h.Resolutions);
         Assert.Equal("CPU Resolved", res.Title);
@@ -382,7 +458,7 @@ public class LiteAlertForwardingTests : IDisposable
         var h = new Harness();
 
         /* SqlOnly compares CpuPercent (90), not Total (95) — :65 CpuPercentForAlert → SqlOnly. */
-        await h.Build().EvaluateServerAsync(Harness.Snapshot(sqlCpu: 90, totalCpu: 95));
+        await DriveCpuAsync(h.Build(), sqlCpu: 90, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("90% (SQL CPU)", fired.CurrentValue);

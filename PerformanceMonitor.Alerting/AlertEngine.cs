@@ -374,6 +374,21 @@ public sealed class AlertEngine
             if (cpuPersistence.HasValue)
             {
                 _cpuPersistence[key] = cpuPersistence.Value;
+
+                /* An incident that was ALREADY OPEN gets its cooldown clock stamped as if it had just been
+                   announced. The persisted Firing bit stops the gate producing a second rising edge, but
+                   the cooldown dictionaries are in-memory by design (see their field comment), so an empty
+                   clock plus a still-breaching condition would deliver the standing-condition REMINDER on
+                   the first post-restart sweep — an identical High CPU message seconds after a restart,
+                   which is a re-announcement whatever it is called internally. Stamping makes the
+                   reminder wait a full cooldown, which is what an operator who already has the incident
+                   open would expect. Nothing can be lost: if the condition is still breaching when the
+                   cooldown elapses the reminder fires then, and if it cleared while the service was down
+                   the first ClearSamples clear samples resolve it. */
+                if (cpuPersistence.Value.State.Firing)
+                {
+                    _lastCpuAlert[key] = _utcNow();
+                }
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
