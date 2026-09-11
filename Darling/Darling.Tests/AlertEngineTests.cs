@@ -728,6 +728,30 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
+    public async Task Cpu_TheGateAdvancesUnderSuppression_SoOneUnsuppressedSampleDelivers()
+    {
+        /* Suppression is evaluate-but-don't-deliver, and that has to remain true of the GATE and not just
+           of the send: a suppressed streak must count, so that un-acknowledging a server reports the
+           condition it is actually in rather than starting a fresh three-sample wait.
+
+           This pin exists because its Lite twin cannot be run here. Lite.Tests is net10.0-windows and its
+           harness is the WPF app, so LiteAlertForwardingTests.SuppressedSweep_... is CI's to execute —
+           and it is the exact claim that test now depends on after #3282. The engine is shared, so
+           asserting it here makes the Lite edit a verified claim rather than a plausible one. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveCpuAsync(engine, sqlCpu: 95, totalCpu: 99, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase, suppressed: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* One UNsuppressed sample: the incident is already open from the suppressed streak, so this is the
+           standing-condition delivery rather than a rising edge that has to be earned again. */
+        await DriveCpuAsync(engine, sqlCpu: 95, totalCpu: 99, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
     public async Task Cpu_APersistenceSaveFailure_StillFires_AndIsNotCountedAsASwallowedRead()
     {
         /* Two claims, and the second is the one that is easy to get wrong — I did.

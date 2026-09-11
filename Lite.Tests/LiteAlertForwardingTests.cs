@@ -352,6 +352,22 @@ public class LiteAlertForwardingTests : IDisposable
         return at;
     }
 
+    /// <summary>The suppressed twin — suppression is evaluate-but-don't-deliver, so the gate still
+    /// advances and a pin about suppression has to drive enough samples to reach the bar.</summary>
+    private static async Task<DateTime> DriveCpuSuppressedAsync(
+        AlertEngine engine, double? sqlCpu, double? totalCpu, int samples, DateTime from)
+    {
+        var at = from;
+        for (var i = 0; i < samples; i++)
+        {
+            at = at.AddMinutes(1);
+            await engine.EvaluateServerAsync(
+                Harness.Snapshot(sqlCpu: sqlCpu, totalCpu: totalCpu, suppressed: true, cpuSampleTime: at));
+        }
+
+        return at;
+    }
+
     [Fact]
     public async Task Cpu_OneSampleOverTheBar_DoesNotFire_OnLiteEither()
     {
@@ -536,7 +552,11 @@ public class LiteAlertForwardingTests : IDisposable
         var engine = h.Build();
         h.Adapter.Blocking.Add(BlockingRow(51));
 
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 95, totalCpu: 99, suppressed: true));
+        /* CpuBreachSamples distinct samples, all suppressed (#3282 — the CPU gate advances under
+           suppression, exactly like the blocking gate, because suppression is evaluate-but-don't-deliver.
+           Driving only one sample would leave this pin unable to distinguish "suppressed" from "the streak
+           never reached the bar", which is the thing it exists to check). */
+        var at = await DriveCpuSuppressedAsync(engine, sqlCpu: 95, totalCpu: 99, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
 
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Empty(h.Resolutions);
@@ -544,7 +564,10 @@ public class LiteAlertForwardingTests : IDisposable
            persisted; when the user un-acknowledges, the same lingering report still alerts. */
         Assert.Empty(h.StateStore.SavedEdge);
 
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 95, totalCpu: 99));
+        /* One UNsuppressed sample is enough for CPU now: the gate is already firing from the suppressed
+           streak above, so this is the standing-condition delivery rather than a fresh rising edge — which
+           is the suppressed-gates-still-advance semantics this test is about. */
+        await DriveCpuAsync(engine, sqlCpu: 95, totalCpu: 99, samples: 1, from: at);
         Assert.Equal(2, h.Deliverer.Outcomes.Count); /* CPU + blocking both fire once unsuppressed */
     }
 
@@ -562,13 +585,13 @@ public class LiteAlertForwardingTests : IDisposable
         var h = new Harness { Muted = true };
         var engine = h.Build();
 
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 92));
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 92, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.True(fired.Muted);
         /* The cooldown was stamped even when muted (:76-78) — no second delivery inside it. */
         h.Now = h.Now.AddMinutes(2);
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 92));
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 92, samples: 1, from: at);
         Assert.Single(h.Deliverer.Outcomes);
     }
 
