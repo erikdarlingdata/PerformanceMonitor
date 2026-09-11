@@ -212,14 +212,13 @@ public sealed class DarlingPgIndexBloatCoverageLivePostgresTests
         }
         finally
         {
-            await LiveStoreCleanup.RunOwnedAsync(
-                bodySucceeded,
-                async () =>
-                {
-                    await using var cleanup = new NpgsqlConnection(connectionString);
-                    await cleanup.OpenAsync(CancellationToken.None);
-                    await DeleteRowsAsync(cleanup, CancellationToken.None);
-                });
+            /* RunAsync, not RunOwnedAsync: this cleanup's statements use unqualified table names, and a
+               connection Npgsql hands back from the pool can predate the store's first migration - it
+               then keeps the pre-ALTER default search_path for its whole life and every bare name
+               resolves to nothing (42P01). RunAsync opens the connection AND sets the search_path, which
+               is the whole reason it exists. Owning the connection here skipped that and made the
+               teardown depend on which physical session the pool happened to return. */
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteRowsAsync);
         }
     }
 
