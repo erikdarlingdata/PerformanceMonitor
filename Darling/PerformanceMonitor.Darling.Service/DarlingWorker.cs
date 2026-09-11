@@ -3600,6 +3600,17 @@ public sealed class DarlingWorker : BackgroundService
                 if (seeded.HasValue)
                 {
                     _pgCpuPersistence[key] = seeded.Value;
+
+                    /* An ALREADY-OPEN incident gets its cooldown clock stamped, the same way
+                       AlertEngine's own seeding does and for the same reason: the persisted Firing bit
+                       stops a second rising edge, but _lastPgCpuAlert is in-memory, so an empty clock plus
+                       a still-breaching condition would deliver the standing-condition reminder on the
+                       first post-restart pass. Doing this on only one of the two engines would be the
+                       shared-seam half-fix this whole issue is about, in miniature. */
+                    if (seeded.Value.State.Firing)
+                    {
+                        _lastPgCpuAlert[key] = now;
+                    }
                 }
             }
 
@@ -3656,13 +3667,6 @@ public sealed class DarlingWorker : BackgroundService
                 lastCounted = sample;
                 lastCapacityPercent = capacityPercent;
 
-                /* A batch wide enough to hold CpuBreachSamples breaches AND CpuClearSamples clears can
-                   produce both edges in one pass — a genuine three-minute excursion that had already ended
-                   by the time Performance Insights handed it over. Both are delivered, in that order,
-                   because that is what the gate says happened and because the deliverer writes a
-                   config_alert_log row either way: suppressing the send would leave the channel and the
-                   history disagreeing about the same incident. The volume is damped where it already is,
-                   by the cooldown below and the per-fingerprint delivery cooldown. */
                 if (evaluation.Outcome == PersistenceOutcome.Fire)
                 {
                     fired = true;
@@ -3685,10 +3689,35 @@ public sealed class DarlingWorker : BackgroundService
             bool breaching = lastCapacityPercent.HasValue
                 && lastCapacityPercent.Value >= alertSettings.CpuThresholdPercent;
 
+            if (fired && resolved)
+            {
+                /* The incident OPENED AND CLOSED inside one pass. Reachable only here and only because of
+                   how this metric arrives: Performance Insights is sampled every 60 seconds but
+                   pg_cpu_utilization is a five-minute collector, so a batch can hold CpuBreachSamples
+                   breaches followed by CpuClearSamples clears — a genuine three-minute excursion that had
+                   already ended before the data was handed over.
+
+                   Nothing is delivered, which is the same call CustomAlertEvaluator makes on the same gate:
+                   it resolves only an incident that was actually delivered. The alternative shapes are both
+                   worse. A resolve alone is a recovery notice for a message nobody received. A fire and a
+                   resolve microseconds apart is the unactionable pair #3282 was filed about, and there was
+                   no instant at which anyone could have looked at this one. The excursion is not lost — it
+                   is in pg_cpu_utilization, which is where a reader would go for a condition that has
+                   already ended. The full cycle is already persisted by the save above, so the next
+                   excursion fires normally. */
+                return;
+            }
+
             if (record.State.Firing && breaching)
             {
-                var cooldownElapsed = fired
-                    || !_lastPgCpuAlert.TryGetValue(key, out var last)
+                /* The rising edge is cooldown-gated like every other fire, matching AlertEngine's SQL
+                   Server twin exactly. #3282 changed what counts as an incident, deliberately not how the
+                   cooldown works, and an engine-specific bypass here would make one threshold mean two
+                   things across the two engines — the parity #2719 chose these metric names for. The gate
+                   has already imposed CpuBreachSamples samples of delay, and a fire/resolve/fire cycle
+                   needs CpuBreachSamples + CpuClearSamples samples, which at the ~60-second sample cadence
+                   is about the default cooldown anyway. */
+                var cooldownElapsed = !_lastPgCpuAlert.TryGetValue(key, out var last)
                     || now - last >= cooldown;
                 if (!cooldownElapsed)
                 {

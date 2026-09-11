@@ -187,6 +187,59 @@ public sealed class BuiltinAlertPersistenceRungTests
     }
 
     /// <summary>
+    /// A restart must not re-announce an already-open incident on EITHER engine. The persisted Firing bit
+    /// stops a second rising edge, but the cooldown dictionaries are in-memory on both sides, so the
+    /// seeding has to stamp the clock too — and doing that on only one of the two engines is the
+    /// shared-seam half-fix this whole issue is about, in miniature.
+    /// </summary>
+    [Fact]
+    public void ARestartStampsTheCooldownOnBothEngines()
+    {
+        var pg = EvaluatePgCpuBody();
+        Assert.Contains("if (seeded.Value.State.Firing)", pg, StringComparison.Ordinal);
+        Assert.Contains("_lastPgCpuAlert[key] = now;", pg, StringComparison.Ordinal);
+
+        var engine = RepoFile.ReadRepoFileLf("PerformanceMonitor.Alerting", "AlertEngine.cs");
+        Assert.Contains("if (cpuPersistence.Value.State.Firing)", engine, StringComparison.Ordinal);
+        Assert.Contains("_lastCpuAlert[key] = _utcNow();", engine, StringComparison.Ordinal);
+
+        /* And neither engine bypasses the cooldown for the rising edge, so one threshold means one thing
+           across them — the parity #2719 chose the shared metric names for. */
+        Assert.DoesNotContain("cooldownElapsed = fired", pg, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An incident that OPENS AND CLOSES inside one pass delivers nothing. Reachable only on the
+    /// PostgreSQL side and only because of how the metric arrives: Performance Insights is sampled every
+    /// 60 seconds while <c>pg_cpu_utilization</c> is a five-minute collector, so one batch can hold a whole
+    /// three-minute excursion that had already ended before the data was handed over.
+    ///
+    /// <para>This is the defect the batch read introduced and it had to be closed rather than accepted:
+    /// without it the falling edge is delivered on its own, which is a recovery notice for a message
+    /// nobody received. Delivering both instead would be the unactionable pair the issue was filed about,
+    /// for an excursion nobody could have looked at. The same call <c>CustomAlertEvaluator</c> makes on the
+    /// same gate — it resolves only an incident that was actually delivered.</para>
+    /// </summary>
+    [Fact]
+    public void AnIncidentThatOpensAndClosesInOnePass_DeliversNothing()
+    {
+        var body = EvaluatePgCpuBody();
+
+        Assert.Contains("if (fired && resolved)", body, StringComparison.Ordinal);
+
+        /* The guard has to sit BEFORE both delivery arms, or it guards nothing. */
+        var guard = body.IndexOf("if (fired && resolved)", StringComparison.Ordinal);
+        var fire = body.IndexOf("if (record.State.Firing && breaching)", StringComparison.Ordinal);
+        var resolve = body.IndexOf("else if (resolved)", StringComparison.Ordinal);
+        Assert.True(guard >= 0 && fire > guard, "the same-pass guard must precede the fire arm");
+        Assert.True(resolve > guard, "the same-pass guard must precede the resolve arm");
+
+        /* And it must not skip the state write, or the streak it just completed would be replayed. */
+        var save = body.IndexOf("stateStore.SaveAlertPersistenceAsync", StringComparison.Ordinal);
+        Assert.True(save >= 0 && save < guard, "the state save must happen before the same-pass early return");
+    }
+
+    /// <summary>
     /// A missing capacity reading must FREEZE the gate rather than clear it. #3281 established that the
     /// alert never FIRES on an absent capacity sample (a fallback to percent-of-allocated silently arms the
     /// threshold against the wrong denominator); the other half is that it must not RESOLVE on one either,
