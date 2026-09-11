@@ -135,6 +135,16 @@ public class WebhookAlertService
     /// Sends webhook alerts to all configured channels (Teams and/or Slack).
     /// Respects the email cooldown setting for throttling. Never throws.
     /// </summary>
+    /// <param name="detailText">
+    /// #3297: the alert's flat prose detail. Resolved ONCE here, the same way <c>triageUrl</c> below is
+    /// and for the same reason — all four channels must carry the same text for the same firing, and a
+    /// per-channel resolution would be four places for one of them to drift or be forgotten.
+    /// </param>
+    /// <param name="displayName">
+    /// #3303: the human-facing name a custom rule carries, rendered in the Teams/Slack titles and the
+    /// PagerDuty summary in place of <paramref name="metricName"/>. Null/empty (every built-in alert)
+    /// renders the metric name unchanged. Never reaches the generic channel — see that branch below.
+    /// </param>
     public async Task<bool> TrySendWebhookAlertsAsync(
         string metricName,
         string serverName,
@@ -142,6 +152,7 @@ public class WebhookAlertService
         string thresholdValue,
         string serverId = "",
         AlertContext? context = null,
+        string? detailText = null,
         string? displayName = null)
     {
         try
@@ -172,26 +183,31 @@ public class WebhookAlertService
                 _settings.TriageBaseUrl, serverName, metricName, DateTime.UtcNow,
                 DerivePagerDutyDedupKey(string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, context));
 
+            /* #3297: null when the alert carries no prose, or when its prose is only a flattening of the
+               structured context every channel below already renders. */
+            var prose = AlertDetailText.ProseForDelivery(detailText, context);
+
             if (TeamsConfigured)
             {
-                sent |= await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl, displayName);
+                sent |= await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl, prose, displayName);
             }
 
             if (SlackConfigured)
             {
-                sent |= await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl, displayName);
+                sent |= await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl, prose, displayName);
             }
 
             if (GenericConfigured)
             {
                 /* Generic webhook: the payload's "metric" field is a machine key an automation correlates on,
-                   so it stays the immutable metric name — the display name is a human-title concern only. */
-                sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl);
+                   so it stays the immutable metric name — the display name is a human-title concern only, and
+                   this channel has no title. The prose detail DOES go, because it is alert content. */
+                sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl, prose);
             }
 
             if (PagerDutyConfigured)
             {
-                sent |= await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl, displayName);
+                sent |= await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl, prose, displayName);
             }
 
             if (sent)
@@ -304,11 +320,13 @@ public class WebhookAlertService
         string thresholdValue,
         AlertContext? context,
         string? triageUrl,
+        string? detailText,
         string? displayName = null)
     {
         try
         {
-            var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl, displayName: displayName);
+            var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
+                detailText: detailText, displayName: displayName);
             var error = await PostWebhookAsync(_settings.TeamsWebhookUrl, payload, _settings.TeamsProxyAddress);
 
             if (error != null)
@@ -386,6 +404,10 @@ public class WebhookAlertService
     /// <para>#2710: a non-null <paramref name="triageUrl"/> adds a <c>potentialAction</c> OpenUri button —
     /// the MessageCard-native link affordance — pointing at the computed triage page. Null (base URL unset,
     /// or a test send) renders exactly the pre-#2710 card.</para>
+    /// <para>#3297: <paramref name="detailText"/> is the alert's flat prose detail. It becomes its own
+    /// <c>Details</c> section ahead of the per-incident ones, because a multi-paragraph remedy in a
+    /// label/value fact renders as an unreadable column — <c>text</c> is the MessageCard-native place for
+    /// prose, and the snooze footer already uses it.</para>
     /// </summary>
     internal static string BuildTeamsPayload(
         string metricName,
@@ -396,9 +418,11 @@ public class WebhookAlertService
         bool isTest = false,
         AlertContext? context = null,
         string? triageUrl = null,
+        string? detailText = null,
         string? displayName = null)
     {
         var (hexColor, badgeText, emoji) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
+        var prose = AlertDetailText.ProseForDelivery(detailText, context);
         /* Title/summary show the human name when present; ForMetric above stays on the immutable metric
            name (the severity key), and a null/empty display name renders the metric name unchanged. */
         var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
@@ -434,6 +458,13 @@ public class WebhookAlertService
            remediation-T-SQL items stay folded into the lead section's facts — they are commentary
            on the whole alert, not incidents. */
         var itemSections = new List<object>();
+
+        /* #3297: ahead of the per-incident sections — it is the actionable half of the alert. */
+        if (prose is not null)
+        {
+            itemSections.Add(new { activityTitle = "Details", text = prose, markdown = true });
+        }
+
         if (context?.Details != null)
         {
             foreach (var detail in context.Details)
@@ -546,11 +577,13 @@ public class WebhookAlertService
         string thresholdValue,
         AlertContext? context,
         string? triageUrl,
+        string? detailText,
         string? displayName = null)
     {
         try
         {
-            var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl, displayName: displayName);
+            var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
+                detailText: detailText, displayName: displayName);
             var error = await PostWebhookAsync(_settings.SlackWebhookUrl, payload, _settings.SlackProxyAddress);
 
             if (error != null)
@@ -589,6 +622,9 @@ public class WebhookAlertService
     /// <para>#2710: a non-null <paramref name="triageUrl"/> adds an actions block with a LINK button (a url
     /// button needs no interactivity config on the webhook, unlike an action_id button) pointing at the
     /// computed triage page, placed above the "Sent by" context footer. Null renders the pre-#2710 payload.</para>
+    /// <para>#3297: <paramref name="detailText"/> is the alert's flat prose detail, rendered as its own
+    /// mrkdwn <c>section</c> block directly under the field block — Block Kit's home for prose, and above
+    /// the per-incident dividers so the remedy reads before the drill-down.</para>
     /// </summary>
     internal static string BuildSlackPayload(
         string metricName,
@@ -599,9 +635,11 @@ public class WebhookAlertService
         bool isTest = false,
         AlertContext? context = null,
         string? triageUrl = null,
+        string? detailText = null,
         string? displayName = null)
     {
         var (hexColor, badgeText, emoji) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
+        var prose = AlertDetailText.ProseForDelivery(detailText, context);
         /* Human name in the header when present; ForMetric above keeps the immutable metric-name key. */
         var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
         var utcNow = DateTime.UtcNow;
@@ -643,6 +681,12 @@ public class WebhookAlertService
         }
 
         blocks.Add(new { type = "section", fields });
+
+        /* #3297: the prose detail, before the per-incident dividers. */
+        if (prose is not null)
+        {
+            blocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*Details*\n{prose}" } });
+        }
 
         if (context?.Details != null)
         {
@@ -733,7 +777,8 @@ public class WebhookAlertService
         string thresholdValue,
         string serverId,
         AlertContext? context,
-        string? triageUrl)
+        string? triageUrl,
+        string? detailText)
     {
         try
         {
@@ -749,7 +794,7 @@ public class WebhookAlertService
             var payload = BuildGenericPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
                 context: context, bodyTemplate: _settings.GenericWebhookBodyTemplate, serverId: serverId,
-                triageUrl: triageUrl);
+                triageUrl: triageUrl, detailText: detailText);
 
             if (!IsWellFormedJson(payload, out var bodyError))
             {
@@ -828,6 +873,16 @@ public class WebhookAlertService
     /// channels carry (<see cref="TriageLink.Build"/>), empty when no <see cref="IAlertSettings.TriageBaseUrl"/>
     /// is configured, so a template using it stays well-formed either way.
     /// </para>
+    /// <para>
+    /// #3297: <c>{{detail}}</c> is the alert's flat prose detail — what happened and the operator action
+    /// that clears it — as an ordinary escaped string, empty when the alert carries no prose over and above
+    /// its structured context. It ALSO leads <c>{{context}}</c>: the default template and every template an
+    /// operator already saved carry <c>{{context}}</c> and none of them can carry a token that did not
+    /// exist when they were written, so a token alone would have left every existing generic-channel
+    /// deployment still dropping the detail. <c>{{detail}}</c> exists on top of that for a template that
+    /// needs the prose on its own — mapped into a ticket body field, say — rather than mixed with the
+    /// flattened structure.
+    /// </para>
     /// </summary>
     internal static string BuildGenericPayload(
         string metricName,
@@ -839,14 +894,17 @@ public class WebhookAlertService
         AlertContext? context = null,
         string? bodyTemplate = null,
         string serverId = "",
-        string? triageUrl = null)
+        string? triageUrl = null,
+        string? detailText = null)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var template = string.IsNullOrWhiteSpace(bodyTemplate) ? DefaultGenericBodyTemplate : bodyTemplate!;
 
+        var prose = AlertDetailText.ProseForDelivery(detailText, context);
+
         var contextText = isTest
             ? $"Webhook configuration is working correctly. Sent by {branding.EditionName}."
-            : RenderContextForTemplate(context, branding);
+            : RenderContextForTemplate(context, branding, prose);
 
         /* Keyed on the numeric serverId the fan-out passes — the same identity the LIVE PagerDuty path
            feeds DerivePagerDutyDedupKey — so the two channels' keys are equal for the same alert. The
@@ -875,6 +933,10 @@ public class WebhookAlertService
             ["resource_name"] = EscapeForJson(DeriveResourceName(context) ?? ""),
             ["database"] = EscapeForJson(DeriveResourceDatabase(context) ?? ""),
             ["triage_url"] = EscapeForJson(triageUrl ?? ""),
+            /* The test send substitutes the same canned line {{context}} gets, so a template that maps
+               {{detail}} into a required field is exercised with a value rather than validating against an
+               empty string and only failing on the first real alert. */
+            ["detail"] = EscapeForJson(isTest ? $"Webhook configuration is working correctly. Sent by {branding.EditionName}." : prose ?? ""),
         };
 
         /* Single pass: a MatchEvaluator's output is NOT re-scanned, so a value that itself contains the
@@ -884,25 +946,48 @@ public class WebhookAlertService
         return s_genericPlaceholders.Replace(template, m => values[m.Groups[1].Value]);
     }
 
-    /* context_json before context: alternation is ordered, and while the closing \}\} would force a
-       backtrack to the right answer anyway, longest-first means correctness never leans on it. */
+    /// <summary>
+    /// Every token <see cref="BuildGenericPayload"/> substitutes, in the order the matcher tries them.
+    /// <para>context_json before context: alternation is ordered, and while the closing <c>}}</c> would
+    /// force a backtrack to the right answer anyway, longest-first means correctness never leans on it.</para>
+    /// <para>A LIST, and the matcher is built from it, because both apps' Settings windows print the token
+    /// set as help text and an operator cannot use a token they never learn exists. That help text has now
+    /// drifted twice — #2710 added <c>triage_url</c> to Darling's list and not Lite's, and #3297 added
+    /// <c>detail</c> to neither — so <c>Lite.Tests.GenericWebhookTests</c> checks both windows against this
+    /// list rather than against a second copy of it that would be free to drift the same way.</para>
+    /// </summary>
+    internal static readonly string[] GenericBodyTokens =
+    {
+        "metric", "server", "value", "threshold", "severity",
+        "context_json", "incidents_json", "dedup_key", "resource_name", "database", "triage_url",
+        "context", "timestamp", "detail"
+    };
+
     private static readonly System.Text.RegularExpressions.Regex s_genericPlaceholders =
-        new(@"\{\{(metric|server|value|threshold|severity|context_json|incidents_json|dedup_key|resource_name|database|triage_url|context|timestamp)\}\}",
+        new(@"\{\{(" + string.Join("|", GenericBodyTokens) + @")\}\}",
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>
     /// Flattens the structured alert context into one plain-text line for <c>{{context}}</c> — the generic
     /// endpoint has no card schema to render into. Follows the Teams/Slack rule: remediation T-SQL is never
     /// inlined, it points at the email / in-app dialog.
+    /// <para>#3297: <paramref name="prose"/>, the alert's flat detail, leads the line when present. A
+    /// prose-only alert used to render this as the bare "Sent by ..." boilerplate — the whole alert body
+    /// reduced to a signature.</para>
     /// </summary>
-    private static string RenderContextForTemplate(AlertContext? context, AlertBranding branding)
+    private static string RenderContextForTemplate(AlertContext? context, AlertBranding branding, string? prose = null)
     {
-        if (context?.Details is not { Count: > 0 })
+        var parts = new List<string>();
+
+        if (prose is not null)
         {
-            return $"Sent by {branding.EditionName}";
+            parts.Add(prose.Replace("\r\n", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal));
         }
 
-        var parts = new List<string>();
+        if (context?.Details is not { Count: > 0 })
+        {
+            return parts.Count == 0 ? $"Sent by {branding.EditionName}" : string.Join(" | ", parts);
+        }
 
         foreach (var detail in context.Details)
         {
@@ -935,6 +1020,10 @@ public class WebhookAlertService
     /// can see a remediation EXISTS) but carry the hint as their body and no <c>Remediation</c> payload; the
     /// typed payload is likewise stripped from every item defensively. Returns a COPY — the same context
     /// instance flows on to the other channels, and mutating it here would redact their email too.
+    /// <para>#3297: this covers the STRUCTURED context, which is the whole of what it has ever protected —
+    /// generated <c>FactRemediation</c> payloads. An alert's flat prose detail is delivered verbatim and
+    /// deliberately; see <see cref="AlertDetailText"/> for why, and for the pin that keeps a generated
+    /// command out of it.</para>
     /// </summary>
     private static AlertContext RedactForWebhook(AlertContext context)
     {
@@ -1184,6 +1273,7 @@ public class WebhookAlertService
         string serverId,
         AlertContext? context,
         string? triageUrl,
+        string? detailText,
         string? displayName = null)
     {
         try
@@ -1195,7 +1285,8 @@ public class WebhookAlertService
 
             var payload = BuildPagerDutyPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
-                _settings.PagerDutyRoutingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl, displayName: displayName);
+                _settings.PagerDutyRoutingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl,
+                detailText: detailText, displayName: displayName);
 
             var endpoint = PagerDutyEndpoint(_settings.PagerDutyUseEuRegion);
             var error = await PostWebhookAsync(endpoint, payload, _settings.PagerDutyProxyAddress);
@@ -1238,6 +1329,10 @@ public class WebhookAlertService
     /// (which PD renders as a first-class link on the alert) and <c>custom_details["Triage"]</c> (so an
     /// integration reading only the details table still gets it). Null renders the pre-#2710 payload — no
     /// empty <c>links</c> key is ever sent.</para>
+    /// <para>#3297: <paramref name="detailText"/>, the alert's flat prose detail, rides in
+    /// <c>custom_details["Details"]</c>. Not in <c>summary</c>: PD-CEF caps that at 1024 characters and it
+    /// is the one-line headline PD pages on, while custom_details is the table view and what most
+    /// downstream integrations read — the same reasoning that put the triage link there.</para>
     /// </summary>
     internal static string BuildPagerDutyPayload(
         string metricName,
@@ -1251,6 +1346,7 @@ public class WebhookAlertService
         string? dedupKey = null,
         string? serverId = null,
         string? triageUrl = null,
+        string? detailText = null,
         string? displayName = null)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
@@ -1270,7 +1366,8 @@ public class WebhookAlertService
             ? branding.EditionName
             : serverName;
 
-        var customDetails = BuildPagerDutyCustomDetails(isTest, branding, context, triageUrl);
+        var customDetails = BuildPagerDutyCustomDetails(
+            isTest, branding, context, triageUrl, AlertDetailText.ProseForDelivery(detailText, context));
 
         /* Derive dedup_key from the incident fingerprint when not explicitly provided, falling back to a
            stable metric+server key. This ensures PagerDuty correlates repeated alerts for the same incident. */
@@ -1329,7 +1426,8 @@ public class WebhookAlertService
         bool isTest,
         AlertBranding branding,
         AlertContext? context,
-        string? triageUrl = null)
+        string? triageUrl = null,
+        string? prose = null)
     {
         var details = new Dictionary<string, object>();
 
@@ -1353,6 +1451,11 @@ public class WebhookAlertService
             details["Database"] = database;
         if (triageUrl is not null)
             details["Triage"] = triageUrl;
+
+        /* #3297: before the per-incident keys and before the empty-Details return, which is the branch a
+           prose-only self-alert takes — the branch that used to reduce the whole alert to "Sent by". */
+        if (prose is not null)
+            details["Details"] = prose;
 
         if (context?.Details is null || context.Details.Count == 0)
         {

@@ -24,7 +24,14 @@ namespace PerformanceMonitor.Alerting;
 /// <param name="CurrentValue">Human-readable current value (e.g. "3 deadlock(s) in the last hour").</param>
 /// <param name="ThresholdValue">Human-readable threshold it breached (e.g. "1", "80%").</param>
 /// <param name="Context">Structured detail context (built by <see cref="AlertContextBuilders"/>), or null when no detail was resolvable.</param>
-/// <param name="DetailText">Flat plain-text rendering of <paramref name="Context"/> (the engine emits <see cref="AlertContextBuilders.ContextToDetailText"/> output), or null.</param>
+/// <param name="DetailText">
+/// The alert's flat plain-text detail, or null. For an engine alert this is a rendering of
+/// <paramref name="Context"/> (<see cref="AlertContextBuilders.ContextToDetailText"/>), but it is NOT only
+/// that: a self-alert fires with <c>Context: null</c> and carries independent prose here — what happened,
+/// what it costs, and the operator action that clears it — which is the ONLY place that text exists. Every
+/// delivery channel renders it (#3297), suppressed on the engine case so the same content is not printed
+/// twice.
+/// </param>
 /// <param name="NumericCurrentValue">Numeric current value for history charting/thresholding, when the metric has one.</param>
 /// <param name="NumericThresholdValue">Numeric threshold twin of <paramref name="NumericCurrentValue"/>.</param>
 /// <param name="Muted">True when a mute rule matched — the host records the alert but must not toast/send it.</param>
