@@ -706,6 +706,73 @@ public sealed class PgIndexBloatCoverageTests
         {
             Assert.Contains(figure, populated, StringComparison.Ordinal);
         }
+
+        /* THE CHECK THE LIST ABOVE CANNOT MAKE. A fixed list of input figures only catches an input being
+           echoed; a mutation that appended the DERIVED candidate total passed every assertion above and was
+           caught only by an unrelated pin. The claim is that the cause is a function of the ARM and its
+           dominant bucket, so the falsifier has to be invariance: same arm, same dominant reason, wildly
+           different figures, identical cause. That catches any figure - raw, summed or formatted. */
+        foreach (var (arm, lean, heavy) in FigureInvariancePairs)
+        {
+            Assert.Equal(arm, lean.Arm);
+            Assert.Equal(arm, heavy.Arm);
+            Assert.Equal(lean.Cause, heavy.Cause);
+
+            /* And the two really do hold different figures, or "identical cause" is a claim about one
+               input rendered twice. */
+            Assert.NotEqual(lean.Census, heavy.Census);
+        }
+
+        /* Every arm but one is swept. NoCandidates is a single input point - it requires zero candidates AND
+           zero returned rows - so there are no two figure sets reaching it to compare, and saying so here
+           beats leaving a reader to assume the sweep was total. */
+        Assert.Equal(
+            Enum.GetValues<PgIndexBloatCoverageArm>()
+                .Where(a => a != PgIndexBloatCoverageArm.NoCandidates)
+                .OrderBy(a => a)
+                .ToArray(),
+            FigureInvariancePairs.Select(pair => pair.Arm).Distinct().OrderBy(a => a).ToArray());
+    }
+
+    /// <summary>
+    /// Per arm, two verdicts reaching it from very different figures with the same dominant suppression
+    /// reason. The input to <see cref="TheCauseCarriesNoneOfTheInputFigures"/>'s invariance half.
+    /// </summary>
+    private static IEnumerable<(PgIndexBloatCoverageArm Arm,
+        PgIndexBloatCoverageVerdict Lean, PgIndexBloatCoverageVerdict Heavy)> FigureInvariancePairs
+    {
+        get
+        {
+            var thin = new PgIndexBloatTally(3, 7 * Mib);
+            var thick = new PgIndexBloatTally(424_242, 777 * Gib);
+            var oneBucket = new[] { Bucket(PgIndexBloatSuppression.Partial, 2, 5 * Mib) };
+            var manyBuckets = new[] { Bucket(PgIndexBloatSuppression.Partial, 90_210, 333 * Gib) };
+
+            yield return (
+                PgIndexBloatCoverageArm.Undetermined,
+                PgIndexBloatCoverage.Classify(false, thin, Nothing, oneBucket, 1),
+                PgIndexBloatCoverage.Classify(false, thick, thin, manyBuckets, 9_999));
+
+            yield return (
+                PgIndexBloatCoverageArm.NothingTrusted,
+                PgIndexBloatCoverage.Classify(true, Nothing, Nothing, oneBucket, 1),
+                PgIndexBloatCoverage.Classify(true, Nothing, Nothing, manyBuckets, 9_999));
+
+            yield return (
+                PgIndexBloatCoverageArm.PartialCoverage,
+                PgIndexBloatCoverage.Classify(true, thin, Nothing, oneBucket, 1),
+                PgIndexBloatCoverage.Classify(true, thick, thin, manyBuckets, 9_999));
+
+            yield return (
+                PgIndexBloatCoverageArm.FullyTrusted,
+                PgIndexBloatCoverage.Classify(true, thin, Nothing, [], 1),
+                PgIndexBloatCoverage.Classify(true, thick, thin, [], 9_999));
+
+            yield return (
+                PgIndexBloatCoverageArm.EvidenceStale,
+                PgIndexBloatCoverage.Classify(true, Nothing, Nothing, [], 1),
+                PgIndexBloatCoverage.Classify(true, Nothing, Nothing, [], 9_999));
+        }
     }
 
     /// <summary>
