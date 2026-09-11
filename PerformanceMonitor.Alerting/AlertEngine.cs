@@ -126,7 +126,14 @@ public sealed class AlertEngine
        proof a fresh observation exists. Poison wait is deliberately NOT level-triggered like CPU
        (which resamples live every sweep): a delta is one collector cycle's computation, and
        reading it twice is the same event surfacing twice, not two observations of a standing
-       condition. Gate re-fire on BOTH the cooldown AND a newer collection_time than last fired. */
+       condition. Gate re-fire on BOTH the cooldown AND a newer collection_time than last fired.
+
+       #3282 note, so nobody reads the contrast above as "CPU needs no freshness guard": CPU has one
+       now too, and for a DIFFERENT reason. Here freshness stops a stale delta being re-reported;
+       there it makes the persistence gate count SAMPLES rather than sweeps. The delta-versus-level
+       distinction is unchanged, which is why poison wait is still not behind that gate — its breach
+       arm observes once per collector cycle while its clear arm observes every sweep, so one gate
+       over both would count breaches and clears in different units. */
     private readonly ConcurrentDictionary<string, DateTime> _lastPoisonWaitCollectionTime = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastLongRunningQueryAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastTempDbSpaceAlert = new();
