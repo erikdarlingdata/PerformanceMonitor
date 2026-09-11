@@ -94,6 +94,7 @@ public static class DarlingWebEndpoints
         "delete_custom_alert_rule",
         "validate_custom_alert_rule",
         "test_custom_alert_rule",
+        "list_custom_alert_templates",
     };
 
     /// <summary>The window (hours) the fleet card blocking / deadlock counts default to — the WPF Overview's window.</summary>

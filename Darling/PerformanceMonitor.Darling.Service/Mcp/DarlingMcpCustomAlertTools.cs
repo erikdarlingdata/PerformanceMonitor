@@ -378,6 +378,34 @@ public sealed class DarlingMcpCustomAlertTools
         }
     }
 
+    [McpServerTool(Name = "list_custom_alert_templates"), Description(
+        "Lists the built-in STARTER custom-alert-rule templates - curated {metric, predicate, hysteresis} " +
+        "definitions for common signals: PostgreSQL (dead-tuple pile-up / replica replay lag / connection " +
+        "count / table bloat / replication-slot WAL retention) and SQL Server (high signal-wait % / sustained " +
+        "blocking / long-running query / tempdb space). Each entry is {key, name, description, definition}, " +
+        "where definition is a ready-to-use rule body. Browse them, tweak the thresholds and scope to your " +
+        "fleet (the starters are deliberately conservative, not tuned), then pass the definition to " +
+        "create_custom_alert_rule to save it - or to test_custom_alert_rule to see what it would do right now. " +
+        "Read-only: this lists code-defined templates and touches no store.")]
+    public static Task<string> ListCustomAlertTemplates()
+    {
+        var templates = new JsonArray();
+        foreach (var template in CustomAlertTemplates.All)
+        {
+            templates.Add(new JsonObject
+            {
+                ["key"] = template.Key,
+                ["name"] = template.Name,
+                ["description"] = template.Description,
+                // The definition embedded as a JSON object (NOT an escaped string), so a client can hand it
+                // straight to create_custom_alert_rule / test_custom_alert_rule after editing.
+                ["definition"] = JsonNode.Parse(template.DefinitionJson),
+            });
+        }
+
+        return Task.FromResult(new JsonObject { ["templates"] = templates }.ToJsonString(McpHelpers.JsonOptions));
+    }
+
     /// <summary>The full single-rule wire shape (definition embedded as JSON, NOT an escaped string) - mirrors
     /// <see cref="DarlingWebEndpoints.BuildFullViewNode"/>, adding the <c>enabled</c> column that alert rules
     /// carry and views do not. Returned by get / create / update.</summary>
