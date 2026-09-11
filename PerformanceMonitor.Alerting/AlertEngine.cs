@@ -578,15 +578,19 @@ public sealed class AlertEngine
     /// </summary>
     private async Task SaveCpuPersistenceAsync(string key, AlertPersistenceRecord record)
     {
-        var writeClock = Stopwatch.StartNew();
         try
         {
             await _stateStore.SaveAlertPersistenceAsync(key, CpuPersistenceMetric, record);
         }
         catch (Exception ex)
         {
-            _logger?.LogError("Failed to persist the CPU persistence gate for {ServerKey} after {ElapsedMs} ms: {Message}", key, writeClock.ElapsedMilliseconds, ex.Message);
-            _readFailures?.RecordReadFailure(key, "CPU persistence gate save", writeClock.ElapsedMilliseconds);
+            /* NOT counted by #3013's counter, and Warning rather than Error — the same call
+               SaveOccurrencesAsync makes for the same reason. That counter is about READS the alert pass
+               performs and swallows, measured against a denominator of alert passes; a write in its
+               numerator would read as the pass going blind on a condition when in fact the condition was
+               evaluated correctly and only the memory of it was lost. The seed LOAD above is a read and is
+               counted there. */
+            _logger?.LogWarning("Could not persist the CPU persistence gate for {ServerKey}: {Message}", key, ex.Message);
         }
     }
 

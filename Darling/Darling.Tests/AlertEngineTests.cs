@@ -187,6 +187,33 @@ public sealed class AlertEngineTests
         }
     }
 
+    /// <summary>A state store whose persistence SAVE always throws — everything else behaves. #3282's
+    /// degradation path: the gate must keep working from its in-memory record.</summary>
+    private sealed class ThrowingPersistenceSaveStore : IAlertStateStore
+    {
+        private readonly FakeStateStore _inner = new();
+
+        public int SaveAttempts { get; private set; }
+
+        public Task<int?> LoadEdgeTriggerWatermarkAsync(string serverKey, string metricName) => _inner.LoadEdgeTriggerWatermarkAsync(serverKey, metricName);
+        public Task SaveEdgeTriggerWatermarkAsync(string serverKey, string metricName, int watermark) => _inner.SaveEdgeTriggerWatermarkAsync(serverKey, metricName, watermark);
+        public Task<DateTime?> LoadFailedJobWatermarkAsync(string serverKey) => _inner.LoadFailedJobWatermarkAsync(serverKey);
+        public Task SaveFailedJobWatermarkAsync(string serverKey, DateTime watermark) => _inner.SaveFailedJobWatermarkAsync(serverKey, watermark);
+        public Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState) => _inner.SaveDatabaseStateAlertedAsync(serverKey, databaseName, effectiveState);
+        public Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName) => _inner.ClearDatabaseStateAlertedAsync(serverKey, databaseName);
+        public Task<IReadOnlyDictionary<string, IncidentOccurrenceState>> LoadIncidentOccurrencesAsync(string serverKey, string metricName) => _inner.LoadIncidentOccurrencesAsync(serverKey, metricName);
+        public Task SaveIncidentOccurrencesAsync(string serverKey, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states) => _inner.SaveIncidentOccurrencesAsync(serverKey, metricName, states);
+
+        public Task<AlertPersistenceRecord?> LoadAlertPersistenceAsync(string serverKey, string metricName) =>
+            Task.FromResult<AlertPersistenceRecord?>(null);
+
+        public Task SaveAlertPersistenceAsync(string serverKey, string metricName, AlertPersistenceRecord record)
+        {
+            SaveAttempts++;
+            throw new InvalidOperationException("persistence store is down");
+        }
+    }
+
     private sealed class FakeStateStore : IAlertStateStore
     {
         public Dictionary<(string Key, string Metric), int> EdgeWatermarks { get; } = new();
@@ -697,6 +724,44 @@ public sealed class AlertEngineTests
 
         /* And it resolves normally rather than being orphaned. */
         at = await DriveCpuAsync(restarted, sqlCpu: 20, totalCpu: 30, samples: AlertEngine.CpuClearSamples, from: at);
+        Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task Cpu_APersistenceSaveFailure_StillFires_AndIsNotCountedAsASwallowedRead()
+    {
+        /* Two claims, and the second is the one that is easy to get wrong — I did.
+
+           The gate decides each observation from its IN-MEMORY record, so a store that cannot be written
+           costs the streak across a restart and never an alert: the incident still fires on the third
+           sample.
+
+           And the failure is NOT recorded on #3013's counter. That counter is about READS the alert pass
+           performs and swallows, against a denominator of alert passes, and an operator reads a non-zero
+           value as the pass going blind on a condition. A write in its numerator says that about a
+           condition that was in fact evaluated correctly — only the memory of it was lost. Same call
+           SaveOccurrencesAsync already makes for the same reason, and it is a claim no compiler or
+           text-assertion can carry. */
+        var counter = new AlertReadFailureCounter(() => new DateTime(2026, 9, 5, 8, 0, 0, DateTimeKind.Utc));
+        var store = new ThrowingPersistenceSaveStore();
+        var h = new Harness { ReadFailures = counter };
+        h.Settings.CpuEnabled = true;
+
+        var engine = new AlertEngine(
+            h.Settings, h.Adapter, store, h.Deliverer, _ => false,
+            resolutionCallback: (r, _) => { h.Resolutions.Add(r); return Task.CompletedTask; },
+            utcNow: () => h.Now, readFailures: counter);
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+
+        Assert.True(store.SaveAttempts > 0, "the engine must have tried to persist, or this pin proves nothing");
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(0, counter.ReadFor(Key).ServerReadFailures);
+        Assert.Equal(0, counter.ReadFor(Key).InstanceReadFailures);
+
+        /* And it resolves normally too — a broken save must not strand an open incident. */
+        await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 30, samples: AlertEngine.CpuClearSamples,
+            from: Harness.SampleBase.AddMinutes(AlertEngine.CpuBreachSamples));
         Assert.Single(h.Resolutions);
     }
 
