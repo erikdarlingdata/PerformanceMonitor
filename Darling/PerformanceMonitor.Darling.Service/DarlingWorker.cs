@@ -68,6 +68,12 @@ public sealed class DarlingWorker : BackgroundService
        edge-trigger gates shape delivery on top of this. */
     private static readonly TimeSpan s_alertSweepInterval = TimeSpan.FromSeconds(30);
 
+    /* #3285: the custom-alert evaluation cadence. Deliberately slower than the 30s built-in alert sweep —
+       user-authored threshold rules are not poison-wait-urgent, and this halves the fleet compose-query cost.
+       Doubles as the per-rule cadence default and the rule-cache TTL; a rule may override its own interval
+       (floored at 30s). */
+    private static readonly TimeSpan s_customAlertSweepInterval = TimeSpan.FromSeconds(60);
+
     /* The command plane's poll cadence (Stage 2): a tighter 5-second tick, run on its OWN loop
        independent of the 15-second collection sweep and the 30-second alert sweep, so an operator
        command (pause, test_connect, snapshot_now, ...) is picked up within ~5s and a slow command
@@ -460,6 +466,10 @@ public sealed class DarlingWorker : BackgroundService
        and emails through a mute rule that says not to. */
     private Func<AlertMuteContext, bool>? _isAlertMuted;
 
+    /* #3285: the user-authored custom-alert evaluator. Null when the deployment cannot supply a viewer-role
+       pool for it (BYO / non-Windows in this first slice); custom alerts are simply not evaluated there. */
+    private CustomAlertEvaluator? _customAlertEvaluator;
+
     private readonly ConcurrentDictionary<string, DateTime> _lastPostgresAlert = new(StringComparer.Ordinal);
 
     /* #2711: Postgres Deadlocks/Blocking, mirroring AlertEngine's own field shape for the SQL Server
@@ -637,6 +647,11 @@ public sealed class DarlingWorker : BackgroundService
            a DISCONNECTED server too (collection-stopped is exactly the unreachable-server case), above
            the Runtime-null connect gate. */
         public DateTime NextSelfAlertSweep { get; set; } = DateTime.MinValue;
+
+        /* MinValue = the first loop pass evaluates the custom-alert rules immediately. Separate from
+           NextAlertSweep and above the connect gate for the same reason as the self-alert sweep: a custom
+           rule reads the collected store, which exists whether or not the server is currently connected. */
+        public DateTime NextCustomAlertSweep { get; set; } = DateTime.MinValue;
 
         /* Default MinValue; on connect TryConnectAsync PHASES this to now + a sub-2.5-minute per-server offset
            (#1553 jitter site 3) when analysis is enabled, so a fleet restart does not make every freshly
@@ -1475,6 +1490,40 @@ public sealed class DarlingWorker : BackgroundService
         _isAlertMuted = muteRuleService.IsAlertMuted;
         _alertCooldownMinutes = alertSettings.CooldownMinutes;
 
+        /* #3285: the user-authored custom-alert evaluator. A rule's compose metric runs on a dedicated
+           VIEWER-role pool (which carries the statement_timeout cap and the least-privilege ACL) — never the
+           owner pool. Requires a managed Windows store with a provisioned viewer credential (written by
+           EnsureProvisionedAsync above); other deployments do not get custom alerts in this first slice. */
+        string? customAlertViewerConnString = null;
+        if (OperatingSystem.IsWindows() && config.Postgres.Managed)
+        {
+            customAlertViewerConnString = DarlingManagedPostgres.TryBuildViewerConnectionStringFromStoredCredential(config.Postgres);
+        }
+
+        await using var customAlertViewerSource =
+            customAlertViewerConnString is not null ? NpgsqlDataSource.Create(customAlertViewerConnString) : null;
+        if (customAlertViewerSource is not null)
+        {
+            _customAlertEvaluator = new CustomAlertEvaluator(
+                new CustomAlertRuleStore(postgres),
+                new CustomAlertStateStore(postgres),
+                customAlertViewerSource,
+                deliverer,
+                muteRuleService.IsAlertMuted,
+                historyStore,
+                (int)s_customAlertSweepInterval.TotalSeconds,
+                s_customAlertSweepInterval,
+                _loggerFactory.CreateLogger<CustomAlertEvaluator>());
+            _logger.LogInformation(
+                "Custom alert evaluator ready (#3285) — evaluating user rules on the viewer-role pool every {Seconds}s.",
+                (int)s_customAlertSweepInterval.TotalSeconds);
+        }
+        else
+        {
+            _logger.LogInformation(
+                "Custom alert evaluator not started: this build evaluates custom alerts only on a managed Windows store with a provisioned viewer role (#3285 first slice).");
+        }
+
         /* Stage 4: the service self-alerts, over the SAME deliverer + history + mute check the engine uses.
            collection-stopped / capture-down are polled from collection_log on the alert cadence below;
            connection lost/restored fire on the connect edges in TryConnectAsync. */
@@ -2053,6 +2102,19 @@ public sealed class DarlingWorker : BackgroundService
                     server.Config.ServerId,
                     server.Config.DisplayName,
                     connected: server.Runtime is not null,
+                    stoppingToken);
+            }
+
+            /* #3285: user-authored custom-alert rules, above the connect gate (like the self-alerts) so a rule
+               reading the collected store still evaluates for a currently-disconnected server. Its own cadence;
+               null on deployments that cannot supply a viewer-role pool. */
+            if (_customAlertEvaluator is not null && DateTime.UtcNow >= server.NextCustomAlertSweep)
+            {
+                server.NextCustomAlertSweep = DateTime.UtcNow.Add(s_customAlertSweepInterval);
+                await _customAlertEvaluator.EvaluateServerAsync(
+                    server.Config.ServerId,
+                    server.Config.StorageName,
+                    server.Config.DisplayName,
                     stoppingToken);
             }
 

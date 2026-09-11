@@ -688,6 +688,13 @@ GRANT CONNECT ON DATABASE {database} TO {mcp};
 --    no sequence USAGE grant.
 GRANT INSERT, UPDATE, DELETE ON {config}.custom_views TO {viewer};
 GRANT INSERT, UPDATE, DELETE ON {config}.custom_views TO {mcp};
+-- Custom alerting (#3285): the web editor (viewer) and the MCP rule tools (mcp) CRUD config.custom_alert_rules,
+-- the same narrow single-table floor as custom_views (non-secret rule JSON -- no ViewerRestrictedConfigTables
+-- carve, no config_command pivot). Created by V116, so provisioning runs after migration. NOTE: the sibling
+-- config.custom_alert_state is written by the CustomAlertEvaluator on the OWNER pool only, so it deliberately
+-- gets NO viewer/mcp grant here (add a viewer SELECT only when the editor surfaces a rule's firing status).
+GRANT INSERT, UPDATE, DELETE ON {config}.custom_alert_rules TO {viewer};
+GRANT INSERT, UPDATE, DELETE ON {config}.custom_alert_rules TO {mcp};
 -- The Viewer's per-database database-state override editor (#1986) writes config.database_state_expected:
 -- the same narrow single-table floor as custom_views. Created by V49, so provisioning runs after migration.
 GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
