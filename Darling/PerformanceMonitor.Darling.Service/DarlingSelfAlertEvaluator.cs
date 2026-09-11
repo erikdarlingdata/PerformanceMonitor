@@ -174,8 +174,15 @@ internal sealed class DarlingSelfAlertEvaluator
        CostRegressionFactor, before it alerts — so a cheap collector, or a new one, cannot trip it.
        #2846: the comparison is per RUN, not per day. Daily totals are runs x cost-per-run, so a cadence
        recovery — more of the same work, each unit cheaper — used to read as a regression. It fired 3,259 times
-       over 612 pairs in one day, 53% of them on collectors whose per-run cost had FALLEN. The floor stays on
-       the daily TOTAL so a cheap-but-frequent collector still cannot trip on a per-run doubling. */
+       over 612 pairs in one day, 53% of them on collectors whose per-run cost had FALLEN.
+       #3316: the two gates measure DIFFERENT UNITS, so the daily-total floor does not constrain the per-run
+       ratio — a total-cost floor is cleared by VOLUME, so a collector averaging 3 ms per run clears
+       CostRegressionBaselineFloorMs on run count alone and is then judged by a ratio on that 3 ms. Such a
+       firing is TRUTHFUL (both sides are means over many runs, so this is not rounding) and useless: the
+       measured case doubled 3.0 -> 6.1 ms per run over 50 runs, which costs 0.16 s a day. So a third gate
+       asks what the regression COSTS — the per-run rise times the volume it is paid on — and requires
+       CostRegressionAddedMsFloor of it. That is unit-consistent with the ratio, and unlike a minimum
+       per-run baseline it still reports a 3 ms collector that runs often enough for the rise to matter. */
     private readonly ConcurrentDictionary<string, string> _activeCostRegression = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastCostRegressionAlert = new();
 
@@ -204,6 +211,14 @@ internal sealed class DarlingSelfAlertEvaluator
 
     private const double CostRegressionFactor = 2.0;
     private const long CostRegressionBaselineFloorMs = 1000;
+
+    /// <summary>#3316: the minimum ADDED cost per day, in ms, before a per-run regression is worth an
+    /// alert and its paired resolution. Derived from a measured 41-hour fleet sample rather than chosen:
+    /// the firings that identified a real regression added 21.8-22.6 s/day, while the ones that were
+    /// truthful and unactionable added 0.16-3.6 s/day. 5 s sits in the empty band between them with more
+    /// than 4x headroom on both sides. It is also 5x <see cref="CostRegressionBaselineFloorMs"/>, which
+    /// is the eligibility floor for the collector rather than for the regression.</summary>
+    private const long CostRegressionAddedMsFloor = 5000;
     private static readonly TimeSpan CostRegressionBaselineWindow = TimeSpan.FromDays(14);
 
     /// <summary>The fixed key for the fleet-level Store Disk Pressure edge (not a real server).</summary>
@@ -758,7 +773,8 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             regressions = await Mcp.DarlingCollectorCostReader.GetCostRegressionsAsync(
                 postgres, _utcNow() - CostRegressionBaselineWindow,
-                CostRegressionBaselineFloorMs, CostRegressionFactor, cancellationToken);
+                CostRegressionBaselineFloorMs, CostRegressionFactor, CostRegressionAddedMsFloor,
+                cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -807,7 +823,8 @@ internal sealed class DarlingSelfAlertEvaluator
                     detail: $"The '{regression.CollectorName}' collector's OWN query time on {regression.ServerName} rose to " +
                         $"{regression.LatestMsPerRun:N1} ms per run, {ratio:N1}x its {CostRegressionBaselineWindow.TotalDays:N0}-day " +
                         $"baseline of {regression.BaselineMsPerRun:N1} ms per run ({regression.LatestRuns:N0} runs totalling " +
-                        $"{regression.LatestMs:N0} ms so far today). This is the MONITORING TOOL's own cost, not the " +
+                        $"{regression.LatestMs:N0} ms so far today, adding {regression.AddedMsPerDay / 1000.0:N1} s of collection " +
+                        $"time a day at that volume). This is the MONITORING TOOL's own cost, not the " +
                         $"server's workload - each individual run is costing more than it used to. Measured PER RUN (#2846) so " +
                         $"a cadence change cannot read as a cost change. get_collector_cost with " +
                         $"collector_name={regression.CollectorName} shows the trend. {CostIsNotAllTargetSide}",
