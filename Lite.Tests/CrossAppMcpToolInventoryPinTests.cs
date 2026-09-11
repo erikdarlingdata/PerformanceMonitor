@@ -223,6 +223,21 @@ public sealed class CrossAppMcpToolInventoryPinTests
            there is no Lite twin to port (same reasoning as the Custom Views + alert-tuning tools above). */
         "add_servers",
         "remove_server",
+
+        /* #3285: the custom-alert-rule tools — the Darling MCP server's write surface for user-authored alert
+           rules (create_custom_alert_rule / update_custom_alert_rule / delete_custom_alert_rule CRUD
+           config.custom_alert_rules in the central Postgres store; get_custom_alert_rule / list_custom_alert_rules
+           read them back; validate_custom_alert_rule checks a definition against the same compose catalog the
+           Custom Views tools draw from, without saving). Darling-ONLY by architecture, the same kind of entry as
+           the Custom Views + alert-tuning tools above rather than a "not ported yet": custom alert rules are a
+           central-store feature the headless service evaluates on its sweep, and Lite (a single-instance WPF app
+           over local DuckDB with no central, service-honored alert store) has no twin to port. */
+        "create_custom_alert_rule",
+        "get_custom_alert_rule",
+        "list_custom_alert_rules",
+        "update_custom_alert_rule",
+        "delete_custom_alert_rule",
+        "validate_custom_alert_rule",
     };
 
     [Fact]
