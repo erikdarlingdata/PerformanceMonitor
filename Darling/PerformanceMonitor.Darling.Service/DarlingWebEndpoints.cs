@@ -1737,12 +1737,27 @@ public static class DarlingWebEndpoints
     private static readonly CollectorTargetInfo s_azureMiTarget = new() { IsAzureManagedInstance = true, SqlMajorVersion = 16, HasMsdbAccess = true };
     private static readonly CollectorTargetInfo s_awsRdsTarget = new() { IsAwsRds = true, SqlMajorVersion = 16, HasMsdbAccess = true };
 
+    /* PostgreSQL target profiles (#3285). Engine = PostgreSql so the dispatch gate's engine half
+       (CollectorCatalog.EngineMatches) selects the PostgreSQL collectors and excludes every SQL Server one -
+       and excludes these PG collectors from the four SQL profiles above. The major/version are pinned modern
+       so the version-gated PG collectors (pg_stat_io PG16+, pg_write_stats PG14+) read as available, and
+       IsInRecovery defaults false so the writer-only collectors (autovacuum, index/table stats) do too.
+       s_postgresTarget is stock PostgreSQL: IsAurora is false, so the Aurora-only collectors (pg_wait_stats,
+       pg_cpu_utilization) correctly read unavailable there; s_auroraTarget flips IsAurora on. */
+    private static readonly CollectorTargetInfo s_postgresTarget =
+        new() { Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = 17, PostgresVersionNum = 170_005 };
+    private static readonly CollectorTargetInfo s_auroraTarget =
+        new() { Engine = CollectorTargetEngine.PostgreSql, IsAurora = true, PostgresMajorVersion = 17, PostgresVersionNum = 170_005 };
+
     /// <summary>The per-server-type availability of a measure (design D4), derived from its owning collector's
-    /// <see cref="ICollectorSchemaInfo.AppliesTo"/> gate — the single authoritative target gate — so the composer
-    /// can label/grey a measure a given server type can't collect. <c>needsMsdb</c> is the SQL-Agent dependency
-    /// (job/agent measures), taken from the named SQL-Agent set rather than probed from the gate - see the
-    /// note there on why #2559 made probing impossible and why the badge still earns its place.
-    /// Returns null only if a measure's source has no collector (impossible — pinned by test).</summary>
+    /// target gate so the composer can label/grey a measure a given server type can't collect. Each flag is
+    /// the FULL dispatch gate <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo, CollectorTargetInfo)"/>
+    /// (<c>EngineMatches AND definition.AppliesTo</c>), NOT the raw <see cref="ICollectorDefinition{TRow}.AppliesTo"/>
+    /// override: the engine half is what makes a PostgreSQL measure read unavailable on the SQL Server profiles
+    /// and a SQL Server measure unavailable on the PostgreSQL profiles. <c>postgres</c>/<c>aurora</c> were added
+    /// with the #3285 PostgreSQL measures; <c>needsMsdb</c> is the SQL-Agent dependency (job/agent measures),
+    /// taken from the named SQL-Agent set rather than probed from the gate - see the note there on why #2559
+    /// made probing impossible. Returns null only if a measure's source has no collector (impossible, pinned by test).</summary>
     private static JsonObject? BuildAppliesToNode(string sourceTable)
     {
         if (!s_collectorByTable.TryGetValue(sourceTable, out var collector))
@@ -1752,10 +1767,17 @@ public static class DarlingWebEndpoints
 
         return new JsonObject
         {
-            ["onPrem"] = collector.AppliesTo(s_onPremTarget),
-            ["azureSqlDb"] = collector.AppliesTo(s_azureSqlDbTarget),
-            ["azureMi"] = collector.AppliesTo(s_azureMiTarget),
-            ["awsRds"] = collector.AppliesTo(s_awsRdsTarget),
+            /* CollectorCatalog.AppliesTo, NOT the raw collector.AppliesTo: the former is
+               EngineMatches && definition.AppliesTo, so a PostgreSQL collector (including one gated `=> true`)
+               correctly reads FALSE on the SQL Server profiles and a SQL Server collector reads FALSE on the
+               PostgreSQL profiles. The raw override skips the engine half and reported a `=> true` PG collector
+               as available on every SQL Server target (#3285). */
+            ["onPrem"] = CollectorCatalog.AppliesTo(collector, s_onPremTarget),
+            ["azureSqlDb"] = CollectorCatalog.AppliesTo(collector, s_azureSqlDbTarget),
+            ["azureMi"] = CollectorCatalog.AppliesTo(collector, s_azureMiTarget),
+            ["awsRds"] = CollectorCatalog.AppliesTo(collector, s_awsRdsTarget),
+            ["postgres"] = CollectorCatalog.AppliesTo(collector, s_postgresTarget),
+            ["aurora"] = CollectorCatalog.AppliesTo(collector, s_auroraTarget),
             ["needsMsdb"] = s_msdbBackedTables.Contains(sourceTable),
         };
     }
