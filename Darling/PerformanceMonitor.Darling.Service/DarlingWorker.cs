@@ -3666,13 +3666,23 @@ public sealed class DarlingWorker : BackgroundService
 
                 if (!capacityPercent.HasValue)
                 {
-                    /* NO CAPACITY READING FREEZES THE GATE — never a breach, never a clear, and the sample
-                       is not marked as counted so a later re-read of it can still be used if the capacity
-                       column gets backfilled. A missing headroom figure is not a measurement of anything,
-                       and the pre-#3282 code treated it as "not exceeded", which resolved an open incident
-                       on the strength of a reading it never took. Not firing on it was already the rule
-                       (#3281 refuses to fall back to percent-of-allocated); not RESOLVING on it is the
-                       other half of the same rule. */
+                    /* NO CAPACITY READING FREEZES THE GATE — never a breach, never a clear. A missing
+                       headroom figure is not a measurement of the thing the threshold is against, and the
+                       pre-#3282 code treated it as "not exceeded", which resolved an open incident on the
+                       strength of a reading it never took. Not firing on it was already the rule (#3281
+                       refuses to fall back to percent-of-allocated); not RESOLVING on it is the other half
+                       of the same rule.
+
+                       `continue` rather than `break` because this is not an EDGE: ending the pass here
+                       would let one capacity-less minute stall the whole batch and every sample behind it.
+
+                       The skipped sample is NOT revisited, and an earlier version of this comment claimed
+                       otherwise (review catch). Once any later sample in the batch counts, the watermark
+                       advances past this one and `sample_time > $2` excludes it for good — and it could not
+                       be corrected anyway: RdsCpuIngestor COPYs new rows keyed off MAX(sample_time) and
+                       never updates an inserted one, so there is no backfill path to wait for. Nothing is
+                       lost by that, which is the point: a sample with no capacity figure has no
+                       contribution to make to a gate counting breaches of a capacity threshold. */
                     continue;
                 }
 
