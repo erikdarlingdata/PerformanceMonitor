@@ -1736,27 +1736,23 @@ public sealed class AlertEngine
                     ? $"{dbName} first observed {stateText} (no baseline yet)"
                     : $"{dbName} changed to {stateText} (expected {expectedText})";
 
-                /* #2109: the same fields the prose carries, as discrete facts — this alert fired with
-                   Context: null, which left the database name reachable only by parsing the title.
-                   #3297: the structured fields are now the ONLY carrier, and the detail text is their
-                   flattening, as at every other engine fire site. The prose used to restate them under
-                   different labels, which since #3297 delivers every channel the same facts twice — the
-                   fields are the canonical copy per #2109, so the restatement is what goes. The one thing
-                   the prose said that the fields did not (no baseline yet) is a field now. */
-                var stateFields = new List<(string Label, string Value)>
-                {
-                    ("Database", dbName),
-                    ("Current State", stateText),
-                    ("Expected State", expectedText)
-                };
-
-                if (pending)
-                {
-                    stateFields.Add(("Baseline", "none — first observed in a critical state"));
-                }
-
+                /* #2109: the same facts as discrete fields — this alert fired with Context: null, which
+                   left the database name reachable only by parsing the title. These three fields are the
+                   canonical copy and the detail text is their flattening, as at every other engine fire
+                   site, so no channel receives the same fact under two labels. The no-baseline case needs
+                   no field of its own: expectedText above IS "(no baseline yet)" whenever pending, and
+                   ShortMessage says it too. */
                 var stateContext = new AlertContext();
-                stateContext.Details.Add(new AlertDetailItem { Heading = dbName, Fields = stateFields });
+                stateContext.Details.Add(new AlertDetailItem
+                {
+                    Heading = dbName,
+                    Fields = new()
+                    {
+                        ("Database", dbName),
+                        ("Current State", stateText),
+                        ("Expected State", expectedText)
+                    }
+                });
 
                 var detailText = AlertContextBuilders.ContextToDetailText(stateContext);
 
