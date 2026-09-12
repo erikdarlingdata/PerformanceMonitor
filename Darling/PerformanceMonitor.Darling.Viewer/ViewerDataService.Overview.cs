@@ -949,8 +949,13 @@ public sealed class ServerSummaryItem
     /// <summary>Deadlocks per HOUR over <see cref="DeadlockWindow"/> — what the band evaluates (#3368), or
     /// null when the window is too short to normalise. Rendered beside the count so the dot's reason is
     /// legible.</summary>
+    /* DeadlockCountForBand, not the raw count - see DarlingFleetReader.BuildCard's note. A PostgreSQL
+       target's raw count is a structural zero, and DeadlockDetail renders this on non-null alone, so the
+       raw value would show 0.0/hr on a card whose severity says Unknown. */
     public double? DeadlockRatePerHour =>
-        ServerHealthClassifier.DeadlockRatePerHour(DeadlockCount, DeadlockWindow);
+        DeadlockCountForBand.HasValue
+            ? ServerHealthClassifier.DeadlockRatePerHour(DeadlockCountForBand.Value, DeadlockWindow)
+            : null;
 
     /// <summary>Deadlock band — deadlocks per hour over the window against the store's tiers (#3368); no
     /// source Unknown.</summary>

@@ -115,6 +115,12 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
         Assert.Equal(HealthSeverity.Unknown, card.BlockingSeverity);
         Assert.Equal(HealthSeverity.Unknown, card.DeadlockSeverity);
 
+        /* And the RATE says the same thing the severity says. A rate of 0.0/hr on a target with no deadlock
+           source is a fabricated measurement, and both the card chip and the viewer detail line render this
+           field on non-null alone - so a structural zero here would contradict the Unknown above on the very
+           same card. */
+        Assert.Null(card.DeadlockRatePerHour);
+
         /* Threads already reached Unknown on its own (a null ceiling), and CPU does since #3267. So after
            this the card makes NO unearned claim on any metric row - which is the property worth asserting,
            rather than three separate arms that happen to agree today. */
@@ -135,6 +141,7 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
         Assert.Equal(HealthSeverity.Unknown, card.MemorySeverity);
         Assert.Equal(HealthSeverity.Unknown, card.BlockingSeverity);
         Assert.Equal(HealthSeverity.Unknown, card.DeadlockSeverity);
+        Assert.Null(card.DeadlockRatePerHour);
     }
 
     /// <summary>

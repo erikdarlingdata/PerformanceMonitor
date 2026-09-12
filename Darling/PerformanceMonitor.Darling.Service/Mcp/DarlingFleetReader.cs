@@ -577,7 +577,15 @@ GROUP BY server_id, collector_name";
             BlockingSeverity = ServerHealthClassifier.BlockingSeverity(blockingForBand, maxBlockedSeconds),
             DeadlockCount = deadlockCount,
             DeadlockLastSeen = deadlock.LastSeen,
-            DeadlockRatePerHour = ServerHealthClassifier.DeadlockRatePerHour(deadlockCount, deadlockWindow),
+            /* deadlocksForBand, not the raw count, for the same reason DeadlockSeverity below takes it: on a
+               PostgreSQL target there is no deadlock reading at all and the raw count is a STRUCTURAL zero,
+               so a rate derived from it publishes 0.0/hr - a measurement nobody took - while the severity on
+               the same card correctly reads Unknown. The card chip and the viewer detail line both render
+               this field on nothing but non-null, so the disclosure has to live here. #3017 fixed exactly
+               this confusion for the count and the band; the rate must not reintroduce it. */
+            DeadlockRatePerHour = deadlocksForBand.HasValue
+                ? ServerHealthClassifier.DeadlockRatePerHour(deadlocksForBand.Value, deadlockWindow)
+                : null,
             DeadlockWindow = deadlockWindow,
             DeadlockRateThresholds = deadlockTiers,
             DeadlockSeverity = ServerHealthClassifier.DeadlockSeverity(
