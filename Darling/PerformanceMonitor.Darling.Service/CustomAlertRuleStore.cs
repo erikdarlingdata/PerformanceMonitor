@@ -54,13 +54,17 @@ SELECT id, name, definition, description, enabled, version, created_at, updated_
 FROM custom_alert_rules
 WHERE id = $1";
 
-    /// <summary>Every ENABLED rule in full — the evaluator's per-sweep read (a handful of rows). Ordered by
-    /// id so evaluation order is stable across sweeps.</summary>
+    /// <summary>Every ENABLED rule in full — the evaluator's per-sweep read. Ordered by id so evaluation order
+    /// is stable across sweeps, and bounded by <c>LIMIT $1</c> (the evaluator's hard ceiling) so a table that
+    /// somehow holds more enabled rows than the cap can never make one sweep evaluate an unbounded set. $1 is
+    /// bound to <see cref="EnabledRuleCap"/> + 1 — one beyond the cap — so the caller can DETECT (and warn about)
+    /// an over-cap table while still reading a bounded number of rows.</summary>
     public const string ListEnabledSql = @"
 SELECT id, name, definition, description, enabled, version, created_at, updated_at, updated_by
 FROM custom_alert_rules
 WHERE enabled
-ORDER BY id";
+ORDER BY id
+LIMIT $1";
 
     /// <summary>Inserts a new rule at version 1. $1 name, $2 definition (jsonb), $3 description, $4 enabled, $5 updated_by.</summary>
     public const string InsertSql = @"
@@ -94,6 +98,73 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     /// <summary>An abuse bound on the rule name (the column itself is unbounded text).</summary>
     public const int MaxNameLength = 200;
 
+    /// <summary>
+    /// The hard cap on ENABLED alert rules across the whole store (#3285, Round-2 "rule-count cap"). Only
+    /// ENABLED rules cost anything: each sweep, the evaluator runs one compose scalar query per (enabled rule,
+    /// in-scope server) pair — so the per-sweep store load scales as enabled_rules × in_scope_servers × the
+    /// sweep frequency, and nothing else bounds it. Disabled rules are never loaded or evaluated, so they are
+    /// deliberately NOT counted here (storing many paused rules is free). 100 sits far above any realistic
+    /// hand-authored rule set (operators run a handful to low dozens) while bounding the runaway/DoS worst case:
+    /// 100 enabled rules against a large fleet is already thousands of compose queries per sweep. Deliberately a
+    /// <c>const</c>, not a config knob (defaults over speculative config) — if a real deployment ever needs more,
+    /// that is a design change with a load conversation, not a setting to quietly raise.
+    /// </summary>
+    public const int EnabledRuleCap = 100;
+
+    /// <summary>The caller-facing refusal when a create would push the enabled count over <see cref="EnabledRuleCap"/>.</summary>
+    internal static readonly string EnabledCapCreateMessage =
+        $"Enabled custom alert rule limit ({EnabledRuleCap}) reached. Disable or delete an existing rule, or create this rule disabled.";
+
+    /// <summary>The caller-facing refusal when enabling an existing rule would push the enabled count over <see cref="EnabledRuleCap"/>.</summary>
+    internal static readonly string EnabledCapEnableMessage =
+        $"Enabled custom alert rule limit ({EnabledRuleCap}) reached. Disable or delete another rule before enabling this one.";
+
+    /// <summary>
+    /// A fixed advisory-lock key that serializes the enabled-rule cap's count-then-write critical section via
+    /// <c>pg_advisory_xact_lock</c>, so two concurrent enabled creates/enables cannot both read a stale
+    /// under-cap count and race past the ceiling (READ COMMITTED alone does not prevent that phantom — the count
+    /// subquery sees the same pre-insert total in both transactions). Distinct from
+    /// <c>PgMigrations.MigrationLockKey</c> (0x4441524C494E47 "DARLING") so the two never collide in Postgres's
+    /// single 64-bit advisory-lock key space.
+    /// </summary>
+    private const long EnabledCapAdvisoryLockKey = 0x4441524C_43415021; // "DARLCAP!"
+
+    /// <summary>Takes the transaction-scoped cap lock (released automatically on commit/rollback). $1 lock key.</summary>
+    private const string AcquireEnabledCapLockSql = "SELECT pg_advisory_xact_lock($1)";
+
+    /// <summary>Inserts a new ENABLED rule at version 1 ONLY while the enabled count is under the cap; returns
+    /// zero rows (nothing inserted) when the cap is already reached. $1 name, $2 definition (jsonb),
+    /// $3 description, $4 updated_by, $5 cap. Run inside the advisory-locked transaction so the count and the
+    /// insert are one atomic step.</summary>
+    public const string InsertEnabledIfUnderCapSql = @"
+INSERT INTO custom_alert_rules (name, definition, description, enabled, version, created_at, updated_at, updated_by)
+SELECT $1, $2, $3, true, 1, (now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC'), $4
+WHERE (SELECT count(*) FROM custom_alert_rules WHERE enabled) < $5
+RETURNING id, name, definition, description, enabled, version, created_at, updated_at, updated_by";
+
+    /// <summary>Enables (or re-saves an already-enabled) rule under optimistic concurrency, refusing a
+    /// disabled-&gt;enabled transition that would exceed the cap. $1 id, $2 name, $3 definition (jsonb),
+    /// $4 description, $5 updated_by, $6 expected_version, $7 cap. Zero rows means id gone OR stale version OR
+    /// (the row was disabled AND the cap is reached) — disambiguated by <see cref="EnabledStateProbeSql"/>. The
+    /// <c>enabled = true OR …</c> guard lets an already-enabled rule be re-saved without consuming a cap slot.
+    /// Run inside the advisory-locked transaction.</summary>
+    public const string UpdateEnableIfUnderCapSql = @"
+UPDATE custom_alert_rules
+SET name = $2,
+    definition = $3,
+    description = $4,
+    enabled = true,
+    version = version + 1,
+    updated_at = (now() AT TIME ZONE 'UTC'),
+    updated_by = $5
+WHERE id = $1 AND version = $6
+  AND (enabled = true OR (SELECT count(*) FROM custom_alert_rules WHERE enabled) < $7)
+RETURNING id, name, definition, description, enabled, version, created_at, updated_at, updated_by";
+
+    /// <summary>Disambiguates a 0-row enable: the current version and enabled state, or no row when the id is
+    /// gone. $1 id.</summary>
+    public const string EnabledStateProbeSql = "SELECT version, enabled FROM custom_alert_rules WHERE id = $1";
+
     /// <summary>Lists every rule as a lightweight summary (no <c>definition</c>), ordered by name.</summary>
     public async Task<IReadOnlyList<CustomAlertRuleSummary>> ListAsync(CancellationToken cancellationToken = default)
     {
@@ -122,6 +193,8 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
         var results = new List<CustomAlertRule>();
         await using var command = _dataSource.CreateCommand(ListEnabledSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        // Read one beyond the cap: the evaluator's ceiling trims to the cap and warns if this extra row is present.
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = EnabledRuleCap + 1 });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -149,7 +222,9 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     /// <summary>
     /// Inserts a new rule. Returns <see cref="CustomAlertRuleResult.Ok"/> with the stored row (version 1),
     /// <see cref="CustomAlertRuleResult.Conflict"/> on a duplicate name (23505), or
-    /// <see cref="CustomAlertRuleResult.Invalid"/> on a failed argument guard. The caller is expected to have
+    /// <see cref="CustomAlertRuleResult.Invalid"/> on a failed argument guard OR when creating this rule ENABLED
+    /// would push the enabled count over <see cref="EnabledRuleCap"/>. A DISABLED create is always allowed (a
+    /// paused rule never evaluates, so it does not count against the cap). The caller is expected to have
     /// validated <paramref name="definitionJson"/>'s structure first.
     /// </summary>
     public async Task<CustomAlertRuleResult> CreateAsync(
@@ -162,12 +237,67 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
             return invalid;
         }
 
+        // A disabled rule never evaluates, so it does not count against the cap and takes the plain insert.
+        if (!enabled)
+        {
+            return await InsertDisabledAsync(name, description, definitionJson, updatedBy, cancellationToken);
+        }
+
+        // An ENABLED create must not push the enabled count over the cap. Serialize the count-then-insert with a
+        // transaction-scoped advisory lock so two concurrent enabled creates cannot both pass a stale under-cap
+        // count (the conditional insert alone, under READ COMMITTED, would let that phantom race through).
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await AcquireCapLockAsync(connection, transaction, cancellationToken);
+
+        await using var command = new NpgsqlCommand(InsertEnabledIfUnderCapSql, connection, transaction)
+        {
+            CommandTimeout = McpCommandDeadlines.ReadSeconds,
+        };
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });                                 // $1
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Jsonb, Value = definitionJson }); // $2
+        AddNullableText(command, description);                                                                      // $3
+        AddNullableText(command, updatedBy);                                                                        // $4
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = EnabledRuleCap });                          // $5
+
+        try
+        {
+            CustomAlertRule? row = null;
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    row = ReadFullRule(reader);
+                }
+            }
+
+            if (row is null)
+            {
+                // 0 rows: the cap guard failed (enabled count already at the cap). Nothing was inserted.
+                await transaction.RollbackAsync(cancellationToken);
+                return new CustomAlertRuleResult.Invalid(EnabledCapCreateMessage);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+            return new CustomAlertRuleResult.Ok(row);
+        }
+        catch (PostgresException ex) when (ex.SqlState == UniqueViolation)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return new CustomAlertRuleResult.Conflict($"An alert rule named '{name}' already exists.");
+        }
+    }
+
+    /// <summary>The plain insert for a DISABLED rule (no cap check needed). Shares the create result contract.</summary>
+    private async Task<CustomAlertRuleResult> InsertDisabledAsync(
+        string name, string? description, string definitionJson, string? updatedBy, CancellationToken cancellationToken)
+    {
         await using var command = _dataSource.CreateCommand(InsertSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });                                 // $1
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Jsonb, Value = definitionJson }); // $2
         AddNullableText(command, description);                                                                      // $3
-        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = enabled });                                 // $4
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = false });                                  // $4 (disabled)
         AddNullableText(command, updatedBy);                                                                        // $5
 
         try
@@ -186,7 +316,10 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     /// Updates a rule under optimistic concurrency. Returns <see cref="CustomAlertRuleResult.Ok"/> with the
     /// new row (version bumped) on success; <see cref="CustomAlertRuleResult.Conflict"/> on a stale
     /// <paramref name="expectedVersion"/> OR a duplicate name; <see cref="CustomAlertRuleResult.NotFound"/>
-    /// when the id no longer exists; <see cref="CustomAlertRuleResult.Invalid"/> on a failed argument guard.
+    /// when the id no longer exists; <see cref="CustomAlertRuleResult.Invalid"/> on a failed argument guard OR
+    /// when a disabled-&gt;enabled transition would push the enabled count over <see cref="EnabledRuleCap"/>
+    /// (else the create-time cap would be trivially bypassed by creating disabled then enabling). Disabling, or
+    /// re-saving an already-enabled rule, never increases the enabled count and so is never capped.
     /// </summary>
     public async Task<CustomAlertRuleResult> UpdateAsync(
         long id, string name, string? description, string definitionJson, bool enabled, int expectedVersion,
@@ -198,13 +331,71 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
             return invalid;
         }
 
+        // Disabling, or staying disabled, can never increase the enabled count, so it takes the plain versioned
+        // update. Only a transition to enabled has to be checked against (and serialized around) the cap.
+        if (!enabled)
+        {
+            return await UpdateDisabledAsync(id, name, description, definitionJson, expectedVersion, updatedBy, cancellationToken);
+        }
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await AcquireCapLockAsync(connection, transaction, cancellationToken);
+
+        await using var command = new NpgsqlCommand(UpdateEnableIfUnderCapSql, connection, transaction)
+        {
+            CommandTimeout = McpCommandDeadlines.ReadSeconds,
+        };
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });                                     // $1
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });                                 // $2
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Jsonb, Value = definitionJson }); // $3
+        AddNullableText(command, description);                                                                      // $4
+        AddNullableText(command, updatedBy);                                                                        // $5
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = expectedVersion });                         // $6
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = EnabledRuleCap });                          // $7
+
+        try
+        {
+            CustomAlertRule? row = null;
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    row = ReadFullRule(reader);
+                }
+            }
+
+            if (row is not null)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return new CustomAlertRuleResult.Ok(row);
+            }
+
+            // 0 rows: id gone, stale version, OR (the row was disabled AND the cap is reached). Probe under the
+            // same lock to tell the cap refusal apart from a NotFound / stale-version Conflict.
+            var classified = await ClassifyMissedEnableAsync(connection, transaction, id, expectedVersion, cancellationToken);
+            await transaction.RollbackAsync(cancellationToken);
+            return classified;
+        }
+        catch (PostgresException ex) when (ex.SqlState == UniqueViolation)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return new CustomAlertRuleResult.Conflict($"An alert rule named '{name}' already exists.");
+        }
+    }
+
+    /// <summary>The plain versioned update for a rule being set (or left) DISABLED (no cap check needed).</summary>
+    private async Task<CustomAlertRuleResult> UpdateDisabledAsync(
+        long id, string name, string? description, string definitionJson, int expectedVersion, string? updatedBy,
+        CancellationToken cancellationToken)
+    {
         await using var command = _dataSource.CreateCommand(UpdateSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });                                     // $1
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = name });                                 // $2
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Jsonb, Value = definitionJson }); // $3
         AddNullableText(command, description);                                                                      // $4
-        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = enabled });                                 // $5
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = false });                                  // $5 (disabled)
         AddNullableText(command, updatedBy);                                                                        // $6
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = expectedVersion });                         // $7
 
@@ -225,6 +416,60 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
 
         /* 0 rows updated: the id is gone (NotFound) or the version moved under us (stale Conflict). */
         return await ClassifyMissedUpdateAsync(id, cancellationToken);
+    }
+
+    /// <summary>Takes the transaction-scoped advisory lock that serializes the enabled-rule cap's
+    /// count-then-write critical section. Released automatically when the transaction commits or rolls back.</summary>
+    private static async Task AcquireCapLockAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(AcquireEnabledCapLockSql, connection, transaction)
+        {
+            CommandTimeout = McpCommandDeadlines.ReadSeconds,
+        };
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = EnabledCapAdvisoryLockKey });
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>Disambiguates a 0-row enable (see <see cref="UpdateEnableIfUnderCapSql"/>): NotFound when the id
+    /// is gone, Conflict on a stale version, else Invalid (the cap) — because a matching version on a row that
+    /// was NOT already enabled means the cap guard is the only clause that could have failed. Runs on the same
+    /// connection/transaction (still holding the cap lock) so it sees a consistent snapshot.</summary>
+    private static async Task<CustomAlertRuleResult> ClassifyMissedEnableAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, long id, int expectedVersion,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(EnabledStateProbeSql, connection, transaction)
+        {
+            CommandTimeout = McpCommandDeadlines.ReadSeconds,
+        };
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = id });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return new CustomAlertRuleResult.NotFound();
+        }
+
+        var currentVersion = reader.GetInt32(0);
+        var currentEnabled = reader.GetBoolean(1);
+        if (currentVersion != expectedVersion)
+        {
+            return new CustomAlertRuleResult.Conflict(
+                $"This rule was changed by someone else (current version {currentVersion}). Reload it and re-apply your edit.");
+        }
+
+        // Version matched and the row was NOT already enabled, so the ONLY clause that could have blocked the
+        // guarded update is the cap: enabling this rule would exceed the limit.
+        if (!currentEnabled)
+        {
+            return new CustomAlertRuleResult.Invalid(EnabledCapEnableMessage);
+        }
+
+        // Version matched AND already enabled: the guard's `enabled = true` branch was satisfied, so the update
+        // should have fired. Reaching here means the row changed between the update and this probe — report a
+        // concurrency conflict rather than inventing a cap error.
+        return new CustomAlertRuleResult.Conflict(
+            $"This rule was changed by someone else (current version {currentVersion}). Reload it and re-apply your edit.");
     }
 
     /// <summary>Deletes a rule (its <c>custom_alert_state</c> rows cascade). Returns

@@ -77,7 +77,7 @@ public sealed class McpAlertTools
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration this instance is running on: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries and jobs, tempdb space, low disk, PVS, file growth, failed jobs, database state, Availability Group health, connection loss), the cooldown, the excluded databases, the deadlock/blocking delivery mode, the scheduled-analysis cadence, and the SMTP email configuration. The same nested shape Darling's get_alert_settings returns, minus its self_alerts group (the headless service's own store-volume and collection-health thresholds, which a single-instance Lite install has no equivalent for) and plus smtp, which Lite delivers itself. Read-only: Lite has no update_alert_settings, so these change in the Settings window.")]
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration this instance is running on: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries and jobs, tempdb space, low disk, PVS, file growth, failed jobs, database state, Availability Group health, connection loss), the cooldown, the excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the SMTP email configuration. The two cooldowns govern different stages: top-level cooldown_minutes gates whether an alert FIRES, delivery.cooldown_minutes throttles the per-fingerprint email/Teams/Slack/PagerDuty/webhook send. The same nested shape Darling's get_alert_settings returns, minus its self_alerts group (the headless service's own store-volume and collection-health thresholds, which a single-instance Lite install has no equivalent for) and plus smtp, which Lite delivers itself. Read-only: Lite has no update_alert_settings, so these change in the Settings window.")]
     public static Task<string> GetAlertSettings()
     {
         try
@@ -227,7 +227,15 @@ public sealed class McpAlertTools
                        update_alert_settings validates delivery.mode against "Summary"/"PerEvent", which are
                        those same member names. */
                     mode = App.AlertDeliveryMode.ToString(),
-                    per_event_max = App.AlertPerEventMaxPerCycle
+                    per_event_max = App.AlertPerEventMaxPerCycle,
+                    /* #3314. Lite runs the SAME shared throttle -- WebhookAlertService and EmailSendCore both
+                       hand IncidentCooldown App.EmailCooldownMinutes through AppAlertSettings -- so the
+                       channel-neutral name Darling adopted applies here verbatim. The stored spelling stays
+                       email_cooldown_minutes in settings.json and the Settings window; only the wire key is
+                       channel-neutral, because one number governs Teams, Slack, PagerDuty, the generic
+                       webhook AND email. DISTINCT from cooldown_minutes above, which gates the engine's FIRE
+                       decision rather than the post. */
+                    cooldown_minutes = App.EmailCooldownMinutes
                 },
                 analysis = new
                 {

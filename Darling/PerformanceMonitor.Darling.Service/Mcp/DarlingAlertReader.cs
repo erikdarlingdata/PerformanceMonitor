@@ -16,8 +16,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
 /// Service-side reads for the alerts MCP tools (<see cref="DarlingMcpAlertTools"/>) — the alert-history log
-/// (<c>config_alert_log</c>) and the single global alert-settings row (<c>config_alert_settings</c>), both
-/// STORED reads (no live monitored-server hit). Each SQL is reproduced from the viewer's proven read
+/// (<c>config_alert_log</c>), the single global alert-settings row (<c>config_alert_settings</c>), and the
+/// delivery cooldown that lives on <c>config_notification</c> instead, all STORED reads (no live
+/// monitored-server hit). Each SQL is reproduced from the viewer's proven read
 /// (<c>ViewerDataService.AlertHistory.cs</c> / <c>.AlertSettings.cs</c>) rather than referenced — the MCP
 /// host is in the Service assembly and cannot reference the WPF Viewer, the same reason
 /// <see cref="DarlingConfigHistoryReader"/> reproduces the viewer's config SQL. The reads live in public
@@ -29,6 +30,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// running <c>DarlingAlertSettings</c>, so it reports the alert engine + analysis config the service is
 /// actually using (matching the viewer's Settings-window prefill), or null when the store has not seeded it
 /// yet.</para>
+///
+/// <para>The delivery cooldown is the one alert-control-plane value on a DIFFERENT table, which is why it
+/// gets its own read rather than another column on the settings SELECT — see
+/// <see cref="DeliveryCooldownSelectSql"/> for why the SELECT list is deliberately one column wide.</para>
 /// </summary>
 internal static class DarlingAlertReader
 {
@@ -187,11 +192,13 @@ FROM config_alert_settings
 WHERE id = 1";
 
     /// <summary>Reads the single global alert-settings row, or null when the store has not seeded it yet
-    /// (a pre-control-plane store, or the service has not started).</summary>
-    public static async Task<AlertSettingsReadRow?> GetAlertSettingsAsync(
-        NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    /// (a pre-control-plane store, or the service has not started). Takes the caller's connection and
+    /// transaction rather than the data source, so it cannot be invoked outside the shared snapshot
+    /// <see cref="GetAlertConfigurationAsync"/> establishes — see there for why that matters.</summary>
+    private static async Task<AlertSettingsReadRow?> ReadAlertSettingsAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken = default)
     {
-        await using var command = postgres.CreateCommand(AlertSettingsSelectSql);
+        await using var command = new NpgsqlCommand(AlertSettingsSelectSql, connection) { Transaction = transaction };
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -224,5 +231,83 @@ WHERE id = 1";
             reader.GetInt32(53),
             /* #2391: V79 file-growth knobs at 54–57. */
             reader.GetBoolean(54), reader.GetInt32(55), reader.GetInt32(56), reader.GetInt32(57));
+    }
+
+    /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */
+
+    /// <summary>The per-fingerprint DELIVERY cooldown the shared notification paths throttle on
+    /// (<c>WebhookAlertService</c> and <c>EmailSendCore</c> both pass it to <c>IncidentCooldown</c>), stored
+    /// as <c>config_notification.email_cooldown_minutes</c>. Reported and accepted under the channel-neutral
+    /// name <c>delivery.cooldown_minutes</c>: the column predates the webhook channels and one number now
+    /// governs Slack, Teams, PagerDuty, the generic webhook AND email, so a headless deployment with no SMTP
+    /// at all is still throttled by it.
+    ///
+    /// <para>A SEPARATE read because this is the ONE column of the alert control plane that does not live on
+    /// <c>config_alert_settings</c> — which is also why it reached 3.5.0 reachable only from the WPF Settings
+    /// window. The SELECT list is exactly one non-secret column, deliberately: <c>config_notification</c>
+    /// holds the SMTP password and the Teams/Slack/generic/PagerDuty bearer URLs, and the section-6 ACL
+    /// (<c>DarlingManagedRoles.ViewerRestrictedConfigTables</c>) SELECT-carves every one of them from
+    /// <c>mcp</c> — while column-level denial answers for the whole TABLE, so naming a single carved column
+    /// here would 42501 the entire read. That is the #2293/#2298 failure exactly, and it is why the host's
+    /// own whole-row <c>LoadViewAsync</c> was removed rather than made to skip rows; a tool-time read of
+    /// columns the carve GRANTS is the shape that survives. <c>McpConfigReadAvoidsSecretColumnsTests</c>
+    /// pins that this SELECT names no carved column.</para></summary>
+    public const string DeliveryCooldownSelectSql = @"
+SELECT email_cooldown_minutes
+FROM config_notification
+WHERE id = 1";
+
+    /// <summary>Reads the delivery cooldown, or null when the store has no notification row. Null is a
+    /// distinct answer rather than the shipped 15: the service seeds this row and
+    /// <c>config_alert_settings</c> in ONE pass, so "settings present, notification absent" is not a state
+    /// the product produces, and reporting a number nobody wrote would claim a reading never taken.</summary>
+    private static async Task<int?> ReadDeliveryCooldownAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken = default)
+    {
+        await using var command = new NpgsqlCommand(DeliveryCooldownSelectSql, connection) { Transaction = transaction };
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0))
+        {
+            return null;
+        }
+
+        return reader.GetInt32(0);
+    }
+
+    /// <summary>Both halves of the alert configuration, read in ONE snapshot: the settings row and the
+    /// delivery cooldown that lives on the other table. Either may be null when the store has not seeded
+    /// that singleton yet.</summary>
+    public sealed record AlertConfigurationRead(AlertSettingsReadRow? Settings, int? DeliveryCooldownMinutes);
+
+    /// <summary>
+    /// The alert configuration across BOTH config tables, under one snapshot.
+    ///
+    /// <para>Two independent reads would let an <c>update_alert_settings</c> commit land between them and
+    /// hand the caller a payload mixing pre- and post-update state across the two tables — a stale
+    /// <c>cooldown_minutes</c> beside a fresh <c>delivery.cooldown_minutes</c>, or the reverse. The write
+    /// path already refuses to leave a half-landed state; a read that can REPORT one puts the asymmetry
+    /// back, and the post-write re-read is described to the caller as the authoritative merged state, which
+    /// it would not be.</para>
+    ///
+    /// <para><b>REPEATABLE READ, and the level is the whole mechanism.</b> PostgreSQL takes a FRESH snapshot
+    /// per statement under READ COMMITTED, so wrapping these two SELECTs in a default transaction reads
+    /// exactly like a fix and changes nothing at all. The two single-table reads are private and take this
+    /// method's connection and transaction, so the split cannot be reintroduced by calling one of them
+    /// alone — a stronger guarantee than a test, since it does not compile.</para>
+    ///
+    /// <para>Read-only, so the transaction is disposed rather than committed; nothing here writes.</para>
+    /// </summary>
+    public static async Task<AlertConfigurationRead> GetAlertConfigurationAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(
+            System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+
+        var settings = await ReadAlertSettingsAsync(connection, transaction, cancellationToken);
+        var deliveryCooldownMinutes = await ReadDeliveryCooldownAsync(connection, transaction, cancellationToken);
+
+        return new AlertConfigurationRead(settings, deliveryCooldownMinutes);
     }
 }
