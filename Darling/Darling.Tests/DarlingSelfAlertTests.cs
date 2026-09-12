@@ -1347,6 +1347,37 @@ public sealed class DarlingSelfAlertTests
     }
 
     /// <summary>
+    /// The expiry is read on the EVALUATOR'S clock, which is the whole reason
+    /// <see cref="MuteRule.MatchesAt"/> exists — <c>MuteRule.IsExpired</c> consults
+    /// <c>DateTime.UtcNow</c>, and this condition judges everything else on an injected instant.
+    ///
+    /// <para>THE discriminating fixture: a bound that is in the future relative to the harness clock and in
+    /// the PAST relative to the wall clock. Against the ambient clock the rule reads lapsed and this reds —
+    /// so it is the one case that can tell the two clocks apart. Its sibling, a bound already passed on both
+    /// clocks, agrees either way and proves nothing about which was consulted.</para>
+    ///
+    /// <para>The wall-clock version of this defect would not have failed consistently, which is worse than
+    /// failing: it would have passed until the fixture's bound went by, then started reddening on a date
+    /// nobody changed anything on.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_AnExplicitRuleBoundInTheHarnessFuture_StillSuppresses()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var bound = MuteClock.AddDays(30);
+        Assert.True(bound < DateTime.UtcNow,
+            "the fixture must sit in the harness's future and the wall clock's past, or it cannot tell the two apart");
+
+        await e.ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 1), ExplicitMute(expiresAtUtc: bound) }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(fired.Muted);
+    }
+
+    /// <summary>
     /// "Explicit" is the MATCHER's own answer about the metric dimension, not a second opinion this condition
     /// formed. <see cref="MuteRule.NamesMetric"/> and <see cref="MuteRule.MatchesAt"/> must agree for a rule
     /// constrained by the metric alone, in both directions, or the split would be an assertion about the
