@@ -8,7 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Alerting;
@@ -46,6 +48,20 @@ public sealed class IncidentAttachmentDeliveryTests
        heading or a fact label — so DoesNotContain cannot pass on a near-miss. */
     private const string StaleGraph = "<deadlock marker=\"GRAPH-FOR-ORDERS\"/>";
     private const string FreshGraph = "<deadlock marker=\"GRAPH-FOR-SHIPMENTS\"/>";
+
+    /// <summary>
+    /// The clock every delivery in this class renders its payload stamps from (#3355). A constant in the
+    /// past, distinctive enough that a stamp taken from the real clock instead is visibly not this one.
+    /// <para>Every payload the four non-email channels build embeds a stamp at SECOND precision. Left on
+    /// the wall clock, the two independently-built captures the byte-identity pin below compares carry two
+    /// separate reads of it, and a second boundary landing between them is a diff in the value under test —
+    /// which is exactly what cost an unrelated PR a red round. Fixing the clock makes the two arms render
+    /// the same stamp BY CONSTRUCTION rather than by winning a race.</para>
+    /// <para>It does not reach the cooldown, which runs on real elapsed time: a clock in the past would
+    /// otherwise place every seeded fingerprint outside its window and quietly defeat the suppression the
+    /// filtered-card tests are about.</para>
+    /// </summary>
+    private static readonly DateTime FixedUtc = new(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
 
     /// <summary>
     /// <b>The pin that matters.</b> An alert carrying two distinct fingerprints, in per-event mode, sends two
@@ -183,6 +199,11 @@ public sealed class IncidentAttachmentDeliveryTests
     /// listener; it takes the same context from the same call in the fan-out as the three checked here, and
     /// the property under test is "the attachment reaches no webhook builder", which is a property of what
     /// the fan-out HANDS them.</para>
+    /// <para>#3355: the payload stamp comes from <see cref="FixedUtc"/>, so both arms render the same
+    /// instant by construction and the comparison can stay byte-exact. On the wall clock the two arms are
+    /// two separate second-precision reads, and a boundary between them is a diff in the value under test —
+    /// which is a flake, not a finding. <see cref="TwoCapturesStraddlingASecondBoundary_PostIdenticalBytes"/>
+    /// is the pin that holds that.</para>
     /// </summary>
     [Fact]
     public async Task TheFourNonEmailChannels_PostIdenticalBytes_WithAndWithoutIncidentAttachments()
@@ -215,18 +236,109 @@ public sealed class IncidentAttachmentDeliveryTests
         Assert.All(withoutAttachments.Emails, e => Assert.DoesNotContain("GRAPH-FOR-", e, StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// #3355's own pin: the same two arms, with a rendered-second boundary of the REAL clock deliberately
+    /// placed between them. The bytes are unchanged, because the stamp comes from the injected clock and
+    /// the wall clock reaches the payload nowhere.
+    /// <para>This is the flake's mechanism made deterministic rather than waited for: the original failed
+    /// roughly once per few hundred runs, so a green run of the byte-identity pin above is not evidence it
+    /// is fixed. This one is red on every run against a build that reads the wall clock, and green on every
+    /// run against one that does not.</para>
+    /// <para>The wait is for a CONDITION, not a timeout: it exits on the first iteration that observes a
+    /// different rendered second, which is at most a second away and cannot be missed, because every
+    /// iteration re-reads the clock. A fixed deadline here would be the same defect class in a new place.
+    /// The stamp is read AFTER the first capture, so that capture's own read is at or before it and the
+    /// second capture's is provably in a later second.</para>
+    /// </summary>
+    [Fact]
+    public async Task TwoCapturesStraddlingASecondBoundary_PostIdenticalBytes()
+    {
+        var withAttachments = await CaptureAsync(TwoIncidents(alertLevelXml: null), perEvent: true);
+
+        var before = RenderedSecond(DateTime.UtcNow);
+        while (RenderedSecond(DateTime.UtcNow) == before)
+        {
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        }
+
+        var withoutAttachments = await CaptureAsync(TwoIncidentsWithNoAttachments(), perEvent: true);
+
+        Assert.Equal(6, withAttachments.Webhooks.Count);
+        Assert.Equal(
+            withAttachments.Webhooks.OrderBy(b => b, StringComparer.Ordinal).ToList(),
+            withoutAttachments.Webhooks.OrderBy(b => b, StringComparer.Ordinal).ToList());
+    }
+
+    /// <summary>
+    /// The structural half, and the reason the two pins above cannot both be satisfied by luck: every
+    /// timestamp a non-email payload carries is a rendering of the INJECTED instant, and advancing that
+    /// instant by a second moves every one of them.
+    /// <para>The census arm is what catches a clock read the seam does not cover — it reads every
+    /// timestamp-shaped token in every body rather than the one field the flake happened to surface, so a
+    /// builder still reaching for the wall clock fails here whatever field it stamps. Teams and Slack each
+    /// render TWO (a UTC one and a local one), and the local one is allowed at its own date because a UTC
+    /// offset can carry it across midnight — both forms are derived from the constant, so this holds on a
+    /// UTC runner and on a machine that is not.</para>
+    /// <para>The advance arm is the control on the census. A seam that ignored its argument and read the
+    /// wall clock would render two captures moments apart nearly identically, and a census asserting only
+    /// an ABSENCE would be green on it. Requiring the stamps to MOVE when the injected clock moves is what
+    /// makes the absence mean something.</para>
+    /// </summary>
+    [Fact]
+    public async Task EveryNonEmailStamp_RendersTheInjectedClock_AndMovesWhenItDoes()
+    {
+        var atFixed = await CaptureAsync(TwoIncidents(alertLevelXml: null), perEvent: true);
+
+        var allowed = new[]
+        {
+            FixedUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture),
+            FixedUtc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+            FixedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)
+        };
+
+        Assert.All(atFixed.Webhooks, body =>
+        {
+            var stamps = Timestamps.Matches(body).Select(m => m.Value).ToList();
+
+            /* A body with no stamp at all would satisfy the loop below vacuously. */
+            Assert.NotEmpty(stamps);
+            Assert.All(stamps, stamp => Assert.Contains(stamp, allowed, StringComparer.Ordinal));
+        });
+
+        /* The control: move the clock, and every body moves with it. */
+        var aSecondLater = await CaptureAsync(
+            TwoIncidents(alertLevelXml: null), perEvent: true, utcNow: FixedUtc.AddSeconds(1));
+
+        Assert.Equal(atFixed.Webhooks.Count, aSecondLater.Webhooks.Count);
+        Assert.All(aSecondLater.Webhooks, body => Assert.All(
+            allowed, stamp => Assert.DoesNotContain(stamp, body, StringComparison.Ordinal)));
+    }
+
     /* ─────────────── helpers ─────────────── */
+
+    /// <summary>
+    /// Every timestamp shape the four non-email builders render: the generic channel's ISO-with-Z form and
+    /// the Teams/Slack fact form with a space. Matched rather than listed per field, so a stamp added to a
+    /// payload later is covered by the census without anyone remembering to extend it.
+    /// </summary>
+    private static readonly Regex Timestamps =
+        new(@"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}Z?", RegexOptions.Compiled);
+
+    private static string RenderedSecond(DateTime utc) =>
+        utc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
 
     private sealed record Captured(IReadOnlyList<string> Webhooks, IReadOnlyList<string> Emails);
 
-    private static async Task<Captured> CaptureAsync(AlertContext context, bool perEvent = false)
+    private static async Task<Captured> CaptureAsync(
+        AlertContext context, bool perEvent = false, DateTime? utcNow = null)
     {
         using var endpoint = new CapturingWebhookEndpoint();
         using var smtp = new CapturingSmtpEndpoint();
 
         var deliverer = BuildDeliverer(
             endpoint, smtp, new SeedingHistoryStore(null, DateTime.UtcNow),
-            perEvent ? config => config.Alerts.DeliveryMode = AlertNotificationMode.PerEvent : null);
+            perEvent ? config => config.Alerts.DeliveryMode = AlertNotificationMode.PerEvent : null,
+            utcNow);
         await deliverer.DeliverAsync(Outcome(context), TestContext.Current.CancellationToken);
 
         return new Captured(endpoint.Bodies.ToList(), smtp.Messages.ToList());
@@ -272,11 +384,17 @@ public sealed class IncidentAttachmentDeliveryTests
         context, AlertContextBuilders.ContextToDetailText(context),
         NumericCurrentValue: 2, NumericThresholdValue: 1, Muted: false, Severity: null);
 
+    /// <param name="utcNow">
+    /// The instant the built payloads stamp themselves with, defaulting to <see cref="FixedUtc"/>. Passed
+    /// on every construction rather than only where a comparison needs it, so no test in this class
+    /// renders a wall-clock stamp at all.
+    /// </param>
     private static DarlingAlertDeliverer BuildDeliverer(
         CapturingWebhookEndpoint endpoint,
         CapturingSmtpEndpoint smtp,
         IAlertHistoryStore history,
-        Action<DarlingConfig>? configure = null)
+        Action<DarlingConfig>? configure = null,
+        DateTime? utcNow = null)
     {
         var config = new DarlingConfig();
         config.Webhooks.TeamsUrl = endpoint.Url;
@@ -290,8 +408,10 @@ public sealed class IncidentAttachmentDeliveryTests
         configure?.Invoke(config);
 
         var settings = new DarlingAlertSettings(config);
+        var stamp = utcNow ?? FixedUtc;
         var webhooks = new WebhookAlertService(
-            settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
+            settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history,
+            utcNow: () => stamp);
         return new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
     }
 
