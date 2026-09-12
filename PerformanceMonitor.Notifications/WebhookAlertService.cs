@@ -75,6 +75,13 @@ public class WebhookAlertService
     private readonly AlertBranding _branding;
     private readonly ILogger<WebhookAlertService> _logger;
 
+    /* The clock every payload this service renders stamps itself from. Injectable because the stamp is
+       second-precision, and a caller comparing two independently-built payloads for byte-identity (#3330's
+       pin, via #3355) can only do so if both render the same instant by construction — on the wall clock,
+       a second boundary landing between the two builds is a diff in the value under test. A Func rather
+       than a settings member, matching DarlingSelfAlertEvaluator's clock seam. */
+    private readonly Func<DateTime> _utcNow;
+
     private int _consecutiveTeamsFailures;
     private string? _lastTeamsError;
     private int _consecutiveSlackFailures;
@@ -89,15 +96,23 @@ public class WebhookAlertService
     /// restart (#1145, mirroring the email seed #981). When null the cooldown is purely in-memory
     /// (the pre-#1145 behavior, seeding disabled) — the test call sites pass null.
     /// </param>
+    /// <param name="utcNow">
+    /// The clock the rendered payload stamps come from; defaults to <see cref="DateTime.UtcNow"/>. A fixed
+    /// clock makes two fan-outs render the same stamp by construction, which is what lets a caller compare
+    /// two independently-built payloads byte-for-byte (#3355). It does NOT feed the cooldown: whether an
+    /// incident is inside its window is a gating decision on real elapsed time, not a rendered value.
+    /// </param>
     public WebhookAlertService(
         IAlertSettings settings,
         AlertBranding branding,
         ILogger<WebhookAlertService> logger,
-        IAlertHistoryStore? historyStore = null)
+        IAlertHistoryStore? historyStore = null,
+        Func<DateTime>? utcNow = null)
     {
         _settings = settings;
         _branding = branding;
         _logger = logger;
+        _utcNow = utcNow ?? (() => DateTime.UtcNow);
         _cooldown = new IncidentCooldown(
             keyPrefix: "webhook:",
             // Null store -> null seed delegate -> no restart seeding (preserves the pre-#1145 in-memory path).
@@ -188,6 +203,14 @@ public class WebhookAlertService
             var renderContext = render.Context;
             var prose = render.Prose;
 
+            /* #3355: the firing's instant, read ONCE for the whole fan-out and threaded to every builder,
+               for the reason triageUrl below and the render above give — four channels describing the same
+               firing must not disagree about WHEN it fired, and a per-builder read makes that a race with
+               the second hand. It also feeds triageUrl, so the link's key and the cards' stamps name one
+               instant. Rendered stamps only: the cooldown decides on real elapsed time and reads its own
+               clock, because "is this fingerprint still inside its window" is not a display concern. */
+            var nowUtc = _utcNow();
+
             /* #2710: the triage-page link, computed ONCE for the whole fan-out so all four channels carry
                the SAME URL for the same firing. Keyed by (server, metric, now, dedup key) rather than an
                alert-history id, because the history row is written AFTER delivery — the page resolves the
@@ -196,17 +219,17 @@ public class WebhookAlertService
                channel's {{dedup_key}} token uses, so link, token, and PagerDuty all correlate — and it
                reads the RENDERED incidents, so the anchor names an incident the card actually shows. */
             var triageUrl = TriageLink.Build(
-                _settings.TriageBaseUrl, serverName, metricName, DateTime.UtcNow,
+                _settings.TriageBaseUrl, serverName, metricName, nowUtc,
                 DerivePagerDutyDedupKey(string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, renderContext));
 
             if (TeamsConfigured)
             {
-                sent |= await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, displayName);
+                sent |= await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName);
             }
 
             if (SlackConfigured)
             {
-                sent |= await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, displayName);
+                sent |= await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName);
             }
 
             if (GenericConfigured)
@@ -214,12 +237,12 @@ public class WebhookAlertService
                 /* Generic webhook: the payload's "metric" field is a machine key an automation correlates on,
                    so it stays the immutable metric name — the display name is a human-title concern only, and
                    this channel has no title. The prose detail DOES go, because it is alert content. */
-                sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose);
+                sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc);
             }
 
             if (PagerDutyConfigured)
             {
-                sent |= await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, displayName);
+                sent |= await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName);
             }
 
             if (sent)
@@ -333,12 +356,13 @@ public class WebhookAlertService
         AlertContext? context,
         string? triageUrl,
         string? detailText,
+        DateTime nowUtc,
         string? displayName = null)
     {
         try
         {
             var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
-                detailText: detailText, displayName: displayName);
+                detailText: detailText, displayName: displayName, nowUtc: nowUtc);
             var error = await PostWebhookAsync(_settings.TeamsWebhookUrl, payload, _settings.TeamsProxyAddress);
 
             if (error != null)
@@ -431,7 +455,8 @@ public class WebhookAlertService
         AlertContext? context = null,
         string? triageUrl = null,
         string? detailText = null,
-        string? displayName = null)
+        string? displayName = null,
+        DateTime? nowUtc = null)
     {
         var (hexColor, badgeText, emoji) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var prose = AlertDetailText.ProseForDelivery(detailText, context);
@@ -439,8 +464,12 @@ public class WebhookAlertService
            name (the severity key), and a null/empty display name renders the metric name unchanged. */
         var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
         var themeColor = hexColor.TrimStart('#');
-        var utcNow = DateTime.UtcNow;
-        var localNow = DateTime.Now;
+        /* One instant, with the local rendering DERIVED from it rather than read separately: two reads can
+           land either side of a second, which would have the card's own "Time (UTC)" and "Time (Local)"
+           facts naming two different seconds of one alert. SpecifyKind because an injected clock may hand
+           back an Unspecified DateTime, which ToLocalTime would otherwise treat as already local. */
+        var utcNow = nowUtc ?? DateTime.UtcNow;
+        var localNow = DateTime.SpecifyKind(utcNow, DateTimeKind.Utc).ToLocalTime();
 
         var facts = new List<object>();
 
@@ -590,12 +619,13 @@ public class WebhookAlertService
         AlertContext? context,
         string? triageUrl,
         string? detailText,
+        DateTime nowUtc,
         string? displayName = null)
     {
         try
         {
             var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
-                detailText: detailText, displayName: displayName);
+                detailText: detailText, displayName: displayName, nowUtc: nowUtc);
             var error = await PostWebhookAsync(_settings.SlackWebhookUrl, payload, _settings.SlackProxyAddress);
 
             if (error != null)
@@ -648,14 +678,16 @@ public class WebhookAlertService
         AlertContext? context = null,
         string? triageUrl = null,
         string? detailText = null,
-        string? displayName = null)
+        string? displayName = null,
+        DateTime? nowUtc = null)
     {
         var (hexColor, badgeText, emoji) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var prose = AlertDetailText.ProseForDelivery(detailText, context);
         /* Human name in the header when present; ForMetric above keeps the immutable metric-name key. */
         var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
-        var utcNow = DateTime.UtcNow;
-        var localNow = DateTime.Now;
+        /* One instant, local derived from it — see the Teams builder's note. */
+        var utcNow = nowUtc ?? DateTime.UtcNow;
+        var localNow = DateTime.SpecifyKind(utcNow, DateTimeKind.Utc).ToLocalTime();
 
         var title = isTest
             ? $"{emoji} TEST — {metricName}"
@@ -790,7 +822,8 @@ public class WebhookAlertService
         string serverId,
         AlertContext? context,
         string? triageUrl,
-        string? detailText)
+        string? detailText,
+        DateTime nowUtc)
     {
         try
         {
@@ -806,7 +839,7 @@ public class WebhookAlertService
             var payload = BuildGenericPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
                 context: context, bodyTemplate: _settings.GenericWebhookBodyTemplate, serverId: serverId,
-                triageUrl: triageUrl, detailText: detailText);
+                triageUrl: triageUrl, detailText: detailText, nowUtc: nowUtc);
 
             if (!IsWellFormedJson(payload, out var bodyError))
             {
@@ -907,7 +940,8 @@ public class WebhookAlertService
         string? bodyTemplate = null,
         string serverId = "",
         string? triageUrl = null,
-        string? detailText = null)
+        string? detailText = null,
+        DateTime? nowUtc = null)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var template = string.IsNullOrWhiteSpace(bodyTemplate) ? DefaultGenericBodyTemplate : bodyTemplate!;
@@ -934,7 +968,7 @@ public class WebhookAlertService
             ["threshold"] = EscapeForJson(thresholdValue),
             ["severity"] = EscapeForJson(isTest ? "TEST" : badgeText),
             ["context"] = EscapeForJson(contextText),
-            ["timestamp"] = EscapeForJson(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)),
+            ["timestamp"] = EscapeForJson((nowUtc ?? DateTime.UtcNow).ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)),
             /* Raw JSON values — never EscapeForJson (see the doc comment). "{}" / "[]" rather than empty
                so a template's `"context": {{context_json}}` stays well-formed on a context-less alert.
                Serialized from a REDACTED copy: the copy-paste remediation T-SQL never leaves the process
@@ -1286,6 +1320,7 @@ public class WebhookAlertService
         AlertContext? context,
         string? triageUrl,
         string? detailText,
+        DateTime nowUtc,
         string? displayName = null)
     {
         try
@@ -1298,7 +1333,7 @@ public class WebhookAlertService
             var payload = BuildPagerDutyPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
                 _settings.PagerDutyRoutingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl,
-                detailText: detailText, displayName: displayName);
+                detailText: detailText, displayName: displayName, nowUtc: nowUtc);
 
             var endpoint = PagerDutyEndpoint(_settings.PagerDutyUseEuRegion);
             var error = await PostWebhookAsync(endpoint, payload, _settings.PagerDutyProxyAddress);
@@ -1359,14 +1394,15 @@ public class WebhookAlertService
         string? serverId = null,
         string? triageUrl = null,
         string? detailText = null,
-        string? displayName = null)
+        string? displayName = null,
+        DateTime? nowUtc = null)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var severity = MapToPagerDutySeverity(badgeText);
         /* The PD summary (the incident title) shows the human name when present; severity above and the
            dedup_key below stay on the immutable metric name so correlation/dedup are rename-safe. */
         var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
-        var utcNow = DateTime.UtcNow;
+        var utcNow = nowUtc ?? DateTime.UtcNow;
 
         /* PD-CEF caps summary at 1024 chars — no truncation needed given the source strings, but document
            the constraint matching this codebase's habit of documenting limits even when unreachable. */
