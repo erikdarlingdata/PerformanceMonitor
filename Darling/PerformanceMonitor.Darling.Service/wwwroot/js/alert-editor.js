@@ -67,7 +67,8 @@ const WINDOW_OPTIONS = [
 
 /* The comparison operators an alert predicate offers — matching the CustomAlertOp enum the backend parses. The
    four scalar comparisons test the value against a single bar (a warning threshold + an optional critical); the
-   two range ops (#3351) test it against a two-sided band [lower, upper] and fire a single Warning tier. */
+   two range ops (#3351) test it against a two-sided band [lower, upper], firing Warning, with an optional second
+   critical band (#3372) for a Warning/Critical two-tier. */
 const OP_OPTIONS = [
   { value: "gt", label: "is greater than (>)" },
   { value: "ge", label: "is greater than or equal to (≥)" },
@@ -158,6 +159,8 @@ function blankModel() {
     critical: "",
     lower: "",
     upper: "",
+    critLower: "",
+    critUpper: "",
     breachSamples: 1,
     clearSamples: 1,
     scopeMode: "all",
@@ -201,6 +204,8 @@ function definitionToModel(def, name, description, enabled) {
     critical: pred.criticalThreshold != null ? String(pred.criticalThreshold) : "",
     lower: pred.lowerBound != null ? String(pred.lowerBound) : "",
     upper: pred.upperBound != null ? String(pred.upperBound) : "",
+    critLower: pred.criticalLowerBound != null ? String(pred.criticalLowerBound) : "",
+    critUpper: pred.criticalUpperBound != null ? String(pred.criticalUpperBound) : "",
     breachSamples: intOr(hyst.breachSamples, 1),
     clearSamples: intOr(hyst.clearSamples, 1),
     scopeMode: scope.mode === "servers" ? "servers" : scope.mode === "tag" ? "tag" : "all",
@@ -221,6 +226,14 @@ function modelToDefinition(model) {
   if (isRangeOp(model.op)) {
     /* Range op: a two-sided band, and NO warn/critical (the backend rejects a range predicate that carries them). */
     predicate = { op: model.op, lowerBound: parseNumOrNull(model.lower), upperBound: parseNumOrNull(model.upper) };
+    /* Optional critical band (#3372): emit BOTH crit bounds or neither. A lone bound is left off (so the backend
+       reads a warn-only rule) — the save-blocker reports the all-or-nothing rule inline before a save. */
+    const critLower = parseNumOrNull(model.critLower);
+    const critUpper = parseNumOrNull(model.critUpper);
+    if (critLower != null && critUpper != null) {
+      predicate.criticalLowerBound = critLower;
+      predicate.criticalUpperBound = critUpper;
+    }
   } else {
     predicate = { op: model.op, warnThreshold: parseNumOrNull(model.warn) };
     if (model.critical.trim() !== "") predicate.criticalThreshold = parseNumOrNull(model.critical);
@@ -279,6 +292,25 @@ function alertSaveBlocker(model) {
     if (metric.aggregate === "count" &&
         (model.op === "outside" ? (0 < lower || 0 > upper) : (lower <= 0 && 0 <= upper))) {
       return "A 'between' or 'outside' alert on a count whose band fires when the count is 0 can't tell zero events from a stalled collector — set the bounds so a count of 0 doesn't fire.";
+    }
+
+    /* Optional critical band (#3372): all-or-nothing, and nested per op — WIDER than the warning band for 'outside'
+       (fires Critical further out), NARROWER for 'between' (fires Critical deeper in). The backend re-validates. */
+    const hasCritLower = String(model.critLower).trim() !== "";
+    const hasCritUpper = String(model.critUpper).trim() !== "";
+    if (hasCritLower !== hasCritUpper) return "Enter BOTH a critical lower and upper bound, or leave both blank.";
+    if (hasCritLower) {
+      const critLower = parseNumOrNull(model.critLower);
+      const critUpper = parseNumOrNull(model.critUpper);
+      if (critLower == null) return "The critical lower bound must be a number.";
+      if (critUpper == null) return "The critical upper bound must be a number.";
+      if (model.op === "outside") {
+        if (!(critLower <= lower && upper <= critUpper)) {
+          return "For 'outside', the critical band must be wider than the warning band (critical lower ≤ lower, and upper ≤ critical upper).";
+        }
+      } else if (!(lower <= critLower && critLower <= critUpper && critUpper <= upper)) {
+        return "For 'between', the critical band must be narrower than the warning band (lower ≤ critical lower ≤ critical upper ≤ upper).";
+      }
     }
   } else {
     const warn = parseNumOrNull(model.warn);
@@ -489,8 +521,8 @@ function buildAlertEditor(main, ctx) {
 /* When the metric fires: the evaluation window, the comparison operator, and the threshold(s) — which DEPEND on
    the operator. A scalar op (gt/ge/lt/le) shows a Warning threshold + an optional (more-extreme) Critical, and the
    severity is those two thresholds (CustomAlertRuleDefinition.SeverityFor). A range op (between/outside, #3351)
-   shows a Lower/Upper bound instead and fires a single Warning tier, so the inputs — and the help text — swap in
-   place when the op category changes. */
+   shows a Lower/Upper bound instead, plus an OPTIONAL Critical Lower/Upper band (#3372) for a second, more-severe
+   tier; so the inputs — and the help text — swap in place when the op category changes. */
 function conditionSection(model, onChange) {
   const windowSel = buildWindowSelect(model, onChange);
 
@@ -516,11 +548,19 @@ function conditionSection(model, onChange) {
 
   function drawCondition() {
     if (isRangeOp(model.op)) {
-      mount(thresholdBox, [numField("Lower bound", "lower", "lower bound"), numField("Upper bound", "upper", "upper bound")]);
+      mount(thresholdBox, [
+        numField("Lower bound", "lower", "lower bound"),
+        numField("Upper bound", "upper", "upper bound"),
+        numField("Critical lower bound", "critLower", "optional"),
+        numField("Critical upper bound", "critUpper", "optional"),
+      ]);
       helpBox.textContent =
         "The metric is aggregated to one value over the window, then tested against the band. 'Is outside the range' " +
         "fires when the value is below the lower bound or above the upper bound; 'is within the range' fires when it " +
-        "falls inside (bounds inclusive). A range rule fires a single Warning tier.";
+        "falls inside (bounds inclusive). Leave the critical bounds blank for a single Warning tier, or set both for a " +
+        "second, more-severe Critical tier: for 'is outside the range' the critical band must be WIDER than the " +
+        "warning band (Critical fires when the value is even further outside); for 'is within the range' it must be " +
+        "NARROWER (Critical fires when the value is even deeper inside).";
     } else {
       mount(thresholdBox, [numField("Warning threshold", "warn", "warning value"), numField("Critical threshold", "critical", "critical value (optional)")]);
       helpBox.textContent =
