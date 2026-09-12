@@ -179,8 +179,14 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
     /* a long wait alone -> Warning at 10s, Critical at 60s, with a count of 1 */
     [InlineData(false, 1, 10_000L, 0, HealthSeverity.Healthy, HealthSeverity.Warning, HealthSeverity.Healthy, FleetHealthBand.Warning)]
     [InlineData(false, 1, 60_000L, 0, HealthSeverity.Healthy, HealthSeverity.Critical, HealthSeverity.Healthy, FleetHealthBand.Critical)]
-    /* any deadlock -> Critical */
-    [InlineData(false, 0, 0L, 1, HealthSeverity.Healthy, HealthSeverity.Healthy, HealthSeverity.Critical, FleetHealthBand.Critical)]
+    /* The deadlock axis bands on a RATE as of #3368, so these rows track the CURRENT band rather than the
+       pre-#3368 one -- the method name is about the unmeasured-metrics change, not about this axis. Card()
+       and ViewerCard() both window one hour, so the count IS the per-hour rate here: one deadlock is 1/hr
+       and Healthy, where the old count band called it Critical. */
+    [InlineData(false, 0, 0L, 1, HealthSeverity.Healthy, HealthSeverity.Healthy, HealthSeverity.Healthy, FleetHealthBand.Healthy)]
+    /* Both tiers on that same one-hour window, so a revert to counting cannot keep this Theory green. */
+    [InlineData(false, 0, 0L, 5, HealthSeverity.Healthy, HealthSeverity.Healthy, HealthSeverity.Warning, FleetHealthBand.Warning)]
+    [InlineData(false, 0, 0L, 20, HealthSeverity.Healthy, HealthSeverity.Healthy, HealthSeverity.Critical, FleetHealthBand.Critical)]
     public void AMeasuredCardBandsExactlyAsItDidBefore(
         bool memoryPressure, int blocking, long maxWaitMs, int deadlocks,
         HealthSeverity expectedMemory, HealthSeverity expectedBlocking, HealthSeverity expectedDeadlock,
