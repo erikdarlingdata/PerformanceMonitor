@@ -746,6 +746,10 @@ public partial class SettingsWindow : Window
         AlertCollectionStaleMinutesBox.Text = r.CollectionStaleMinutes.ToString(CultureInfo.InvariantCulture);
         AlertCollectionFailureThresholdBox.Text = r.CollectionFailureThreshold.ToString(CultureInfo.InvariantCulture);
         AlertStoreJobCadenceWarnPercentBox.Text = r.StoreJobCadenceWarnPercent.ToString(CultureInfo.InvariantCulture);
+        /* #3297: one decimal, matching how the alert itself renders the ratio ("held at 4.5x"), so the box
+           and the alert text agree about what the number looks like. */
+        AlertRetentionHoldWarnRatioBox.Text = r.RetentionHoldWarnRatio.ToString("0.0", CultureInfo.InvariantCulture);
+        AlertRetentionHoldCriticalRatioBox.Text = r.RetentionHoldCriticalRatio.ToString("0.0", CultureInfo.InvariantCulture);
         AlertPvsCheckBox.IsChecked = r.PvsEnabled;
         AlertPvsThresholdPercentBox.Text = r.PvsThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertPvsFloorGbBox.Text = r.PvsFloorGb.ToString(CultureInfo.InvariantCulture);
@@ -857,6 +861,21 @@ public partial class SettingsWindow : Window
         /* #2136: validated to the same range DarlingAlertSettings clamps ([5, 100]). */
         if (int.TryParse(AlertStoreJobCadenceWarnPercentBox.Text, out var cadencePct) && cadencePct is >= 5 and <= 100)
             row.StoreJobCadenceWarnPercent = cadencePct;
+        /* #3297: validated against the SAME named bounds DarlingAlertSettings clamps to and the MCP writer
+           accepts, so the three surfaces cannot disagree about what is settable. InvariantCulture on the
+           parse deliberately: this writes a double precision column read by the service and by
+           get_alert_settings, so a comma decimal separator from the operator's locale must be rejected
+           rather than silently parsed as a different number on one machine and not another. The two are
+           validated INDEPENDENTLY — critical below warn is a legitimate setting (every fire is Critical),
+           not a pair to reject. */
+        if (double.TryParse(AlertRetentionHoldWarnRatioBox.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var holdWarn)
+            && holdWarn >= TimescaleSupport.RetentionHoldRatioFloor
+            && holdWarn <= TimescaleSupport.RetentionHoldRatioCeiling)
+            row.RetentionHoldWarnRatio = holdWarn;
+        if (double.TryParse(AlertRetentionHoldCriticalRatioBox.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var holdCritical)
+            && holdCritical >= TimescaleSupport.RetentionHoldRatioFloor
+            && holdCritical <= TimescaleSupport.RetentionHoldRatioCeiling)
+            row.RetentionHoldCriticalRatio = holdCritical;
         if (int.TryParse(AlertPvsThresholdPercentBox.Text, out var pvsPct) && pvsPct is >= 0 and <= 100)
             row.PvsThresholdPercent = pvsPct;
         if (int.TryParse(AlertPvsFloorGbBox.Text, out var pvsFloor) && pvsFloor >= 0)
@@ -946,6 +965,12 @@ public partial class SettingsWindow : Window
            the grid moved would arm the alert past the point it exists to precede. */
         AlertStoreJobCadenceWarnPercentBox.Text =
             TimescaleSupport.RefreshSlotPercentOfHourlyCadence.ToString(CultureInfo.InvariantCulture);
+        /* #3297: derived for the reason one line up — this button writes the row when the boxes do not
+           parse, so a frozen literal here is the value an operator would be handed back. */
+        AlertRetentionHoldWarnRatioBox.Text =
+            TimescaleSupport.RetentionHoldWarnRatioDefault.ToString("0.0", CultureInfo.InvariantCulture);
+        AlertRetentionHoldCriticalRatioBox.Text =
+            TimescaleSupport.RetentionHoldCriticalRatioDefault.ToString("0.0", CultureInfo.InvariantCulture);
         AnalysisNotifyCooldownBox.Text = "360";
         AlertPvsThresholdPercentBox.Text = "40";
         AlertPvsFloorGbBox.Text = "1";
@@ -1060,6 +1085,8 @@ public partial class SettingsWindow : Window
         AlertCollectionStaleMinutesBox.IsEnabled = enabled;
         AlertCollectionFailureThresholdBox.IsEnabled = enabled;
         AlertStoreJobCadenceWarnPercentBox.IsEnabled = enabled;
+        AlertRetentionHoldWarnRatioBox.IsEnabled = enabled;
+        AlertRetentionHoldCriticalRatioBox.IsEnabled = enabled;
         AlertFileGrowthCheckBox.IsEnabled = enabled;
         AlertFileGrowthRiseMbBox.IsEnabled = enabled;
         AlertFileGrowthVolumePercentBox.IsEnabled = enabled;

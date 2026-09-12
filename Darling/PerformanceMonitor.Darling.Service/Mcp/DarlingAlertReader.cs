@@ -163,10 +163,16 @@ LIMIT $3";
         bool FileGrowthEnabled,
         int FileGrowthRiseMb,
         int FileGrowthVolumePercent,
-        int FileGrowthLookbackMinutes);
+        int FileGrowthLookbackMinutes,
+        /* #3297 (V119): the Retention Held tiers. APPENDED for the reason stated above. */
+        double RetentionHoldWarnRatio,
+        double RetentionHoldCriticalRatio);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
-    /// 58 columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>). This had
+    /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
+    /// <c>AlertSettingsSelect_ColumnCount_MatchesTheOrdinalsRead</c> pins how many against the positional
+    /// read — so the count lives there, derived, rather than as a numeral here that a new rung leaves
+    /// behind. This had
     /// stopped at 36, so <c>get_alert_settings</c> reported a store whose newest five knobs did not exist:
     /// an MCP client could not see the V33 connection opt-ins or the V35 Availability Group family at all.</summary>
     public const string AlertSettingsSelectSql = @"
@@ -187,7 +193,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold,
        disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes,
        store_job_cadence_warn_percent,
-       file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes
+       file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes,
+       retention_hold_warn_ratio, retention_hold_critical_ratio
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -230,7 +237,9 @@ WHERE id = 1";
             reader.GetInt32(50), reader.GetInt32(51), reader.GetInt32(52),
             reader.GetInt32(53),
             /* #2391: V79 file-growth knobs at 54–57. */
-            reader.GetBoolean(54), reader.GetInt32(55), reader.GetInt32(56), reader.GetInt32(57));
+            reader.GetBoolean(54), reader.GetInt32(55), reader.GetInt32(56), reader.GetInt32(57),
+            /* #3297: V119 Retention Held tiers at 58–59. */
+            reader.GetDouble(58), reader.GetDouble(59));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */

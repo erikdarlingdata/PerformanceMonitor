@@ -168,13 +168,17 @@ public sealed class McpAlertTools
                     critical_free_percent = App.AlertDiskCriticalFreePercent,
                     critical_free_gb = App.AlertDiskCriticalFreeGb
                 },
-                /* Darling reports a self_alerts group in this position — its own store volume, collection
-                   staleness/failure counts, and store-job cadence. Deliberately NOT emitted here.
-                   AppAlertEngineSettings returns shipped constants for three of those members precisely
-                   because Lite has no headless store volume and no fleet collection loop to self-monitor,
-                   and Lite has no concept whatsoever of the fourth (store_job_cadence_warn_percent).
-                   Reporting constants under names that read as knobs would tell an agent it can tune
-                   something Lite cannot, and an admitted gap beats an overstated capability. */
+                /* Darling reports a self_alerts group in this position — the thresholds for alerts about its
+                   own STORE rather than a monitored server: store volume, collection staleness/failure
+                   counts, store-job cadence, and the Retention Held tiers. Deliberately NOT emitted here.
+                   AppAlertEngineSettings returns shipped constants for the members Lite has any analogue of
+                   at all, because Lite has no headless store volume and no fleet collection loop to
+                   self-monitor; the rest — the TimescaleDB background-job and retention-policy knobs — name
+                   machinery a DuckDB store does not contain. Reporting either kind under names that read as
+                   knobs would tell an agent it can tune something Lite cannot, and an admitted gap beats an
+                   overstated capability. Deliberately no count of which members fall in which half: a
+                   numeral here would be a frozen enumeration that the next Darling self-alert knob leaves
+                   behind. */
                 pvs = new
                 {
                     enabled = App.AlertPvsEnabled,

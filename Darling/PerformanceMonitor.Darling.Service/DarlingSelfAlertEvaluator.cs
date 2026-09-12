@@ -317,9 +317,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <para><b>Why not read <c>MuteRuleDefaultExpiration</c> itself.</b> It is a VIEWER app setting — a
     /// per-install UI preference that prefills a dialog — and it is not in <c>config_alert_settings</c>, so
     /// the headless service does not have it and could not honor a change to it. A compile-time constant
-    /// rather than a store-backed knob for the <see cref="RetentionHoldWarnRatio"/> reason: that would need
-    /// a migration rung this change is deliberately not taking, and it belongs in the control plane the next
-    /// time a rung is going in anyway.</para>
+    /// rather than a store-backed knob because a knob needs a migration rung, and it belongs in the control
+    /// plane the next time one is going in anyway. The Retention Held tiers are the worked example of that
+    /// step being taken (#3297, V119); this one is still outstanding.</para>
     /// </summary>
     internal static readonly TimeSpan StaleMuteAge = TimeSpan.FromDays(7);
 
@@ -412,26 +412,34 @@ internal sealed class DarlingSelfAlertEvaluator
     private const string RetentionHoldKeyPrefix = "retentionhold:";
 
     /// <summary>
-    /// #2813 WARNING tier: how many times its own configured horizon a HELD tier must be holding before the
-    /// hold has cost enough to say so.
+    /// #2813 WARNING tier, SHIPPED DEFAULT — how many times its own configured horizon a HELD tier must be
+    /// holding before the hold has cost enough to say so.
     ///
-    /// <para>Bounded on BOTH sides rather than picked. <b>Below</b>, retention drops whole CHUNKS, so a
-    /// 4-day policy with 1-day chunks legitimately holds ~5 days (1.25x) while working perfectly; 2.0x sits
-    /// clear of that floor with margin, so normal chunk granularity can never reach it. <b>Above</b>, the
-    /// production incident this comes from sat at 4.5x (18 days under a 4-day policy) after 16 days — 2.0x
-    /// on that tier is ~8 days, so the alert arrives about a week in, while the cost is still recoverable
-    /// and long before the 16 days it actually went unnoticed.</para>
+    /// <para>#3297 moved the live value into <c>config_alert_settings.retention_hold_warn_ratio</c> (V119),
+    /// so this is the seed and the unsupplied-seam fallback, not what the check reads: the decision reads
+    /// <see cref="_retentionHoldWarnRatio"/>. Field-reported on #3296 — the operator received an hourly
+    /// CRITICAL and found nothing in Settings matching "Retention Held" or "Monitor Store".</para>
     ///
-    /// <para>A compile-time constant rather than a store-backed knob like its #2136 sibling
-    /// (<c>config_alert_settings</c>, V57) only because that would need a migration rung this change is
-    /// deliberately not taking. It belongs in the control plane the next time a rung is going in anyway.</para>
+    /// <para>Taken from <see cref="TimescaleSupport.RetentionHoldWarnRatioDefault"/> rather than restated,
+    /// where the measurement that bounds it on both sides lives — including the correction that healthy
+    /// chunk granularity reaches <b>1.4x</b> in production, not the ~1.25x the arithmetic predicts.</para>
     /// </summary>
-    internal const double RetentionHoldWarnRatio = 2.0;
+    internal const double RetentionHoldWarnRatio = TimescaleSupport.RetentionHoldWarnRatioDefault;
 
-    /// <summary>#2813 CRITICAL tier: double the warning ratio. A tier at four times its intended depth is
-    /// no longer drifting, it is the dominant and still-compounding contributor to store size — the
-    /// motivating incident (4.5x) reads CRITICAL, which is the point.</summary>
-    internal const double RetentionHoldCriticalRatio = 4.0;
+    /// <summary>#2813 CRITICAL tier, SHIPPED DEFAULT: double the warning ratio, and store-backed since V119
+    /// for its sibling's reason. The live value is <see cref="_retentionHoldCriticalRatio"/>.</summary>
+    internal const double RetentionHoldCriticalRatio = TimescaleSupport.RetentionHoldCriticalRatioDefault;
+
+    /// <summary>#3297: the Retention Held WARNING tier, read live through the same by-reference settings seam
+    /// as the AG thresholds and the #2136 cadence knob (the clamp lives on <c>DarlingAlertSettings</c>).
+    /// Every retention-hold decision AND every threshold this check states back to the operator goes through
+    /// these two seams — a bare <see cref="RetentionHoldWarnRatio"/> in the fire path would judge on the
+    /// shipped default while <c>get_alert_settings</c> reported the store's, and a bare one in the message
+    /// would name a threshold the engine is not using.</summary>
+    private readonly Func<double> _retentionHoldWarnRatio;
+
+    /// <summary>#3297: the Retention Held CRITICAL tier, read live like its warning sibling.</summary>
+    private readonly Func<double> _retentionHoldCriticalRatio;
 
     /// <summary>#2136: the Warning tier's percent-of-cadence threshold, read live through the same
     /// by-reference settings seam as the AG thresholds (the clamp lives on DarlingAlertSettings).
@@ -506,6 +514,8 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<long>? agRedoQueueAlertKb = null,
         Func<int>? agDisconnectRefireMinutes = null,
         Func<int>? storeJobCadenceWarnPercent = null,
+        Func<double>? retentionHoldWarnRatio = null,
+        Func<double>? retentionHoldCriticalRatio = null,
         AlertReadFailureCounter? readFailures = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
@@ -529,6 +539,13 @@ internal sealed class DarlingSelfAlertEvaluator
            grid would leave behind, and this one would fire past the slot silently. */
         _storeJobCadenceWarnPercent =
             storeJobCadenceWarnPercent ?? (() => TimescaleSupport.RefreshSlotPercentOfHourlyCadence);
+        /* #3297: unsupplied falls back to the V119 column defaults, so an evaluator built without the seams
+           behaves like a store at its shipped defaults — the AG-seam discipline, and taken from the shared
+           constants rather than restated for the #3060 reason the cadence fallback above gives. */
+        _retentionHoldWarnRatio =
+            retentionHoldWarnRatio ?? (() => TimescaleSupport.RetentionHoldWarnRatioDefault);
+        _retentionHoldCriticalRatio =
+            retentionHoldCriticalRatio ?? (() => TimescaleSupport.RetentionHoldCriticalRatioDefault);
         _readFailures = readFailures;
     }
 
@@ -2329,7 +2346,7 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>
     /// Applies the fleet-level Retention Held condition (#2813): a retention policy the #1680/#1877 coverage
     /// gate has PAUSED, whose tier has as a result grown past its own configured horizon by
-    /// <see cref="RetentionHoldWarnRatio"/> or more.
+    /// the store's configured warning ratio or more.
     ///
     /// <para><b>Both halves are required, and that is the whole design.</b> Paused alone is normal —
     /// <see cref="TimescaleSupport.EnsureRetentionPoliciesAsync"/> deliberately creates every policy paused
@@ -2345,9 +2362,15 @@ internal sealed class DarlingSelfAlertEvaluator
     /// makes the cost legible, and it self-scales with the horizon so one threshold serves a 4-day raw tier
     /// and a 35-day baseline tier alike.</para>
     ///
-    /// <para>Tiers: WARNING at <see cref="RetentionHoldWarnRatio"/>, CRITICAL at
-    /// <see cref="RetentionHoldCriticalRatio"/> — the production incident that motivated this sat at 4.5x
-    /// (18 days held under a 4-day policy for 16 days) and would have read CRITICAL. A STANDING condition
+    /// <para>Tiers: WARNING at the store's <c>retention_hold_warn_ratio</c>, CRITICAL at its
+    /// <c>retention_hold_critical_ratio</c> (#3297, V119), read live through
+    /// <see cref="_retentionHoldWarnRatio"/> / <see cref="_retentionHoldCriticalRatio"/> and defaulting to
+    /// <see cref="RetentionHoldWarnRatio"/> / <see cref="RetentionHoldCriticalRatio"/> — the production
+    /// incident that motivated this sat at 4.5x (18 days held under a 4-day policy for 16 days) and would
+    /// have read CRITICAL on the shipped pair. Both are read ONCE per pass, so one pass cannot judge some
+    /// policies on the old pair and the rest on a reloaded one. A critical tier set BELOW the warning tier
+    /// is not corrected: every fire is then Critical and the Warning tier is empty, which is what setting it
+    /// there asks for. A STANDING condition
     /// like Store Job Over Cadence: fire once on breach, re-fire only on the alert cooldown while it
     /// persists, one "Retention Hold Cleared" resolution when the policy arms or the tier comes back under
     /// the warning ratio. A policy with no chunks, no measurable horizon, or an unreadable span has no
@@ -2370,6 +2393,12 @@ internal sealed class DarlingSelfAlertEvaluator
 
         var now = _utcNow();
 
+        /* #3297: read BOTH tiers ONCE per pass, not per policy. A store reload can hot-swap the settings row
+           mid-pass, and re-reading per policy would let one pass judge some policies on the old pair and the
+           rest on the new one — a mixed reading no configuration ever held. */
+        var warnRatio = _retentionHoldWarnRatio();
+        var criticalRatio = _retentionHoldCriticalRatio();
+
         foreach (var policy in policies)
         {
             var key = policy.JobId.ToString(CultureInfo.InvariantCulture);
@@ -2381,7 +2410,7 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 if (policy.Armed)
                 {
-                    await ClearRetentionHoldAsync(key, policy, cancellationToken);
+                    await ClearRetentionHoldAsync(key, policy, warnRatio, cancellationToken);
                 }
 
                 continue;
@@ -2391,17 +2420,17 @@ internal sealed class DarlingSelfAlertEvaluator
                 ? $"retention job {key}"
                 : $"{policy.HypertableName} retention [{key}]";
 
-            if (!policy.Armed && ratio >= RetentionHoldWarnRatio)
+            if (!policy.Armed && ratio >= warnRatio)
             {
                 _activeRetentionHold[key] = true;
                 if (CooldownElapsed(_lastRetentionHoldAlert, key, now))
                 {
                     _lastRetentionHoldAlert[key] = now;
-                    bool critical = ratio >= RetentionHoldCriticalRatio;
+                    bool critical = ratio >= criticalRatio;
                     double spanDays = (policy.SpanSeconds ?? 0) / 86400.0;
                     await FireAsync(
                         RetentionHoldKeyPrefix + key, StoreServerLabel, RetentionHoldMetric,
-                        $"{ratio:F1}x its {policy.DropAfter} horizon", $"{RetentionHoldWarnRatio:F1}x",
+                        $"{ratio:F1}x its {policy.DropAfter} horizon", $"{warnRatio:F1}x",
                         detail: $"Store {label} is HELD PAUSED by the rollup-coverage gate, and the tier now " +
                             $"holds {spanDays:F1} days across {policy.ChunkCount} chunk(s) against a configured " +
                             $"{policy.DropAfter} horizon ({ratio:F1}x). " +
@@ -2423,21 +2452,26 @@ internal sealed class DarlingSelfAlertEvaluator
                         severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
                         shortMessage: $"{label} held at {ratio:F1}x its {policy.DropAfter} horizon",
                         numericCurrentValue: Math.Round(ratio, 2),
-                        numericThresholdValue: critical ? RetentionHoldCriticalRatio : RetentionHoldWarnRatio,
+                        numericThresholdValue: critical ? criticalRatio : warnRatio,
                         cancellationToken);
                 }
             }
             else
             {
-                await ClearRetentionHoldAsync(key, policy, cancellationToken);
+                await ClearRetentionHoldAsync(key, policy, warnRatio, cancellationToken);
             }
         }
     }
 
     /// <summary>Drops one retention hold's standing state and records the resolution, but only if it was
-    /// actually standing — so a store where nothing is held writes no resolution rows at all.</summary>
+    /// actually standing — so a store where nothing is held writes no resolution rows at all.
+    ///
+    /// <para><paramref name="warnRatio"/> is handed in rather than read here, and that is the point: the
+    /// resolution names the threshold the tier came back under, so reading the seam a second time could
+    /// report a ratio that never judged this policy if a store reload landed mid-pass — and a bare constant
+    /// would name the shipped default on a store that had tuned it.</para></summary>
     private async Task ClearRetentionHoldAsync(
-        string key, RetentionHoldReading policy, CancellationToken cancellationToken)
+        string key, RetentionHoldReading policy, double warnRatio, CancellationToken cancellationToken)
     {
         if (!_activeRetentionHold.TryRemove(key, out var was) || !was)
         {
@@ -2449,7 +2483,7 @@ internal sealed class DarlingSelfAlertEvaluator
             : $"{policy.HypertableName} retention [{key}]";
         var why = policy.Armed
             ? "is armed again - its consumer now covers everything the tier holds"
-            : $"is back under {RetentionHoldWarnRatio:F1}x its {policy.DropAfter} horizon";
+            : $"is back under {warnRatio:F1}x its {policy.DropAfter} horizon";
 
         await RecordResolutionAsync(new AlertResolution(
             RetentionHoldKeyPrefix + key, StoreServerLabel, RetentionHoldMetric,

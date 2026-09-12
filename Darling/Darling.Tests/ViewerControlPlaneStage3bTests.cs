@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
@@ -513,6 +514,71 @@ public sealed class ViewerAlertRowCadenceDefaultTests
            value that gets rejected on its way back in. */
         Assert.InRange(AlertSettingsRow.Defaults().StoreJobCadenceWarnPercent, 5, 100);
     }
+}
+
+/// <summary>
+/// <c>AlertSettingsRow.ValueEquals</c> compares EVERY settable column, enumerated by reflection rather than
+/// read off the expression.
+///
+/// <para><b>Reading the expression finds a wrong comparison; only enumerating the type finds a missing
+/// one</b> — and six were missing, added by two lanes that did not extend it (#2136's cadence knob and
+/// #2349/#2391's four file-growth gates). The consequence is one-directional and silent:
+/// <c>ViewerControlPlaneMigration.ShouldImportAlerts</c> asks "is the store section untouched", so a store
+/// whose ONLY customization lived in an uncompared column read as DEFAULT and had its whole row overwritten
+/// by the viewer's on the one-time migrate-in. Nothing throws, and the row that lands is a valid row.</para>
+///
+/// <para>Driven off the properties rather than a list, so the next column cannot go uncompared. Each is
+/// mutated to a value the type guarantees differs, which is why <c>CpuMode</c> is special-cased: it is
+/// compared case-insensitively, so flipping its case would produce a mutation the comparison is RIGHT to
+/// call equal, and the test would report a defect that is not one.</para>
+/// </summary>
+public sealed class AlertSettingsRowValueEqualsTests
+{
+    [Fact]
+    public void EverySettableColumn_IsComparedByValueEquals()
+    {
+        var properties = typeof(AlertSettingsRow)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.CanRead && p.CanWrite)
+            .ToList();
+
+        /* The enumeration has to find something, or every Assert below is over an empty set and this test
+           passes by testing nothing — the failure mode of a reflection-driven pin. */
+        Assert.True(properties.Count > 40, $"only {properties.Count} settable columns found, which cannot be this row");
+
+        foreach (var property in properties)
+        {
+            var mutated = AlertSettingsRow.Defaults();
+            property.SetValue(mutated, Different(property, property.GetValue(mutated)));
+
+            Assert.False(
+                AlertSettingsRow.Defaults().ValueEquals(mutated),
+                $"ValueEquals does not compare {property.Name}, so a store customized only there reads as default");
+        }
+    }
+
+    /// <summary>A value of <paramref name="property"/>'s type that <c>ValueEquals</c> must treat as
+    /// different from <paramref name="current"/>. Throws on an unhandled type rather than returning
+    /// something plausible: a silent fallback would hand the comparison a value equal to what it replaced,
+    /// and the assertion above would then fail against a correct implementation.</summary>
+    private static object Different(PropertyInfo property, object? current) => property.PropertyType switch
+    {
+        /* cpu_mode is compared case-insensitively against the service's two-word vocabulary, so the only
+           genuinely different value is the OTHER word. */
+        _ when property.Name == nameof(AlertSettingsRow.CpuMode) =>
+            string.Equals((string?)current, ViewerDataService.CpuModeSql, StringComparison.OrdinalIgnoreCase)
+                ? ViewerDataService.CpuModeTotal
+                : ViewerDataService.CpuModeSql,
+        var t when t == typeof(bool) => !(bool)current!,
+        var t when t == typeof(int) => (int)current! + 1,
+        var t when t == typeof(long) => (long)current! + 1,
+        var t when t == typeof(double) => (double)current! + 1.0,
+        var t when t == typeof(string) => (string?)current == "x" ? "y" : "x",
+        var t when t == typeof(List<string>) => new List<string>((List<string>?)current ?? new List<string>()) { "__mutated__" },
+        _ => throw new NotSupportedException(
+            $"{property.Name} is a {property.PropertyType.Name}, which this pin cannot mutate — teach it "
+            + "rather than skipping, or the column silently stops being checked."),
+    };
 }
 
 /// <summary>The one-time operational migrate-in: the defaults-only import decision + the projection, with no
