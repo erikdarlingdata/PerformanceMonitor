@@ -1623,6 +1623,17 @@ public static class DarlingWebEndpoints
     private static CatalogParam PBool(string name, bool def) => new(name, TypeBool, false, def);
     private static CatalogParam PDouble(string name, double def) => new(name, TypeDouble, false, def);
 
+    /// <summary>
+    /// A numeric FILTER, which carries no default — the <see cref="PText"/> shape rather than
+    /// <see cref="PDouble(string, double)"/>'s.
+    ///
+    /// <para>The distinction is load-bearing for <c>min_duration_ms</c>: <c>0</c> is a real value there (it
+    /// admits every row AND ranks the page by duration), so advertising <c>0</c> as the default would tell a
+    /// catalog consumer that sending nothing and sending zero are the same request. Absent means no filter,
+    /// which is a third state and not a number.</para>
+    /// </summary>
+    private static CatalogParam PDouble(string name) => new(name, TypeDouble, false, null);
+
     private static CatalogRead R(string category, string description, params CatalogParam[] parameters) =>
         new(category, description, parameters);
 
@@ -1677,7 +1688,7 @@ public static class DarlingWebEndpoints
 
             /* ── core data reads (DarlingMcpDataTools + long-query / fleet tools) ── */
             ["get_collection_health"] = R(CatData, "Per-collector collection health for a server.", PServer()),
-            ["get_collection_log"] = R(CatData, "Raw per-run collector log for a server, newest first.", PServer(), PHours(24), PLimit(200), PAsOf()),
+            ["get_collection_log"] = R(CatData, "Raw per-run collector log for a server, newest first — or slowest first when min_duration_ms is supplied.", PServer(), PHours(24), PLimit(200), PAsOf(), PText("collector_name"), PDouble("min_duration_ms")),
             ["get_current_waits_trend"] = R(CatData, "Waiting-task and blocked-session series over time.", PServer(), PHours(4), PText("database_name"), PAsOf()),
             ["get_blocking_stats"] = R(CatData, "Blocking duration and deadlock severity per minute.", PServer(), PHours(24), PAsOf()),
             ["get_cpu_utilization"] = R(CatData, "CPU utilization over time.", PServer(), PHours(4), PAsOf()),

@@ -21,6 +21,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -234,6 +235,81 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("collector_name", lite);
         Assert.Contains("min_duration_ms", lite);
         Assert.DoesNotContain("dataService", lite);
+    }
+
+    /// <summary>
+    /// <c>get_collection_log</c>'s parameter list, held identical across every surface that writes it down.
+    ///
+    /// <para>Five places name these parameters: Darling's signature, Lite's signature, the two quick-reference
+    /// instruction tables (byte-identical rows on both SKUs), and the <c>/api/catalog</c> descriptor. #3287
+    /// added two filters to the first two and review found the other three stale — and nothing caught it,
+    /// because the new parameters are OPTIONAL and no shipped caller sends them, so every existing pin stayed
+    /// green. That is the same shape as the defect being fixed: a surface advertising a parameter list that no
+    /// longer matches what the read accepts, with no way for a consumer to discover the difference.</para>
+    ///
+    /// <para>So the list is derived from the signature and compared, rather than each surface being spot-checked
+    /// for the two names this change happened to add. A third filter added to the tool and not to the tables
+    /// reds this.</para>
+    ///
+    /// <para>The catalog is asserted by CONTAINMENT rather than equality, because it names parameters as they
+    /// appear on the WIRE — <c>server</c> and <c>hours</c> against the tool's <c>server_name</c> and
+    /// <c>hours_back</c> — and reconciling that mapping is <c>ServerPageTabsTests</c>' job, not this one's.</para>
+    /// </summary>
+    [Fact]
+    public void CollectionLogParams_AreTheSameListOnEverySurfaceThatWritesThemDown()
+    {
+        var reflected = McpParams("get_collection_log").Select(p => p.Name).ToArray();
+
+        Assert.Equal(reflected, LiteMcpParamNames("get_collection_log", "GetCollectionLog"));
+
+        /* The tables render the list as backticked names joined by ", " — the shape every other row uses. */
+        var expectedCell = string.Join(", ", reflected.Select(n => $"`{n}`"));
+
+        var liteInstructions = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Mcp", "McpInstructions.cs"));
+        foreach (var (surface, text) in new[]
+                 {
+                     ("Darling's instruction table", DarlingMcpInstructions.Text),
+                     ("Lite's instruction table", liteInstructions),
+                 })
+        {
+            Assert.Equal(expectedCell, CollectionLogInstructionCell(surface, text));
+        }
+
+        var catalog = DarlingWebEndpoints.CatalogDescriptors["get_collection_log"].Params;
+
+        foreach (var filter in new[] { "collector_name", "min_duration_ms" })
+        {
+            Assert.Contains(filter, catalog.Select(p => p.Name));
+        }
+
+        /*
+            And min_duration_ms advertises NO default. 0 is a real value on this read -- it admits every row
+            AND ranks the page by duration -- so a catalog default of 0 would tell a consumer that sending
+            nothing and sending zero are the same request. Absent is a third state, not a number.
+        */
+        Assert.Null(catalog.Single(p => p.Name == "min_duration_ms").Default);
+
+        /* Positive control on the two negatives-by-absence above: the descriptor really does carry the
+           parameters it always had, so containment is not passing against a descriptor that lost its list. */
+        Assert.Contains("limit", catalog.Select(p => p.Name));
+        Assert.Contains("as_of", catalog.Select(p => p.Name));
+    }
+
+    /// <summary>The "Key Parameters" cell of the <c>get_collection_log</c> row in a quick-reference table.</summary>
+    private static string CollectionLogInstructionCell(string surface, string text)
+    {
+        var row = text
+            .Split('\n')
+            .SingleOrDefault(l => l.TrimStart().StartsWith("| `get_collection_log` |", StringComparison.Ordinal));
+
+        Assert.True(row is not null, $"{surface} has no `get_collection_log` row — this pin needs re-anchoring.");
+
+        /* Four cells between five pipes, so the parameter list is the last populated one. The row is a single
+           line by convention and its prose carries no pipe, which is what makes this safe. */
+        var cells = row!.TrimEnd('\r').Split('|');
+        Assert.True(cells.Length >= 4, $"{surface}'s `get_collection_log` row is not a four-cell row.");
+
+        return cells[^2].Trim();
     }
 
     /// <summary>The advertised MCP parameter names of one Lite tool, in declaration order, read out of Lite's
