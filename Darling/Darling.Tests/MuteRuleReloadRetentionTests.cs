@@ -207,12 +207,21 @@ public sealed class MuteRuleReloadRetentionTests
             "LoadAsync").Stripped;
 
         var read = body.IndexOf("await _store.LoadAllAsync()", StringComparison.Ordinal);
-        var assign = body.IndexOf("_rules = rules.ToList()", StringComparison.Ordinal);
+
+        /* The FIRST write to the cache, whatever it assigns — not the assignment of the loaded rules.
+           Anchoring on "_rules = rules.ToList()" reads the same on a body that CLEARS the cache first and
+           then assigns, which is the defect exactly: the clear lands, the read throws, and the assignment
+           the pin was watching never runs. Mutating this file proved it — the narrower form stayed green
+           while all three behavioural arms went red, which is the shape of a pin that cannot fail. */
+        var write = body.IndexOf("_rules =", StringComparison.Ordinal);
 
         Assert.True(read >= 0, "LoadAsync no longer reads the store through LoadAllAsync");
-        Assert.True(assign >= 0, "LoadAsync no longer replaces the cache — this pin is reading the wrong member");
-        Assert.True(read < assign, "the cache is replaced before the read completes, so a failed read empties it");
+        Assert.True(write >= 0, "LoadAsync no longer writes the cache — this pin is reading the wrong member");
+        Assert.True(
+            read < write,
+            "the cache is written before the store read completes, so a failed read reduces it");
 
+        Assert.Contains("_rules = rules.ToList()", body, StringComparison.Ordinal);
         Assert.DoesNotContain("catch", body, StringComparison.Ordinal);
     }
 
