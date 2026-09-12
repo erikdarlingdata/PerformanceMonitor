@@ -877,6 +877,18 @@ def self_test() -> int:
         )
         os.rmdir(blocked)
 
+        # A manifest naming no products. `collect` cannot write one, but `apply` reads a file
+        # rather than a return value, so the guard on its own census is what stops a hand-edited
+        # or future manifest from reporting success over an empty write-back -- the failure this
+        # whole issue is about, in the one place left that could still produce it.
+        empty_manifest = os.path.join(root, "empty.json")
+        with open(empty_manifest, "w", encoding="utf-8") as handle:
+            json.dump({"version": MANIFEST_VERSION, "products": []}, handle)
+        expect_raises(
+            "apply reported success over a manifest naming no products",
+            lambda: apply(whole, empty_manifest),
+        )
+
         signed = _sign_stage(stage)
         before_lite = snapshot(os.path.join(lite, "PerformanceMonitorLite-lite-Portable.zip"))
         expect_ok("apply refused a correct signing response", lambda: apply(signed, manifest))

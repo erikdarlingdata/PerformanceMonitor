@@ -3,6 +3,20 @@ name: Probe vpk signing invocations
 # #3288 groundwork. Manual only, publishes nothing, touches no release, uploads nothing to
 # SignPath.
 #
+# THE QUESTION BELOW IS SETTLED, AND NOT IN FAVOUR OF THE DESIGN IT MEASURES. `vpk pack
+# --signTemplate` cannot sign anything on this SignPath account: the open-source signing policy
+# requires origin verification through a trusted build system, so a request is accepted only
+# through `signpath/github-action-submit-signing-request`, and that is a workflow step which
+# cannot be invoked from inside a running `vpk pack`. A real 3.7.1 release build submitted two
+# batches by raw API token and got 403 "the selected signing policy requires that the signing
+# request is submitted via a trusted build system" on both. Signing therefore happens after
+# packing -- see `Sign the executables Velopack generates` in build.yml and
+# .github/scripts/postpack_signing.py.
+#
+# What this probe still measures honestly is `vpk pack`'s own behaviour: which files it offers a
+# signing template, and how it batches them. Everything below about approval cost describes an
+# approach that cannot run.
+#
 # The design question this answers: `vpk pack --signTemplate` is the only way to sign the
 # executables Velopack GENERATES (the portable stub, Update.exe, Setup.exe), because those are
 # created after packing and re-signing them afterwards invalidates the SHA256 and Size that
