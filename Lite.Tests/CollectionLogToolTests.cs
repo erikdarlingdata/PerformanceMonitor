@@ -86,6 +86,34 @@ public sealed class CollectionLogToolTests : IClassFixture<SharedDuckDbFixture>,
         Assert.Contains("EVER", neverText, StringComparison.Ordinal);
         Assert.DoesNotContain("widen", neverText, StringComparison.OrdinalIgnoreCase);
 
+        /*
+            Never collected AND a filter supplied: still the FAULT, because a fault outranks a miss.
+
+            The filtered branch #3287 added short-circuited ahead of the never-collected probe, so this call
+            answered "the filters were applied, so unfiltered runs may well exist -- drop them to see what the
+            window holds" about a server that has nothing to see either way. That is the same defect the two
+            original branches exist to prevent, reintroduced by the branch added to prevent it. Review caught
+            it; nothing here covered it, which is how it got in. Both filters, separately, because the branch
+            triggers on either.
+        */
+        foreach (var filtered in new[]
+                 {
+                     await McpHealthTools.GetCollectionLog(service, _serverManager, ServerName, 24, 200, collector_name: "query_store"),
+                     await McpHealthTools.GetCollectionLog(service, _serverManager, ServerName, 24, 200, min_duration_ms: 1000),
+                 })
+        {
+            var root = JsonDocument.Parse(filtered).RootElement;
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+
+            var text = root.GetProperty("message").GetString()!;
+            Assert.Contains("EVER", text, StringComparison.Ordinal);
+
+            /* And NOT the filtered wording, which would send this caller to unfilter a window that will
+               never fill -- the specific false instruction the ordering fixes. */
+            Assert.DoesNotContain("Drop them", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("widen", text, StringComparison.OrdinalIgnoreCase);
+        }
+
         /* Collected, but outside the asked-for window: a true negative, and widening IS the move. */
         await SeedLogAsync("query_store", DateTime.UtcNow.AddHours(-48));
 

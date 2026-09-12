@@ -76,6 +76,34 @@ public sealed class DarlingCollectionLogReadTests
             /* The trap this test exists for: a caller told to widen the window will never fill it. */
             Assert.DoesNotContain("widen", neverText, StringComparison.OrdinalIgnoreCase);
 
+            /*
+                And still the FAULT when a FILTER is supplied, because a fault outranks a miss.
+
+                #3287's filtered branch short-circuited ahead of the never-collected probe, so this call
+                answered "the filters were applied, so unfiltered runs may well exist -- drop them to see
+                what the window holds" about a server with nothing to see either way. That is the same
+                defect the two branches above exist to prevent, reintroduced by the branch added to prevent
+                it. Review caught it; nothing here covered it, which is how it got in. Both filters
+                separately, because the branch triggers on either one.
+            */
+            foreach (var filtered in new[]
+                     {
+                         await DarlingMcpDataTools.GetCollectionLog(dataSource, ServerName, 24, 200, collector_name: "query_store"),
+                         await DarlingMcpDataTools.GetCollectionLog(dataSource, ServerName, 24, 200, min_duration_ms: 1000),
+                     })
+            {
+                var filteredRoot = JsonDocument.Parse(filtered).RootElement;
+                Assert.Equal("unavailable", filteredRoot.GetProperty("status").GetString());
+
+                var filteredText = filteredRoot.GetProperty("message").GetString()!;
+                Assert.Contains("EVER", filteredText, StringComparison.Ordinal);
+
+                /* Not the filtered wording, which would send this caller to unfilter a window that will
+                   never fill -- the specific false instruction the ordering fixes. */
+                Assert.DoesNotContain("Drop them", filteredText, StringComparison.Ordinal);
+                Assert.DoesNotContain("widen", filteredText, StringComparison.OrdinalIgnoreCase);
+            }
+
             /* ── 2. collected, but not inside the asked-for window: a TRUE NEGATIVE ── */
             await SeedAsync(connection, ct, "query_store", HoursAgo(48));
 

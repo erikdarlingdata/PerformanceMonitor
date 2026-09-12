@@ -1328,7 +1328,25 @@ public sealed class DarlingMcpDataTools
                     sentence would then assert the window is quiet on a read that never looked at the
                     whole window. It also names the filters back, because the caller cannot otherwise tell
                     a rejected value from an honestly empty match.
+
+                    THE NEVER-COLLECTED CHECK COMES FIRST, ahead of the filter branch, and the order is the
+                    whole correctness of this block. A fault outranks a miss: on a server that has never
+                    collected, "the filters were applied, so unfiltered runs may well exist -- drop them to
+                    see what the window holds" is FALSE, and it sends the caller to widen and unfilter a
+                    window that will never fill. That is the same defect the two original branches exist to
+                    prevent, reintroduced by the branch added to prevent it -- so the filters can only ever
+                    narrow the answer given to a server that HAS collected. It costs one LIMIT 1 probe on a
+                    path that already returned no rows.
                 */
+                var everCollected = await DarlingDataReader.HasAnyCollectionLogAsync(postgres, resolved.ServerId);
+
+                if (!everCollected)
+                {
+                    return McpHelpers.Status(
+                        "unavailable",
+                        $"No collector runs have EVER been recorded for {resolved.ServerName}. This is not an empty window — collection has not run at all for this server. Check that the service is running and that the server is enabled for collection; get_collection_health will be equally empty until it does.");
+                }
+
                 if (filtered)
                 {
                     return McpHelpers.Status(
@@ -1336,14 +1354,9 @@ public sealed class DarlingMcpDataTools
                         $"No collector runs on {resolved.ServerName} in the last {Math.Abs(hours_back)} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.");
                 }
 
-                var everCollected = await DarlingDataReader.HasAnyCollectionLogAsync(postgres, resolved.ServerId);
-                return everCollected
-                    ? McpHelpers.Status(
-                        "empty",
-                        $"No collector runs recorded for {resolved.ServerName} in the last {Math.Abs(hours_back)} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.")
-                    : McpHelpers.Status(
-                        "unavailable",
-                        $"No collector runs have EVER been recorded for {resolved.ServerName}. This is not an empty window — collection has not run at all for this server. Check that the service is running and that the server is enabled for collection; get_collection_health will be equally empty until it does.");
+                return McpHelpers.Status(
+                    "empty",
+                    $"No collector runs recorded for {resolved.ServerName} in the last {Math.Abs(hours_back)} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.");
             }
 
             var result = rows.Select(r => new
