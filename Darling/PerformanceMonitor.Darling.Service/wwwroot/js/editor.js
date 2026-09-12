@@ -123,6 +123,38 @@ export async function loadFleetOptions() {
     .sort((a, b) => a.label.localeCompare(b.label));
 }
 
+/* Fleet TAG options for the alert-rule scope picker (#3350): the /api/fleet tag forest flattened depth-first
+   (parents before their children) into { value: String(tag id), label, depth }. The value is the STABLE tag id
+   — a tag-scoped rule stores scope.tagId, not the name, so a rename never re-scopes it — and depth lets a flat
+   <select> render the hierarchy with indentation. Cycle- and dangling-parent-safe, the same projection the
+   fleet page groups with. Empty when no tags are defined. */
+export async function loadFleetTagOptions() {
+  const res = await apiGet("/api/fleet");
+  if (res.kind !== "data" || !res.data) return [];
+  const forest = Array.isArray(res.data.tags) ? res.data.tags : [];
+  const known = new Set(forest.map((t) => t.id));
+  const byParent = new Map();
+  for (const t of forest) {
+    const p = t.parent_id != null && known.has(t.parent_id) ? t.parent_id : 0; // dangling parent -> root
+    if (!byParent.has(p)) byParent.set(p, []);
+    byParent.get(p).push(t);
+  }
+  for (const list of byParent.values()) {
+    list.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0) || String(a.name).localeCompare(String(b.name)));
+  }
+  const out = [];
+  const visited = new Set();
+  const emit = (t, depth) => {
+    if (visited.has(t.id)) return; // cycle guard
+    visited.add(t.id);
+    out.push({ value: String(t.id), label: t.name || "Tag " + t.id, depth });
+    for (const child of byParent.get(t.id) || []) emit(child, depth + 1);
+  };
+  for (const t of byParent.get(0) || []) emit(t, 0);
+  for (const t of forest) if (!visited.has(t.id)) emit(t, 0); // cycle / disconnected -> surface as a root
+  return out;
+}
+
 /* ─────────────────────────── model <-> stored definition ─────────────────────────── */
 
 /** A new panel — a COMPOSED metric by default (the v2 headline); a read panel is the "advanced" alternative. */

@@ -146,6 +146,31 @@ public sealed class DarlingMcpCustomAlertToolsSurfaceTests
     }
 
     [Fact]
+    public async Task ValidateCustomAlertRule_TagScope_ReturnsValidTrue()
+    {
+        // #3350: a tag-scoped rule stores the tag's stable integer id; the validator accepts it (the evaluator
+        // resolves the id -> the tag's server set at sweep time — no store hit in the validator).
+        var rule =
+            "{\"metric\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"hours\":1}," +
+            "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1000},\"scope\":{\"mode\":\"tag\",\"tagId\":7}}";
+        var result = await DarlingMcpCustomAlertTools.ValidateCustomAlertRule(rule);
+        using var doc = JsonDocument.Parse(result);
+        Assert.True(doc.RootElement.GetProperty("valid").GetBoolean(), result);
+    }
+
+    [Fact]
+    public async Task ValidateCustomAlertRule_TagScopeMissingTagId_ReturnsValidFalse()
+    {
+        var rule =
+            "{\"metric\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"hours\":1}," +
+            "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1000},\"scope\":{\"mode\":\"tag\"}}";
+        var result = await DarlingMcpCustomAlertTools.ValidateCustomAlertRule(rule);
+        using var doc = JsonDocument.Parse(result);
+        Assert.False(doc.RootElement.GetProperty("valid").GetBoolean(), result);
+        Assert.Contains("tagId", doc.RootElement.GetProperty("error").GetString()!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task CreateCustomAlertRule_InvalidDefinition_ReturnsInvalid_WithoutTouchingTheStore()
     {
         /* Validation runs BEFORE persistence, so a bad definition returns 'invalid' without ever opening a
@@ -196,6 +221,12 @@ public sealed class DarlingMcpCustomAlertToolsLivePostgresTests
     private const string BadMeasureRule =
         "{\"metric\":{\"source\":\"wait_stats\",\"measure\":\"nope\",\"aggregate\":\"sum\",\"hours\":1}," +
         "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1}}";
+
+    /* #3350: a tag-scoped rule. The tag id rides as opaque scope JSON — the rule stores/returns it verbatim, so
+       the round-trip does not require the tag itself to exist (membership is resolved only at evaluation time). */
+    private const string TagScopedRule =
+        "{\"metric\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"hours\":1}," +
+        "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1000},\"scope\":{\"mode\":\"tag\",\"tagId\":123456}}";
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -317,6 +348,63 @@ public sealed class DarlingMcpCustomAlertToolsLivePostgresTests
             {
                 await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt,
                     "DELETE FROM config.custom_alert_rules WHERE name = $1 OR name = $2", name, name + "_invalid");
+            });
+        }
+    }
+
+    [Fact]
+    public async Task CustomAlertRule_TagScope_RoundTripsThroughCreateAndGet_AgainstDevPostgres()
+    {
+        // #3350: a tag-scoped rule survives create -> get with its scope intact (mode "tag" + the stable tagId).
+        // The definition is stored as jsonb and returned verbatim, so tag scope rides through the CRUD the same
+        // way All/Servers do — no tag row needs to exist for the round-trip (resolution happens at sweep time).
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string (owner/superuser) to run the tag-scope round-trip live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using (var migrate = new NpgsqlConnection(cs))
+        {
+            await migrate.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(migrate, ct);
+        }
+
+        var dataSourceConnectionString = new NpgsqlConnectionStringBuilder(cs)
+        {
+            SearchPath = "collect,config,public",
+        }.ConnectionString;
+
+        await using var postgres = NpgsqlDataSource.Create(dataSourceConnectionString);
+
+        var name = "car_tag_live_" + Guid.NewGuid().ToString("N");
+        var bodySucceeded = false;
+        try
+        {
+            long id;
+            using (var created = JsonDocument.Parse(
+                await DarlingMcpCustomAlertTools.CreateCustomAlertRule(postgres, name, TagScopedRule)))
+            {
+                id = created.RootElement.GetProperty("id").GetInt64();
+            }
+
+            using (var fetched = JsonDocument.Parse(await DarlingMcpCustomAlertTools.GetCustomAlertRule(postgres, id)))
+            {
+                // definition is embedded as a JSON object (BuildFullRuleNode parses the stored jsonb).
+                var scope = fetched.RootElement.GetProperty("definition").GetProperty("scope");
+                Assert.Equal("tag", scope.GetProperty("mode").GetString());
+                Assert.Equal(123456, scope.GetProperty("tagId").GetInt32());
+            }
+
+            Assert.Equal("deleted", DarlingMcpTestData.StatusOf(await DarlingMcpCustomAlertTools.DeleteCustomAlertRule(postgres, id)));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt,
+                    "DELETE FROM config.custom_alert_rules WHERE name = $1", name);
             });
         }
     }

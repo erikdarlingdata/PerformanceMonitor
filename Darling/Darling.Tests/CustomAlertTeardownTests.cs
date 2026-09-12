@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System.Collections.Generic;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -27,6 +28,10 @@ public class CustomAlertTeardownTests
         "{\"metric\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"hours\":1}," +
         "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1000},\"scope\":{\"mode\":\"servers\",\"servers\":[\"" + server + "\"]}}");
 
+    private static CustomAlertRuleDefinition TagScope() => Parse(
+        "{\"metric\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"hours\":1}," +
+        "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1000},\"scope\":{\"mode\":\"tag\",\"tagId\":5}}");
+
     private static CustomAlertRuleDefinition Parse(string json)
     {
         var (def, error) = CustomAlertRuleDefinition.TryParse(json);
@@ -41,26 +46,26 @@ public class CustomAlertTeardownTests
         // A disabled rule is not in the enabled cache, so the reconcile passes a null definition; disabled wins.
         Assert.Equal(
             CustomAlertEvaluator.TeardownReasonDisabled,
-            CustomAlertEvaluator.ClassifyStateTeardown(ruleEnabled: false, definition: null, serverStorageName: "PROD01"));
+            CustomAlertEvaluator.ClassifyStateTeardown(ruleEnabled: false, definition: null, tagServerIds: null, serverId: 1, serverStorageName: "PROD01"));
     }
 
     [Fact]
     public void EnabledRule_WithNoCachedDefinition_IsLeftAlone()
     {
         // Just-enabled or a stale cache: don't tear down on uncertainty.
-        Assert.Null(CustomAlertEvaluator.ClassifyStateTeardown(ruleEnabled: true, definition: null, serverStorageName: "PROD01"));
+        Assert.Null(CustomAlertEvaluator.ClassifyStateTeardown(ruleEnabled: true, definition: null, tagServerIds: null, serverId: 1, serverStorageName: "PROD01"));
     }
 
     [Fact]
     public void EnabledAllScopeRule_WithAMonitoredServer_IsKept()
     {
-        Assert.Null(CustomAlertEvaluator.ClassifyStateTeardown(ruleEnabled: true, AllScope(), serverStorageName: "PROD01"));
+        Assert.Null(CustomAlertEvaluator.ClassifyStateTeardown(ruleEnabled: true, AllScope(), tagServerIds: null, serverId: 1, serverStorageName: "PROD01"));
     }
 
     [Fact]
     public void EnabledServersScopeRule_ServerInScope_IsKept()
     {
-        Assert.Null(CustomAlertEvaluator.ClassifyStateTeardown(ruleEnabled: true, ServersScope("PROD01"), serverStorageName: "PROD01"));
+        Assert.Null(CustomAlertEvaluator.ClassifyStateTeardown(ruleEnabled: true, ServersScope("PROD01"), tagServerIds: null, serverId: 1, serverStorageName: "PROD01"));
     }
 
     [Fact]
@@ -68,7 +73,7 @@ public class CustomAlertTeardownTests
     {
         Assert.Equal(
             CustomAlertEvaluator.TeardownReasonOutOfScope,
-            CustomAlertEvaluator.ClassifyStateTeardown(ruleEnabled: true, ServersScope("PROD01"), serverStorageName: "PROD02"));
+            CustomAlertEvaluator.ClassifyStateTeardown(ruleEnabled: true, ServersScope("PROD01"), tagServerIds: null, serverId: 1, serverStorageName: "PROD02"));
     }
 
     [Fact]
@@ -79,6 +84,37 @@ public class CustomAlertTeardownTests
         // even though an "all"-scoped rule would otherwise apply to it.
         Assert.Equal(
             CustomAlertEvaluator.TeardownReasonOutOfScope,
-            CustomAlertEvaluator.ClassifyStateTeardown(ruleEnabled: true, AllScope(), serverStorageName: null));
+            CustomAlertEvaluator.ClassifyStateTeardown(ruleEnabled: true, AllScope(), tagServerIds: null, serverId: 1, serverStorageName: null));
+    }
+
+    [Fact]
+    public void EnabledTagScopeRule_ServerInTag_IsKept()
+    {
+        // The server's id is in the tag's resolved member set -> in scope, keep the row.
+        var members = new HashSet<int> { 101 };
+        Assert.Null(CustomAlertEvaluator.ClassifyStateTeardown(
+            ruleEnabled: true, TagScope(), members, serverId: 101, serverStorageName: "PROD01"));
+    }
+
+    [Fact]
+    public void EnabledTagScopeRule_ServerLeftTag_IsTornDown()
+    {
+        // The server is still monitored, but its id is no longer in the tag's resolved set (it left the tag) —
+        // out of scope, so its open incident is force-resolved (#3350), the same idiom as leaving a 'servers' scope.
+        var members = new HashSet<int> { 202 };
+        Assert.Equal(
+            CustomAlertEvaluator.TeardownReasonOutOfScope,
+            CustomAlertEvaluator.ClassifyStateTeardown(
+                ruleEnabled: true, TagScope(), members, serverId: 101, serverStorageName: "PROD01"));
+    }
+
+    [Fact]
+    public void EnabledTagScopeRule_EmptyTag_IsTornDown()
+    {
+        // A tag that resolves to no members (empty / deleted) matches no server, so any lingering state is stale.
+        Assert.Equal(
+            CustomAlertEvaluator.TeardownReasonOutOfScope,
+            CustomAlertEvaluator.ClassifyStateTeardown(
+                ruleEnabled: true, TagScope(), new HashSet<int>(), serverId: 101, serverStorageName: "PROD01"));
     }
 }

@@ -29,6 +29,7 @@ import { el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip } from "./
 import {
   buildComposedPanelBody,
   loadFleetOptions,
+  loadFleetTagOptions,
   newComposedPanel,
   descToComposedPanel,
   composedPanelToDesc,
@@ -91,8 +92,9 @@ export async function renderAlertEditor(main, id, templateKey) {
     return;
   }
 
-  /* The metric picker needs the compose catalog; the scope picker needs the fleet server names. */
-  const [catalog, fleet] = await Promise.all([api.getCatalog(), loadFleetOptions()]);
+  /* The metric picker needs the compose catalog; the scope picker needs the fleet server names AND the fleet tag
+     forest (#3350 tag scope). */
+  const [catalog, fleet, tags] = await Promise.all([api.getCatalog(), loadFleetOptions(), loadFleetTagOptions()]);
 
   let model;
   let editingId = null;
@@ -124,7 +126,7 @@ export async function renderAlertEditor(main, id, templateKey) {
     model = seed ? seededModel(seed) : blankModel();
   }
 
-  buildAlertEditor(main, { model, editingId, loadedVersion, catalog, fleet });
+  buildAlertEditor(main, { model, editingId, loadedVersion, catalog, fleet, tags });
 }
 
 /* ─────────────────────────── model <-> definition ─────────────────────────── */
@@ -149,6 +151,7 @@ function blankModel() {
     clearSamples: 1,
     scopeMode: "all",
     scopeServers: [],
+    scopeTagId: null,
     intervalSeconds: "",
   };
 }
@@ -187,8 +190,9 @@ function definitionToModel(def, name, description, enabled) {
     critical: pred.criticalThreshold != null ? String(pred.criticalThreshold) : "",
     breachSamples: intOr(hyst.breachSamples, 1),
     clearSamples: intOr(hyst.clearSamples, 1),
-    scopeMode: scope.mode === "servers" ? "servers" : "all",
+    scopeMode: scope.mode === "servers" ? "servers" : scope.mode === "tag" ? "tag" : "all",
     scopeServers: Array.isArray(scope.servers) ? scope.servers.map(String) : [],
+    scopeTagId: typeof scope.tagId === "number" ? scope.tagId : null,
     intervalSeconds: typeof def.evaluationIntervalSeconds === "number" ? String(def.evaluationIntervalSeconds) : "",
   };
 }
@@ -207,12 +211,22 @@ function modelToDefinition(model) {
     metric,
     predicate,
     hysteresis: { breachSamples: model.breachSamples, clearSamples: model.clearSamples },
-    scope: model.scopeMode === "servers" ? { mode: "servers", servers: [...model.scopeServers] } : { mode: "all" },
+    scope: scopeToDefinition(model),
   };
 
   const interval = model.intervalSeconds.trim();
   if (interval !== "") def.evaluationIntervalSeconds = parseInt(interval, 10);
   return def;
+}
+
+/** The model's scope -> the definition's scope object: all servers, a specific-server list, or a fleet tag by
+ *  its STABLE id (#3350). A "tag" mode with no chosen id still emits { mode:"tag", tagId:null } so the backend
+ *  returns its own "scope.tagId required" verdict — the same way an empty "servers" list is left for the backend
+ *  to reject; the save-blocker already blocks the save in both cases. */
+function scopeToDefinition(model) {
+  if (model.scopeMode === "servers") return { mode: "servers", servers: [...model.scopeServers] };
+  if (model.scopeMode === "tag") return { mode: "tag", tagId: model.scopeTagId };
+  return { mode: "all" };
 }
 
 /* ─────────────────────────── save blocker (mirrors the server's cheap rules) ─────────────────────────── */
@@ -252,6 +266,10 @@ function alertSaveBlocker(model) {
 
   if (model.scopeMode === "servers" && !model.scopeServers.length) {
     return "Pick at least one server, or scope the rule to all servers.";
+  }
+
+  if (model.scopeMode === "tag" && !(model.scopeTagId > 0)) {
+    return "Pick a tag, or scope the rule to all servers.";
   }
 
   const interval = model.intervalSeconds.trim();
@@ -417,7 +435,7 @@ function buildAlertEditor(main, ctx) {
     el("h3", { class: "section-title", text: "Hysteresis" }),
     el("div", { class: "alert-section card" }, [hysteresisSection(model, onFieldChange)]),
     el("h3", { class: "section-title", text: "Scope" }),
-    el("div", { class: "alert-section card" }, [scopeSection(model, ctx.fleet, onFieldChange)]),
+    el("div", { class: "alert-section card" }, [scopeSection(model, ctx.fleet, ctx.tags, onFieldChange)]),
     advancedSection(model, onFieldChange),
     el("h3", { class: "section-title", text: "Preview" }),
     previewBox,
@@ -536,24 +554,30 @@ function hysteresisSection(model, onChange) {
 
 /* ─────────────────────────── scope ─────────────────────────── */
 
-/* Which servers the rule evaluates against: all servers (the fleet), or a chosen set. Tag scope is deferred
-   (#3350), so only All / Specific servers are offered. */
-function scopeSection(model, fleet, onChange) {
+/* Which servers the rule evaluates against: all servers (the fleet), a chosen set, or the members of a fleet
+   tag (#3350). Tag scope stores the tag's STABLE id (scope.tagId), so a rename never re-scopes the rule; the
+   picker resolves name<->id from the /api/fleet tag forest. */
+function scopeSection(model, fleet, tags, onChange) {
   const list = el("div", { class: "scope-list" });
   const box = el("div", {});
 
   const modeSel = el("select", { class: "editor-select", "aria-label": "Scope" }, [
     el("option", { value: "all", text: "All servers (fleet)" }),
     el("option", { value: "servers", text: "Specific servers" }),
+    el("option", { value: "tag", text: "Servers with a tag" }),
   ]);
   modeSel.value = model.scopeMode;
   modeSel.addEventListener("change", () => {
-    model.scopeMode = modeSel.value === "servers" ? "servers" : "all";
+    model.scopeMode = modeSel.value === "servers" ? "servers" : modeSel.value === "tag" ? "tag" : "all";
     redraw();
     onChange();
   });
 
   function redraw() {
+    if (model.scopeMode === "tag") {
+      mount(box, tagScope());
+      return;
+    }
     if (model.scopeMode !== "servers") {
       mount(box, el("div", { class: "block-help", text: "This rule evaluates against every monitored server." }));
       return;
@@ -577,8 +601,41 @@ function scopeSection(model, fleet, onChange) {
     mount(box, [list, el("div", { class: "block-help", text: "The rule fires per server; pick the servers it applies to." })]);
   }
 
+  /* The tag picker: a single-select of the fleet tag forest, indented by depth. The rule evaluates the servers
+     DIRECTLY assigned the chosen tag, resolved fresh each sweep — so adding or removing a server from the tag
+     re-scopes the rule without editing it. */
+  function tagScope() {
+    if (!tags.length) {
+      return noticeStrip("No fleet tags are defined yet. Create and assign tags in the desktop viewer's fleet view, then scope a rule to one.");
+    }
+    const sel = el("select", { class: "editor-select", "aria-label": "Tag" });
+    sel.appendChild(el("option", { value: "", text: "— pick a tag —" }));
+    for (const t of tags) {
+      // Indent by depth (non-breaking spaces via textContent, never innerHTML) so the flat <select> shows the tree.
+      const prefix = t.depth > 0 ? "  ".repeat(t.depth) + "└ " : "";
+      sel.appendChild(el("option", { value: t.value, text: prefix + t.label }));
+    }
+    // A loaded rule may name a tag since deleted/renamed away; keep it selectable (like buildWindowSelect keeps a
+    // non-preset window) so the operator sees what is applied rather than a silent reset to "pick a tag".
+    if (model.scopeTagId != null && !tags.some((t) => t.value === String(model.scopeTagId))) {
+      sel.appendChild(el("option", { value: String(model.scopeTagId), text: "Tag " + model.scopeTagId + " (not in fleet — deleted?)" }));
+    }
+    sel.value = model.scopeTagId != null ? String(model.scopeTagId) : "";
+    sel.addEventListener("change", () => {
+      model.scopeTagId = sel.value ? Number(sel.value) : null;
+      onChange();
+    });
+    return el("div", {}, [
+      field("Tag", sel),
+      el("div", {
+        class: "block-help",
+        text: "The rule fires per server for every server DIRECTLY assigned this tag. Membership is resolved fresh each evaluation, so adding or removing a server from the tag re-scopes the rule automatically; an empty or deleted tag matches no server (the rule never fires).",
+      }),
+    ]);
+  }
+
   redraw();
-  return el("div", {}, [field("Servers", modeSel), box]);
+  return el("div", {}, [field("Scope", modeSel), box]);
 }
 
 function checkRow(label, checked, onToggle) {

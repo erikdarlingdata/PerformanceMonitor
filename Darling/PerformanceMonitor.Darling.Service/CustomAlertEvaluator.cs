@@ -70,7 +70,49 @@ public sealed class CustomAlertEvaluator
 
     private DateTime _cacheRefreshedUtc = DateTime.MinValue;
 
-    private sealed record ParsedRule(CustomAlertRule Row, CustomAlertRuleDefinition Definition);
+    /// <summary>A parsed, enabled rule plus — for a tag-scoped rule (#3350) — the server-id set its tag currently
+    /// resolves to (from <c>config.server_tag_map</c>, refreshed alongside the rule cache). <c>null</c> for an
+    /// All/Servers rule (those are decided purely from the storage name); an EMPTY set for a tag that currently
+    /// has no members, so the rule matches no server and never fires.</summary>
+    private sealed record ParsedRule(
+        CustomAlertRule Row, CustomAlertRuleDefinition Definition, IReadOnlySet<int>? TagServerIds)
+    {
+        /// <summary>Whether this rule evaluates the given monitored server, honoring tag scope.</summary>
+        public bool AppliesToServer(int serverId, string storageName) =>
+            RuleAppliesToServer(Definition, TagServerIds, serverId, storageName);
+    }
+
+    /// <summary>An empty tag→members map (an empty rule set, or when no rule is tag-scoped this pass).</summary>
+    private static readonly IReadOnlyDictionary<int, IReadOnlySet<int>> EmptyTagMembers =
+        new Dictionary<int, IReadOnlySet<int>>();
+
+    /// <summary>The shared "matches no server" set for a tag that currently resolves to no member — read-only,
+    /// so one shared instance is safe.</summary>
+    private static readonly IReadOnlySet<int> EmptyServerIds = new HashSet<int>();
+
+    /// <summary>
+    /// Whether a rule applies to one monitored server, across ALL scope modes (#3350) — the single tag-aware
+    /// gate the sweep, the reconcile teardown, and the never-firing check all route through. All/Servers is the
+    /// pure <see cref="CustomAlertRuleDefinition.AppliesTo"/> over the storage name; <see cref="CustomAlertScopeMode.Tag"/>
+    /// is membership of the resolved server-id set (<paramref name="tagServerIds"/>, resolved once per cache
+    /// refresh from <c>config.server_tag_map</c>). A tag that resolves to no servers — empty, deleted, or
+    /// renamed away — is a null/empty set, so the rule matches no server and never fires; that 0-server case is
+    /// surfaced by the #3304 never-firing self-health check. Pure so it is unit-testable without a store.
+    /// </summary>
+    internal static bool RuleAppliesToServer(
+        CustomAlertRuleDefinition definition, IReadOnlySet<int>? tagServerIds, int serverId, string storageName) =>
+        definition.ScopeMode == CustomAlertScopeMode.Tag
+            ? tagServerIds is not null && tagServerIds.Contains(serverId)
+            : definition.AppliesTo(storageName);
+
+    /// <summary>The resolved server-id set to attach to a parsed rule: for a tag-scoped rule, its tag's current
+    /// members from <paramref name="tagMembers"/> (an EMPTY set when the tag has no members / is gone, so the
+    /// rule matches nothing); <c>null</c> for an All/Servers rule (those are decided from the storage name).</summary>
+    private static IReadOnlySet<int>? ResolveTagServers(
+        CustomAlertRuleDefinition definition, IReadOnlyDictionary<int, IReadOnlySet<int>> tagMembers) =>
+        definition.ScopeMode != CustomAlertScopeMode.Tag || definition.ScopeTagId is not int tagId
+            ? null
+            : tagMembers.TryGetValue(tagId, out var ids) ? ids : EmptyServerIds;
 
     public CustomAlertEvaluator(
         CustomAlertRuleStore ruleStore,
@@ -192,7 +234,7 @@ public sealed class CustomAlertEvaluator
             return;
         }
 
-        var applicable = rules.Where(r => r.Definition.AppliesTo(storageName)).ToList();
+        var applicable = rules.Where(r => r.AppliesToServer(serverId, storageName)).ToList();
         if (applicable.Count == 0)
         {
             return;
@@ -217,7 +259,7 @@ public sealed class CustomAlertEvaluator
         }
 
         var now = DateTime.UtcNow;
-        foreach (var (row, def) in applicable)
+        foreach (var (row, def, _) in applicable)
         {
             try
             {
@@ -575,7 +617,22 @@ public sealed class CustomAlertEvaluator
             _logger.LogWarning("Custom alert rule {Id} '{Name}' will NOT fire: {Reason}", b.RuleId, b.RuleName, b.Reason);
         }
 
-        var parsed = parsedPairs.Select(p => new ParsedRule(p.Row, p.Definition)).ToList();
+        // #3350: resolve every tag-scoped rule's CURRENT server membership once per cache refresh (one round-trip
+        // for all tags), so the per-server gate + the reconcile teardown honor the live tag assignment without a
+        // per-server query. A store failure here propagates like a rule-load failure — the caller skips this tick
+        // and the cache is not advanced, so the next tick retries; the previous good cache is not returned stale.
+        var tagIds = parsedPairs
+            .Where(p => p.Definition.ScopeMode == CustomAlertScopeMode.Tag && p.Definition.ScopeTagId is not null)
+            .Select(p => p.Definition.ScopeTagId!.Value)
+            .Distinct()
+            .ToList();
+        var tagMembers = tagIds.Count > 0
+            ? await _ruleStore.ListTagMembersAsync(tagIds, cancellationToken)
+            : EmptyTagMembers;
+
+        var parsed = parsedPairs
+            .Select(p => new ParsedRule(p.Row, p.Definition, ResolveTagServers(p.Definition, tagMembers)))
+            .ToList();
 
         // Drop no-data bookkeeping for rules that are gone (disabled/deleted) or now broken, so the in-memory
         // map tracks only the currently-parsed, evaluable set and cannot grow without bound.
@@ -650,24 +707,30 @@ public sealed class CustomAlertEvaluator
     }
 
     /// <summary>
-    /// Classifies whether a rule that DOES compile is nonetheless "armed but never fires" (#3304) — the two
-    /// cases that pass the compile-check yet can never deliver: a rule scoped to specific servers that are not
-    /// currently monitored (so it never evaluates), and a rule that has produced no data for longer than
-    /// <see cref="NoDataFlagWindow"/> (an always-NULL measure, or a dead collector). Returns the issue, or null
-    /// when the rule is firing-eligible. Pure so both cases are unit-testable with controlled inputs.
+    /// Classifies whether a rule that DOES compile is nonetheless "armed but never fires" (#3304) — the cases
+    /// that pass the compile-check yet can never deliver: a rule whose scope matches no currently-monitored
+    /// server (a 'servers' scope naming only unmonitored servers, or a #3350 tag scope whose tag is empty /
+    /// deleted / holds only unmonitored servers — <paramref name="tagServerIds"/> is that tag's resolved set),
+    /// and a rule that has produced no data for longer than <see cref="NoDataFlagWindow"/> (an always-NULL
+    /// measure, or a dead collector). Returns the issue, or null when the rule is firing-eligible. Pure so every
+    /// case is unit-testable with controlled inputs.
     /// </summary>
     internal static CustomAlertRuleHealthIssue? ClassifyNeverFiring(
-        CustomAlertRule row, CustomAlertRuleDefinition definition, string sanitizedName,
-        IReadOnlyCollection<string> monitoredStorageNames, DateTime? noDataSinceUtc, DateTime nowUtc)
+        CustomAlertRule row, CustomAlertRuleDefinition definition, IReadOnlySet<int>? tagServerIds,
+        string sanitizedName, IReadOnlyCollection<(int ServerId, string StorageName)> monitoredServers,
+        DateTime? noDataSinceUtc, DateTime nowUtc)
     {
-        // A server-scoped rule whose named servers are not currently monitored never enters any server's
-        // applicable set, so it is evaluated zero times, so it can never fire. (An "all"-scoped rule always
-        // applies to whatever fleet exists, so an empty fleet is not a per-rule defect and is not flagged.)
-        if (definition.ScopeMode == CustomAlertScopeMode.Servers && !monitoredStorageNames.Any(definition.AppliesTo))
+        // A server- or tag-scoped rule that matches no CURRENTLY-monitored server never enters any server's
+        // applicable set, so it is evaluated zero times and can never fire. (An "all"-scoped rule always applies
+        // to whatever fleet exists, so an empty fleet is not a per-rule defect and is not flagged.) Both the
+        // 'servers'-scope case and the #3350 tag-scope 0-server case flow through the SAME tag-aware gate.
+        if (definition.ScopeMode != CustomAlertScopeMode.All
+            && !monitoredServers.Any(s => RuleAppliesToServer(definition, tagServerIds, s.ServerId, s.StorageName)))
         {
-            return new CustomAlertRuleHealthIssue(
-                row.Id, sanitizedName,
-                "armed but scoped only to servers that are not currently monitored, so it never evaluates");
+            var reason = definition.ScopeMode == CustomAlertScopeMode.Tag
+                ? "armed but its tag currently matches no monitored server (the tag is empty, was deleted, or none of its servers are monitored), so it never evaluates"
+                : "armed but scoped only to servers that are not currently monitored, so it never evaluates";
+            return new CustomAlertRuleHealthIssue(row.Id, sanitizedName, reason);
         }
 
         // Produced no data continuously for longer than the window: an always-NULL measure for every in-scope
@@ -692,7 +755,7 @@ public sealed class CustomAlertEvaluator
     /// empty report would read as "all healthy" and clear a real broken-rule alert.
     /// </summary>
     public async Task<CustomAlertHealthReport?> BuildHealthReportAsync(
-        IReadOnlyCollection<string> monitoredStorageNames, CancellationToken cancellationToken)
+        IReadOnlyCollection<(int ServerId, string StorageName)> monitoredServers, CancellationToken cancellationToken)
     {
         IReadOnlyList<ParsedRule> parsed;
         try
@@ -714,12 +777,12 @@ public sealed class CustomAlertEvaluator
 
         var now = DateTime.UtcNow;
         var neverFiring = new List<CustomAlertRuleHealthIssue>();
-        foreach (var (row, def) in parsed)
+        foreach (var p in parsed)
         {
-            var since = _noDataSinceUtc.TryGetValue(row.Id, out var s) ? s : (DateTime?)null;
+            var since = _noDataSinceUtc.TryGetValue(p.Row.Id, out var s) ? s : (DateTime?)null;
             var issue = ClassifyNeverFiring(
-                row, def, SanitizeDisplayText(row.Name, CustomAlertRuleStore.MaxNameLength),
-                monitoredStorageNames, since, now);
+                p.Row, p.Definition, p.TagServerIds, SanitizeDisplayText(p.Row.Name, CustomAlertRuleStore.MaxNameLength),
+                monitoredServers, since, now);
             if (issue is not null)
             {
                 neverFiring.Add(issue);
@@ -733,13 +796,16 @@ public sealed class CustomAlertEvaluator
     /// Decides whether one persisted (rule, server) state row should be TORN DOWN (#3305): a disabled rule's
     /// state is orphaned (the evaluator's <c>ListEnabledAsync</c> skips it, so its incident never resolves on its
     /// own), and an enabled rule's state for a server that has left its scope — or left monitoring entirely
-    /// (<paramref name="serverStorageName"/> null) — is stale. Returns the teardown reason, or null to KEEP the
-    /// row. Conservative on uncertainty: an enabled rule whose definition is not currently in the cache
-    /// (<paramref name="definition"/> null — just enabled, or a stale cache) is left alone rather than torn down.
-    /// Pure so both teardown cases are unit-testable without a store.
+    /// (<paramref name="serverStorageName"/> null) — is stale. Scope is the tag-aware
+    /// <see cref="RuleAppliesToServer"/>, so a server that has LEFT a tag-scoped rule's tag (#3350) — its id no
+    /// longer in <paramref name="tagServerIds"/> — is torn down exactly like one that left a 'servers' scope.
+    /// Returns the teardown reason, or null to KEEP the row. Conservative on uncertainty: an enabled rule whose
+    /// definition is not currently in the cache (<paramref name="definition"/> null — just enabled, or a stale
+    /// cache) is left alone rather than torn down. Pure so every teardown case is unit-testable without a store.
     /// </summary>
     internal static string? ClassifyStateTeardown(
-        bool ruleEnabled, CustomAlertRuleDefinition? definition, string? serverStorageName)
+        bool ruleEnabled, CustomAlertRuleDefinition? definition, IReadOnlySet<int>? tagServerIds,
+        int serverId, string? serverStorageName)
     {
         if (!ruleEnabled)
         {
@@ -752,7 +818,8 @@ public sealed class CustomAlertEvaluator
             return null;
         }
 
-        if (serverStorageName is null || !definition.AppliesTo(serverStorageName))
+        if (serverStorageName is null
+            || !RuleAppliesToServer(definition, tagServerIds, serverId, serverStorageName))
         {
             return TeardownReasonOutOfScope;
         }
@@ -789,7 +856,7 @@ public sealed class CustomAlertEvaluator
             return;
         }
 
-        var definitionsById = parsed.ToDictionary(p => p.Row.Id, p => p.Definition);
+        var parsedById = parsed.ToDictionary(p => p.Row.Id, p => p);
 
         IReadOnlyList<CustomAlertStateRow> rows;
         try
@@ -811,8 +878,9 @@ public sealed class CustomAlertEvaluator
             cancellationToken.ThrowIfCancellationRequested();
 
             var storageName = monitoredServers.TryGetValue(row.ServerId, out var server) ? server.StorageName : null;
-            var definition = definitionsById.TryGetValue(row.RuleId, out var def) ? def : null;
-            var reason = ClassifyStateTeardown(row.RuleEnabled, definition, storageName);
+            var parsedRule = parsedById.TryGetValue(row.RuleId, out var pr) ? pr : null;
+            var reason = ClassifyStateTeardown(
+                row.RuleEnabled, parsedRule?.Definition, parsedRule?.TagServerIds, row.ServerId, storageName);
             if (reason is null)
             {
                 continue;

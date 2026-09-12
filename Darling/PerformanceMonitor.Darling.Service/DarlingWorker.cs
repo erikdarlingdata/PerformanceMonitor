@@ -4726,7 +4726,7 @@ LIMIT 1";
     /// <summary>
     /// #3304: the fleet-level custom-alert-rule integrity check. Asks the <see cref="CustomAlertEvaluator"/> to
     /// re-parse the enabled rules against the live catalog and flag broken / never-firing ones (the current
-    /// monitored-storage-name set feeds the 0-server-scope case), then hands the report to
+    /// monitored (server_id, storage name) set feeds the 0-server-scope case, including #3350 tag scope), then hands the report to
     /// <see cref="DarlingSelfAlertEvaluator.EvaluateCustomRuleHealthAsync"/>, which raises ONE aggregated
     /// self-health alert. Both halves are failure-isolated internally (BuildHealthReportAsync returns null on a
     /// load error and this method then HOLDS the standing alert rather than resolving it; the Evaluate* wrapper
@@ -4735,12 +4735,14 @@ LIMIT 1";
     /// </summary>
     private async Task EvaluateCustomAlertRuleHealthAsync(List<ServerLoopState> servers, CancellationToken cancellationToken)
     {
-        var storageNames = servers
+        // #3350: (server_id, storage name) pairs so the tag-scope 0-server case can be resolved by id (the tag
+        // membership is keyed on server_id) while the 'servers' scope still matches on the storage name.
+        var monitoredServers = servers
             .Where(s => !s.Retired)
-            .Select(s => s.Config.StorageName)
+            .Select(s => (s.Config.ServerId, s.Config.StorageName))
             .ToList();
 
-        var report = await _customAlertEvaluator!.BuildHealthReportAsync(storageNames, cancellationToken);
+        var report = await _customAlertEvaluator!.BuildHealthReportAsync(monitoredServers, cancellationToken);
 
         // Null = the rule load failed this tick; HOLD the standing alert (never resolve on uncertainty).
         if (report is not null)
