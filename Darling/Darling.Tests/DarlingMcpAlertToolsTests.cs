@@ -303,6 +303,39 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     }
 
     /// <summary>
+    /// #3314 round two: the two config tables are read under ONE snapshot, and the ISOLATION LEVEL is the
+    /// whole mechanism. PostgreSQL takes a fresh snapshot per statement under READ COMMITTED, so wrapping
+    /// the two SELECTs in a default transaction reads exactly like a fix and changes nothing — this is the
+    /// one line whose being wrong is invisible to every behavioural test that does not race a writer.
+    ///
+    /// <para>The split itself cannot come back by accident: the two single-table reads are private and take
+    /// the combined method's connection and transaction, so calling one alone does not compile. That is why
+    /// this test pins the LEVEL and the entry point rather than counting call sites — the compiler already
+    /// holds the part a test would be redundant for, and the level is the part it cannot.</para>
+    /// </summary>
+    [Fact]
+    public void TheTwoConfigTables_AreReadUnderOneRepeatableReadSnapshot()
+    {
+        var reader = ReadRepoFile(System.IO.Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingAlertReader.cs"));
+        var tools = ReadRepoFile(System.IO.Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs"));
+
+        Assert.Contains("System.Data.IsolationLevel.RepeatableRead", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("IsolationLevel.ReadCommitted", reader, StringComparison.Ordinal);
+
+        /* The single-table reads are private, so the split cannot be reintroduced -- asserted so that
+           widening either back to public is a decision someone makes here rather than a quiet edit. */
+        Assert.Contains("private static async Task<AlertSettingsReadRow?> ReadAlertSettingsAsync", reader, StringComparison.Ordinal);
+        Assert.Contains("private static async Task<int?> ReadDeliveryCooldownAsync", reader, StringComparison.Ordinal);
+
+        /* And both tool paths go through the combined entry point -- get_alert_settings and the post-write
+           re-read, which is the one described to the caller as the authoritative merged state. */
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(
+            tools, @"GetAlertConfigurationAsync\(postgres\)").Count);
+    }
+
+    /// <summary>
     /// #3314: the delivery cooldown is reachable through the control plane under a CHANNEL-NEUTRAL name, and
     /// the stored name still works. The whole defect was that the only throttle on a Slack / Teams /
     /// PagerDuty / generic-webhook post was named for email, lived in the SMTP config block, and could not be

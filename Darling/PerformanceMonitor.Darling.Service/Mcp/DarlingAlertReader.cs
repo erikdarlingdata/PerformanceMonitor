@@ -192,11 +192,13 @@ FROM config_alert_settings
 WHERE id = 1";
 
     /// <summary>Reads the single global alert-settings row, or null when the store has not seeded it yet
-    /// (a pre-control-plane store, or the service has not started).</summary>
-    public static async Task<AlertSettingsReadRow?> GetAlertSettingsAsync(
-        NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    /// (a pre-control-plane store, or the service has not started). Takes the caller's connection and
+    /// transaction rather than the data source, so it cannot be invoked outside the shared snapshot
+    /// <see cref="GetAlertConfigurationAsync"/> establishes — see there for why that matters.</summary>
+    private static async Task<AlertSettingsReadRow?> ReadAlertSettingsAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken = default)
     {
-        await using var command = postgres.CreateCommand(AlertSettingsSelectSql);
+        await using var command = new NpgsqlCommand(AlertSettingsSelectSql, connection) { Transaction = transaction };
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -259,10 +261,10 @@ WHERE id = 1";
     /// distinct answer rather than the shipped 15: the service seeds this row and
     /// <c>config_alert_settings</c> in ONE pass, so "settings present, notification absent" is not a state
     /// the product produces, and reporting a number nobody wrote would claim a reading never taken.</summary>
-    public static async Task<int?> GetDeliveryCooldownMinutesAsync(
-        NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    private static async Task<int?> ReadDeliveryCooldownAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, CancellationToken cancellationToken = default)
     {
-        await using var command = postgres.CreateCommand(DeliveryCooldownSelectSql);
+        await using var command = new NpgsqlCommand(DeliveryCooldownSelectSql, connection) { Transaction = transaction };
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0))
@@ -271,5 +273,41 @@ WHERE id = 1";
         }
 
         return reader.GetInt32(0);
+    }
+
+    /// <summary>Both halves of the alert configuration, read in ONE snapshot: the settings row and the
+    /// delivery cooldown that lives on the other table. Either may be null when the store has not seeded
+    /// that singleton yet.</summary>
+    public sealed record AlertConfigurationRead(AlertSettingsReadRow? Settings, int? DeliveryCooldownMinutes);
+
+    /// <summary>
+    /// The alert configuration across BOTH config tables, under one snapshot.
+    ///
+    /// <para>Two independent reads would let an <c>update_alert_settings</c> commit land between them and
+    /// hand the caller a payload mixing pre- and post-update state across the two tables — a stale
+    /// <c>cooldown_minutes</c> beside a fresh <c>delivery.cooldown_minutes</c>, or the reverse. The write
+    /// path already refuses to leave a half-landed state; a read that can REPORT one puts the asymmetry
+    /// back, and the post-write re-read is described to the caller as the authoritative merged state, which
+    /// it would not be.</para>
+    ///
+    /// <para><b>REPEATABLE READ, and the level is the whole mechanism.</b> PostgreSQL takes a FRESH snapshot
+    /// per statement under READ COMMITTED, so wrapping these two SELECTs in a default transaction reads
+    /// exactly like a fix and changes nothing at all. The two single-table reads are private and take this
+    /// method's connection and transaction, so the split cannot be reintroduced by calling one of them
+    /// alone — a stronger guarantee than a test, since it does not compile.</para>
+    ///
+    /// <para>Read-only, so the transaction is disposed rather than committed; nothing here writes.</para>
+    /// </summary>
+    public static async Task<AlertConfigurationRead> GetAlertConfigurationAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(
+            System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+
+        var settings = await ReadAlertSettingsAsync(connection, transaction, cancellationToken);
+        var deliveryCooldownMinutes = await ReadDeliveryCooldownAsync(connection, transaction, cancellationToken);
+
+        return new AlertConfigurationRead(settings, deliveryCooldownMinutes);
     }
 }

@@ -133,17 +133,20 @@ public sealed class DarlingMcpAlertTools
     {
         try
         {
-            var s = await DarlingAlertReader.GetAlertSettingsAsync(postgres);
+            /* ONE snapshot across both config tables. The delivery cooldown is the single value on
+               config_notification rather than config_alert_settings, so reporting the configuration takes two
+               SELECTs -- and two independent reads could straddle a concurrent update_alert_settings commit
+               and report a mix of pre- and post-update state, which is the very thing the write path takes a
+               transaction to avoid producing. See DarlingAlertReader.GetAlertConfigurationAsync. */
+            var (s, deliveryCooldown) = await DarlingAlertReader.GetAlertConfigurationAsync(postgres);
             if (s is null)
                 return McpHelpers.Status(
                     "unavailable",
                     "No alert-settings row is present in the store yet. The service seeds it on startup (or the Viewer's Settings window writes it); until then the service runs on its darling.json defaults.");
 
-            /* The delivery cooldown is the one value on config_notification rather than config_alert_settings,
-               so it costs a second read. Absent means the notification row is unseeded, which the service
-               seeds in the SAME pass as the settings row -- so it is the same unseeded control plane the arm
-               above reports, and reporting the shipped 15 instead would state a number nobody wrote. */
-            var deliveryCooldown = await DarlingAlertReader.GetDeliveryCooldownMinutesAsync(postgres);
+            /* Absent means the notification row is unseeded, which the service seeds in the SAME pass as the
+               settings row -- so it is the same unseeded control plane the arm above reports, and reporting
+               the shipped 15 instead would state a number nobody wrote. */
             if (deliveryCooldown is null)
                 return McpHelpers.Status(
                     "unavailable",
@@ -455,9 +458,10 @@ public sealed class DarlingMcpAlertTools
             await transaction.CommitAsync();
 
             /* Re-read so the caller sees the authoritative merged state — the write fired the config-table trigger
-               that self-bumps config_version, so the running service reloads this within one sweep. */
-            var reread = await DarlingAlertReader.GetAlertSettingsAsync(postgres);
-            var rereadCooldown = await DarlingAlertReader.GetDeliveryCooldownMinutesAsync(postgres);
+               that self-bumps config_version, so the running service reloads this within one sweep. ONE snapshot
+               across both tables, for the reason get_alert_settings uses one: "authoritative merged state" is
+               a claim a pair of independent reads cannot keep. */
+            var (reread, rereadCooldown) = await DarlingAlertReader.GetAlertConfigurationAsync(postgres);
             return JsonSerializer.Serialize(new
             {
                 status = "updated",
