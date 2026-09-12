@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Services;
@@ -280,6 +283,44 @@ public class PagerDutyWebhookTests
             .GetProperty("payload").GetProperty("custom_details");
 
         Assert.False(customDetails.TryGetProperty("Details", out _));
+    }
+
+    /* ---------------- #3355: the payload stamp's clock ---------------- */
+
+    /// <summary>
+    /// The stamp renders the injected instant, and moves when that instant moves.
+    /// <para>This channel needs its own pin because a delivery capture cannot reach it: PagerDuty's endpoint
+    /// is the hardcoded Events v2 URL, so a fan-out capture that redirects the other three channels to a
+    /// loopback leaves this one unconfigured and never observes its payload. A census over captured bodies
+    /// is green whether or not this builder is wired to the clock seam, which would leave its one call site
+    /// unheld.</para>
+    /// <para>Both arms carry weight. A builder that ignored its argument and read the wall clock renders
+    /// neither the fixed instant nor the advanced one, so asserting the stamp EQUALS the injected instant is
+    /// what catches an unwired seam; asserting it MOVES is what stops a hardcoded constant passing for one.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void BuildPagerDutyPayload_StampsTheInjectedClock_AndMovesWhenItDoes()
+    {
+        var fixedUtc = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        var fixedStamp = fixedUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+        var timestamps = new Regex(@"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}Z?");
+
+        var atFixed = WebhookAlertService.BuildPagerDutyPayload(
+            "High CPU", "SRV1", "95%", "90%", Branding, "rk", nowUtc: fixedUtc);
+
+        /* Every timestamp-shaped token rather than the one field it happens to stamp today, so a stamp added
+           to this payload later is covered without anyone remembering to extend this test. */
+        var stamps = timestamps.Matches(atFixed).Select(m => m.Value).ToList();
+
+        /* A payload carrying no stamp at all would satisfy the loop below vacuously. */
+        Assert.NotEmpty(stamps);
+        Assert.All(stamps, stamp => Assert.Equal(fixedStamp, stamp));
+
+        var aSecondLater = WebhookAlertService.BuildPagerDutyPayload(
+            "High CPU", "SRV1", "95%", "90%", Branding, "rk", nowUtc: fixedUtc.AddSeconds(1));
+
+        Assert.DoesNotContain(fixedStamp, aSecondLater, StringComparison.Ordinal);
     }
 
     /* ---------------- Fan-out (TrySendWebhookAlertsAsync) ---------------- */
