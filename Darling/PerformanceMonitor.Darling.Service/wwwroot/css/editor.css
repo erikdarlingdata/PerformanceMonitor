@@ -586,3 +586,44 @@ button.template-item:focus-visible { outline: 2px solid var(--muted); outline-of
 .views-hero .hero-chip.clickable:hover { color: var(--fg); border-color: var(--accent); }
 .views-hero .hero-chip.clickable:focus-visible { outline: 2px solid var(--muted); outline-offset: 1px; }
 .views-hero .starter-server { justify-content: center; padding: 0; }
+
+/* ─────────────────────────── custom alert rules (#3285) ─────────────────────────── */
+
+/* The "Paused" badge on a disabled rule's list card — the muted twin of the notebook badge. */
+.paused-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  background: var(--lighter);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.view-card .vc-name .paused-badge { flex: 0 0 auto; }
+
+/* The alert editor's card sections (Condition / Hysteresis / Scope) — the same inset the panel editor uses. */
+.alert-section { padding: 0.9rem 1rem; }
+
+/* The Enabled checkbox field sits left-aligned under its label rather than stretching. */
+.editor-field.field-enabled { align-items: flex-start; }
+.editor-field.field-enabled .editor-check { margin-top: 0.2rem; }
+
+/* The "Create alert from this metric" action row inside a composed panel editor — set off from the config above. */
+.composed-panel-actions { margin-top: 0.85rem; border-top: 1px solid var(--border); padding-top: 0.7rem; }
+
+/* The alert editor's advanced (cadence) disclosure — the twin of the composer's Advanced. */
+.alert-advanced { margin: 0.85rem 0 1.25rem; }
+.alert-advanced > summary { cursor: pointer; font-size: 0.8rem; font-weight: 600; color: var(--muted); }
+.alert-advanced > summary:hover { color: var(--fg); }
+.alert-advanced > summary::-webkit-details-marker { display: none; }
+.alert-advanced > summary::before { content: "▸ "; color: var(--muted); }
+.alert-advanced[open] > summary::before { content: "▾ "; }
+.alert-advanced > .cfg { margin-top: 0.6rem; }
+
+/* The would-fire preview area. */
+.alert-preview { margin-bottom: 1rem; }
