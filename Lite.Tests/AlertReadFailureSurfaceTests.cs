@@ -222,6 +222,11 @@ public sealed class AlertReadFailureSurfaceTests
             Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"),
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"),
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"),
+            /* Lite's own recording site. The constant is concatenated into BOTH SKUs' descriptions, so a
+               derivation that read only Darling's files could not see a Lite fleet-scoped read at all — and
+               the reverse gap is the one that bites: a read named here that the reading SKU cannot
+               increment is this counter's own defect, a confident zero, written into its documentation. */
+            Path.Combine("Lite", "MainWindow.xaml.cs"),
         })
         {
             var src = File.ReadAllText(Path.Combine(root, relative));
@@ -234,7 +239,7 @@ public sealed class AlertReadFailureSurfaceTests
             }
         }
 
-        Assert.Equal(3, nullKeyReads.Count);
+        Assert.Equal(4, nullKeyReads.Count);
 
         var inventory = AlertReadFailureCounter.FleetScopedReads;
 
@@ -244,8 +249,13 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Contains(nullKeyReads, r => r.Contains("background-job health", StringComparison.Ordinal));
         /* #3354: config_mute_rules belongs to the store, not to any monitored server, so its failed read
            lands in the instance total and in no server's count — exactly the case a per-server-only
-           surface would have given no home. */
-        Assert.Contains(nullKeyReads, r => r.Contains("mute-rule reload", StringComparison.Ordinal));
+           surface would have given no home. Recorded TWICE across the tree, once per SKU, and that is the
+           point rather than a duplicate: both SKUs perform this read, the counters are per-process, and a
+           SKU that named it without recording it would promise a reading it cannot produce. The other two
+           entries are Darling store self-alerts with no Lite equivalent. */
+        Assert.Equal(
+            2,
+            nullKeyReads.Count(r => r.Contains("mute-rule reload", StringComparison.Ordinal)));
         Assert.Contains("collector-cost regression", inventory, StringComparison.Ordinal);
         Assert.Contains("background-job health", inventory, StringComparison.Ordinal);
         Assert.Contains("mute-rule reload", inventory, StringComparison.Ordinal);

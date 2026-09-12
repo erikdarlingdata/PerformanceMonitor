@@ -460,6 +460,13 @@ public sealed class AlertReadFailureCounter
     /// from a cache that is correct and current: the rule list, every mute surface and the stale-mute
     /// condition all read what the last successful load put there. A nonzero instance total naming this
     /// read is the artefact, which is why it is counted rather than exempt.</para>
+    ///
+    /// <para>It is also the only member of this set that BOTH SKUs can produce, and that is load-bearing
+    /// for a constant both descriptions concatenate. The other two are Darling store self-alerts that have
+    /// no Lite equivalent at all, so naming them there describes a shared inventory rather than promising a
+    /// Lite reading. The mute-rule reload is different: Lite performs that read, Lite swallows its failure,
+    /// and Lite's call site therefore records it here too. A read this constant names on a SKU that cannot
+    /// increment it would be this class's own defect — a confident zero — reproduced in its documentation.</para>
     /// </summary>
     public const string FleetScopedReads =
         "the collector-cost regression self-alert, the mute-rule reload, and the store background-job "

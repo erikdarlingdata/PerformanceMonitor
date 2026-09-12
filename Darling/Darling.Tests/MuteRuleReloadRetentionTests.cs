@@ -284,8 +284,16 @@ public sealed class MuteRuleReloadRetentionTests
     }
 
     /// <summary>
-    /// Lite's arm was the worse of the two — a bare <c>catch</c> with no logging, so the event left no
-    /// artefact at all on that SKU. Its call site now swallows the throw the store propagates and says so.
+    /// Lite's call site swallows the throw the store propagates and leaves BOTH artefacts Darling's does —
+    /// the log line and the #3013 count.
+    ///
+    /// <para>Both, not just the log, and asserted rather than assumed for a reason that is specific to this
+    /// read. <c>AlertReadFailureCounter.FleetScopedReads</c> is concatenated into both SKUs'
+    /// <c>get_collection_health</c> description byte-for-byte, and this is the only member of that set a
+    /// Lite process can produce — the other two are Darling store self-alerts. So a Lite arm that logged
+    /// and did not count would leave that description promising a reading Lite cannot produce, which is a
+    /// confident zero on the surface built to end confident zeroes. The first draft of this pin asserted
+    /// only the log line, so the asymmetry was PINNED rather than caught.</para>
     /// </summary>
     [Fact]
     public void LitesCallSite_SwallowsTheThrowAndLeavesAnArtefact()
@@ -315,6 +323,27 @@ public sealed class MuteRuleReloadRetentionTests
         Assert.True(end > 0, "Lite's mute-rule catch block never closes");
         Assert.Contains("AppLogger.Warn(", handler[..end], StringComparison.Ordinal);
         Assert.Contains("stay in force", handler[..end], StringComparison.Ordinal);
+
+        /* The count, on the same surface and under the same read name Darling uses — with the null key and
+           a measured elapsed, in ONE expression so a site cannot satisfy the name while dropping either.
+           Same name as Darling's on purpose: it is the same read, the counters are per-process, and a
+           second spelling would split one read across two labels on a surface whose whole job is naming
+           which read went blind. Matched with a pattern rather than a literal because the call wraps. */
+        Assert.True(
+            Regex.IsMatch(
+                handler[..end],
+                @"RecordReadFailure\(\s*null,\s*""mute-rule reload"",\s*muteReadClock\.ElapsedMilliseconds\s*\)"),
+            "Lite's mute-rule catch does not record the failure on #3013's surface with a null key and a "
+            + "measured elapsed, so the read this SKU's get_collection_health description names cannot "
+            + "reach its own instance total");
+
+        /* And the clock is started BEFORE the try, not inside the handler — a clock started in the catch
+           compiles, reads correctly, and can only ever measure zero. The Darling census closes that route
+           on its own sites; this file is the only guard over Lite's. */
+        Assert.Contains(
+            "var muteReadClock = System.Diagnostics.Stopwatch.StartNew();",
+            raw[..guard.Value.Start],
+            StringComparison.Ordinal);
     }
 
     /* ---------------- helpers ---------------- */
