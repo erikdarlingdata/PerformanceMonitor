@@ -1010,9 +1010,11 @@ public sealed class DarlingSelfAlertTests
             MetricName = metric,
         };
 
-    /// <summary>The harness's default clock instant, so a fixture's age is stated against the same "now"
-    /// the evaluator will read.</summary>
-    private static readonly DateTime MuteClock = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+    /// <summary>The harness's default clock instant, TAKEN FROM THE HARNESS rather than restated, so a
+    /// fixture's age is measured against the same "now" the evaluator will read. A literal here would
+    /// drift the instant a test changed <see cref="Harness.Now"/>'s default, and every age assertion
+    /// below would shift with it silently.</summary>
+    private static readonly DateTime MuteClock = new Harness().Now;
 
     private static double StaleDays => DarlingSelfAlertEvaluator.StaleMuteAge.TotalDays;
 
