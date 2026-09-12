@@ -92,8 +92,17 @@ jobs:
       # but sorts as an alphanumeric identifier, which outranks every numeric one.
       - name: Derive the nightly stamp
         id: stamp
+        shell: bash
         run: |
+          set -euo pipefail
           stamp="$(date -u +%Y%m%d).${{ github.run_number }}"
+          # Shape, not emptiness. A `date` that exited 0 having printed nothing yields
+          # ".<run_number>" - non-empty, so it passes every downstream `-n` /
+          # IsNullOrWhiteSpace guard and stamps both artifacts with a malformed version instead
+          # of failing here. Asserting the shape at the one place the stamp is produced makes
+          # those guards a backstop against broken output wiring rather than the only check.
+          shape='^[0-9]{8}\.[0-9]+$'
+          [[ "${stamp}" =~ ${shape} ]] || { echo "::error::Derived a malformed nightly stamp: '${stamp}'"; exit 1; }
           echo "stamp=${stamp}" >> "$GITHUB_OUTPUT"
           echo "Nightly stamp: ${stamp}"
 
