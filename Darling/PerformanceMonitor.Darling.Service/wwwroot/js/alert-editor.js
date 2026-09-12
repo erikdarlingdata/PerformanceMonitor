@@ -65,14 +65,23 @@ const WINDOW_OPTIONS = [
   { hours: 24, label: "Last 24 hours" },
 ];
 
-/* The comparison operators an alert predicate offers. Between / outside are deferred (#3351), so only the four
-   scalar comparisons appear — matching the CustomAlertOp enum the backend parses. */
+/* The comparison operators an alert predicate offers — matching the CustomAlertOp enum the backend parses. The
+   four scalar comparisons test the value against a single bar (a warning threshold + an optional critical); the
+   two range ops (#3351) test it against a two-sided band [lower, upper] and fire a single Warning tier. */
 const OP_OPTIONS = [
   { value: "gt", label: "is greater than (>)" },
   { value: "ge", label: "is greater than or equal to (≥)" },
   { value: "lt", label: "is less than (<)" },
   { value: "le", label: "is less than or equal to (≤)" },
+  { value: "outside", label: "is outside the range" },
+  { value: "between", label: "is within the range" },
 ];
+
+/* Range ops compare the value to a band [lower, upper] rather than a single threshold, so the editor swaps the
+   Warning/Critical inputs for Lower/Upper-bound inputs when one is chosen (and maps them to lowerBound/upperBound
+   instead of warnThreshold/criticalThreshold). */
+const RANGE_OPS = new Set(["between", "outside"]);
+const isRangeOp = (op) => RANGE_OPS.has(op);
 
 /* ─────────────────────────── entry ─────────────────────────── */
 
@@ -147,6 +156,8 @@ function blankModel() {
     op: "gt",
     warn: "",
     critical: "",
+    lower: "",
+    upper: "",
     breachSamples: 1,
     clearSamples: 1,
     scopeMode: "all",
@@ -188,6 +199,8 @@ function definitionToModel(def, name, description, enabled) {
     op: normalizeOp(pred.op),
     warn: pred.warnThreshold != null ? String(pred.warnThreshold) : "",
     critical: pred.criticalThreshold != null ? String(pred.criticalThreshold) : "",
+    lower: pred.lowerBound != null ? String(pred.lowerBound) : "",
+    upper: pred.upperBound != null ? String(pred.upperBound) : "",
     breachSamples: intOr(hyst.breachSamples, 1),
     clearSamples: intOr(hyst.clearSamples, 1),
     scopeMode: scope.mode === "servers" ? "servers" : scope.mode === "tag" ? "tag" : "all",
@@ -204,8 +217,14 @@ function modelToDefinition(model) {
   const metric = metricSpecFromDesc(composedPanelToDesc(model.metric));
   metric.hours = model.windowHours;
 
-  const predicate = { op: model.op, warnThreshold: parseNumOrNull(model.warn) };
-  if (model.critical.trim() !== "") predicate.criticalThreshold = parseNumOrNull(model.critical);
+  let predicate;
+  if (isRangeOp(model.op)) {
+    /* Range op: a two-sided band, and NO warn/critical (the backend rejects a range predicate that carries them). */
+    predicate = { op: model.op, lowerBound: parseNumOrNull(model.lower), upperBound: parseNumOrNull(model.upper) };
+  } else {
+    predicate = { op: model.op, warnThreshold: parseNumOrNull(model.warn) };
+    if (model.critical.trim() !== "") predicate.criticalThreshold = parseNumOrNull(model.critical);
+  }
 
   const def = {
     metric,
@@ -245,20 +264,30 @@ function alertSaveBlocker(model) {
   if (!(model.windowHours >= MIN_WINDOW_HOURS)) return "Choose an evaluation window.";
   if (model.windowHours > MAX_WINDOW_HOURS) return "The evaluation window can be at most 24 hours (an alert window is recent).";
 
-  const warn = parseNumOrNull(model.warn);
-  if (warn == null) return "Enter a warning threshold (a number).";
+  if (isRangeOp(model.op)) {
+    /* Range op: both bounds required and ordered; no warn/critical and no count trap (the same rules the backend
+       enforces for a between/outside predicate). */
+    const lower = parseNumOrNull(model.lower);
+    const upper = parseNumOrNull(model.upper);
+    if (lower == null) return "Enter a lower bound (a number).";
+    if (upper == null) return "Enter an upper bound (a number).";
+    if (!(lower < upper)) return "The lower bound must be less than the upper bound.";
+  } else {
+    const warn = parseNumOrNull(model.warn);
+    if (warn == null) return "Enter a warning threshold (a number).";
 
-  /* A '<'/'<=' alert on a COUNT can't tell zero matching events from a stalled collector reading zero rows, so it
-     would false-fire exactly when the true signal is "no data" — the same rule the backend enforces. */
-  if (metric.aggregate === "count" && (model.op === "lt" || model.op === "le")) {
-    return "A '<' or '≤' alert on a count can't tell zero events from a stalled collector — use '≥' instead.";
-  }
+    /* A '<'/'<=' alert on a COUNT can't tell zero matching events from a stalled collector reading zero rows, so it
+       would false-fire exactly when the true signal is "no data" — the same rule the backend enforces. */
+    if (metric.aggregate === "count" && (model.op === "lt" || model.op === "le")) {
+      return "A '<' or '≤' alert on a count can't tell zero events from a stalled collector — use '≥' instead.";
+    }
 
-  if (model.critical.trim() !== "") {
-    const critical = parseNumOrNull(model.critical);
-    if (critical == null) return "The critical threshold must be a number (or leave it blank).";
-    const ordered = model.op === "gt" || model.op === "ge" ? critical >= warn : critical <= warn;
-    if (!ordered) return "The critical threshold must be more extreme than the warning threshold, in the operator's direction.";
+    if (model.critical.trim() !== "") {
+      const critical = parseNumOrNull(model.critical);
+      if (critical == null) return "The critical threshold must be a number (or leave it blank).";
+      const ordered = model.op === "gt" || model.op === "ge" ? critical >= warn : critical <= warn;
+      if (!ordered) return "The critical threshold must be more extreme than the warning threshold, in the operator's direction.";
+    }
   }
 
   if (!(model.breachSamples >= 1)) return "Breach samples must be at least 1.";
@@ -287,6 +316,7 @@ function readyToCheck(model) {
   const metric = model.metric;
   if (!metric.measure && !metric.ratio) return false;
   if (metric.measure && !metric.aggregate) return false;
+  if (isRangeOp(model.op)) return parseNumOrNull(model.lower) != null && parseNumOrNull(model.upper) != null;
   return parseNumOrNull(model.warn) != null;
 }
 
@@ -448,45 +478,65 @@ function buildAlertEditor(main, ctx) {
 
 /* ─────────────────────────── condition (window + predicate) ─────────────────────────── */
 
-/* When the metric fires: the evaluation window, the comparison operator, and the warning / critical thresholds.
-   Warn = the Warning tier; adding a (more-extreme) critical threshold arms the Critical tier — the severity is the
-   two thresholds, not a separate control (CustomAlertRuleDefinition.SeverityFor). */
+/* When the metric fires: the evaluation window, the comparison operator, and the threshold(s) — which DEPEND on
+   the operator. A scalar op (gt/ge/lt/le) shows a Warning threshold + an optional (more-extreme) Critical, and the
+   severity is those two thresholds (CustomAlertRuleDefinition.SeverityFor). A range op (between/outside, #3351)
+   shows a Lower/Upper bound instead and fires a single Warning tier, so the inputs — and the help text — swap in
+   place when the op category changes. */
 function conditionSection(model, onChange) {
   const windowSel = buildWindowSelect(model, onChange);
 
   const opSel = el("select", { class: "editor-select", "aria-label": "Comparison" });
   for (const o of OP_OPTIONS) opSel.appendChild(el("option", { value: o.value, text: o.label }));
   opSel.value = model.op;
+
+  /* The threshold inputs + help live in redrawn sub-containers so switching between a scalar and a range op swaps
+     Warning/Critical <-> Lower/Upper in place; modelToDefinition maps them to the right predicate keys. */
+  const thresholdBox = el("div", { class: "composed-fields" });
+  const helpBox = el("div", { class: "block-help" });
+
+  /** A numeric input bound to model[key], re-checking save state + preview on every edit (like the old warn/crit). */
+  function numField(label, key, placeholder) {
+    const input = el("input", { class: "editor-input", type: "number", step: "any", placeholder, "aria-label": label });
+    input.value = model[key];
+    input.addEventListener("input", () => {
+      model[key] = input.value;
+      onChange();
+    });
+    return field(label, input);
+  }
+
+  function drawCondition() {
+    if (isRangeOp(model.op)) {
+      mount(thresholdBox, [numField("Lower bound", "lower", "lower bound"), numField("Upper bound", "upper", "upper bound")]);
+      helpBox.textContent =
+        "The metric is aggregated to one value over the window, then tested against the band. 'Is outside the range' " +
+        "fires when the value is below the lower bound or above the upper bound; 'is within the range' fires when it " +
+        "falls inside (bounds inclusive). A range rule fires a single Warning tier.";
+    } else {
+      mount(thresholdBox, [numField("Warning threshold", "warn", "warning value"), numField("Critical threshold", "critical", "critical value (optional)")]);
+      helpBox.textContent =
+        "The metric is aggregated to one value over the window, then compared. Crossing the warning threshold fires " +
+        "a Warning; crossing the (more-extreme) critical threshold fires a Critical. Leave critical blank for a " +
+        "single Warning tier.";
+    }
+  }
+
   opSel.addEventListener("change", () => {
+    const wasRange = isRangeOp(model.op);
     model.op = opSel.value;
+    /* Only redraw the inputs when the op crosses the scalar<->range boundary (a scalar->scalar change keeps the
+       same warn/crit inputs, so their in-progress values are preserved). */
+    if (isRangeOp(model.op) !== wasRange) drawCondition();
     onChange();
   });
 
-  const warnInput = el("input", { class: "editor-input", type: "number", step: "any", placeholder: "warning value", "aria-label": "Warning threshold" });
-  warnInput.value = model.warn;
-  warnInput.addEventListener("input", () => {
-    model.warn = warnInput.value;
-    onChange();
-  });
-
-  const critInput = el("input", { class: "editor-input", type: "number", step: "any", placeholder: "critical value (optional)", "aria-label": "Critical threshold" });
-  critInput.value = model.critical;
-  critInput.addEventListener("input", () => {
-    model.critical = critInput.value;
-    onChange();
-  });
+  drawCondition();
 
   return el("div", {}, [
-    el("div", { class: "composed-fields" }, [
-      field("Evaluate over", windowSel),
-      field("When the value", opSel),
-      field("Warning threshold", warnInput),
-      field("Critical threshold", critInput),
-    ]),
-    el("div", {
-      class: "block-help",
-      text: "The metric is aggregated to one value over the window, then compared. Crossing the warning threshold fires a Warning; crossing the (more-extreme) critical threshold fires a Critical. Leave critical blank for a single Warning tier.",
-    }),
+    el("div", { class: "composed-fields" }, [field("Evaluate over", windowSel), field("When the value", opSel)]),
+    thresholdBox,
+    helpBox,
   ]);
 }
 
@@ -772,6 +822,10 @@ function normalizeOp(raw) {
     case "le":
     case "<=":
       return "le";
+    case "between":
+      return "between";
+    case "outside":
+      return "outside";
     default:
       return "gt";
   }
