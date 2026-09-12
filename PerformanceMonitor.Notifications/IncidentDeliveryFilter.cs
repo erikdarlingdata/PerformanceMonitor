@@ -35,12 +35,15 @@ namespace PerformanceMonitor.Notifications;
 /// (<c>EmailAlertService</c>'s <c>deliverProse</c>), for the same reason.
 /// </para>
 /// <para>
-/// <b>Per-event mode (#1141) does not have the defect and is not changed.</b>
+/// <b>Per-event mode (#1141) does not RE-DELIVER a stale incident, and this filter does not change it.</b>
 /// <c>PerEventNotification.Split</c> already emits one message per incident, each carrying a single-incident
 /// context, and each goes through its own send — so an in-window fingerprint fails its own
 /// <see cref="IncidentCooldown.Decision.ShouldSend"/> and never posts. Its trailing "+N more" overflow
 /// message is the one per-event payload carrying several fingerprints, and it is filtered here like any
 /// other batch because this sits at the delivery boundary every message crosses.
+/// <para>Scoped to re-delivery deliberately: per-event mode had its own separate defect in what it
+/// ATTACHED (#3330 — every message carried the first graph in the window), fixed where the splitter builds
+/// each message rather than here.</para>
 /// </para>
 /// </summary>
 public static class IncidentDeliveryFilter
@@ -139,14 +142,21 @@ public static class IncidentDeliveryFilter
 
         var suppressedCount = incidents.Count - kept.Count;
 
+        /* #3330: the attachment for the incidents this card KEEPS, resolved through the same rule
+           PerEventNotification.NewContext uses. The alert-level AttachmentXml is the first graph in the
+           window, which once this filter narrows the card may belong to an incident the card no longer
+           mentions — the mismatch #3324 made reachable in Summary mode. Null when none of the kept
+           incidents carries one, which is a real outcome on the blocking arm (a chain seen only by the DMV
+           fallback has no report) and not a reason to fall back to a stale one. */
+        var attachment = AlertIncidentAttachment.ForIncidents(kept);
+
         var rendered = new AlertContext
         {
-            /* Carried over for the same reasons PerEventNotification.NewContext carries them: severity
-               drives every channel's accent, and the attachment is the forensic deadlock/blocked-process XML
-               the email keeps. */
+            /* Severity is carried for the same reason PerEventNotification.NewContext carries it: it drives
+               every channel's accent and describes the alert, not one incident. */
             SeverityOverride = context.SeverityOverride,
-            AttachmentXml = context.AttachmentXml,
-            AttachmentFileName = context.AttachmentFileName,
+            AttachmentXml = attachment?.Xml,
+            AttachmentFileName = attachment?.FileName,
             Incidents = kept
         };
 

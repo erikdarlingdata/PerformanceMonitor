@@ -148,6 +148,58 @@ public class BlockingDeadlockContextBuilderTests
         Assert.Null(context.AttachmentFileName);
     }
 
+    /// <summary>
+    /// #3330, the blocking arm. Its multiplicity is the same as the deadlock arm's — the report XML is
+    /// per row, so distinct chains carry distinct reports — with one shaped difference: a row from the
+    /// DMV-snapshot fallback has NO report, so an incident grouped only from those has no attachment while
+    /// every deadlock incident has one (an unparseable graph yields no objects, so it never becomes an
+    /// incident at all).
+    /// <para>Pinned on one alert carrying both cases at once, because an incident whose attachment is
+    /// legitimately absent is exactly where a "fall back to the alert-level one" repair would look
+    /// harmless.</para>
+    /// </summary>
+    [Fact]
+    public void BuildBlockingContext_EachIncidentCarriesItsOwnReport_AndADmvOnlyChainCarriesNone()
+    {
+        var rows = new List<BlockedProcessAlertRow>
+        {
+            Blocked(obj: "db.dbo.A", xml: "<blocked-process-report for=\"A\"/>"),
+            Blocked(obj: "db.dbo.B", xml: "<blocked-process-report for=\"B\"/>"),
+            Blocked(obj: "db.dbo.C")                                            /* DMV-style row: no report */
+        };
+
+        var context = AlertContextBuilders.BuildBlockingContext(Server, rows, NoExclusions);
+
+        var byObject = context!.Incidents!.ToDictionary(i => i.InvolvedObjects[0], i => i.Attachment);
+        Assert.Equal("<blocked-process-report for=\"A\"/>", byObject["db.dbo.A"]!.Xml);
+        Assert.Equal("<blocked-process-report for=\"B\"/>", byObject["db.dbo.B"]!.Xml);
+        Assert.Equal(AlertIncidentAttachment.BlockedProcessReportFileName, byObject["db.dbo.A"]!.FileName);
+        Assert.Null(byObject["db.dbo.C"]);
+    }
+
+    /// <summary>
+    /// #3330: a chain's attachment comes from the first sample IN ITS OWN GROUP that has a report, not from
+    /// its representative. The XE and DMV feeds merge into one list
+    /// (<see cref="BlockedProcessReportMerge"/>), so the newest sample of a chain — the one the group
+    /// represents — can be the DMV row with no report while an older XE sample of the same chain has one.
+    /// Taking the representative's would discard a report the incident actually has.
+    /// </summary>
+    [Fact]
+    public void BuildBlockingContext_AChainsReportCanComeFromALaterSampleOfTheSameChain()
+    {
+        var rows = new List<BlockedProcessAlertRow>
+        {
+            Blocked(obj: "db.dbo.A", waitMs: 9000),                                   /* representative, no report */
+            Blocked(obj: "db.dbo.A", waitMs: 4000, xml: "<blocked-process-report for=\"A\"/>")
+        };
+
+        var context = AlertContextBuilders.BuildBlockingContext(Server, rows, NoExclusions);
+
+        var incident = Assert.Single(context!.Incidents!);
+        Assert.Equal(2, incident.OccurrenceCount);
+        Assert.Equal("<blocked-process-report for=\"A\"/>", incident.Attachment!.Xml);
+    }
+
     [Fact]
     public void BuildBlockingContext_ExcludedDatabases_DropRows_CaseInsensitive_NoDbAlwaysPasses()
     {
@@ -300,6 +352,77 @@ public class BlockingDeadlockContextBuilderTests
 
         Assert.Equal(DeadlockGraph, context!.AttachmentXml);
         Assert.Equal("deadlock_graph.xml", context.AttachmentFileName);
+    }
+
+    /// <summary>
+    /// #3330: two distinct deadlock fingerprints on one alert each carry THEIR OWN graph, so the per-event
+    /// splitter and #3313's delivery filter have something to select. The alert-level attachment is still
+    /// the window's first, for the one card an unfiltered Summary send produces.
+    /// <para>The graphs are asserted DISTINCT and paired to the right fingerprint. "Every incident has an
+    /// attachment" is satisfied by copying one graph onto all of them, which is the defect.</para>
+    /// </summary>
+    [Fact]
+    public void BuildDeadlockContext_EachIncidentCarriesItsOwnGraph()
+    {
+        var otherGraph = DeadlockGraph
+            .Replace("StackOverflow.dbo.Users", "OtherDb.dbo.T1")
+            .Replace(@"currentdbname=""StackOverflow""", @"currentdbname=""OtherDb""");
+        var rows = new List<DeadlockAlertRow>
+        {
+            Deadlock(),
+            Deadlock(xml: otherGraph, victimSql: "UPDATE T1 SET x = 1")
+        };
+
+        var context = AlertContextBuilders.BuildDeadlockContext(Server, rows, NoExclusions);
+
+        var incidents = context!.Incidents!;
+        Assert.Equal(2, incidents.Count);
+        Assert.All(incidents, i => Assert.Equal(
+            AlertIncidentAttachment.DeadlockGraphFileName, i.Attachment!.FileName));
+
+        /* Each incident's graph is the one naming ITS objects. Matched by content rather than by index,
+           because the groups are ordered by occurrence count and both have one. */
+        var byObject = incidents.ToDictionary(i => i.InvolvedObjects[0], i => i.Attachment!.Xml);
+        Assert.Contains("StackOverflow.dbo.Users", byObject["StackOverflow.dbo.Users"]);
+        Assert.Contains("OtherDb.dbo.T1", byObject["OtherDb.dbo.T1"]);
+        Assert.Equal(2, byObject.Values.Distinct().Count());
+
+        /* The alert-level attachment is unchanged: the window's first graph, for the Summary card. */
+        Assert.Equal(DeadlockGraph, context.AttachmentXml);
+    }
+
+    /// <summary>
+    /// #3330: the attachment is on the incident BEFORE the #2216 <c>decorateIncidents</c> hook runs, and
+    /// survives it. Both halves matter and neither implies the other — attaching after the hook would hand a
+    /// decorator an incident with no graph to preserve, and a decorator that RECONSTRUCTED an incident
+    /// instead of copying it would drop the graph it was handed.
+    /// <para>The engine always passes that hook (<c>IncidentOccurrenceAccumulator</c>), so the undecorated
+    /// path the other pins here exercise is the one no production alert takes.</para>
+    /// </summary>
+    [Fact]
+    public void BuildDeadlockContext_TheDecorateHook_SeesTheGraphAndKeepsIt()
+    {
+        var seenByHook = new List<AlertIncidentAttachment?>();
+
+        var context = AlertContextBuilders.BuildDeadlockContext(
+            Server, new List<DeadlockAlertRow> { Deadlock() }, NoExclusions,
+            decorateIncidents: incidents =>
+            {
+                foreach (var i in incidents)
+                {
+                    seenByHook.Add(i.Attachment);
+                }
+
+                /* `with`, the way the real accumulator decorates. Same count and order, which is what
+                   AlertContextBuilders.Decorate requires. */
+                return incidents.Select(i => i with { TotalOccurrences = 9 }).ToList();
+            });
+
+        Assert.Equal(DeadlockGraph, Assert.Single(seenByHook)!.Xml);
+
+        var incident = Assert.Single(context!.Incidents!);
+        Assert.Equal(9, incident.TotalOccurrences);
+        Assert.Equal(DeadlockGraph, incident.Attachment!.Xml);
     }
 
     [Fact]

@@ -168,6 +168,7 @@ internal sealed class CapturingSmtpEndpoint : IDisposable
 {
     private readonly TcpListener _listener;
     private readonly List<string> _messages = new();
+    private readonly List<string> _rawMessages = new();
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _accepting;
 
@@ -183,6 +184,13 @@ internal sealed class CapturingSmtpEndpoint : IDisposable
 
     /// <summary>Safe to read once the send has been awaited; see the webhook endpoint's note.</summary>
     public IReadOnlyList<string> Messages => _messages;
+
+    /// <summary>
+    /// The undecoded DATA of each message, index-aligned with <see cref="Messages"/>. For assertions about
+    /// the MIME structure itself rather than the delivered words — an attachment's <c>name=</c> parameter is
+    /// a part HEADER, which the decode deliberately drops (#3330).
+    /// </summary>
+    public IReadOnlyList<string> RawMessages => _rawMessages;
 
     private async Task AcceptLoopAsync()
     {
@@ -206,6 +214,7 @@ internal sealed class CapturingSmtpEndpoint : IDisposable
                     {
                         if (line == ".")
                         {
+                            _rawMessages.Add(data.ToString());
                             _messages.Add(DecodeMimeText(data.ToString()));
                             data.Clear();
                             inData = false;
@@ -254,6 +263,13 @@ internal sealed class CapturingSmtpEndpoint : IDisposable
     /// actually uses are handled — .NET picks base64 for the utf-8 plain-text alternate view and
     /// quoted-printable for the us-ascii HTML one — because an assertion against the raw DATA would be
     /// asserting against an encoding choice rather than against the delivered words.
+    /// <para>Recurses into a nested multipart (#3330). An attachment makes the message
+    /// <c>multipart/mixed</c> wrapping the <c>multipart/alternative</c> body, and a single-level split on
+    /// the outer boundary yields the whole inner multipart as ONE part whose headers say
+    /// <c>multipart/alternative</c> — so the base64 plain-text view inside it would be
+    /// quoted-printable-"decoded" and emerge as literal base64. A test asserting on a card's words would
+    /// then depend on which of the two views happened to survive. Depth is bounded by the nesting the
+    /// message actually has, and a message with no attachment recurses zero times.</para>
     /// </summary>
     private static string DecodeMimeText(string raw)
     {
@@ -276,6 +292,14 @@ internal sealed class CapturingSmtpEndpoint : IDisposable
 
             var headers = part.Substring(0, split);
             var body = part.Substring(split + 4);
+
+            if (headers.Contains("multipart/", StringComparison.OrdinalIgnoreCase))
+            {
+                /* The nested part carries its own boundary= in its own headers, so hand DOWN the headers
+                   with the body — the recursive call's regex has to find that boundary, not the outer one. */
+                decoded.Append(DecodeMimeText(part)).Append("\r\n");
+                continue;
+            }
 
             decoded.Append(headers.Contains("base64", StringComparison.OrdinalIgnoreCase)
                 ? Encoding.UTF8.GetString(Convert.FromBase64String(
