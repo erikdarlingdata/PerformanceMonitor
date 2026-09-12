@@ -9,9 +9,9 @@
 /*
  * Custom Alert Rules (#3285, Component 7): the list page — the twin of pages/views.js's renderViewList, for
  * user-authored alert rules instead of custom views. A rule is stored JSON { metric, predicate, hysteresis, scope }
- * behind the /api/alerts CRUD; this page lists the summaries as cards (name, enabled/paused, and — enriched per
- * card from the rule's definition — its metric, condition, and scope), and offers New rule + a "start from a
- * template" menu of the server-authored starter templates.
+ * behind the /api/alerts CRUD; this page lists the summaries as cards (name, enabled/paused, when it last fired,
+ * and — enriched per card from the rule's definition — its metric, condition, and scope), and offers New rule + a
+ * "start from a template" menu of the server-authored starter templates.
  *
  * Unlike a custom view, an alert rule has no read-only "rendered" surface — the card links straight to the editor
  * (alert-editor.js). Edit affordances (New / New from template) show only when the session reports can_edit (the
@@ -123,11 +123,14 @@ function templateMenu(templates) {
   ]);
 }
 
-/* One rule -> a card linking to its editor. The summary carries name + enabled synchronously; the metric /
-   condition / scope chips are filled in progressively from the rule's own definition (enrichCard), so the card
-   renders immediately and never blocks on that fetch. */
+/* One rule -> a card linking to its editor. The summary carries name + enabled + last_fired synchronously; the
+   metric / condition / scope chips are filled in progressively from the rule's own definition (enrichCard), so the
+   card renders immediately and never blocks on that fetch. */
 function ruleCard(r) {
   const meta = "v" + r.version + " · updated " + relTime(r.updated_at) + (r.updated_by ? " by " + r.updated_by : "");
+  /* last_fired (#3360): the summary correlates the rule's fires (config_alert_log 'Custom:<id>' rows, resolves
+     excluded) into one field. Non-null -> a relative time via the shared relTime helper; null -> "never fired". */
+  const fired = r.last_fired ? "Last fired " + relTime(r.last_fired) : "Never fired";
   const chips = el("div", { class: "vc-chips" });
   const card = el("a", { class: "view-card card", href: "#/alert-rule/" + encodeURIComponent(r.id) }, [
     el("div", { class: "vc-name" }, [
@@ -136,6 +139,7 @@ function ruleCard(r) {
     ]),
     r.description ? el("div", { class: "vc-desc", text: r.description }) : null,
     chips,
+    el("div", { class: "vc-fired" + (r.last_fired ? "" : " never"), text: fired }),
     el("div", { class: "vc-meta", text: meta }),
   ]);
   enrichCard(r.id, chips);

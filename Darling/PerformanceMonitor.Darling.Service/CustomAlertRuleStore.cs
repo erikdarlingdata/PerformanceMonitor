@@ -42,11 +42,50 @@ public sealed class CustomAlertRuleStore
         _dataSource = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
     }
 
-    /// <summary>The lightweight list read: the (potentially large) <c>definition</c> body is never selected.</summary>
+    /// <summary>
+    /// The lightweight list read: the (potentially large) <c>definition</c> body is never selected. LEFT JOINs
+    /// each rule to when it LAST FIRED (#3360) — <c>MAX(alert_time)</c> over the <c>config_alert_log</c> rows keyed
+    /// on the rule's IMMUTABLE fire key <c>'Custom:' || id</c> (<see cref="CustomAlertEvaluator.MetricNameFor"/>).
+    ///
+    /// <para>The correlation is that EXACT fire key only. A resolve / teardown row is written under a DIFFERENT
+    /// <c>metric_name</c> — <c>'&lt;display name&gt; Resolved'</c> (<c>CustomAlertEvaluator.DeliverResolveAsync</c> /
+    /// <c>WriteTeardownResolutionAsync</c>) — which can never equal <c>'Custom:&lt;numeric id&gt;'</c>, so a resolve
+    /// is never counted as a fire and one rule's fires never bleed into another's. The <c>LIKE 'Custom:%'</c> is only
+    /// a pre-filter that shrinks the grouped set; the <c>= 'Custom:' || id</c> join key is what actually correlates,
+    /// so even a (contrived) row like <c>'Custom:5 Resolved'</c> — which passes the LIKE — does NOT join to rule 5.</para>
+    ///
+    /// <para>Every fire DELIVERY writes a <c>Custom:&lt;id&gt;</c> row regardless of mute / channel (the deliver path
+    /// records the incident even when muted or channel-less), so <c>MAX(alert_time)</c> over those rows means "the
+    /// last time the rule's condition fired (the incident was recorded)" — the intended meaning of "last fired" —
+    /// and the read is deliberately NOT filtered on <c>alert_sent</c> / <c>notification_type</c>. It is ONE
+    /// round-trip: the grouped subquery scans the fire rows once and joins to the whole rule set, never a per-rule
+    /// query. The <c>idx_config_alert_log_time (server_id, metric_name, alert_time)</c> index leads with
+    /// <c>server_id</c>, so this deliberately cross-server aggregate scans rather than seeks — acceptable on this
+    /// cold, operator-triggered list render over the retention-bounded history table (the per-(server, metric)
+    /// cooldown seeds still seek that index). A rule that has never fired LEFT-JOINs to a NULL <c>last_fired</c>.</para>
+    /// </summary>
     public const string ListSql = @"
-SELECT id, name, description, enabled, version, updated_at, updated_by
-FROM custom_alert_rules
-ORDER BY name";
+SELECT
+    r.id,
+    r.name,
+    r.description,
+    r.enabled,
+    r.version,
+    r.updated_at,
+    r.updated_by,
+    f.last_fired
+FROM custom_alert_rules AS r
+LEFT JOIN
+(
+    SELECT
+        metric_name,
+        MAX(alert_time) AS last_fired
+    FROM config_alert_log
+    WHERE metric_name LIKE 'Custom:%'
+    GROUP BY metric_name
+) AS f
+    ON f.metric_name = 'Custom:' || r.id
+ORDER BY r.name";
 
     /// <summary>The full single-rule read (includes <c>definition</c>). $1 id.</summary>
     public const string GetSql = @"
@@ -195,7 +234,9 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
                 reader.GetBoolean(3),
                 reader.GetInt32(4),
                 reader.GetDateTime(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6)));
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                // last_fired: naive-UTC like updated_at (timestamp column -> Kind=Unspecified), NULL when never fired.
+                reader.IsDBNull(7) ? (DateTime?)null : reader.GetDateTime(7)));
         }
 
         return results;
@@ -613,7 +654,10 @@ public sealed record CustomAlertRule(
     DateTime UpdatedAt,
     string? UpdatedBy);
 
-/// <summary>The lightweight list projection — every field except the <c>definition</c> body.</summary>
+/// <summary>The lightweight list projection — every field except the <c>definition</c> body. <see cref="LastFired"/>
+/// (#3360) is the UTC instant this rule most recently FIRED, or null when it never has — see
+/// <see cref="CustomAlertRuleStore.ListSql"/> for how it is correlated on the immutable <c>Custom:&lt;id&gt;</c>
+/// fire key (resolve rows excluded).</summary>
 public sealed record CustomAlertRuleSummary(
     long Id,
     string Name,
@@ -621,7 +665,8 @@ public sealed record CustomAlertRuleSummary(
     bool Enabled,
     int Version,
     DateTime UpdatedAt,
-    string? UpdatedBy);
+    string? UpdatedBy,
+    DateTime? LastFired);
 
 /// <summary>
 /// The discriminated outcome of a store operation. Closed (the private base constructor blocks external

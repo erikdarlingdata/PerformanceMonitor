@@ -86,6 +86,9 @@
   -webkit-box-orient: vertical;
 }
 .view-card .vc-meta { font-size: 0.72rem; color: var(--muted); }
+/* #3360: "last fired …" — a fired rule reads in --fg to draw the eye to active rules; "never fired" is dimmed. */
+.view-card .vc-fired { font-size: 0.72rem; color: var(--fg); margin-bottom: 0.15rem; }
+.view-card .vc-fired.never { color: var(--muted); font-style: italic; }
 
 /* enriched card: panel count + distinct viz-type chips (fetched per view — the list summary omits the definition) */
 .view-card .vc-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 0.45rem; }

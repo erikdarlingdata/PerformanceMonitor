@@ -2260,7 +2260,10 @@ public static class DarlingWebEndpoints
     };
 
     /// <summary>The bare-array list wire shape (no definition body), carrying <c>enabled</c> so the list can
-    /// badge a paused rule without fetching each full definition — mirrors the MCP list surface.</summary>
+    /// badge a paused rule without fetching each full definition — plus <c>last_fired</c> (#3360), the naive-UTC
+    /// ISO-8601 instant the rule most recently fired (JSON <c>null</c> when it never has) so a card can show
+    /// "last fired …" / "never fired" without a per-rule read. Mirrors the MCP list surface (they share this
+    /// builder AND <see cref="CustomAlertRuleSummary"/>, so the field reaches both surfaces identically).</summary>
     internal static JsonArray BuildRuleSummariesNode(IReadOnlyList<CustomAlertRuleSummary> rules)
     {
         var array = new JsonArray();
@@ -2275,6 +2278,7 @@ public static class DarlingWebEndpoints
                 ["version"] = rule.Version,
                 ["updated_at"] = rule.UpdatedAt,
                 ["updated_by"] = rule.UpdatedBy,
+                ["last_fired"] = rule.LastFired,
             });
         }
 
