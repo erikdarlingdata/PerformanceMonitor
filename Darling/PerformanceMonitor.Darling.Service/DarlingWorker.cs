@@ -103,8 +103,8 @@ public sealed class DarlingWorker : BackgroundService
        a mute rule with no expiry, in force past every expiry the product offers — so the tick exists for the
        RESOLUTION half rather than the firing half: an operator who deletes the rule should see the alert
        clear promptly, not on the next hour. It costs a scan of the in-memory MuteRuleService cache (a handful
-       of rows on any real store) and the alert itself is cooldown-limited inside the evaluator, so matching
-       its #3304 neighbour costs nothing. */
+       of rows on any real store) and the alert itself is rate-limited to once a day inside the evaluator,
+       so matching its #3304 neighbour costs nothing. */
     private static readonly TimeSpan s_staleMuteCheckInterval = TimeSpan.FromMinutes(5);
 
     /* The compression-job self-heal check's cadence (fleet-level, #1581). Compression is a slow archival tier
@@ -1973,11 +1973,11 @@ public sealed class DarlingWorker : BackgroundService
                 await ReconcileCustomAlertStateAsync(servers, stoppingToken);
             }
 
-            /* #3306: a mute rule that has outlived its reason. A mute is a deliberate blind spot, and until
-               this there was no surface that reported one exists, how old it is, or whether it will ever
-               expire — the only way to find one was to already suspect it and call get_mute_rules. So a rule
-               created to stop a false-positive flood keeps suppressing the alert after the fix ships, and the
-               symptom is silence. Judged on the CONJUNCTION (still in force, no expiry, past every expiry the
+            /* #3306: a mute rule that has outlived its reason. A mute is a deliberate blind spot, and this is
+               the only surface that reports one exists, how old it is, and whether it will ever expire —
+               otherwise the only way to find one is to already suspect it and call get_mute_rules. Without it
+               a rule created to stop a false-positive flood keeps suppressing the alert after the fix ships,
+               and the symptom is silence. Judged on the CONJUNCTION (still in force, no expiry, past every expiry the
                product offers), never on permanence alone, which the dialog offers on purpose. Reads the live
                MuteRuleService cache the engine matches against — so it sees exactly what is suppressing
                alerts right now, and needs no store read of its own. Fleet-level, own slow cadence; the

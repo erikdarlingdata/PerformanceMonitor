@@ -1271,7 +1271,7 @@ public sealed class DarlingSelfAlertTests
     }
 
     /// <summary>
-    /// The reason and the four pattern fields are operator-authored free text, and the alert's
+    /// The reason and the pattern fields are operator-authored free text, and the alert's
     /// <c>detail_text</c> is later re-parsed by <see cref="AlertMuteContext.PopulateFromDetailText"/> for the
     /// viewer's mute-from-history pre-fill. A crafted value carrying a newline plus a label could otherwise
     /// forge a mute-context field — the #3304 spoof, one surface over.
@@ -1362,9 +1362,9 @@ public sealed class DarlingSelfAlertTests
     /// The severity tier rests on <see cref="MuteRule.MatchesEveryAlert"/> meaning what it says, so pin the
     /// claim itself: a rule that reports matching every alert really does accept an arbitrary one.
     ///
-    /// <para>The per-dimension half is DERIVED FROM THE TYPE rather than listing the six fields, because the
+    /// <para>The per-dimension half is DERIVED FROM THE TYPE rather than listing the fields, because the
     /// failure this guards is a SEVENTH match dimension added to <c>Matches</c> and missed by the description
-    /// list — and a test that enumerates the same six the code does cannot see that. Every existing dimension
+    /// list — and a test that enumerates the same set the code does cannot see that. Every existing dimension
     /// is a writable <c>string?</c>, so walking those (bar the two that are not dimensions) covers a new one
     /// for free: constrained by it alone, the rule would still claim to match everything, and this reds.</para>
     /// </summary>

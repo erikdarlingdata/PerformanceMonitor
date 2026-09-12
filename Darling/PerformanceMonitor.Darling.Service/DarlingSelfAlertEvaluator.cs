@@ -308,7 +308,7 @@ internal sealed class DarlingSelfAlertEvaluator
     ///
     /// <para><b>Derived from the product's own expiry options, not picked.</b> The mute dialog offers
     /// "1 hour", "24 hours", "7 days" and "Never" (<c>ViewerAppSettings.MuteRuleDefaultExpiration</c>), so
-    /// seven days is the longest BOUND an operator could have chosen. A rule that has outlived it, with no
+    /// the last of those is the longest BOUND an operator could have chosen. A rule that has outlived it, with no
     /// bound at all, has by the product's own standard outlasted every expiry it offered — which is a
     /// different statement from a threshold someone liked the sound of. It also sits clear of the case this
     /// must not report: a mute made deliberately this morning to stop a flood while a fix ships, whose
@@ -352,7 +352,7 @@ internal sealed class DarlingSelfAlertEvaluator
     private const int MaxStaleMuteReasonLength = 160;
 
     /// <summary>Length cap for one stale rule's rendered <c>MuteRule.Summary</c>. Also operator-authored in
-    /// part — the four pattern fields are free text — so it is sanitized and capped like the reason.</summary>
+    /// part — its pattern fields are free text — so it is sanitized and capped like the reason.</summary>
     private const int MaxStaleMuteSummaryLength = 160;
 
     /* Compression-job self-heal edge state (#1581). FLEET-level like disk pressure (one shared store), but

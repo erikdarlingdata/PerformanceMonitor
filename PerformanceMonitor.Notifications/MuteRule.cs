@@ -49,8 +49,8 @@ public class MuteRule
 
     /// <summary>
     /// The match dimensions this rule actually constrains, rendered one per entry. The SINGLE enumeration
-    /// behind both <see cref="Summary"/> and <see cref="MatchesEveryAlert"/>, and it names the same six
-    /// fields <see cref="Matches"/> tests.
+    /// behind both <see cref="Summary"/> and <see cref="MatchesEveryAlert"/>, and it names the same fields
+    /// <see cref="Matches"/> tests.
     ///
     /// <para>One list rather than two hand-kept copies: a seventh dimension added to <see cref="Matches"/>
     /// but missed by a copied "is this rule unconstrained" predicate would make a rule narrowed ONLY by
@@ -79,7 +79,7 @@ public class MuteRule
     }
 
     /// <summary>
-    /// True when the rule constrains NOTHING — no server, no metric, none of the four patterns — so
+    /// True when the rule constrains NOTHING — no server, no metric, none of its patterns — so
     /// <see cref="Matches"/> accepts every alert on the store rather than one recurring alert. The blast
     /// radius, not the age: a blanket rule makes a whole fleet read quiet, which is why it is severity-
     /// bearing wherever a mute is reported.
