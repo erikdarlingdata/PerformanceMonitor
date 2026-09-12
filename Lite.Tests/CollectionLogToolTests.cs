@@ -273,6 +273,28 @@ public sealed class CollectionLogToolTests : IClassFixture<SharedDuckDbFixture>,
             service, _serverManager, ServerName, 24, 200, min_duration_ms: -1);
         Assert.Contains("cannot be negative", negative, StringComparison.Ordinal);
         Assert.DoesNotContain("\"runs\"", negative, StringComparison.Ordinal);
+
+        /*
+            And a NON-FINITE floor, which a negative test cannot see: every comparison against NaN is false
+            and +Infinity < 0 is false, so both passed the original range check and came back as an empty,
+            duration-ranked page. Same refusal words as Darling's twin.
+        */
+        foreach (var unusable in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity })
+        {
+            var refused = await McpHealthTools.GetCollectionLog(
+                service, _serverManager, ServerName, 24, 200, min_duration_ms: unusable);
+
+            Assert.Contains("must be a finite number", refused, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"runs\"", refused, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"empty\"", refused, StringComparison.Ordinal);
+            Assert.DoesNotContain("matched min_duration_ms", refused, StringComparison.Ordinal);
+        }
+
+        /* Positive control: a FINITE floor on the same read still returns a page, so the negatives above are
+           not passing against a read that refuses everything. */
+        var finite = await McpHealthTools.GetCollectionLog(
+            service, _serverManager, ServerName, 24, 200, min_duration_ms: 20_000);
+        Assert.Contains("\"runs\"", finite, StringComparison.Ordinal);
     }
 
     /// <summary>
