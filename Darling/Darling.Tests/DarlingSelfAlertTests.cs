@@ -1142,8 +1142,15 @@ public sealed class DarlingSelfAlertTests
         Assert.Single(h.Deliverer.Outcomes);
     }
 
+    /// <summary>
+    /// A standing condition on its OWN re-fire interval, not the shared alert cooldown. The middle step is
+    /// the discriminating one: it sits well past the alert cooldown's own CEILING, so a version that used
+    /// <c>CooldownElapsed</c> like every sibling reds here under any configured value rather than only under
+    /// the shipped default. That matters because this alert cannot be muted — an unsuppressible condition
+    /// re-firing on a five-minute clock about a days-scale fact is the flood the mute was meant to stop.
+    /// </summary>
     [Fact]
-    public async Task StaleMute_StandingCondition_ReFiresOnlyAfterCooldown()
+    public async Task StaleMute_StandingCondition_ReFiresOnItsOwnDailyInterval_NotTheAlertCooldown()
     {
         var h = new Harness();
         var e = h.Build();
@@ -1152,13 +1159,13 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyStaleMuteRulesAsync(rules, Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
-        // Inside the 5-minute cooldown: no re-fire (fire once on entry, not every sweep).
-        h.Now = h.Now.AddMinutes(1);
+        /* Past the alert cooldown's clamp ceiling (120 minutes) and still well inside the daily interval. */
+        h.Now = h.Now.AddHours(6);
         await e.ApplyStaleMuteRulesAsync(rules, Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
-        // Cooldown elapsed, still unbounded and still old: re-fires the standing reminder.
-        h.Now = h.Now.AddMinutes(5);
+        // A day on, still unbounded and still old: re-states the standing reminder, once.
+        h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StaleMuteRefire);
         await e.ApplyStaleMuteRulesAsync(rules, Ct);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }

@@ -322,6 +322,25 @@ internal sealed class DarlingSelfAlertEvaluator
     /// </summary>
     internal static readonly TimeSpan StaleMuteAge = TimeSpan.FromDays(7);
 
+    /// <summary>
+    /// How long this condition waits before re-stating itself while a stale rule is still there — its OWN
+    /// interval, and the only condition in this class that does not re-fire on the shared alert cooldown.
+    ///
+    /// <para><b>Because it cannot be muted, it must not shout.</b> Every sibling re-fires on
+    /// <c>IAlertEngineSettings.CooldownMinutes</c> (shipped default 5, clamped to at most 120), which for a
+    /// condition an operator can silence is a reasonable standing reminder. This one is deliberately
+    /// unsuppressible — see the <c>honorMuteRules</c> argument at its fire site — so on the shipped defaults
+    /// it would have produced a history row every five minutes and a notification every fifteen, forever,
+    /// about a fact that changes on a scale of DAYS. That is the channel flood a permanent mute rule was
+    /// usually created to prevent, arriving from the thing that reports the mute.</para>
+    ///
+    /// <para>Daily: unmistakable as a standing reminder, and bounded at one a day. It cannot be configured
+    /// for the <see cref="StaleMuteAge"/> reason — a knob needs a migration rung this change is not taking.
+    /// The alert cooldown's own ceiling is two hours, so this dominates it under every setting rather than
+    /// only under the default, and there is no configuration in which the two disagree about which wins.</para>
+    /// </summary>
+    internal static readonly TimeSpan StaleMuteRefire = TimeSpan.FromDays(1);
+
     /// <summary>How many stale rules the aggregated alert lists before eliding the rest, on
     /// <see cref="MaxListedUnhealthyRules"/>' reasoning — one bounded alert, not a wall of text.</summary>
     private const int MaxListedStaleMuteRules = 20;
@@ -1853,9 +1872,12 @@ internal sealed class DarlingSelfAlertEvaluator
 
         _activeStaleMute[StaleMuteKey] = true;
 
-        /* Standing condition: fire on entry, re-fire only per cooldown while any rule qualifies. The CURRENT
-           set is rendered each time, so a rule that ages past the bound later shows up on the next re-fire. */
-        if (!CooldownElapsed(_lastStaleMuteAlert, StaleMuteKey, now))
+        /* Standing condition: fire on entry, re-fire only per StaleMuteRefire while any rule qualifies. The
+           CURRENT set is rendered each time, so a rule that ages past the bound later shows up on the next
+           re-fire. Its OWN interval rather than the shared CooldownElapsed the siblings use, because this
+           alert cannot be muted — see StaleMuteRefire. */
+        if (_lastStaleMuteAlert.TryGetValue(StaleMuteKey, out var lastFired)
+            && now - lastFired < StaleMuteRefire)
         {
             return;
         }
