@@ -22,12 +22,12 @@ namespace PerformanceMonitor.Notifications;
 /// exact SQL — INSERT throws on a duplicate id, UPDATE is a narrow update.
 ///
 /// <para><b>Every member THROWS on a store failure, reads included.</b> An empty result from
-/// <see cref="LoadAllAsync"/> means the store holds no rules, and nothing else. A store that swallowed a
-/// failed read and returned empty made those two answers one value, and
-/// <see cref="MuteRuleService.LoadAsync"/> then replaced a live cache with it — so a store blip un-muted
-/// every rule an operator had in force, which is the outcome a permanent rule is chosen to avoid. The
-/// service's reload skips its cache assignment when the read throws, so the previously-loaded set stays
-/// in force; each caller decides how loudly to report the event.</para>
+/// <see cref="LoadAllAsync"/> means the store holds no rules, and nothing else. An implementation that
+/// swallowed a failed read and returned empty would make those two answers one value, and
+/// <see cref="MuteRuleService.LoadAsync"/> replaces its live cache with whatever it is handed — so the
+/// swallow would un-mute every rule an operator has in force on a store blip, which is the outcome a
+/// permanent rule is chosen to avoid. Throwing instead makes the reload skip its cache assignment, so the
+/// set already loaded stays in force; each caller decides how loudly to report the event.</para>
 /// </summary>
 public interface IMuteRuleStore
 {

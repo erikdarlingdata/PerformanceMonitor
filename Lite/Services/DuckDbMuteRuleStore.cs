@@ -22,9 +22,9 @@ namespace PerformanceMonitorLite.Services;
 /// EVERY method throws on failure; <see cref="MuteRuleService"/> keeps the
 /// try/catch + logging + in-memory cache (persist-then-cache ordering preserved).
 /// <see cref="LoadAllAsync"/> throws too, so an empty list is the answer "this store holds no rules" and
-/// never also the answer "I could not read them" — the swallow it used to carry returned whatever rows had
-/// already been read when the fault hit, so a mid-read failure silently narrowed the set in force rather
-/// than merely emptying it.
+/// never also the answer "I could not read them". A swallow here would be worse than an empty answer:
+/// the rows read before the fault are already in the list, so it would report a silently NARROWED set in
+/// force rather than an absent one, and the caller cannot tell a short list from a short table.
 ///
 /// <para><b>Four of the five write-lock sites are earned; <see cref="InsertAsync"/> is not (#2463).</b>
 /// Worth saying because <c>FindingStore.MuteStoryAsync</c> writes a mute row under the READ lock, and the
