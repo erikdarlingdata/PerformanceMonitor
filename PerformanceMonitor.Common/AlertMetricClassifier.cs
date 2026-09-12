@@ -137,9 +137,11 @@ namespace PerformanceMonitor.Common
             /* Count metrics — whole-number event counts. "Custom Alert Rules Unhealthy" (#3304) is the
                fleet-level self-alert whose value is the COUNT of custom rules that are broken or never-firing;
                a whole number like its siblings, not a state, so it renders here rather than joining
-               IsStateOnly (its "Custom Alert Rules Recovered" resolution is state-only via IsResolution). */
+               IsStateOnly (its "Custom Alert Rules Recovered" resolution is state-only via IsResolution).
+               "Stale Mute Rules" (#3306) is the same shape: the count of mute rules still suppressing alerts
+               with no expiry, past every expiry the product offers. */
             "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job"
-                or "Custom Alert Rules Unhealthy" => $"{value:F0}",
+                or "Custom Alert Rules Unhealthy" or "Stale Mute Rules" => $"{value:F0}",
 
             /* #1846: a state-only metric never had a number — its display value is a role, a connection
                state, a version or the literal "resolved", and the stored double is the 0 sentinel the

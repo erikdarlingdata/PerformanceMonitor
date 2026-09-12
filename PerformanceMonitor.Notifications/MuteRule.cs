@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -46,20 +47,44 @@ public class MuteRule
         ? (IsExpired ? "Expired" : ExpiresAtUtc.Value.ToLocalTime().ToString("g"))
         : "Never";
 
+    /// <summary>
+    /// The match dimensions this rule actually constrains, rendered one per entry. The SINGLE enumeration
+    /// behind both <see cref="Summary"/> and <see cref="MatchesEveryAlert"/>, and it names the same fields
+    /// <see cref="Matches"/> tests.
+    ///
+    /// <para>One list rather than two hand-kept copies: a seventh dimension added to <see cref="Matches"/>
+    /// but missed by a copied "is this rule unconstrained" predicate would make a rule narrowed ONLY by
+    /// that new dimension read as matching every alert. Sharing the list makes the two answers move
+    /// together by construction.</para>
+    /// </summary>
+    private List<string> MatchDescriptions()
+    {
+        var parts = new List<string>();
+        if (MetricName != null) parts.Add(MetricName);
+        if (ServerName != null) parts.Add($"on {ServerName}");
+        if (DatabasePattern != null) parts.Add($"db≈{DatabasePattern}");
+        if (QueryTextPattern != null) parts.Add($"query≈{QueryTextPattern}");
+        if (WaitTypePattern != null) parts.Add($"wait≈{WaitTypePattern}");
+        if (JobNamePattern != null) parts.Add($"job≈{JobNamePattern}");
+        return parts;
+    }
+
     public string Summary
     {
         get
         {
-            var parts = new System.Collections.Generic.List<string>();
-            if (MetricName != null) parts.Add(MetricName);
-            if (ServerName != null) parts.Add($"on {ServerName}");
-            if (DatabasePattern != null) parts.Add($"db≈{DatabasePattern}");
-            if (QueryTextPattern != null) parts.Add($"query≈{QueryTextPattern}");
-            if (WaitTypePattern != null) parts.Add($"wait≈{WaitTypePattern}");
-            if (JobNamePattern != null) parts.Add($"job≈{JobNamePattern}");
+            var parts = MatchDescriptions();
             return parts.Count > 0 ? string.Join(", ", parts) : "(matches all alerts)";
         }
     }
+
+    /// <summary>
+    /// True when the rule constrains NOTHING — no server, no metric, none of its patterns — so
+    /// <see cref="Matches"/> accepts every alert on the store rather than one recurring alert. The blast
+    /// radius, not the age: a blanket rule makes a whole fleet read quiet, which is why it is severity-
+    /// bearing wherever a mute is reported.
+    /// </summary>
+    public bool MatchesEveryAlert => MatchDescriptions().Count == 0;
 
     public bool Matches(AlertMuteContext context)
     {

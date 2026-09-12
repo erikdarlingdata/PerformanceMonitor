@@ -112,6 +112,7 @@ internal static class DarlingTriageEndpoint
         (DarlingSelfAlertEvaluator.DiskPressureResolvedMetric, DarlingSelfAlertEvaluator.DiskPressureMetric),
         ("Store Job Cadence Recovered", DarlingSelfAlertEvaluator.JobCadenceMetric),
         ("Compression Job Recovered", DarlingSelfAlertEvaluator.CompressionJobMetric),
+        (DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, DarlingSelfAlertEvaluator.StaleMuteMetric),
     };
 
     /// <summary>
@@ -244,6 +245,19 @@ internal static class DarlingTriageEndpoint
             [DarlingSelfAlertEvaluator.StoreUpgradeMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.JobCadenceMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.CompressionJobMetric] = StoreSections(),
+
+            /* #3306: the stale-mute alert is the one store-family member whose subject is the CONFIGURATION
+               rather than the store's volume, so get_store_metrics answers nothing about it. The rule list is
+               the drill-down, with enabled_only=false so a rule that lapsed or was disabled between the
+               firing and the click is still visible rather than looking deleted. The alert history is the
+               second half: what a stale mute costs is the alerts it suppressed, and a muted alert is still
+               RECORDED, so the history is where the suppressed signal actually is. */
+            [DarlingSelfAlertEvaluator.StaleMuteMetric] = new[]
+            {
+                F("Mute rules in force", "get_mute_rules", ("enabled_only", "false")),
+                /* 168 hours because that is StaleMuteAge, and it is also this read's own ceiling. */
+                F("Recent alerts (a muted alert is still recorded here)", "get_alert_history", ("hours", "168"), ("limit", "50")),
+            },
 
             /* PostgreSQL alert family (PostgresAlertEvaluator). */
             ["PostgreSQL Wraparound Risk"] = new[]
