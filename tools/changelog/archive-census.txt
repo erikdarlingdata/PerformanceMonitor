@@ -1,0 +1,20 @@
+# One row per archived minor-version file: version, the number of top-level entries in it,
+# and the sha256 of its version heading plus its prose with LF endings - the archive header
+# above the heading and the link-definition block below it are NOT covered, because neither
+# is content that was taken out of CHANGELOG.md.
+#
+# Regenerate at a release cut, after `split`:
+#     python3 tools/changelog/changelog_archive.py census
+#
+# ChangelogIndexAndArchiveTests reads this file, so a row that stops matching its archive
+# fails CI. It is the durable half of the proof; `roundtrip` is the whole-document half and
+# needs the pre-split revision to compare against.
+
+3.7.0   279  8912147a684e50dbd37b772b44688d68b71f46b854b5f90a2cfd9aeca5c71021
+3.6.0   111  18d83858c51eee65c76c97e9e6d8ff90b6553e38a66388b4346c3d36e20bbaa0
+3.5.0   112  e771f3e10ee28b49861466d19945eddc9b6c99f44480d81e0304216d46584752
+3.4.0   152  2e93a5e27abcaed5698635bf872f019212f94a058f6095b2b8b03ca936384192
+3.3.0   131  10cbbfd2868291b694bb3001057f01746c7e8cb0b7d6fba6f40eb8830b48844a
+3.2.0   178  b428e9c1afdd6cefa0a5c570b0d5b779919135e383a6523e4b95eb940cbac75b
+3.1.0    40  453a9aee5019cef2042d1938b4d2131c18e09fc42258501b732ca0ce41b7b746
+3.0.0    37  7b18b6d26405560d31b436f9fc36e42858850af2e48bfd96f59c8148b17c18c7

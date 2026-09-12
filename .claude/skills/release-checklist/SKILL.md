@@ -44,6 +44,21 @@ If a week of parallel PRs left duplicate section headers in `[Unreleased]` (two 
 
 If the previous version's changelog entry is missing, add that too.
 
+#### 2a. Archive and compact the cut version
+
+`CHANGELOG.md` is an **index**: from 3.0.0 on, each released entry is reduced to its bold title and the issues it references, and the prose lives in `docs/changelog/<major>.<minor>.md`. The single file had reached 2.06 MB, which GitHub refuses to render. `[Unreleased]` keeps its full prose because that is where entries are written, so once the heading is renamed to the new version its prose has to move:
+
+```
+python3 tools/changelog/changelog_archive.py split     # rewrites the index and the archives
+python3 tools/changelog/changelog_archive.py census    # the counts and hashes the CI pin reads
+python3 tools/changelog/changelog_archive.py verify    # counts, reference resolution, size ceilings
+python3 tools/changelog/changelog_archive.py roundtrip # byte identity against the pre-split revision
+```
+
+`split` is idempotent — run it on an already-split tree and only the newly-released version moves. **Regenerating the census is the step to remember**: `ChangelogIndexAndArchiveTests` reads `tools/changelog/archive-census.txt`, so a new archive with no row there fails CI, and so does a row that no longer matches its archive.
+
+Pre-3.0 versions are deliberately **not** archived: those entries carry no prose to move, and an empty file beside them would be one more thing to maintain that says nothing.
+
 ### 2b. README Sync
 
 Cross-reference `README.md` against the changelog and ensure all user-facing changes are reflected:

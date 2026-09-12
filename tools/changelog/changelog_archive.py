@@ -19,6 +19,7 @@ silently drops one, produces both.
 
 Sub-commands
     split      write the index and the archives from the current CHANGELOG.md
+    census     write the per-archive entry counts and prose hashes the C# pin reads
     verify     structural checks that need no history: entry counts, every [#N] resolving in the
                file that uses it, per-file size ceilings
     roundtrip  reconstruct a git revision's CHANGELOG.md from the working tree's index plus
@@ -39,6 +40,7 @@ import hashlib
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 # The commit whose CHANGELOG.md this layout was derived from. `roundtrip` defaults to it: the
@@ -48,6 +50,25 @@ from pathlib import Path
 PRE_SPLIT_REV = "3653e8d63a086965c9b75c8e484a14f1d01ac79a"
 
 ARCHIVE_DIR = "docs/changelog"
+
+# The census the C# pin reads, so the two tools share one set of numbers instead of mirroring
+# them by hand - a hand-mirrored literal goes stale and then reports its own staleness as a
+# defect in whatever it was checking.
+CENSUS = "tools/changelog/archive-census.txt"
+
+CENSUS_HEADER = [
+    "# One row per archived minor-version file: version, the number of top-level entries in it,",
+    "# and the sha256 of its version heading plus its prose with LF endings - the archive header",
+    "# above the heading and the link-definition block below it are NOT covered, because neither",
+    "# is content that was taken out of CHANGELOG.md.",
+    "#",
+    "# Regenerate at a release cut, after `split`:",
+    "#     python3 tools/changelog/changelog_archive.py census",
+    "#",
+    "# ChangelogIndexAndArchiveTests reads this file, so a row that stops matching its archive",
+    "# fails CI. It is the durable half of the proof; `roundtrip` is the whole-document half and",
+    "# needs the pre-split revision to compare against.",
+]
 
 # Only a released 3.x version is archived. [Unreleased] is excluded because it is the authoring
 # surface; pre-3.0 is excluded because its entries are already terse - mean 213 bytes against
@@ -260,8 +281,18 @@ LAYOUT_NOTE = [
 ]
 
 
-def build(preamble: list[str], sections: list[Section]) -> tuple[list[str], dict[str, list[str]]]:
-    """Return the index's lines and each archive's lines."""
+def index_link(path: str) -> str:
+    return f"Full entries: [{path}]({path})"
+
+
+def build(repo: Path, preamble: list[str], sections: list[Section]) -> tuple[list[str], dict[str, list[str]]]:
+    """Return the index's lines and each archive's lines.
+
+    Idempotent, which matters because a release cut runs this on an already-split tree and only
+    the newly-released version has prose in the index. A section whose archive already exists
+    takes its prose FROM that archive: reading the already-compacted index lines instead would
+    rewrite the archive as its own index and destroy the prose in one pass.
+    """
     all_defs = definitions([l for s in sections for l in s.trailer] + preamble)
 
     index = strip_layout_note(preamble) + LAYOUT_NOTE + [""]
@@ -276,7 +307,25 @@ def build(preamble: list[str], sections: list[Section]) -> tuple[list[str], dict
         assert version is not None
         path = archive_path(version)
 
-        index.extend([section.heading, "", f"Full entries: [{path}]({path})"])
+        prose = section.prose
+        existing = repo / path
+        compacted = index_link(path) in prose
+        if existing.exists():
+            if not compacted:
+                raise SystemExit(
+                    f"{version}: {path} exists but CHANGELOG.md still carries prose for it rather "
+                    f"than a '{index_link(path)}' line. Two copies of the prose disagree and this "
+                    "cannot tell which is current - reconcile them by hand."
+                )
+            prose = archive_body(read_lines(existing.read_bytes()))[1:]
+        elif compacted:
+            raise SystemExit(
+                f"{version}: CHANGELOG.md points at {path} but that file is missing - the prose is "
+                "gone rather than compacted, and rewriting from here would make the loss permanent."
+            )
+        section = Section(section.heading, prose, section.trailer)
+
+        index.extend([section.heading, "", index_link(path)])
         for kind, payload in group_prose(section.prose):
             if kind == "entry":
                 index.append(compact(payload))
@@ -344,7 +393,7 @@ def archive_header(version: str) -> list[str]:
 def cmd_split(repo: Path, write: bool) -> int:
     original = (repo / "CHANGELOG.md").read_bytes()
     preamble, sections = parse(read_lines(original))
-    index, archives = build(preamble, sections)
+    index, archives = build(repo, preamble, sections)
 
     outputs = {"CHANGELOG.md": join_crlf(index)}
     for path, lines in archives.items():
@@ -362,11 +411,45 @@ def cmd_split(repo: Path, write: bool) -> int:
     return 0
 
 
-def cmd_verify(repo: Path) -> int:
+def census_rows(repo: Path) -> list[tuple[str, int, str]]:
+    rows = []
+    _, sections = parse(read_lines((repo / "CHANGELOG.md").read_bytes()))
+    for section in sections:
+        if not section.archived:
+            continue
+        body = archive_body(read_lines((repo / archive_path(section.version)).read_bytes()))
+        digest = hashlib.sha256(join_lf(body)).hexdigest()
+        rows.append((section.version, len(entries(body[1:])), digest))
+    return rows
+
+
+def read_census(repo: Path) -> dict[str, tuple[int, str]]:
+    out = {}
+    for line in read_lines((repo / CENSUS).read_bytes()):
+        if not line.strip() or line.startswith("#"):
+            continue
+        version, count, digest = line.split()
+        out[version] = (int(count), digest)
+    return out
+
+
+def cmd_census(repo: Path, write: bool) -> int:
+    rows = census_rows(repo)
+    lines = CENSUS_HEADER + [""] + [f"{v}  {n:>4}  {d}" for v, n, d in rows]
+    for line in lines[len(CENSUS_HEADER) + 1 :]:
+        print(line)
+    if write:
+        (repo / CENSUS).write_bytes(join_crlf(lines))
+        print(f"wrote {CENSUS}")
+    return 0
+
+
+def cmd_verify(repo: Path, quiet: bool = False) -> int:
     failures: list[str] = []
 
     def check(ok: bool, message: str) -> None:
-        print(("PASS " if ok else "FAIL ") + message)
+        if not quiet:
+            print(("PASS " if ok else "FAIL ") + message)
         if not ok:
             failures.append(message)
 
@@ -383,7 +466,7 @@ def cmd_verify(repo: Path) -> int:
     index_used = set(ordered_refs([l for l in index_lines if not LINK_DEF.match(l)]))
     undefined = sorted(r for r in index_used if f"#{r}" not in index_defs)
     check(not undefined, f"every [#N] in CHANGELOG.md resolves there ({len(index_used)} distinct)")
-    if undefined:
+    if undefined and not quiet:
         print("      undefined:", undefined[:20])
 
     total_entries = 0
@@ -404,11 +487,11 @@ def cmd_verify(repo: Path) -> int:
             used = set(ordered_refs([l for l in lines if not LINK_DEF.match(l)]))
             missing = sorted(r for r in used if f"#{r}" not in defs)
             check(not missing, f"every [#N] in {path} resolves there ({len(used)} distinct)")
-            if missing:
+            if missing and not quiet:
                 print("      undefined:", missing[:20])
             extra = sorted(k for k in defs if k.startswith("#") and k[1:] not in used)
             check(not extra, f"{path} defines nothing it does not reference")
-            if extra:
+            if extra and not quiet:
                 print("      unreferenced:", extra[:20])
             prose = body[1:]
 
@@ -421,8 +504,11 @@ def cmd_verify(repo: Path) -> int:
                   f"{section.version}: {len(index_entries)} index lines for "
                   f"{len(section_entries)} archived entries")
 
-    check(total_entries == 1329,
-          f"{total_entries} bold-titled entries across every version (1,329 pre-split)")
+    # A FLOOR, not an equality: [Unreleased] grows with every lane, so an exact total would report
+    # its own staleness on the next ordinary changelog edit. 1,329 is the pre-split census, and
+    # entries only ever move between sections, so the total can never legitimately drop below it.
+    check(total_entries >= 1329,
+          f"{total_entries} bold-titled entries across every version, floor 1,329 (pre-split census)")
 
     # What makes the split reversible in one commit: CHANGELOG.md keeps the whole pre-split
     # definition set, in the sixteen positions it already occupied, so no definition had to be
@@ -437,11 +523,23 @@ def cmd_verify(repo: Path) -> int:
     orphaned = sorted(r for r in archive_refs if f"#{r}" not in index_defs)
     check(not orphaned,
           f"CHANGELOG.md still defines every ref the archives use ({len(archive_refs)} distinct)")
-    if orphaned:
+    if orphaned and not quiet:
         print("      missing from the index:", orphaned[:20])
     unreferenced = sorted(k for k in index_defs if k.startswith("#") and k[1:] not in index_used)
-    print(f"INFO CHANGELOG.md holds {len(index_defs)} definitions, {len(unreferenced)} of them "
-          f"unreferenced there: {unreferenced}")
+    if not quiet:
+        print(f"INFO CHANGELOG.md holds {len(index_defs)} definitions, {len(unreferenced)} of them "
+              f"unreferenced there: {unreferenced}")
+
+    census = read_census(repo)
+    observed = {v: (n, d) for v, n, d in census_rows(repo)}
+    check(set(census) == set(observed),
+          f"{CENSUS} has a row for every archive and no others ({len(observed)} archives)")
+    for version in sorted(observed):
+        if version not in census:
+            continue
+        check(census[version] == observed[version],
+              f"{version}: {observed[version][0]} entries, prose sha256 "
+              f"{observed[version][1][:16]} matches {CENSUS}")
 
     return 1 if failures else 0
 
@@ -469,30 +567,84 @@ def reconstruct(repo: Path, archive_override: dict[str, bytes] | None = None) ->
     return out
 
 
+def prose_only(lines: list[str]) -> list[str]:
+    return [l for l in lines if not LINK_DEF.match(l)]
+
+
 def cmd_roundtrip(repo: Path, rev: str, archive_override=None, quiet=False) -> int:
+    """Substitute every archive's prose back into a revision's CHANGELOG.md and compare.
+
+    Two verdicts, and the difference between them is the point. IDENTICAL is the whole document,
+    byte for byte, which is what this returned at the split. Once the index moves on - a new entry
+    in [Unreleased], a new release archived, a new link definition appended - the bytes cannot
+    match any more, so the fallback compares the thing that must never change: the PROSE of every
+    version the revision already had. It reports which is which rather than quietly grading itself
+    on the easier claim.
+    """
     want = git_show(repo, rev, "CHANGELOG.md")
     got = join_lf(reconstruct(repo, archive_override))
 
     if got == want:
-        digest = hashlib.sha256(want).hexdigest()
         if not quiet:
-            print(f"IDENTICAL  {len(want):,} bytes, sha256 {digest}")
-            print(f"           reconstructed from CHANGELOG.md + {ARCHIVE_DIR}/ against {rev[:12]}")
+            print(f"IDENTICAL  {len(want):,} bytes, sha256 {hashlib.sha256(want).hexdigest()}")
+            print(f"           the whole of {rev[:12]}:CHANGELOG.md, rebuilt from CHANGELOG.md "
+                  f"+ {ARCHIVE_DIR}/")
         return 0
 
-    want_lines, got_lines = read_lines(want), read_lines(got)
+    want_pre, want_sections = parse(read_lines(want))
+    got_pre, got_sections = parse(read_lines(got))
+    got_by_heading = {s.heading: s for s in got_sections}
+
+    failures: list[str] = []
+    notes: list[str] = []
+
+    if prose_only(want_pre) != prose_only(got_pre):
+        failures.append("the preamble's prose differs")
+
+    for section in want_sections:
+        if section.version is None:
+            notes.append(f"{section.heading} is the authoring surface, so its drift is expected")
+            continue
+        rebuilt = got_by_heading.get(section.heading)
+        if rebuilt is None:
+            failures.append(f"{section.heading} is gone from the rebuilt document")
+            continue
+        want_prose = prose_only(section.prose)
+        got_prose = prose_only(rebuilt.prose)
+        if want_prose == got_prose:
+            continue
+        where = next((i for i in range(max(len(want_prose), len(got_prose)))
+                      if want_prose[i:i + 1] != got_prose[i:i + 1]), 0)
+        failures.append(
+            f"{section.heading}: prose differs at line {where + 1} of the section\n"
+            f"             at {rev[:12]}: {(want_prose[where:where + 1] or ['<missing>'])[0][:150]}\n"
+            f"             rebuilt     : {(got_prose[where:where + 1] or ['<missing>'])[0][:150]}")
+
+    extra = [s.heading for s in got_sections if s.heading not in {w.heading for w in want_sections}]
+    if extra:
+        notes.append(f"released since {rev[:12]}: {', '.join(extra)}")
+
+    # Every definition the revision carried must still resolve somewhere in the set, or an issue
+    # link that used to work now renders as literal text.
+    want_defs = definitions(read_lines(want))
+    got_defs = definitions(read_lines(got))
+    lost = sorted(k for k, v in want_defs.items() if got_defs.get(k) != v)
+    if lost:
+        failures.append(f"{len(lost)} link definitions lost or changed: {lost[:10]}")
+
     if not quiet:
-        print(f"DIFFERENT  reconstructed {len(got):,} bytes against {len(want):,} at {rev[:12]}")
-        print(f"           {len(got_lines):,} lines against {len(want_lines):,}")
-        for i in range(max(len(want_lines), len(got_lines))):
-            a = want_lines[i] if i < len(want_lines) else "<missing>"
-            b = got_lines[i] if i < len(got_lines) else "<missing>"
-            if a != b:
-                print(f"           first difference at line {i + 1}")
-                print(f"             pre-split: {a[:160]}")
-                print(f"             rebuilt  : {b[:160]}")
-                break
-    return 1
+        for note in notes:
+            print(f"NOTE       {note}")
+        for failure in failures:
+            print(f"FAIL       {failure}")
+        if failures:
+            print(f"DIFFERENT  rebuilt {len(got):,} bytes against {len(want):,} at {rev[:12]}")
+        else:
+            print(f"PROSE INTACT  every version {rev[:12]} held is byte-identical in prose, and "
+                  "every link definition still resolves")
+            print(f"              NOT the whole document: the index has moved on since then, so "
+                  "this is the durable half of the claim rather than the byte comparison")
+    return 1 if failures else 0
 
 
 def cmd_self_test(repo: Path, rev: str) -> int:
@@ -515,43 +667,77 @@ def cmd_self_test(repo: Path, rev: str) -> int:
     pristine = (repo / path).read_bytes()
     pristine_lines = read_lines(pristine)
 
-    entry_at = next(i for i, l in enumerate(pristine_lines) if l.startswith("- **"))
+    entry_lines = [i for i, l in enumerate(pristine_lines) if l.startswith("- **")]
+    first, last = entry_lines[0], entry_lines[-1]
+
+    # Flip one character rather than substitute a word: a replace() whose needle happens not to
+    # occur mutates nothing, and then every assertion about it passes while asserting nothing.
+    # This one cannot be a no-op, and the `deep` line is chosen past the first 1,000 bytes so the
+    # weakened comparisons below are answering about a real edit.
+    deep = entry_lines[len(entry_lines) // 2]
+    assert sum(len(l) + 2 for l in pristine_lines[:deep]) > 1000, "the deep line is in the prefix"
+    original = pristine_lines[deep]
+    at = len(original) // 2
+    flipped = original[:at] + ("x" if original[at] != "x" else "y") + original[at + 1 :]
+    assert flipped != original and len(flipped) == len(original)
 
     mutations = {
         "a dropped entry is reported":
-            pristine_lines[:entry_at] + pristine_lines[entry_at + 1 :],
+            pristine_lines[:first] + pristine_lines[first + 1 :],
         "a dropped final entry is reported":
-            [l for i, l in enumerate(pristine_lines)
-             if i != max(i for i, x in enumerate(pristine_lines) if x.startswith("- **"))],
+            pristine_lines[:last] + pristine_lines[last + 1 :],
         "a one-character edit deep in the prose is reported":
-            [l.replace("collector", "collecter", 1) if i == entry_at else l
-             for i, l in enumerate(pristine_lines)],
+            pristine_lines[:deep] + [flipped] + pristine_lines[deep + 1 :],
         "a truncated entry is reported":
-            [l[: len(l) // 2] if i == entry_at else l for i, l in enumerate(pristine_lines)],
+            [l[: len(l) // 2] if i == deep else l for i, l in enumerate(pristine_lines)],
         "two swapped entries are reported":
             swap_first_two_entries(pristine_lines),
     }
     for name, lines in mutations.items():
-        corrupt = join_crlf(lines)
-        expect(name, cmd_roundtrip(repo, rev, {path: corrupt}, quiet=True) == 1)
+        expect(name, cmd_roundtrip(repo, rev, {path: join_crlf(lines)}, quiet=True) == 1)
 
-    # The same corruptions against comparisons that only look at a prefix or a line count. These
-    # MUST come back clean: that is what makes the byte comparison above load-bearing rather than
-    # decorative, and it is the reason a "first 1,000 bytes" or "same number of lines" check is
-    # not an acceptable substitute.
+    # The SAME real edit, against comparisons reduced to a prefix or a line count. Both MUST come
+    # back clean: that is what makes the byte comparison load-bearing rather than decorative, and
+    # it is why "the file got smaller" and "the line counts agree" are not acceptable substitutes.
     want = git_show(repo, rev, "CHANGELOG.md")
-    edited = join_crlf(mutations["a one-character edit deep in the prose is reported"])
-    truncated_prefix_agrees = (
-        join_lf(reconstruct(repo, {path: edited}))[:1000] == want[:1000])
-    expect("a 1,000-byte-prefix comparison misses the edit (so it is not the check)",
-           truncated_prefix_agrees)
-    line_count_agrees = (
-        len(read_lines(join_lf(reconstruct(repo, {path: edited})))) == len(read_lines(want)))
-    expect("a line-count comparison misses the edit (so it is not the check)", line_count_agrees)
+    edited = join_crlf(pristine_lines[:deep] + [flipped] + pristine_lines[deep + 1 :])
+    rebuilt = join_lf(reconstruct(repo, {path: edited}))
+    expect("a 1,000-byte-prefix comparison misses that edit, so it is not the check",
+           rebuilt[:1000] == want[:1000] and rebuilt != want)
+    expect("a line-count comparison misses that edit, so it is not the check",
+           len(read_lines(rebuilt)) == len(read_lines(want)) and rebuilt != want)
+    expect("a byte-length comparison misses that edit, so it is not the check",
+           len(rebuilt) == len(want) and rebuilt != want)
+
+    # Where roundtrip deliberately does not look, and which check covers it instead. CHANGELOG.md
+    # holds the canonical definition set in its original positions, so roundtrip never reads an
+    # archive's own block and cannot see one go missing - it would rebuild the pre-split file
+    # perfectly while shipping an archive whose every issue link renders as literal text. That is
+    # `verify`'s to catch, and the pair below is what stops either check being assumed to cover
+    # the other's half.
+    stripped = join_crlf([l for l in pristine_lines if not LINK_DEF.match(l)])
+    expect("roundtrip still passes with an archive's definitions dropped (it reads prose only)",
+           cmd_roundtrip(repo, rev, {path: stripped}, quiet=True) == 0)
+    with tempfile.TemporaryDirectory() as tmp:
+        expect("verify reports an archive's dropped definitions",
+               cmd_verify(materialize(repo, Path(tmp) / "corrupt", {path: stripped}), quiet=True) == 1)
+        expect("verify passes on the same tree uncorrupted",
+               cmd_verify(materialize(repo, Path(tmp) / "clean", {}), quiet=True) == 0)
 
     assert (repo / path).read_bytes() == pristine, "the self-test altered a file on disk"
     print(f"{path} unchanged on disk, sha256 {hashlib.sha256(pristine).hexdigest()[:16]}")
     return 1 if failures else 0
+
+
+def materialize(repo: Path, target: Path, overrides: dict[str, bytes]) -> Path:
+    """A throwaway copy of just the changelog set, so a corruption never reaches the real tree."""
+    wanted = ["CHANGELOG.md", CENSUS] + [
+        f"{ARCHIVE_DIR}/{p.name}" for p in sorted((repo / ARCHIVE_DIR).glob("*.md"))]
+    for rel in wanted:
+        destination = target / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(overrides.get(rel) or (repo / rel).read_bytes())
+    return target
 
 
 def swap_first_two_entries(lines: list[str]) -> list[str]:
@@ -564,11 +750,12 @@ def swap_first_two_entries(lines: list[str]) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["split", "verify", "roundtrip"], nargs="?",
+    parser.add_argument("command", choices=["split", "census", "verify", "roundtrip"], nargs="?",
                         default="verify")
     parser.add_argument("--repo", default=None, help="repository root (default: derived from this file)")
     parser.add_argument("--rev", default=PRE_SPLIT_REV, help="revision to round-trip against")
-    parser.add_argument("--dry-run", action="store_true", help="split: report sizes, write nothing")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="split / census: report, write nothing")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -578,6 +765,8 @@ def main() -> int:
         return cmd_self_test(repo, args.rev)
     if args.command == "split":
         return cmd_split(repo, not args.dry_run)
+    if args.command == "census":
+        return cmd_census(repo, not args.dry_run)
     if args.command == "roundtrip":
         return cmd_roundtrip(repo, args.rev)
     return cmd_verify(repo)
