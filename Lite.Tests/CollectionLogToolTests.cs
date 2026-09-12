@@ -273,6 +273,20 @@ public sealed class CollectionLogToolTests : IClassFixture<SharedDuckDbFixture>,
             service, _serverManager, ServerName, 24, 200, min_duration_ms: -1);
         Assert.Contains("cannot be negative", negative, StringComparison.Ordinal);
         Assert.DoesNotContain("\"runs\"", negative, StringComparison.Ordinal);
+
+        /* ── and a floor that is not a real number, in the same words again ── */
+        foreach (var notANumber in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity })
+        {
+            var refused = await McpHealthTools.GetCollectionLog(
+                service, _serverManager, ServerName, 24, 200, min_duration_ms: notANumber);
+
+            Assert.Contains("real number of milliseconds", refused, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"runs\"", refused, StringComparison.Ordinal);
+
+            /* The discriminating one: these used to pass validation and fall into the no-matches status,
+               which names the floor and reads as a fact about the window. See Darling's twin. */
+            Assert.DoesNotContain("matched min_duration_ms", refused, StringComparison.Ordinal);
+        }
     }
 
     /// <summary>

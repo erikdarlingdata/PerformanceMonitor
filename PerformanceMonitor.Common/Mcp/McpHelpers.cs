@@ -243,8 +243,22 @@ internal static class McpHelpers
     /// </summary>
     public static string? ValidateMinMs(double? minMs, string paramName)
     {
-        if (minMs is < 0)
-            return $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor cannot be negative — use 0 to admit every row, or omit it entirely.";
+        if (minMs is not { } floor)
+            return null;
+
+        /* Non-finite is tested BEFORE the sign, and both tests are needed. NaN fails every comparison it
+           is given, including `< 0`; +Infinity is not negative either; and an overflowing literal such as
+           1e400 PARSES, to +Infinity, rather than failing to bind. So all three arrived as accepted floors,
+           matched no row, and came back as the filtered-no-matches status naming a floor that was never a
+           number — a refusal rendered as an answer, in the one validator whose job is refusing. -Infinity
+           was already caught by the sign test and is caught here instead, because "not a real number of
+           milliseconds" is the accurate reason for it rather than its sign. */
+        if (!double.IsFinite(floor))
+            return $"Invalid {paramName} value '{Ms(floor)}'. A duration floor has to be a real number of milliseconds — use 0 to admit every row, or omit it entirely.";
+
+        if (floor < 0)
+            return $"Invalid {paramName} value '{Ms(floor)}'. A duration floor cannot be negative — use 0 to admit every row, or omit it entirely.";
+
         return null;
     }
 

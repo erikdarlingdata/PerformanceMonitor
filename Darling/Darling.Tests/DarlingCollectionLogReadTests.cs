@@ -359,6 +359,22 @@ public sealed class DarlingCollectionLogReadTests
                full page with nothing to say the filter did not apply. */
             Assert.DoesNotContain("\"runs\"", negative, StringComparison.Ordinal);
 
+            /* ── 8. a floor that is not a real number is refused on the same terms ── */
+            foreach (var notANumber in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity })
+            {
+                var refused = await DarlingMcpDataTools.GetCollectionLog(
+                    dataSource, FilterServerName, 24, 200, min_duration_ms: notANumber);
+
+                Assert.Contains("real number of milliseconds", refused, StringComparison.Ordinal);
+                Assert.DoesNotContain("\"runs\"", refused, StringComparison.Ordinal);
+
+                /* The assertion that discriminates. Before the finite test, NaN and +Infinity passed
+                   validation and then matched nothing, so the caller got the filtered-no-matches status —
+                   which NAMES the floor it applied and reads as a true negative about the window. Asserting
+                   only the absence of a payload would have been green on that. */
+                Assert.DoesNotContain("matched min_duration_ms", refused, StringComparison.Ordinal);
+            }
+
             bodySucceeded = true;
         }
         finally
