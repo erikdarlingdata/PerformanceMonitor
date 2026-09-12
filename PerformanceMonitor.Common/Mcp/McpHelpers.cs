@@ -228,6 +228,76 @@ internal static class McpHelpers
     }
 
     /// <summary>
+    /// Validates an optional millisecond FLOOR — a <c>min_*_ms</c> filter. Returns null when the caller sent
+    /// nothing or sent a usable value, an error message when the value cannot mean what it says.
+    ///
+    /// <para>REFUSES a negative rather than treating it as "no floor", following <see cref="ValidateTop"/>.
+    /// A duration is non-negative, so a negative floor matches every row — and on a read where supplying the
+    /// floor also changes the ORDERING, quietly accepting one hands back a differently-sorted full page with
+    /// nothing to say the filter did not apply. That is the silently-dropped-parameter failure these filters
+    /// exist to remove, so it is an error instead.</para>
+    ///
+    /// <para>ZERO is accepted and is NOT the same as omitting the parameter: it is the floor that admits every
+    /// row, which on an ordering-switching read is how a caller asks to rank the whole window by duration
+    /// rather than by time. Callers must therefore test for <c>null</c>, never for falsiness.</para>
+    /// </summary>
+    public static string? ValidateMinMs(double? minMs, string paramName)
+    {
+        if (minMs is < 0)
+            return $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor cannot be negative — use 0 to admit every row, or omit it entirely.";
+        return null;
+    }
+
+    /// <summary>
+    /// A millisecond figure rendered for a MESSAGE, invariant-culture.
+    ///
+    /// <para>The JSON payload spells these numbers invariantly, so a refusal or a no-matches message that
+    /// rendered <c>2.5</c> as <c>2,5</c> under a comma-decimal host locale would give the caller two
+    /// spellings of the value they sent, in the two places they compare.</para>
+    /// </summary>
+    private static string Ms(double? value) =>
+        value?.ToString(CultureInfo.InvariantCulture) ?? "";
+
+    /// <summary>
+    /// The two values <c>get_collection_log</c>'s <c>order</c> field takes on BOTH SKUs.
+    ///
+    /// <para>Constants rather than inline literals for the reason <see cref="AsOfDescription"/> is one: this
+    /// is a value an MCP client keys on, so the two products must spell it identically, and a token published
+    /// to clients is a consumer API rather than a label.</para>
+    /// </summary>
+    public const string CollectionLogOrderNewestFirst = "collection_time_desc";
+
+    /// <inheritdoc cref="CollectionLogOrderNewestFirst"/>
+    public const string CollectionLogOrderSlowestFirst = "duration_ms_desc";
+
+    /// <summary>
+    /// Names <c>get_collection_log</c>'s active filters back to the caller, for the status message a filtered
+    /// read with no matches returns.
+    ///
+    /// <para>Shared so both SKUs say the same words about the same state, which is the rule the tool's two
+    /// empty branches already follow — a user moving between the products must not be told a different story
+    /// about the same read. The phrase is written to slot after "…matched ", so it names the constraint rather
+    /// than forming a sentence of its own.</para>
+    /// </summary>
+    public static string DescribeCollectionLogFilters(string? collectorName, double? minDurationMs)
+    {
+        var named = string.IsNullOrWhiteSpace(collectorName) ? null : collectorName.Trim();
+
+        if (named != null && minDurationMs is not null)
+            return $"collector_name '{named}' with min_duration_ms {Ms(minDurationMs)}";
+        if (named != null)
+            return $"collector_name '{named}'";
+        if (minDurationMs is not null)
+            return $"min_duration_ms {Ms(minDurationMs)}";
+
+        /* Unreachable from the one caller, which asks only when a filter was supplied. Written out rather
+           than left to fall through the branch above, because that would emit "matched min_duration_ms "
+           with nothing after it -- a formatting bug in the one message whose whole job is to name what was
+           applied, and one that would read as a product defect rather than as a misuse of this helper. */
+        return "no filters";
+    }
+
+    /// <summary>
     /// Formats an exception as a user-friendly error message.
     /// </summary>
     public static string FormatError(string operation, Exception ex)

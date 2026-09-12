@@ -1623,6 +1623,17 @@ public static class DarlingWebEndpoints
     private static CatalogParam PBool(string name, bool def) => new(name, TypeBool, false, def);
     private static CatalogParam PDouble(string name, double def) => new(name, TypeDouble, false, def);
 
+    /// <summary>
+    /// A numeric FILTER, which carries no default — the <see cref="PText"/> shape rather than
+    /// <see cref="PDouble(string, double)"/>'s.
+    ///
+    /// <para>The distinction is load-bearing for <c>min_duration_ms</c>: <c>0</c> is a real value there (it
+    /// admits every row AND ranks the page by duration), so advertising <c>0</c> as the default would tell a
+    /// catalog consumer that sending nothing and sending zero are the same request. Absent means no filter,
+    /// which is a third state and not a number.</para>
+    /// </summary>
+    private static CatalogParam PDouble(string name) => new(name, TypeDouble, false, null);
+
     private static CatalogRead R(string category, string description, params CatalogParam[] parameters) =>
         new(category, description, parameters);
 
@@ -1677,7 +1688,7 @@ public static class DarlingWebEndpoints
 
             /* ── core data reads (DarlingMcpDataTools + long-query / fleet tools) ── */
             ["get_collection_health"] = R(CatData, "Per-collector collection health for a server.", PServer()),
-            ["get_collection_log"] = R(CatData, "Raw per-run collector log for a server, newest first.", PServer(), PHours(24), PLimit(200), PAsOf()),
+            ["get_collection_log"] = R(CatData, "Raw per-run collector log for a server, newest first — or slowest first when min_duration_ms is supplied.", PServer(), PHours(24), PLimit(200), PAsOf(), PText("collector_name"), PDouble("min_duration_ms")),
             ["get_current_waits_trend"] = R(CatData, "Waiting-task and blocked-session series over time.", PServer(), PHours(4), PText("database_name"), PAsOf()),
             ["get_blocking_stats"] = R(CatData, "Blocking duration and deadlock severity per minute.", PServer(), PHours(24), PAsOf()),
             ["get_cpu_utilization"] = R(CatData, "CPU utilization over time.", PServer(), PHours(4), PAsOf()),
@@ -2346,7 +2357,9 @@ public static class DarlingWebEndpoints
 
             /* ── core data reads ── */
             ["get_collection_health"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionHealth(pg, Server(c)),
-            ["get_collection_log"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionLog(pg, Server(c), Hours(c, 24), Rows(c, "limit", 200), as_of: AsOf(c)),
+            ["get_collection_log"] = (c, pg, an) => OptionalDouble(c, "min_duration_ms", out var minDurationMs)
+                ? DarlingMcpDataTools.GetCollectionLog(pg, Server(c), Hours(c, 24), Rows(c, "limit", 200), AsOf(c), Str(c, "collector_name"), minDurationMs)
+                : UnparseableParam("min_duration_ms"),
             ["get_current_waits_trend"] = (c, pg, an) => DarlingMcpDataTools.GetCurrentWaitsTrend(pg, Server(c), Hours(c, 4), Str(c, "database_name"), as_of: AsOf(c)),
             ["get_blocking_stats"] = (c, pg, an) => DarlingMcpDataTools.GetBlockingStats(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
             ["get_cpu_utilization"] = (c, pg, an) => DarlingMcpDataTools.GetCpuUtilization(pg, Server(c), Hours(c, 4), as_of: AsOf(c)),
@@ -2547,6 +2560,38 @@ public static class DarlingWebEndpoints
     }
 
     private static Task<string> MissingParam(string key) => Task.FromResult($"Missing required parameter '{key}'.");
+
+    /// <summary>
+    /// An OPTIONAL numeric parameter: true with null when the key is absent, true with the value when it
+    /// parses, and FALSE when it is present and cannot be read as a number.
+    ///
+    /// <para>The false arm is the whole reason this is not <see cref="QueryDouble"/>. Every other optional
+    /// knob on this dispatch falls back to its default on a value it cannot parse, so <c>?hours=abc</c>
+    /// quietly means 24 — and for a FILTER that same fallback means the filter does not apply and the caller
+    /// receives a complete-looking UNFILTERED page. That is exactly the silently-dropped-parameter failure
+    /// the filter was added to remove (#3287), so an unreadable filter is refused rather than ignored.</para>
+    /// </summary>
+    private static bool OptionalDouble(HttpContext context, string key, out double? value) =>
+        TryParseOptionalDouble(First(context, key), out value);
+
+    /// <summary>PURE optional-number binding — what <see cref="OptionalDouble"/> is without an HttpContext,
+    /// so the three outcomes are pinnable the way <see cref="ParseDouble"/> and <see cref="ClampRows"/>
+    /// are.</summary>
+    internal static bool TryParseOptionalDouble(string? raw, out double? value)
+    {
+        if (raw is null)
+        {
+            value = null;
+            return true;
+        }
+
+        var parsed = double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var number);
+        value = parsed ? number : null;
+        return parsed;
+    }
+
+    private static Task<string> UnparseableParam(string key) =>
+        Task.FromResult($"Invalid value for parameter '{key}'. Expected a number.");
 
     private static int QueryInt(HttpContext context, string key, string? aliasKey, int def) =>
         ParseInt(First(context, key) ?? (aliasKey is null ? null : First(context, aliasKey)), def);

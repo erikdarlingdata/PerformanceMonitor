@@ -9,15 +9,19 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -133,6 +137,10 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     [InlineData("get_top_procedures_by_cpu", "server_name,hours_back,top,database_name,as_of")]
     [InlineData("get_query_store_top", "server_name,hours_back,top,database_name,as_of")]
     [InlineData("get_collection_health", "server_name")]
+    /* #3287 gave this read two filters, on BOTH SKUs and in the same relative order, so it joins the theory
+       rather than sitting outside it. The two are LAST because as_of and collector_name are both `string?`:
+       a positional C# caller passing the anchor would otherwise bind it to the collector filter silently. */
+    [InlineData("get_collection_log", "server_name,hours_back,limit,as_of,collector_name,min_duration_ms")]
     [InlineData("get_server_properties", "server_name")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
@@ -179,6 +187,312 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
 
         foreach (var tool in new[] { "get_top_procedures_by_cpu", "get_query_store_top" })
             Assert.DoesNotContain("group_by", McpParams(tool).Select(p => p.Name));
+    }
+
+    /// <summary>
+    /// #3287's two filters, pinned as APPENDED optionals behind <c>as_of</c> on both SKUs — the one property
+    /// here that a compiler cannot protect.
+    ///
+    /// <para><c>as_of</c> is <c>string?</c> and so is <c>collector_name</c>. Grouped beside <c>limit</c>,
+    /// where they logically belong, a C# call site passing the anchor POSITIONALLY binds it to the collector
+    /// filter instead and compiles without a diagnostic; the read then matches no collector and returns the
+    /// no-matches status for a call that asked about a past incident. <c>AsOfWindowAnchorTests</c> makes
+    /// exactly that call, so this is a demonstrated hazard rather than a hypothetical one. MCP invokes by
+    /// name, so the position costs a client nothing and a positional C# caller is the only observer — which
+    /// is why the order is the thing pinned and not merely commented.</para>
+    ///
+    /// <para>Lite's half is read from SOURCE, not restated. The theory above compares Darling's reflected
+    /// parameters against a hand-typed copy of Lite's list, which cannot see Lite drifting; a filter present
+    /// on one product and silently absent on the other is the precise defect #3287 is about, so this derives
+    /// both sides. Comments are stripped with the repo's own walker rather than a regex, because the
+    /// parameter list here HAS a block comment in it and a naive sweep would read words out of it.</para>
+    /// </summary>
+    [Fact]
+    public void ParamContract_CollectionLogFilters_AreAppendedBehindAsOf_OnBothSkus()
+    {
+        var darling = McpParams("get_collection_log");
+        var names = darling.Select(p => p.Name).ToArray();
+
+        foreach (var filter in new[] { "collector_name", "min_duration_ms" })
+        {
+            Assert.Contains(filter, names);
+            Assert.True(darling.Single(p => p.Name == filter).Optional,
+                $"{filter} must be optional — an unfiltered read is the default and every shipped caller makes one");
+            Assert.True(
+                Array.IndexOf(names, filter) > Array.IndexOf(names, "as_of"),
+                $"{filter} must sit after as_of: both it and as_of are string?/nullable, so a positional C# "
+                + "caller passing the anchor would otherwise bind it here and compile silently");
+        }
+
+        /* Lite's list, derived from its source. Every MCP parameter carries a default and the two injected
+           DI services do not, so the defaulted ones IN ORDER are exactly the advertised contract. */
+        Assert.Equal(names, LiteMcpParamNames("get_collection_log", "GetCollectionLog"));
+
+        /* Control on the derivation, because a helper that returned an empty array would make the equality
+           above pass only if Darling's list were empty too -- but one that returned a WRONG non-empty array
+           of the same length would not be visible. Both filters must be findable through it by name. */
+        var lite = LiteMcpParamNames("get_collection_log", "GetCollectionLog");
+        Assert.Contains("collector_name", lite);
+        Assert.Contains("min_duration_ms", lite);
+        Assert.DoesNotContain("dataService", lite);
+    }
+
+    /// <summary>
+    /// <c>get_collection_log</c>'s parameter list, held identical across every surface that writes it down.
+    ///
+    /// <para>Five places name these parameters: Darling's signature, Lite's signature, the two quick-reference
+    /// instruction tables (byte-identical rows on both SKUs), and the <c>/api/catalog</c> descriptor. #3287
+    /// added two filters to the first two and review found the other three stale — and nothing caught it,
+    /// because the new parameters are OPTIONAL and no shipped caller sends them, so every existing pin stayed
+    /// green. That is the same shape as the defect being fixed: a surface advertising a parameter list that no
+    /// longer matches what the read accepts, with no way for a consumer to discover the difference.</para>
+    ///
+    /// <para>So the list is derived from the signature and compared, rather than each surface being spot-checked
+    /// for the two names this change happened to add. A third filter added to the tool and not to the tables
+    /// reds this.</para>
+    ///
+    /// <para>The catalog is asserted by CONTAINMENT rather than equality, because it names parameters as they
+    /// appear on the WIRE — <c>server</c> and <c>hours</c> against the tool's <c>server_name</c> and
+    /// <c>hours_back</c> — and reconciling that mapping is <c>ServerPageTabsTests</c>' job, not this one's.</para>
+    /// </summary>
+    [Fact]
+    public void CollectionLogParams_AreTheSameListOnEverySurfaceThatWritesThemDown()
+    {
+        var reflected = McpParams("get_collection_log").Select(p => p.Name).ToArray();
+
+        Assert.Equal(reflected, LiteMcpParamNames("get_collection_log", "GetCollectionLog"));
+
+        /* The tables render the list as backticked names joined by ", " — the shape every other row uses. */
+        var expectedCell = string.Join(", ", reflected.Select(n => $"`{n}`"));
+
+        var liteInstructions = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Mcp", "McpInstructions.cs"));
+        foreach (var (surface, text) in new[]
+                 {
+                     ("Darling's instruction table", DarlingMcpInstructions.Text),
+                     ("Lite's instruction table", liteInstructions),
+                 })
+        {
+            Assert.Equal(expectedCell, CollectionLogInstructionCell(surface, text));
+        }
+
+        var catalog = DarlingWebEndpoints.CatalogDescriptors["get_collection_log"].Params;
+
+        foreach (var filter in new[] { "collector_name", "min_duration_ms" })
+        {
+            Assert.Contains(filter, catalog.Select(p => p.Name));
+        }
+
+        /*
+            And min_duration_ms advertises NO default. 0 is a real value on this read -- it admits every row
+            AND ranks the page by duration -- so a catalog default of 0 would tell a consumer that sending
+            nothing and sending zero are the same request. Absent is a third state, not a number.
+        */
+        Assert.Null(catalog.Single(p => p.Name == "min_duration_ms").Default);
+
+        /* Positive control on the two negatives-by-absence above: the descriptor really does carry the
+           parameters it always had, so containment is not passing against a descriptor that lost its list. */
+        Assert.Contains("limit", catalog.Select(p => p.Name));
+        Assert.Contains("as_of", catalog.Select(p => p.Name));
+    }
+
+    /// <summary>
+    /// The page-span fields say they bound the PAGE, on both SKUs, and the description says what that means
+    /// under each ordering — the doctrine <c>QueryStoreTopWindowTests</c> states, carried to the read that
+    /// borrowed half of it.
+    ///
+    /// <para>That pin forbids <c>get_query_store_top</c> deriving its window from its rows, because those rows
+    /// are always cost-ranked and their timestamps say nothing about reach. <c>get_collection_log</c> is the
+    /// case that pin's file-scoped form could not express: under its DEFAULT ordering the page is a contiguous
+    /// slice of the window's tail, so its oldest row IS the reach and is exactly the figure #3287 asks for —
+    /// but under a duration floor the same page becomes a cost-ranked sample and the same number becomes
+    /// meaningless as reach.</para>
+    ///
+    /// <para>So the resolution is naming plus disclosure, and both halves are pinned here. A field called
+    /// <c>oldest_collection_time</c> would be one number quietly meaning two things depending on a parameter
+    /// the caller may not have sent; <c>oldest_returned_collection_time</c> cannot be read as a window floor,
+    /// and the description states which ordering makes it reach. The negative is what stops the shorter name
+    /// coming back as a "tidy-up".</para>
+    /// </summary>
+    [Fact]
+    public void CollectionLogPageSpanFields_SayTheyBoundThePage_AndTheDescriptionSaysWhenThatIsReach()
+    {
+        var liteTools = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Mcp", "McpHealthTools.cs"));
+        var darlingTools = File.ReadAllText(Path.Combine(
+            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs"));
+
+        foreach (var (surface, source) in new[] { ("Darling", darlingTools), ("Lite", liteTools) })
+        {
+            Assert.Contains("oldest_returned_collection_time", source, StringComparison.Ordinal);
+            Assert.Contains("newest_returned_collection_time", source, StringComparison.Ordinal);
+
+            /*
+                And NOT the unqualified names, which is the assertion that actually holds the line: they read
+                as a window floor, and this read does not probe for one. Checked against the two possible
+                spellings rather than the field syntax, so a rename in the payload and a stale mention in the
+                prose both fail.
+            */
+            Assert.DoesNotContain("oldest_collection_time", source, StringComparison.Ordinal);
+            Assert.DoesNotContain("newest_collection_time", source, StringComparison.Ordinal);
+
+            /* Positive control for those two negatives: the qualified names really are present in this
+               surface, so neither is passing against a file that has stopped emitting the fields. */
+            Assert.Contains("_returned_collection_time", source, StringComparison.Ordinal);
+
+            _ = surface;
+        }
+
+        /* The disclosure half, on both SKUs' published descriptions. A caller who cannot tell which ordering
+           makes the field a reach figure has the same problem the field name just fixed. */
+        var darlingDescription = ToolDescriptionOf(darlingTools, "get_collection_log");
+        var liteDescription = ToolDescriptionOf(liteTools, "get_collection_log");
+
+        foreach (var description in new[] { darlingDescription, liteDescription })
+        {
+            Assert.Contains("cost-RANKED sample", description, StringComparison.Ordinal);
+            Assert.Contains("NOTHING about reach", description, StringComparison.Ordinal);
+
+            /* And it says outright that no probe happens, so nobody reads either field as a window floor. */
+            Assert.Contains("Neither field is a window floor", description, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// <c>collector_name</c>'s example collectors: the SAME list on both SKUs, and every name a REAL collector.
+    ///
+    /// <para>Review caught Lite's list omitting <c>plan_correction</c> while Darling's named it, which reads as
+    /// the two products running different collectors. They do not — Lite schedules it, enabled, in
+    /// <c>ScheduleManager</c> — so the example was simply stale on one side.</para>
+    ///
+    /// <para>The catalog assertion is the one worth having. A stale list is a cosmetic parity bug; a list
+    /// naming a collector that does not exist is worse than useless on a filter matched EXACTLY, because a
+    /// caller copies the name, gets zero rows, and reads it as "this server never ran that". So the names are
+    /// checked against <see cref="CollectorCatalog"/> rather than only against each other — a frozen
+    /// enumeration in prose is right until the catalog moves under it.</para>
+    ///
+    /// <para><b>The two controls at the bottom are not decoration.</b> The first version of this pin parsed the
+    /// list with a capture that stopped at the first separator, so it compared <c>["query_store"]</c> against
+    /// <c>["query_store"]</c> — and passed while a name was dropped from one SKU and while a name was
+    /// misspelled into one the catalog does not have. Both mutations green. An <c>Assert.NotEmpty</c> is not a
+    /// control here: a one-element list is not empty. What discriminates is checking the capture reached the
+    /// END of the list.</para>
+    /// </summary>
+    [Fact]
+    public void CollectionLogCollectorExamples_AgreeAcrossSkus_AndNameRealCollectors()
+    {
+        var darling = CollectorNameExamples(File.ReadAllText(Path.Combine(
+            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs")));
+        var lite = CollectorNameExamples(File.ReadAllText(Path.Combine(
+            RepoRoot(), "Lite", "Mcp", "McpHealthTools.cs")));
+
+        /* Drift first, so a name present on one SKU and missing on the other reports as the difference it is
+           rather than as a parse complaint from whichever side came up short. */
+        Assert.Equal(darling, lite);
+
+        var real = CollectorCatalog.All.Select(d => d.Name).ToHashSet(StringComparer.Ordinal);
+        foreach (var name in darling)
+        {
+            Assert.Contains(name, real);
+        }
+
+        /* Controls on the PARSE, which is what makes everything above able to fail. Named rather than
+           positional, so reordering the examples is not a failure; counted, so a capture that stops at the
+           first separator cannot make the comparison vacuous. */
+        Assert.True(
+            darling.Length >= 3,
+            $"only parsed {darling.Length} example collector(s) [{string.Join(",", darling)}] — the capture is "
+            + "stopping short, which makes every assertion above vacuous");
+        Assert.Contains("wait_stats", darling);
+    }
+
+    /// <summary>The collector names listed as examples in a SKU's <c>collector_name</c> description.</summary>
+    private static string[] CollectorNameExamples(string source)
+    {
+        /* Bounded by the em dash that introduces the explanatory clause, so the capture spans the whole
+           parenthesised list rather than stopping at its first separator. */
+        var match = Regex.Match(source, "matched EXACTLY \\(([^\u2014)]+)\u2014");
+        Assert.True(match.Success, "collector_name's example list moved — this pin needs re-anchoring.");
+
+        return match.Groups[1].Value
+            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+    }
+
+    /// <summary>One tool's <c>Description</c> text, sliced out of a SKU's source by tool name — the pattern
+    /// #2839 established for reading across the Lite seam, used on both here so the two descriptions are held
+    /// to the same claims by the same instrument.</summary>
+    private static string ToolDescriptionOf(string source, string toolName)
+    {
+        var at = source.IndexOf($"Name = \"{toolName}\"", StringComparison.Ordinal);
+        Assert.True(at > 0, $"Could not locate the {toolName} tool — this pin needs re-anchoring.");
+
+        var end = source.IndexOf(")]", at, StringComparison.Ordinal);
+        Assert.True(end > at, $"Could not find the end of {toolName}'s attribute.");
+
+        return source[at..end];
+    }
+
+    /// <summary>The "Key Parameters" cell of the <c>get_collection_log</c> row in a quick-reference table.</summary>
+    private static string CollectionLogInstructionCell(string surface, string text)
+    {
+        var row = text
+            .Split('\n')
+            .SingleOrDefault(l => l.TrimStart().StartsWith("| `get_collection_log` |", StringComparison.Ordinal));
+
+        Assert.True(row is not null, $"{surface} has no `get_collection_log` row — this pin needs re-anchoring.");
+
+        /* Four cells between five pipes, so the parameter list is the last populated one. The row is a single
+           line by convention and its prose carries no pipe, which is what makes this safe. */
+        var cells = row!.TrimEnd('\r').Split('|');
+        Assert.True(cells.Length >= 4, $"{surface}'s `get_collection_log` row is not a four-cell row.");
+
+        return cells[^2].Trim();
+    }
+
+    /// <summary>The advertised MCP parameter names of one Lite tool, in declaration order, read out of Lite's
+    /// own source — Darling.Tests holds no ProjectReference to Lite, and reading Lite .cs across the seam is
+    /// the pattern #2839 established for exactly this.</summary>
+    private static string[] LiteMcpParamNames(string toolName, string methodName)
+    {
+        var raw = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Mcp", "McpHealthTools.cs"));
+
+        /* Anchored on the TOOL NAME, which lives in a string literal — so the anchor is found in the raw
+           text. StripCommentsAndStrings preserves length (non-code characters become spaces), so the two
+           strings share one offset space and the anchor found here is usable in the masked one. */
+        var attribute = raw.IndexOf($"Name = \"{toolName}\"", StringComparison.Ordinal);
+        Assert.True(attribute > 0, $"Could not locate Lite's {toolName} tool — this pin needs re-anchoring.");
+
+        var masked = CSharpSourceWalker.StripCommentsAndStrings(raw);
+        Assert.Equal(raw.Length, masked.Length);
+
+        /* From the method name AFTER that attribute, so a sibling tool's parameter list cannot satisfy this,
+           and bounded at the body's opening brace. Read off the MASKED text: this parameter list carries a
+           block comment and every [Description] holds prose, and a regex over the raw form would read
+           parameter names out of both. */
+        var method = masked.IndexOf(methodName, attribute, StringComparison.Ordinal);
+        Assert.True(method > attribute, $"Could not locate Lite's {methodName} declaration.");
+
+        var signature = masked.IndexOf('(', method);
+        var body = masked.IndexOf('{', signature);
+        Assert.True(body > signature, $"Could not find the end of Lite's {toolName} signature.");
+
+        /* Every MCP parameter carries a default and the injected DI services do not, so the defaulted ones
+           in order ARE the advertised contract. */
+        return Regex.Matches(masked[signature..body], @"(\w+)\s*=\s*[^,)]+")
+            .Select(m => m.Groups[1].Value)
+            .ToArray();
+    }
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null
+               && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln"))
+               && !Directory.Exists(Path.Combine(dir, ".git")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
     }
 
     [Fact]
