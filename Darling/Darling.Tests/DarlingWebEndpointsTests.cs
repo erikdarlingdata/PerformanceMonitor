@@ -170,6 +170,49 @@ public sealed class DarlingWebEndpointsTests
     public void ParseDouble_DefaultsOnMissOrGarbage(string? raw, double expected) =>
         Assert.Equal(expected, DarlingWebEndpoints.ParseDouble(raw, 0.0));
 
+    /// <summary>
+    /// #3287's optional numeric FILTER binding, which deliberately does NOT behave like
+    /// <see cref="DarlingWebEndpoints.ParseDouble"/> beside it.
+    ///
+    /// <para>Every other optional knob on this dispatch falls back to its default on a value it cannot read,
+    /// so <c>?hours=abc</c> quietly means 24. For a filter that same fallback means the filter does not
+    /// apply and the caller receives a complete-looking UNFILTERED page — the silently-dropped-parameter
+    /// failure <c>min_duration_ms</c> was added to remove, reintroduced one layer down. So an unreadable
+    /// filter is REFUSED: absent binds null, a number binds the number, and garbage returns false and reaches
+    /// the caller as a message.</para>
+    ///
+    /// <para>Zero and a negative both BIND rather than being rejected here. This layer only decides whether a
+    /// value was readable; the tool owns the range refusal, so the web and MCP surfaces cannot disagree about
+    /// what a bad floor means — the rule <c>AsOf</c> already follows for the same reason.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(null, true, null)]        // absent: no filter, and that is not an error
+    [InlineData("5000", true, 5000.0)]    // a plain number
+    [InlineData("0", true, 0.0)]          // zero is a real floor, not an absent one
+    [InlineData("-1", true, -1.0)]        // readable; the TOOL refuses the range, not this layer
+    [InlineData("2.5", true, 2.5)]
+    [InlineData("abc", false, null)]      // unreadable: refused, NOT defaulted to "no filter"
+    [InlineData("", true, null)]          // an empty value is an absent one (First() returns null)
+    public void TryParseOptionalDouble_RefusesGarbageRatherThanDroppingTheFilter(string? raw, bool expectedOk, double? expectedValue)
+    {
+        /* First() maps an empty query value to null, so the empty case arrives here as null. */
+        var ok = DarlingWebEndpoints.TryParseOptionalDouble(string.IsNullOrEmpty(raw) ? null : raw, out var value);
+
+        Assert.Equal(expectedOk, ok);
+        Assert.Equal(expectedValue, value);
+    }
+
+    /// <summary>
+    /// And the sibling this is NOT: <c>ParseDouble</c> really does swallow the same garbage, so the theory
+    /// above is pinning a difference rather than restating shared behaviour.
+    /// </summary>
+    [Fact]
+    public void TheFilterBinding_DiffersFromTheDefaultingOne_OnGarbage()
+    {
+        Assert.Equal(0.0, DarlingWebEndpoints.ParseDouble("abc", 0.0));
+        Assert.False(DarlingWebEndpoints.TryParseOptionalDouble("abc", out _));
+    }
+
     /* ── row-count clamp: the abuse bound on ?limit= / ?top= (security review M3) ── */
 
     [Theory]

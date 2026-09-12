@@ -2560,9 +2560,14 @@ public static class DarlingWebEndpoints
     /// receives a complete-looking UNFILTERED page. That is exactly the silently-dropped-parameter failure
     /// the filter was added to remove (#3287), so an unreadable filter is refused rather than ignored.</para>
     /// </summary>
-    private static bool OptionalDouble(HttpContext context, string key, out double? value)
+    private static bool OptionalDouble(HttpContext context, string key, out double? value) =>
+        TryParseOptionalDouble(First(context, key), out value);
+
+    /// <summary>PURE optional-number binding — what <see cref="OptionalDouble"/> is without an HttpContext,
+    /// so the three outcomes are pinnable the way <see cref="ParseDouble"/> and <see cref="ClampRows"/>
+    /// are.</summary>
+    internal static bool TryParseOptionalDouble(string? raw, out double? value)
     {
-        var raw = First(context, key);
         if (raw is null)
         {
             value = null;

@@ -181,6 +181,14 @@ public sealed class CollectionLogToolTests : IClassFixture<SharedDuckDbFixture>,
             service, _serverManager, ServerName, 24, 2, collector_name: "query_store");
         var collectorRoot = JsonDocument.Parse(byCollector).RootElement;
 
+        /* Named explicitly because it is the mutation's own signature: filtering the RETURNED PAGE instead of
+           the query takes the two newest rows, finds both are wait_stats, and returns the no-matches STATUS,
+           which has no run_count at all. Without this the failure reads as a missing key. */
+        Assert.True(
+            collectorRoot.TryGetProperty("run_count", out _),
+            "get_collection_log returned a status envelope, not a page. The filter was applied AFTER the cap: "
+            + "the newest rows in this fixture are all non-matching, so a post-cap filter finds nothing.");
+
         Assert.Equal(2, collectorRoot.GetProperty("run_count").GetInt32());
         Assert.True(collectorRoot.GetProperty("truncated").GetBoolean(),
             "Three rows match and two were returned, so truncated must describe the MATCHING set.");
