@@ -2,13 +2,13 @@
 """Report which published Windows executables carry an Authenticode signature (#3288).
 
 Every executable `vpk pack` GENERATES shipped unsigned on v3.6.0 and v3.7.0 -- the portable
-launcher stub, `Update.exe`, and `Setup.exe` -- while the app payload was signed. Nobody
-noticed for two releases because `build.yml` carries a comment saying the gap was closed, and
-because the only visible symptom is a Windows "unknown publisher" block on someone else's
-machine.
+launcher stub, `Update.exe`, and `Setup.exe` -- while the app payload was signed. It went
+unnoticed for two releases because the only visible symptom is a Windows "unknown publisher"
+block on someone else's machine, and because nothing asked the question.
 
-So this exists to be run against a PUBLISHED release, from any platform, and to answer the one
-question no other check asks: is there a signature attached to each thing a user can launch.
+So this asks it, from any platform: is there a signature attached to each thing a user can
+launch. `--verify-dir` asks it of artifacts still on disk in the release job, which is the step
+that refuses to publish. The tag form asks it of what a release actually shipped.
 
 WHAT IT CHECKS, AND WHAT IT DELIBERATELY DOES NOT
 
@@ -28,6 +28,14 @@ WHAT IT CHECKS, AND WHAT IT DELIBERATELY DOES NOT
   while the signed 182 kB app sits in `current/`. A check that only looked at top-level assets
   would have passed every affected release.
 
+  Two executables are allowed to be unsigned, and only in one place each: `lib/app/*_ExecutionStub.exe`
+  and `lib/app/Squirrel.exe` INSIDE a `.nupkg`. `releases.<channel>.json` records a SHA256 and a
+  Size for each `.nupkg`, the delta package patches against those bytes, and `vpk pack` is what
+  writes that manifest -- so re-signing a member of a `.nupkg` invalidates it. The copies of the
+  same two files that ship in `Portable.zip` carry no recorded hash and ARE signed, and the
+  allowance is keyed on the container as well as the member path so those copies, and a
+  same-named file anywhere else, still fail. See ALLOWED_UNSIGNED.
+
 COST, because it is why this is runnable rather than theoretical
 
   It never downloads a whole artifact. For each standalone `.exe` it fetches the first 4 kB to
@@ -45,20 +53,23 @@ USAGE
 
   python3 .github/scripts/verify_release_signatures.py v3.7.0
   python3 .github/scripts/verify_release_signatures.py v3.7.0 --json
+  python3 .github/scripts/verify_release_signatures.py --verify-dir releases
+  python3 .github/scripts/verify_release_signatures.py --self-test
 
-  Exit status is 1 if any executable is unsigned, 2 if a release or asset could not be read at
-  all, and 0 only when every executable found carried a signature. An empty executable list is
-  status 2, not 0: finding nothing to check is a broken run, not a clean one.
+  Exit status is 1 if any executable is unsigned and not covered by ALLOWED_UNSIGNED, 2 if a
+  release, asset or directory could not be read at all, and 0 otherwise. An empty executable
+  list is status 2, not 0: finding nothing to check is a broken run, not a clean one.
 
-  The CI half of #3288 is deliberately NOT this script. In the release job the artifacts are on
-  disk before upload, so that check needs no HTTP at all and belongs in the workflow's own pwsh.
-  This one answers "what did we actually publish", which is the question that goes unasked.
+  `--verify-dir` is the release guard: the same reader over artifacts that are still on disk
+  before upload, so it needs no HTTP and no published release. The tag form answers "what did we
+  actually publish", which is the question that goes unasked. Both apply ALLOWED_UNSIGNED.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import struct
 import subprocess
 import sys
@@ -70,6 +81,60 @@ EXECUTABLE_SUFFIXES = (".exe", ".dll")
 HEADER_BYTES = 4096
 # The end-of-central-directory record is 22 bytes plus a comment of up to 64 kB.
 EOCD_SEARCH_BYTES = 66 * 1024
+
+
+@dataclass(frozen=True)
+class AllowedUnsigned:
+    """One executable that is allowed to be unsigned, in one kind of container only.
+
+    `container_suffix` is matched against the containing archive's name and `member` against the
+    path inside it. A standalone file has no container and therefore no allowance: that is what
+    keeps an unsigned `Setup.exe`, or an unsigned copy of either of these two files sitting
+    beside it, a failure.
+    """
+
+    container_suffix: str
+    member: re.Pattern[str]
+    reason: str
+
+
+ALLOWED_UNSIGNED: tuple[AllowedUnsigned, ...] = (
+    AllowedUnsigned(
+        container_suffix=".nupkg",
+        member=re.compile(r"\Alib/app/[^/]+_ExecutionStub\.exe\Z", re.IGNORECASE),
+        reason=(
+            "Velopack generates the launcher stub during `vpk pack`, so no pre-pack round reaches "
+            "it, and `releases.<channel>.json` records this package's SHA256 and Size for the "
+            "updater and the delta to patch against, so no post-pack round may rewrite it. The "
+            "copy in Portable.zip is signed after packing."
+        ),
+    ),
+    AllowedUnsigned(
+        container_suffix=".nupkg",
+        member=re.compile(r"\Alib/app/Squirrel\.exe\Z", re.IGNORECASE),
+        reason=(
+            "Velopack's updater, generated during `vpk pack` and deployed as Update.exe. Same "
+            "recorded-hash constraint as the launcher stub. The copy in Portable.zip is signed "
+            "after packing."
+        ),
+    ),
+)
+
+
+def allowance_for(container: str, member: str) -> AllowedUnsigned | None:
+    """The allowance covering an unsigned `member` of `container`, or None.
+
+    `member` is empty for a standalone file, which never has an allowance.
+    """
+    if not member:
+        return None
+    normalised = member.replace("\\", "/")
+    for allowed in ALLOWED_UNSIGNED:
+        if not container.lower().endswith(allowed.container_suffix):
+            continue
+        if allowed.member.search(normalised):
+            return allowed
+    return None
 
 
 class ReadError(RuntimeError):
@@ -96,8 +161,23 @@ class Report:
     errors: list[str] = field(default_factory=list)
 
     @property
+    def allowed(self) -> list[tuple[Finding, AllowedUnsigned]]:
+        pairs = ((f, allowance_for(f.asset, f.path)) for f in self.findings if not f.signed)
+        return [(f, a) for f, a in pairs if a is not None]
+
+    @property
     def unsigned(self) -> list[Finding]:
-        return [f for f in self.findings if not f.signed]
+        """Unsigned and NOT allowed. The same allowlist the release guard applies.
+
+        Both modes read the same allowlist so that a correct release audits clean here. A mode
+        that reported the two allowed `.nupkg` members as failures would be red on every release
+        from now on, which is the state in which nobody reads it.
+        """
+        return [
+            f
+            for f in self.findings
+            if not f.signed and allowance_for(f.asset, f.path) is None
+        ]
 
 
 def fetch_range(url: str, start: int, length: int) -> bytes:
@@ -196,43 +276,15 @@ def check_archive(url: str, name: str, size: int, include_dlls: bool) -> tuple[l
     return findings, errors
 
 
-def verify_local_files(paths: list[str]) -> int:
-    """Assert every named local file carries a signature. Used as the post-condition of signing.
-
-    This exists because `vpk pack` does NOT verify that its `--signTemplate` actually signed
-    anything: a template that exits 0 without signing leaves packing to complete normally and
-    the release to publish unsigned binaries, which is exactly how #3288 shipped twice. So the
-    signing script asserts the outcome here rather than trusting its own success.
-    """
-    failures, checked = [], 0
-    for path in paths:
-        try:
-            with open(path, "rb") as handle:
-                head = handle.read(HEADER_BYTES)
-            off, length = certificate_table(head)
-        except (OSError, ReadError, struct.error) as exc:
-            failures.append(f"{path}: unreadable as a PE image ({exc})")
-            continue
-        checked += 1
-        if off == 0 or length == 0:
-            failures.append(f"{path}: NO SIGNATURE after signing")
-    for f in failures:
-        print(f"VERIFY FAIL: {f}", file=sys.stderr)
-    if not checked:
-        print("VERIFY FAIL: nothing was checked", file=sys.stderr)
-        return 2
-    if failures:
-        return 1
-    print(f"verified: {checked} file(s) carry a signature")
-    return 0
-
-
 def verify_local_dir(directory: str) -> int:
     """Assert every executable under `directory`, including inside zips and nupkgs, is signed.
 
     This is the release guard. It runs on the artifacts as they sit on disk BEFORE upload, so it
     needs no network and no published release -- the difference between this and the tag mode is
     only where the bytes come from.
+
+    ALLOWED_UNSIGNED exempts exactly two members of a `.nupkg`. Everything else fails, including
+    those same two names in any other container and as standalone files.
     """
     import glob
     import os
@@ -270,10 +322,46 @@ def verify_local_dir(directory: str) -> int:
     if not findings:
         print(f"GUARD FAIL: no executables found under {directory}", file=sys.stderr)
         return 2
-    unsigned = [f for f in findings if not f.signed]
-    for f in sorted(findings, key=lambda x: (x.signed, x.label)):
-        print(f"  {'signed  ' if f.signed else 'UNSIGNED'}  {f.label}")
-    print(f"\n{len(findings)} executable(s) checked, {len(unsigned)} unsigned")
+
+    allowed: list[tuple[Finding, AllowedUnsigned]] = []
+    unsigned: list[Finding] = []
+    for finding in findings:
+        if finding.signed:
+            continue
+        allowance = allowance_for(os.path.basename(finding.asset), finding.path)
+        if allowance is None:
+            unsigned.append(finding)
+        else:
+            allowed.append((finding, allowance))
+
+    allowed_ids = {id(entry) for entry, _ in allowed}
+    for finding in sorted(findings, key=lambda x: (x.signed, x.label)):
+        if finding.signed:
+            mark = "signed  "
+        elif id(finding) in allowed_ids:
+            mark = "allowed "
+        else:
+            mark = "UNSIGNED"
+        print(f"  {mark}  {finding.label}")
+
+    for finding, allowance in allowed:
+        print(f"\nallowed unsigned: {finding.label}\n  {allowance.reason}")
+
+    # An allowance that matches nothing has outlived the constraint that justifies it. It is
+    # reported rather than fatal: the guard's job is to refuse unsigned executables, and an
+    # allowance covering none of them refuses nothing.
+    used = {id(allowance) for _, allowance in allowed}
+    for allowance in ALLOWED_UNSIGNED:
+        if id(allowance) not in used:
+            print(
+                f"ALLOWANCE UNUSED: {allowance.container_suffix} :: "
+                f"{allowance.member.pattern} matched no unsigned executable"
+            )
+
+    print(
+        f"\n{len(findings)} executable(s) checked, {len(unsigned)} unsigned, "
+        f"{len(allowed)} allowed unsigned"
+    )
     if unsigned:
         print(f"GUARD FAIL: {len(unsigned)} unsigned executable(s). See #3288.", file=sys.stderr)
         return 1
@@ -324,11 +412,59 @@ def _synth_pe(*, signed: bool, plus: bool = True) -> bytes:
     return bytes(buf)
 
 
+def _release_dir(root: str, layout: dict[str, object]) -> str:
+    """Materialise a release directory. A str key is a standalone file, a dict is an archive.
+
+    Used by the self-test so the guard is exercised through its real entry point -- a directory
+    of real zip and nupkg files -- rather than through a stubbed finding list.
+    """
+    import os
+    import zipfile
+
+    os.makedirs(root, exist_ok=True)
+    for name, content in layout.items():
+        target = os.path.join(root, name)
+        os.makedirs(os.path.dirname(target) or root, exist_ok=True)
+        if isinstance(content, dict):
+            with zipfile.ZipFile(target, "w") as zf:
+                for member, signed in content.items():
+                    zf.writestr(member, _synth_pe(signed=bool(signed)))
+        else:
+            with open(target, "wb") as handle:
+                handle.write(_synth_pe(signed=bool(content)))
+    return root
+
+
 def self_test() -> int:
+    import contextlib
+    import io
+    import os
+    import tempfile
+
     failures: list[str] = []
+    checks = 0
+
+    def guard(label: str, layout: dict[str, object], want: int) -> None:
+        """Run the release guard over a synthesised release directory."""
+        nonlocal checks
+        checks += 1
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = _release_dir(os.path.join(tmp, "releases"), layout)
+            sink = io.StringIO()
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                got = verify_local_dir(directory)
+        if got != want:
+            failures.append(f"{label}: guard returned {got}, expected {want}")
+
+    def expect(label: str, condition: bool) -> None:
+        nonlocal checks
+        checks += 1
+        if not condition:
+            failures.append(label)
 
     for plus in (True, False):
         shape = "PE32+" if plus else "PE32"
+        checks += 2
         off, size = certificate_table(_synth_pe(signed=True, plus=plus))
         if (off, size) == (0, 0):
             failures.append(f"{shape}: a signed image read as unsigned")
@@ -351,6 +487,7 @@ def self_test() -> int:
         ("MZ without PE", b"MZ" + bytes(1022)),
         ("non-MZ carrying a valid PE header", bytes(not_mz_but_valid_pe)),
     ):
+        checks += 1
         try:
             certificate_table(blob)
         except (ReadError, struct.error, IndexError):
@@ -359,6 +496,7 @@ def self_test() -> int:
             failures.append(f"{label}: returned a verdict instead of raising")
 
     # A short range must raise, or a truncated read silently becomes "no signature".
+    checks += 1
     try:
         fetch_range("file:///dev/null", 0, 64)
     except ReadError:
@@ -366,11 +504,149 @@ def self_test() -> int:
     else:
         failures.append("a short read returned data instead of raising")
 
+    # ------------------------------------------------------------------------------------------
+    # The release guard and its allowlist.
+    #
+    # A blanket skip by filename is the failure mode these cases exist to refuse: the two allowed
+    # names also appear as the portable zip's root launcher and as Update.exe, and `Setup.exe`
+    # shares nothing with them but would pass any allowlist loose enough to be written by name
+    # alone. So every case below pairs a member path with a container.
+    # ------------------------------------------------------------------------------------------
+    stub = "lib/app/PerformanceMonitorLite_ExecutionStub.exe"
+    squirrel = "lib/app/Squirrel.exe"
+    app = "lib/app/PerformanceMonitorLite.exe"
+    nupkg = "PerformanceMonitorLite-3.7.2-lite-full.nupkg"
+    portable = "PerformanceMonitorLite-lite-Portable.zip"
+    setup = "PerformanceMonitorLite-lite-Setup.exe"
+
+    def correct_release() -> dict[str, object]:
+        """What a release looks like once post-pack signing has run."""
+        return {
+            nupkg: {app: True, stub: False, squirrel: False},
+            portable: {
+                "PerformanceMonitorLite.exe": True,
+                "Update.exe": True,
+                "current/PerformanceMonitorLite.exe": True,
+            },
+            setup: True,
+        }
+
+    guard("a correct release", correct_release(), 0)
+
+    # The allowance is the whole point, so it has to actually apply.
+    only_allowed = {nupkg: {app: True, stub: False, squirrel: False}}
+    guard("the two allowed nupkg members", only_allowed, 0)
+    guard("the allowed stub alone", {nupkg: {app: True, stub: False}}, 0)
+    guard("the allowed Squirrel.exe alone", {nupkg: {app: True, squirrel: False}}, 0)
+
+    # And it has to stop applying the moment anything about the location changes.
+    broken = correct_release()
+    broken[setup] = False
+    guard("an unsigned Setup.exe beside allowed nupkg members", broken, 1)
+
+    broken = correct_release()
+    broken[portable] = dict(broken[portable])  # type: ignore[arg-type]
+    broken[portable]["PerformanceMonitorLite.exe"] = False  # type: ignore[index]
+    guard("an unsigned portable-root launcher", broken, 1)
+
+    broken = correct_release()
+    broken[portable] = dict(broken[portable])  # type: ignore[arg-type]
+    broken[portable]["Update.exe"] = False  # type: ignore[index]
+    guard("an unsigned portable Update.exe", broken, 1)
+
+    guard(
+        "the allowed member paths inside a .zip rather than a .nupkg",
+        {portable.replace("Portable", "Other"): {stub: False, squirrel: False}},
+        1,
+    )
+    guard("an unsigned standalone Squirrel.exe", {"Squirrel.exe": False}, 1)
+    guard(
+        "an unsigned standalone launcher stub",
+        {"PerformanceMonitorLite_ExecutionStub.exe": False},
+        1,
+    )
+    guard(
+        "an unsigned nupkg member that is not on the allowlist",
+        {nupkg: {app: True, "lib/app/Update.exe": False}},
+        1,
+    )
+    guard(
+        "an allowed name in a different directory inside the nupkg",
+        {nupkg: {app: True, "lib/other/Squirrel.exe": False}},
+        1,
+    )
+    guard("an unsigned app payload inside the nupkg", {nupkg: {app: False}}, 1)
+    guard("a nupkg whose stub is signed and app is not", {nupkg: {app: False, stub: False}}, 1)
+
+    # Finding nothing to check is a broken run, not a clean one.
+    guard("a directory with no executables", {}, 2)
+
+    # The allowance predicate itself, at the boundary the container check defends.
+    expect(
+        "a standalone file was granted an allowance",
+        allowance_for("PerformanceMonitorLite-lite-Setup.exe", "") is None,
+    )
+    expect(
+        "the stub inside a .nupkg was not allowed",
+        allowance_for(nupkg, stub) is not None,
+    )
+    expect(
+        "the stub inside a .zip was allowed",
+        allowance_for(portable, stub) is None,
+    )
+    expect(
+        "a backslash-separated nupkg member path was not normalised",
+        allowance_for(nupkg, squirrel.replace("/", "\\")) is not None,
+    )
+    expect(
+        "a nested path under lib/app was allowed",
+        allowance_for(nupkg, "lib/app/sub/Squirrel.exe") is None,
+    )
+    expect(
+        "a name that merely ends with the allowed name was allowed",
+        allowance_for(nupkg, "lib/app/NotSquirrel.exe") is None,
+    )
+    expect(
+        "every allowance carries a reason",
+        all(a.reason.strip() for a in ALLOWED_UNSIGNED),
+    )
+    expect(
+        f"the allowlist holds {len(ALLOWED_UNSIGNED)} entries rather than the two nupkg members",
+        len(ALLOWED_UNSIGNED) == 2,
+    )
+
+    # The published-release mode and the release guard have to agree, or the audit is red on
+    # every correct release and stops being read.
+    def as_findings(layout: dict[str, object]) -> Report:
+        out = Report(tag="synthetic")
+        for asset, content in layout.items():
+            if isinstance(content, dict):
+                for member, signed in content.items():
+                    out.findings.append(Finding(asset, member, 1024, bool(signed)))
+            else:
+                out.findings.append(Finding(asset, "", 1024, bool(content)))
+        return out
+
+    fixed = as_findings(correct_release())
+    expect(
+        f"the published-release mode reports {len(fixed.unsigned)} unsigned on a correct release",
+        not fixed.unsigned,
+    )
+    expect(
+        f"the published-release mode reports {len(fixed.allowed)} allowances on a correct release",
+        len(fixed.allowed) == 2,
+    )
+    regressed = as_findings({**correct_release(), setup: False})
+    expect(
+        "the published-release mode passed an unsigned Setup.exe",
+        [f.label for f in regressed.unsigned] == [setup],
+    )
+
     for f in failures:
         print(f"SELF-TEST FAIL: {f}", file=sys.stderr)
     if failures:
         return 1
-    print("self-test: 10 assertions passed (both PE shapes, both verdicts, 4 malformed, short read)")
+    print(f"self-test: {checks} assertions passed")
     return 0
 
 
@@ -378,12 +654,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("tag", nargs="?", help="release tag, e.g. v3.7.0")
     parser.add_argument("--self-test", action="store_true", dest="self_test")
-    parser.add_argument(
-        "--verify-files",
-        nargs="+",
-        metavar="PATH",
-        help="verify local files carry a signature (the signing script's post-condition)",
-    )
     parser.add_argument(
         "--verify-dir",
         metavar="DIR",
@@ -401,12 +671,10 @@ def main() -> int:
 
     if args.self_test:
         return self_test()
-    if args.verify_files:
-        return verify_local_files(args.verify_files)
     if args.verify_dir:
         return verify_local_dir(args.verify_dir)
     if not args.tag:
-        parser.error("a release tag is required unless --self-test or --verify-files is given")
+        parser.error("a release tag is required unless --self-test or --verify-dir is given")
 
     try:
         report = build_report(args.tag, args.repo, args.gh, args.include_dlls)
@@ -420,10 +688,18 @@ def main() -> int:
                 {
                     "tag": report.tag,
                     "executables": [
-                        {"asset": f.asset, "path": f.path, "size": f.size, "signed": f.signed}
+                        {
+                            "asset": f.asset,
+                            "path": f.path,
+                            "size": f.size,
+                            "signed": f.signed,
+                            "allowed_unsigned": not f.signed
+                            and allowance_for(f.asset, f.path) is not None,
+                        }
                         for f in report.findings
                     ],
                     "unsigned_count": len(report.unsigned),
+                    "allowed_unsigned_count": len(report.allowed),
                     "errors": report.errors,
                 },
                 indent=2,
@@ -432,9 +708,17 @@ def main() -> int:
     else:
         print(f"{report.tag}: {len(report.findings)} executable(s) checked\n")
         width = max((len(f.label) for f in report.findings), default=0)
+        allowed_labels = {f.label for f, _ in report.allowed}
         for f in sorted(report.findings, key=lambda x: (x.signed, x.label)):
-            mark = "signed  " if f.signed else "UNSIGNED"
+            if f.signed:
+                mark = "signed  "
+            elif f.label in allowed_labels:
+                mark = "allowed "
+            else:
+                mark = "UNSIGNED"
             print(f"  {mark}  {f.label:<{width}}  {f.size:>10,} bytes")
+        for f, allowance in report.allowed:
+            print(f"\nallowed unsigned: {f.label}\n  {allowance.reason}")
         for e in report.errors:
             print(f"\n  ERROR  {e}", file=sys.stderr)
 

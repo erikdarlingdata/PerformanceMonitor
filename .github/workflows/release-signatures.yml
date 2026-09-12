@@ -2,16 +2,22 @@ name: Release signatures
 
 # #3288: every executable `vpk pack` GENERATES shipped unsigned on v3.6.0 and v3.7.0 while the
 # app payload was signed, and nothing noticed for two releases. The reader that found it lives in
-# .github/scripts/verify_release_signatures.py; this workflow exists so that reader cannot rot
-# unnoticed, and so a published release can be audited on demand without a local checkout.
+# .github/scripts/verify_release_signatures.py and the post-pack signing that fixes it lives in
+# .github/scripts/postpack_signing.py; this workflow exists so neither can rot unnoticed, and so
+# a published release can be audited on demand without a local checkout.
 #
-# It deliberately does NOT run inside the release job. The release guard belongs there, checks
-# local files before upload, and lands with the fix — see the script's own docstring. This one
+# Neither self-test needs SignPath, a release, or a Windows runner, which matters because the
+# release path itself runs only on `release: published` and blocks on manual approvals — these
+# self-tests are the only part of #3288 that a pull request can exercise.
+#
+# The release-time guard is not here. It belongs in the release job, checks local files before
+# upload, and is the step that refuses to publish — see the script's own docstring. This one
 # answers "what did we actually publish", which needs the release to exist first.
 on:
   pull_request:
     paths:
       - '.github/scripts/verify_release_signatures.py'
+      - '.github/scripts/postpack_signing.py'
       - '.github/workflows/release-signatures.yml'
     branches: [dev, main]
   workflow_dispatch:
@@ -34,12 +40,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # The only step that can fail on a pull request. It needs no network and no release, and
-      # it is what keeps the reader honest: six mutations of the PE parse were each confirmed to
-      # turn it red, including one that reported every file as signed — the failure mode that
-      # would otherwise be indistinguishable from the fix having landed.
+      # Covers the PE parse and the release guard's allowlist. The allowlist cases are the ones
+      # worth naming: the two allowed names also appear as the portable zip's root launcher and
+      # as Update.exe, so a skip written by filename alone would let an unsigned Setup.exe and an
+      # unsigned launcher through — which is the defect. Each case pairs a member path with a
+      # container, and a mutation broadening the match to the basename turns this step red.
       - name: Self-test the signature reader
         run: python3 .github/scripts/verify_release_signatures.py --self-test
+
+      # Covers the staging rules and the portable-zip rebuild. The rebuild matters because the
+      # zip is a shipped artifact: the self-test asserts that a re-created archive, which loses
+      # entry order and the stored `.portable` marker, is refused.
+      - name: Self-test the post-pack signing script
+        run: python3 .github/scripts/postpack_signing.py --self-test
 
       # Manual only, because it requires a published release. Exits 1 while #3288 is open, which
       # is the correct answer and the reason this is not wired to anything that gates a merge.
