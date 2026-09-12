@@ -54,7 +54,7 @@ public sealed class HypotheticalIndexSingleStatementGuardTests
 
         /* Nested, with the ; in the INNER comment. PostgreSQL block comments nest, so closing at the
            first terminator would read the rest of the outer comment as code. */
-        "SELECT /* outer /* ; */ still outer */ a FROM t WHERE x = $1",
+        "SELECT /* outer /* ; */ ; still outer */ a FROM t WHERE x = $1",
 
         /* Nested, with the ; in the OUTER comment after the inner one closes. */
         "SELECT /* /* inner */ ; */ a FROM t WHERE x = $1",
@@ -179,6 +179,9 @@ public sealed class HypotheticalIndexSingleStatementGuardTests
     [InlineData("SELECT $$ a; b")]
     /* A tag closes only on itself: $aa$ is not $a$. */
     [InlineData("SELECT $a$ x $aa$ y")]
+    /* $1 is a PARAMETER, so the $ in front of the ; opens nothing and the ; is a real separator.
+       Reading a digit as a tag start turns all of this into one dollar-quoted body. */
+    [InlineData("SELECT $1$;$1$")]
     [InlineData("SELECT a AS \"a; b")]
     /* Zero statements is not one statement. */
     [InlineData("/* just a comment ; */")]
