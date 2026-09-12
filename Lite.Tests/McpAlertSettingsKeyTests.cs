@@ -329,10 +329,15 @@ public sealed class McpAlertSettingsKeyTests
     /// <summary>
     /// The one group Lite deliberately does NOT report, asserted so the hole reads as a decision rather than
     /// the oversight it would otherwise look like. <c>AppAlertEngineSettings</c> returns shipped constants for
-    /// three of self_alerts' four members precisely because a single-instance WPF app has no headless store
-    /// volume and no fleet collection loop to self-monitor, and Lite has no concept whatsoever of the fourth,
-    /// store_job_cadence_warn_percent. Reporting constants under names that read as knobs would tell an agent
-    /// it can tune something Lite cannot.
+    /// the self_alerts members Lite has any analogue of, because a single-instance WPF app has no headless
+    /// store volume and no fleet collection loop to self-monitor; the remainder name TimescaleDB machinery a
+    /// DuckDB store does not contain at all (the background-job cadence knob, and #3297's Retention Held
+    /// tiers). Reporting either kind under names that read as knobs would tell an agent it can tune something
+    /// Lite cannot.
+    ///
+    /// <para>The split is stated without a COUNT on purpose: a numeral here would be a frozen enumeration
+    /// that the next Darling self-alert knob leaves behind, and this assertion is over the group's presence
+    /// rather than its size, so it would go stale without going red.</para>
     /// </summary>
     [Fact]
     public void GetAlertSettings_OmitsSelfAlerts_WhichLiteHasNoEquivalentFor()

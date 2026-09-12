@@ -18,6 +18,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
@@ -127,7 +128,7 @@ public sealed class DarlingMcpAlertTools
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, and the scheduled-analysis cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes is the per-alert-fingerprint throttle on the resulting Slack/Teams/PagerDuty/webhook/email post. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, and the scheduled-analysis cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes is the per-alert-fingerprint throttle on the resulting Slack/Teams/PagerDuty/webhook/email post. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store', so an alert naming that is tuned here and nowhere else, including Retention Held's warn/critical ratios. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]
     public static async Task<string> GetAlertSettings(
         NpgsqlDataSource postgres)
     {
@@ -227,7 +228,17 @@ public sealed class DarlingMcpAlertTools
             collection_stale_minutes = s.CollectionStaleMinutes,
             collection_failure_threshold = s.CollectionFailureThreshold,
             /* #2136: the Store Job Over Cadence warning percent (Critical is fixed at 100). */
-            store_job_cadence_warn_percent = s.StoreJobCadenceWarnPercent
+            store_job_cadence_warn_percent = s.StoreJobCadenceWarnPercent,
+            /* #3297 (V119): the Retention Held tiers — how many times its own configured horizon a retention
+               policy held by the rollup-coverage gate must be holding before it warns, and before it goes
+               critical. Reported HERE beside the other store self-alerts because "Monitor Store" is the
+               subject: #3296's operator received an hourly CRITICAL named Retention Held against Monitor
+               Store and could find nothing in Settings or on this surface that matched either word, because
+               these two numbers were compile-time constants. UNLIKE its cadence neighbour the critical tier
+               is a knob rather than a fixed 100 — a hold has no structural ceiling the way a job outrunning
+               its own cadence does. */
+            retention_hold_warn_ratio = s.RetentionHoldWarnRatio,
+            retention_hold_critical_ratio = s.RetentionHoldCriticalRatio
         },
         pvs = new { enabled = s.PvsEnabled, threshold_percent = s.PvsThresholdPercent, floor_gb = s.PvsFloorGb },
         /* #2391: #2349's knobs reached 3.5.0 with the store plane only, so an alert that ships OFF could
@@ -358,7 +369,13 @@ public sealed class DarlingMcpAlertTools
         "one collection sweep. TWO cooldowns are writable and they are different stages: cooldown_minutes gates " +
         "the engine's FIRE decision, delivery.cooldown_minutes throttles the per-fingerprint post to " +
         "Slack/Teams/PagerDuty/webhook/email (its stored name, email_cooldown_minutes, is also accepted as a " +
-        "top-level alias, but send only one of the two spellings). For silencing ONE recurring signature for a " +
+        "top-level alias, but send only one of the two spellings). An alert whose Server reads 'Monitor Store' " +
+        "is about the monitor's own store and is tuned under self_alerts — including Retention Held, whose " +
+        "self_alerts.retention_hold_warn_ratio and self_alerts.retention_hold_critical_ratio are how many times " +
+        "its configured horizon a held retention tier must be holding to warn and to go critical. Both accept " +
+        "2.0 upward only: healthy whole-chunk granularity reaches 1.4x on a store that is working correctly, so " +
+        "a lower threshold fires on nothing being wrong. Setting critical BELOW warn is accepted and means every " +
+        "fire is Critical. For silencing ONE recurring signature for a " +
         "long stretch, use create_mute_rule instead of a long delivery cooldown: a mute is scoped, expires, is " +
         "listed by get_mute_rules, and still logs the alert, where the cooldown is global to every fingerprint " +
         "on every server and no tool reports what it suppressed. SMTP/webhook delivery credentials are managed " +
@@ -872,6 +889,22 @@ public sealed class DarlingMcpAlertTools
                             case "collection_stale_minutes": AddInt("collection_stale_minutes", n, "self_alerts.collection_stale_minutes", 5, 1440); break;
                             case "collection_failure_threshold": AddInt("collection_failure_threshold", n, "self_alerts.collection_failure_threshold", 1, 1000); break;
                             case "store_job_cadence_warn_percent": AddInt("store_job_cadence_warn_percent", n, "self_alerts.store_job_cadence_warn_percent", 5, 100); break;
+                            /* #3297: bounds are the SAME named constants DarlingAlertSettings clamps to, not
+                               a retyped pair -- the file-growth note above gives the reason, and here the
+                               constants make it structural rather than a matching literal. The floor is the
+                               shipped warning default, so these knobs RAISE the tiers and cannot lower them:
+                               healthy chunk granularity reaches 1.4x measured on production, so anything at
+                               or below ~1.5x fires on a store that is working correctly, and the band above
+                               that up to 2.0x is margin nobody has measured. See the constants for the rest,
+                               including why the ceiling exists rather than leaving the knob open. */
+                            case "retention_hold_warn_ratio":
+                                AddDouble("retention_hold_warn_ratio", n, "self_alerts.retention_hold_warn_ratio",
+                                    TimescaleSupport.RetentionHoldRatioFloor, TimescaleSupport.RetentionHoldRatioCeiling);
+                                break;
+                            case "retention_hold_critical_ratio":
+                                AddDouble("retention_hold_critical_ratio", n, "self_alerts.retention_hold_critical_ratio",
+                                    TimescaleSupport.RetentionHoldRatioFloor, TimescaleSupport.RetentionHoldRatioCeiling);
+                                break;
                             default: error = $"Unknown field 'self_alerts.{k}'."; break;
                         }
                     });

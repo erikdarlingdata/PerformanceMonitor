@@ -496,11 +496,10 @@ public sealed class CustomAlertEvaluator
     /// Failure-isolated: an audit-row write must never break a delete or a sweep.
     /// </summary>
     public static async Task WriteTeardownResolutionAsync(
-        IAlertHistoryStore historyStore, ILogger? logger,
+        PgAlertHistoryStore historyStore, ILogger? logger,
         long ruleId, string ruleName, int serverId, string serverName, string reason)
     {
         var safeName = SanitizeDisplayText(ruleName, CustomAlertRuleStore.MaxNameLength);
-        var metricName = MetricNameFor(ruleId);
         var title = safeName + " Resolved";
         var message = string.Create(CultureInfo.InvariantCulture, $"{serverName}: {safeName} resolved because {reason}");
 
@@ -508,8 +507,15 @@ public sealed class CustomAlertEvaluator
 
         try
         {
-            await historyStore.RecordAlertAsync(DarlingSelfAlertEvaluator.BuildResolutionRecord(
-                new AlertResolution(serverId.ToString(CultureInfo.InvariantCulture), serverName, metricName, title, message)));
+            // #3334: route the recovery-row write through the SECURITY DEFINER config.record_custom_alert_resolution
+            // (owner-privileged, EXECUTE-granted to viewer/mcp) so it succeeds on the least-privilege delete pools
+            // (mcp delete tool / viewer web DELETE), which may not INSERT config_alert_log directly -- the gap that
+            // silently dropped this row (#3305). The row maps the same way the DeliverResolveAsync/BuildResolutionRecord
+            // resolve does (title -> metric_name, message -> detail_text, zeroed values, unmuted), but is pinned to a
+            // NO-CHANNEL row (alert_sent false, notification_type 'none') -- UNLIKE the natural-clear resolve's 'tray':
+            // a teardown surfaces no operator notification, and the definer function must never let a grantee write a
+            // row claiming a delivery. That divergence is intentional; nothing pairs open/resolved on those columns.
+            await historyStore.RecordCustomAlertResolutionAsync(serverId, serverName, title, message);
         }
         catch (Exception ex)
         {

@@ -645,6 +645,23 @@ public sealed class AlertsConfig
     [JsonPropertyName("storeJobCadenceWarnPercent")]
     public int StoreJobCadenceWarnPercent { get; set; } = TimescaleSupport.RefreshSlotPercentOfHourlyCadence;
 
+    /// <summary>#3297 (V119): the Retention Held WARNING tier — how many times its own configured horizon a
+    /// retention policy held by the rollup-coverage gate must be holding before the hold is reported. Was a
+    /// compile-time constant, which made this the one alert an operator could not tune (#3296).
+    ///
+    /// <para>The seed is <see cref="TimescaleSupport.RetentionHoldWarnRatioDefault"/>, named rather than
+    /// restated, so this and the V119 column default cannot disagree — the #3060 discipline the cadence knob
+    /// above already follows. <c>DarlingAlertSettings</c> clamps it on read.</para></summary>
+    [JsonPropertyName("retentionHoldWarnRatio")]
+    public double RetentionHoldWarnRatio { get; set; } = TimescaleSupport.RetentionHoldWarnRatioDefault;
+
+    /// <summary>#3297 (V119): the Retention Held CRITICAL tier, seeded from
+    /// <see cref="TimescaleSupport.RetentionHoldCriticalRatioDefault"/> for the reason its warning sibling
+    /// above is. A value below the warning tier is not invalid — it means every fire is Critical, which is
+    /// what setting it there asks for.</summary>
+    [JsonPropertyName("retentionHoldCriticalRatio")]
+    public double RetentionHoldCriticalRatio { get; set; } = TimescaleSupport.RetentionHoldCriticalRatioDefault;
+
     [JsonPropertyName("longRunningJobEnabled")]
     public bool LongRunningJobEnabled { get; set; } = true;
 

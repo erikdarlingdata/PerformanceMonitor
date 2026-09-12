@@ -1,7 +1,8 @@
 # Clearing a "Retention Held" alert (Darling)
 
 The `Retention Held` self-alert (#2813) means a retention policy has been **paused on purpose** and the
-tier it governs has grown past its configured horizon. Warning fires at 2.0x that horizon, Critical at 4.0x.
+tier it governs has grown past its configured horizon. Warning fires at 2.0x that horizon by default,
+Critical at 4.0x; both are settable — see [Adjusting the thresholds](#adjusting-the-thresholds).
 
 Reported from the field in #3296, where the command sequence below came from the reporter.
 
@@ -68,7 +69,26 @@ out of date, ask the binary:
 
 That output is the authority, and it is generated from the parser that actually handles the arguments.
 
-## Known rough edges
+## Adjusting the thresholds
 
-- **The 2.0x and 4.0x thresholds are not tunable.** They are compile-time constants rather than
-  `config_alert_settings` rows, which makes this the one alert that cannot be adjusted in Settings. #3297.
+Both tiers live on the store's alert settings, so a change takes effect on the service's next sweep with no
+restart. Three ways in, all writing the same two values:
+
+- **Darling Viewer → Settings → Alerts**, the "Retention held past _ x its horizon; critical at _ x" row.
+- **`update_alert_settings`**, under `self_alerts`:
+
+  ```json
+  { "self_alerts": { "retention_hold_warn_ratio": 3.0, "retention_hold_critical_ratio": 6.0 } }
+  ```
+
+- `config.config_alert_settings.retention_hold_warn_ratio` / `retention_hold_critical_ratio` directly.
+
+**Both accept 2.0 or above, and that floor is deliberate.** Retention drops whole chunks and the retention
+job runs on a schedule, so a tier legitimately holds more than its horizon while working perfectly — measured
+on a healthy production store under 4-day horizons, that reaches **1.4x**. A threshold at or below about 1.5x
+therefore fires on a store with nothing wrong with it, and the band between there and 2.0x is margin nobody
+has measured, so the knob raises the tiers rather than lowering them. If the alert is too loud, raise it; to
+silence one recurring signature instead, use a mute rule, which is scoped, expires, and is listed by
+`get_mute_rules`.
+
+Setting critical **below** warn is accepted and means every fire is Critical, with no Warning tier.

@@ -317,9 +317,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <para><b>Why not read <c>MuteRuleDefaultExpiration</c> itself.</b> It is a VIEWER app setting — a
     /// per-install UI preference that prefills a dialog — and it is not in <c>config_alert_settings</c>, so
     /// the headless service does not have it and could not honor a change to it. A compile-time constant
-    /// rather than a store-backed knob for the <see cref="RetentionHoldWarnRatio"/> reason: that would need
-    /// a migration rung this change is deliberately not taking, and it belongs in the control plane the next
-    /// time a rung is going in anyway.</para>
+    /// rather than a store-backed knob because a knob needs a migration rung, and it belongs in the control
+    /// plane the next time one is going in anyway. The Retention Held tiers are the worked example of that
+    /// step being taken (#3297, V119); this one is still outstanding.</para>
     /// </summary>
     internal static readonly TimeSpan StaleMuteAge = TimeSpan.FromDays(7);
 
@@ -327,13 +327,22 @@ internal sealed class DarlingSelfAlertEvaluator
     /// How long this condition waits before re-stating itself while a stale rule is still there — its OWN
     /// interval, and the only condition in this class that does not re-fire on the shared alert cooldown.
     ///
-    /// <para><b>Because it cannot be muted, it must not shout.</b> Every sibling re-fires on
-    /// <c>IAlertEngineSettings.CooldownMinutes</c> (shipped default 5, clamped to at most 120), which for a
-    /// condition an operator can silence is a reasonable standing reminder. This one is deliberately
-    /// unsuppressible — see the <c>honorMuteRules</c> argument at its fire site — and on the shipped defaults
-    /// the shared cooldown gives a history row every five minutes and a notification every fifteen, forever,
-    /// about a fact that changes on a scale of DAYS. That is the channel flood a permanent mute rule is
-    /// usually created to prevent, arriving from the thing that reports the mute.</para>
+    /// <para><b>Because the fact changes on a scale of DAYS.</b> Every sibling re-fires on
+    /// <c>IAlertEngineSettings.CooldownMinutes</c> (shipped default 5, clamped to at most 120), which is a
+    /// reasonable standing reminder for an episodic condition. This one's subject is a rule's CREATION DATE
+    /// measured against a seven-day bound: it is identical on every sweep and changes only when an operator
+    /// edits a rule. On the shipped defaults the shared cooldown gives a history row every five minutes and
+    /// a notification every fifteen, forever, about that — which is the channel flood a permanent mute rule
+    /// is usually created to prevent, arriving from the thing that reports the mute.</para>
+    ///
+    /// <para><b>It stayed daily when the mute arrived (#3348), on reasoning that never rested on being
+    /// unsuppressible.</b> The interval was first chosen while this alert could not be silenced at all, so
+    /// the obvious reading is that an off switch makes the shared cooldown safe again. It does not, for two
+    /// reasons independent of suppressibility. The timescale argument above is one. The other is that a
+    /// five-minute cadence would make the explicit mute the only survivable configuration: the single way to
+    /// quiet it would be to mute it permanently, so the cadence would manufacture exactly the blind spot the
+    /// condition exists to report. Daily keeps the alert livable WITHOUT the mute, which is what leaves the
+    /// mute a real choice rather than a forced one.</para>
     ///
     /// <para>Daily: unmistakable as a standing reminder, and bounded at one a day. It cannot be configured
     /// for the <see cref="StaleMuteAge"/> reason — a knob needs a migration rung this change is not taking.
@@ -403,26 +412,34 @@ internal sealed class DarlingSelfAlertEvaluator
     private const string RetentionHoldKeyPrefix = "retentionhold:";
 
     /// <summary>
-    /// #2813 WARNING tier: how many times its own configured horizon a HELD tier must be holding before the
-    /// hold has cost enough to say so.
+    /// #2813 WARNING tier, SHIPPED DEFAULT — how many times its own configured horizon a HELD tier must be
+    /// holding before the hold has cost enough to say so.
     ///
-    /// <para>Bounded on BOTH sides rather than picked. <b>Below</b>, retention drops whole CHUNKS, so a
-    /// 4-day policy with 1-day chunks legitimately holds ~5 days (1.25x) while working perfectly; 2.0x sits
-    /// clear of that floor with margin, so normal chunk granularity can never reach it. <b>Above</b>, the
-    /// production incident this comes from sat at 4.5x (18 days under a 4-day policy) after 16 days — 2.0x
-    /// on that tier is ~8 days, so the alert arrives about a week in, while the cost is still recoverable
-    /// and long before the 16 days it actually went unnoticed.</para>
+    /// <para>#3297 moved the live value into <c>config_alert_settings.retention_hold_warn_ratio</c> (V119),
+    /// so this is the seed and the unsupplied-seam fallback, not what the check reads: the decision reads
+    /// <see cref="_retentionHoldWarnRatio"/>. Field-reported on #3296 — the operator received an hourly
+    /// CRITICAL and found nothing in Settings matching "Retention Held" or "Monitor Store".</para>
     ///
-    /// <para>A compile-time constant rather than a store-backed knob like its #2136 sibling
-    /// (<c>config_alert_settings</c>, V57) only because that would need a migration rung this change is
-    /// deliberately not taking. It belongs in the control plane the next time a rung is going in anyway.</para>
+    /// <para>Taken from <see cref="TimescaleSupport.RetentionHoldWarnRatioDefault"/> rather than restated,
+    /// where the measurement that bounds it on both sides lives — including the correction that healthy
+    /// chunk granularity reaches <b>1.4x</b> in production, not the ~1.25x the arithmetic predicts.</para>
     /// </summary>
-    internal const double RetentionHoldWarnRatio = 2.0;
+    internal const double RetentionHoldWarnRatio = TimescaleSupport.RetentionHoldWarnRatioDefault;
 
-    /// <summary>#2813 CRITICAL tier: double the warning ratio. A tier at four times its intended depth is
-    /// no longer drifting, it is the dominant and still-compounding contributor to store size — the
-    /// motivating incident (4.5x) reads CRITICAL, which is the point.</summary>
-    internal const double RetentionHoldCriticalRatio = 4.0;
+    /// <summary>#2813 CRITICAL tier, SHIPPED DEFAULT: double the warning ratio, and store-backed since V119
+    /// for its sibling's reason. The live value is <see cref="_retentionHoldCriticalRatio"/>.</summary>
+    internal const double RetentionHoldCriticalRatio = TimescaleSupport.RetentionHoldCriticalRatioDefault;
+
+    /// <summary>#3297: the Retention Held WARNING tier, read live through the same by-reference settings seam
+    /// as the AG thresholds and the #2136 cadence knob (the clamp lives on <c>DarlingAlertSettings</c>).
+    /// Every retention-hold decision AND every threshold this check states back to the operator goes through
+    /// these two seams — a bare <see cref="RetentionHoldWarnRatio"/> in the fire path would judge on the
+    /// shipped default while <c>get_alert_settings</c> reported the store's, and a bare one in the message
+    /// would name a threshold the engine is not using.</summary>
+    private readonly Func<double> _retentionHoldWarnRatio;
+
+    /// <summary>#3297: the Retention Held CRITICAL tier, read live like its warning sibling.</summary>
+    private readonly Func<double> _retentionHoldCriticalRatio;
 
     /// <summary>#2136: the Warning tier's percent-of-cadence threshold, read live through the same
     /// by-reference settings seam as the AG thresholds (the clamp lives on DarlingAlertSettings).
@@ -497,6 +514,8 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<long>? agRedoQueueAlertKb = null,
         Func<int>? agDisconnectRefireMinutes = null,
         Func<int>? storeJobCadenceWarnPercent = null,
+        Func<double>? retentionHoldWarnRatio = null,
+        Func<double>? retentionHoldCriticalRatio = null,
         AlertReadFailureCounter? readFailures = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
@@ -520,6 +539,13 @@ internal sealed class DarlingSelfAlertEvaluator
            grid would leave behind, and this one would fire past the slot silently. */
         _storeJobCadenceWarnPercent =
             storeJobCadenceWarnPercent ?? (() => TimescaleSupport.RefreshSlotPercentOfHourlyCadence);
+        /* #3297: unsupplied falls back to the V119 column defaults, so an evaluator built without the seams
+           behaves like a store at its shipped defaults — the AG-seam discipline, and taken from the shared
+           constants rather than restated for the #3060 reason the cadence fallback above gives. */
+        _retentionHoldWarnRatio =
+            retentionHoldWarnRatio ?? (() => TimescaleSupport.RetentionHoldWarnRatioDefault);
+        _retentionHoldCriticalRatio =
+            retentionHoldCriticalRatio ?? (() => TimescaleSupport.RetentionHoldCriticalRatioDefault);
         _readFailures = readFailures;
     }
 
@@ -1821,8 +1847,8 @@ internal sealed class DarlingSelfAlertEvaluator
     ///
     /// <para>A STANDING condition like Custom Alert Rules Unhealthy: fire once on entry, re-state it while
     /// any rule qualifies, and ONE resolution row when none does. Unlike those siblings it re-states on its
-    /// own <see cref="StaleMuteRefire"/> rather than the shared alert cooldown — see there for why an
-    /// unsuppressible condition needs its own, longer interval. Gated on the master alerts switch. Internal
+    /// own <see cref="StaleMuteRefire"/> rather than the shared alert cooldown — see there for why a
+    /// days-scale fact needs its own, longer interval. Gated on the master alerts switch. Internal
     /// so it pins directly with a recording deliverer and a controllable clock.</para>
     /// </summary>
     internal async Task ApplyStaleMuteRulesAsync(
@@ -1877,8 +1903,8 @@ internal sealed class DarlingSelfAlertEvaluator
 
         /* Standing condition: fire on entry, re-fire only per StaleMuteRefire while any rule qualifies. The
            CURRENT set is rendered each time, so a rule that ages past the bound later shows up on the next
-           re-fire. Its OWN interval rather than the shared CooldownElapsed the siblings use, because this
-           alert cannot be muted — see StaleMuteRefire. */
+           re-fire. Its OWN interval rather than the shared CooldownElapsed the siblings use, because the
+           fact it reports changes on a scale of days — see StaleMuteRefire. */
         if (_lastStaleMuteAlert.TryGetValue(StaleMuteKey, out var lastFired)
             && now - lastFired < StaleMuteRefire)
         {
@@ -1902,15 +1928,69 @@ internal sealed class DarlingSelfAlertEvaluator
             numericThresholdValue: 0,
             cancellationToken,
             context: null,
-            /* THE load-bearing deviation from every sibling: this one alert ignores mute rules.
-               FireAsync's mute check asks "does a rule match (Monitor Store, this metric)", and a rule that
-               constrains nothing matches EVERYTHING — including this. A blanket rule is also the shape with
-               the largest blast radius, so honoring the mute would lose the report precisely where it
-               matters most: what survives is a row in alert history that nobody reads without already
-               suspecting the mute. That is the blind spot, not a fix for it. A muted alert
-               is still recorded, which is enough for every other condition; it is not enough for the one
-               whose subject IS the muting. */
-            honorMuteRules: false);
+            /* The ONE condition that decides its own mute rather than asking the shared seam, because the
+               seam returns a single boolean over every rule and cannot say which rule answered — see
+               FindExplicitMute. Always non-null, so the seam is never consulted for this metric. */
+            muted: FindExplicitMute(rules, now) is not null);
+    }
+
+    /// <summary>
+    /// The one mute rule that deliberately silences this alert, or null — the EXPLICIT/incidental split that
+    /// gives the condition an off switch without letting it switch itself off (#3348).
+    ///
+    /// <para><b>Why it cannot just ask the shared seam.</b> <c>_isAlertMuted</c> answers one boolean over
+    /// every rule, so it cannot say WHICH rule answered. A rule that constrains nothing matches every alert
+    /// on the store, this one included, and it is also the shape with the largest blast radius — so an
+    /// affirmative seam answer is as easily a fleet-wide silence as a decision about this condition, and
+    /// honoring it would lose the report precisely where it matters most. The surviving history row is the
+    /// surface nobody reads without already suspecting the mute, which is the blind spot rather than a fix
+    /// for it.</para>
+    ///
+    /// <para><b>What "explicit" means, and why it is the matcher's own answer rather than an assertion.</b>
+    /// The metric dimension is EXACT full-string equality (<see cref="MuteRule.NamesMetric"/>, the same
+    /// comparison <see cref="MuteRule.MatchesAt"/> applies) — unlike the four <c>*Pattern</c> dimensions
+    /// there is no substring, glob or regex form of a metric constraint. So a rule either spells
+    /// <see cref="StaleMuteMetric"/> out or does not constrain metrics at all, and no rule can match this
+    /// alert incidentally while looking deliberate. A pattern that happened to cover the name would NOT
+    /// count and cannot arise: there is no such shape to write.</para>
+    ///
+    /// <para><b>Self-suppression stays impossible by construction, not by care.</b> The only input to the
+    /// decision is a rule that names this metric, and a blanket rule names nothing — so a blanket mute
+    /// cannot reach this decision at all, whatever else it silences. The narrowing is also strictly
+    /// one-directional: an explicitly-naming rule still has to pass the FULL matcher against this alert's
+    /// real context, so a rule naming the metric but scoped to some monitored server does not suppress a
+    /// fleet-level condition whose server is the synthetic <see cref="StoreServerLabel"/>, and one carrying
+    /// a database or wait pattern does not either — this alert has no such dimension to match.</para>
+    ///
+    /// <para>Judged on the evaluator's injected clock via <see cref="MuteRule.MatchesAt"/>, so the rule's
+    /// expiry is read on the same instant the staleness ages are, and an operator's explicit mute lapses
+    /// exactly when its bound says. A muted alert is still RECORDED — the history row lands every re-fire,
+    /// naming the very rule that silenced the channels, and <c>get_mute_rules</c> lists it with its reason.
+    /// That is the audit trail an operator gets for this decision, and it is what makes the decision
+    /// answerable rather than invisible.</para>
+    /// </summary>
+    private static MuteRule? FindExplicitMute(IReadOnlyList<MuteRule> rules, DateTime now)
+    {
+        var context = new AlertMuteContext
+        {
+            ServerName = StoreServerLabel,
+            MetricName = StaleMuteMetric
+        };
+
+        foreach (var rule in rules)
+        {
+            if (rule is null || !rule.NamesMetric(StaleMuteMetric))
+            {
+                continue;
+            }
+
+            if (rule.MatchesAt(context, now))
+            {
+                return rule;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -2266,7 +2346,7 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>
     /// Applies the fleet-level Retention Held condition (#2813): a retention policy the #1680/#1877 coverage
     /// gate has PAUSED, whose tier has as a result grown past its own configured horizon by
-    /// <see cref="RetentionHoldWarnRatio"/> or more.
+    /// the store's configured warning ratio or more.
     ///
     /// <para><b>Both halves are required, and that is the whole design.</b> Paused alone is normal —
     /// <see cref="TimescaleSupport.EnsureRetentionPoliciesAsync"/> deliberately creates every policy paused
@@ -2282,9 +2362,15 @@ internal sealed class DarlingSelfAlertEvaluator
     /// makes the cost legible, and it self-scales with the horizon so one threshold serves a 4-day raw tier
     /// and a 35-day baseline tier alike.</para>
     ///
-    /// <para>Tiers: WARNING at <see cref="RetentionHoldWarnRatio"/>, CRITICAL at
-    /// <see cref="RetentionHoldCriticalRatio"/> — the production incident that motivated this sat at 4.5x
-    /// (18 days held under a 4-day policy for 16 days) and would have read CRITICAL. A STANDING condition
+    /// <para>Tiers: WARNING at the store's <c>retention_hold_warn_ratio</c>, CRITICAL at its
+    /// <c>retention_hold_critical_ratio</c> (#3297, V119), read live through
+    /// <see cref="_retentionHoldWarnRatio"/> / <see cref="_retentionHoldCriticalRatio"/> and defaulting to
+    /// <see cref="RetentionHoldWarnRatio"/> / <see cref="RetentionHoldCriticalRatio"/> — the production
+    /// incident that motivated this sat at 4.5x (18 days held under a 4-day policy for 16 days) and would
+    /// have read CRITICAL on the shipped pair. Both are read ONCE per pass, so one pass cannot judge some
+    /// policies on the old pair and the rest on a reloaded one. A critical tier set BELOW the warning tier
+    /// is not corrected: every fire is then Critical and the Warning tier is empty, which is what setting it
+    /// there asks for. A STANDING condition
     /// like Store Job Over Cadence: fire once on breach, re-fire only on the alert cooldown while it
     /// persists, one "Retention Hold Cleared" resolution when the policy arms or the tier comes back under
     /// the warning ratio. A policy with no chunks, no measurable horizon, or an unreadable span has no
@@ -2307,6 +2393,12 @@ internal sealed class DarlingSelfAlertEvaluator
 
         var now = _utcNow();
 
+        /* #3297: read BOTH tiers ONCE per pass, not per policy. A store reload can hot-swap the settings row
+           mid-pass, and re-reading per policy would let one pass judge some policies on the old pair and the
+           rest on the new one — a mixed reading no configuration ever held. */
+        var warnRatio = _retentionHoldWarnRatio();
+        var criticalRatio = _retentionHoldCriticalRatio();
+
         foreach (var policy in policies)
         {
             var key = policy.JobId.ToString(CultureInfo.InvariantCulture);
@@ -2318,7 +2410,7 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 if (policy.Armed)
                 {
-                    await ClearRetentionHoldAsync(key, policy, cancellationToken);
+                    await ClearRetentionHoldAsync(key, policy, warnRatio, cancellationToken);
                 }
 
                 continue;
@@ -2328,17 +2420,17 @@ internal sealed class DarlingSelfAlertEvaluator
                 ? $"retention job {key}"
                 : $"{policy.HypertableName} retention [{key}]";
 
-            if (!policy.Armed && ratio >= RetentionHoldWarnRatio)
+            if (!policy.Armed && ratio >= warnRatio)
             {
                 _activeRetentionHold[key] = true;
                 if (CooldownElapsed(_lastRetentionHoldAlert, key, now))
                 {
                     _lastRetentionHoldAlert[key] = now;
-                    bool critical = ratio >= RetentionHoldCriticalRatio;
+                    bool critical = ratio >= criticalRatio;
                     double spanDays = (policy.SpanSeconds ?? 0) / 86400.0;
                     await FireAsync(
                         RetentionHoldKeyPrefix + key, StoreServerLabel, RetentionHoldMetric,
-                        $"{ratio:F1}x its {policy.DropAfter} horizon", $"{RetentionHoldWarnRatio:F1}x",
+                        $"{ratio:F1}x its {policy.DropAfter} horizon", $"{warnRatio:F1}x",
                         detail: $"Store {label} is HELD PAUSED by the rollup-coverage gate, and the tier now " +
                             $"holds {spanDays:F1} days across {policy.ChunkCount} chunk(s) against a configured " +
                             $"{policy.DropAfter} horizon ({ratio:F1}x). " +
@@ -2360,21 +2452,26 @@ internal sealed class DarlingSelfAlertEvaluator
                         severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
                         shortMessage: $"{label} held at {ratio:F1}x its {policy.DropAfter} horizon",
                         numericCurrentValue: Math.Round(ratio, 2),
-                        numericThresholdValue: critical ? RetentionHoldCriticalRatio : RetentionHoldWarnRatio,
+                        numericThresholdValue: critical ? criticalRatio : warnRatio,
                         cancellationToken);
                 }
             }
             else
             {
-                await ClearRetentionHoldAsync(key, policy, cancellationToken);
+                await ClearRetentionHoldAsync(key, policy, warnRatio, cancellationToken);
             }
         }
     }
 
     /// <summary>Drops one retention hold's standing state and records the resolution, but only if it was
-    /// actually standing — so a store where nothing is held writes no resolution rows at all.</summary>
+    /// actually standing — so a store where nothing is held writes no resolution rows at all.
+    ///
+    /// <para><paramref name="warnRatio"/> is handed in rather than read here, and that is the point: the
+    /// resolution names the threshold the tier came back under, so reading the seam a second time could
+    /// report a ratio that never judged this policy if a store reload landed mid-pass — and a bare constant
+    /// would name the shipped default on a store that had tuned it.</para></summary>
     private async Task ClearRetentionHoldAsync(
-        string key, RetentionHoldReading policy, CancellationToken cancellationToken)
+        string key, RetentionHoldReading policy, double warnRatio, CancellationToken cancellationToken)
     {
         if (!_activeRetentionHold.TryRemove(key, out var was) || !was)
         {
@@ -2386,7 +2483,7 @@ internal sealed class DarlingSelfAlertEvaluator
             : $"{policy.HypertableName} retention [{key}]";
         var why = policy.Armed
             ? "is armed again - its consumer now covers everything the tier holds"
-            : $"is back under {RetentionHoldWarnRatio:F1}x its {policy.DropAfter} horizon";
+            : $"is back under {warnRatio:F1}x its {policy.DropAfter} horizon";
 
         await RecordResolutionAsync(new AlertResolution(
             RetentionHoldKeyPrefix + key, StoreServerLabel, RetentionHoldMetric,
@@ -2867,27 +2964,31 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
     /// <param name="numericThresholdValue">The bound behind <paramref name="thresholdValue"/>, on the same
     /// terms. Almost every self-alert's threshold is an English phrase ("collecting", "Online", "running
     /// on schedule"), not a bound.</param>
-    /// <param name="honorMuteRules">Whether the operator's mute rules may suppress this alert's channels.
-    /// True for every condition but one. #3306's "Stale Mute Rules" passes FALSE because a mute rule that
-    /// constrains nothing matches every alert on the store, this one included — so honoring the mute would
-    /// let the condition suppress the only report of its own subject, and an alert whose whole point is
-    /// "you are not being told things" cannot be one of the things you are not told. Nothing else may pass
-    /// false without the same argument: muting is the operator's to decide, and a self-alert that cannot be
-    /// silenced is a self-alert that will be ignored instead.</param>
+    /// <param name="muted">The mute decision, when the caller has ALREADY made it; null (the default, and
+    /// every condition but one) asks the shared <c>_isAlertMuted</c> seam for this server and metric, which
+    /// is what every sibling wants.
+    ///
+    /// <para>Only "Stale Mute Rules" decides for itself, and it must, because the seam returns ONE boolean
+    /// over every rule and so cannot say WHICH rule answered. A rule that constrains nothing matches every
+    /// alert on the store, this one included, so a seam answer of true is as easily a blanket mute as a
+    /// decision about this alert — and honoring it would let the condition suppress the only report of its
+    /// own subject. That condition scans the rules it already holds for one that NAMES it and passes the
+    /// verdict in here instead (#3348). Nothing else may pass this: a caller that hands in a decision it did
+    /// not derive from an explicit naming has re-introduced the self-suppression the seam cannot see.</para></param>
     /* The optional context TRAILS the cancellation token so the dozens of existing positional call
        sites stay untouched — only the callers that have discrete facts to carry (#2109: the AG
-       database alerts) name it. Same for honorMuteRules, which defaults to the sibling behavior. */
+       database alerts) name it. Same for muted, which defaults to asking the seam like its siblings. */
     private async Task FireAsync(
         string serverKey, string serverName, string metricName, string currentValue, string thresholdValue,
         string detail, AlertSeverityLevel? severity, string shortMessage,
         double? numericCurrentValue, double? numericThresholdValue, CancellationToken cancellationToken,
-        AlertContext? context = null, bool honorMuteRules = true)
+        AlertContext? context = null, bool? muted = null)
     {
         /* Same mute treatment as the engine: a muted self-alert is still recorded (flagged muted) but its
-           channels are skipped — the deliverer honors AlertOutcome.Muted. The one condition that opts out
-           does not even ASK, so a throwing Matches() cannot reach it either. */
-        bool muted = honorMuteRules
-            && _isAlertMuted(new AlertMuteContext { ServerName = serverName, MetricName = metricName });
+           channels are skipped — the deliverer honors AlertOutcome.Muted. A caller that brought its own
+           decision does not even ASK, so a throwing Matches() cannot reach it either. */
+        bool isMuted = muted
+            ?? _isAlertMuted(new AlertMuteContext { ServerName = serverName, MetricName = metricName });
 
         /* #1681: log the FIRING, not just the recovery. RecordResolutionAsync has always logged at Information,
            so the service log showed "… Recovered" with nothing before it — which reads as a spontaneous
@@ -2900,13 +3001,13 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
         _logger?.LogWarning(
             "{Line}",
             AlertFiringLog.Fired(
-                serverName, metricName, severity?.ToString() ?? "Warning", shortMessage, muted));
+                serverName, metricName, severity?.ToString() ?? "Warning", shortMessage, isMuted));
 
         await _deliverer.DeliverAsync(new AlertOutcome(
             serverKey, serverName, metricName, currentValue, thresholdValue,
             Context: context, DetailText: detail,
             NumericCurrentValue: numericCurrentValue, NumericThresholdValue: numericThresholdValue,
-            Muted: muted, Severity: severity, ShortMessage: shortMessage), cancellationToken);
+            Muted: isMuted, Severity: severity, ShortMessage: shortMessage), cancellationToken);
     }
 
     private async Task RecordResolutionAsync(AlertResolution resolution, CancellationToken cancellationToken)

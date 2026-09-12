@@ -175,6 +175,7 @@ public static class PgMigrations
         new Migration(116, "custom-alert-core", V116Sql),
         new Migration(117, "mute-rules-reload-beacon", V117Sql),
         new Migration(118, "builtin-alert-persistence", V118Sql),
+        new Migration(119, "retention-hold-ratio-knobs", V119Sql),
     };
 
     /// <summary>
@@ -383,6 +384,38 @@ CREATE TABLE IF NOT EXISTS config.alert_persistence_state (
     updated_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
     PRIMARY KEY (server_id, metric_name)
 );";
+
+    /// <summary>
+    /// V119 — the Retention Held tiers on the singleton <c>config_alert_settings</c> row (#3297), which were
+    /// compile-time constants, making the one alert an operator most needs to tune the one alert that could
+    /// not be. Field-reported on #3296: an hourly CRITICAL arrived, and Settings held nothing matching
+    /// "Retention Held" or "Monitor Store".
+    ///
+    /// <para>Store-backed like its #2136 sibling <c>store_job_cadence_warn_percent</c> (V57), which is the
+    /// pattern the constants' own comment named as the destination. <c>double precision</c> because the
+    /// value is a ratio with a meaningful fractional part —
+    /// <c>analysis_notify_severity</c> is the same type on this table, so this is the established shape
+    /// rather than a new one. The column defaults ARE the constants they replace, taken from
+    /// <see cref="TimescaleSupport.RetentionHoldWarnRatioDefault"/> and its critical sibling rather than
+    /// restated here, so a store that upgrades and is never touched keeps firing exactly where it did.</para>
+    ///
+    /// <para><b>No ACL or provisioning change</b>: <c>config_alert_settings</c> carries table-level grants
+    /// with no column carve (the V33/V35/V55/V57 rungs all say so), and the V17 statement-level
+    /// <c>trg_bump_alert_settings</c> already bumps <c>config_service.config_version</c> on any write here,
+    /// so the running service picks a change up on its next sweep with no restart and no new trigger.</para>
+    ///
+    /// <para><b>No CHECK ordering the two tiers</b>, deliberately. A pair where critical sits below warn is
+    /// not a broken state needing a constraint or a read-time rewrite: firing is gated on warn and severity
+    /// on critical, so every fire is simply Critical and the Warning tier is empty — which is exactly what
+    /// an operator who put critical below warn asked for. A <c>GREATEST</c> on read would instead accept the
+    /// value and then use a different one, which is the "setting did not stick" failure the MCP
+    /// bound-equals-clamp parity exists to prevent.</para>
+    /// </summary>
+    private const string V119Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS retention_hold_warn_ratio double precision NOT NULL DEFAULT 2.0;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS retention_hold_critical_ratio double precision NOT NULL DEFAULT 4.0;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
