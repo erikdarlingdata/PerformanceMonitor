@@ -108,7 +108,8 @@ public sealed class DarlingMcpCustomAlertTools
         "must reduce to a single value), a 'predicate' ('op' one of gt/ge/lt/le, a numeric 'warnThreshold', and " +
         "an optional 'criticalThreshold' that must be more extreme than warn in the operator's direction), an " +
         "optional 'hysteresis' ('breachSamples'/'clearSamples', each an integer >= 1), an optional 'scope' " +
-        "('mode' 'all' or 'servers' with a non-empty 'servers' list; tag scope is not yet supported), and an " +
+        "('mode' 'all', or 'servers' with a non-empty 'servers' list, or 'tag' with an integer 'tagId' fleet-tag " +
+        "id whose directly-assigned servers the rule then evaluates), and an " +
         "optional 'evaluationIntervalSeconds' (>= 30). Build the metric panel from the compose catalog exposed " +
         "by describe_custom_view_catalog. A '<'/'<=' predicate on a count aggregate is rejected because it " +
         "cannot tell zero events from a stalled collector; use '>=' instead.")]
@@ -326,9 +327,21 @@ public sealed class DarlingMcpCustomAlertTools
                 def = parsed;
             }
 
-            // In-scope = the enabled monitored servers the rule applies to (the same AppliesTo the sweep uses).
+            // In-scope = the enabled monitored servers the rule applies to, via the SAME tag-aware gate the sweep
+            // uses (#3350). A tag-scoped rule resolves its tag's current members from config.server_tag_map on
+            // this same least-privilege mcp/viewer pool (which carries SELECT on the config tag tables); an
+            // All/Servers rule is decided purely from the storage name and never hits the tag tables.
             var servers = await DarlingServerResolver.LoadEnabledAsync(postgres);
-            var inScope = servers.Where(s => def.AppliesTo(s.ServerName)).ToList();
+            IReadOnlySet<int>? tagServerIds = null;
+            if (def.ScopeMode == CustomAlertScopeMode.Tag && def.ScopeTagId is int tagId)
+            {
+                var members = await new CustomAlertRuleStore(postgres).ListTagMembersAsync(new[] { tagId });
+                tagServerIds = members.TryGetValue(tagId, out var ids) ? ids : null;
+            }
+
+            var inScope = servers
+                .Where(s => CustomAlertEvaluator.RuleAppliesToServer(def, tagServerIds, s.ServerId, s.ServerName))
+                .ToList();
             if (inScope.Count == 0)
             {
                 return JsonSerializer.Serialize(new

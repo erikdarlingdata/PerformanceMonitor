@@ -117,7 +117,7 @@ public class CustomAlertRuleHealthTests
         var def = Parse(row.DefinitionJson);
 
         var issue = CustomAlertEvaluator.ClassifyNeverFiring(
-            row, def, "pg cpu", new[] { "PROD01", "PROD02" }, noDataSinceUtc: null, nowUtc: DateTime.UtcNow);
+            row, def, null, "pg cpu", new[] { (1, "PROD01"), (2, "PROD02") }, noDataSinceUtc: null, nowUtc: DateTime.UtcNow);
 
         Assert.NotNull(issue);
         Assert.Equal(3, issue!.RuleId);
@@ -131,7 +131,7 @@ public class CustomAlertRuleHealthTests
         var def = Parse(row.DefinitionJson);
 
         var issue = CustomAlertEvaluator.ClassifyNeverFiring(
-            row, def, "pg cpu", new[] { "PROD01", "PROD02" }, noDataSinceUtc: null, nowUtc: DateTime.UtcNow);
+            row, def, null, "pg cpu", new[] { (1, "PROD01"), (2, "PROD02") }, noDataSinceUtc: null, nowUtc: DateTime.UtcNow);
 
         Assert.Null(issue);
     }
@@ -144,7 +144,7 @@ public class CustomAlertRuleHealthTests
         var def = Parse(row.DefinitionJson);
 
         var issue = CustomAlertEvaluator.ClassifyNeverFiring(
-            row, def, "everywhere", Array.Empty<string>(), noDataSinceUtc: null, nowUtc: DateTime.UtcNow);
+            row, def, null, "everywhere", Array.Empty<(int, string)>(), noDataSinceUtc: null, nowUtc: DateTime.UtcNow);
 
         Assert.Null(issue);
     }
@@ -157,7 +157,7 @@ public class CustomAlertRuleHealthTests
         var now = new DateTime(2026, 9, 11, 12, 0, 0, DateTimeKind.Utc);
 
         var issue = CustomAlertEvaluator.ClassifyNeverFiring(
-            row, def, "always null", new[] { "PROD01" },
+            row, def, null, "always null", new[] { (1, "PROD01") },
             noDataSinceUtc: now - CustomAlertEvaluator.NoDataFlagWindow - TimeSpan.FromMinutes(1),
             nowUtc: now);
 
@@ -173,7 +173,7 @@ public class CustomAlertRuleHealthTests
         var now = new DateTime(2026, 9, 11, 12, 0, 0, DateTimeKind.Utc);
 
         var issue = CustomAlertEvaluator.ClassifyNeverFiring(
-            row, def, "recent gap", new[] { "PROD01" },
+            row, def, null, "recent gap", new[] { (1, "PROD01") },
             noDataSinceUtc: now - TimeSpan.FromMinutes(2), // well within the window
             nowUtc: now);
 
@@ -187,7 +187,55 @@ public class CustomAlertRuleHealthTests
         var def = Parse(row.DefinitionJson);
 
         var issue = CustomAlertEvaluator.ClassifyNeverFiring(
-            row, def, "healthy", new[] { "PROD01" }, noDataSinceUtc: null, nowUtc: DateTime.UtcNow);
+            row, def, null, "healthy", new[] { (1, "PROD01") }, noDataSinceUtc: null, nowUtc: DateTime.UtcNow);
+
+        Assert.Null(issue);
+    }
+
+    // ─────────────────────────── ClassifyNeverFiring (tag scope, #3350) ───────────────────────────
+
+    [Fact]
+    public void ClassifyNeverFiring_TagScope_NoMonitoredMember_IsFlagged()
+    {
+        var row = Rule(6, "tagged", ValidJson("\"scope\":{\"mode\":\"tag\",\"tagId\":5}"));
+        var def = Parse(row.DefinitionJson);
+
+        // The tag resolves to server 999, which is not among the monitored servers -> the rule never evaluates.
+        var issue = CustomAlertEvaluator.ClassifyNeverFiring(
+            row, def, new HashSet<int> { 999 }, "tagged",
+            new[] { (1, "PROD01"), (2, "PROD02") }, noDataSinceUtc: null, nowUtc: DateTime.UtcNow);
+
+        Assert.NotNull(issue);
+        Assert.Equal(6, issue!.RuleId);
+        Assert.Contains("tag", issue.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ClassifyNeverFiring_TagScope_EmptyTag_IsFlagged()
+    {
+        // A tag that resolves to no members (empty / deleted / renamed away) matches no server, so a rule scoped
+        // to it can never fire — the #3350 integrity requirement, surfaced through the SAME #3304 self-health.
+        var row = Rule(6, "empty tag", ValidJson("\"scope\":{\"mode\":\"tag\",\"tagId\":5}"));
+        var def = Parse(row.DefinitionJson);
+
+        var issue = CustomAlertEvaluator.ClassifyNeverFiring(
+            row, def, new HashSet<int>(), "empty tag",
+            new[] { (1, "PROD01") }, noDataSinceUtc: null, nowUtc: DateTime.UtcNow);
+
+        Assert.NotNull(issue);
+        Assert.Contains("tag", issue!.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ClassifyNeverFiring_TagScope_WithMonitoredMember_IsNotFlagged()
+    {
+        var row = Rule(6, "tagged", ValidJson("\"scope\":{\"mode\":\"tag\",\"tagId\":5}"));
+        var def = Parse(row.DefinitionJson);
+
+        // The tag resolves to server 1, which IS monitored -> firing-eligible, not flagged.
+        var issue = CustomAlertEvaluator.ClassifyNeverFiring(
+            row, def, new HashSet<int> { 1 }, "tagged",
+            new[] { (1, "PROD01"), (2, "PROD02") }, noDataSinceUtc: null, nowUtc: DateTime.UtcNow);
 
         Assert.Null(issue);
     }

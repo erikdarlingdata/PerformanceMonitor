@@ -66,6 +66,20 @@ WHERE enabled
 ORDER BY id
 LIMIT $1";
 
+    /// <summary>Resolves each given fleet-tag id to the set of server ids DIRECTLY assigned to it (#3350 tag
+    /// scope) — one round-trip for every tag via <c>= ANY($1)</c>. Reads <c>config.server_tag_map</c> (bare
+    /// name; the pool's search_path resolves it, the same as <c>custom_alert_rules</c> above). $1 the tag ids.
+    ///
+    /// <para>A tag with no rows — never assigned, or deleted so the map rows cascaded away — is simply absent
+    /// from the result, which the caller treats as "resolves to no server", so a tag-scoped rule on it never
+    /// fires (the #3350 integrity requirement; the 0-server case then flows to the #3304 never-firing surface).
+    /// Membership is DIRECT only: descendant tags' servers are NOT pulled in (a v1 decision — the tree is not
+    /// traversed here; that is a possible later slice).</para></summary>
+    public const string ListTagMembersSql = @"
+SELECT tag_id, server_id
+FROM server_tag_map
+WHERE tag_id = ANY($1)";
+
     /// <summary>Inserts a new rule at version 1. $1 name, $2 definition (jsonb), $3 description, $4 enabled, $5 updated_by.</summary>
     public const string InsertSql = @"
 INSERT INTO custom_alert_rules (name, definition, description, enabled, version, created_at, updated_at, updated_by)
@@ -202,6 +216,49 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Resolves each fleet-tag id to the set of server ids directly assigned to it (#3350 tag scope), in ONE
+    /// round-trip. The single shared tag-membership read: the evaluator calls it on the owner pool each cache
+    /// refresh, and the evaluate-now test tool calls it on the least-privilege mcp/viewer pool — both of which
+    /// carry <c>SELECT</c> on <c>config.server_tag_map</c> (it holds no secret column). A tag with no assigned
+    /// servers is absent from the returned map (the caller reads that as an empty set → the rule matches no
+    /// server). Returns an empty map for an empty input without touching the store.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<int, IReadOnlySet<int>>> ListTagMembersAsync(
+        IReadOnlyCollection<int> tagIds, CancellationToken cancellationToken = default)
+    {
+        if (tagIds.Count == 0)
+        {
+            return new Dictionary<int, IReadOnlySet<int>>();
+        }
+
+        var byTag = new Dictionary<int, HashSet<int>>();
+        await using var command = _dataSource.CreateCommand(ListTagMembersSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = System.Linq.Enumerable.ToArray(tagIds) });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var tagId = reader.GetInt32(0);
+            var serverId = reader.GetInt32(1);
+            if (!byTag.TryGetValue(tagId, out var set))
+            {
+                set = new HashSet<int>();
+                byTag[tagId] = set;
+            }
+
+            set.Add(serverId);
+        }
+
+        var result = new Dictionary<int, IReadOnlySet<int>>(byTag.Count);
+        foreach (var pair in byTag)
+        {
+            result[pair.Key] = pair.Value;
+        }
+
+        return result;
     }
 
     /// <summary>Reads one rule in full (with <c>definition</c>), or <see cref="CustomAlertRuleResult.NotFound"/>.</summary>

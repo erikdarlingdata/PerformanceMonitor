@@ -140,11 +140,48 @@ public class CustomAlertRuleDefinitionTests
     }
 
     [Fact]
-    public void TagScope_IsRejectedForNow()
+    public void TagScope_Parses_WithStableTagId()
+    {
+        // #3350: a tag-scoped rule stores the tag's STABLE integer id (scope.tagId), so a rename never
+        // re-scopes it; the evaluator resolves the id -> the tag's server set at sweep time.
+        var (def, error) = CustomAlertRuleDefinition.TryParse(
+            "{" + Metric + ",\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1}," +
+            "\"scope\":{\"mode\":\"tag\",\"tagId\":7}}");
+
+        Assert.Null(error);
+        Assert.NotNull(def);
+        Assert.Equal(CustomAlertScopeMode.Tag, def!.ScopeMode);
+        Assert.Equal(7, def.ScopeTagId);
+        // A tag rule cannot be decided from a storage name alone — AppliesTo (All/Servers only) returns false.
+        Assert.False(def.AppliesTo("anything"));
+    }
+
+    [Fact]
+    public void TagScope_MissingTagId_IsError()
+    {
+        var (def, error) = CustomAlertRuleDefinition.TryParse(
+            "{" + Metric + ",\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1},\"scope\":{\"mode\":\"tag\"}}");
+        Assert.Null(def);
+        Assert.NotNull(error);
+    }
+
+    [Fact]
+    public void TagScope_NonIntegerTagId_IsError()
+    {
+        // A tag is stored by its stable integer id, never its name — a string tagId is rejected.
+        var (def, error) = CustomAlertRuleDefinition.TryParse(
+            "{" + Metric + ",\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1}," +
+            "\"scope\":{\"mode\":\"tag\",\"tagId\":\"prod\"}}");
+        Assert.Null(def);
+        Assert.NotNull(error);
+    }
+
+    [Fact]
+    public void TagScope_NonPositiveTagId_IsError()
     {
         var (def, error) = CustomAlertRuleDefinition.TryParse(
             "{" + Metric + ",\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1}," +
-            "\"scope\":{\"mode\":\"tag\",\"tag\":\"prod\"}}");
+            "\"scope\":{\"mode\":\"tag\",\"tagId\":0}}");
         Assert.Null(def);
         Assert.NotNull(error);
     }

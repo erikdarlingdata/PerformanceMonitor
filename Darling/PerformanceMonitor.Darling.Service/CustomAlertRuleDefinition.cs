@@ -24,11 +24,15 @@ public enum CustomAlertOp
     LessOrEqual,
 }
 
-/// <summary>Which servers a rule evaluates against. Tag scope is deferred to a later slice.</summary>
+/// <summary>Which servers a rule evaluates against: every monitored server (<see cref="All"/>), an explicit
+/// set of storage names (<see cref="Servers"/>), or the members of a fleet tag (<see cref="Tag"/>, #3350).
+/// Tag membership is store state that changes independently of the rule, so a tag-scoped rule stores only the
+/// tag's stable id and the evaluator resolves it to a server-id set each sweep.</summary>
 public enum CustomAlertScopeMode
 {
     All,
     Servers,
+    Tag,
 }
 
 /// <summary>
@@ -54,6 +58,7 @@ public sealed record CustomAlertRuleDefinition(
     int ClearSamples,
     CustomAlertScopeMode ScopeMode,
     IReadOnlyList<string> ScopeServers,
+    int? ScopeTagId,
     int? EvaluationIntervalSeconds)
 {
     /// <summary>Alert windows are recent (hours), never the 90-day compose chart ceiling — R2 hardening.</summary>
@@ -65,7 +70,14 @@ public sealed record CustomAlertRuleDefinition(
     /// <summary>Cadence floor so a rule cannot ask to be evaluated faster than the collectors move.</summary>
     public const int MinEvaluationIntervalSeconds = 30;
 
-    /// <summary>Whether this rule evaluates against the given storage server name.</summary>
+    /// <summary>
+    /// Whether this rule evaluates against the given storage server name — the PURE All/Servers decision
+    /// (no store). <see cref="CustomAlertScopeMode.Tag"/> cannot be decided from a name alone (its membership
+    /// is the <c>config.server_tag_map</c> set the evaluator resolves at sweep time), so this returns
+    /// <c>false</c> for a tag-scoped rule; the tag-aware gate is
+    /// <see cref="CustomAlertEvaluator.RuleAppliesToServer"/>, which delegates the non-tag modes back to this
+    /// one authority so All/Servers is resolved in exactly one place.
+    /// </summary>
     public bool AppliesTo(string storageName) =>
         ScopeMode == CustomAlertScopeMode.All
         || ScopeServers.Any(s => string.Equals(s, storageName, StringComparison.OrdinalIgnoreCase));
@@ -225,6 +237,7 @@ public sealed record CustomAlertRuleDefinition(
         // ---- scope ----
         var scopeMode = CustomAlertScopeMode.All;
         IReadOnlyList<string> scopeServers = Array.Empty<string>();
+        int? scopeTagId = null;
         if (root["scope"] is JsonObject scope)
         {
             var mode = (scope["mode"] as JsonValue)?.ToString() ?? "all";
@@ -252,9 +265,27 @@ public sealed record CustomAlertRuleDefinition(
 
                     break;
                 case "tag":
-                    return (null, "tag scope is not yet supported; use scope.mode 'all' or 'servers'.");
+                    // Tag scope (#3350): the rule evaluates the DIRECTLY-assigned members of one fleet tag,
+                    // stored by the tag's STABLE id (not its name — a rename must not silently re-scope the rule),
+                    // the same immutable-id discipline the metric key uses. The id -> current server-id set is
+                    // resolved by the evaluator from config.server_tag_map each sweep; a tag that resolves to no
+                    // servers (empty, deleted, or renamed away) matches nothing, so the rule never fires — and
+                    // that 0-server case is surfaced by the #3304 never-firing self-health check.
+                    scopeMode = CustomAlertScopeMode.Tag;
+                    if (scope["tagId"] is not JsonNode tagIdNode || !TryInt(tagIdNode, out var tagId))
+                    {
+                        return (null, "'scope.tagId' (an integer fleet-tag id) is required when scope.mode is 'tag'.");
+                    }
+
+                    if (tagId <= 0)
+                    {
+                        return (null, "'scope.tagId' must be a positive integer fleet-tag id.");
+                    }
+
+                    scopeTagId = tagId;
+                    break;
                 default:
-                    return (null, $"'scope.mode' must be 'all' or 'servers' (got '{mode}').");
+                    return (null, $"'scope.mode' must be 'all', 'servers', or 'tag' (got '{mode}').");
             }
         }
 
@@ -272,7 +303,7 @@ public sealed record CustomAlertRuleDefinition(
 
         var definition = new CustomAlertRuleDefinition(
             plan, plan.Measure.DisplayName, windowHours, op, warn, critical,
-            breachSamples, clearSamples, scopeMode, scopeServers, intervalSeconds);
+            breachSamples, clearSamples, scopeMode, scopeServers, scopeTagId, intervalSeconds);
         return (definition, null);
     }
 
