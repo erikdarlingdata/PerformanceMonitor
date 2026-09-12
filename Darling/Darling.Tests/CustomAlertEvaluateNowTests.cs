@@ -35,6 +35,15 @@ public class CustomAlertEvaluateNowTests
         "{\"metric\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"hours\":1}," +
         "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":1000}}");
 
+    /// <summary>Range ops (#3351): a two-sided band [10, 100]. between = fire inside, outside = fire beyond; both Warning-only.</summary>
+    private static CustomAlertRuleDefinition BetweenRule() => Parse(
+        "{\"metric\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"hours\":1}," +
+        "\"predicate\":{\"op\":\"between\",\"lowerBound\":10,\"upperBound\":100}}");
+
+    private static CustomAlertRuleDefinition OutsideRule() => Parse(
+        "{\"metric\":{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"hours\":1}," +
+        "\"predicate\":{\"op\":\"outside\",\"lowerBound\":10,\"upperBound\":100}}");
+
     private static CustomAlertRuleDefinition Parse(string json)
     {
         var (def, error) = CustomAlertRuleDefinition.TryParse(json);
@@ -81,6 +90,48 @@ public class CustomAlertEvaluateNowTests
     public void NoData_IsNeverABreach()
     {
         var (breaching, severity) = CustomAlertEvaluator.ClassifyTestValue(TieredRule(), null);
+        Assert.False(breaching);
+        Assert.Null(severity);
+    }
+
+    // ─────────────────────────── range ops (#3351): between / outside would-fire ───────────────────────────
+
+    [Fact]
+    public void Between_InsideBand_WouldFire_Warning()
+    {
+        var (breaching, severity) = CustomAlertEvaluator.ClassifyTestValue(BetweenRule(), 55);
+        Assert.True(breaching);
+        Assert.Equal(AlertSeverityLevel.Warning, severity); // a range op has no critical tier in v1
+    }
+
+    [Fact]
+    public void Between_OutsideBand_WouldNotFire()
+    {
+        var (breaching, severity) = CustomAlertEvaluator.ClassifyTestValue(BetweenRule(), 500);
+        Assert.False(breaching);
+        Assert.Null(severity);
+    }
+
+    [Fact]
+    public void Outside_BeyondBand_WouldFire_Warning()
+    {
+        var (breaching, severity) = CustomAlertEvaluator.ClassifyTestValue(OutsideRule(), 500);
+        Assert.True(breaching);
+        Assert.Equal(AlertSeverityLevel.Warning, severity);
+    }
+
+    [Fact]
+    public void Outside_InsideBand_WouldNotFire()
+    {
+        var (breaching, severity) = CustomAlertEvaluator.ClassifyTestValue(OutsideRule(), 55);
+        Assert.False(breaching);
+        Assert.Null(severity);
+    }
+
+    [Fact]
+    public void Range_NoData_IsNeverABreach()
+    {
+        var (breaching, severity) = CustomAlertEvaluator.ClassifyTestValue(OutsideRule(), null);
         Assert.False(breaching);
         Assert.Null(severity);
     }

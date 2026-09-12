@@ -15,13 +15,21 @@ using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service;
 
-/// <summary>The scalar comparison a rule's value is tested against.</summary>
+/// <summary>The comparison a rule's value is tested against: a one-sided scalar bar
+/// (<see cref="GreaterThan"/>..<see cref="LessOrEqual"/>) or a two-sided range band
+/// (<see cref="Between"/>/<see cref="Outside"/>, #3351).</summary>
 public enum CustomAlertOp
 {
     GreaterThan,
     GreaterOrEqual,
     LessThan,
     LessOrEqual,
+
+    /// <summary>Breaches when the value is INSIDE the inclusive band [lowerBound, upperBound] (#3351).</summary>
+    Between,
+
+    /// <summary>Breaches when the value is OUTSIDE the inclusive band [lowerBound, upperBound] (#3351).</summary>
+    Outside,
 }
 
 /// <summary>Which servers a rule evaluates against: every monitored server (<see cref="All"/>), an explicit
@@ -52,8 +60,10 @@ public sealed record CustomAlertRuleDefinition(
     string MeasureDisplayName,
     double WindowHours,
     CustomAlertOp Op,
-    double WarnThreshold,
+    double? WarnThreshold,
     double? CriticalThreshold,
+    double? LowerBound,
+    double? UpperBound,
     int BreachSamples,
     int ClearSamples,
     CustomAlertScopeMode ScopeMode,
@@ -61,6 +71,15 @@ public sealed record CustomAlertRuleDefinition(
     int? ScopeTagId,
     int? EvaluationIntervalSeconds)
 {
+    /// <summary>Whether this rule's operator tests the value against a two-sided band
+    /// (<see cref="LowerBound"/>/<see cref="UpperBound"/>) rather than a single scalar threshold (#3351). A
+    /// range op carries both bounds and neither <see cref="WarnThreshold"/> nor <see cref="CriticalThreshold"/>;
+    /// a scalar op is the mirror image — the validator enforces that mutual exclusivity.</summary>
+    public bool IsRange => IsRangeOp(Op);
+
+    /// <summary>Pure op-category test, usable by the validator before a definition is constructed.</summary>
+    private static bool IsRangeOp(CustomAlertOp op) => op is CustomAlertOp.Between or CustomAlertOp.Outside;
+
     /// <summary>Alert windows are recent (hours), never the 90-day compose chart ceiling — R2 hardening.</summary>
     public const double MaxWindowHours = 24.0;
 
@@ -82,13 +101,27 @@ public sealed record CustomAlertRuleDefinition(
         ScopeMode == CustomAlertScopeMode.All
         || ScopeServers.Any(s => string.Equals(s, storageName, StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>Whether a value breaches the warning bar (the predicate).</summary>
-    public bool IsBreaching(double value) => Compare(value, WarnThreshold);
+    /// <summary>
+    /// Whether a value breaches the predicate. A scalar op crosses its warning bar (the <see cref="Compare"/>
+    /// authority); a range op falls IN (<see cref="CustomAlertOp.Between"/>) or OUT
+    /// (<see cref="CustomAlertOp.Outside"/>) of the INCLUSIVE band [<see cref="LowerBound"/>,
+    /// <see cref="UpperBound"/>] (#3351). Bounds are guaranteed present for a range op by the validator.
+    /// </summary>
+    public bool IsBreaching(double value) => Op switch
+    {
+        CustomAlertOp.Between => LowerBound is double lo && UpperBound is double hi && value >= lo && value <= hi,
+        CustomAlertOp.Outside => LowerBound is double lo && UpperBound is double hi && (value < lo || value > hi),
+        _ => WarnThreshold is double warn && Compare(value, warn),
+    };
 
-    /// <summary>The tier a breaching value fires at: Critical when it also crosses the critical bar, else Warning.</summary>
+    /// <summary>The tier a breaching value fires at: Critical when it also crosses the critical bar, else Warning.
+    /// A range op is Warning-only in v1 (a two-tier band would need a warn-band AND a crit-band = four bounds;
+    /// that escalation is a tracked follow-up, not this slice), so it always fires Warning.</summary>
     public AlertSeverityLevel SeverityFor(double value) =>
-        CriticalThreshold is double c && Compare(value, c) ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning;
+        !IsRange && CriticalThreshold is double c && Compare(value, c) ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning;
 
+    /// <summary>The scalar comparison — the single authority for a one-sided bar. Range ops go through the band
+    /// logic in <see cref="IsBreaching"/> instead, never here.</summary>
     private bool Compare(double value, double threshold) => Op switch
     {
         CustomAlertOp.GreaterThan => value > threshold,
@@ -98,7 +131,8 @@ public sealed record CustomAlertRuleDefinition(
         _ => false,
     };
 
-    /// <summary>The operator's human symbol, for rendering the threshold in an alert body.</summary>
+    /// <summary>The scalar operator's human symbol, for rendering a one-sided threshold in an alert body. A range
+    /// op has no single symbol — its band renders through <see cref="FiredThreshold"/> — so this is "?" for one.</summary>
     public string OpSymbol => Op switch
     {
         CustomAlertOp.GreaterThan => ">",
@@ -107,6 +141,26 @@ public sealed record CustomAlertRuleDefinition(
         CustomAlertOp.LessOrEqual => "<=",
         _ => "?",
     };
+
+    /// <summary>
+    /// How the threshold reads in a fired alert body, plus the numeric twin persisted alongside it
+    /// (<c>NumericThresholdValue</c>). A scalar op reports the crossed bar as "&lt;symbol&gt; &lt;value&gt;"
+    /// (e.g. "&gt;= 25") with that bar as the numeric twin; a range op reports the band as "outside 10 - 100" /
+    /// "between 10 - 100" with a NULL numeric twin (a band has no single threshold value). The plain " - " band
+    /// separator keeps an em dash — a style tell — out of delivered text. Range ops are Warning-only, so the tier
+    /// only selects warn-vs-critical for a scalar op.
+    /// </summary>
+    public (string Text, double? Numeric) FiredThreshold(AlertSeverityLevel severity)
+    {
+        if (IsRange)
+        {
+            var word = Op == CustomAlertOp.Between ? "between" : "outside";
+            return (string.Create(CultureInfo.InvariantCulture, $"{word} {LowerBound ?? 0:0.###} - {UpperBound ?? 0:0.###}"), null);
+        }
+
+        var bar = severity == AlertSeverityLevel.Critical && CriticalThreshold is double c ? c : WarnThreshold ?? 0;
+        return (string.Create(CultureInfo.InvariantCulture, $"{OpSymbol} {bar:0.###}"), bar);
+    }
 
     /// <summary>
     /// Parses and validates a rule definition JSON. Returns the typed definition, or a human-readable error
@@ -185,37 +239,81 @@ public sealed record CustomAlertRuleDefinition(
 
         if (predicate["op"] is not JsonValue opValue || !TryParseOp(opValue.ToString(), out var op))
         {
-            return (null, "'predicate.op' must be one of: gt, ge, lt, le.");
+            return (null, "'predicate.op' must be one of: gt, ge, lt, le, between, outside.");
         }
 
-        // A '<'/'<=' alert on a COUNT cannot tell zero matching events from a stalled collector reading zero
-        // rows, so it would false-fire exactly when the true signal is "no data". Deferred; use a >= count.
-        if (plan.Aggregate == ComposeAggregate.Count && op is CustomAlertOp.LessThan or CustomAlertOp.LessOrEqual)
-        {
-            return (null, "a '<'/'<=' alert on a count can't distinguish zero events from a stalled collector; use '>=' instead.");
-        }
-
-        if (predicate["warnThreshold"] is not JsonNode warnNode || !TryDouble(warnNode, out var warn))
-        {
-            return (null, "'predicate.warnThreshold' (a number) is required.");
-        }
-
+        // Scalar ops carry a warning bar (+ optional more-extreme critical); range ops carry a two-sided band.
+        // The two shapes are MUTUALLY EXCLUSIVE (#3351): a scalar predicate MUST NOT carry bounds, and a range
+        // predicate MUST NOT carry warn/critical. Overloading warn/critical as the band would break the "crossed
+        // the warning threshold" wording and the two-tier severity model, so the band lives in its own
+        // lowerBound/upperBound and only one shape is populated on any given rule.
+        double? warn = null;
         double? critical = null;
-        if (predicate["criticalThreshold"] is JsonNode critNode)
+        double? lowerBound = null;
+        double? upperBound = null;
+
+        if (IsRangeOp(op))
         {
-            if (!TryDouble(critNode, out var c))
+            if (predicate["warnThreshold"] is not null || predicate["criticalThreshold"] is not null)
             {
-                return (null, "'predicate.criticalThreshold' must be a number.");
+                return (null, "a range predicate ('between'/'outside') uses 'lowerBound'/'upperBound', not 'warnThreshold'/'criticalThreshold'.");
             }
 
-            // Critical must be MORE extreme than warning in the operator's direction.
-            var ordered = op is CustomAlertOp.GreaterThan or CustomAlertOp.GreaterOrEqual ? c >= warn : c <= warn;
-            if (!ordered)
+            if (predicate["lowerBound"] is not JsonNode lowerNode || !TryDouble(lowerNode, out var lower))
             {
-                return (null, "'predicate.criticalThreshold' must be more extreme than 'warnThreshold' in the operator's direction.");
+                return (null, "'predicate.lowerBound' (a number) is required for a range predicate ('between'/'outside').");
             }
 
-            critical = c;
+            if (predicate["upperBound"] is not JsonNode upperNode || !TryDouble(upperNode, out var upper))
+            {
+                return (null, "'predicate.upperBound' (a number) is required for a range predicate ('between'/'outside').");
+            }
+
+            if (!(lower < upper))
+            {
+                return (null, "'predicate.lowerBound' must be less than 'predicate.upperBound'.");
+            }
+
+            lowerBound = lower;
+            upperBound = upper;
+        }
+        else
+        {
+            if (predicate["lowerBound"] is not null || predicate["upperBound"] is not null)
+            {
+                return (null, "a scalar predicate ('gt'/'ge'/'lt'/'le') uses 'warnThreshold' (+ an optional 'criticalThreshold'), not 'lowerBound'/'upperBound'.");
+            }
+
+            // A '<'/'<=' alert on a COUNT cannot tell zero matching events from a stalled collector reading zero
+            // rows, so it would false-fire exactly when the true signal is "no data". Deferred; use a >= count.
+            if (plan.Aggregate == ComposeAggregate.Count && op is CustomAlertOp.LessThan or CustomAlertOp.LessOrEqual)
+            {
+                return (null, "a '<'/'<=' alert on a count can't distinguish zero events from a stalled collector; use '>=' instead.");
+            }
+
+            if (predicate["warnThreshold"] is not JsonNode warnNode || !TryDouble(warnNode, out var w))
+            {
+                return (null, "'predicate.warnThreshold' (a number) is required.");
+            }
+
+            warn = w;
+
+            if (predicate["criticalThreshold"] is JsonNode critNode)
+            {
+                if (!TryDouble(critNode, out var c))
+                {
+                    return (null, "'predicate.criticalThreshold' must be a number.");
+                }
+
+                // Critical must be MORE extreme than warning in the operator's direction.
+                var ordered = op is CustomAlertOp.GreaterThan or CustomAlertOp.GreaterOrEqual ? c >= w : c <= w;
+                if (!ordered)
+                {
+                    return (null, "'predicate.criticalThreshold' must be more extreme than 'warnThreshold' in the operator's direction.");
+                }
+
+                critical = c;
+            }
         }
 
         // ---- hysteresis ----
@@ -302,7 +400,7 @@ public sealed record CustomAlertRuleDefinition(
         }
 
         var definition = new CustomAlertRuleDefinition(
-            plan, plan.Measure.DisplayName, windowHours, op, warn, critical,
+            plan, plan.Measure.DisplayName, windowHours, op, warn, critical, lowerBound, upperBound,
             breachSamples, clearSamples, scopeMode, scopeServers, scopeTagId, intervalSeconds);
         return (definition, null);
     }
@@ -327,6 +425,12 @@ public sealed record CustomAlertRuleDefinition(
             case "le":
             case "<=":
                 op = CustomAlertOp.LessOrEqual;
+                return true;
+            case "between":
+                op = CustomAlertOp.Between;
+                return true;
+            case "outside":
+                op = CustomAlertOp.Outside;
                 return true;
             default:
                 return false;

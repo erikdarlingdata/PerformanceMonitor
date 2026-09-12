@@ -459,10 +459,9 @@ public sealed class CustomAlertEvaluator
     {
         var metricName = MetricNameFor(row.Id);
         var currentText = value.ToString("0.###", CultureInfo.InvariantCulture);
-        var thresholdValue = severity == AlertSeverityLevel.Critical && def.CriticalThreshold is double critical
-            ? critical
-            : def.WarnThreshold;
-        var thresholdText = string.Create(CultureInfo.InvariantCulture, $"{def.OpSymbol} {thresholdValue:0.###}");
+        // Scalar ops render "<symbol> <bar>" with the crossed bar as the numeric twin; a range op renders its
+        // band ("outside 10 - 100") with a null numeric twin. The definition is the single authority (#3351).
+        var (thresholdText, thresholdValue) = def.FiredThreshold(severity);
 
         /* Sanitize the user-authored name/description before they enter any rendered string or the persisted
            detail_text: strip every line break + control char and cap the length so a crafted name cannot

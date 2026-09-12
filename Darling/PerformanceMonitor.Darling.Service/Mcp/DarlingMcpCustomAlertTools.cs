@@ -106,8 +106,11 @@ public sealed class DarlingMcpCustomAlertTools
         "it loads a rule, so use it to iterate on a generated definition until it is valid. The definition is a " +
         "JSON object: a 'metric' (a compose SCALAR panel - a 'source' + 'measure'|'ratio' + 'aggregate', plus " +
         "an optional 'hours' window between one minute and 24 hours; no 'timeBucket'/'topN', since the metric " +
-        "must reduce to a single value), a 'predicate' ('op' one of gt/ge/lt/le, a numeric 'warnThreshold', and " +
-        "an optional 'criticalThreshold' that must be more extreme than warn in the operator's direction), an " +
+        "must reduce to a single value), a 'predicate' (either a SCALAR comparison - 'op' one of gt/ge/lt/le, a " +
+        "numeric 'warnThreshold', and an optional 'criticalThreshold' that must be more extreme than warn in the " +
+        "operator's direction; or a RANGE band - 'op' 'between' or 'outside', with numeric 'lowerBound' and " +
+        "'upperBound' where lowerBound < upperBound, which fires Warning-only and carries no warn/critical - the " +
+        "two shapes being mutually exclusive), an " +
         "optional 'hysteresis' ('breachSamples'/'clearSamples', each an integer >= 1), an optional 'scope' " +
         "('mode' 'all', or 'servers' with a non-empty 'servers' list, or 'tag' with an integer 'tagId' fleet-tag " +
         "id whose directly-assigned servers the rule then evaluates), and an " +

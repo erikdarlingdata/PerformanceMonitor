@@ -22,7 +22,8 @@
 import { el, mount, loadingStrip, errorStrip, emptyStrip, relTime } from "../util.js";
 import * as api from "../alerts-api.js";
 
-/** The operator's human symbol for a condition chip (mirrors CustomAlertRuleDefinition.OpSymbol). */
+/** The scalar operator's human symbol for a condition chip (mirrors CustomAlertRuleDefinition.OpSymbol); the range
+ *  ops (between/outside, #3351) render their band instead — see describeCondition. */
 const OP_SYMBOLS = { gt: ">", ge: "≥", lt: "<", le: "≤" };
 
 /* ─────────────────────────── list page ─────────────────────────── */
@@ -174,9 +175,18 @@ function describeMetric(metric) {
   return agg + name;
 }
 
-/** A compact condition label ("> 25" or "≥ 30000 / crit 120000"), or null. */
+/** A compact condition label — a scalar bar ("≥ 30000 / crit 120000") or a range band ("outside 10–100"), or null. */
 function describeCondition(pred) {
-  if (!pred || typeof pred !== "object" || pred.warnThreshold == null) return null;
+  if (!pred || typeof pred !== "object") return null;
+
+  /* Range op (#3351): a two-sided band, rendered "outside 10–100" / "between 10–100" with an en dash (–)
+     between the bounds — a range predicate carries lowerBound/upperBound and no warnThreshold. */
+  if (pred.op === "between" || pred.op === "outside") {
+    if (pred.lowerBound == null || pred.upperBound == null) return null;
+    return pred.op + " " + pred.lowerBound + "–" + pred.upperBound;
+  }
+
+  if (pred.warnThreshold == null) return null;
   const sym = OP_SYMBOLS[pred.op] || pred.op || "?";
   let text = sym + " " + pred.warnThreshold;
   if (pred.criticalThreshold != null) text += " / crit " + pred.criticalThreshold;
