@@ -53,14 +53,16 @@ USAGE
 
   python3 .github/scripts/verify_release_signatures.py v3.7.0
   python3 .github/scripts/verify_release_signatures.py v3.7.0 --json
+  python3 .github/scripts/verify_release_signatures.py --verify-dir releases
+  python3 .github/scripts/verify_release_signatures.py --self-test
 
   Exit status is 1 if any executable is unsigned, 2 if a release or asset could not be read at
   all, and 0 only when every executable found carried a signature. An empty executable list is
   status 2, not 0: finding nothing to check is a broken run, not a clean one.
 
-  The CI half of #3288 is deliberately NOT this script. In the release job the artifacts are on
-  disk before upload, so that check needs no HTTP at all and belongs in the workflow's own pwsh.
-  This one answers "what did we actually publish", which is the question that goes unasked.
+  `--verify-dir` is the release guard: the same reader over artifacts that are still on disk
+  before upload, so it needs no HTTP and no published release. The tag form answers "what did we
+  actually publish", which is the question that goes unasked. Both apply ALLOWED_UNSIGNED.
 """
 
 from __future__ import annotations
@@ -272,37 +274,6 @@ def check_archive(url: str, name: str, size: int, include_dlls: bool) -> tuple[l
         except ReadError as exc:
             errors.append(f"{name} :: {member}: {exc}")
     return findings, errors
-
-
-def verify_local_files(paths: list[str]) -> int:
-    """Assert every named local file carries a signature. Used as the post-condition of signing.
-
-    This exists because `vpk pack` does NOT verify that its `--signTemplate` actually signed
-    anything: a template that exits 0 without signing leaves packing to complete normally and
-    the release to publish unsigned binaries, which is exactly how #3288 shipped twice. So the
-    signing script asserts the outcome here rather than trusting its own success.
-    """
-    failures, checked = [], 0
-    for path in paths:
-        try:
-            with open(path, "rb") as handle:
-                head = handle.read(HEADER_BYTES)
-            off, length = certificate_table(head)
-        except (OSError, ReadError, struct.error) as exc:
-            failures.append(f"{path}: unreadable as a PE image ({exc})")
-            continue
-        checked += 1
-        if off == 0 or length == 0:
-            failures.append(f"{path}: NO SIGNATURE after signing")
-    for f in failures:
-        print(f"VERIFY FAIL: {f}", file=sys.stderr)
-    if not checked:
-        print("VERIFY FAIL: nothing was checked", file=sys.stderr)
-        return 2
-    if failures:
-        return 1
-    print(f"verified: {checked} file(s) carry a signature")
-    return 0
 
 
 def verify_local_dir(directory: str) -> int:
@@ -684,12 +655,6 @@ def main() -> int:
     parser.add_argument("tag", nargs="?", help="release tag, e.g. v3.7.0")
     parser.add_argument("--self-test", action="store_true", dest="self_test")
     parser.add_argument(
-        "--verify-files",
-        nargs="+",
-        metavar="PATH",
-        help="verify local files carry a signature (the signing script's post-condition)",
-    )
-    parser.add_argument(
         "--verify-dir",
         metavar="DIR",
         help="release guard: every .exe under DIR, including inside zips/nupkgs, must be signed",
@@ -706,12 +671,10 @@ def main() -> int:
 
     if args.self_test:
         return self_test()
-    if args.verify_files:
-        return verify_local_files(args.verify_files)
     if args.verify_dir:
         return verify_local_dir(args.verify_dir)
     if not args.tag:
-        parser.error("a release tag is required unless --self-test or --verify-files is given")
+        parser.error("a release tag is required unless --self-test or --verify-dir is given")
 
     try:
         report = build_report(args.tag, args.repo, args.gh, args.include_dlls)
