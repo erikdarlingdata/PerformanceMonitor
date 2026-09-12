@@ -69,8 +69,8 @@ public class MuteRuleService
     /// BEFORE the cache assignment and this method catches nothing, so a read that throws leaves the
     /// previously-loaded rules exactly where they were: the service keeps suppressing what the operator
     /// asked it to suppress until a read succeeds. That ordering is the whole mechanism — a catch here, or
-    /// hoisting the assignment above the await, would put back the defect where a store blip un-muted every
-    /// rule at once and the only surfaces that would have shown it read the same empty cache.</para>
+    /// a cache write hoisted above the await, would let a store blip un-mute every rule at once, and every
+    /// surface that could report it reads this same cache.</para>
     ///
     /// <para>The first load needs no special case and deliberately has none. A fresh or unmigrated store
     /// genuinely has no rules and must not stop the service from starting — and at that point the cache is
@@ -81,8 +81,8 @@ public class MuteRuleService
     /// the store's job, and <see cref="IMuteRuleStore"/> requires it.</para>
     ///
     /// <para>Callers must handle the throw — not to preserve the cache, which is guaranteed here whatever
-    /// they do, but because an unhandled one would take down the host that was collecting. Each does, and
-    /// reports it on the surfaces its own SKU has.</para>
+    /// they do, but because an unhandled one takes down a host whose collection is otherwise healthy. Each
+    /// does, and reports it on the surfaces its own SKU has.</para>
     /// </summary>
     public async Task LoadAsync()
     {
