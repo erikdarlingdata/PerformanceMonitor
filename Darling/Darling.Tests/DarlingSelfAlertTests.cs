@@ -1103,17 +1103,22 @@ public sealed class DarlingSelfAlertTests
     }
 
     /// <summary>
-    /// THE load-bearing pin: a mute rule that constrains nothing matches every alert on the store, this
-    /// alert included — so honoring the mute would let the condition suppress the only report of its own
-    /// subject. The muted-and-recorded compromise every sibling accepts is not enough here, because a row
-    /// in alert history is exactly the surface you cannot find without already suspecting the mute.
+    /// THE load-bearing pin: the shared mute seam's ANSWER never suppresses this alert, however affirmative.
+    /// The seam returns one boolean over every rule and cannot say which rule answered, and a rule that
+    /// constrains nothing matches every alert on the store — this one included — so trusting it would let
+    /// the condition suppress the only report of its own subject. The muted-and-recorded compromise every
+    /// sibling accepts is not enough here, because a row in alert history is exactly the surface you cannot
+    /// find without already suspecting the mute.
+    ///
+    /// <para>Suppression is available (#3348) but only through an EXPLICIT naming, decided from the rule
+    /// list rather than from this seam — see the explicit-mute pins below.</para>
     ///
     /// <para>The sibling fire in the SAME harness, under the SAME <c>Muted = true</c>, is the control. Without
     /// it this test would pass just as happily if the harness's mute seam were never wired to anything, which
     /// is the shape a pin that cannot fail takes.</para>
     /// </summary>
     [Fact]
-    public async Task StaleMute_IsNotSuppressibleByAMuteRule_WhileItsSiblingStillIs()
+    public async Task StaleMute_IsNotSuppressibleByTheSharedMuteSeam_WhileItsSiblingStillIs()
     {
         var h = new Harness { Muted = true };
         var e = h.Build();
@@ -1129,27 +1134,266 @@ public sealed class DarlingSelfAlertTests
     }
 
     /// <summary>
-    /// And it does not merely ignore the ANSWER — it never asks the question. <c>ApplyStaleMuteRulesAsync</c>
-    /// is the un-isolated entry point, so a mute seam that throws would propagate out of it; that it does not
-    /// is what distinguishes "never consulted" from "consulted and the result discarded".
+    /// And it does not merely ignore the ANSWER — it never asks the question, on EITHER outcome.
+    /// <c>ApplyStaleMuteRulesAsync</c> is the un-isolated entry point, so a mute seam that throws would
+    /// propagate out of it; that it does not is what distinguishes "never consulted" from "consulted and the
+    /// result discarded".
+    ///
+    /// <para>Both the unsuppressed and the explicitly-suppressed paths are walked against the throwing seam,
+    /// because #3348 made the mute decision a <c>bool?</c> that only DEFAULTS to asking. A fire site passing
+    /// its own verdict short-circuits the seam on the value it passes — so covering one value would leave
+    /// the other free to start consulting it, and the blanket-mute self-suppression would come back through
+    /// a path this pin was watching the wrong half of.</para>
     /// </summary>
     [Fact]
-    public async Task StaleMute_NeverConsultsTheMuteSeamAtAll()
+    public async Task StaleMute_NeverConsultsTheMuteSeamAtAll_OnEitherVerdict()
     {
         var h = new Harness { MuteThrows = true };
         var e = h.Build();
 
         await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
-
         Assert.Single(h.Deliverer.Outcomes);
+
+        /* The explicitly-muted verdict, on a SECOND harness so the daily re-fire gate does not swallow it. */
+        var explicitlyMuted = new Harness { MuteThrows = true };
+        var e2 = explicitlyMuted.Build();
+
+        await e2.ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 1), ExplicitMute() }, Ct);
+
+        var fired = Assert.Single(explicitlyMuted.Deliverer.Outcomes);
+        Assert.True(fired.Muted);
+    }
+
+    /* ---------------- the explicit/incidental mute split (#3348) ---------------- */
+
+    /// <summary>
+    /// A mute rule whose <c>MetricName</c> NAMES this condition, and nothing else — the escape hatch. An
+    /// operator who writes this has decided about THIS alert, which is a different act from one whose rule
+    /// happens to cover it.
+    /// </summary>
+    private static MuteRule ExplicitMute(
+        double ageDays = 0,
+        string? metric = DarlingSelfAlertEvaluator.StaleMuteMetric,
+        string? serverName = null,
+        DateTime? expiresAtUtc = null,
+        bool enabled = true,
+        string id = "rule-explicit") =>
+        new()
+        {
+            Id = id,
+            Enabled = enabled,
+            CreatedAtUtc = MuteClock.AddDays(-ageDays),
+            ExpiresAtUtc = expiresAtUtc,
+            Reason = "seeded fixture reason",
+            MetricName = metric,
+            ServerName = serverName,
+        };
+
+    /// <summary>
+    /// The escape hatch itself: a rule that NAMES this metric silences its channels, on the same surface
+    /// every other alert uses. Before #3348 this was the one alert in the product an operator could not
+    /// answer by any route except deleting the rule it was reporting.
+    ///
+    /// <para>The alert is still DELIVERED-AND-FLAGGED rather than dropped, which is the whole audit trail
+    /// for the decision: the history row lands every re-fire and still names the stale rules, so "why did
+    /// this stop paging me" is answerable from the record. The asserted <c>Muted</c> flag is what the
+    /// deliverer keys its channel skip on.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_ARuleNamingThisMetric_SuppressesIt_AndIsStillRecorded()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 1), ExplicitMute() }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(fired.Muted);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteMetric, fired.MetricName);
+        Assert.Contains("Rule rule-a", fired.DetailText);   // the report itself is unchanged
+    }
+
+    /// <summary>
+    /// THE self-suppression pin, stated on its own subject: the blanket mute cannot hide the report OF THAT
+    /// BLANKET MUTE. One rule, in the list twice over — it is the thing being reported and the thing that
+    /// would do the suppressing — and it is exactly the shape with the largest blast radius, so a version
+    /// that honoured it would lose the report precisely where it matters most.
+    ///
+    /// <para>This holds by construction rather than by care, because a blanket rule constrains no metric and
+    /// so cannot pass the explicit-naming filter that is the decision's only input. The severity assertion
+    /// is the control that the fixture really is the blanket shape: a rule that had quietly acquired a
+    /// constraint would read Warning, and this test would then be pinning the wrong rule shape while still
+    /// passing.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_ABlanketMute_CannotSuppressTheReportOfThatSameBlanketMute()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 2, metric: null, id: "rule-blanket") }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.False(fired.Muted);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Contains("(matches all alerts)", fired.DetailText);
+    }
+
+    /// <summary>
+    /// An explicit rule is found among incidental ones IN BOTH ARRIVAL ORDERS. <c>FindExplicitMute</c>
+    /// returns the first rule that names the metric, so a list holding both a blanket rule and an explicit
+    /// one must reach the same verdict either way round.
+    ///
+    /// <para>Both orders on purpose: the #3306 lane's first ordering mutation survived because arrival order
+    /// happened to equal the sorted order, so <c>Reverse()</c> was a no-op. A single-order fixture here
+    /// could not tell a scan of the whole list from one that stops at the first rule.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task StaleMute_FindsTheExplicitRuleAmongBlanketOnes_InEitherArrivalOrder(bool explicitFirst)
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var blanket = Mute(StaleDays + 2, metric: null, id: "rule-blanket");
+        var named = ExplicitMute();
+        var rules = explicitFirst
+            ? new[] { named, blanket }
+            : new[] { blanket, named };
+
+        await e.ApplyStaleMuteRulesAsync(rules, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(fired.Muted);
+    }
+
+    /// <summary>
+    /// Naming the metric is necessary but not sufficient: an explicit rule still has to pass the FULL matcher
+    /// against this alert's real context, so the narrowing is strictly one-directional and honouring an
+    /// explicit mute can never suppress MORE than the ordinary seam would.
+    ///
+    /// <para>Each case is a rule that names the metric and is turned away by a different arm of
+    /// <c>MuteRule.MatchesAt</c> — the wrong server, a disabled rule, a lapsed bound, and a dimension this
+    /// fleet-level condition does not have. Without these, "explicit" would mean "names the metric" alone,
+    /// and a rule aimed at one monitored server would silence a fleet-wide condition.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_AnExplicitRuleMustStillMatch_OrItDoesNotSuppress()
+    {
+        /* Scoped to a monitored server: this condition's server is the synthetic "Monitor Store" sentinel,
+           so a rule aimed at a real server is not about it. */
+        await AssertNotSuppressed(ExplicitMute(serverName: "some-monitored-server"));
+
+        // Disabled: it suppresses nothing at all, so it cannot be suppressing this.
+        await AssertNotSuppressed(ExplicitMute(enabled: false));
+
+        /* A bound that has passed, judged on the INJECTED clock — the reason MuteRule grew MatchesAt. Read
+           against the ambient clock instead, this case's verdict would depend on the wall-clock date the
+           suite happened to run on. */
+        await AssertNotSuppressed(ExplicitMute(ageDays: 30, expiresAtUtc: MuteClock.AddDays(-1)));
+
+        /* A database pattern: this alert has no database dimension, so the rule cannot match it — the same
+           answer the ordinary seam gives every alert without one. */
+        var withPattern = ExplicitMute();
+        withPattern.DatabasePattern = "anything";
+        await AssertNotSuppressed(withPattern);
+
+        // A different metric's name is not this metric's name.
+        await AssertNotSuppressed(ExplicitMute(metric: "High CPU"));
+
+        /* Empty string is not a naming. It is also not "unconstrained" to the matcher, which tests for null
+           — so a rule written this way matches NOTHING, and reading it as explicit would hand the alert an
+           off switch whose own rule could never suppress anything else. */
+        await AssertNotSuppressed(ExplicitMute(metric: ""));
+
+        static async Task AssertNotSuppressed(MuteRule rule)
+        {
+            var h = new Harness();
+            var e = h.Build();
+
+            await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1), rule }, Ct);
+
+            var fired = Assert.Single(h.Deliverer.Outcomes);
+            Assert.False(fired.Muted,
+                $"a rule that does not match this alert must not suppress it: {rule.Summary}");
+        }
+    }
+
+    /// <summary>
+    /// The fleet sentinel IS matchable, which is what makes the negative case above a real constraint rather
+    /// than an artefact of fleet-level alerts being unmutable by any server-scoped rule. An operator reading
+    /// "Monitor Store" out of the alert history and scoping a rule to it gets the suppression they asked for.
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_AnExplicitRuleScopedToTheFleetSentinel_DoesSuppress()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(
+            new[]
+            {
+                Mute(StaleDays + 1),
+                ExplicitMute(serverName: DarlingSelfAlertEvaluator.StoreServerLabel),
+            },
+            Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(fired.Muted);
+    }
+
+    /// <summary>
+    /// "Explicit" is the MATCHER's own answer about the metric dimension, not a second opinion this condition
+    /// formed. <see cref="MuteRule.NamesMetric"/> and <see cref="MuteRule.MatchesAt"/> must agree for a rule
+    /// constrained by the metric alone, in both directions, or the split would be an assertion about the
+    /// matcher rather than a reading of it — and a rule could be called deliberate while matching nothing,
+    /// or incidental while matching.
+    ///
+    /// <para>Case is part of the claim: the metric arm is <c>OrdinalIgnoreCase</c>, so a differently-cased
+    /// spelling of the name is still a naming. A <c>NamesMetric</c> that compared ordinally would let a
+    /// lower-cased rule suppress nothing while <c>get_mute_rules</c> showed the operator a rule that reads
+    /// exactly right.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("Stale Mute Rules", true)]
+    [InlineData("stale mute rules", true)]
+    [InlineData("STALE MUTE RULES", true)]
+    [InlineData("Stale Mute Rule", false)]
+    [InlineData("Stale", false)]
+    [InlineData("Stale Mute Rules Cleared", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void MuteRule_NamesMetric_AgreesWithTheMatcherItself(string? ruleMetric, bool names)
+    {
+        var rule = new MuteRule { MetricName = ruleMetric };
+        var context = new AlertMuteContext
+        {
+            ServerName = DarlingSelfAlertEvaluator.StoreServerLabel,
+            MetricName = DarlingSelfAlertEvaluator.StaleMuteMetric,
+        };
+
+        Assert.Equal(names, rule.NamesMetric(DarlingSelfAlertEvaluator.StaleMuteMetric));
+
+        /* Constrained by the metric alone, so the matcher's verdict IS its metric arm's verdict — except for
+           the null spelling, which constrains nothing and therefore matches while naming nothing. That
+           asymmetry is the whole point of the split: matching is not deciding. */
+        Assert.Equal(names || ruleMetric is null, rule.MatchesAt(context, MuteClock));
     }
 
     /// <summary>
     /// A standing condition on its OWN re-fire interval, not the shared alert cooldown. The middle step is
     /// the discriminating one: it sits well past the alert cooldown's own CEILING, so a version that used
     /// <c>CooldownElapsed</c> like every sibling reds here under any configured value rather than only under
-    /// the shipped default. That matters because this alert cannot be muted — an unsuppressible condition
-    /// re-firing on a five-minute clock about a days-scale fact is the flood the mute was meant to stop.
+    /// the shipped default.
+    ///
+    /// <para>It stayed daily after #3348 gave the alert an off switch, on reasoning that never depended on
+    /// being unsuppressible: the subject is a creation date against a seven-day bound, identical on every
+    /// sweep, and a five-minute cadence would make a permanent mute the only survivable configuration —
+    /// manufacturing the blind spot the condition exists to report.</para>
     /// </summary>
     [Fact]
     public async Task StaleMute_StandingCondition_ReFiresOnItsOwnDailyInterval_NotTheAlertCooldown()

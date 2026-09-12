@@ -26,7 +26,13 @@ public class MuteRule
     public string? WaitTypePattern { get; set; }
     public string? JobNamePattern { get; set; }
 
-    public bool IsExpired => ExpiresAtUtc.HasValue && DateTime.UtcNow >= ExpiresAtUtc.Value;
+    /// <summary>Whether the rule's bound has passed as of <paramref name="nowUtc"/>. The clock-taking form,
+    /// so a caller that already holds an injected clock judges expiry on the SAME instant it judges
+    /// everything else — a rule read as unexpired by one clock and expired by another is a rule whose
+    /// suppression decision depends on which line of the caller asked.</summary>
+    public bool IsExpiredAt(DateTime nowUtc) => ExpiresAtUtc.HasValue && nowUtc >= ExpiresAtUtc.Value;
+
+    public bool IsExpired => IsExpiredAt(DateTime.UtcNow);
 
     public MuteRule Clone() => new()
     {
@@ -50,9 +56,9 @@ public class MuteRule
     /// <summary>
     /// The match dimensions this rule actually constrains, rendered one per entry. The SINGLE enumeration
     /// behind both <see cref="Summary"/> and <see cref="MatchesEveryAlert"/>, and it names the same fields
-    /// <see cref="Matches"/> tests.
+    /// <see cref="MatchesAt"/> tests.
     ///
-    /// <para>One list rather than two hand-kept copies: a seventh dimension added to <see cref="Matches"/>
+    /// <para>One list rather than two hand-kept copies: a seventh dimension added to <see cref="MatchesAt"/>
     /// but missed by a copied "is this rule unconstrained" predicate would make a rule narrowed ONLY by
     /// that new dimension read as matching every alert. Sharing the list makes the two answers move
     /// together by construction.</para>
@@ -86,16 +92,39 @@ public class MuteRule
     /// </summary>
     public bool MatchesEveryAlert => MatchDescriptions().Count == 0;
 
-    public bool Matches(AlertMuteContext context)
+    /// <summary>
+    /// True when the rule's <see cref="MetricName"/> NAMES <paramref name="metricName"/> — the operator
+    /// typed this metric into this rule, rather than the rule reaching it because the metric dimension was
+    /// left unconstrained.
+    ///
+    /// <para>The distinction matters where a caller must tell a decision ABOUT an alert from a decision
+    /// that merely covers it (#3348). It is a meaningful distinction here only because the metric dimension
+    /// is EXACT: this is the same <see cref="StringComparison.OrdinalIgnoreCase"/> full-string equality
+    /// <see cref="MatchesAt"/> applies, and <see cref="MatchesAt"/> routes its metric arm through this
+    /// method so the two cannot drift into disagreeing about what "names" means. Unlike the four
+    /// <c>*Pattern</c> dimensions there is no substring, glob or regex form of a metric constraint, so a
+    /// rule either spells the metric out or does not constrain metrics at all — there is no third shape
+    /// that could match one incidentally while looking deliberate.</para>
+    /// </summary>
+    public bool NamesMetric(string? metricName) =>
+        MetricName != null
+        && string.Equals(MetricName, metricName, StringComparison.OrdinalIgnoreCase);
+
+    public bool Matches(AlertMuteContext context) => MatchesAt(context, DateTime.UtcNow);
+
+    /// <summary>
+    /// <see cref="Matches"/> judged against a caller-supplied instant rather than the ambient clock, so a
+    /// caller that already holds one decides the whole question on a single "now". Pure: no clock, no I/O.
+    /// </summary>
+    public bool MatchesAt(AlertMuteContext context, DateTime nowUtc)
     {
-        if (!Enabled || IsExpired) return false;
+        if (!Enabled || IsExpiredAt(nowUtc)) return false;
 
         if (ServerName != null &&
             !string.Equals(ServerName, context.ServerName, StringComparison.OrdinalIgnoreCase))
             return false;
 
-        if (MetricName != null &&
-            !string.Equals(MetricName, context.MetricName, StringComparison.OrdinalIgnoreCase))
+        if (MetricName != null && !NamesMetric(context.MetricName))
             return false;
 
         if (DatabasePattern != null &&
