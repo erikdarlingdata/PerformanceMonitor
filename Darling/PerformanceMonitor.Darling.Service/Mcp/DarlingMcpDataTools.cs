@@ -1249,13 +1249,25 @@ public sealed class DarlingMcpDataTools
             .FromFreshness(ServerHealthClassifier.ClassifyFreshness(lastCollectionUtc, nowUtc))
             .McpToken();
 
-    [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, newest first: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the store, rows collected, status and any error. get_collection_health rolls seven days of these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window. Also carries the phase decomposition where the run recorded one, as nested blocks that are null when the run took a path that does not report them — and a row carries at most ONE family. Server-scoped collectors fill sql_phases (open_ms, drain_ms, other_ms which is derived, watermark_ms) and drain (rows_read, bytes_read, last_read_ms, target_session_id). Per-database collectors that perform a deferred plan or statement-text fetch instead fill plan_fetch and/or text_fetch, each carrying probe_ms, target_ms, write_ms, ids_attempted and probe_ids summed across that run's databases. sweep_peer_max_ms is flat and present on every row: it is the slowest peer collector in the same sweep, the denominator for asking whether a slow run was slow alone or the whole sweep was. A null block means the run took the other path, not that the phase was free — most runs perform no deferred fetch at all. Divide target_ms by ids_attempted for the per-id target cost, probe_ms by probe_ids for the per-reference probe cost. CRITICAL for reading sql_duration_ms on a fetching collector: it is NOT purely target-side there. The deferred fetches run inside the driver's per-item SQL stopwatch and each one round-trips the MONITORING STORE to decide what plan XML and statement text are already held before writing back what came off the target, so the store's probe and write are billed to the column documented as the monitored server's. The probe is the largest single term in both fetches on this fleet — 55.4% of plan_fetch and 80.6% of text_fetch — and on one production run it was 107,334 ms of a 124,972 ms sql_duration_ms, 86%, against a plan-plus-text target time of 6,494 ms. sql_store_ms is that store share, derived from the two fetch blocks (probe_ms + write_ms of each) and null when no fetch ran. It is a FLOOR, not the whole: the per-item watermark refresh is also a store read inside the same stopwatch, the enumerated path records no watermark_ms, and that component is stored nowhere — so sql_duration_ms minus sql_store_ms is an UPPER bound on target-side time rather than the target-side time. store_duration_ms is not where the probe went either: it is the binary COPY of the collected rows and nothing else. Do NOT conclude a monitored server is slow from a large sql_duration_ms on query_store without reading sql_store_ms beside it.")]
+    [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, NEWEST FIRST by default and SLOWEST FIRST whenever min_duration_ms is supplied: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the store, rows collected, status and any error. get_collection_health rolls seven days of these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window. READ THE REACH FIELDS BEFORE CONCLUDING ANYTHING FROM THE ROWS. hours_back is the span you ASKED for; oldest_collection_time and newest_collection_time are the span you GOT, and on a busy fleet those are wildly different — roughly 500 log rows a minute across 50 servers means a 24-hour request at the 200-row default is satisfied by about the last 25 seconds of activity. truncated says the cap bit; the two timestamps say how far back the page actually reaches. A read whose newest and oldest are seconds apart has told you nothing about the window you named, and raising limit does NOT fix it under the default ordering because the slow runs are not the recent ones — min_duration_ms is the knob for that, because supplying it ranks by duration instead of by time. Both filters are applied in SQL, BEFORE the cap, so truncated and run_count describe the MATCHING rows rather than the unfiltered window. order names which ordering you got, so a caller never has to infer it from the filters it sent. Also carries the phase decomposition where the run recorded one, as nested blocks that are null when the run took a path that does not report them — and a row carries at most ONE family. Server-scoped collectors fill sql_phases (open_ms, drain_ms, other_ms which is derived, watermark_ms) and drain (rows_read, bytes_read, last_read_ms, target_session_id). Per-database collectors that perform a deferred plan or statement-text fetch instead fill plan_fetch and/or text_fetch, each carrying probe_ms, target_ms, write_ms, ids_attempted and probe_ids summed across that run's databases. sweep_peer_max_ms is flat and present on every row: it is the slowest peer collector in the same sweep, the denominator for asking whether a slow run was slow alone or the whole sweep was. A null block means the run took the other path, not that the phase was free — most runs perform no deferred fetch at all. Divide target_ms by ids_attempted for the per-id target cost, probe_ms by probe_ids for the per-reference probe cost. CRITICAL for reading sql_duration_ms on a fetching collector: it is NOT purely target-side there. The deferred fetches run inside the driver's per-item SQL stopwatch and each one round-trips the MONITORING STORE to decide what plan XML and statement text are already held before writing back what came off the target, so the store's probe and write are billed to the column documented as the monitored server's. The probe is the largest single term in both fetches on this fleet — 55.4% of plan_fetch and 80.6% of text_fetch — and on one production run it was 107,334 ms of a 124,972 ms sql_duration_ms, 86%, against a plan-plus-text target time of 6,494 ms. sql_store_ms is that store share, derived from the two fetch blocks (probe_ms + write_ms of each) and null when no fetch ran. It is a FLOOR, not the whole: the per-item watermark refresh is also a store read inside the same stopwatch, the enumerated path records no watermark_ms, and that component is stored nowhere — so sql_duration_ms minus sql_store_ms is an UPPER bound on target-side time rather than the target-side time. store_duration_ms is not where the probe went either: it is the binary COPY of the collected rows and nothing else. Do NOT conclude a monitored server is slow from a large sql_duration_ms on query_store without reading sql_store_ms beside it.")]
     public static async Task<string> GetCollectionLog(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows to return, newest first. Default 200.")] int limit = 200,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description("Maximum rows to return. Default 200. Applied AFTER the two filters, so it caps the matching rows rather than the window.")] int limit = 200,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        /*
+            APPENDED after as_of rather than grouped beside `limit`, and this is not tidiness deferred.
+            as_of is `string?` and collector_name is `string?`, so a C# call site passing the anchor
+            POSITIONALLY -- which one shipped test does -- would silently rebind it to the collector filter
+            and compile without a word. The read would then refuse to match any collector and return the
+            no-matches status for a call that asked about a past incident: a silently-different answer, which
+            is the failure class these filters were added to remove. MCP invokes by name, so the position
+            costs a client nothing; a positional C# caller is the only observer, and appending is what keeps
+            every existing one meaning what it already meant.
+        */
+        [Description("Limit to one collector, matched EXACTLY (query_store, plan_correction, wait_stats — the names get_collection_health lists). Omit for every collector. A name this server has never run returns the no-matches status rather than a quiet-window one.")] string? collector_name = null,
+        [Description("Return only runs whose total duration_ms is at or above this floor, AND rank the page SLOWEST FIRST rather than newest first — a floor under newest-first ordering still cannot reach the tail. Applied in SQL before the cap. 0 is a real value: it admits every run and is how you ask for the whole window ranked by cost. A negative is refused. Omit for no floor and newest-first order.")] double? min_duration_ms = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -1264,6 +1276,12 @@ public sealed class DarlingMcpDataTools
            silently clamping, so a caller asking for 5000 is told no instead of quietly given 1000. */
         var invalidLimit = McpHelpers.ValidateTop(limit);
         if (invalidLimit != null) return invalidLimit;
+
+        /* Same contract for the floor, and for the same reason one step further on: supplying it also
+           switches the ORDERING, so a negative quietly read as "no floor" would hand back a
+           duration-ranked full page with nothing to say the filter was ignored. */
+        var invalidFloor = McpHelpers.ValidateMinMs(min_duration_ms, "min_duration_ms");
+        if (invalidFloor != null) return invalidFloor;
 
         /* ResolveAsOf here, deliberately NOT ValidateWindow. These three reads have never capped
            hours_back -- they Math.Abs() it and window on the result -- so routing them through the
@@ -1280,23 +1298,44 @@ public sealed class DarlingMcpDataTools
 
             /* Over-fetch by one so truncation is OBSERVED rather than inferred. Comparing count to the
                cap cannot tell a window holding exactly `limit` runs from one holding more, and this
-               read's whole premise is that the cap announces itself instead of being guessed at. */
+               read's whole premise is that the cap announces itself instead of being guessed at.
+
+               The filters go INTO the read, so the over-fetch is of the FILTERED set and `truncated`
+               keeps meaning "more rows match than you were given". Filtering the returned page instead
+               would make it mean "more rows were in the window", which is a different sentence under the
+               same field name. */
             var rows = await DarlingDataReader.GetCollectionLogAsync(
-                postgres, resolved.ServerId, start, end, limit + 1);
+                postgres, resolved.ServerId, start, end, limit + 1, collector_name, min_duration_ms);
             var truncated = rows.Count > limit;
             if (truncated) rows = rows.Take(limit).ToList();
+
+            var filtered = !string.IsNullOrWhiteSpace(collector_name) || min_duration_ms is not null;
 
             if (rows.Count == 0)
             {
                 /*
-                    Zero rows is two completely different facts and they need different answers.
+                    Zero rows is now THREE completely different facts and they need different answers.
                     A server that has collected before and simply did nothing in THIS window is a
                     true negative -- the caller narrowed to a quiet period, and widening the window
                     is the move. A server with no log rows at all has never collected, which is a
                     fault, and telling that caller "nothing in the last 24 hours" would send them
                     off widening a window that will never fill. So we ask which one it is rather
                     than emitting one sentence that is true of both.
+
+                    The third is a filter that matched nothing, and it is the one that would have been
+                    filed as a defect the day after the filters shipped: a misspelled collector_name or a
+                    floor above every run in the window reaches the same zero, and the quiet-window
+                    sentence would then assert the window is quiet on a read that never looked at the
+                    whole window. It also names the filters back, because the caller cannot otherwise tell
+                    a rejected value from an honestly empty match.
                 */
+                if (filtered)
+                {
+                    return McpHelpers.Status(
+                        "empty",
+                        $"No collector runs on {resolved.ServerName} in the last {Math.Abs(hours_back)} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.");
+                }
+
                 var everCollected = await DarlingDataReader.HasAnyCollectionLogAsync(postgres, resolved.ServerId);
                 return everCollected
                     ? McpHelpers.Status(
@@ -1429,10 +1468,42 @@ public sealed class DarlingMcpDataTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                /* The span REQUESTED. Kept under its shipped name, and no longer the only span reported --
+                   see the two timestamps below. */
                 hours_back = Math.Abs(hours_back),
                 run_count = rows.Count,
                 /* Observed by the over-fetch above, not inferred from the row count. */
                 truncated,
+                /*
+                    #3287: the span actually COVERED, beside the span requested.
+
+                    `hours_back = 24` next to `truncated = true` told a caller the cap bit and then showed
+                    them the 24 hours as if that were the window -- an instrument reporting a span it did
+                    not measure. On the production fleet a 24-hour request at the default cap is satisfied
+                    by roughly the last 25 SECONDS of activity, and nothing in the payload said so, which
+                    is how a 114,331 ms run went unfound behind a page whose maximum was 19,064 ms.
+
+                    Computed as the MIN and MAX over the returned rows, deliberately not rows[0] and
+                    rows[^1]. Those are the same thing only under time ordering; the moment min_duration_ms
+                    switches the page to slowest-first, neither end of the array is an end of the window --
+                    and the time-ordered case would keep passing while the ranked one lied.
+
+                    Both ends, not just the oldest: under either ordering the newest row is not
+                    necessarily recent either (an as_of anchor or a stalled collector both move it), so a
+                    caller cannot derive the covered span from the oldest alone.
+                */
+                oldest_collection_time = rows.Min(r => r.CollectionTime).ToString("o"),
+                newest_collection_time = rows.Max(r => r.CollectionTime).ToString("o"),
+                /* Which ordering the page actually came back in. Stated rather than left to be inferred
+                   from whether min_duration_ms was sent, because the first sentence of this tool's
+                   description is the only other place that coupling is written down. */
+                order = min_duration_ms is null
+                    ? McpHelpers.CollectionLogOrderNewestFirst
+                    : McpHelpers.CollectionLogOrderSlowestFirst,
+                /* Echoed back so the filters that produced this page are on the page. run_count and
+                   truncated describe the MATCHING rows, and that sentence is unreadable without them. */
+                collector_name = string.IsNullOrWhiteSpace(collector_name) ? null : collector_name.Trim(),
+                min_duration_ms,
                 runs = result,
             }, McpHelpers.JsonOptions);
         }

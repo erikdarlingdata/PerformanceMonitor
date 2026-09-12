@@ -1600,15 +1600,30 @@ internal static class DarlingDataReader
     }
 
     /// <summary>
-    /// The raw per-run collection log for one server inside an explicit window, newest first, capped.
+    /// The SELECT and the window for the raw per-run collection log — everything both orderings share, so the
+    /// twenty-six columns and the five predicates exist once. Not executable on its own: the two consts below
+    /// close it with an <c>ORDER BY</c> and the cap.
+    ///
     /// <para>Bounded on BOTH sides rather than by a single now-relative lower bound, matching how the
     /// viewer's Collection Log tab windows this read: a caller asking about a past incident wants the
     /// rows from THEN, and an hours-back-from-now span cannot express that.</para>
+    ///
     /// <para>Reads <c>v_collection_log</c>, the same view the viewer uses, so the web dashboard and the
     /// MCP surface cannot drift from what the desktop shows. $1 server_id, $2 window start, $3 window
-    /// end (naive UTC), $4 row cap.</para>
+    /// end (naive UTC), $4 row cap, $5 collector name or NULL, $6 duration floor in ms or NULL.</para>
+    ///
+    /// <para>The two filters are NULL-tolerant predicates against always-bound parameters rather than
+    /// conditionally appended text, which is the shape a dozen sibling readers already use
+    /// (<c>DarlingStoredPlanReader</c>, <c>DarlingObjectStatsReader</c>, <c>DarlingAgReader</c>). It keeps
+    /// every parameter at a FIXED position, which is what makes a renumbering bug impossible rather than
+    /// merely unlikely. The casts are load-bearing: an untyped NULL parameter has no type to compare with.</para>
+    ///
+    /// <para>Filtering here rather than after the cap is the whole point of #3287, and it is what keeps the
+    /// truncation signal meaningful: the caller's <c>limit</c> is applied to the MATCHING rows, so
+    /// <c>truncated</c> reports that more matches exist. A filter applied to an already-capped page would
+    /// report truncation of the UNFILTERED window instead — a different claim wearing the same field name.</para>
     /// </summary>
-    public const string CollectionLogSql = """
+    private const string CollectionLogBody = """
         SELECT
             collector_name,
             collection_time,
@@ -1640,7 +1655,47 @@ internal static class DarlingDataReader
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
-        ORDER BY collection_time DESC
+        AND   ($5::text IS NULL OR collector_name = $5::text)
+        AND   ($6::double precision IS NULL OR duration_ms >= $6::double precision)
+        """;
+
+    /// <summary>
+    /// The DEFAULT ordering: newest first, which is what a caller asking "what has this server been doing"
+    /// wants and what every shipped caller gets.
+    ///
+    /// <para>A whole statement rather than a spliced <c>ORDER BY</c> so the leading sort key stays a bare
+    /// column. TimescaleDB's ordered <c>ChunkAppend</c> can walk chunks newest-first and stop as soon as the
+    /// cap is met on <c>ORDER BY collection_time DESC LIMIT $4</c>; wrap that key in the CASE expression a
+    /// single-statement form would need and it cannot, so the common unfiltered read would pay for a
+    /// capability only the filtered one uses.</para>
+    ///
+    /// <para><c>duration_ms</c> is a tiebreak, not a ranking: runs inside one sweep share a
+    /// <c>collection_time</c> to the second, and breaking those ties by cost puts the interesting one first
+    /// instead of leaving the order to the scan.</para>
+    /// </summary>
+    public const string CollectionLogSql = CollectionLogBody + """
+
+        ORDER BY collection_time DESC, duration_ms DESC NULLS LAST
+        LIMIT $4
+        """;
+
+    /// <summary>
+    /// The ordering a duration floor implies: slowest first.
+    ///
+    /// <para>#3287's third defect. A floor under newest-first ordering still cannot surface the tail — the
+    /// cap takes the most RECENT matches, and the slow runs a caller is hunting are precisely the ones that
+    /// are not recent. The filter and the ordering are therefore one decision, which is why
+    /// <see cref="GetCollectionLogAsync"/> derives this from whether the floor was supplied rather than
+    /// taking a separate flag a caller could set the wrong way.</para>
+    ///
+    /// <para><c>NULLS LAST</c> is belt-and-braces: a NULL <c>duration_ms</c> cannot satisfy the floor
+    /// predicate, so no unmeasured run reaches this ordering. It is written anyway because Postgres sorts
+    /// NULLs FIRST under <c>DESC</c>, so a later change that decoupled the two knobs would otherwise lead
+    /// the slowest-first page with the rows that have no duration at all.</para>
+    /// </summary>
+    public const string CollectionLogSlowestFirstSql = CollectionLogBody + """
+
+        ORDER BY duration_ms DESC NULLS LAST, collection_time DESC
         LIMIT $4
         """;
 
@@ -1668,22 +1723,39 @@ internal static class DarlingDataReader
         return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }
 
-    /// <summary>Runs <see cref="CollectionLogSql"/>. See it for the window semantics.</summary>
+    /// <summary>
+    /// Runs <see cref="CollectionLogSql"/>, or <see cref="CollectionLogSlowestFirstSql"/> when
+    /// <paramref name="minDurationMs"/> is supplied. See <see cref="CollectionLogBody"/> for the window and
+    /// filter semantics.
+    ///
+    /// <para>The ordering is DERIVED from the floor here rather than passed in. Two callers on two SKUs would
+    /// each have to remember the coupling, and a caller that filtered without switching the order would get a
+    /// page that looks like an answer and cannot contain the tail — so the coupling is structural.</para>
+    ///
+    /// <para><paramref name="collectorName"/> is matched EXACTLY, not by prefix or pattern. A name the store
+    /// has never seen therefore returns zero rows, which the caller cannot distinguish from a quiet window on
+    /// the row list alone; the tool's empty branch is what separates those two.</para>
+    /// </summary>
     public static async Task<List<CollectionLogEntry>> GetCollectionLogAsync(
         NpgsqlDataSource postgres,
         int serverId,
         DateTime windowStartUtc,
         DateTime windowEndUtc,
         int maxRows,
+        string? collectorName = null,
+        double? minDurationMs = null,
         CancellationToken cancellationToken = default)
     {
         var rows = new List<CollectionLogEntry>();
-        await using var command = postgres.CreateCommand(CollectionLogSql);
+        await using var command = postgres.CreateCommand(
+            minDurationMs is null ? CollectionLogSql : CollectionLogSlowestFirstSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, windowStartUtc);
         AddTimestamp(command, windowEndUtc);
         AddInt(command, maxRows);
+        AddNullableText(command, string.IsNullOrWhiteSpace(collectorName) ? null : collectorName.Trim());
+        AddNullableDouble(command, minDurationMs);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -1998,6 +2070,11 @@ internal static class DarlingDataReader
     /// <c>$N::text IS NULL OR ...</c> "no filter" branch).</summary>
     private static void AddNullableText(NpgsqlCommand command, string? value) =>
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)value ?? DBNull.Value });
+
+    /// <summary>Binds a nullable numeric floor (a null value binds SQL NULL, activating the read's
+    /// <c>$N::double precision IS NULL OR ...</c> "no filter" branch).</summary>
+    private static void AddNullableDouble(NpgsqlCommand command, double? value) =>
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Double, Value = (object?)value ?? DBNull.Value });
 
     /// <summary>Binds a naive-UTC timestamp: Kind=Unspecified maps to the store's <c>timestamp without
     /// time zone</c> columns (a Kind=Utc DateTime maps to timestamptz and throws since Npgsql 6.0).</summary>

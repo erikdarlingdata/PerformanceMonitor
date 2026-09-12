@@ -2346,7 +2346,9 @@ public static class DarlingWebEndpoints
 
             /* ── core data reads ── */
             ["get_collection_health"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionHealth(pg, Server(c)),
-            ["get_collection_log"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionLog(pg, Server(c), Hours(c, 24), Rows(c, "limit", 200), as_of: AsOf(c)),
+            ["get_collection_log"] = (c, pg, an) => OptionalDouble(c, "min_duration_ms", out var minDurationMs)
+                ? DarlingMcpDataTools.GetCollectionLog(pg, Server(c), Hours(c, 24), Rows(c, "limit", 200), AsOf(c), Str(c, "collector_name"), minDurationMs)
+                : UnparseableParam("min_duration_ms"),
             ["get_current_waits_trend"] = (c, pg, an) => DarlingMcpDataTools.GetCurrentWaitsTrend(pg, Server(c), Hours(c, 4), Str(c, "database_name"), as_of: AsOf(c)),
             ["get_blocking_stats"] = (c, pg, an) => DarlingMcpDataTools.GetBlockingStats(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
             ["get_cpu_utilization"] = (c, pg, an) => DarlingMcpDataTools.GetCpuUtilization(pg, Server(c), Hours(c, 4), as_of: AsOf(c)),
@@ -2547,6 +2549,33 @@ public static class DarlingWebEndpoints
     }
 
     private static Task<string> MissingParam(string key) => Task.FromResult($"Missing required parameter '{key}'.");
+
+    /// <summary>
+    /// An OPTIONAL numeric parameter: true with null when the key is absent, true with the value when it
+    /// parses, and FALSE when it is present and cannot be read as a number.
+    ///
+    /// <para>The false arm is the whole reason this is not <see cref="QueryDouble"/>. Every other optional
+    /// knob on this dispatch falls back to its default on a value it cannot parse, so <c>?hours=abc</c>
+    /// quietly means 24 — and for a FILTER that same fallback means the filter does not apply and the caller
+    /// receives a complete-looking UNFILTERED page. That is exactly the silently-dropped-parameter failure
+    /// the filter was added to remove (#3287), so an unreadable filter is refused rather than ignored.</para>
+    /// </summary>
+    private static bool OptionalDouble(HttpContext context, string key, out double? value)
+    {
+        var raw = First(context, key);
+        if (raw is null)
+        {
+            value = null;
+            return true;
+        }
+
+        var parsed = double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var number);
+        value = parsed ? number : null;
+        return parsed;
+    }
+
+    private static Task<string> UnparseableParam(string key) =>
+        Task.FromResult($"Invalid value for parameter '{key}'. Expected a number.");
 
     private static int QueryInt(HttpContext context, string key, string? aliasKey, int def) =>
         ParseInt(First(context, key) ?? (aliasKey is null ? null : First(context, aliasKey)), def);

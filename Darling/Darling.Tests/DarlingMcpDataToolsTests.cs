@@ -9,9 +9,12 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
@@ -133,6 +136,10 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     [InlineData("get_top_procedures_by_cpu", "server_name,hours_back,top,database_name,as_of")]
     [InlineData("get_query_store_top", "server_name,hours_back,top,database_name,as_of")]
     [InlineData("get_collection_health", "server_name")]
+    /* #3287 gave this read two filters, on BOTH SKUs and in the same relative order, so it joins the theory
+       rather than sitting outside it. The two are LAST because as_of and collector_name are both `string?`:
+       a positional C# caller passing the anchor would otherwise bind it to the collector filter silently. */
+    [InlineData("get_collection_log", "server_name,hours_back,limit,as_of,collector_name,min_duration_ms")]
     [InlineData("get_server_properties", "server_name")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
@@ -179,6 +186,102 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
 
         foreach (var tool in new[] { "get_top_procedures_by_cpu", "get_query_store_top" })
             Assert.DoesNotContain("group_by", McpParams(tool).Select(p => p.Name));
+    }
+
+    /// <summary>
+    /// #3287's two filters, pinned as APPENDED optionals behind <c>as_of</c> on both SKUs — the one property
+    /// here that a compiler cannot protect.
+    ///
+    /// <para><c>as_of</c> is <c>string?</c> and so is <c>collector_name</c>. Grouped beside <c>limit</c>,
+    /// where they logically belong, a C# call site passing the anchor POSITIONALLY binds it to the collector
+    /// filter instead and compiles without a diagnostic; the read then matches no collector and returns the
+    /// no-matches status for a call that asked about a past incident. <c>AsOfWindowAnchorTests</c> makes
+    /// exactly that call, so this is a demonstrated hazard rather than a hypothetical one. MCP invokes by
+    /// name, so the position costs a client nothing and a positional C# caller is the only observer — which
+    /// is why the order is the thing pinned and not merely commented.</para>
+    ///
+    /// <para>Lite's half is read from SOURCE, not restated. The theory above compares Darling's reflected
+    /// parameters against a hand-typed copy of Lite's list, which cannot see Lite drifting; a filter present
+    /// on one product and silently absent on the other is the precise defect #3287 is about, so this derives
+    /// both sides. Comments are stripped with the repo's own walker rather than a regex, because the
+    /// parameter list here HAS a block comment in it and a naive sweep would read words out of it.</para>
+    /// </summary>
+    [Fact]
+    public void ParamContract_CollectionLogFilters_AreAppendedBehindAsOf_OnBothSkus()
+    {
+        var darling = McpParams("get_collection_log");
+        var names = darling.Select(p => p.Name).ToArray();
+
+        foreach (var filter in new[] { "collector_name", "min_duration_ms" })
+        {
+            Assert.Contains(filter, names);
+            Assert.True(darling.Single(p => p.Name == filter).Optional,
+                $"{filter} must be optional — an unfiltered read is the default and every shipped caller makes one");
+            Assert.True(
+                Array.IndexOf(names, filter) > Array.IndexOf(names, "as_of"),
+                $"{filter} must sit after as_of: both it and as_of are string?/nullable, so a positional C# "
+                + "caller passing the anchor would otherwise bind it here and compile silently");
+        }
+
+        /* Lite's list, derived from its source. Every MCP parameter carries a default and the two injected
+           DI services do not, so the defaulted ones IN ORDER are exactly the advertised contract. */
+        Assert.Equal(names, LiteMcpParamNames("get_collection_log", "GetCollectionLog"));
+
+        /* Control on the derivation, because a helper that returned an empty array would make the equality
+           above pass only if Darling's list were empty too -- but one that returned a WRONG non-empty array
+           of the same length would not be visible. Both filters must be findable through it by name. */
+        var lite = LiteMcpParamNames("get_collection_log", "GetCollectionLog");
+        Assert.Contains("collector_name", lite);
+        Assert.Contains("min_duration_ms", lite);
+        Assert.DoesNotContain("dataService", lite);
+    }
+
+    /// <summary>The advertised MCP parameter names of one Lite tool, in declaration order, read out of Lite's
+    /// own source — Darling.Tests holds no ProjectReference to Lite, and reading Lite .cs across the seam is
+    /// the pattern #2839 established for exactly this.</summary>
+    private static string[] LiteMcpParamNames(string toolName, string methodName)
+    {
+        var raw = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Mcp", "McpHealthTools.cs"));
+
+        /* Anchored on the TOOL NAME, which lives in a string literal — so the anchor is found in the raw
+           text. StripCommentsAndStrings preserves length (non-code characters become spaces), so the two
+           strings share one offset space and the anchor found here is usable in the masked one. */
+        var attribute = raw.IndexOf($"Name = \"{toolName}\"", StringComparison.Ordinal);
+        Assert.True(attribute > 0, $"Could not locate Lite's {toolName} tool — this pin needs re-anchoring.");
+
+        var masked = CSharpSourceWalker.StripCommentsAndStrings(raw);
+        Assert.Equal(raw.Length, masked.Length);
+
+        /* From the method name AFTER that attribute, so a sibling tool's parameter list cannot satisfy this,
+           and bounded at the body's opening brace. Read off the MASKED text: this parameter list carries a
+           block comment and every [Description] holds prose, and a regex over the raw form would read
+           parameter names out of both. */
+        var method = masked.IndexOf(methodName, attribute, StringComparison.Ordinal);
+        Assert.True(method > attribute, $"Could not locate Lite's {methodName} declaration.");
+
+        var signature = masked.IndexOf('(', method);
+        var body = masked.IndexOf('{', signature);
+        Assert.True(body > signature, $"Could not find the end of Lite's {toolName} signature.");
+
+        /* Every MCP parameter carries a default and the injected DI services do not, so the defaulted ones
+           in order ARE the advertised contract. */
+        return Regex.Matches(masked[signature..body], @"(\w+)\s*=\s*[^,)]+")
+            .Select(m => m.Groups[1].Value)
+            .ToArray();
+    }
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null
+               && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln"))
+               && !Directory.Exists(Path.Combine(dir, ".git")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
     }
 
     [Fact]
