@@ -1229,25 +1229,37 @@ public sealed class DarlingSelfAlertTests
         Assert.Empty(h.History.Records);
     }
 
+    /// <summary>
+    /// The list is capped but the count is not, and the lines that survive the cap are the OLDEST — the ones
+    /// most worth reading.
+    ///
+    /// <para>The ages are a scrambled permutation on purpose. With arrival order equal to age order (or its
+    /// reverse) the fixture cannot tell a real sort from an accident: a mutation replacing the sort with
+    /// <c>Reverse()</c> survived exactly that way, because arrival happened to be youngest-first.</para>
+    /// </summary>
     [Fact]
-    public async Task StaleMute_CapsTheListedRules_ButTheCountAndTheOldestReflectAll()
+    public async Task StaleMute_CapsTheListedRules_AndKeepsTheOldest_ButTheCountReflectsAll()
     {
         var h = new Harness();
         var e = h.Build();
 
+        /* 7 is coprime with 31, so (i * 7) % 31 over i = 1..30 is a permutation of 1..30 in scrambled
+           order — 30 distinct ages, none of them in arrival sequence. */
         var many = Enumerable.Range(1, 30)
-            .Select(i => Mute(StaleDays + i, id: $"rule-{i}"))
+            .Select(i => Mute(StaleDays + ((i * 7) % 31), id: $"rule-{i}"))
             .ToArray();
+        var oldest = many.OrderBy(r => r.CreatedAtUtc).First();
+        var youngest = many.OrderByDescending(r => r.CreatedAtUtc).First();
 
         await e.ApplyStaleMuteRulesAsync(many, Ct);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("30", fired.CurrentValue);      // the count is not truncated by the list cap
         Assert.Contains("more", fired.DetailText!, StringComparison.OrdinalIgnoreCase);
-        /* Oldest-first, so the line that survives the cap is the one most worth reading, and the summary
-           quotes the oldest age rather than whichever rule happened to arrive first. */
-        Assert.Contains("Rule rule-30", fired.DetailText);
-        Assert.Contains($"oldest {StaleDays + 30:F0} days", fired.DetailText);
+        Assert.Contains($"Rule {oldest.Id}:", fired.DetailText);
+        Assert.DoesNotContain($"Rule {youngest.Id}:", fired.DetailText);
+        Assert.Contains(
+            $"oldest {(MuteClock - oldest.CreatedAtUtc).TotalDays:F0} days", fired.DetailText);
     }
 
     /// <summary>
