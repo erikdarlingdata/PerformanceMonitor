@@ -94,11 +94,15 @@ public static class AlertContextBuilders
             });
         }
 
+        /* The alert-level attachment, for the ONE card an unfiltered Summary send produces: it lists every
+           incident, so the first report in the window belongs to something it describes. Each incident also
+           carries its own (#3330, in GroupBlocking) for the two paths that render a SUBSET — the per-event
+           splitter and #3313's delivery filter — where "the first in the window" is another incident's. */
         var firstXml = filtered.FirstOrDefault(e => e.HasReportXml)?.BlockedProcessReportXml;
         if (!string.IsNullOrEmpty(firstXml))
         {
             context.AttachmentXml = firstXml;
-            context.AttachmentFileName = "blocked_process_report.xml";
+            context.AttachmentFileName = AlertIncidentAttachment.BlockedProcessReportFileName;
         }
 
         AlertIncidentRenderer.Apply(context, Decorate(shown.Select(g => g.Incident).ToList(), decorateIncidents));
@@ -137,11 +141,14 @@ public static class AlertContextBuilders
         if (filtered.Count == 0) return null;
 
         var context = new AlertContext();
+        /* The alert-level attachment, for the ONE card an unfiltered Summary send produces — see the same
+           note in BuildBlockingContext. Each incident carries its own graph too (#3330, in
+           GroupParsedDeadlocks). */
         var firstGraph = filtered.FirstOrDefault(d => d.HasDeadlockXml)?.DeadlockGraphXml;
         if (!string.IsNullOrEmpty(firstGraph))
         {
             context.AttachmentXml = firstGraph;
-            context.AttachmentFileName = "deadlock_graph.xml";
+            context.AttachmentFileName = AlertIncidentAttachment.DeadlockGraphFileName;
         }
 
         /* One parse pass per deadlock: the fingerprint's object set and the discrete Database fact's
@@ -435,7 +442,14 @@ public static class AlertContextBuilders
         BlockingIncidentGrouper.Group(
             serverName,
             filtered.Select(e => new BlockingIncidentGrouper.BlockedEvent(
-                e.DatabaseName, e.ContentiousObject, e.BlockedSqlText, e.BlockingSqlText, e.WaitTimeMs, e.LockMode)));
+                e.DatabaseName, e.ContentiousObject, e.BlockedSqlText, e.BlockingSqlText, e.WaitTimeMs, e.LockMode,
+                /* #3330: the row's own report travels with it, so the group can attach the one belonging to
+                   its own fingerprint. HasReportXml is false for every DMV-snapshot row, which has no
+                   report — null here, and an incident grouped only from those gets no attachment. */
+                e.HasReportXml
+                    ? new AlertIncidentAttachment(
+                        e.BlockedProcessReportXml, AlertIncidentAttachment.BlockedProcessReportFileName)
+                    : null)));
 
     /* The graph parse, shared by the render path and #2216's observation path. Both the fingerprint's object
        set and the #2109 Database fact come off the same pass, so parsing once per deadlock is the point. */
@@ -456,7 +470,13 @@ public static class AlertContextBuilders
             serverName,
             parsed.Select(p => new DeadlockIncidentGrouper.DeadlockEvent(
                 p.Objects,
-                DeadlockDetailFields(p.Databases, p.Row.VictimSqlText, p.Row.ProcessSummary))));
+                DeadlockDetailFields(p.Databases, p.Row.VictimSqlText, p.Row.ProcessSummary),
+                /* #3330: the deadlock's own graph travels with it, so each incident attaches the graph for
+                   the deadlock its card actually describes. */
+                p.Row.HasDeadlockXml
+                    ? new AlertIncidentAttachment(
+                        p.Row.DeadlockGraphXml, AlertIncidentAttachment.DeadlockGraphFileName)
+                    : null)));
 
     private static List<DeadlockIncidentGrouper.DeadlockGroup> GroupDeadlocks(
         string serverName, IReadOnlyList<DeadlockAlertRow> filtered) =>

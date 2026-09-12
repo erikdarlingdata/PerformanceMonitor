@@ -208,13 +208,19 @@ public static class ContentiousObjectLabel
 public static class BlockingIncidentGrouper
 {
     /// <summary>One blocked-process sample projected from each app's row model into a shared shape.</summary>
+    /// <param name="Attachment">
+    /// #3330: this sample's own blocked-process report, so the incident it groups into can attach its own
+    /// rather than the first one in the window. Null on a DMV-snapshot row, which has no report — that is
+    /// why the group takes the first sample with one rather than its representative's.
+    /// </param>
     public readonly record struct BlockedEvent(
         string? Database,
         string? ContentiousObject,
         string? BlockedQuery,
         string? BlockingQuery,
         long WaitTimeMs,
-        string? LockMode = null);
+        string? LockMode = null,
+        AlertIncidentAttachment? Attachment = null);
 
     /// <summary>One distinct blocking incident: a representative chain, its true occurrence count and
     /// wait range, and the dedup <see cref="AlertIncident"/>.</summary>
@@ -300,10 +306,15 @@ public static class BlockingIncidentGrouper
                ForKey branches above get it from one place. UnknownDatabase is ContentiousObjectLabel's sentinel for
                "the row had none" and becomes null here -- a literal "unknown" in a Database field reads as a
                database actually called that. */
+            /* #3330: the first sample in THIS group that carried a report, which is not always the
+               representative -- the XE and DMV feeds merge into one list, and a DMV-snapshot row has no
+               report XML at all. Scoped to the group's own rows, so an incident whose every sample came from
+               the DMV fallback gets null rather than a neighbouring incident's report. */
             var enriched = incident with
             {
                 DetailFields = BlockingDetail(representative),
                 Database = IncidentDatabaseHelpers.NormalizeDatabase(representative.Database),
+                Attachment = rows.Select(r => r.Attachment).FirstOrDefault(a => a is { IsComplete: true }),
             };
 
             groups.Add(new BlockingGroup(
@@ -411,9 +422,16 @@ public static class DeadlockIncidentGrouper
 {
     /// <summary>One deadlock event projected to the distinct fully-qualified objects it involved, plus
     /// optional forensic detail (Victim SQL / Processes) carried onto the incident for per-event cards.</summary>
+    /// <param name="Attachment">
+    /// #3330: this event's own deadlock graph, so the incident it groups into can attach its own rather than
+    /// the first one in the window. An event with no parseable graph has no objects either, so it never
+    /// reaches an incident at all — which is why, unlike the blocking arm, a deadlock incident always ends
+    /// up with one.
+    /// </param>
     public readonly record struct DeadlockEvent(
         IReadOnlyList<string> Objects,
-        IReadOnlyList<AlertIncidentField>? DetailFields = null);
+        IReadOnlyList<AlertIncidentField>? DetailFields = null,
+        AlertIncidentAttachment? Attachment = null);
 
     /// <summary>One distinct deadlock incident: the involved object set, occurrence count, and fingerprint.</summary>
     public sealed record DeadlockGroup(IReadOnlyList<string> Objects, int OccurrenceCount, AlertIncident Incident);
@@ -429,6 +447,7 @@ public static class DeadlockIncidentGrouper
         var counts = new Dictionary<string, int>(StringComparer.Ordinal);
         var incidents = new Dictionary<string, AlertIncident>(StringComparer.Ordinal);
         var details = new Dictionary<string, IReadOnlyList<AlertIncidentField>?>(StringComparer.Ordinal);
+        var attachments = new Dictionary<string, AlertIncidentAttachment?>(StringComparer.Ordinal);
 
         foreach (var e in events ?? Enumerable.Empty<DeadlockEvent>())
         {
@@ -446,6 +465,15 @@ public static class DeadlockIncidentGrouper
                 current = 0;
             }
             counts[key] = current + 1;
+
+            /* #3330: the first COMPLETE graph in the group, not the representative's. Same rule the blocking
+               arm uses, so the two arms cannot diverge on a producer that supplies the graph unevenly —
+               here that is a distinction without a difference (an event with no graph has no objects and
+               never reached this line), which is exactly why one rule is cheaper than two. */
+            if (attachments.GetValueOrDefault(key) is null && e.Attachment is { IsComplete: true })
+            {
+                attachments[key] = e.Attachment;
+            }
         }
 
         var groups = new List<DeadlockGroup>(order.Count);
@@ -462,6 +490,7 @@ public static class DeadlockIncidentGrouper
                 OccurrenceCount = count,
                 DetailFields = details[key],
                 Database = IncidentDatabaseHelpers.DatabaseFromFields(details[key]),
+                Attachment = attachments.GetValueOrDefault(key),
             };
             groups.Add(new DeadlockGroup(incident.InvolvedObjects, count, incident));
         }
