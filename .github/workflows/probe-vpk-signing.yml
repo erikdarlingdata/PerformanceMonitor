@@ -1,0 +1,141 @@
+name: Probe vpk signing invocations
+
+# #3288 groundwork. Manual only, publishes nothing, touches no release, uploads nothing to
+# SignPath.
+#
+# THE QUESTION BELOW IS SETTLED, AND NOT IN FAVOUR OF THE DESIGN IT MEASURES. `vpk pack
+# --signTemplate` cannot sign anything on this SignPath account: the open-source signing policy
+# requires origin verification through a trusted build system, so a request is accepted only
+# through `signpath/github-action-submit-signing-request`, and that is a workflow step which
+# cannot be invoked from inside a running `vpk pack`. A real 3.7.1 release build submitted two
+# batches by raw API token and got 403 "the selected signing policy requires that the signing
+# request is submitted via a trusted build system" on both. Signing therefore happens after
+# packing -- see `Sign the executables Velopack generates` in build.yml and
+# .github/scripts/postpack_signing.py.
+#
+# What this probe still measures honestly is `vpk pack`'s own behaviour: which files it offers a
+# signing template, and how it batches them. Everything below about approval cost describes an
+# approach that cannot run.
+#
+# The design question this answers: `vpk pack --signTemplate` is the only way to sign the
+# executables Velopack GENERATES (the portable stub, Update.exe, Setup.exe), because those are
+# created after packing and re-signing them afterwards invalidates the SHA256 and Size that
+# releases.*.json records for each .nupkg -- which the updater verifies, and which delta packages
+# patch against.
+#
+# But on the SignPath Foundation tier every signing request needs a MANUAL approval, and there
+# are already four per release. Each --signTemplate invocation would be one more. So the cost of
+# the fix is exactly "how many times does vpk invoke the template, and with which files", and
+# nothing in Velopack's documentation states it: --signParallel is documented as "10 files per
+# signtool.exe call" without saying whether the payload is batched separately from the generated
+# binaries, and --signDisableDeep is documented as "requires you to pre-sign your binaries"
+# without saying what it then still signs.
+#
+# So this measures it. The template points at a script that LOGS its arguments and exits 0 --
+# never signing anything -- and the job prints the invocation count and the file list per
+# invocation. That is the number that decides whether the fix costs one extra approval per
+# product or six.
+on:
+  # A pull_request trigger, not only workflow_dispatch, and the reason is load-bearing: a
+  # workflow that has NEVER run is not registered, and `gh workflow run` answers
+  # "not found on the default branch" for it. Since this repo merges to dev and defaults to
+  # main, a dispatch-only workflow added here could never be dispatched at all -- it would
+  # have to reach main first, which only happens on a release. Running once on its own PR
+  # both answers the question and registers it for later dispatch.
+  pull_request:
+    paths:
+      - '.github/workflows/probe-vpk-signing.yml'
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # --signDisableDeep is NOT a Windows option: vpk 1.2.0 answers "Unrecognized command
+        # or argument" for it, and the string in the assembly belongs to the macOS variant.
+        # The axis that matters is batch size: vpk invokes the template once per batch and
+        # each invocation is one SignPath approval. Default is 10, and 2000 is rejected, so
+        # this brackets the accepted range. 0 means "omit the flag" (the default).
+        sign_parallel: [0, 35, 50, 100]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # The same publish shape build.yml feeds to `vpk pack`, so the file census is the real one.
+      - name: Publish Lite (self-contained, as the Velopack path does)
+        shell: pwsh
+        run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-x64 --self-contained -o publish/Lite-velopack
+
+      - name: Write the probe that stands in for a signing tool
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path probe | Out-Null
+          @'
+          # Logs one line per invocation: the count of files and their names. Exits 0 so vpk
+          # proceeds exactly as it would with a real signing tool that succeeded.
+          $log = Join-Path $env:GITHUB_WORKSPACE 'probe\invocations.log'
+          $files = $args
+          Add-Content -Path $log -Value ("INVOCATION`t{0} file(s)" -f $files.Count)
+          foreach ($f in $files) { Add-Content -Path $log -Value ("    {0}" -f $f) }
+          exit 0
+          '@ | Set-Content -Path probe/sign-probe.ps1 -Encoding utf8
+          New-Item -ItemType File -Force -Path probe/invocations.log | Out-Null
+
+      - name: Pack with the probe as the signing tool
+        shell: pwsh
+        env:
+          VPK_VERSION: '1.2.0'
+        run: |
+          dotnet tool install -g vpk --version $env:VPK_VERSION
+          New-Item -ItemType Directory -Force -Path probe/out | Out-Null
+          $probeCmd = 'pwsh -NoProfile -File "{0}\probe\sign-probe.ps1" {{{{file...}}}}' -f $env:GITHUB_WORKSPACE
+          $vpkArgs = @(
+            'pack',
+            '-u', 'PerformanceMonitorLite',
+            '-v', '9.9.9',
+            '-p', 'publish/Lite-velopack',
+            '-e', 'PerformanceMonitorLite.exe',
+            '-o', 'probe/out',
+            '--channel', 'probe',
+            '--signTemplate', $probeCmd
+          )
+          if ('${{ matrix.sign_parallel }}' -ne '0') { $vpkArgs += @('--signParallel', '${{ matrix.sign_parallel }}') }
+          Write-Host "vpk $($vpkArgs -join ' ')"
+          & vpk @vpkArgs 2>&1 | Tee-Object -Variable vpkOut
+          Write-Host "vpk exit: $LASTEXITCODE"
+          # Never let a rejected argument look like a zero-invocation result.
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host '=== vpk FAILED; its output above is the reason ==='
+            exit 0
+          }
+
+      # The answer. Printed rather than uploaded, so reading the job log is the whole workflow.
+      - name: Report what vpk asked to be signed
+        if: always()
+        shell: pwsh
+        run: |
+          $log = 'probe/invocations.log'
+          if (-not (Test-Path $log)) { Write-Host 'NO LOG: the template was never invoked.'; exit 0 }
+          $lines = Get-Content $log
+          $invocations = ($lines | Where-Object { $_ -like 'INVOCATION*' }).Count
+          $files = $lines | Where-Object { $_ -notlike 'INVOCATION*' } | ForEach-Object { $_.Trim() }
+          Write-Host "=== --signParallel=${{ matrix.sign_parallel }}: $invocations template invocation(s) -> $invocations SignPath approval(s) ==="
+          Write-Host ''
+          Get-Content $log
+          Write-Host ''
+          Write-Host "=== distinct files vpk wanted signed: $(($files | Select-Object -Unique).Count) ==="
+          $files | Select-Object -Unique | ForEach-Object { Write-Host "  $_" }
+          Write-Host ''
+          Write-Host '=== of those, the ones that are Velopack-GENERATED (the #3288 set) ==='
+          $files | Select-Object -Unique |
+            Where-Object { $_ -match 'Setup\.exe|Update\.exe|Squirrel\.exe|ExecutionStub' } |
+            ForEach-Object { Write-Host "  $_" }

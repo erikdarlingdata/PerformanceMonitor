@@ -15,7 +15,7 @@
     agree with the XML read, so the ordering is enforced rather than remembered.
   -->
   <PropertyGroup>
-    <Version>3.7.0</Version>
+    <Version>3.7.1</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 

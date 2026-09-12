@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.1] - 2026-09-12
+
+### Fixed
+
+- **The installer and the portable launcher are signed, and a release-time guard refuses to publish an unsigned executable anywhere else** ([#3288]) - the portable launcher stub, `Update.exe` and `Setup.exe` shipped unsigned on both products while the app payload was signed, so the file a user double-clicks in the portable zip was a 399 kB unsigned launcher rather than the signed 182 kB app - which is exactly what an "unknown publisher" policy blocks. Velopack creates those three during packing, so no pre-pack round reaches them, and SignPath's open-source policy requires origin verification through a trusted build system - a signing request is accepted only through the GitHub Action, which cannot be invoked from inside a running `vpk pack`. So the standalone assets are signed by an Action step AFTER packing: `Setup.exe`, and the root launcher and `Update.exe` inside `Portable.zip`. Neither carries a recorded hash - `releases.<channel>.json` records a SHA256 and a Size for the two `.nupkg` files and nothing else - so rewriting them invalidates nothing, and the portable zip is rebuilt member by member with every unchanged entry's local header, name and raw compressed bytes copied verbatim, verified against a snapshot of the original before it replaces it. **Two executables are still unsigned, and only inside the `.nupkg`**: `lib/app/<App>_ExecutionStub.exe` and `lib/app/Squirrel.exe`, because that package's bytes are what the updater verifies and what the delta patches against. Their deployed copies in `Portable.zip` ARE signed; the copies `Setup.exe` lays down are not, so an installed user's shortcut target and updater remain unsigned.
+
 ## [3.7.0] - 2026-09-10
 
 ### Added
@@ -3632,3 +3638,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#3262]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3262
 [#3267]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3267
 [#3271]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3271
+[#3288]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3288
