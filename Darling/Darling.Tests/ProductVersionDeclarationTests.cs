@@ -472,6 +472,10 @@ public class ProductVersionDeclarationTests
     [InlineData("base=$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)", false)]
     // An emptiness test that fails nothing is not a guard, and this spelling is already in the workflows.
     [InlineData("base=$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)\nif [ -n \"$base\" ]; then echo found; fi", false)]
+    // A real guard that fails the step, for a DIFFERENT variable. Both spellings occur in nightly.yml's
+    // version steps, which guard the version and the run stamp separately (#3390).
+    [InlineData("base=$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)\n[ -n \"${STAMP}\" ] || { echo x; exit 1; }", false)]
+    [InlineData("$v = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version\nif ([string]::IsNullOrWhiteSpace($env:STAMP)) { throw \"no\" }", false)]
     public void TheGuardDetector_CreditsOnlyAGuardThatFailsTheStep(string snippet, bool expected) =>
         Assert.Equal(expected, Assert.Single(VersionReads(snippet)).Guarded);
 
@@ -529,7 +533,8 @@ public class ProductVersionDeclarationTests
             found.Add(new VersionRead(
                 line,
                 sources.Count == 0 ? new[] { "(unresolved)" } : sources,
-                lines.Skip(index + 1).Take(GuardWindowLines).Any(IsGuardLine)));
+                lines.Skip(index + 1).Take(GuardWindowLines)
+                 .Any(candidate => IsGuardLine(candidate, AssignedVariable(line)))));
         }
 
         return found;
@@ -549,11 +554,47 @@ public class ProductVersionDeclarationTests
     /// <para>The bash arm requires the exit as well as the test. <c>[ -n "</c> on its own is not a
     /// guard — the workflows already use that spelling for unrelated conditions, and one sitting
     /// near a read would otherwise be credited as protecting it.</para>
+    ///
+    /// <para>It must also guard THIS read's variable. A step may legitimately hold more than one
+    /// emptiness guard — <c>nightly.yml</c>'s version steps guard the version they read and the
+    /// run stamp they interpolate — and a shape-only match credits either one for the other. That
+    /// is not hypothetical: adding the stamp guard made removing the version guard undetectable
+    /// here until this check became variable-aware.</para>
     /// </summary>
-    private static bool IsGuardLine(string line) =>
-        line.Contains("IsNullOrWhiteSpace", StringComparison.Ordinal)
-        || (line.Contains("[ -n \"", StringComparison.Ordinal) && line.Contains("exit 1", StringComparison.Ordinal))
-        || line.Contains("==\"\" (", StringComparison.Ordinal);
+    private static bool IsGuardLine(string line, string? variable)
+    {
+        var fails =
+            line.Contains("IsNullOrWhiteSpace", StringComparison.Ordinal)
+            || (line.Contains("[ -n \"", StringComparison.Ordinal) && line.Contains("exit 1", StringComparison.Ordinal))
+            || line.Contains("==\"\" (", StringComparison.Ordinal);
+
+        if (!fails)
+        {
+            return false;
+        }
+
+        /* A read whose assigned name could not be determined falls back to shape alone, so an
+           unrecognised assignment spelling cannot silently mark every read unguarded. */
+        return variable is null
+            || Regex.IsMatch(line, $@"\b{Regex.Escape(variable)}\b", RegexOptions.IgnoreCase);
+    }
+
+    /// <summary>
+    /// The variable a version read assigns to, across the three spellings the reads use:
+    /// <c>base=$(...)</c> and <c>version="$(...)"</c> in bash, <c>$base = ([xml]...)</c> in pwsh, and
+    /// <c>... do set VERSION=%%a</c> in cmd. Null when no assignment is recognisable.
+    /// </summary>
+    private static string? AssignedVariable(string line)
+    {
+        var cmd = Regex.Match(line, @"\bset\s+([A-Za-z_][A-Za-z0-9_]*)\s*=");
+        if (cmd.Success)
+        {
+            return cmd.Groups[1].Value;
+        }
+
+        var assignment = Regex.Match(line, @"^\s*\$?([A-Za-z_][A-Za-z0-9_]*)\s*=");
+        return assignment.Success ? assignment.Groups[1].Value : null;
+    }
 
     /// <summary>The MSBuild file paths named on one line, separators normalised to forward slashes.</summary>
     private static List<string> MsBuildPathsIn(string line) =>

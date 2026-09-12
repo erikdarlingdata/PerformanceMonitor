@@ -65,11 +65,37 @@ jobs:
     timeout-minutes: 10
     outputs:
       has_changes: ${{ steps.check.outputs.has_changes }}
+      stamp: ${{ steps.stamp.outputs.stamp }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
           fetch-depth: 0
+
+      # The nightly prerelease stamp, derived ONCE for the whole run and consumed by every job
+      # that names an artifact (#3390). Two properties matter and a per-job `date` has neither.
+      #
+      # Stable across jobs: `linux` needs `build`, which takes ~8.5 minutes, so the two jobs read
+      # their clocks ~8.5 minutes apart. Each deriving its own date means a run whose two stamp
+      # steps straddle midnight UTC ships a Windows zip dated one day and a Linux tarball dated
+      # the next, from one commit.
+      #
+      # Unique per build: the date alone is not. Multiple dispatches a day are normal here - over
+      # 2026-08-24..09-12, 13 of 20 days published two or more distinct source trees under one
+      # version string, peaking at five - and nothing in the artifact then distinguishes them.
+      # `FileVersion` / `ProductVersion` / `InformationalVersion` and the asset names all carry
+      # this string, and the apphost exe is byte-identical across builds, so with a colliding
+      # stamp there is no read that answers "which nightly is this".
+      #
+      # run_number is monotonic and numeric, so SemVer 2.0 compares these prereleases in build
+      # order; the date stays leftmost and human-readable. A short sha would identify the tree
+      # but sorts as an alphanumeric identifier, which outranks every numeric one.
+      - name: Derive the nightly stamp
+        id: stamp
+        run: |
+          stamp="$(date -u +%Y%m%d).${{ github.run_number }}"
+          echo "stamp=${stamp}" >> "$GITHUB_OUTPUT"
+          echo "Nightly stamp: ${stamp}"
 
       - name: Check for new commits in last 24 hours
         id: check
@@ -110,11 +136,13 @@ jobs:
       - name: Set nightly version
         id: version
         shell: pwsh
+        env:
+          NIGHTLY_STAMP: ${{ needs.check.outputs.stamp }}
         run: |
           $base = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version | Where-Object { $_ }
           if ([string]::IsNullOrWhiteSpace($base)) { throw "Read no version from Directory.Build.props." }
-          $date = Get-Date -Format "yyyyMMdd"
-          $nightly = "$base-nightly.$date"
+          if ([string]::IsNullOrWhiteSpace($env:NIGHTLY_STAMP)) { throw "Read no stamp from the check job." }
+          $nightly = "$base-nightly.$env:NIGHTLY_STAMP"
           echo "VERSION=$nightly" >> $env:GITHUB_OUTPUT
           echo "Nightly version: $nightly"
 
@@ -450,7 +478,9 @@ jobs:
   # The bundled pg-runtime is deliberately absent from the linux artifact — the compose distribution
   # pairs the service with the official timescale/timescaledb image, and managed mode stays Windows.
   linux:
-    needs: build
+    # check as well as build: build already depends on check, so this adds no ordering, only
+    # access to the one stamp both jobs name their artifacts with (#3390).
+    needs: [check, build]
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -469,13 +499,15 @@ jobs:
       - name: Set nightly version
         id: version
         shell: bash
+        env:
+          NIGHTLY_STAMP: ${{ needs.check.outputs.stamp }}
         run: |
           set -euo pipefail
           base=$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)
           [ -n "${base}" ] || { echo "::error::Read no version from Directory.Build.props."; exit 1; }
-          date=$(date +%Y%m%d)
-          echo "VERSION=${base}-nightly.${date}" >> "$GITHUB_OUTPUT"
-          echo "Nightly version: ${base}-nightly.${date}"
+          [ -n "${NIGHTLY_STAMP}" ] || { echo "::error::Read no stamp from the check job."; exit 1; }
+          echo "VERSION=${base}-nightly.${NIGHTLY_STAMP}" >> "$GITHUB_OUTPUT"
+          echo "Nightly version: ${base}-nightly.${NIGHTLY_STAMP}"
 
       - name: Publish service (linux-x64)
         run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r linux-x64 --self-contained false -o publish/DarlingService-linux
