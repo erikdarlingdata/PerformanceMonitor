@@ -464,9 +464,10 @@ namespace PerformanceMonitor.Common
         ///
         /// <para>Null is the unsupplied-seam fallback its #3297 sibling uses, so a path built before the
         /// knobs existed behaves like a store at its V120 defaults rather than banding on zeros.
-        /// <c>DeadlockRateThresholdsReachEveryBundleTests</c> is what stops a PRODUCTION path taking that
-        /// fallback: on a store whose tiers were raised, a bundle that left this null would band on numbers
-        /// <c>get_alert_settings</c> does not report — the "the setting did not stick" reading.</para>
+        /// <c>DeadlockRateBandRungTests.EveryProductionMetricBundleDeclaresTheWindowAndTheTiers</c> is what
+        /// stops a PRODUCTION path taking that fallback: on a store whose tiers were raised, a bundle that
+        /// left this null would band on numbers <c>get_alert_settings</c> does not report — the "the setting
+        /// did not stick" reading.</para>
         /// </summary>
         public DeadlockRateThresholds? DeadlockRateThresholds { get; init; }
 
