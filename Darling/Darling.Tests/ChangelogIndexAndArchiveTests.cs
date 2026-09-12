@@ -23,7 +23,7 @@ namespace Darling.Tests;
 /// two halves describing the same history.
 ///
 /// <para>The split happened because GitHub will not render a blob the size the single file had reached
-/// (2.06 MB), which made the project's own record unreadable in the web UI. Moving prose out is only
+/// (2,160,009 bytes), which made the project's own record unreadable in the web UI. Moving prose out is
 /// acceptable while it is provably the SAME prose, and a size reduction proves nothing: a transform that
 /// silently drops an entry and one that silently passes it through unchanged both shrink the file.</para>
 ///
@@ -150,7 +150,7 @@ public sealed class ChangelogIndexAndArchiveTests
             }
             else
             {
-                /* Pre-3.0 entries are already terse — mean 213 bytes against 1,915 in 3.7.0 — so there is
+                /* Pre-3.0 entries are already terse — mean 157 bytes against 1,916 in 3.7.0 — so there is
                    nothing to move, and an empty archive beside them would be a file to maintain that says
                    nothing. Asserted so the rule cannot drift into "archive everything". */
                 Assert.False(File.Exists(file), $"{section.Version} keeps its prose in the index but {path} exists");

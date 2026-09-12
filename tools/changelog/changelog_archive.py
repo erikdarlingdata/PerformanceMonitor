@@ -2,7 +2,7 @@
 """Split CHANGELOG.md into a compacted index plus one prose archive per minor version.
 
 GitHub refuses to render a blob past a few hundred kilobytes, and the single-file history had
-grown to 2.06 MB, so the file the project keeps its record in could not be read in the web UI at
+grown to 2,160,009 bytes, so the file the project keeps its record in could not be read in the web UI at
 all (#3387). The record itself is worth keeping at that length: each entry explains a mechanism
 and carries its measurements. So the prose moves rather than shrinks.
 
@@ -71,8 +71,8 @@ CENSUS_HEADER = [
 ]
 
 # Only a released 3.x version is archived. [Unreleased] is excluded because it is the authoring
-# surface; pre-3.0 is excluded because its entries are already terse - mean 213 bytes against
-# 1,915 in 3.7.0 - so compacting them would move nothing and delete the record's oldest half.
+# surface; pre-3.0 is excluded because its entries are already terse - mean 157 bytes against
+# 1,916 in 3.7.0 - so compacting them would move nothing and delete the record's oldest half.
 ARCHIVED = re.compile(r"^## \[(3\.\d+\.\d+)\](?: |$)")
 
 VERSION_HEADING = re.compile(r"^## \[(\d+\.\d+\.\d+)\](?: |$)")
