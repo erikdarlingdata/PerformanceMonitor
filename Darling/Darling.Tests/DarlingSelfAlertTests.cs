@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Globalization;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -1284,6 +1285,70 @@ public sealed class DarlingSelfAlertTests
         ctx.PopulateFromDetailText(fired.DetailText);
         Assert.Null(ctx.DatabaseName);
         Assert.Null(ctx.WaitType);
+    }
+
+    /// <summary>
+    /// Every condition this evaluator exposes has a call site in the worker — the #2213 lesson applied to
+    /// this class. A self-alert whose logic is perfect and whose <c>Evaluate*</c> nothing calls is
+    /// indistinguishable from a store where the condition never occurs: every behavioural pin above passes,
+    /// the build is clean, and the feature collects nothing. Nothing else in the suite asks the question.
+    ///
+    /// <para>The subject list is DERIVED from the type rather than written here, so a condition added later
+    /// is covered without anyone remembering to add it — which is the same drift that let this go unpinned
+    /// through eight conditions. Naming the method is a weaker claim than reaching it (a call inside a dead
+    /// branch would pass), so the specific gate is asserted separately below.</para>
+    /// </summary>
+    [Fact]
+    public void EverySelfAlertCondition_HasACallSiteInTheWorker()
+    {
+        var worker = RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+
+        var conditions = typeof(DarlingSelfAlertEvaluator)
+            .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Select(m => m.Name)
+            .Where(n => n.StartsWith("Evaluate", StringComparison.Ordinal))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.NotEmpty(conditions);
+        var uncalled = conditions
+            .Where(n => !worker.Contains(n, StringComparison.Ordinal))
+            .ToList();
+
+        Assert.True(uncalled.Count == 0,
+            "these self-alert conditions are never invoked by the worker, so they can never fire: "
+            + string.Join(", ", uncalled));
+    }
+
+    /// <summary>
+    /// And the stale-mute condition is reached on EVERY deployment, not only the ones that can run custom
+    /// alerts. Its call sits next to #3304's on the fleet-global maintenance pass, and #3304's is gated on
+    /// <c>_customAlertEvaluator is not null</c> — which is false on any non-Windows or unmanaged store. Pasted
+    /// inside that gate the condition would be dead for most of the fleet, the build would be clean, and the
+    /// pin above would still pass because the method is named.
+    /// </summary>
+    [Fact]
+    public void StaleMute_IsEvaluatedOnItsOwnGate_NotTheCustomAlertEvaluatorsGate()
+    {
+        var lines = RepoFile
+            .ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs")
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n');
+
+        var callSites = Enumerable.Range(0, lines.Length)
+            .Where(i => lines[i].Contains("EvaluateStaleMuteRulesAsync(", StringComparison.Ordinal))
+            .ToList();
+        var call = Assert.Single(callSites);
+
+        var guard = Enumerable.Range(0, call)
+            .Reverse()
+            .Select(i => lines[i])
+            .First(l => l.Contains("if (", StringComparison.Ordinal));
+
+        Assert.Contains("_nextStaleMuteCheckUtc", guard);
+        Assert.DoesNotContain("_customAlertEvaluator", guard);
     }
 
     /// <summary>
