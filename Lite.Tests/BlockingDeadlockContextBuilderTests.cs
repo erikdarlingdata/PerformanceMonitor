@@ -391,6 +391,40 @@ public class BlockingDeadlockContextBuilderTests
         Assert.Equal(DeadlockGraph, context.AttachmentXml);
     }
 
+    /// <summary>
+    /// #3330: the attachment is on the incident BEFORE the #2216 <c>decorateIncidents</c> hook runs, and
+    /// survives it. Both halves matter and neither implies the other — attaching after the hook would hand a
+    /// decorator an incident with no graph to preserve, and a decorator that RECONSTRUCTED an incident
+    /// instead of copying it would drop the graph it was handed.
+    /// <para>The engine always passes that hook (<c>IncidentOccurrenceAccumulator</c>), so the undecorated
+    /// path the other pins here exercise is the one no production alert takes.</para>
+    /// </summary>
+    [Fact]
+    public void BuildDeadlockContext_TheDecorateHook_SeesTheGraphAndKeepsIt()
+    {
+        var seenByHook = new List<AlertIncidentAttachment?>();
+
+        var context = AlertContextBuilders.BuildDeadlockContext(
+            Server, new List<DeadlockAlertRow> { Deadlock() }, NoExclusions,
+            decorateIncidents: incidents =>
+            {
+                foreach (var i in incidents)
+                {
+                    seenByHook.Add(i.Attachment);
+                }
+
+                /* `with`, the way the real accumulator decorates. Same count and order, which is what
+                   AlertContextBuilders.Decorate requires. */
+                return incidents.Select(i => i with { TotalOccurrences = 9 }).ToList();
+            });
+
+        Assert.Equal(DeadlockGraph, Assert.Single(seenByHook)!.Xml);
+
+        var incident = Assert.Single(context!.Incidents!);
+        Assert.Equal(9, incident.TotalOccurrences);
+        Assert.Equal(DeadlockGraph, incident.Attachment!.Xml);
+    }
+
     [Fact]
     public void IsDeadlockExcluded_TrueOnlyWhenEveryProcessDatabaseIsExcluded()
     {
