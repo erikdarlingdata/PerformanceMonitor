@@ -752,6 +752,30 @@ def self_test() -> int:
             lambda: rebuild(source, {"NoSuchFile.exe": b"x"}, os.path.join(root, "bad.zip")),
         )
 
+        # The case that isolates the raw-bytes comparison from every other assertion: same
+        # entries, same order, same metadata, same content, re-deflated at a different level.
+        # Only a check on the compressed bytes can tell this apart from a faithful rebuild, and
+        # a rebuild that recompresses is the one that would silently rewrite a shipped artifact.
+        recompressed = os.path.join(root, "recompressed.zip")
+        with zipfile.ZipFile(source) as src, zipfile.ZipFile(recompressed, "w") as dst:
+            for info in src.infolist():
+                fresh = zipfile.ZipInfo(info.filename, date_time=info.date_time)
+                fresh.compress_type = info.compress_type
+                fresh.flag_bits = info.flag_bits
+                fresh.external_attr = info.external_attr
+                fresh.internal_attr = info.internal_attr
+                fresh.create_system = info.create_system
+                fresh.create_version = info.create_version
+                fresh.extract_version = info.extract_version
+                fresh.comment = info.comment
+                fresh.extra = info.extra
+                fresh._compresslevel = 1
+                dst.writestr(fresh, src.read(info))
+        expect_raises(
+            "the faithfulness check accepted a recompressed archive as byte-faithful",
+            lambda: assert_faithful(before_viewer, recompressed, {}),
+        )
+
     for failure in failures:
         print(f"SELF-TEST FAIL: {failure}", file=sys.stderr)
     if failures:

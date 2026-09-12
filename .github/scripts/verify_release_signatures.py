@@ -104,7 +104,7 @@ ALLOWED_UNSIGNED: tuple[AllowedUnsigned, ...] = (
             "Velopack generates the launcher stub during `vpk pack`, so no pre-pack round reaches "
             "it, and `releases.<channel>.json` records this package's SHA256 and Size for the "
             "updater and the delta to patch against, so no post-pack round may rewrite it. The "
-            "copy in Portable.zip is signed."
+            "copy in Portable.zip is signed after packing."
         ),
     ),
     AllowedUnsigned(
@@ -112,7 +112,8 @@ ALLOWED_UNSIGNED: tuple[AllowedUnsigned, ...] = (
         member=re.compile(r"\Alib/app/Squirrel\.exe\Z", re.IGNORECASE),
         reason=(
             "Velopack's updater, generated during `vpk pack` and deployed as Update.exe. Same "
-            "recorded-hash constraint as the launcher stub. The copy in Portable.zip is signed."
+            "recorded-hash constraint as the launcher stub. The copy in Portable.zip is signed "
+            "after packing."
         ),
     ),
 )
