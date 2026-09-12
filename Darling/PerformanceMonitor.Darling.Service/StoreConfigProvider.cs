@@ -987,10 +987,12 @@ INSERT INTO config_alert_settings (
     disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes,
     store_job_cadence_warn_percent,
     file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes,
-    retention_hold_warn_ratio, retention_hold_critical_ratio)
+    retention_hold_warn_ratio, retention_hold_critical_ratio,
+    /* #3368 (V120) appended after those, for the same reason. */
+    deadlock_warn_per_hour, deadlock_critical_per_hour)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
-        $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61)
+        $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -1067,6 +1069,11 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
            setting (every fire is Critical), not a state to normalize on the way in. */
         command.Parameters.AddWithValue(a.RetentionHoldWarnRatio);
         command.Parameters.AddWithValue(a.RetentionHoldCriticalRatio);
+        /* #3368, bound in the same order the V120 columns were appended. Seeded RAW like every sibling: the
+           clamp lives on DeadlockRateThresholds, and a pair where critical sits below warn is a legitimate
+           setting (every banded rate is Critical), not a state to normalize on the way in. */
+        command.Parameters.AddWithValue(a.DeadlockWarnPerHour);
+        command.Parameters.AddWithValue(a.DeadlockCriticalPerHour);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -1337,7 +1344,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes,
        store_job_cadence_warn_percent,
        file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes,
-       retention_hold_warn_ratio, retention_hold_critical_ratio
+       retention_hold_warn_ratio, retention_hold_critical_ratio,
+       deadlock_warn_per_hour, deadlock_critical_per_hour
 FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -1440,6 +1448,13 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
                is precisely the "the setting did not stick" reading this issue exists to remove. */
             RetentionHoldWarnRatio = reader.GetDouble(58),
             RetentionHoldCriticalRatio = reader.GetDouble(59),
+
+            /* #3368 deadlock-rate band tiers appended (V120) at ordinals 60-61, double precision like the
+               pair above. Same reachability rule as every appended knob: ApplyToConfig replaces
+               config.Alerts wholesale, so a column selected but not read here -- or read but not selected --
+               would silently reset the tier to the shipped default on every worker start. */
+            DeadlockWarnPerHour = reader.GetDouble(60),
+            DeadlockCriticalPerHour = reader.GetDouble(61),
         };
         var analysis = new AnalysisConfig
         {

@@ -248,7 +248,8 @@ public sealed class DarlingFleetDtoJsonTests
             "\"is_azure_sql_db\"", "\"is_azure_mi\"", "\"is_silenced\"", "\"tags\"", "\"band\"", "\"status\"",
             "\"is_online\"", "\"last_collection\"", "\"cpu_percent\"", "\"total_cpu_percent\"",
             "\"cpu_severity\"", "\"memory_severity\"", "\"blocking_count\"", "\"blocking_severity\"",
-            "\"deadlock_count\"", "\"deadlock_last_seen\"", "\"deadlock_severity\"", "\"threads_severity\"",
+            "\"deadlock_count\"", "\"deadlock_last_seen\"", "\"deadlock_rate_per_hour\"",
+            "\"deadlock_severity\"", "\"threads_severity\"",
             "\"failed_collector_count\"", "\"collector_severity\"", "\"overall_metric_severity\"",
         })
         {

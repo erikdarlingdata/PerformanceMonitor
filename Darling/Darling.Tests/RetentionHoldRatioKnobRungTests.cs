@@ -25,36 +25,39 @@ namespace Darling.Tests;
 /// that could not be — #3296's reporter received an hourly CRITICAL named <c>Retention Held</c> against
 /// <c>Monitor Store</c>, went looking in Settings for either phrase, and found neither.</para>
 ///
-/// <para>This file carries the "I am the top rung" claims that moved off
-/// <see cref="BuiltinAlertPersistenceRungTests"/> (V118) when this rung landed — a fully-migrated store must
-/// map to EXACTLY this version, or the viewer's connect-time gate refuses a store that is actually
-/// current.</para>
+/// <para>The "I am the top rung" claims have MOVED OFF this file to
+/// <see cref="DeadlockRateBandRungTests"/> (V120), the same way they moved off
+/// <c>BuiltinAlertPersistenceRungTests</c> (V118) when this rung landed. What is left here is this rung's
+/// own claims, stated against this rung's own NUMBER — read out of the ladder rather than taken from
+/// <see cref="StorageVersion.SchemaVersion"/>, which is no longer it.</para>
 /// </summary>
 public sealed class RetentionHoldRatioKnobRungTests
 {
-    private const int RungVersion = 119;
+    /// <summary>This rung's number, DERIVED from the ladder entry that owns the name rather than written as
+    /// a literal — so a renumber moves it here instead of leaving a silent copy.</summary>
+    private static int RungVersion =>
+        PgMigrations.Scripts.Single(s => s.Name == "retention-hold-ratio-knobs").Version;
+
     private const int PreviousVersion = 118;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe.</summary>
     private const int ProbeOrdinal = 94;
 
     private const string WarnColumn = "retention_hold_warn_ratio";
     private const string CriticalColumn = "retention_hold_critical_ratio";
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
-        Assert.Equal(
-            "retention-hold-ratio-knobs",
-            PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
-
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
-
+        Assert.Equal(119, RungVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
+
+        /* Below the top now, and that has to be asserted rather than assumed: every probe claim in this
+           file is about a store that has THIS rung and not the ones above it, which is only a meaningful
+           distinction while something is above it. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
     }
 
     /// <summary>
@@ -111,7 +114,7 @@ public sealed class RetentionHoldRatioKnobRungTests
     }
 
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeMapsAStoreAtThisRungToThisRung()
     {
         Assert.Contains($"column_name = '{WarnColumn}'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
@@ -119,22 +122,19 @@ public sealed class RetentionHoldRatioKnobRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasRetentionHoldRatioKnobs", viewer, StringComparison.Ordinal);
 
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
-
         var method = typeof(ViewerDataService)
             .GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* A store that stopped at THIS rung: everything up to and including this sentinel is true, and
+           every sentinel ABOVE it is false. Built by reflection so the arity tracks the signature — and
+           expressed as "false above" rather than as one named ordinal, so a rung landing on top of this one
+           does not quietly turn this case into a test of that rung instead. */
+        var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
+        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
 
-        /* Every sentinel true = a fully-migrated store, which must map to exactly this version. Built by
-           reflection so the arity tracks the signature. */
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-
-        /* One rung behind: every sentinel EXCEPT this one reports the previous top rung. */
-        var behind = Enumerable.Repeat((object)true, arity).ToArray();
+        /* One rung behind: the same store WITHOUT this rung's sentinel reports the previous rung. */
+        var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
     }

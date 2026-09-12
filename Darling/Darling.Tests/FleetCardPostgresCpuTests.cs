@@ -67,7 +67,11 @@ public sealed class FleetCardPostgresCpuTests
             Now.AddSeconds(-30),
             default,
             null,
-            Now);
+            Now,
+            /* #3368: a real one-hour window and the shipped tiers, so these CPU-arm cards band their
+               deadlock row on the same footing production does. */
+            TimeSpan.FromHours(1),
+            DeadlockRateThresholds.Default);
 
     private static ServerSummaryItem ViewerCard(
         string? engineKind,

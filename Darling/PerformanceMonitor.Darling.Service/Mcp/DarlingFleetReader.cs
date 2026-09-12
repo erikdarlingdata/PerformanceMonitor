@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
@@ -275,6 +276,17 @@ WHERE deadlock_time >= $1
 AND   deadlock_time <= $2
 GROUP BY server_id";
 
+    /// <summary>The deadlock health band's two tiers from the singleton settings row (#3368, V120).
+    ///
+    /// <para>Read through the same VIEWER-role pool every other fleet read uses, and no window parameter:
+    /// this is the current configuration, not history. <c>config_alert_settings</c> is the store's one
+    /// control-plane row, so the tiers sit beside every other operator-settable threshold rather than in a
+    /// second settings table an operator would have to know to look in.</para></summary>
+    public const string FleetDeadlockRateThresholdSql = @"
+SELECT deadlock_warn_per_hour, deadlock_critical_per_hour
+FROM config_alert_settings
+WHERE id = 1";
+
     /// <summary>Newest collection time per server — drives each card's freshness status. $1 window start.
     /// Bounded (not a bare GROUP BY over the whole table) so TimescaleDB can chunk-exclude: this table only
     /// grows, and every collector run adds a row, so an unbounded MAX(collection_time) over ALL history was
@@ -374,6 +386,11 @@ GROUP BY server_id, collector_name";
         var failingCollectors = await ReadFailingCollectorCountsAsync(postgres, now, cancellationToken);
         var tags = await ReadTagsAsync(postgres, cancellationToken);
         var tagForest = await ReadTagForestAsync(postgres, cancellationToken);
+        /* #3368: the deadlock band's tiers, read ONCE per roll-up rather than per card. A store reload can
+           hot-swap the settings row mid-read, and re-reading per server would let one roll-up band some
+           servers on the old pair and the rest on the new one — a mixed reading no configuration ever held,
+           and the band counts and the worst-first ranking would be derived from it. */
+        var deadlockTiers = await ReadDeadlockRateThresholdsAsync(postgres, cancellationToken);
 
         var cards = new List<FleetServerCard>(servers.Count);
         foreach (var server in servers)
@@ -401,7 +418,9 @@ GROUP BY server_id, collector_name";
             failingCollectors.TryGetValue(server.ServerId, out var collectors);
             tags.TryGetValue(server.ServerId, out var serverTags);
 
-            cards.Add(BuildCard(server, c, pg, m, mp, t, b, deadlock, lastColl, collectors, serverTags, now));
+            cards.Add(BuildCard(
+                server, c, pg, m, mp, t, b, deadlock, lastColl, collectors, serverTags, now,
+                windowEndUtc - windowStartUtc, deadlockTiers));
         }
 
         return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest);
@@ -429,7 +448,9 @@ GROUP BY server_id, collector_name";
         DateTime? lastCollection,
         CollectorCounts collectors,
         List<FleetTag>? tags,
-        DateTime now)
+        DateTime now,
+        TimeSpan deadlockWindow,
+        DeadlockRateThresholds deadlockTiers)
     {
         var deadlockCount = deadlock.Count;
 
@@ -485,6 +506,12 @@ GROUP BY server_id, collector_name";
             BlockingCount = blockingForBand,
             MaxBlockedSeconds = maxBlockedSeconds,
             DeadlockCount = deadlocksForBand,
+            /* #3368: the count's own denominator and the store's tiers travel WITH it, because the band is
+               a rate. Omitting either would leave the deadlock dot banded on one pair of numbers while the
+               overall band and the fleet score used another — the contradiction #3281 fixed on the CPU
+               arm, one metric over. */
+            DeadlockWindow = deadlockWindow,
+            DeadlockRateThresholds = deadlockTiers,
             TotalThreads = threads.TotalThreads,
             AvailableThreads = availableThreads,
             ThreadsWaitingForCpu = threads.RunnableTasks,
@@ -550,7 +577,11 @@ GROUP BY server_id, collector_name";
             BlockingSeverity = ServerHealthClassifier.BlockingSeverity(blockingForBand, maxBlockedSeconds),
             DeadlockCount = deadlockCount,
             DeadlockLastSeen = deadlock.LastSeen,
-            DeadlockSeverity = ServerHealthClassifier.DeadlockSeverity(deadlocksForBand),
+            DeadlockRatePerHour = ServerHealthClassifier.DeadlockRatePerHour(deadlockCount, deadlockWindow),
+            DeadlockWindow = deadlockWindow,
+            DeadlockRateThresholds = deadlockTiers,
+            DeadlockSeverity = ServerHealthClassifier.DeadlockSeverity(
+                deadlocksForBand, deadlockWindow, deadlockTiers),
             DeadlockCollectorBand = collectors.DeadlockBand,
             TotalThreads = threads.TotalThreads,
             CurrentWorkers = threads.CurrentWorkers,
@@ -728,7 +759,14 @@ GROUP BY server_id, collector_name";
 
         if (c.DeadlockSeverity >= HealthSeverity.Warning && c.DeadlockCount > 0)
         {
-            parts.Add($"Deadlocks {c.DeadlockCount}");
+            /* #3368: the RATE is what banded, so the reason names it. "Deadlocks 1" against a Critical band
+               was the reading #3368 was filed about, and the count alone cannot say which tier it crossed —
+               1 in an hour and 1 in a day are the same string. The count stays because it is the countable
+               fact; the rate is added because it is the banded one. An unrateable window prints the count
+               alone, which is exactly what the band had to go on. */
+            parts.Add(c.DeadlockRatePerHour.HasValue
+                ? $"Deadlocks {c.DeadlockCount} ({c.DeadlockRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr)"
+                : $"Deadlocks {c.DeadlockCount}");
         }
 
         if (c.CollectorSeverity >= HealthSeverity.Warning)
@@ -959,6 +997,31 @@ GROUP BY server_id, collector_name";
         }
 
         return map;
+    }
+
+    /// <summary>
+    /// The store's deadlock-rate tiers (#3368, V120), or the shipped pair when the row is absent.
+    ///
+    /// <para><b>A missing row falls back rather than failing.</b> <c>config_alert_settings</c> is a
+    /// singleton seeded on first worker start, so a store read before that has no row — and the fleet
+    /// roll-up is a READ that must still answer. The shipped pair is what such a store would seed anyway,
+    /// so the fallback is the store's own future value, not a guess.</para>
+    ///
+    /// <para>Values come back RAW; <see cref="DeadlockRateThresholds"/> clamps on read, so a hand-edited
+    /// row cannot drive a nonsense threshold and the roll-up reports the tier it actually used.</para>
+    /// </summary>
+    private static async Task<DeadlockRateThresholds> ReadDeadlockRateThresholdsAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        await using var command = postgres.CreateCommand(FleetDeadlockRateThresholdSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            return new DeadlockRateThresholds(reader.GetDouble(0), reader.GetDouble(1));
+        }
+
+        return DeadlockRateThresholds.Default;
     }
 
     private static async Task<Dictionary<int, DeadlockRow>> ReadDeadlocksAsync(
@@ -1247,7 +1310,26 @@ public sealed class FleetServerCard
 
     [JsonPropertyName("deadlock_count")] public int DeadlockCount { get; init; }
     [JsonPropertyName("deadlock_last_seen")] public DateTime? DeadlockLastSeen { get; init; }
+    /// <summary>Deadlocks per HOUR over the card's window — the figure <c>deadlock_severity</c> banded on
+    /// (#3368), or null when the window was too short to normalise. Published beside the raw count because a
+    /// card that bands on a number it does not show leaves a reader unable to tell which tier was
+    /// crossed.</summary>
+    [JsonPropertyName("deadlock_rate_per_hour")] public double? DeadlockRatePerHour { get; init; }
+
     [JsonPropertyName("deadlock_severity")] public HealthSeverity DeadlockSeverity { get; init; }
+
+    /// <summary>The window <c>deadlock_count</c> covers (#3368) — carried, not serialized, so
+    /// <see cref="ToHealthMetrics"/> can re-band on the same denominator the card banded on. The window is
+    /// already published on the roll-up as <c>window_start</c> / <c>window_end</c>, so a second copy on
+    /// every card would be 43 restatements of one fact.</summary>
+    [JsonIgnore]
+    public TimeSpan DeadlockWindow { get; init; }
+
+    /// <summary>The tiers this card banded on (#3368) — carried, not serialized, for
+    /// <see cref="ToHealthMetrics"/>. <c>get_alert_settings</c> is where a reader asks what they are, and
+    /// putting them on every card would invite reading two cards' copies as two configurations.</summary>
+    [JsonIgnore]
+    public DeadlockRateThresholds DeadlockRateThresholds { get; init; }
 
     /// <summary>This server's <c>deadlocks</c> collector band over the trailing seven days of collection
     /// health (#3017) — the fact that explains a <see cref="DeadlockCount"/> of zero. Null when that
@@ -1302,6 +1384,12 @@ public sealed class FleetServerCard
         BlockingCount = ServerMetricSources.DmvSourced(BlockingCount, IsPostgres),
         MaxBlockedSeconds = MaxBlockingWaitMs / 1000.0,
         DeadlockCount = ServerMetricSources.DmvSourced(DeadlockCount, IsPostgres),
+        /* #3368: the three travel together for the reason the CPU trio above does. Without the window the
+           re-band would have no denominator and the worst-first score would rank every deadlocking server
+           at Warning; without the tiers it would rank them against the shipped pair while the card's own
+           dot used the store's. */
+        DeadlockWindow = DeadlockWindow,
+        DeadlockRateThresholds = DeadlockRateThresholds,
         TotalThreads = TotalThreads,
         AvailableThreads = AvailableThreads,
         ThreadsWaitingForCpu = ThreadsWaitingForCpu,

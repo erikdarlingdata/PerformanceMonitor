@@ -63,7 +63,13 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
             Now.AddSeconds(-30),
             default,
             null,
-            Now);
+            Now,
+            /* #3368: a real one-hour window and the shipped tiers. This file's subject is the
+               measured-vs-unmeasured distinction, so the window has to be one a rate CAN be computed over —
+               otherwise a Postgres card's Unknown would be indistinguishable from the unrateable-window
+               Unknown and the pins would pass for the wrong reason. */
+            TimeSpan.FromHours(1),
+            DeadlockRateThresholds.Default);
 
     private static ServerSummaryItem ViewerCard(
         string? engineKind,
@@ -80,6 +86,10 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
             BlockingCount = blocking,
             MaxBlockingWaitMs = maxBlockingWaitMs,
             DeadlockCount = deadlocks,
+            /* #3368: a rateable window, for the reason the fleet-card helper above gives — this file's
+               subject is Postgres-vs-SQL-Server, so the window must not be the thing producing the
+               Unknown. */
+            DeadlockWindow = TimeSpan.FromHours(1),
             IsPostgres = MonitoredEngineKind.IsPostgres(engineKind),
             IsAurora = MonitoredEngineKind.IsAurora(engineKind),
             LastCollectionTime = Now.AddSeconds(-30),
@@ -212,9 +222,20 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
            so a stray duration cannot smuggle a band back in. */
         Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.BlockingSeverity(null, 600));
 
-        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.DeadlockSeverity(0));
-        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.DeadlockSeverity(1));
-        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.DeadlockSeverity(null));
+        /* #3368 re-banded this one on a RATE, so "unchanged" holds only for the null arm this file is
+           about. The measured arms are asserted at their post-#3368 values, over a window a rate can be
+           computed on: 0/hr Healthy, 30/hr Critical. That the NULL arm still answers Unknown at every
+           window length is the claim that belongs here. */
+        var hour = TimeSpan.FromHours(1);
+        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.DeadlockSeverity(0, hour, DeadlockRateThresholds.Default));
+        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.DeadlockSeverity(30, hour, DeadlockRateThresholds.Default));
+        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.DeadlockSeverity(null, hour, DeadlockRateThresholds.Default));
+
+        /* An engine with no deadlock source stays Unknown whatever the window says — the #3272 arm is read
+           BEFORE any rate arithmetic, so an unrateable window cannot turn a structural absence into the
+           Warning an unrateable COUNT gets. */
+        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.DeadlockSeverity(null, TimeSpan.Zero, DeadlockRateThresholds.Default));
+        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.DeadlockSeverity(null, TimeSpan.FromHours(168), DeadlockRateThresholds.Default));
     }
 
     /* ─────────────────────────── neutrality ─────────────────────────── */

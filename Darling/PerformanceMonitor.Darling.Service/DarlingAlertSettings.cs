@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
@@ -120,6 +121,19 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
         _config.Alerts.RetentionHoldCriticalRatio,
         TimescaleSupport.RetentionHoldRatioFloor,
         TimescaleSupport.RetentionHoldRatioCeiling);
+
+    /// <summary>#3368 (V120): the deadlock health band's tiers as ONE value, because they are only ever read
+    /// together and a caller handed two doubles can drop one.
+    ///
+    /// <para>The clamp lives on <see cref="PerformanceMonitor.Common.DeadlockRateThresholds"/> rather than
+    /// here, unlike every neighbour on this class, and that is deliberate: the band is in
+    /// <c>PerformanceMonitor.Common</c> and both cards construct the value — so a clamp here would leave the
+    /// viewer's card reading raw store values while the service's read clamped ones. The MCP write bound
+    /// names the same two constants, so <c>update_alert_settings</c> cannot ACCEPT a value the clamp then
+    /// rewrites.</para></summary>
+    public DeadlockRateThresholds DeadlockRateThresholds => new(
+        _config.Alerts.DeadlockWarnPerHour,
+        _config.Alerts.DeadlockCriticalPerHour);
 
     public int CollectionFailureThreshold => Math.Clamp(_config.Alerts.CollectionFailureThreshold, 1, 1000);
 

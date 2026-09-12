@@ -176,6 +176,7 @@ public static class PgMigrations
         new Migration(117, "mute-rules-reload-beacon", V117Sql),
         new Migration(118, "builtin-alert-persistence", V118Sql),
         new Migration(119, "retention-hold-ratio-knobs", V119Sql),
+        new Migration(120, "deadlock-rate-band-knobs", V120Sql),
     };
 
     /// <summary>
@@ -416,6 +417,26 @@ ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS retention_hold_warn_ratio double precision NOT NULL DEFAULT 2.0;
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS retention_hold_critical_ratio double precision NOT NULL DEFAULT 4.0;";
+
+    /// <summary>
+    /// V120 — the deadlock health band's two tiers, in deadlocks per HOUR (#3368).
+    ///
+    /// <para>The band was <c>count &gt; 0 ? Critical : Healthy</c>, so a single resolved deadlock made a
+    /// server Critical and the band's most common cause was the one condition that had already resolved
+    /// itself. Banding on a rate instead needs numbers whose right value differs per workload, which is
+    /// #3297's argument for the control plane rather than a compile-time constant.</para>
+    ///
+    /// <para>Column defaults name the same figures
+    /// <c>ServerHealthThresholds.DeadlockWarnPerHourDefault</c> /
+    /// <c>DeadlockCriticalPerHourDefault</c> carry, where the measured distribution they come from is
+    /// documented; they are literals HERE because SQL text cannot reference a C# constant, and
+    /// <c>DeadlockRateBandRungTests</c> pins the two against each other so the pair cannot drift.</para>
+    /// </summary>
+    private const string V120Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS deadlock_warn_per_hour double precision NOT NULL DEFAULT 5.0;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS deadlock_critical_per_hour double precision NOT NULL DEFAULT 20.0;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

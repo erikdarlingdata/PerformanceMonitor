@@ -81,11 +81,63 @@ public sealed class ServerHealthClassifierTests
     public void BlockingSeverity_BandsOnCountAndWait(int count, double maxSeconds, HealthSeverity expected) =>
         Assert.Equal(expected, ServerHealthClassifier.BlockingSeverity(count, maxSeconds));
 
-    [Theory]
-    [InlineData(0, HealthSeverity.Healthy)]
-    [InlineData(1, HealthSeverity.Critical)]
-    public void DeadlockSeverity_AnyDeadlockCritical(int count, HealthSeverity expected) =>
-        Assert.Equal(expected, ServerHealthClassifier.DeadlockSeverity(count));
+    /// <summary>
+    /// #3368: the count ladder has ONE Warning arm, so every count that is not Critical and not zero lands
+    /// on the same severity. A second arm at <c>&gt;= 2</c> existed above it returning the same Warning and
+    /// decided nothing.
+    ///
+    /// <para>Stated as a PROPERTY over the whole non-Critical range rather than as the old pair of
+    /// <c>InlineData</c> rows: the rows above happened to cover 1 and 2 and would have kept passing if a
+    /// third indistinguishable arm were added, where this cannot.</para>
+    /// </summary>
+    [Fact]
+    public void BlockingSeverity_HasOneWarningArmOnTheCount()
+    {
+        for (var count = 1; count < 5; count++)
+        {
+            Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.BlockingSeverity(count, 0.0));
+        }
+
+        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.BlockingSeverity(0, 0.0));
+        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.BlockingSeverity(5, 0.0));
+    }
+
+    /// <summary>
+    /// #3368's headline control, and the assertion this replaced said the opposite: a single deadlock in a
+    /// normal window is NOT Critical. One resolved deadlock on a 43-server production fleet routinely made a
+    /// server the top entry in the worst-first ranking with every other metric Healthy.
+    /// </summary>
+    [Fact]
+    public void DeadlockSeverity_OneDeadlockInANormalWindow_IsNotCritical()
+    {
+        Assert.NotEqual(
+            HealthSeverity.Critical,
+            ServerHealthClassifier.DeadlockSeverity(1, TimeSpan.FromHours(1), DeadlockRateThresholds.Default));
+
+        Assert.NotEqual(
+            HealthSeverity.Critical,
+            ServerHealthClassifier.DeadlockSeverity(1, TimeSpan.FromHours(24), DeadlockRateThresholds.Default));
+    }
+
+    /// <summary>
+    /// #3368: the band reads a RATE, so the SAME raw count over two different windows bands differently.
+    /// This is the one case that can tell a rate band from a count band — a suite that only ever passes one
+    /// window length would stay green if someone reverted to counting.
+    /// </summary>
+    [Fact]
+    public void DeadlockSeverity_SameCountTwoWindows_BandsDifferently()
+    {
+        const int count = 24;
+
+        var tight = ServerHealthClassifier.DeadlockSeverity(
+            count, TimeSpan.FromHours(1), DeadlockRateThresholds.Default);
+        var wide = ServerHealthClassifier.DeadlockSeverity(
+            count, TimeSpan.FromHours(24), DeadlockRateThresholds.Default);
+
+        Assert.Equal(HealthSeverity.Critical, tight);   // 24/hr
+        Assert.Equal(HealthSeverity.Healthy, wide);     // 1/hr
+        Assert.NotEqual(tight, wide);
+    }
 
     [Fact]
     public void ThreadsSeverity_NoSnapshot_IsUnknown() =>
@@ -119,7 +171,15 @@ public sealed class ServerHealthClassifierTests
     [Fact]
     public void OverallMetricSeverity_CriticalWins()
     {
-        var m = new ServerHealthMetrics { CpuPercentForAlert = 82, DeadlockCount = 1 }; // Warning + Critical
+        /* #3368: the Critical half is now a RATE, so the bundle has to declare the window its count covers
+           — 30 deadlocks in an hour, well past the 20/hr tier. A bare count of 1 reads Warning here, which
+           is the finding this band was changed for. */
+        var m = new ServerHealthMetrics
+        {
+            CpuPercentForAlert = 82,                     // Warning
+            DeadlockCount = 30,
+            DeadlockWindow = TimeSpan.FromHours(1),      // 30/hr -> Critical
+        };
         Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.OverallMetricSeverity(m));
     }
 
@@ -183,8 +243,19 @@ public sealed class ServerHealthClassifierTests
     [Fact]
     public void FleetHealthScore_WithinBand_MoreBadMetricsRanksHigher()
     {
-        var worse = new ServerHealthMetrics { CpuPercentForAlert = 96, DeadlockCount = 1 }; // two Critical metrics
-        var milder = new ServerHealthMetrics { DeadlockCount = 1 };                          // one Critical metric
+        /* #3368: both bundles declare a window, so "Critical metric" means a Critical RATE and not a
+           non-zero count. */
+        var worse = new ServerHealthMetrics
+        {
+            CpuPercentForAlert = 96,
+            DeadlockCount = 30,
+            DeadlockWindow = TimeSpan.FromHours(1),
+        };                                                                                  // two Critical metrics
+        var milder = new ServerHealthMetrics
+        {
+            DeadlockCount = 30,
+            DeadlockWindow = TimeSpan.FromHours(1),
+        };                                                                                  // one Critical metric
         Assert.True(
             ServerHealthClassifier.FleetHealthScore(FleetHealthBand.Critical, worse) >
             ServerHealthClassifier.FleetHealthScore(FleetHealthBand.Critical, milder));
@@ -202,6 +273,7 @@ public sealed class ServerHealthClassifierTests
             BlockingCount = 99,
             MaxBlockedSeconds = 120,
             DeadlockCount = 99,
+            DeadlockWindow = TimeSpan.FromHours(1),   // #3368: 99/hr, so this metric really is maxed
             TotalThreads = 512,
             AvailableThreads = 1,
             FailedCollectorCount = 1,

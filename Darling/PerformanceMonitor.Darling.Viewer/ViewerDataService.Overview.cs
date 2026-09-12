@@ -183,7 +183,11 @@ WHERE server_id = $1";
     public async Task<ServerSummaryItem> GetServerSummaryAsync(int serverId, string displayName, CancellationToken cancellationToken = default)
     {
         var nowUtc = DateTime.UtcNow;
-        var windowStart = DateTime.SpecifyKind(nowUtc.AddHours(-1), DateTimeKind.Unspecified);
+        /* #3368: the window's LENGTH is named once and the start derived from it, so the card's deadlock
+           rate can only ever be normalised over the span its count was actually taken from. Two independent
+           expressions of "one hour" is how a denominator drifts away from its numerator. */
+        var window = ServerHealthThresholds.DeadlockRateMinimumWindow;
+        var windowStart = DateTime.SpecifyKind(nowUtc - window, DateTimeKind.Unspecified);
 
         double? cpuPercent = null;
         double? otherProcessCpuPercent = null;
@@ -359,6 +363,11 @@ WHERE server_id = $1";
            SUM(CASE health_status = 'HEALTHY' / 'FAILING') over report.collection_health. */
         var (healthyCollectors, failingCollectors, deadlockBand) = await GetCollectorHealthCountsAsync(serverId, cancellationToken);
 
+        /* #3368: the deadlock band's tiers from the store's control-plane row, so this card and the
+           service's fleet card band on the same two numbers — the #1562 reason the thresholds live in one
+           place at all, extended to the ones that are now settable. */
+        var deadlockTiers = await GetDeadlockRateThresholdsAsync(cancellationToken);
+
         return new ServerSummaryItem
         {
             DisplayName = displayName,
@@ -379,6 +388,10 @@ WHERE server_id = $1";
             LastBlockingMinutesAgo = lastBlockingMinutesAgo,
             DeadlockCount = deadlockCount,
             LastDeadlockMinutesAgo = lastDeadlockMinutesAgo,
+            /* #3368: the count's denominator and the store's tiers, so this card bands on the same rate and
+               the same numbers the service's fleet card does. */
+            DeadlockWindow = window,
+            DeadlockRateThresholds = deadlockTiers,
             TotalThreads = totalThreads,
             CurrentWorkers = currentWorkers,
             ThreadsWaitingForCpu = threadsWaitingForCpu,
@@ -388,6 +401,37 @@ WHERE server_id = $1";
             DeadlockCollectorBand = deadlockBand,
             LastCollectionTime = lastCollection,
         };
+    }
+
+    /// <summary>The deadlock health band's two tiers from the store's singleton control-plane row (#3368,
+    /// V120). $1-less: this is the current configuration, not history.</summary>
+    public const string DeadlockRateThresholdSql = @"
+SELECT deadlock_warn_per_hour, deadlock_critical_per_hour
+FROM config_alert_settings
+WHERE id = 1";
+
+    /// <summary>
+    /// The store's deadlock-rate tiers (#3368), or the shipped pair when the singleton row is absent.
+    ///
+    /// <para><b>A missing row falls back rather than failing.</b> <c>config_alert_settings</c> is seeded on
+    /// the service's first start, so a viewer opened against a store the service has not run against yet has
+    /// no row — and an Overview card must still render. The shipped pair is what that store will seed, so
+    /// the fallback is its own future value.</para>
+    ///
+    /// <para>Values come back RAW; <see cref="DeadlockRateThresholds"/> clamps on read, so a hand-edited row
+    /// cannot drive a nonsense threshold.</para>
+    /// </summary>
+    private async Task<DeadlockRateThresholds> GetDeadlockRateThresholdsAsync(CancellationToken cancellationToken)
+    {
+        await using var command = _dataSource.CreateCommand(DeadlockRateThresholdSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            return new DeadlockRateThresholds(reader.GetDouble(0), reader.GetDouble(1));
+        }
+
+        return DeadlockRateThresholds.Default;
     }
 
     /// <summary>
@@ -858,11 +902,37 @@ public sealed class ServerSummaryItem
     /// <summary>Memory band — Critical on any resource-semaphore pressure, else Healthy; no source Unknown.</summary>
     public HealthSeverity MemorySeverity => ServerHealthClassifier.MemorySeverity(MemoryPressureForBand);
 
-    /// <summary>Blocking band — >= 60s max wait or >= 5 events Critical; >= 10s, >= 2 events, or any blocking Warning; no source Unknown.</summary>
+    /// <summary>Blocking band — >= 60s max wait or >= 5 events Critical; >= 10s or any blocking Warning; no source Unknown.</summary>
     public HealthSeverity BlockingSeverity => ServerHealthClassifier.BlockingSeverity(BlockingCountForBand, MaxBlockedSeconds);
 
-    /// <summary>Deadlock band — any deadlock in the window is Critical; no source Unknown.</summary>
-    public HealthSeverity DeadlockSeverity => ServerHealthClassifier.DeadlockSeverity(DeadlockCountForBand);
+    /// <summary>
+    /// The window <see cref="DeadlockCount"/> and <see cref="BlockingCount"/> cover (#3368) — the
+    /// denominator of the deadlock rate this card bands on.
+    ///
+    /// <para>Set by the read, not defaulted to the hour it happens to use, because
+    /// <see cref="TimeSpan.Zero"/> has to remain the reading "no window was declared": a default of one
+    /// hour here would let a card built by any other path band a bare count as a per-hour rate, which is
+    /// the defect #3368 removed.</para>
+    /// </summary>
+    public TimeSpan DeadlockWindow { get; set; }
+
+    /// <summary>The store's deadlock-rate tiers (#3368), or null to band on the shipped pair — set by the
+    /// read from <c>config_alert_settings</c>, so this card and the service's fleet card cannot disagree
+    /// about which numbers are in force.</summary>
+    public DeadlockRateThresholds? DeadlockRateThresholds { get; set; }
+
+    /// <summary>Deadlocks per HOUR over <see cref="DeadlockWindow"/> — what the band evaluates (#3368), or
+    /// null when the window is too short to normalise. Rendered beside the count so the dot's reason is
+    /// legible.</summary>
+    public double? DeadlockRatePerHour =>
+        ServerHealthClassifier.DeadlockRatePerHour(DeadlockCount, DeadlockWindow);
+
+    /// <summary>Deadlock band — deadlocks per hour over the window against the store's tiers (#3368); no
+    /// source Unknown.</summary>
+    public HealthSeverity DeadlockSeverity => ServerHealthClassifier.DeadlockSeverity(
+        DeadlockCountForBand,
+        DeadlockWindow,
+        DeadlockRateThresholds ?? PerformanceMonitor.Common.DeadlockRateThresholds.Default);
 
     /// <summary>Threads band — work-queue starvation Critical; >= 20 runnable-waiting or under 10% available Warning; no snapshot Unknown.</summary>
     public HealthSeverity ThreadsSeverity =>
@@ -894,6 +964,11 @@ public sealed class ServerSummaryItem
         BlockingCount = BlockingCountForBand,
         MaxBlockedSeconds = MaxBlockedSeconds,
         DeadlockCount = DeadlockCountForBand,
+        /* #3368: the three travel together. Without them the card's overall band and its border would
+           re-band the same count against no window while the deadlock dot banded a rate — a card
+           contradicting itself, which is the shape #3281 fixed on the CPU arm. */
+        DeadlockWindow = DeadlockWindow,
+        DeadlockRateThresholds = DeadlockRateThresholds,
         TotalThreads = TotalThreads,
         AvailableThreads = AvailableThreads,
         ThreadsWaitingForCpu = ThreadsWaitingForCpu,

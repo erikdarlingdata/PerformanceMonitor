@@ -662,6 +662,23 @@ public sealed class AlertsConfig
     [JsonPropertyName("retentionHoldCriticalRatio")]
     public double RetentionHoldCriticalRatio { get; set; } = TimescaleSupport.RetentionHoldCriticalRatioDefault;
 
+    /// <summary>#3368 (V120): the deadlock health band's WARNING tier, in deadlocks per hour normalised over
+    /// the window a card counted them in. The band was <c>count &gt; 0</c>, so one resolved deadlock made a
+    /// server Critical; the right rate differs per workload, which is #3297's argument for the control plane.
+    ///
+    /// <para>The seed is <see cref="ServerHealthThresholds.DeadlockWarnPerHourDefault"/>, named rather than
+    /// restated, so this and the V120 column default cannot disagree — the #3060 discipline the retention
+    /// knobs above already follow. <c>DeadlockRateThresholds</c> clamps it on read.</para></summary>
+    [JsonPropertyName("deadlockWarnPerHour")]
+    public double DeadlockWarnPerHour { get; set; } = ServerHealthThresholds.DeadlockWarnPerHourDefault;
+
+    /// <summary>#3368 (V120): the deadlock health band's CRITICAL tier, seeded from
+    /// <see cref="ServerHealthThresholds.DeadlockCriticalPerHourDefault"/> for the reason its warning sibling
+    /// above is. A value below the warning tier is not invalid — it means every banded rate is Critical,
+    /// which is what setting it there asks for.</summary>
+    [JsonPropertyName("deadlockCriticalPerHour")]
+    public double DeadlockCriticalPerHour { get; set; } = ServerHealthThresholds.DeadlockCriticalPerHourDefault;
+
     [JsonPropertyName("longRunningJobEnabled")]
     public bool LongRunningJobEnabled { get; set; } = true;
 

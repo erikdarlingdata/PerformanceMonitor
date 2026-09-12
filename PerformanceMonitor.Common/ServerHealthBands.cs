@@ -277,6 +277,123 @@ namespace PerformanceMonitor.Common
         /// <see cref="ServerFreshness.Stale"/>, which is the honest reading.
         /// </summary>
         public static readonly TimeSpan OfflineThreshold = TimeSpan.FromMinutes(CollectionStoppedMinutesDefault);
+
+        /* ── the deadlock RATE band (#3368) ── */
+
+        /// <summary>
+        /// The shortest window a deadlock rate is computed over. A window below this is not rateable and
+        /// <see cref="ServerHealthClassifier.DeadlockSeverity"/> declines to band on one.
+        ///
+        /// <para><b>It costs nothing, which is why it is set here.</b> Every surface that windows this band
+        /// takes its span as an integral number of hours with a floor of one:
+        /// <c>McpHelpers.ValidateHoursBack</c> refuses anything below 1 and above
+        /// <c>McpHelpers.MaxHoursBack</c>, <c>/api/fleet</c> clamps to the same pair, and the viewer's
+        /// Overview card reads a fixed one hour. So no window this product can produce is excluded by the
+        /// minimum, and the arithmetic below never divides by a fraction.</para>
+        ///
+        /// <para><b>What it buys is that one sample cannot be multiplied into a rate.</b> A single deadlock
+        /// in a 60-second window is 60 per hour, which is true and says nothing: the whole hour was not
+        /// observed. Declining to band is the honest reading, and it is the reading
+        /// <see cref="HealthSeverity.Unknown"/> exists for on every other metric here.</para>
+        /// </summary>
+        public static readonly TimeSpan DeadlockRateMinimumWindow = TimeSpan.FromHours(1);
+
+        /// <summary>
+        /// WARNING tier, shipped default: deadlocks per hour, normalised over the window.
+        ///
+        /// <para><b>The 99.94th percentile of a measured production distribution.</b> 14 days of
+        /// <c>collect.deadlocks</c> on a 43-server OLTP fleet — 2,722 deadlocks over 14,448 server-hours —
+        /// bucketed one server-hour at a time: 86.5% of server-hours hold none, 97.4% hold at most one,
+        /// 99.1% at most two, and 99.94% at most five. So a typical server-hour (0, 1 or 2) bands Healthy,
+        /// which is the requirement — the band exists to find the server in trouble, and a fleet whose
+        /// normal state is 11-20 deadlocks per hour across 43 servers has no such server most hours.</para>
+        ///
+        /// <para>Twenty of those 14,448 server-hours reach this tier or above, spread over 13 distinct
+        /// servers — 18 band Warning and 2 band Critical. That is about one banded server-hour every 37
+        /// hours fleet-wide, which is a rate an operator can read.</para>
+        /// </summary>
+        public const double DeadlockWarnPerHourDefault = 5.0;
+
+        /// <summary>
+        /// CRITICAL tier, shipped default: deadlocks per hour.
+        ///
+        /// <para><b>Placed inside a measured empty interval, not chosen for roundness.</b> The same 14-day
+        /// distribution is bimodal with nothing between the two modes: the routine mode tops out at 15
+        /// deadlocks in an hour (one server-hour in 14 days), and the next observation at all is <b>90</b>,
+        /// then 102. The interval [16, 89] is empty across 43 servers and 14 days. 20 sits near its lower
+        /// edge — 4x the warning tier, above every routine hour measured, and 4.5x below the smallest storm
+        /// — so it catches a storm while it is building rather than only at full height, and nothing routine
+        /// can reach it. Both storm hours band Critical; 0.014% of server-hours do.</para>
+        /// </summary>
+        public const double DeadlockCriticalPerHourDefault = 20.0;
+
+        /// <summary>
+        /// The FLOOR both deadlock-rate knobs clamp to.
+        ///
+        /// <para><b>It is what keeps the knob a rate.</b> One per hour is the tightest threshold that still
+        /// describes a rate rather than an occurrence: on any window longer than an hour it means "more than
+        /// one deadlock for every hour observed", so no setting reachable through this knob can restore the
+        /// "any deadlock in the window is Critical" reading #3368 removed. That reading is not a tighter
+        /// threshold, it is a different claim, and it is unexpressible here by construction.</para>
+        ///
+        /// <para>A fleet where one deadlock an hour genuinely is the alarm can still say so; a fleet with a
+        /// deliberate retry-on-deadlock design raises instead, which is the direction the field asked
+        /// for.</para>
+        /// </summary>
+        public const double DeadlockRatePerHourFloor = 1.0;
+
+        /// <summary>
+        /// The CEILING both deadlock-rate knobs clamp to, so the knob stays a threshold rather than becoming
+        /// an undisclosed off switch — <c>create_mute_rule</c> silences a signal visibly, is scoped, expires
+        /// and is listed; a threshold parked out of reach reports nothing about what it suppressed.
+        ///
+        /// <para>1,000 per hour is an order of magnitude above the worst hour in the measured distribution
+        /// (102). A server deadlocking faster than that is doing little else, and the CPU and blocking bands
+        /// reach it first regardless.</para>
+        /// </summary>
+        public const double DeadlockRatePerHourCeiling = 1000.0;
+    }
+
+    /// <summary>
+    /// The two settable tiers of the deadlock RATE band (#3368) — deadlocks per hour, normalised over the
+    /// window the count was taken from, so one pair of numbers means the same thing on a one-hour read and a
+    /// 24-hour one.
+    ///
+    /// <para><b>Raw in, clamped out.</b> The store holds what the operator set and
+    /// <c>get_alert_settings</c> reports it back; these accessors clamp to
+    /// <see cref="ServerHealthThresholds.DeadlockRatePerHourFloor"/> ..
+    /// <see cref="ServerHealthThresholds.DeadlockRatePerHourCeiling"/> on read, the split
+    /// <c>DarlingAlertSettings</c> uses for its own knobs. A hand-edited row cannot drive a nonsense
+    /// threshold, and a <c>default</c> struct — every field zero — clamps to the floor rather than to zero,
+    /// which would band every measured deadlock Critical.</para>
+    ///
+    /// <para><b>The critical tier is not floored at the warning tier.</b> Set below it, every fire is
+    /// Critical and the Warning tier is empty, which is a coherent reading of what an operator who set it
+    /// there asked for — where a <c>Math.Max</c> would silently band on a number no surface reports.</para>
+    /// </summary>
+    /// <param name="WarnPerHourRaw">The stored warning tier, before clamping.</param>
+    /// <param name="CriticalPerHourRaw">The stored critical tier, before clamping.</param>
+    public readonly record struct DeadlockRateThresholds(double WarnPerHourRaw, double CriticalPerHourRaw)
+    {
+        /// <summary>The warning tier the band evaluates, clamped.</summary>
+        public double WarnPerHour => Clamp(WarnPerHourRaw);
+
+        /// <summary>The critical tier the band evaluates, clamped independently of the warning tier.</summary>
+        public double CriticalPerHour => Clamp(CriticalPerHourRaw);
+
+        /// <summary>The shipped pair — what a store at its V120 column defaults hands the band, and what a
+        /// bundle that declares no thresholds is banded on.</summary>
+        public static DeadlockRateThresholds Default => new(
+            ServerHealthThresholds.DeadlockWarnPerHourDefault,
+            ServerHealthThresholds.DeadlockCriticalPerHourDefault);
+
+        private static double Clamp(double value) =>
+            double.IsNaN(value)
+                ? ServerHealthThresholds.DeadlockRatePerHourFloor
+                : Math.Clamp(
+                    value,
+                    ServerHealthThresholds.DeadlockRatePerHourFloor,
+                    ServerHealthThresholds.DeadlockRatePerHourCeiling);
     }
 
     /// <summary>
@@ -324,6 +441,34 @@ namespace PerformanceMonitor.Common
         /// <summary>Deadlocks in the window, or <c>null</c> when this target has no deadlock source the
         /// card reads (#3272). Same reasoning as <see cref="HasMemoryPressure"/>.</summary>
         public int? DeadlockCount { get; init; }
+
+        /// <summary>
+        /// How long the window <see cref="DeadlockCount"/> was counted over (#3368) — the denominator of the
+        /// deadlock rate the band evaluates.
+        ///
+        /// <para><b>A measurement property, so its <c>default</c> has to be unusable.</b>
+        /// <see cref="TimeSpan.Zero"/> means no window was declared, and
+        /// <see cref="ServerHealthClassifier.DeadlockSeverity"/> refuses to compute a rate from it rather
+        /// than dividing by zero or reading it as "none per hour" — which would paint a green dot on a
+        /// server that deadlocked. It is the <see cref="FleetCpuSource.NotCollected"/> discipline: a bundle
+        /// built by a path that declares no window cannot land on an arm meaning "measured".</para>
+        ///
+        /// <para>Populated on the count's own terms, not on <see cref="MaxBlockedSeconds"/>'s: blocking
+        /// bands on a wait duration, which carries its own scale, while a bare deadlock count means
+        /// different things over an hour and over a week.</para>
+        /// </summary>
+        public TimeSpan DeadlockWindow { get; init; }
+
+        /// <summary>
+        /// The store's deadlock-rate tiers (#3368), or <c>null</c> to band on the shipped pair.
+        ///
+        /// <para>Null is the unsupplied-seam fallback its #3297 sibling uses, so a path built before the
+        /// knobs existed behaves like a store at its V120 defaults rather than banding on zeros.
+        /// <c>DeadlockRateThresholdsReachEveryBundleTests</c> is what stops a PRODUCTION path taking that
+        /// fallback: on a store whose tiers were raised, a bundle that left this null would band on numbers
+        /// <c>get_alert_settings</c> does not report — the "the setting did not stick" reading.</para>
+        /// </summary>
+        public DeadlockRateThresholds? DeadlockRateThresholds { get; init; }
 
         /// <summary>Worker-thread ceiling (max_workers_count), or null with no scheduler snapshot (e.g. Azure SQL DB).</summary>
         public int? TotalThreads { get; init; }
@@ -496,11 +641,21 @@ namespace PerformanceMonitor.Common
             return hasMemoryPressure.Value ? HealthSeverity.Critical : HealthSeverity.Healthy;
         }
 
-        /// <summary>Blocking band: >= 60s max wait or >= 5 events Critical; >= 10s max wait, >= 2 events, or any blocking Warning; no source Unknown (#3272).
+        /// <summary>Blocking band: >= 60s max wait or >= 5 events Critical; >= 10s max wait or any blocking Warning; no source Unknown (#3272).
         ///
         /// <para>The COUNT carries the measured/not-measured distinction on its own — there is no second
         /// spelling of "unknown" to get wrong — because a max wait means nothing without a population to
-        /// have waited. See <see cref="MemorySeverity"/> for why the arm exists.</para></summary>
+        /// have waited. See <see cref="MemorySeverity"/> for why the arm exists.</para>
+        ///
+        /// <para><b>One Warning arm on the count, not two.</b> A <c>&gt;= 2</c> arm sat above this
+        /// <c>&gt; 0</c> one returning the same Warning, so it decided nothing: every count it caught the
+        /// count arm below caught, at the same severity. It reads as a tier that was intended and collapsed,
+        /// and the tier is NOT restored here, because there is no third label to give it — the enum runs
+        /// Healthy / Warning / Critical, Critical already belongs to <c>&gt;= 5</c>, and inventing an
+        /// intermediate band for 2-4 blocking events would be a threshold with nothing behind it while
+        /// #3368's deadlock tiers were derived from a measured distribution. The dead arm is deleted so the
+        /// ladder reads as the three decisions it actually makes; a magnitude tier here wants the same
+        /// derivation its deadlock sibling got, on the blocking population.</para></summary>
         public static HealthSeverity BlockingSeverity(int? blockingCountOrNullWhenUnmeasured, double maxBlockedSeconds)
         {
             if (!blockingCountOrNullWhenUnmeasured.HasValue)
@@ -525,11 +680,6 @@ namespace PerformanceMonitor.Common
                 return HealthSeverity.Warning;
             }
 
-            if (blockingCount >= 2)
-            {
-                return HealthSeverity.Warning;
-            }
-
             if (blockingCount > 0)
             {
                 return HealthSeverity.Warning;
@@ -538,25 +688,93 @@ namespace PerformanceMonitor.Common
             return HealthSeverity.Healthy;
         }
 
-        /// <summary>Deadlock band — any deadlock in the window is Critical; no source Unknown (#3272).
+        /// <summary>
+        /// Deadlocks per hour over <paramref name="window"/>, or <c>null</c> when the window is too short to
+        /// normalise honestly (below <see cref="ServerHealthThresholds.DeadlockRateMinimumWindow"/>, which
+        /// includes a zero, negative or undeclared one).
         ///
-        /// <para><b>This completes #3017 rather than reversing it.</b> That issue established that a
+        /// <para>Public because both cards REPORT the rate beside the count: a card that bands on a figure
+        /// it does not show leaves an operator reading "Deadlocks 3" against a Critical dot with no way to
+        /// see which number crossed which tier.</para>
+        /// </summary>
+        public static double? DeadlockRatePerHour(int deadlockCount, TimeSpan window) =>
+            window >= ServerHealthThresholds.DeadlockRateMinimumWindow
+                ? deadlockCount / window.TotalHours
+                : null;
+
+        /// <summary>
+        /// Deadlock band (#3368): deadlocks per HOUR over the window, Critical at
+        /// <see cref="DeadlockRateThresholds.CriticalPerHour"/> and Warning at
+        /// <see cref="DeadlockRateThresholds.WarnPerHour"/>; no source Unknown (#3272).
+        ///
+        /// <para><b>A rate, because the count is window-scoped and the band is not.</b> Measured on a
+        /// 43-server production OLTP fleet, the count band <c>&gt; 0</c> read 13.4% of one-hour windows
+        /// Critical and 87.9% of 24-hour windows Critical — the same servers, the same code, a 6.5x swing
+        /// from the window alone. Normalising removes the window from the answer: one pair of tiers means
+        /// the same condition on a one-hour read and a 24-hour read, which is what makes the band
+        /// comparable across the surfaces that window differently (the MCP tool's <c>hours_back</c>,
+        /// <c>/api/fleet</c>'s, and the viewer card's fixed hour).</para>
+        ///
+        /// <para><b>A resolved deadlock is not a present-tense state, and the tiers are set accordingly.</b>
+        /// By the time the engine wrote the graph it had already chosen a victim and rolled something back;
+        /// what the band can honestly claim is that deadlocking is frequent enough to be the server's
+        /// problem. On the measured distribution a typical server-hour is 0, 1 or 2 deadlocks (99.1% of
+        /// them) and bands Healthy — see the tier constants for the percentiles and the empty interval the
+        /// Critical tier sits in. That is the whole finding of #3368: the band's most common cause used to
+        /// be the one condition that had already resolved itself, so Critical stopped discriminating.
+        /// <see cref="MemorySeverity"/> and <see cref="ThreadsSeverity"/> keep their unthresholded booleans
+        /// because both read a condition holding NOW.</para>
+        ///
+        /// <para><b>An unrateable window fails away from Healthy, never into Critical.</b> With no honest
+        /// denominator the count is all there is, and banding it would be the count band this replaced. A
+        /// count above zero reads <see cref="HealthSeverity.Warning"/> — deadlocks demonstrably happened,
+        /// which #3368 calls a real finding, and no rate supports a Critical claim. A count of zero reads
+        /// <see cref="HealthSeverity.Unknown"/>, not Healthy: a window of no length measured nothing, and a
+        /// green dot for an unmeasured metric is the failure <see cref="MemorySeverity"/>'s Unknown arm and
+        /// <see cref="CpuSeverity"/>'s exist to avoid.</para>
+        ///
+        /// <para><b>The null arm completes #3017 rather than reversing it.</b> That issue established that a
         /// PostgreSQL target's zero is structural — <c>v_deadlocks</c> is the SQL Server extended-event
         /// capture and nothing joins <c>pg_deadlocks</c> into it — and gave the CARD
         /// <see cref="FleetDeadlockSource"/> plus the fleet total a coverage denominator to say so. It
         /// deliberately added no band to the FLEET ROLLUP, so that a quiet, fully-covered SQL Server fleet
-        /// keeps reading healthy; that reasoning is untouched here. What it left behind was this
-        /// per-metric severity still answering <b>Healthy</b> for the same uncountable zero, so the card
-        /// disclosed the gap in <c>deadlock_source</c> and contradicted itself on the dot beside
-        /// it.</para></summary>
-        public static HealthSeverity DeadlockSeverity(int? deadlockCount)
+        /// keeps reading healthy; that reasoning is untouched here. A PostgreSQL target has no
+        /// SQL-Server-deadlock reading at any rate, so it bands off none.</para></summary>
+        /// <param name="deadlockCount">Deadlocks counted in the window, or null where the engine has no
+        /// source behind the reading.</param>
+        /// <param name="window">How long that count covers. Required rather than defaulted, for the reason
+        /// <see cref="CpuSeverity"/>'s source is: a caller that kept the old single-argument call would
+        /// compile and silently band a bare count again, which is the entire defect.</param>
+        /// <param name="thresholds">The store's tiers. Required for the same reason — a defaulted parameter
+        /// would let a surface band on the shipped pair while <c>get_alert_settings</c> reported the
+        /// store's.</param>
+        public static HealthSeverity DeadlockSeverity(
+            int? deadlockCount,
+            TimeSpan window,
+            DeadlockRateThresholds thresholds)
         {
             if (!deadlockCount.HasValue)
             {
                 return HealthSeverity.Unknown;
             }
 
-            return deadlockCount.Value > 0 ? HealthSeverity.Critical : HealthSeverity.Healthy;
+            var ratePerHour = DeadlockRatePerHour(deadlockCount.Value, window);
+            if (!ratePerHour.HasValue)
+            {
+                return deadlockCount.Value > 0 ? HealthSeverity.Warning : HealthSeverity.Unknown;
+            }
+
+            if (ratePerHour.Value >= thresholds.CriticalPerHour)
+            {
+                return HealthSeverity.Critical;
+            }
+
+            if (ratePerHour.Value >= thresholds.WarnPerHour)
+            {
+                return HealthSeverity.Warning;
+            }
+
+            return HealthSeverity.Healthy;
         }
 
         /// <summary>
@@ -599,7 +817,10 @@ namespace PerformanceMonitor.Common
             yield return ThreadsSeverity(m.TotalThreads, m.AvailableThreads, m.ThreadsWaitingForCpu, m.RequestsWaitingForThreads);
             yield return MemorySeverity(m.HasMemoryPressure);
             yield return BlockingSeverity(m.BlockingCount, m.MaxBlockedSeconds);
-            yield return DeadlockSeverity(m.DeadlockCount);
+            yield return DeadlockSeverity(
+                m.DeadlockCount,
+                m.DeadlockWindow,
+                m.DeadlockRateThresholds ?? DeadlockRateThresholds.Default);
             yield return CollectorSeverity(m.FailedCollectorCount);
         }
 

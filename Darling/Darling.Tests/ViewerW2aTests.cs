@@ -338,7 +338,14 @@ public sealed class ViewerServerSummaryDisplayTests
     [Fact]
     public void CardBorderBrush_RedForDeadlock_DefaultOtherwise()
     {
-        var deadlocked = new ServerSummaryItem { DeadlockCount = 1, LastCollectionTime = Now };
+        /* #3368: red is the CRITICAL border, and Critical is now a RATE — 30 deadlocks in an hour. One
+           deadlock in an hour paints the amber Warning border, which is the reading that issue is about. */
+        var deadlocked = new ServerSummaryItem
+        {
+            DeadlockCount = 30,
+            DeadlockWindow = TimeSpan.FromHours(1),
+            LastCollectionTime = Now,
+        };
         deadlocked.ApplyFreshness(Now);
         Assert.Equal("#FFE57373", deadlocked.CardBorderBrush.Color.ToString());
 
@@ -449,7 +456,7 @@ public sealed class ViewerServerSummaryDisplayTests
     [Theory]
     [InlineData(0, 0, HealthSeverity.Healthy)]
     [InlineData(1, 0, HealthSeverity.Warning)]        // any blocking at all → Warning
-    [InlineData(2, 0, HealthSeverity.Warning)]        // >=2 events → Warning
+    [InlineData(2, 0, HealthSeverity.Warning)]        // still the "any blocking" arm; #3368 removed the indistinguishable >=2 one
     [InlineData(5, 0, HealthSeverity.Critical)]       // >=5 events → Critical
     [InlineData(1, 10000, HealthSeverity.Warning)]    // 10s max wait → Warning
     [InlineData(1, 59000, HealthSeverity.Warning)]
@@ -529,11 +536,42 @@ public sealed class ViewerServerSummaryDisplayTests
         Assert.Equal(HealthSeverity.Healthy, notChecked.CollectorSeverity);
     }
 
+    /// <summary>
+    /// #3368: the viewer card bands deadlocks on a RATE over its own window, not on the count.
+    ///
+    /// <para>The assertion this replaced said one deadlock in the window is Critical, which is the defect.
+    /// Stated here as the two properties that distinguish a rate band: a single deadlock in a normal window
+    /// is not Critical, and the SAME count over two windows bands differently — a card that ignored the
+    /// window would pass one of those and fail the other.</para>
+    ///
+    /// <para>And a card with NO window declared cannot read Healthy off a non-zero count: a zero-length
+    /// window measured nothing, so there is no rate to be calm about.</para>
+    /// </summary>
     [Fact]
-    public void DeadlockSeverity_AnyInWindow_IsCritical()
+    public void DeadlockSeverity_BandsOnTheRate_NotTheCount()
     {
-        Assert.Equal(HealthSeverity.Healthy, new ServerSummaryItem { DeadlockCount = 0 }.DeadlockSeverity);
-        Assert.Equal(HealthSeverity.Critical, new ServerSummaryItem { DeadlockCount = 1 }.DeadlockSeverity);
+        var hour = TimeSpan.FromHours(1);
+
+        Assert.Equal(
+            HealthSeverity.Healthy,
+            new ServerSummaryItem { DeadlockCount = 0, DeadlockWindow = hour }.DeadlockSeverity);
+
+        Assert.NotEqual(
+            HealthSeverity.Critical,
+            new ServerSummaryItem { DeadlockCount = 1, DeadlockWindow = hour }.DeadlockSeverity);
+
+        /* The discriminating case: 30 deadlocks is 30/hr over an hour and 1.25/hr over a day. */
+        Assert.Equal(
+            HealthSeverity.Critical,
+            new ServerSummaryItem { DeadlockCount = 30, DeadlockWindow = hour }.DeadlockSeverity);
+        Assert.Equal(
+            HealthSeverity.Healthy,
+            new ServerSummaryItem { DeadlockCount = 30, DeadlockWindow = TimeSpan.FromHours(24) }.DeadlockSeverity);
+
+        /* No window declared: not Healthy on a count above zero, and not Healthy on a count of zero
+           either — nothing was measured. */
+        Assert.Equal(HealthSeverity.Warning, new ServerSummaryItem { DeadlockCount = 1 }.DeadlockSeverity);
+        Assert.Equal(HealthSeverity.Unknown, new ServerSummaryItem { DeadlockCount = 0 }.DeadlockSeverity);
     }
 
     [Fact]
