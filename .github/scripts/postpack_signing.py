@@ -476,40 +476,53 @@ def apply(signed_dir: str, manifest_path: str) -> int:
         for member in product["portable"]["members"]:
             blobs[member["stage"]] = signed_blob(member["stage"])
 
-    written = 0
-    for product in manifest["products"]:
-        setup = product["setup"]
-        blob = blobs[setup["stage"]]
-        with open(setup["path"], "wb") as handle:
-            handle.write(blob)
-        if not is_signed(setup["path"]):
-            raise PostPackError(f"{setup['path']}: unsigned after the write-back")
-        written += 1
-        print(f"  {product['name']}: {os.path.basename(setup['path'])} signed")
+    # Nothing in the packed output is touched until every rebuild has been built AND verified,
+    # for every product. A rebuild that fails does so while the artifacts are still exactly as
+    # `vpk pack` left them, rather than after an earlier product has already been overwritten.
+    pending_setups: list[tuple[str, bytes]] = []
+    pending_archives: list[tuple[str, str, list[str], int]] = []
+    rebuilt_paths: list[str] = []
+    try:
+        for product in manifest["products"]:
+            pending_setups.append((product["setup"]["path"], blobs[product["setup"]["stage"]]))
 
-        archive = product["portable"]["path"]
-        replacements = {m["member"]: blobs[m["stage"]] for m in product["portable"]["members"]}
-        if not replacements:
-            raise PostPackError(f"{archive}: no members to replace")
-        before = snapshot(archive)
-        rebuilt = archive + ".rebuilt"
-        try:
+            archive = product["portable"]["path"]
+            replacements = {m["member"]: blobs[m["stage"]] for m in product["portable"]["members"]}
+            if not replacements:
+                raise PostPackError(f"{archive}: no members to replace")
+            before = snapshot(archive)
+            rebuilt = archive + ".rebuilt"
+            rebuilt_paths.append(rebuilt)
             rebuild(archive, replacements, rebuilt)
             assert_faithful(before, rebuilt, replacements)
+            pending_archives.append((archive, rebuilt, sorted(replacements), len(before)))
+
+        for path, blob in pending_setups:
+            with open(path, "wb") as handle:
+                handle.write(blob)
+        for archive, rebuilt, _, _ in pending_archives:
             os.replace(rebuilt, archive)
-        finally:
+    finally:
+        for rebuilt in rebuilt_paths:
             if os.path.exists(rebuilt):
                 os.remove(rebuilt)
+
+    written = 0
+    for path, _ in pending_setups:
+        if not is_signed(path):
+            raise PostPackError(f"{path}: unsigned after the write-back")
+        written += 1
+        print(f"  {os.path.basename(path)} signed")
+    for archive, _, replaced, entries in pending_archives:
         with zipfile.ZipFile(archive) as zf:
-            for member in replacements:
-                head = zf.read(member)[: vrs.HEADER_BYTES]
-                offset, length = vrs.certificate_table(head)
+            for member in replaced:
+                offset, length = vrs.certificate_table(zf.read(member)[: vrs.HEADER_BYTES])
                 if offset == 0 or length == 0:
                     raise PostPackError(f"{archive} :: {member}: unsigned after the rebuild")
-        written += len(replacements)
+        written += len(replaced)
         print(
-            f"  {product['name']}: {os.path.basename(archive)} rebuilt with "
-            f"{len(replacements)} signed member(s), {len(before)} entries preserved"
+            f"  {os.path.basename(archive)} rebuilt with {len(replaced)} signed member(s), "
+            f"{entries} entries preserved"
         )
 
     if not written:
@@ -777,6 +790,53 @@ def self_test() -> int:
         )
         expect(
             "apply wrote the signed installers before refusing a partially signed response",
+            artifact_digests() == untouched,
+        )
+
+        # And the mirror: the portable members come back signed and the installers come back as
+        # submitted. Every rebuild then succeeds, so only a check on the installers refuses it --
+        # and the artifacts have to be untouched when it does.
+        mirror = _sign_stage(stage, suffix="-mirror", only="-portable/")
+        untouched = artifact_digests()
+        expect_raises(
+            "apply accepted a response whose installers came back unsigned",
+            lambda: apply(mirror, manifest),
+        )
+        expect(
+            "apply wrote the rebuilt archives before refusing an unsigned installer",
+            artifact_digests() == untouched,
+        )
+
+        # A fully signed response whose SECOND product cannot be rebuilt. This is the case that
+        # decides whether the write-back is atomic ACROSS products: the first product's rebuild
+        # succeeds, and the refusal arrives while its artifacts must still be untouched.
+        awkward = os.path.join(root, "velopack-awkward")
+        os.makedirs(awkward, exist_ok=True)
+        with open(os.path.join(awkward, "Awkward-awkward-Setup.exe"), "wb") as handle:
+            handle.write(vrs._synth_pe(signed=False))
+        with zipfile.ZipFile(os.path.join(awkward, "Awkward-awkward-Portable.zip"), "w") as zf:
+            marker = zipfile.ZipInfo(".portable", date_time=(2026, 9, 12, 10, 0, 0))
+            marker.compress_type = zipfile.ZIP_STORED
+            zf.writestr(marker, b"")
+            # A compression method the rebuilder refuses rather than silently re-encoding.
+            odd = zipfile.ZipInfo("Awkward.exe", date_time=(2026, 9, 12, 10, 0, 0))
+            odd.compress_type = zipfile.ZIP_BZIP2
+            zf.writestr(odd, vrs._synth_pe(signed=False))
+
+        pair_stage = os.path.join(root, "pair-stage")
+        pair_manifest = os.path.join(root, "pair.json")
+        expect_ok(
+            "collect refused a product whose archive uses an unusual compression method",
+            lambda: collect(pair_stage, pair_manifest, [("lite", lite), ("awkward", awkward)]),
+        )
+        pair_signed = _sign_stage(pair_stage, suffix="-signed")
+        untouched = artifact_digests()
+        expect_raises(
+            "apply accepted a response whose second product cannot be rebuilt",
+            lambda: apply(pair_signed, pair_manifest),
+        )
+        expect(
+            "apply committed the first product before the second product's rebuild failed",
             artifact_digests() == untouched,
         )
 
