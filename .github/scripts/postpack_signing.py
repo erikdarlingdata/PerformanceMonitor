@@ -17,9 +17,10 @@ WHY THIS RUNS AFTER PACKING RATHER THAN INSIDE IT
   So the two standalone assets are signed by an Action step after packing. `Setup.exe` and
   `Portable.zip` carry no recorded hash: `releases.<channel>.json` records a SHA256 and a Size
   for the two `.nupkg` files and nothing else, so rewriting the standalone assets invalidates
-  nothing. The copies of the stub and `Squirrel.exe` inside the `.nupkg` stay unsigned, are
-  allowlisted by name AND container in verify_release_signatures.py, and are the only two
-  executables in a release that are.
+  nothing. The copies of the stub and `Squirrel.exe` inside the `.nupkg` stay unsigned, two per
+  product, and they are the only executables a release publishes without a signature. They are
+  allowlisted by member path AND container in verify_release_signatures.py, so the same two
+  names anywhere else still fail its guard.
 
 WHAT IT SIGNS, AND HOW IT FINDS THEM
 
@@ -52,8 +53,9 @@ USAGE
 
   postpack_signing.py --self-test
 
-  Exit status is 0 on success and 1 on any failure. There is no partial success: `apply` writes
-  a rebuilt zip over the original only after the rebuild has been verified.
+  Exit status is 0 on success and 1 on any failure. There is no partial success: `apply` reads
+  and signature-checks the entire signing response, then builds and verifies every product's
+  rebuilt archive, and only then writes anything into the packed output.
 """
 
 from __future__ import annotations
