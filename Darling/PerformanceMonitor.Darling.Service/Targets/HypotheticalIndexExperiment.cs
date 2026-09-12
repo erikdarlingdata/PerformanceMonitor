@@ -183,6 +183,17 @@ public static class HypotheticalIndexExperiment
                 + "rather than guessed.");
         }
 
+        if (!IsSingleStatement(normalizedStatementText))
+        {
+            return new Result(
+                false, 0, 0, null, null, null,
+                "The stored text for this statement is not exactly one PostgreSQL statement, and the "
+                + "EXPLAIN concatenates it into a server-side EXECUTE. Refused rather than repaired: "
+                + "nothing was stripped, escaped or truncated, and no command reached the monitored "
+                + "server. A normalized pg_stat_statements entry is one statement and carries no "
+                + "terminator, so this is text that did not come from one.");
+        }
+
         /* ROLLED BACK unconditionally: the hypothetical index is session-local, but the session is pooled
            and would carry it into the next caller's work. */
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -301,6 +312,255 @@ public static class HypotheticalIndexExperiment
     }
 
     /// <summary>
+    /// Whether <paramref name="statementText"/> is EXACTLY ONE PostgreSQL statement — the deliberate
+    /// barrier under the concatenation at <see cref="ExplainThroughGucSql"/> (#3385).
+    ///
+    /// <para>
+    /// <b>It refuses; it never repairs.</b> Nothing is escaped, nothing is truncated at the first
+    /// statement, and a trailing <c>;</c> is not stripped. The text reaches the EXPLAIN byte-identical or
+    /// it does not reach it at all, which is also what keeps the <c>$1</c> placeholders
+    /// <c>GENERIC_PLAN</c> needs from being rewritten into something that is no longer a placeholder.
+    /// Sanitizing a value on its way into a dynamic-SQL sink converts a loud refusal into a quiet
+    /// transformation nobody reviews.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>A <c>;</c> scan is NOT this check.</b> Real normalized <c>pg_stat_statements</c> text is full of
+    /// comments — tracing headers from agents and ORMs, and prose inside this product's own queries — and
+    /// #3385 measured ~45% of real normalized queries carrying a block comment, ~5% of them with a
+    /// <c>;</c> inside one. A <c>;</c> scan refuses those, so it costs legitimate index candidates without
+    /// buying anything. PostgreSQL's lexical rules therefore run FIRST and the <c>;</c> is looked for only
+    /// in what they leave: <c>--</c> to end of line; <c>/* … */</c>, which NESTS in PostgreSQL, so depth is
+    /// counted rather than matched to the first <c>*/</c>; <c>'…'</c> with <c>''</c> doubling and no
+    /// backslash escape, which is what <c>standard_conforming_strings</c> means; <c>E'…'</c>, where a
+    /// backslash DOES escape, recognized only where the <c>E</c> does not continue an identifier;
+    /// <c>$tag$…$tag$</c> and <c>$$…$$</c>, closed only by the byte-identical tag and told apart from the
+    /// <c>$1</c> placeholders; <c>"…"</c> with <c>""</c> doubling. <c>U&amp;'…'</c>, <c>B'…'</c> and
+    /// <c>X'…'</c> need no case of their own — their prefixes lex as ordinary characters and their bodies
+    /// follow the <c>'…'</c> rule.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>Every uncertainty resolves toward refusal.</b> An unterminated comment, string, quoted identifier
+    /// or dollar-quoted body is refused rather than read to the end of the text, and so is text holding no
+    /// statement at all. An <c>E</c> that might belong to an identifier is scanned as a plain quote,
+    /// because reading a plain string as an escape string is the one direction that can hide a <c>;</c>:
+    /// in <c>'\'; x'</c> the backslash is data, the <c>;</c> separates statements, and only the plain
+    /// reading sees it.
+    /// </para>
+    /// </summary>
+    public static bool IsSingleStatement(string? statementText)
+    {
+        if (string.IsNullOrWhiteSpace(statementText))
+        {
+            return false;
+        }
+
+        var text = statementText;
+        var index = 0;
+        var sawStatement = false;
+
+        while (index < text.Length)
+        {
+            var character = text[index];
+            int next;
+
+            if (character == '-' && index + 1 < text.Length && text[index + 1] == '-')
+            {
+                next = EndOfLineComment(text, index);
+            }
+            else if (character == '/' && index + 1 < text.Length && text[index + 1] == '*')
+            {
+                next = EndOfBlockComment(text, index);
+            }
+            else if (character == ';')
+            {
+                /* Top level, because every construct that could be holding one has been consumed above. */
+                return false;
+            }
+            else if (character is '\'' or '"')
+            {
+                sawStatement = true;
+                next = EndOfQuoted(text, index, character, backslashEscapes: false);
+            }
+            else if ((character is 'e' or 'E')
+                     && index + 1 < text.Length
+                     && text[index + 1] == '\''
+                     && (index == 0 || !IsIdentifierCharacter(text[index - 1])))
+            {
+                sawStatement = true;
+                next = EndOfQuoted(text, index + 1, '\'', backslashEscapes: true);
+            }
+            else if (character == '$')
+            {
+                sawStatement = true;
+                next = EndOfDollarQuoted(text, index);
+            }
+            else
+            {
+                sawStatement |= !char.IsWhiteSpace(character);
+                next = index + 1;
+            }
+
+            if (next < 0)
+            {
+                /* Unterminated. The tail of a construct nobody can close is not something to scan past. */
+                return false;
+            }
+
+            index = next;
+        }
+
+        /* Comments and whitespace alone are zero statements, not one. */
+        return sawStatement;
+    }
+
+    /// <summary>
+    /// Past a <c>--</c> comment. One that reaches the end of the text is COMPLETE rather than
+    /// unterminated, so this never returns a refusal.
+    /// </summary>
+    private static int EndOfLineComment(string text, int start)
+    {
+        for (var index = start + 2; index < text.Length; index++)
+        {
+            if (text[index] is '\n' or '\r')
+            {
+                return index;
+            }
+        }
+
+        return text.Length;
+    }
+
+    /// <summary>
+    /// Past a <c>/* … */</c> comment, or -1 when it never closes.
+    ///
+    /// <para>PostgreSQL block comments NEST, so this counts depth. Matching to the first <c>*/</c> would
+    /// leave the tail of a nested comment being read as code, and a <c>;</c> in that tail is exactly where
+    /// one hides from a scanner that looks like it handles comments.</para>
+    /// </summary>
+    private static int EndOfBlockComment(string text, int start)
+    {
+        var depth = 0;
+        var index = start;
+
+        while (index + 1 < text.Length)
+        {
+            if (text[index] == '/' && text[index + 1] == '*')
+            {
+                depth++;
+                index += 2;
+                continue;
+            }
+
+            if (text[index] == '*' && text[index + 1] == '/')
+            {
+                depth--;
+                index += 2;
+
+                if (depth == 0)
+                {
+                    return index;
+                }
+
+                continue;
+            }
+
+            index++;
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// Past a <c>'…'</c> string or a <c>"…"</c> quoted identifier, or -1 when it never closes. A doubled
+    /// delimiter is an embedded one in both forms.
+    ///
+    /// <para><paramref name="backslashEscapes"/> is true only for <c>E'…'</c>. A plain string honours no
+    /// backslash, which is what <c>standard_conforming_strings</c> means and has been the default since
+    /// PostgreSQL 9.1. With it OFF this reading refuses MORE rather than less: the <c>'</c> that an
+    /// ignored backslash exposes ends the string, and whatever follows is then read at top level.</para>
+    /// </summary>
+    private static int EndOfQuoted(string text, int start, char quote, bool backslashEscapes)
+    {
+        for (var index = start + 1; index < text.Length; index++)
+        {
+            if (backslashEscapes && text[index] == '\\')
+            {
+                index++;
+                continue;
+            }
+
+            if (text[index] != quote)
+            {
+                continue;
+            }
+
+            if (index + 1 < text.Length && text[index + 1] == quote)
+            {
+                index++;
+                continue;
+            }
+
+            return index + 1;
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// Past a <c>$tag$…$tag$</c> or <c>$$…$$</c> body, -1 when it never closes, or the next character when
+    /// this <c>$</c> opens nothing.
+    ///
+    /// <para><b>Telling those last two apart is the case this feature cannot afford to get wrong.</b>
+    /// Normalized text is built out of <c>$1</c>, <c>$2</c>, <c>$35</c> placeholders. A <c>$</c> before a
+    /// digit is a placeholder, a <c>$</c> at the end of the text is an ordinary character, and <c>$abc</c>
+    /// with no second <c>$</c> lexes as a <c>$</c> followed by an identifier. Reading any of them as an
+    /// opening delimiter would swallow the rest of the statement and every <c>;</c> in it.</para>
+    ///
+    /// <para>A tag follows the rules for an unquoted identifier except that it cannot hold a <c>$</c>, and
+    /// only the byte-identical tag closes the body — neither <c>$$</c> nor a different <c>$tag$</c> inside
+    /// a <c>$outer$</c> body ends it.</para>
+    /// </summary>
+    private static int EndOfDollarQuoted(string text, int start)
+    {
+        var tagEnd = start + 1;
+
+        if (tagEnd < text.Length && IsDollarTagStart(text[tagEnd]))
+        {
+            do
+            {
+                tagEnd++;
+            }
+            while (tagEnd < text.Length && IsDollarTagCharacter(text[tagEnd]));
+        }
+
+        if (tagEnd >= text.Length || text[tagEnd] != '$')
+        {
+            return start + 1;
+        }
+
+        var delimiter = text[start..(tagEnd + 1)];
+        var close = text.IndexOf(delimiter, tagEnd + 1, StringComparison.Ordinal);
+
+        return close < 0 ? -1 : close + delimiter.Length;
+    }
+
+    /// <summary>
+    /// Identifier characters as PostgreSQL's lexer reads them: ASCII letters and digits, <c>_</c>,
+    /// <c>$</c> (legal anywhere but the first character), and everything above ASCII.
+    /// </summary>
+    private static bool IsIdentifierCharacter(char character)
+        => char.IsAsciiLetterOrDigit(character) || character is '_' or '$' || character > '\u007f';
+
+    /// <summary>A dollar-quote tag's first character. A digit here makes it a placeholder instead.</summary>
+    private static bool IsDollarTagStart(char character)
+        => char.IsAsciiLetter(character) || character == '_' || character > '\u007f';
+
+    private static bool IsDollarTagCharacter(char character)
+        => IsDollarTagStart(character) || char.IsAsciiDigit(character);
+
+    /// <summary>
     /// The statement text is BOUND, never interpolated — and getting there took two failed designs worth
     /// recording, because both look correct.
     ///
@@ -332,9 +592,12 @@ public static class HypotheticalIndexExperiment
     /// rests, in order, on: (1) <c>EXPLAIN</c> WITHOUT <c>ANALYZE</c> only PLANS — a hostile statement is never
     /// executed; (2) the text is a single NORMALIZED <c>pg_stat_statements</c> entry, not a script;
     /// (3) <c>FOR line IN EXECUTE</c> rejects a multi-statement string outright; (4) the whole call runs in a
-    /// ROLLED-BACK transaction as a least-privilege role. Barriers (2) and (3) are today INCIDENTAL, not a
-    /// deliberate check — a real single-statement guard is tracked in #3385, and a naive semicolon scan is NOT
-    /// it (measured: ~5% of real normalized queries carry a <c>;</c> inside a block comment). So do NOT
+    /// ROLLED-BACK transaction as a least-privilege role. Barrier (1) is the strong one and stays first:
+    /// <see cref="IsSingleStatement"/> is defence in depth beneath it, never a replacement for it. That
+    /// guard is what makes barriers (2) and (3) DELIBERATE rather than incidental — it refuses anything
+    /// that is not exactly one statement, and it decides that with PostgreSQL's lexical rules rather than a
+    /// semicolon scan, which would refuse the ~5% of real normalized queries that carry a <c>;</c> inside a
+    /// block comment (#3385). So do NOT
     /// "simplify" this to a plain <c>EXECUTE</c> of a bound value, and do not drop the
     /// <c>GENERIC_PLAN</c>/no-<c>ANALYZE</c> shape, on the belief that the binding protects the concatenation:
     /// it does not.
@@ -355,6 +618,16 @@ public static class HypotheticalIndexExperiment
     private static async Task<string?> ExplainAsync(
         NpgsqlConnection connection, DbTransaction transaction, string statementText, CancellationToken cancellationToken)
     {
+        /* The guard sits AT the sink as well as at the entry point, so a second caller of this method
+           cannot reach the concatenation without it. RunAsync checks first and returns a Result carrying
+           the refusal, so the only caller today never reaches this throw. */
+        if (!IsSingleStatement(statementText))
+        {
+            throw new InvalidOperationException(
+                "Refused: the statement text is not exactly one PostgreSQL statement, and it is "
+                + "concatenated into a server-side EXECUTE.");
+        }
+
         /* is_local = true on both: the settings die with the transaction that is rolled back below, so
            nothing survives into the next caller of this pooled session. */
         await using (var stage = new NpgsqlCommand("SELECT set_config('pm.stmt', $1, true)", connection, (NpgsqlTransaction)transaction)
