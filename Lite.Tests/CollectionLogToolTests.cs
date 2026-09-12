@@ -280,10 +280,10 @@ public sealed class CollectionLogToolTests : IClassFixture<SharedDuckDbFixture>,
 
         Assert.Equal(
             minus30.ToString("o")[..19],
-            root.GetProperty("oldest_collection_time").GetString()![..19]);
+            root.GetProperty("oldest_returned_collection_time").GetString()![..19]);
         Assert.Equal(
             minus10.ToString("o")[..19],
-            root.GetProperty("newest_collection_time").GetString()![..19]);
+            root.GetProperty("newest_returned_collection_time").GetString()![..19]);
 
         /* The last row is neither, so the two assertions above cannot be passing by coincidence. */
         Assert.Equal(

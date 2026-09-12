@@ -295,6 +295,81 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("as_of", catalog.Select(p => p.Name));
     }
 
+    /// <summary>
+    /// The page-span fields say they bound the PAGE, on both SKUs, and the description says what that means
+    /// under each ordering — the doctrine <c>QueryStoreTopWindowTests</c> states, carried to the read that
+    /// borrowed half of it.
+    ///
+    /// <para>That pin forbids <c>get_query_store_top</c> deriving its window from its rows, because those rows
+    /// are always cost-ranked and their timestamps say nothing about reach. <c>get_collection_log</c> is the
+    /// case that pin's file-scoped form could not express: under its DEFAULT ordering the page is a contiguous
+    /// slice of the window's tail, so its oldest row IS the reach and is exactly the figure #3287 asks for —
+    /// but under a duration floor the same page becomes a cost-ranked sample and the same number becomes
+    /// meaningless as reach.</para>
+    ///
+    /// <para>So the resolution is naming plus disclosure, and both halves are pinned here. A field called
+    /// <c>oldest_collection_time</c> would be one number quietly meaning two things depending on a parameter
+    /// the caller may not have sent; <c>oldest_returned_collection_time</c> cannot be read as a window floor,
+    /// and the description states which ordering makes it reach. The negative is what stops the shorter name
+    /// coming back as a "tidy-up".</para>
+    /// </summary>
+    [Fact]
+    public void CollectionLogPageSpanFields_SayTheyBoundThePage_AndTheDescriptionSaysWhenThatIsReach()
+    {
+        var liteTools = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Mcp", "McpHealthTools.cs"));
+        var darlingTools = File.ReadAllText(Path.Combine(
+            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs"));
+
+        foreach (var (surface, source) in new[] { ("Darling", darlingTools), ("Lite", liteTools) })
+        {
+            Assert.Contains("oldest_returned_collection_time", source, StringComparison.Ordinal);
+            Assert.Contains("newest_returned_collection_time", source, StringComparison.Ordinal);
+
+            /*
+                And NOT the unqualified names, which is the assertion that actually holds the line: they read
+                as a window floor, and this read does not probe for one. Checked against the two possible
+                spellings rather than the field syntax, so a rename in the payload and a stale mention in the
+                prose both fail.
+            */
+            Assert.DoesNotContain("oldest_collection_time", source, StringComparison.Ordinal);
+            Assert.DoesNotContain("newest_collection_time", source, StringComparison.Ordinal);
+
+            /* Positive control for those two negatives: the qualified names really are present in this
+               surface, so neither is passing against a file that has stopped emitting the fields. */
+            Assert.Contains("_returned_collection_time", source, StringComparison.Ordinal);
+
+            _ = surface;
+        }
+
+        /* The disclosure half, on both SKUs' published descriptions. A caller who cannot tell which ordering
+           makes the field a reach figure has the same problem the field name just fixed. */
+        var darlingDescription = ToolDescriptionOf(darlingTools, "get_collection_log");
+        var liteDescription = ToolDescriptionOf(liteTools, "get_collection_log");
+
+        foreach (var description in new[] { darlingDescription, liteDescription })
+        {
+            Assert.Contains("cost-RANKED sample", description, StringComparison.Ordinal);
+            Assert.Contains("NOTHING about reach", description, StringComparison.Ordinal);
+
+            /* And it says outright that no probe happens, so nobody reads either field as a window floor. */
+            Assert.Contains("Neither field is a window floor", description, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>One tool's <c>Description</c> text, sliced out of a SKU's source by tool name — the pattern
+    /// #2839 established for reading across the Lite seam, used on both here so the two descriptions are held
+    /// to the same claims by the same instrument.</summary>
+    private static string ToolDescriptionOf(string source, string toolName)
+    {
+        var at = source.IndexOf($"Name = \"{toolName}\"", StringComparison.Ordinal);
+        Assert.True(at > 0, $"Could not locate the {toolName} tool — this pin needs re-anchoring.");
+
+        var end = source.IndexOf(")]", at, StringComparison.Ordinal);
+        Assert.True(end > at, $"Could not find the end of {toolName}'s attribute.");
+
+        return source[at..end];
+    }
+
     /// <summary>The "Key Parameters" cell of the <c>get_collection_log</c> row in a quick-reference table.</summary>
     private static string CollectionLogInstructionCell(string surface, string text)
     {

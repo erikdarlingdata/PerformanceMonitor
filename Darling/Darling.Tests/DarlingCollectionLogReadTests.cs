@@ -181,18 +181,33 @@ public sealed class DarlingCollectionLogReadTests
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, FilterServerId, FilterServerName, ct);
 
+            /*
+                Every timestamp is captured ONCE, here, and reused by the seeds and the assertions.
+
+                MinutesAgo() reads the clock, so calling it again at assertion time is a different instant:
+                the seconds tick over between seeding and asserting and the two disagree by exactly one
+                second. That is a flake, not a failure -- it passed locally and failed in CI on the same
+                commit, which is the worst way to learn it. One capture, one value.
+            */
+            var t1 = MinutesAgo(1);
+            var t2 = MinutesAgo(2);
+            var t3 = MinutesAgo(3);
+            var t10 = MinutesAgo(10);
+            var t20 = MinutesAgo(20);
+            var t30 = MinutesAgo(30);
+
             /* The three NON-matching rows are the newest in the window, so any implementation that caps
                before it filters sees only these. Cheap and recent, like the ordinary traffic that buries a
                slow run on a real fleet. */
-            await SeedFilterAsync(connection, ct, "wait_stats", MinutesAgo(1), 10);
-            await SeedFilterAsync(connection, ct, "wait_stats", MinutesAgo(2), 12);
-            await SeedFilterAsync(connection, ct, "wait_stats", MinutesAgo(3), 11);
+            await SeedFilterAsync(connection, ct, "wait_stats", t1, 10);
+            await SeedFilterAsync(connection, ct, "wait_stats", t2, 12);
+            await SeedFilterAsync(connection, ct, "wait_stats", t3, 11);
 
             /* The three matching rows, all older, with duration deliberately NOT monotone in time and the
                heaviest one the OLDEST. */
-            await SeedFilterAsync(connection, ct, "plan_correction", MinutesAgo(30), 50_000);
-            await SeedFilterAsync(connection, ct, "plan_correction", MinutesAgo(10), 40_000);
-            await SeedFilterAsync(connection, ct, "plan_correction", MinutesAgo(20), 30_000);
+            await SeedFilterAsync(connection, ct, "plan_correction", t30, 50_000);
+            await SeedFilterAsync(connection, ct, "plan_correction", t10, 40_000);
+            await SeedFilterAsync(connection, ct, "plan_correction", t20, 30_000);
 
             /* ── 1. collector_name filters in SQL, so the cap applies to the MATCHES ── */
             var byCollector = await DarlingMcpDataTools.GetCollectionLog(
@@ -222,7 +237,7 @@ public sealed class DarlingCollectionLogReadTests
             /* No floor, so the order is unchanged: newest first among the matches. */
             Assert.Equal("collection_time_desc", collectorRoot.GetProperty("order").GetString());
             Assert.Equal(
-                MinutesAgo(10),
+                t10,
                 collectorRoot.GetProperty("runs")[0].GetProperty("collection_time").GetDateTime());
 
             /* ── 2. min_duration_ms filters in SQL AND ranks by duration ── */
@@ -259,12 +274,12 @@ public sealed class DarlingCollectionLogReadTests
                 window. rows[^1] would report -20m as the oldest and rows[0] would report -30m as the newest;
                 both are wrong, and both are what a lane reusing the time-ordered idiom would write.
             */
-            Assert.Equal(MinutesAgo(30), reachRoot.GetProperty("oldest_collection_time").GetDateTime());
-            Assert.Equal(MinutesAgo(10), reachRoot.GetProperty("newest_collection_time").GetDateTime());
+            Assert.Equal(t30, reachRoot.GetProperty("oldest_returned_collection_time").GetDateTime());
+            Assert.Equal(t10, reachRoot.GetProperty("newest_returned_collection_time").GetDateTime());
 
             /* The last row really is neither, so the two assertions above cannot be passing by coincidence. */
             var last = reachRoot.GetProperty("runs")[2].GetProperty("collection_time").GetDateTime();
-            Assert.Equal(MinutesAgo(20), last);
+            Assert.Equal(t20, last);
 
             /* ── 4. a filter that matches nothing says so, and does NOT call the window quiet ── */
             var noMatch = await DarlingMcpDataTools.GetCollectionLog(

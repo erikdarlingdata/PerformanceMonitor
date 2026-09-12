@@ -498,7 +498,7 @@ public sealed class McpHealthTools
         }
     }
 
-    [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, NEWEST FIRST by default and SLOWEST FIRST whenever min_duration_ms is supplied: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the local store, rows collected, status and any error. get_collection_health rolls these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window. READ THE REACH FIELDS BEFORE CONCLUDING ANYTHING FROM THE ROWS. hours_back is the span you ASKED for; oldest_collection_time and newest_collection_time are the span you GOT, and the row cap can make those wildly different — enough collectors writing often enough will satisfy a 24-hour request out of the last few seconds of activity. truncated says the cap bit; the two timestamps say how far back the page actually reaches. A read whose newest and oldest are seconds apart has told you nothing about the window you named, and raising limit does NOT fix it under the default ordering because the slow runs are not the recent ones — min_duration_ms is the knob for that, because supplying it ranks by duration instead of by time. Both filters are applied in SQL, BEFORE the cap, so truncated and run_count describe the MATCHING rows rather than the unfiltered window. order names which ordering you got, so a caller never has to infer it from the filters it sent. One precision on sql_duration_ms, which Darling's twin of this tool states at length (#3192): on the collectors that enumerate databases it is the driver's per-item stopwatch, which also wraps the per-database watermark refresh - a read against the LOCAL store, so a small part of it is not the monitored server. What does NOT apply here is the large part: this SKU never enables the deferred plan-XML or statement-text fetches, so none of the store probe or write-back that dominates Darling's figure for query_store is in this one, and there is nothing here to attribute.")]
+    [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, NEWEST FIRST by default and SLOWEST FIRST whenever min_duration_ms is supplied: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the local store, rows collected, status and any error. get_collection_health rolls these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window. READ THE PAGE-SPAN FIELDS BEFORE CONCLUDING ANYTHING FROM THE ROWS. hours_back is the span you ASKED for; oldest_returned_collection_time and newest_returned_collection_time bound the page you GOT, and the row cap can make those wildly different — enough collectors writing often enough will satisfy a 24-hour request out of the last few seconds of activity. truncated says the cap bit; the two timestamps say what the page holds. THE TWO FIELDS MEAN DIFFERENT THINGS UNDER THE TWO ORDERINGS and the difference matters: under the default newest-first ordering the page is a contiguous slice of the window's tail, so oldest_returned_collection_time IS how far back this read reached; under a min_duration_ms floor the page is a cost-RANKED sample drawn from the whole window, so it tells you how old the slowest matching runs are and NOTHING about reach. Read order to know which you have. Neither field is a window floor: nothing here probes for the oldest row the window could have held. A read whose newest and oldest are seconds apart has told you nothing about the window you named, and raising limit does NOT fix it under the default ordering because the slow runs are not the recent ones — min_duration_ms is the knob for that, because supplying it ranks by duration instead of by time. Both filters are applied in SQL, BEFORE the cap, so truncated and run_count describe the MATCHING rows rather than the unfiltered window. order names which ordering you got, so a caller never has to infer it from the filters it sent. One precision on sql_duration_ms, which Darling's twin of this tool states at length (#3192): on the collectors that enumerate databases it is the driver's per-item stopwatch, which also wraps the per-database watermark refresh - a read against the LOCAL store, so a small part of it is not the monitored server. What does NOT apply here is the large part: this SKU never enables the deferred plan-XML or statement-text fetches, so none of the store probe or write-back that dominates Darling's figure for query_store is in this one, and there is nothing here to attribute.")]
     public static async Task<string> GetCollectionLog(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -613,17 +613,26 @@ public sealed class McpHealthTools
                 run_count = rows.Count,
                 truncated,
                 /*
-                    #3287, field-identical to Darling's twin: the span actually COVERED beside the span
+                    #3287, field-identical to Darling's twin: the span this PAGE covers, beside the span
                     requested. `hours_back = 24` next to `truncated = true` said the cap bit and then showed
                     the 24 hours as if that were the window -- an instrument reporting a span it did not
                     measure.
 
-                    MIN and MAX over the returned rows, deliberately not rows[0] and rows[^1]: those are the
-                    same thing only under time ordering, and the moment min_duration_ms switches the page to
-                    slowest-first neither end of the array is an end of the window.
+                    The _returned_ in these names is load-bearing (and the unqualified spellings are not
+                    written out anywhere here, because a pin forbids them across this file and a correction
+                    naming what it corrected would be the occurrence that defeats it). Under the DEFAULT
+                    ordering the page is a contiguous slice of the window's tail, so its oldest row IS how
+                    far back the read reached. Under a duration floor it is a cost-RANKED sample drawn from
+                    the whole window, so its oldest row says how old the slowest runs happen to be and says
+                    NOTHING about reach. The field names what it is and the description says which case is
+                    which, rather than one number quietly meaning two things.
+
+                    MIN and MAX over the rows, deliberately not rows[0] and rows[^1]: those are the same
+                    thing only under time ordering, and the ranked page would report the wrong ends while
+                    the time-ordered test kept passing.
                 */
-                oldest_collection_time = rows.Min(r => r.CollectionTime).ToString("o"),
-                newest_collection_time = rows.Max(r => r.CollectionTime).ToString("o"),
+                oldest_returned_collection_time = rows.Min(r => r.CollectionTime).ToString("o"),
+                newest_returned_collection_time = rows.Max(r => r.CollectionTime).ToString("o"),
                 /* Which ordering this page came back in, stated rather than left to be inferred from the
                    filters sent. Same two tokens as Darling's twin, from the shared constants. */
                 order = min_duration_ms is null
