@@ -524,7 +524,7 @@ public sealed class CustomAlertEvaluator
             return _cache;
         }
 
-        var rows = await _ruleStore.ListEnabledAsync(cancellationToken);
+        var rows = ApplyEnabledCeiling(await _ruleStore.ListEnabledAsync(cancellationToken), _logger);
         var (parsedPairs, broken) = ClassifyRules(rows);
 
         foreach (var b in broken)
@@ -551,6 +551,29 @@ public sealed class CustomAlertEvaluator
         _brokenRules = broken;
         _cacheRefreshedUtc = DateTime.UtcNow;
         return _cache;
+    }
+
+    /// <summary>
+    /// The evaluator's HARD ceiling on how many enabled rules a sweep will ever evaluate (#3285, Round-2). The
+    /// write path already caps enabled rules at <see cref="CustomAlertRuleStore.EnabledRuleCap"/>, so this is a
+    /// defense-in-depth backstop: even if the table somehow holds more enabled rows than the cap (a direct SQL
+    /// insert that bypassed the store, say), the sweep still evaluates at most the cap, in the deterministic
+    /// id order <see cref="CustomAlertRuleStore.ListEnabledSql"/> reads them in. When the ceiling is actually hit
+    /// it is logged (WARN) rather than silently trimmed, so an over-cap table is visible. The store reads one
+    /// beyond the cap, so a hit here means "at least cap+1 enabled rows exist". Pure over its inputs so the trim
+    /// is unit-testable without a store.
+    /// </summary>
+    internal static IReadOnlyList<CustomAlertRule> ApplyEnabledCeiling(IReadOnlyList<CustomAlertRule> enabledRows, ILogger? logger)
+    {
+        if (enabledRows.Count <= CustomAlertRuleStore.EnabledRuleCap)
+        {
+            return enabledRows;
+        }
+
+        logger?.LogWarning(
+            "Custom alert rule enabled-count ceiling hit: at least {Count} enabled rules exist but only the first {Cap} (by id) will be evaluated. The write-path cap should prevent this — a rule was likely inserted bypassing the store; disable the excess.",
+            enabledRows.Count, CustomAlertRuleStore.EnabledRuleCap);
+        return enabledRows.Take(CustomAlertRuleStore.EnabledRuleCap).ToList();
     }
 
     /// <summary>
