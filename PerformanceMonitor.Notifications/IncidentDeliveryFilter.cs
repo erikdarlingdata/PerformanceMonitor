@@ -35,12 +35,15 @@ namespace PerformanceMonitor.Notifications;
 /// (<c>EmailAlertService</c>'s <c>deliverProse</c>), for the same reason.
 /// </para>
 /// <para>
-/// <b>Per-event mode (#1141) does not have the defect and is not changed.</b>
+/// <b>Per-event mode (#1141) does not RE-DELIVER a stale incident, and this filter does not change it.</b>
 /// <c>PerEventNotification.Split</c> already emits one message per incident, each carrying a single-incident
 /// context, and each goes through its own send — so an in-window fingerprint fails its own
 /// <see cref="IncidentCooldown.Decision.ShouldSend"/> and never posts. Its trailing "+N more" overflow
 /// message is the one per-event payload carrying several fingerprints, and it is filtered here like any
 /// other batch because this sits at the delivery boundary every message crosses.
+/// <para>Scoped to re-delivery deliberately: per-event mode had its own separate defect in what it
+/// ATTACHED (#3330 — every message carried the first graph in the window), fixed where the splitter builds
+/// each message rather than here.</para>
 /// </para>
 /// </summary>
 public static class IncidentDeliveryFilter
