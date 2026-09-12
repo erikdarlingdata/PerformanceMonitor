@@ -187,32 +187,46 @@ public sealed class IncidentAttachmentDeliveryTests
     [Fact]
     public async Task TheFourNonEmailChannels_PostIdenticalBytes_WithAndWithoutIncidentAttachments()
     {
-        var withAttachments = await CaptureAsync(TwoIncidents(alertLevelXml: null));
-        var withoutAttachments = await CaptureAsync(TwoIncidentsWithNoAttachments());
+        /* Per-event mode, because that is where the delivered attachment actually varies: an unfiltered
+           Summary card carries the ALERT-level attachment, which is the same (absent) in both arms — so a
+           Summary comparison would find the emails identical too and prove nothing. */
+        var withAttachments = await CaptureAsync(TwoIncidents(alertLevelXml: null), perEvent: true);
+        var withoutAttachments = await CaptureAsync(TwoIncidentsWithNoAttachments(), perEvent: true);
 
-        /* Three redirectable channels x one Summary card. Ordered before comparing: the property is that
-           the SET of bytes each run posted is the same, and the fan-out's ordering is not what is under
-           test here. */
-        Assert.Equal(3, withAttachments.Webhooks.Count);
+        /* Two split messages x three redirectable channels. Ordered before comparing: the property is that
+           the SET of bytes each run posted is the same, and the fan-out's ordering is not under test. */
+        Assert.Equal(6, withAttachments.Webhooks.Count);
         Assert.Equal(
             withAttachments.Webhooks.OrderBy(b => b, StringComparer.Ordinal).ToList(),
             withoutAttachments.Webhooks.OrderBy(b => b, StringComparer.Ordinal).ToList());
 
-        /* The control on the control: the emails DID differ, so the comparison above was not vacuous. */
-        Assert.Contains(FreshGraph, Assert.Single(withAttachments.Emails), StringComparison.Ordinal);
-        Assert.DoesNotContain(FreshGraph, Assert.Single(withoutAttachments.Emails), StringComparison.Ordinal);
+        /* And the direct reading of the same claim, independent of that comparison: no webhook body names
+           an attachment at all, on either arm. */
+        Assert.All(withAttachments.Webhooks, body =>
+        {
+            Assert.DoesNotContain("GRAPH-FOR-", body, StringComparison.Ordinal);
+            Assert.DoesNotContain(AlertIncidentAttachment.DeadlockGraphFileName, body, StringComparison.Ordinal);
+        });
+
+        /* The control on the control: the EMAILS did differ, so the comparison above was not comparing two
+           runs that both delivered nothing. */
+        Assert.Equal(2, withAttachments.Emails.Count);
+        Assert.Contains(withAttachments.Emails, e => e.Contains(FreshGraph, StringComparison.Ordinal));
+        Assert.All(withoutAttachments.Emails, e => Assert.DoesNotContain("GRAPH-FOR-", e, StringComparison.Ordinal));
     }
 
     /* ─────────────── helpers ─────────────── */
 
     private sealed record Captured(IReadOnlyList<string> Webhooks, IReadOnlyList<string> Emails);
 
-    private static async Task<Captured> CaptureAsync(AlertContext context)
+    private static async Task<Captured> CaptureAsync(AlertContext context, bool perEvent = false)
     {
         using var endpoint = new CapturingWebhookEndpoint();
         using var smtp = new CapturingSmtpEndpoint();
 
-        var deliverer = BuildDeliverer(endpoint, smtp, new SeedingHistoryStore(null, DateTime.UtcNow));
+        var deliverer = BuildDeliverer(
+            endpoint, smtp, new SeedingHistoryStore(null, DateTime.UtcNow),
+            perEvent ? config => config.Alerts.DeliveryMode = AlertNotificationMode.PerEvent : null);
         await deliverer.DeliverAsync(Outcome(context), TestContext.Current.CancellationToken);
 
         return new Captured(endpoint.Bodies.ToList(), smtp.Messages.ToList());
