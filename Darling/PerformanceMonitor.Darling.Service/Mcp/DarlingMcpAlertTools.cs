@@ -839,7 +839,7 @@ public sealed class DarlingMcpAlertTools
                    DeadlockRateThresholds clamps to, not a retyped pair, so update_alert_settings cannot
                    ACCEPT a value the clamp then rewrites — the "setting did not stick" failure. The floor is
                    what keeps the knob a rate: see the constants for why one per hour is the tightest
-                   threshold that cannot restore the count band this replaced. */
+                   threshold that cannot reach a bare-count band. */
                 case "health_bands":
                     Group(prop.Value, "health_bands", (k, n) =>
                     {

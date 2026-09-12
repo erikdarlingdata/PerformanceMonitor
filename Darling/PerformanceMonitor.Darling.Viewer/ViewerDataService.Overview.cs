@@ -912,7 +912,7 @@ public sealed class ServerSummaryItem
     /// <para>Set by the read, not defaulted to the hour it happens to use, because
     /// <see cref="TimeSpan.Zero"/> has to remain the reading "no window was declared": a default of one
     /// hour here would let a card built by any other path band a bare count as a per-hour rate, which is
-    /// the defect #3368 removed.</para>
+    /// the defect #3368 is about.</para>
     /// </summary>
     public TimeSpan DeadlockWindow { get; set; }
 

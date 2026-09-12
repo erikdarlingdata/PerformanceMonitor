@@ -333,7 +333,7 @@ namespace PerformanceMonitor.Common
         /// <para><b>It is what keeps the knob a rate.</b> One per hour is the tightest threshold that still
         /// describes a rate rather than an occurrence: on any window longer than an hour it means "more than
         /// one deadlock for every hour observed", so no setting reachable through this knob can restore the
-        /// "any deadlock in the window is Critical" reading #3368 removed. That reading is not a tighter
+        /// "any deadlock in the window is Critical" reading this band refuses (#3368). That reading is not a tighter
         /// threshold, it is a different claim, and it is unexpressible here by construction.</para>
         ///
         /// <para>A fleet where one deadlock an hour genuinely is the alarm can still say so; a fleet with a
@@ -648,15 +648,15 @@ namespace PerformanceMonitor.Common
         /// spelling of "unknown" to get wrong — because a max wait means nothing without a population to
         /// have waited. See <see cref="MemorySeverity"/> for why the arm exists.</para>
         ///
-        /// <para><b>One Warning arm on the count, not two.</b> A <c>&gt;= 2</c> arm sat above this
-        /// <c>&gt; 0</c> one returning the same Warning, so it decided nothing: every count it caught the
-        /// count arm below caught, at the same severity. It reads as a tier that was intended and collapsed,
-        /// and the tier is NOT restored here, because there is no third label to give it — the enum runs
-        /// Healthy / Warning / Critical, Critical already belongs to <c>&gt;= 5</c>, and inventing an
-        /// intermediate band for 2-4 blocking events would be a threshold with nothing behind it while
-        /// #3368's deadlock tiers were derived from a measured distribution. The dead arm is deleted so the
-        /// ladder reads as the three decisions it actually makes; a magnitude tier here wants the same
-        /// derivation its deadlock sibling got, on the blocking population.</para></summary>
+        /// <para><b>One Warning arm on the count, deliberately, and a second one would decide nothing.</b>
+        /// An arm at <c>&gt;= 2</c> above the <c>&gt; 0</c> one returns Warning for counts the lower arm
+        /// already returns Warning for, so it is indistinguishable from its neighbour rather than a tier
+        /// (#3368). Giving 2-4 events a band of their own is the alternative, and it is rejected: the enum
+        /// runs Healthy / Warning / Critical, Critical already belongs to <c>&gt;= 5</c>, and there is no
+        /// third label to put between them — inventing one would mean a threshold with nothing behind it,
+        /// where the deadlock tiers above come off a measured distribution. So the count decides exactly two
+        /// things here, and a magnitude tier wants that same derivation on the blocking population
+        /// first.</para></summary>
         public static HealthSeverity BlockingSeverity(int? blockingCountOrNullWhenUnmeasured, double maxBlockedSeconds)
         {
             if (!blockingCountOrNullWhenUnmeasured.HasValue)
@@ -721,13 +721,14 @@ namespace PerformanceMonitor.Common
         /// what the band can honestly claim is that deadlocking is frequent enough to be the server's
         /// problem. On the measured distribution a typical server-hour is 0, 1 or 2 deadlocks (99.1% of
         /// them) and bands Healthy — see the tier constants for the percentiles and the empty interval the
-        /// Critical tier sits in. That is the whole finding of #3368: the band's most common cause used to
-        /// be the one condition that had already resolved itself, so Critical stopped discriminating.
+        /// Critical tier sits in. An unthresholded band here makes Critical's most common cause the one
+        /// condition that has already resolved itself, at which point the label stops discriminating and an
+        /// operator scanning for the server in trouble cannot use it (#3368).
         /// <see cref="MemorySeverity"/> and <see cref="ThreadsSeverity"/> keep their unthresholded booleans
         /// because both read a condition holding NOW.</para>
         ///
         /// <para><b>An unrateable window fails away from Healthy, never into Critical.</b> With no honest
-        /// denominator the count is all there is, and banding it would be the count band this replaced. A
+        /// denominator the count is all there is, and banding it is the count band this one exists instead of. A
         /// count above zero reads <see cref="HealthSeverity.Warning"/> — deadlocks demonstrably happened,
         /// which #3368 calls a real finding, and no rate supports a Critical claim. A count of zero reads
         /// <see cref="HealthSeverity.Unknown"/>, not Healthy: a window of no length measured nothing, and a
