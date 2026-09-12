@@ -642,7 +642,10 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         FileGrowthLookbackMinutes: 60,
         /* #3297: deliberately NOT the shipped 2.0/4.0. A sample row equal to the defaults would let a
            payload that emitted a constant instead of the row's value round-trip unnoticed. */
-        RetentionHoldWarnRatio: 3.0, RetentionHoldCriticalRatio: 7.5);
+        RetentionHoldWarnRatio: 3.0, RetentionHoldCriticalRatio: 7.5,
+        /* #3368: inside [1.0, 1000.0], and deliberately NOT the shipped 5.0 / 20.0 — a sample equal to the
+           default would let a surface that dropped the column and fell back to the default still match. */
+        DeadlockWarnPerHour: 7.0, DeadlockCriticalPerHour: 31.0);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

@@ -17,6 +17,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Navigation;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitor.Ui;
@@ -750,6 +751,10 @@ public partial class SettingsWindow : Window
            and the alert text agree about what the number looks like. */
         AlertRetentionHoldWarnRatioBox.Text = r.RetentionHoldWarnRatio.ToString("0.0", CultureInfo.InvariantCulture);
         AlertRetentionHoldCriticalRatioBox.Text = r.RetentionHoldCriticalRatio.ToString("0.0", CultureInfo.InvariantCulture);
+        /* #3368: one decimal, matching how both cards render the rate beside the count, so the box and the
+           card agree about what the number looks like. */
+        BandDeadlockWarnPerHourBox.Text = r.DeadlockWarnPerHour.ToString("0.0", CultureInfo.InvariantCulture);
+        BandDeadlockCriticalPerHourBox.Text = r.DeadlockCriticalPerHour.ToString("0.0", CultureInfo.InvariantCulture);
         AlertPvsCheckBox.IsChecked = r.PvsEnabled;
         AlertPvsThresholdPercentBox.Text = r.PvsThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertPvsFloorGbBox.Text = r.PvsFloorGb.ToString(CultureInfo.InvariantCulture);
@@ -876,6 +881,17 @@ public partial class SettingsWindow : Window
             && holdCritical >= TimescaleSupport.RetentionHoldRatioFloor
             && holdCritical <= TimescaleSupport.RetentionHoldRatioCeiling)
             row.RetentionHoldCriticalRatio = holdCritical;
+        /* #3368: validated against the SAME named bounds DeadlockRateThresholds clamps to and the MCP
+           writer accepts, InvariantCulture on the parse, and the two validated INDEPENDENTLY — all three
+           for the reasons the pair above gives. */
+        if (double.TryParse(BandDeadlockWarnPerHourBox.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var dlWarn)
+            && dlWarn >= ServerHealthThresholds.DeadlockRatePerHourFloor
+            && dlWarn <= ServerHealthThresholds.DeadlockRatePerHourCeiling)
+            row.DeadlockWarnPerHour = dlWarn;
+        if (double.TryParse(BandDeadlockCriticalPerHourBox.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var dlCritical)
+            && dlCritical >= ServerHealthThresholds.DeadlockRatePerHourFloor
+            && dlCritical <= ServerHealthThresholds.DeadlockRatePerHourCeiling)
+            row.DeadlockCriticalPerHour = dlCritical;
         if (int.TryParse(AlertPvsThresholdPercentBox.Text, out var pvsPct) && pvsPct is >= 0 and <= 100)
             row.PvsThresholdPercent = pvsPct;
         if (int.TryParse(AlertPvsFloorGbBox.Text, out var pvsFloor) && pvsFloor >= 0)
@@ -971,6 +987,12 @@ public partial class SettingsWindow : Window
             TimescaleSupport.RetentionHoldWarnRatioDefault.ToString("0.0", CultureInfo.InvariantCulture);
         AlertRetentionHoldCriticalRatioBox.Text =
             TimescaleSupport.RetentionHoldCriticalRatioDefault.ToString("0.0", CultureInfo.InvariantCulture);
+        /* #3368: derived for the reason one line up — this button writes the row when the boxes do not
+           parse, so a frozen literal here is the value an operator would be handed back. */
+        BandDeadlockWarnPerHourBox.Text =
+            ServerHealthThresholds.DeadlockWarnPerHourDefault.ToString("0.0", CultureInfo.InvariantCulture);
+        BandDeadlockCriticalPerHourBox.Text =
+            ServerHealthThresholds.DeadlockCriticalPerHourDefault.ToString("0.0", CultureInfo.InvariantCulture);
         AnalysisNotifyCooldownBox.Text = "360";
         AlertPvsThresholdPercentBox.Text = "40";
         AlertPvsFloorGbBox.Text = "1";
@@ -1087,6 +1109,10 @@ public partial class SettingsWindow : Window
         AlertStoreJobCadenceWarnPercentBox.IsEnabled = enabled;
         AlertRetentionHoldWarnRatioBox.IsEnabled = enabled;
         AlertRetentionHoldCriticalRatioBox.IsEnabled = enabled;
+        /* #3368's BandDeadlockWarnPerHourBox / BandDeadlockCriticalPerHourBox are ABSENT from this list on
+           purpose. They are health-BAND tiers, not alert thresholds: a card's colour and the fleet
+           roll-up's band counts are rendered whether or not the alert engine is switched on, so greying
+           them here would make the one setting that still has an effect look inert. */
         AlertFileGrowthCheckBox.IsEnabled = enabled;
         AlertFileGrowthRiseMbBox.IsEnabled = enabled;
         AlertFileGrowthVolumePercentBox.IsEnabled = enabled;

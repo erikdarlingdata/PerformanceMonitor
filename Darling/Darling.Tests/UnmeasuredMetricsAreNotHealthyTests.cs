@@ -63,7 +63,13 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
             Now.AddSeconds(-30),
             default,
             null,
-            Now);
+            Now,
+            /* #3368: a real one-hour window and the shipped tiers. This file's subject is the
+               measured-vs-unmeasured distinction, so the window has to be one a rate CAN be computed over —
+               otherwise a Postgres card's Unknown would be indistinguishable from the unrateable-window
+               Unknown and the pins would pass for the wrong reason. */
+            TimeSpan.FromHours(1),
+            DeadlockRateThresholds.Default);
 
     private static ServerSummaryItem ViewerCard(
         string? engineKind,
@@ -80,6 +86,10 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
             BlockingCount = blocking,
             MaxBlockingWaitMs = maxBlockingWaitMs,
             DeadlockCount = deadlocks,
+            /* #3368: a rateable window, for the reason the fleet-card helper above gives — this file's
+               subject is Postgres-vs-SQL-Server, so the window must not be the thing producing the
+               Unknown. */
+            DeadlockWindow = TimeSpan.FromHours(1),
             IsPostgres = MonitoredEngineKind.IsPostgres(engineKind),
             IsAurora = MonitoredEngineKind.IsAurora(engineKind),
             LastCollectionTime = Now.AddSeconds(-30),
@@ -105,6 +115,12 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
         Assert.Equal(HealthSeverity.Unknown, card.BlockingSeverity);
         Assert.Equal(HealthSeverity.Unknown, card.DeadlockSeverity);
 
+        /* And the RATE says the same thing the severity says. A rate of 0.0/hr on a target with no deadlock
+           source is a fabricated measurement, and both the card chip and the viewer detail line render this
+           field on non-null alone - so a structural zero here would contradict the Unknown above on the very
+           same card. */
+        Assert.Null(card.DeadlockRatePerHour);
+
         /* Threads already reached Unknown on its own (a null ceiling), and CPU does since #3267. So after
            this the card makes NO unearned claim on any metric row - which is the property worth asserting,
            rather than three separate arms that happen to agree today. */
@@ -125,6 +141,7 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
         Assert.Equal(HealthSeverity.Unknown, card.MemorySeverity);
         Assert.Equal(HealthSeverity.Unknown, card.BlockingSeverity);
         Assert.Equal(HealthSeverity.Unknown, card.DeadlockSeverity);
+        Assert.Null(card.DeadlockRatePerHour);
     }
 
     /// <summary>
@@ -169,8 +186,14 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
     /* a long wait alone -> Warning at 10s, Critical at 60s, with a count of 1 */
     [InlineData(false, 1, 10_000L, 0, HealthSeverity.Healthy, HealthSeverity.Warning, HealthSeverity.Healthy, FleetHealthBand.Warning)]
     [InlineData(false, 1, 60_000L, 0, HealthSeverity.Healthy, HealthSeverity.Critical, HealthSeverity.Healthy, FleetHealthBand.Critical)]
-    /* any deadlock -> Critical */
-    [InlineData(false, 0, 0L, 1, HealthSeverity.Healthy, HealthSeverity.Healthy, HealthSeverity.Critical, FleetHealthBand.Critical)]
+    /* The deadlock axis bands on a RATE as of #3368, so these rows track the CURRENT band rather than the
+       pre-#3368 one -- the method name is about the unmeasured-metrics change, not about this axis. Card()
+       and ViewerCard() both window one hour, so the count IS the per-hour rate here: one deadlock is 1/hr
+       and Healthy, where the old count band called it Critical. */
+    [InlineData(false, 0, 0L, 1, HealthSeverity.Healthy, HealthSeverity.Healthy, HealthSeverity.Healthy, FleetHealthBand.Healthy)]
+    /* Both tiers on that same one-hour window, so a revert to counting cannot keep this Theory green. */
+    [InlineData(false, 0, 0L, 5, HealthSeverity.Healthy, HealthSeverity.Healthy, HealthSeverity.Warning, FleetHealthBand.Warning)]
+    [InlineData(false, 0, 0L, 20, HealthSeverity.Healthy, HealthSeverity.Healthy, HealthSeverity.Critical, FleetHealthBand.Critical)]
     public void AMeasuredCardBandsExactlyAsItDidBefore(
         bool memoryPressure, int blocking, long maxWaitMs, int deadlocks,
         HealthSeverity expectedMemory, HealthSeverity expectedBlocking, HealthSeverity expectedDeadlock,
@@ -212,9 +235,20 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
            so a stray duration cannot smuggle a band back in. */
         Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.BlockingSeverity(null, 600));
 
-        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.DeadlockSeverity(0));
-        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.DeadlockSeverity(1));
-        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.DeadlockSeverity(null));
+        /* #3368 re-banded this one on a RATE, so "unchanged" holds only for the null arm this file is
+           about. The measured arms are asserted at their post-#3368 values, over a window a rate can be
+           computed on: 0/hr Healthy, 30/hr Critical. That the NULL arm still answers Unknown at every
+           window length is the claim that belongs here. */
+        var hour = TimeSpan.FromHours(1);
+        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.DeadlockSeverity(0, hour, DeadlockRateThresholds.Default));
+        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.DeadlockSeverity(30, hour, DeadlockRateThresholds.Default));
+        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.DeadlockSeverity(null, hour, DeadlockRateThresholds.Default));
+
+        /* An engine with no deadlock source stays Unknown whatever the window says — the #3272 arm is read
+           BEFORE any rate arithmetic, so an unrateable window cannot turn a structural absence into the
+           Warning an unrateable COUNT gets. */
+        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.DeadlockSeverity(null, TimeSpan.Zero, DeadlockRateThresholds.Default));
+        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.DeadlockSeverity(null, TimeSpan.FromHours(168), DeadlockRateThresholds.Default));
     }
 
     /* ─────────────────────────── neutrality ─────────────────────────── */

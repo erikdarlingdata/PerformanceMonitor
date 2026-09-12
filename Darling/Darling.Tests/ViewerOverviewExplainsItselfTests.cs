@@ -474,7 +474,14 @@ public sealed class ViewerOverviewExplainsItselfTests
         }
         for (var i = 0; i < critical; i++)
         {
-            fleet.Add(new ServerSummaryItem { DisplayName = $"c{i:00}", ServerId = ++id, IsOnline = true, DeadlockCount = 1 });
+            /* #3368: a Critical DEADLOCK band is a rate now, so the fixture states the window its count
+               covers — 30 in an hour. A bare count of 1 lands in the Warning bucket and would silently
+               move every band count this helper's callers assert. */
+            fleet.Add(new ServerSummaryItem
+            {
+                DisplayName = $"c{i:00}", ServerId = ++id, IsOnline = true,
+                DeadlockCount = 30, DeadlockWindow = TimeSpan.FromHours(1),
+            });
         }
         for (var i = 0; i < warning; i++)
         {

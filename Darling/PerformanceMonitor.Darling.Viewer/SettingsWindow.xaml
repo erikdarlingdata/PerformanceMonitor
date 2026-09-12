@@ -513,6 +513,29 @@
                 </StackPanel>
                 <TextBlock x:Name="AlertPreviewText" FontSize="11" FontStyle="Italic"
                            Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" Margin="20,10,0,0"/>
+                <!-- #3368: Server Health Bands. Its own section, and NOT an alert section — these two tiers
+                     decide what colour a server's Overview card and the fleet roll-up read, not whether
+                     anything is delivered. They are deliberately absent from SetAlertControlsEnabled for
+                     that reason: a deployment with alerting switched off still renders bands. -->
+                <TextBlock Text="Server Health Bands" FontWeight="SemiBold" FontSize="12"
+                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,14,0,4"/>
+                <TextBlock Text="Card and fleet-roll-up colours, not alert delivery — these stay in effect with alerting switched off."
+                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           Margin="20,0,0,4" TextWrapping="Wrap"/>
+                <StackPanel Orientation="Horizontal" Margin="20,0,0,0">
+                    <TextBlock Text="Deadlocks warn at" VerticalAlignment="Center"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="BandDeadlockWarnPerHourBox" Width="45" Text="5.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="per hour; critical at" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="BandDeadlockCriticalPerHourBox" Width="45" Text="20.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="per hour (1.0 or above; a typical busy server-hour measures 1-2)" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                </StackPanel>
+                <TextBlock Text="Normalised over whatever window a surface asks for, so one pair means the same condition on a 1-hour and a 24-hour read."
+                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           Margin="20,2,0,0" TextWrapping="Wrap"/>
+
                 <!-- Global Alert Filters -->
                 <TextBlock Text="Global Alert Filters" FontWeight="SemiBold" FontSize="12"
                            Foreground="{DynamicResource ForegroundBrush}" Margin="20,14,0,4"/>

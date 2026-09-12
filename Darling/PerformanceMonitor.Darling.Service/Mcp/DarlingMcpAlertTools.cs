@@ -128,7 +128,7 @@ public sealed class DarlingMcpAlertTools
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, and the scheduled-analysis cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes is the per-alert-fingerprint throttle on the resulting Slack/Teams/PagerDuty/webhook/email post. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store', so an alert naming that is tuned here and nowhere else, including Retention Held's warn/critical ratios. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, and the scheduled-analysis cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes is the per-alert-fingerprint throttle on the resulting Slack/Teams/PagerDuty/webhook/email post. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store', so an alert naming that is tuned here and nowhere else, including Retention Held's warn/critical ratios. The health_bands group is NOT an alert: its two tiers decide what band a server's card, the worst-first ranking and get_fleet_overview's counts read, in deadlocks per HOUR normalised over whatever window was asked for — so the same pair means the same condition on a 1-hour read and a 24-hour one. Tuning deadlocks.count_threshold does not move the band and tuning health_bands does not move the alert. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]
     public static async Task<string> GetAlertSettings(
         NpgsqlDataSource postgres)
     {
@@ -198,6 +198,16 @@ public sealed class DarlingMcpAlertTools
             wait_threshold_seconds = s.BlockingWaitSecondsThreshold
         },
         deadlocks = new { enabled = s.DeadlockEnabled, count_threshold = s.DeadlockCountThreshold },
+        /* #3368 (V120): the per-server HEALTH BAND tiers, reported as their own group rather than folded
+           into the alert group above — the distinction is the point. `deadlocks` governs whether an alert is
+           DELIVERED; these two decide what colour a server's card, the worst-first "needs attention"
+           ranking and get_fleet_overview's band counts read. Nesting a band tier under the alert would
+           invite tuning one and expecting the other to move. */
+        health_bands = new
+        {
+            deadlock_warn_per_hour = s.DeadlockWarnPerHour,
+            deadlock_critical_per_hour = s.DeadlockCriticalPerHour
+        },
         poison_wait = new { enabled = s.PoisonWaitEnabled, threshold_ms = s.PoisonWaitThresholdMs },
         long_running_query = new
         {
@@ -375,7 +385,13 @@ public sealed class DarlingMcpAlertTools
         "its configured horizon a held retention tier must be holding to warn and to go critical. Both accept " +
         "2.0 upward only: healthy whole-chunk granularity reaches 1.4x on a store that is working correctly, so " +
         "a lower threshold fires on nothing being wrong. Setting critical BELOW warn is accepted and means every " +
-        "fire is Critical. For silencing ONE recurring signature for a " +
+        "fire is Critical. The health_bands group is NOT an alert and does not deliver anything: " +
+        "health_bands.deadlock_warn_per_hour and health_bands.deadlock_critical_per_hour are the per-server " +
+        "HEALTH BAND tiers in deadlocks per HOUR, normalised over the window each surface asked for, and they " +
+        "decide what colour a card reads and how get_fleet_overview counts bands. Both accept 1.0 upward: one " +
+        "per hour is the tightest setting that is still a rate, so no value here can restore the 'any deadlock " +
+        "is Critical' reading these tiers replaced. Setting critical BELOW warn is accepted and means every " +
+        "banded rate is Critical. For silencing ONE recurring signature for a " +
         "long stretch, use create_mute_rule instead of a long delivery cooldown: a mute is scoped, expires, is " +
         "listed by get_mute_rules, and still logs the alert, where the cooldown is global to every fingerprint " +
         "on every server and no tool reports what it suppressed. SMTP/webhook delivery credentials are managed " +
@@ -815,6 +831,31 @@ public sealed class DarlingMcpAlertTools
                             case "enabled": AddBool("deadlock_enabled", n, "deadlocks.enabled"); break;
                             case "count_threshold": AddInt("deadlock_count_threshold", n, "deadlocks.count_threshold", 1, int.MaxValue); break;
                             default: error = $"Unknown field 'deadlocks.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                /* #3368 (V120): the deadlock HEALTH BAND tiers. Bounds are the SAME named constants
+                   DeadlockRateThresholds clamps to, not a retyped pair, so update_alert_settings cannot
+                   ACCEPT a value the clamp then rewrites — the "setting did not stick" failure. The floor is
+                   what keeps the knob a rate: see the constants for why one per hour is the tightest
+                   threshold that cannot reach a bare-count band. */
+                case "health_bands":
+                    Group(prop.Value, "health_bands", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "deadlock_warn_per_hour":
+                                AddDouble("deadlock_warn_per_hour", n, "health_bands.deadlock_warn_per_hour",
+                                    ServerHealthThresholds.DeadlockRatePerHourFloor,
+                                    ServerHealthThresholds.DeadlockRatePerHourCeiling);
+                                break;
+                            case "deadlock_critical_per_hour":
+                                AddDouble("deadlock_critical_per_hour", n, "health_bands.deadlock_critical_per_hour",
+                                    ServerHealthThresholds.DeadlockRatePerHourFloor,
+                                    ServerHealthThresholds.DeadlockRatePerHourCeiling);
+                                break;
+                            default: error = $"Unknown field 'health_bands.{k}'."; break;
                         }
                     });
                     break;

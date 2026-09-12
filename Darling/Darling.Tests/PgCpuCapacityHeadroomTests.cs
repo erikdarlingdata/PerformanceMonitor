@@ -75,7 +75,10 @@ public sealed class PgCpuCapacityHeadroomTests
             Now.AddSeconds(-30),
             default,
             null,
-            Now);
+            Now,
+            /* #3368: a real one-hour window and the shipped tiers. */
+            TimeSpan.FromHours(1),
+            DeadlockRateThresholds.Default);
 
     private static ServerSummaryItem ViewerCard(
         string? engineKind,
@@ -187,7 +190,10 @@ public sealed class PgCpuCapacityHeadroomTests
             Now.AddSeconds(-30),
             default,
             null,
-            Now);
+            Now,
+            /* #3368: a real one-hour window and the shipped tiers. */
+            TimeSpan.FromHours(1),
+            DeadlockRateThresholds.Default);
 
         Assert.Equal(expected, card.CpuSeverity);
         Assert.Equal(FleetCpuSource.RingBuffer, card.CpuSource);
@@ -514,7 +520,8 @@ public sealed class PgCpuCapacityHeadroomTests
             new DarlingFleetReader.FleetServerRow(2, "sql-1", "sql-1", null, MonitoredEngineKind.SqlServer, false),
             new DarlingFleetReader.CpuRow(60.0, 30.0),
             default, default, default, default, default, default,
-            Now.AddSeconds(-30), default, null, Now);
+            Now.AddSeconds(-30), default, null, Now,
+            TimeSpan.FromHours(1), DeadlockRateThresholds.Default);
 
         Assert.Contains("CPU 90%", DarlingFleetReader.BuildReason(sqlServer), StringComparison.Ordinal);
         Assert.Null(FleetCpuProvenance.CapacityBandClause(null, FleetCpuSource.RingBuffer));

@@ -13,7 +13,7 @@
  * API reports it (band = Warning, status text verbatim) — never the red offline treatment.
  */
 
-import { el, mount, apiGet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId } from "../util.js";
+import { el, mount, apiGet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId } from "../util.js";
 import { VIZ, navigateServer } from "../panels.js";
 
 const BAND_RANK = { Offline: 0, Critical: 1, Warning: 2, Healthy: 3 };
@@ -611,7 +611,13 @@ export function metricBands(c) {
       : null;
 
   const blockingDetail = c.blocking_count > 0 && c.max_blocking_wait_ms > 0 ? "max wait " + fmtMs(c.max_blocking_wait_ms) : null;
-  const deadlockDetail = c.deadlock_count > 0 && c.deadlock_last_seen ? "last " + relTime(c.deadlock_last_seen) : null;
+  /* #3368: the chip's VALUE is the count and its colour is banded on the RATE, so the detail carries the
+     rate — a chip that bands on a figure it does not show leaves "Deadlocks 3" against an amber border with
+     no way to see which tier was crossed, and "3" is the same string over an hour and over a day. Null when
+     the window was too short to normalise, which is the reading the band itself had to go on. */
+  const deadlockRate = c.deadlock_rate_per_hour != null ? fmtNum(c.deadlock_rate_per_hour) + "/hr" : null;
+  const deadlockLast = c.deadlock_count > 0 && c.deadlock_last_seen ? "last " + relTime(c.deadlock_last_seen) : null;
+  const deadlockDetail = [deadlockRate, deadlockLast].filter(Boolean).join(" · ") || null;
 
   /* #2779: a server that has stopped collecting has stale collector counts — its collectors are not "OK", they
      are unmeasured. collector_severity keys only on the FAILING count (a stale collector is neither healthy nor
