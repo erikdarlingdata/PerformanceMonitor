@@ -181,22 +181,12 @@ def definitions(lines: list[str]) -> dict[str, str]:
 
 
 def entries(prose: list[str]) -> list[list[str]]:
-    """Top-level list items, each with its continuation and nested lines."""
-    out = []
-    i = 0
-    while i < len(prose):
-        if prose[i].startswith("- "):
-            j = i + 1
-            while j < len(prose) and not prose[j].startswith("- ") and not prose[j].startswith("#"):
-                j += 1
-            # A loose list puts a blank line between items; it belongs to neither.
-            while j > i + 1 and prose[j - 1] == "":
-                j -= 1
-            out.append(prose[i:j])
-            i = j
-        else:
-            i += 1
-    return out
+    """Top-level list items, each with its continuation and nested lines.
+
+    One walker, expressed over group_prose: two near-identical loops over the same shapes are how a
+    count and a rewrite stop agreeing about what an entry is.
+    """
+    return [payload for kind, payload in group_prose(prose) if kind == "entry"]
 
 
 def compact(entry: list[str]) -> str:
@@ -323,17 +313,15 @@ def build(repo: Path, preamble: list[str], sections: list[Section]) -> tuple[lis
                 f"{version}: CHANGELOG.md points at {path} but that file is missing - the prose is "
                 "gone rather than compacted, and rewriting from here would make the loss permanent."
             )
-        section = Section(section.heading, prose, section.trailer)
-
         index.extend([section.heading, "", index_link(path)])
-        for kind, payload in group_prose(section.prose):
+        for kind, payload in group_prose(prose):
             if kind == "entry":
                 index.append(compact(payload))
             else:
                 index.extend(["", payload, ""])
         index.extend(section.trailer)
 
-        heading_and_prose = [section.heading] + section.prose
+        heading_and_prose = [section.heading] + prose
         used = ordered_refs(heading_and_prose)
         missing = [r for r in used if f"#{r}" not in all_defs]
         if missing:
