@@ -327,13 +327,22 @@ internal sealed class DarlingSelfAlertEvaluator
     /// How long this condition waits before re-stating itself while a stale rule is still there — its OWN
     /// interval, and the only condition in this class that does not re-fire on the shared alert cooldown.
     ///
-    /// <para><b>Because it cannot be muted, it must not shout.</b> Every sibling re-fires on
-    /// <c>IAlertEngineSettings.CooldownMinutes</c> (shipped default 5, clamped to at most 120), which for a
-    /// condition an operator can silence is a reasonable standing reminder. This one is deliberately
-    /// unsuppressible — see the <c>honorMuteRules</c> argument at its fire site — and on the shipped defaults
-    /// the shared cooldown gives a history row every five minutes and a notification every fifteen, forever,
-    /// about a fact that changes on a scale of DAYS. That is the channel flood a permanent mute rule is
-    /// usually created to prevent, arriving from the thing that reports the mute.</para>
+    /// <para><b>Because the fact changes on a scale of DAYS.</b> Every sibling re-fires on
+    /// <c>IAlertEngineSettings.CooldownMinutes</c> (shipped default 5, clamped to at most 120), which is a
+    /// reasonable standing reminder for an episodic condition. This one's subject is a rule's CREATION DATE
+    /// measured against a seven-day bound: it is identical on every sweep and changes only when an operator
+    /// edits a rule. On the shipped defaults the shared cooldown gives a history row every five minutes and
+    /// a notification every fifteen, forever, about that — which is the channel flood a permanent mute rule
+    /// is usually created to prevent, arriving from the thing that reports the mute.</para>
+    ///
+    /// <para><b>It stayed daily when the mute arrived (#3348), on reasoning that never rested on being
+    /// unsuppressible.</b> The interval was first chosen while this alert could not be silenced at all, so
+    /// the obvious reading is that an off switch makes the shared cooldown safe again. It does not, for two
+    /// reasons independent of suppressibility. The timescale argument above is one. The other is that a
+    /// five-minute cadence would make the explicit mute the only survivable configuration: the single way to
+    /// quiet it would be to mute it permanently, so the cadence would manufacture exactly the blind spot the
+    /// condition exists to report. Daily keeps the alert livable WITHOUT the mute, which is what leaves the
+    /// mute a real choice rather than a forced one.</para>
     ///
     /// <para>Daily: unmistakable as a standing reminder, and bounded at one a day. It cannot be configured
     /// for the <see cref="StaleMuteAge"/> reason — a knob needs a migration rung this change is not taking.
@@ -1821,8 +1830,8 @@ internal sealed class DarlingSelfAlertEvaluator
     ///
     /// <para>A STANDING condition like Custom Alert Rules Unhealthy: fire once on entry, re-state it while
     /// any rule qualifies, and ONE resolution row when none does. Unlike those siblings it re-states on its
-    /// own <see cref="StaleMuteRefire"/> rather than the shared alert cooldown — see there for why an
-    /// unsuppressible condition needs its own, longer interval. Gated on the master alerts switch. Internal
+    /// own <see cref="StaleMuteRefire"/> rather than the shared alert cooldown — see there for why a
+    /// days-scale fact needs its own, longer interval. Gated on the master alerts switch. Internal
     /// so it pins directly with a recording deliverer and a controllable clock.</para>
     /// </summary>
     internal async Task ApplyStaleMuteRulesAsync(
@@ -1877,8 +1886,8 @@ internal sealed class DarlingSelfAlertEvaluator
 
         /* Standing condition: fire on entry, re-fire only per StaleMuteRefire while any rule qualifies. The
            CURRENT set is rendered each time, so a rule that ages past the bound later shows up on the next
-           re-fire. Its OWN interval rather than the shared CooldownElapsed the siblings use, because this
-           alert cannot be muted — see StaleMuteRefire. */
+           re-fire. Its OWN interval rather than the shared CooldownElapsed the siblings use, because the
+           fact it reports changes on a scale of days — see StaleMuteRefire. */
         if (_lastStaleMuteAlert.TryGetValue(StaleMuteKey, out var lastFired)
             && now - lastFired < StaleMuteRefire)
         {
@@ -1902,15 +1911,69 @@ internal sealed class DarlingSelfAlertEvaluator
             numericThresholdValue: 0,
             cancellationToken,
             context: null,
-            /* THE load-bearing deviation from every sibling: this one alert ignores mute rules.
-               FireAsync's mute check asks "does a rule match (Monitor Store, this metric)", and a rule that
-               constrains nothing matches EVERYTHING — including this. A blanket rule is also the shape with
-               the largest blast radius, so honoring the mute would lose the report precisely where it
-               matters most: what survives is a row in alert history that nobody reads without already
-               suspecting the mute. That is the blind spot, not a fix for it. A muted alert
-               is still recorded, which is enough for every other condition; it is not enough for the one
-               whose subject IS the muting. */
-            honorMuteRules: false);
+            /* The ONE condition that decides its own mute rather than asking the shared seam, because the
+               seam returns a single boolean over every rule and cannot say which rule answered — see
+               FindExplicitMute. Always non-null, so the seam is never consulted for this metric. */
+            muted: FindExplicitMute(rules, now) is not null);
+    }
+
+    /// <summary>
+    /// The one mute rule that deliberately silences this alert, or null — the EXPLICIT/incidental split that
+    /// gives the condition an off switch without letting it switch itself off (#3348).
+    ///
+    /// <para><b>Why it cannot just ask the shared seam.</b> <c>_isAlertMuted</c> answers one boolean over
+    /// every rule, so it cannot say WHICH rule answered. A rule that constrains nothing matches every alert
+    /// on the store, this one included, and it is also the shape with the largest blast radius — so an
+    /// affirmative seam answer is as easily a fleet-wide silence as a decision about this condition, and
+    /// honoring it would lose the report precisely where it matters most. The surviving history row is the
+    /// surface nobody reads without already suspecting the mute, which is the blind spot rather than a fix
+    /// for it.</para>
+    ///
+    /// <para><b>What "explicit" means, and why it is the matcher's own answer rather than an assertion.</b>
+    /// The metric dimension is EXACT full-string equality (<see cref="MuteRule.NamesMetric"/>, the same
+    /// comparison <see cref="MuteRule.MatchesAt"/> applies) — unlike the four <c>*Pattern</c> dimensions
+    /// there is no substring, glob or regex form of a metric constraint. So a rule either spells
+    /// <see cref="StaleMuteMetric"/> out or does not constrain metrics at all, and no rule can match this
+    /// alert incidentally while looking deliberate. A pattern that happened to cover the name would NOT
+    /// count and cannot arise: there is no such shape to write.</para>
+    ///
+    /// <para><b>Self-suppression stays impossible by construction, not by care.</b> The only input to the
+    /// decision is a rule that names this metric, and a blanket rule names nothing — so a blanket mute
+    /// cannot reach this decision at all, whatever else it silences. The narrowing is also strictly
+    /// one-directional: an explicitly-naming rule still has to pass the FULL matcher against this alert's
+    /// real context, so a rule naming the metric but scoped to some monitored server does not suppress a
+    /// fleet-level condition whose server is the synthetic <see cref="StoreServerLabel"/>, and one carrying
+    /// a database or wait pattern does not either — this alert has no such dimension to match.</para>
+    ///
+    /// <para>Judged on the evaluator's injected clock via <see cref="MuteRule.MatchesAt"/>, so the rule's
+    /// expiry is read on the same instant the staleness ages are, and an operator's explicit mute lapses
+    /// exactly when its bound says. A muted alert is still RECORDED — the history row lands every re-fire,
+    /// naming the very rule that silenced the channels, and <c>get_mute_rules</c> lists it with its reason.
+    /// That is the audit trail an operator gets for this decision, and it is what makes the decision
+    /// answerable rather than invisible.</para>
+    /// </summary>
+    private static MuteRule? FindExplicitMute(IReadOnlyList<MuteRule> rules, DateTime now)
+    {
+        var context = new AlertMuteContext
+        {
+            ServerName = StoreServerLabel,
+            MetricName = StaleMuteMetric
+        };
+
+        foreach (var rule in rules)
+        {
+            if (rule is null || !rule.NamesMetric(StaleMuteMetric))
+            {
+                continue;
+            }
+
+            if (rule.MatchesAt(context, now))
+            {
+                return rule;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -2867,27 +2930,31 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
     /// <param name="numericThresholdValue">The bound behind <paramref name="thresholdValue"/>, on the same
     /// terms. Almost every self-alert's threshold is an English phrase ("collecting", "Online", "running
     /// on schedule"), not a bound.</param>
-    /// <param name="honorMuteRules">Whether the operator's mute rules may suppress this alert's channels.
-    /// True for every condition but one. #3306's "Stale Mute Rules" passes FALSE because a mute rule that
-    /// constrains nothing matches every alert on the store, this one included — so honoring the mute would
-    /// let the condition suppress the only report of its own subject, and an alert whose whole point is
-    /// "you are not being told things" cannot be one of the things you are not told. Nothing else may pass
-    /// false without the same argument: muting is the operator's to decide, and a self-alert that cannot be
-    /// silenced is a self-alert that will be ignored instead.</param>
+    /// <param name="muted">The mute decision, when the caller has ALREADY made it; null (the default, and
+    /// every condition but one) asks the shared <c>_isAlertMuted</c> seam for this server and metric, which
+    /// is what every sibling wants.
+    ///
+    /// <para>Only "Stale Mute Rules" decides for itself, and it must, because the seam returns ONE boolean
+    /// over every rule and so cannot say WHICH rule answered. A rule that constrains nothing matches every
+    /// alert on the store, this one included, so a seam answer of true is as easily a blanket mute as a
+    /// decision about this alert — and honoring it would let the condition suppress the only report of its
+    /// own subject. That condition scans the rules it already holds for one that NAMES it and passes the
+    /// verdict in here instead (#3348). Nothing else may pass this: a caller that hands in a decision it did
+    /// not derive from an explicit naming has re-introduced the self-suppression the seam cannot see.</para></param>
     /* The optional context TRAILS the cancellation token so the dozens of existing positional call
        sites stay untouched — only the callers that have discrete facts to carry (#2109: the AG
-       database alerts) name it. Same for honorMuteRules, which defaults to the sibling behavior. */
+       database alerts) name it. Same for muted, which defaults to asking the seam like its siblings. */
     private async Task FireAsync(
         string serverKey, string serverName, string metricName, string currentValue, string thresholdValue,
         string detail, AlertSeverityLevel? severity, string shortMessage,
         double? numericCurrentValue, double? numericThresholdValue, CancellationToken cancellationToken,
-        AlertContext? context = null, bool honorMuteRules = true)
+        AlertContext? context = null, bool? muted = null)
     {
         /* Same mute treatment as the engine: a muted self-alert is still recorded (flagged muted) but its
-           channels are skipped — the deliverer honors AlertOutcome.Muted. The one condition that opts out
-           does not even ASK, so a throwing Matches() cannot reach it either. */
-        bool muted = honorMuteRules
-            && _isAlertMuted(new AlertMuteContext { ServerName = serverName, MetricName = metricName });
+           channels are skipped — the deliverer honors AlertOutcome.Muted. A caller that brought its own
+           decision does not even ASK, so a throwing Matches() cannot reach it either. */
+        bool isMuted = muted
+            ?? _isAlertMuted(new AlertMuteContext { ServerName = serverName, MetricName = metricName });
 
         /* #1681: log the FIRING, not just the recovery. RecordResolutionAsync has always logged at Information,
            so the service log showed "… Recovered" with nothing before it — which reads as a spontaneous
@@ -2900,13 +2967,13 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
         _logger?.LogWarning(
             "{Line}",
             AlertFiringLog.Fired(
-                serverName, metricName, severity?.ToString() ?? "Warning", shortMessage, muted));
+                serverName, metricName, severity?.ToString() ?? "Warning", shortMessage, isMuted));
 
         await _deliverer.DeliverAsync(new AlertOutcome(
             serverKey, serverName, metricName, currentValue, thresholdValue,
             Context: context, DetailText: detail,
             NumericCurrentValue: numericCurrentValue, NumericThresholdValue: numericThresholdValue,
-            Muted: muted, Severity: severity, ShortMessage: shortMessage), cancellationToken);
+            Muted: isMuted, Severity: severity, ShortMessage: shortMessage), cancellationToken);
     }
 
     private async Task RecordResolutionAsync(AlertResolution resolution, CancellationToken cancellationToken)
