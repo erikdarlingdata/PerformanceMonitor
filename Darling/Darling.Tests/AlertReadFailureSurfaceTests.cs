@@ -389,9 +389,15 @@ public sealed class AlertReadFailureSurfaceTests
         "SweepStoreSelfMetricsAsync",
         "NotifyPgResolutionAsync",
         "FetchFailedJobsAsync",
+        /* #3354: the mute-rule reload. Not an alert pass — a control-plane read — but its swallowed
+           failure decides what the engine suppresses on every following sweep, so it belongs to this
+           population. It is also the member whose scope this list was designed to admit: an alerting read
+           arriving in a new member of this file cannot inherit clean status, because the totals stop
+           matching the moment its catch block is neither counted nor exempt. */
+        "LoadMuteRulesAsync",
     };
 
-    private const int WorkerCountedSites = 9;
+    private const int WorkerCountedSites = 10;
     private const int WorkerExemptSites = 7;
 
     /// <summary>
@@ -403,9 +409,10 @@ public sealed class AlertReadFailureSurfaceTests
     /// <para>Cross-checked against the compiler rather than counted by eye: making the counter's elapsed
     /// parameter required errored at exactly 13 sites in <c>AlertEngine.cs</c>, 5 in
     /// <c>DarlingSelfAlertEvaluator.cs</c>, 9 in <c>DarlingWorker.cs</c> and 0 in Lite, which is a census
-    /// that cannot miss a site or invent one.</para>
+    /// that cannot miss a site or invent one. <c>DarlingWorker.cs</c> carries a tenth since #3354's
+    /// mute-rule reload.</para>
     /// </summary>
-    private const int CountedSites = 27;
+    private const int CountedSites = 28;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the

@@ -202,8 +202,12 @@ public sealed class AlertReadFailureSurfaceTests
     ///
     /// <para>So the set is derived from SOURCE (every <c>RecordReadFailure(null, ...)</c> call, matched
     /// across line breaks because those calls are wrapped) and each one must be represented in the single
-    /// constant every surface now concatenates. A sixth fleet-scoped site fails here until the constant
+    /// constant every surface now concatenates. A fourth fleet-scoped site fails here until the constant
     /// names it.</para>
+    ///
+    /// <para>Derived from the LITERAL, which is why the call sites spell the read name inline rather than
+    /// through a constant: a named constant at the site would leave this regex finding nothing there, and
+    /// the pin would report the set complete while an un-inventoried fleet-scoped read shipped.</para>
     /// </summary>
     [Fact]
     public void TheFleetScopedInventory_MatchesWhatTheCounterActuallyRecords()
@@ -228,7 +232,7 @@ public sealed class AlertReadFailureSurfaceTests
             }
         }
 
-        Assert.Equal(2, nullKeyReads.Count);
+        Assert.Equal(3, nullKeyReads.Count);
 
         var inventory = AlertReadFailureCounter.FleetScopedReads;
 
@@ -236,8 +240,13 @@ public sealed class AlertReadFailureSurfaceTests
            name, because the constant is prose for an operator and the read name is a label for a log. */
         Assert.Contains(nullKeyReads, r => r.Contains("collector-cost", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("background-job health", StringComparison.Ordinal));
+        /* #3354: config_mute_rules belongs to the store, not to any monitored server, so its failed read
+           lands in the instance total and in no server's count — exactly the case a per-server-only
+           surface would have given no home. */
+        Assert.Contains(nullKeyReads, r => r.Contains("mute-rule reload", StringComparison.Ordinal));
         Assert.Contains("collector-cost regression", inventory, StringComparison.Ordinal);
         Assert.Contains("background-job health", inventory, StringComparison.Ordinal);
+        Assert.Contains("mute-rule reload", inventory, StringComparison.Ordinal);
 
         /* And the phantom stays gone. Disk pressure's feed reads are exempt — a local filesystem read and a
            recorded-store-size lookup that is context for the alert text — so naming it here would send an

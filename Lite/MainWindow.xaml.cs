@@ -272,8 +272,23 @@ public partial class MainWindow : Window
                    constructs its own and cannot pollute this one. */
                 readFailures: AlertReadFailureCounter.Shared);
 
-            // Load mute rules from database
-            await _muteRuleService.LoadAsync();
+            /* Load mute rules from the local store. A failed read THROWS (the store no longer renders one
+               as an empty rule set), and it is swallowed here for the reason Darling swallows it: the rules
+               already in force stay in force inside MuteRuleService whatever happens out here, and an
+               unhandled throw would abandon the rest of this startup sequence over a transient DuckDB
+               read. Logged so the event leaves an artefact on this SKU too — it used to leave none at
+               all. */
+            try
+            {
+                await _muteRuleService.LoadAsync();
+            }
+            catch (Exception muteEx)
+            {
+                AppLogger.Warn(
+                    "MuteRules",
+                    $"Could not load mute rules — the {_muteRuleService.GetRules().Count} rule(s) already "
+                    + $"in force stay in force until a read succeeds: {muteEx.Message}");
+            }
 
             // Initialize alerts history tab
             AlertsHistoryContent.Initialize(_dataService);

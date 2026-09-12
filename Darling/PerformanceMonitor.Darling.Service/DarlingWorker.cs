@@ -1479,8 +1479,8 @@ public sealed class DarlingWorker : BackgroundService
             alertSettings, DarlingAlertDeliverer.Branding,
             _loggerFactory.CreateLogger<WebhookAlertService>(), historyStore);
         var muteRuleService = new MuteRuleService(
-            new PgMuteRuleStore(postgres, _logger), _loggerFactory.CreateLogger<MuteRuleService>());
-        await muteRuleService.LoadAsync();
+            new PgMuteRuleStore(postgres), _loggerFactory.CreateLogger<MuteRuleService>());
+        await LoadMuteRulesAsync(muteRuleService);
 
         /* The shared record-and-send deliverer — hoisted so BOTH the shared alert engine and the Stage 4
            service self-alerts (DarlingSelfAlertEvaluator) fire through the SAME instance: identical
@@ -2912,7 +2912,7 @@ public sealed class DarlingWorker : BackgroundService
            upserting), and an enable_server flips it back. */
         await DarlingObservability.SyncServerEnabledStatesAsync(_postgres!, _logger, cancellationToken);
 
-        await muteRuleService.LoadAsync();
+        await LoadMuteRulesAsync(muteRuleService);
 
         /* view.ConfigVersion rather than _lastConfigVersion: the caller has not advanced the watermark yet
            (it advances from this method's RETURN value), so the field still holds the PREVIOUS version
@@ -2923,6 +2923,45 @@ public sealed class DarlingWorker : BackgroundService
             view.ConfigVersion, servers.Count, _paused);
 
         return view.ConfigVersion;
+    }
+
+    /// <summary>
+    /// The ONLY route from this service to <see cref="MuteRuleService.LoadAsync"/> — startup and every
+    /// control-plane reload both come through here, so neither path can be guarded while the other is not.
+    ///
+    /// <para>The service keeps the rules it already read when the store read throws, so the operator's
+    /// suppression survives a store blip: that guarantee lives in <c>LoadAsync</c> and holds whatever this
+    /// method does. What this method owns is the reporting. A failed reload leaves a cache that is CORRECT
+    /// and STALE, and the only way to tell that apart from a cache that is correct and current is an
+    /// artefact of the failure — so the event is logged with the number of rules left standing, and counted
+    /// on #3013's swallowed-alerting-read surface with a null server key, because
+    /// <c>config_mute_rules</c> belongs to the store rather than to any monitored server.</para>
+    ///
+    /// <para>Counted rather than exempt: this is a store read, on the alert pass's own command deadline,
+    /// whose failure changes what the alert engine does on its next sweep. That is the population #3013
+    /// measures, and it is the one member of it whose failure makes the fleet report MORE health rather
+    /// than less.</para>
+    ///
+    /// <para>Swallowed here, and it has to be: an unhandled throw at either site takes down a service whose
+    /// collection is otherwise healthy, and losing the fleet's monitoring is a larger error than running on
+    /// a stale mute set. The elapsed is the store read's alone — <c>LoadAsync</c>'s expiry purge runs only
+    /// after a read that succeeded, and swallows its own write failures.</para>
+    /// </summary>
+    private async Task LoadMuteRulesAsync(MuteRuleService muteRuleService)
+    {
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            await muteRuleService.LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Could not reload mute rules after {ElapsedMs} ms — the {Rules} rule(s) already in force "
+                + "stay in force until a read succeeds: {Message}",
+                readClock.ElapsedMilliseconds, muteRuleService.GetRules().Count, ex.Message);
+            _readFailures.RecordReadFailure(null, "mute-rule reload", readClock.ElapsedMilliseconds);
+        }
     }
 
     /// <summary>

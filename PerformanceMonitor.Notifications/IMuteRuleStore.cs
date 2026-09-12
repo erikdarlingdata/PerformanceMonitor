@@ -20,10 +20,19 @@ namespace PerformanceMonitor.Notifications;
 ///               wrapped in completed tasks).
 /// Insert/Update are kept SEPARATE (not a single Upsert) to preserve Lite's
 /// exact SQL — INSERT throws on a duplicate id, UPDATE is a narrow update.
+///
+/// <para><b>Every member THROWS on a store failure, reads included.</b> An empty result from
+/// <see cref="LoadAllAsync"/> means the store holds no rules, and nothing else. A store that swallowed a
+/// failed read and returned empty made those two answers one value, and
+/// <see cref="MuteRuleService.LoadAsync"/> then replaced a live cache with it — so a store blip un-muted
+/// every rule an operator had in force, which is the outcome a permanent rule is chosen to avoid. The
+/// service's reload skips its cache assignment when the read throws, so the previously-loaded set stays
+/// in force; each caller decides how loudly to report the event.</para>
 /// </summary>
 public interface IMuteRuleStore
 {
-    /// <summary>Loads every persisted rule. Lite: SELECT … ORDER BY created_at_utc DESC. Dash: the already-loaded set.</summary>
+    /// <summary>Loads every persisted rule. Lite: SELECT … ORDER BY created_at_utc DESC. Dash: the already-loaded set.
+    /// An empty list means the store holds no rules; a failed read throws rather than rendering as one.</summary>
     Task<IReadOnlyList<MuteRule>> LoadAllAsync();
 
     /// <summary>Persists a new rule. Lite: INSERT one row. Dash: add + rewrite file.</summary>
