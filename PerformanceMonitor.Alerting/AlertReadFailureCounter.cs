@@ -453,10 +453,24 @@ public sealed class AlertReadFailureCounter
     /// collector-cost regression self-alert, which does. An operator reading the phantom list would
     /// have hunted a disk-pressure read that cannot fail into this number, and would not have thought
     /// to check the one that can.</para>
+    ///
+    /// <para>The mute-rule reload is the member of this set whose failure leaves a cache that is correct
+    /// and STALE rather than absent — the rules already in force stay in force, so nothing is un-muted, but
+    /// a rule written or deleted during the outage is not honoured yet. Nothing else can tell that apart
+    /// from a cache that is correct and current: the rule list, every mute surface and the stale-mute
+    /// condition all read what the last successful load put there. A nonzero instance total naming this
+    /// read is the artefact, which is why it is counted rather than exempt.</para>
+    ///
+    /// <para>It is also the only member of this set that BOTH SKUs can produce, and that is load-bearing
+    /// for a constant both descriptions concatenate. The other two are Darling store self-alerts that have
+    /// no Lite equivalent at all, so naming them there describes a shared inventory rather than promising a
+    /// Lite reading. The mute-rule reload is different: Lite performs that read, Lite swallows its failure,
+    /// and Lite's call site therefore records it here too. A read this constant names on a SKU that cannot
+    /// increment it would be this class's own defect — a confident zero — reproduced in its documentation.</para>
     /// </summary>
     public const string FleetScopedReads =
-        "the collector-cost regression self-alert, and the store background-job health reads behind "
-        + "compression-job health, store-job cadence and retention holds";
+        "the collector-cost regression self-alert, the mute-rule reload, and the store background-job "
+        + "health reads behind compression-job health, store-job cadence and retention holds";
 
     /// <summary>
     /// The window these figures cover, and the window they do NOT.

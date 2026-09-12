@@ -19,10 +19,12 @@ namespace PerformanceMonitorLite.Services;
 /// Wraps the persistence that previously lived directly inside
 /// <see cref="MuteRuleService"/> (LoadAsync / PersistRuleAsync / RemoveRuleAsync /
 /// UpdateRuleAsync / SetRuleEnabledAsync / PurgeExpiredRulesAsync) — verbatim SQL.
-/// The mutating methods throw on failure; <see cref="MuteRuleService"/> keeps the
+/// EVERY method throws on failure; <see cref="MuteRuleService"/> keeps the
 /// try/catch + logging + in-memory cache (persist-then-cache ordering preserved).
-/// <see cref="LoadAllAsync"/> swallows errors and returns an empty set, matching
-/// the old LoadAsync ("start with empty rules if DB not ready").
+/// <see cref="LoadAllAsync"/> throws too, so an empty list is the answer "this store holds no rules" and
+/// never also the answer "I could not read them". A swallow here would be worse than an empty answer:
+/// the rows read before the fault are already in the list, so it would report a silently NARROWED set in
+/// force rather than an absent one, and the caller cannot tell a short list from a short table.
 ///
 /// <para><b>Four of the five write-lock sites are earned; <see cref="InsertAsync"/> is not (#2463).</b>
 /// Worth saying because <c>FindingStore.MuteStoryAsync</c> writes a mute row under the READ lock, and the
@@ -48,41 +50,35 @@ public sealed class DuckDbMuteRuleStore : IMuteRuleStore
     public async Task<IReadOnlyList<MuteRule>> LoadAllAsync()
     {
         var rules = new List<MuteRule>();
-        try
-        {
-            using var readLock = _dbInitializer.AcquireReadLock();
-            using var connection = _dbInitializer.CreateConnection();
-            await connection.OpenAsync();
-            using var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
+
+        using var readLock = _dbInitializer.AcquireReadLock();
+        using var connection = _dbInitializer.CreateConnection();
+        await connection.OpenAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
                     SELECT id, enabled, created_at_utc, expires_at_utc, reason,
                            server_name, metric_name, database_pattern,
                            query_text_pattern, wait_type_pattern, job_name_pattern
                     FROM config_mute_rules
                     ORDER BY created_at_utc DESC";
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                rules.Add(new MuteRule
-                {
-                    Id = reader.GetString(0),
-                    Enabled = reader.GetBoolean(1),
-                    CreatedAtUtc = reader.GetDateTime(2),
-                    ExpiresAtUtc = reader.IsDBNull(3) ? null : reader.GetDateTime(3),
-                    Reason = reader.IsDBNull(4) ? null : reader.GetString(4),
-                    ServerName = reader.IsDBNull(5) ? null : reader.GetString(5),
-                    MetricName = reader.IsDBNull(6) ? null : reader.GetString(6),
-                    DatabasePattern = reader.IsDBNull(7) ? null : reader.GetString(7),
-                    QueryTextPattern = reader.IsDBNull(8) ? null : reader.GetString(8),
-                    WaitTypePattern = reader.IsDBNull(9) ? null : reader.GetString(9),
-                    JobNamePattern = reader.IsDBNull(10) ? null : reader.GetString(10)
-                });
-            }
-        }
-        catch
+        using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
         {
-            /* Non-fatal — start with empty rules if DB not ready */
+            rules.Add(new MuteRule
+            {
+                Id = reader.GetString(0),
+                Enabled = reader.GetBoolean(1),
+                CreatedAtUtc = reader.GetDateTime(2),
+                ExpiresAtUtc = reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+                Reason = reader.IsDBNull(4) ? null : reader.GetString(4),
+                ServerName = reader.IsDBNull(5) ? null : reader.GetString(5),
+                MetricName = reader.IsDBNull(6) ? null : reader.GetString(6),
+                DatabasePattern = reader.IsDBNull(7) ? null : reader.GetString(7),
+                QueryTextPattern = reader.IsDBNull(8) ? null : reader.GetString(8),
+                WaitTypePattern = reader.IsDBNull(9) ? null : reader.GetString(9),
+                JobNamePattern = reader.IsDBNull(10) ? null : reader.GetString(10)
+            });
         }
 
         return rules;

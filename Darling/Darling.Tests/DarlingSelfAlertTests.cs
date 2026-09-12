@@ -1499,6 +1499,57 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, resolution.MetricName);
     }
 
+    /// <summary>
+    /// #3354, the second-order half. This condition reads the LIVE <c>MuteRuleService</c> cache, which is
+    /// exactly why it is the surface a wrongly-emptied cache damages most: with the cache empty it finds
+    /// nothing stale, clears the edge and writes a RESOLUTION — the surface built to make an invisible mute
+    /// visible asserting that nothing is being suppressed, at the moment everything has been un-suppressed.
+    ///
+    /// <para>So the fixture is a real service over a scripted store rather than a hand-built rule list: the
+    /// claim is about what this condition sees AFTER a failed reload, and a list handed in directly cannot
+    /// express a failed reload at all.</para>
+    ///
+    /// <para>Three steps, because the middle one alone would be satisfied by a condition that never
+    /// resolves anything. A failed read must not clear it; a SUCCESSFUL empty read — the operator deleting
+    /// the rule, which is the whole point of the resolution — still must.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_AFailedMuteReload_CannotReportAllClear_ButAnEmptyOneStillDoes()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var store = new ScriptedMuteRuleStore()
+            .Returning(Mute(StaleDays + 1))
+            .Failing()
+            .Returning();
+        var service = new MuteRuleService(
+            store, Microsoft.Extensions.Logging.Abstractions.NullLogger<MuteRuleService>.Instance);
+
+        await service.LoadAsync();
+        await e.ApplyStaleMuteRulesAsync(service.GetRules(), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteMetric, fired.MetricName);
+        Assert.Empty(h.History.Records);
+
+        /* The reload faults. The rules stay in force inside the service, so this condition still sees the
+           rule it reported — and writes nothing, because the standing condition has not changed. */
+        await Assert.ThrowsAsync<InvalidOperationException>(service.LoadAsync);
+        await e.ApplyStaleMuteRulesAsync(service.GetRules(), Ct);
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        /* The operator deletes it for real. Same evaluator, same edge, and the only thing that differs is
+           the store's answer — so the resolution this condition exists to write still gets written. */
+        await service.LoadAsync();
+        await e.ApplyStaleMuteRulesAsync(service.GetRules(), Ct);
+
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, resolution.MetricName);
+    }
+
     [Fact]
     public async Task StaleMute_QuietStore_WritesNothingAtAll()
     {

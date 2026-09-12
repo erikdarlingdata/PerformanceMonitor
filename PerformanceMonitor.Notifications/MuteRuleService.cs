@@ -61,6 +61,29 @@ public class MuteRuleService
         }
     }
 
+    /// <summary>
+    /// Replaces the cache with the store's rules and purges any that have expired. Reached at service start
+    /// AND on every control-plane reload, so it is a RELOAD as often as it is a startup path.
+    ///
+    /// <para><b>A failed load must not reduce the set of rules in force.</b> The store read is awaited
+    /// BEFORE the cache assignment and this method catches nothing, so a read that throws leaves the
+    /// previously-loaded rules exactly where they were: the service keeps suppressing what the operator
+    /// asked it to suppress until a read succeeds. That ordering is the whole mechanism — a catch here, or
+    /// a cache write hoisted above the await, would let a store blip un-mute every rule at once, and every
+    /// surface that could report it reads this same cache.</para>
+    ///
+    /// <para>The first load needs no special case and deliberately has none. A fresh or unmigrated store
+    /// genuinely has no rules and must not stop the service from starting — and at that point the cache is
+    /// already empty, so retaining it IS starting clean. One rule covers both.</para>
+    ///
+    /// <para>An empty list from a SUCCESSFUL read still empties the cache: that is an operator deleting
+    /// their last rule, and refusing to honour it would be the opposite error. Distinguishing the two is
+    /// the store's job, and <see cref="IMuteRuleStore"/> requires it.</para>
+    ///
+    /// <para>Callers must handle the throw — not to preserve the cache, which is guaranteed here whatever
+    /// they do, but because an unhandled one takes down a host whose collection is otherwise healthy. Each
+    /// does, and reports it on the surfaces its own SKU has.</para>
+    /// </summary>
     public async Task LoadAsync()
     {
         var rules = await _store.LoadAllAsync();
