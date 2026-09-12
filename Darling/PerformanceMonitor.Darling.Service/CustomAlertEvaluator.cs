@@ -235,6 +235,26 @@ public sealed class CustomAlertEvaluator
         }
     }
 
+    /// <summary>
+    /// Decides whether an ALREADY-OPEN incident's severity band changed on this observation (#3341), returning
+    /// the new severity to deliver or <c>null</c> for no change. Pure so the escalate/de-escalate decision is
+    /// unit-testable without a store. Only an open incident (<paramref name="firing"/>) that is STILL breaching
+    /// (<paramref name="breaching"/>) and was already delivered (<paramref name="firedSeverity"/> non-null) can
+    /// change band: a clearing value holds its severity until the resolve edge, and a subject not yet firing has
+    /// no delivered band to change. Per the plan's Decision 3 a change in EITHER direction is delivered — a climb
+    /// to Critical pages Critical, and a drop back to Warning is a severity change, not a resolve.
+    /// </summary>
+    internal static AlertSeverityLevel? ClassifySeverityChange(
+        bool firing, bool breaching, AlertSeverityLevel currentSeverity, string? firedSeverity)
+    {
+        if (!firing || !breaching || firedSeverity is null)
+        {
+            return null;
+        }
+
+        return currentSeverity.ToString() != firedSeverity ? currentSeverity : null;
+    }
+
     private async Task EvaluateRuleForServerAsync(
         CustomAlertRule row, CustomAlertRuleDefinition def, int serverId, string storageName, string displayName,
         DateTime now, RollupAvailability rollups, RollupCoverage coverage, int composedSeconds, CancellationToken cancellationToken)
@@ -290,6 +310,21 @@ public sealed class CustomAlertEvaluator
 
             case PersistenceOutcome.None:
             default:
+                // #3341: severity is re-evaluated while an incident stays OPEN, not only on the rising Fire edge.
+                // If the still-breaching value has crossed into a different band than the one delivered, deliver
+                // the change on the SAME incident (Custom:<id>) and record the new band. Decision 3: a higher band
+                // wins (Warning -> Critical pages Critical), and a drop back to Warning is a severity change, not a
+                // resolve, so BOTH directions are delivered. No tier-change debounce yet: a value oscillating right
+                // at a band boundary could re-deliver — low in practice (windowed aggregate, 60s cadence, tier
+                // gap), tracked as a possible follow-up.
+                if (ClassifySeverityChange(
+                        newState.Persistence.Firing, breaching, def.SeverityFor(value.Value), state.FiredSeverity)
+                    is { } changedSeverity)
+                {
+                    await DeliverFireAsync(row, def, serverId, displayName, value.Value, changedSeverity, cancellationToken);
+                    newState = newState with { FiredSeverity = changedSeverity.ToString() };
+                }
+
                 break;
         }
 
