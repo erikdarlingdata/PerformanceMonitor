@@ -359,21 +359,37 @@ public sealed class DarlingCollectionLogReadTests
                full page with nothing to say the filter did not apply. */
             Assert.DoesNotContain("\"runs\"", negative, StringComparison.Ordinal);
 
-            /* ── 8. a floor that is not a real number is refused on the same terms ── */
-            foreach (var notANumber in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity })
+            /* ── 8. a NON-FINITE floor is refused too, and a negative test cannot see one ── */
+            /*
+                Every comparison against NaN is false and +Infinity < 0 is false, so both passed the
+                original range check and came back as an empty, duration-RANKED page reporting
+                "matched min_duration_ms NaN". All of them are reachable through /api/read: TryParse under
+                NumberStyles.Float accepts the named literals AND accepts an oversized number like 1e400,
+                which overflows to +Infinity rather than failing. Review found this after the lane had
+                reasoned -- wrongly -- that no real surface could deliver one.
+            */
+            foreach (var unusable in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity })
             {
                 var refused = await DarlingMcpDataTools.GetCollectionLog(
-                    dataSource, FilterServerName, 24, 200, min_duration_ms: notANumber);
+                    dataSource, FilterServerName, 24, 200, min_duration_ms: unusable);
 
-                Assert.Contains("real number of milliseconds", refused, StringComparison.Ordinal);
+                Assert.Contains("must be a finite number", refused, StringComparison.Ordinal);
                 Assert.DoesNotContain("\"runs\"", refused, StringComparison.Ordinal);
 
-                /* The assertion that discriminates. Before the finite test, NaN and +Infinity passed
-                   validation and then matched nothing, so the caller got the filtered-no-matches status —
-                   which NAMES the floor it applied and reads as a true negative about the window. Asserting
-                   only the absence of a payload would have been green on that. */
+                /* And NOT the empty status: an unusable floor is a refusal, not a miss. */
+                Assert.DoesNotContain("\"empty\"", refused, StringComparison.Ordinal);
+
+                /* And not the no-matches MESSAGE either, which names the floor it applied and so reads as a
+                   fact about the window. Asserted beside the status token because the two can drift: the
+                   status is the branch, this sentence is what the caller actually reads. */
                 Assert.DoesNotContain("matched min_duration_ms", refused, StringComparison.Ordinal);
             }
+
+            /* Positive control for those negatives: a FINITE floor on the same read still returns a page,
+               so the three assertions above are not passing against a read that refuses everything. */
+            var finite = await DarlingMcpDataTools.GetCollectionLog(
+                dataSource, FilterServerName, 24, 200, min_duration_ms: 20_000);
+            Assert.Contains("\"runs\"", finite, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }
