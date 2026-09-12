@@ -2,9 +2,9 @@
 """Split CHANGELOG.md into a compacted index plus one prose archive per minor version.
 
 GitHub refuses to render a blob past a few hundred kilobytes, and the single-file history had
-grown to 2,160,009 bytes, so the file the project keeps its record in could not be read in the web UI at
-all (#3387). The record itself is worth keeping at that length: each entry explains a mechanism
-and carries its measurements. So the prose moves rather than shrinks.
+grown to 2,160,009 bytes, so the file the project keeps its record in could not be read in the
+web UI at all (#3387). The record itself is worth keeping at that length: each entry explains a
+mechanism and carries its measurements. So the prose moves rather than shrinks.
 
     CHANGELOG.md            every version, every entry reduced to its bold title and the issue
                             references the entry carries. [Unreleased] and everything before
@@ -18,16 +18,21 @@ reduction and a spot check are not proof: a parser that silently passes an entry
 silently drops one, produces both.
 
 Sub-commands
-    split      write the index and the archives from the current CHANGELOG.md
+    split      write the index and the archives from the current CHANGELOG.md. Idempotent: a
+               version whose archive already exists takes its prose FROM that archive, so a
+               release cut moves only the newly-released version
     census     write the per-archive entry counts and prose hashes the C# pin reads
     verify     structural checks that need no history: entry counts, every [#N] resolving in the
                file that uses it, per-file size ceilings
     roundtrip  reconstruct a git revision's CHANGELOG.md from the working tree's index plus
                archives and compare byte for byte
     --self-test
-               run `roundtrip` against deliberately corrupted archives and assert it REPORTS
-               each corruption. A reconstruction check that cannot see a dropped entry is not a
-               check, so the instrument is exercised rather than trusted.
+               corrupt an archive in memory and assert the checks REPORT it, then run the same
+               corruption past comparisons reduced to a byte prefix, a line count and a length
+               and assert all three MISS it. A reconstruction check that cannot see a dropped
+               entry is not a check, so the instruments are exercised rather than trusted. Also
+               pins the boundary between the two: roundtrip reads prose only, so a dropped
+               definition block is invisible to it and is `verify`'s to catch.
 
 Line endings: .gitattributes is `* text=auto eol=crlf`, so the working tree is CRLF and the blob
 is LF. Everything here reads and writes bytes and is explicit about which form it holds.
@@ -275,7 +280,9 @@ def index_link(path: str) -> str:
     return f"Full entries: [{path}]({path})"
 
 
-def build(repo: Path, preamble: list[str], sections: list[Section]) -> tuple[list[str], dict[str, list[str]]]:
+def build(
+    repo: Path, preamble: list[str], sections: list[Section]
+) -> tuple[list[str], dict[str, list[str]]]:
     """Return the index's lines and each archive's lines.
 
     Idempotent, which matters because a release cut runs this on an already-split tree and only
