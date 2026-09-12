@@ -659,11 +659,7 @@ jobs:
         if: github.event_name == 'release'
         shell: pwsh
         run: |
-          python3 .github/scripts/postpack_signing.py collect `
-            --stage postpack/unsigned `
-            --manifest postpack/manifest.json `
-            --product lite=releases/velopack-lite `
-            --product darlingviewer=releases/velopack-darlingviewer
+          python3 .github/scripts/postpack_signing.py collect --stage postpack/unsigned --manifest postpack/manifest.json --product lite=releases/velopack-lite --product darlingviewer=releases/velopack-darlingviewer
 
       - name: Upload the Velopack-generated executables for signing
         if: github.event_name == 'release'
@@ -698,9 +694,7 @@ jobs:
         if: github.event_name == 'release'
         shell: pwsh
         run: |
-          python3 .github/scripts/postpack_signing.py apply `
-            --signed postpack/signed `
-            --manifest postpack/manifest.json
+          python3 .github/scripts/postpack_signing.py apply --signed postpack/signed --manifest postpack/manifest.json
 
       # After the write-back, not before: signing changes the bytes of every asset it touches.
       - name: Generate checksums

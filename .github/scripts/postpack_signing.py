@@ -348,17 +348,17 @@ def assert_faithful(before: list[Member], rebuilt_path: str, replacements: dict[
 
 
 def is_signed(path: str) -> bool:
-    with open(path, "rb") as handle:
-        offset, length = vrs.certificate_table(handle.read(vrs.HEADER_BYTES))
-    return offset != 0 and length != 0
+    """Whether `path` carries a certificate table. A file that is not a PE image is a refusal.
 
-
-def assert_pe(path: str) -> None:
+    Reading a non-PE as "unsigned" would submit it for signing and then report it as signed or
+    not on the strength of bytes that are not a PE header at all.
+    """
     try:
         with open(path, "rb") as handle:
-            vrs.certificate_table(handle.read(vrs.HEADER_BYTES))
+            offset, length = vrs.certificate_table(handle.read(vrs.HEADER_BYTES))
     except (OSError, vrs.ReadError, struct.error) as exc:
         raise PostPackError(f"{path}: not a PE image ({exc})") from exc
+    return offset != 0 and length != 0
 
 
 def exactly_one(directory: str, pattern: str, what: str) -> str:
@@ -395,6 +395,7 @@ def collect(stage: str, manifest_path: str, products: list[tuple[str, str]]) -> 
 
     manifest: dict = {"version": MANIFEST_VERSION, "products": []}
     staged: dict[str, str] = {}
+    already: list[str] = []
 
     for name, directory in products:
         if not os.path.isdir(directory):
@@ -414,7 +415,8 @@ def collect(stage: str, manifest_path: str, products: list[tuple[str, str]]) -> 
             target = os.path.join(stage, rel)
             os.makedirs(os.path.dirname(target), exist_ok=True)
             writer(target)
-            assert_pe(target)
+            if is_signed(target):
+                already.append(rel)
             staged[rel] = target
 
         stage_file(entry["setup"]["stage"], lambda dst: shutil.copyfile(setup, dst))
@@ -439,10 +441,9 @@ def collect(stage: str, manifest_path: str, products: list[tuple[str, str]]) -> 
         json.dump(manifest, handle, indent=2)
         handle.write("\n")
 
-    already = sorted(rel for rel, path in staged.items() if is_signed(path))
     print(f"\ncollect: {len(staged)} file(s) staged under {stage}")
     if already:
-        print(f"collect: {len(already)} already carry a signature: {already}")
+        print(f"collect: {len(already)} already carry a signature: {sorted(already)}")
     return 0
 
 
@@ -456,16 +457,25 @@ def apply(signed_dir: str, manifest_path: str) -> int:
         path = os.path.join(signed_dir, rel)
         if not os.path.isfile(path):
             raise PostPackError(f"the signing response has no '{rel}' under {signed_dir}")
-        assert_pe(path)
         if not is_signed(path):
             raise PostPackError(f"{rel} came back from signing without a certificate table")
         with open(path, "rb") as handle:
             return handle.read()
 
+    # Every file in the response is read and checked before any artifact is written, so a bad
+    # response leaves the packed output exactly as `vpk pack` left it. Writing first and failing
+    # afterwards would still fail the release, but it would leave an unsigned installer on disk
+    # under a name the next step would otherwise have uploaded.
+    blobs: dict[str, bytes] = {}
+    for product in manifest["products"]:
+        blobs[product["setup"]["stage"]] = signed_blob(product["setup"]["stage"])
+        for member in product["portable"]["members"]:
+            blobs[member["stage"]] = signed_blob(member["stage"])
+
     written = 0
     for product in manifest["products"]:
         setup = product["setup"]
-        blob = signed_blob(setup["stage"])
+        blob = blobs[setup["stage"]]
         with open(setup["path"], "wb") as handle:
             handle.write(blob)
         if not is_signed(setup["path"]):
@@ -474,7 +484,7 @@ def apply(signed_dir: str, manifest_path: str) -> int:
         print(f"  {product['name']}: {os.path.basename(setup['path'])} signed")
 
         archive = product["portable"]["path"]
-        replacements = {m["member"]: signed_blob(m["stage"]) for m in product["portable"]["members"]}
+        replacements = {m["member"]: blobs[m["stage"]] for m in product["portable"]["members"]}
         if not replacements:
             raise PostPackError(f"{archive}: no members to replace")
         before = snapshot(archive)
@@ -538,14 +548,34 @@ def _product_dir(root: str, name: str, pack_id: str, app_exe: str) -> str:
     return directory
 
 
-def _sign_stage(stage: str) -> str:
+def _divergent_local_header(path: str) -> None:
+    """Set the UTF-8 name flag in one member's LOCAL header only, leaving the central one clear.
+
+    Two bytes, no size or offset change. It gives a zip whose per-member metadata, CRC, sizes and
+    content are all readable from the central directory and all unchanged, while its raw bytes
+    differ from anything a rewriter that reconstructs local headers from the central directory
+    would produce. That is the only thing the raw-bytes comparison decides on its own.
+    """
+    with zipfile.ZipFile(path) as zf:
+        target = zf.infolist()[1]
+    with open(path, "r+b") as handle:
+        handle.seek(target.header_offset + 6)
+        flags = struct.unpack("<H", handle.read(2))[0]
+        handle.seek(target.header_offset + 6)
+        handle.write(struct.pack("<H", flags | 0x800))
+
+
+def _sign_stage(stage: str, suffix: str = "-signed", only: str = "") -> str:
     """Return a directory that mirrors `stage` with a certificate table appended to each file.
 
     A SignPath response is the same container with the same entry paths, signed. `--verify-dir`
     and this script both read "is the certificate table non-empty", so appending a table is the
     right stand-in: it is exactly the state the guard distinguishes.
+
+    `only` restricts the appending to staged paths containing that substring, which produces the
+    response shape that matters most -- some files signed, some returned as submitted.
     """
-    signed = stage + "-signed"
+    signed = stage + suffix
     if os.path.exists(signed):
         shutil.rmtree(signed)
     for base, _, files in os.walk(stage):
@@ -556,6 +586,10 @@ def _sign_stage(stage: str) -> str:
             os.makedirs(os.path.dirname(target), exist_ok=True)
             with open(source, "rb") as handle:
                 blob = bytearray(handle.read())
+            if only and only not in rel.replace(os.sep, "/"):
+                with open(target, "wb") as handle:
+                    handle.write(bytes(blob))
+                continue
             table = b"\x00" * 0x1C0
             offset = len(blob)
             pe_off = struct.unpack_from("<I", blob, 0x3C)[0]
@@ -565,6 +599,29 @@ def _sign_stage(stage: str) -> str:
             with open(target, "wb") as handle:
                 handle.write(bytes(blob) + table)
     return signed
+
+
+def _rebuilt_from_central(source: str, root: str) -> str:
+    """Rewrite `source` with local headers reconstructed from the central directory.
+
+    What a `zipfile`-based round trip produces: every field the central directory carries is
+    preserved, and any local-header field that disagrees with it is silently normalised.
+    """
+    destination = os.path.join(root, "from-central.zip")
+    with zipfile.ZipFile(source) as src, zipfile.ZipFile(destination, "w") as dst:
+        for info in src.infolist():
+            fresh = zipfile.ZipInfo(info.filename, date_time=info.date_time)
+            fresh.compress_type = info.compress_type
+            fresh.flag_bits = info.flag_bits
+            fresh.external_attr = info.external_attr
+            fresh.internal_attr = info.internal_attr
+            fresh.create_system = info.create_system
+            fresh.create_version = info.create_version
+            fresh.extract_version = info.extract_version
+            fresh.comment = info.comment
+            fresh.extra = info.extra
+            dst.writestr(fresh, src.read(info))
+    return destination
 
 
 def self_test() -> int:
@@ -683,9 +740,36 @@ def self_test() -> int:
             "apply accepted a signing response with nothing in it",
             lambda: apply(os.path.join(root, "empty-response"), manifest),
         )
+        def artifact_digests() -> dict[str, str]:
+            out = {}
+            for directory in (lite, viewer):
+                for name in sorted(os.listdir(directory)):
+                    with open(os.path.join(directory, name), "rb") as handle:
+                        out[f"{directory}/{name}"] = hashlib.sha256(handle.read()).hexdigest()
+            return out
+
+        untouched = artifact_digests()
         expect_raises(
             "apply accepted files that came back without a certificate table",
             lambda: apply(stage, manifest),
+        )
+        expect(
+            "apply modified a packed artifact before refusing the signing response",
+            artifact_digests() == untouched,
+        )
+
+        # The response shape that separates "refuses" from "refuses without writing": the
+        # installers come back signed and the portable members come back as submitted. A run that
+        # checks each file as it writes it leaves a signed installer beside an unbuilt zip.
+        partial = _sign_stage(stage, suffix="-partial", only="-setup/")
+        untouched = artifact_digests()
+        expect_raises(
+            "apply accepted a response in which only some files came back signed",
+            lambda: apply(partial, manifest),
+        )
+        expect(
+            "apply wrote the signed installers before refusing a partially signed response",
+            artifact_digests() == untouched,
         )
 
         signed = _sign_stage(stage)
@@ -774,6 +858,57 @@ def self_test() -> int:
         expect_raises(
             "the faithfulness check accepted a recompressed archive as byte-faithful",
             lambda: assert_faithful(before_viewer, recompressed, {}),
+        )
+
+        # The raw-bytes comparison on its own. This pair is identical in every field the central
+        # directory carries -- names, order, method, timestamps, attributes, CRC, both sizes and
+        # content -- and differs only in two bytes of one LOCAL header, which is what a rewriter
+        # that reconstructs local headers rather than copying them changes.
+        divergent = os.path.join(root, "divergent.zip")
+        with zipfile.ZipFile(divergent, "w") as zf:
+            for name, blob in (("a.txt", b"a" * 400), ("b.txt", b"b" * 400), ("c.txt", b"c" * 400)):
+                info = zipfile.ZipInfo(name, date_time=(2026, 9, 12, 10, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                zf.writestr(info, blob)
+        reconstructed = snapshot(divergent)
+        _divergent_local_header(divergent)
+        divergent_snapshot = snapshot(divergent)
+        expect(
+            "patching a local header changed a field the central directory reports",
+            [
+                (m.name, m.compress_type, m.crc, m.file_size, m.compress_size, m.content_sha)
+                for m in divergent_snapshot
+            ]
+            == [
+                (m.name, m.compress_type, m.crc, m.file_size, m.compress_size, m.content_sha)
+                for m in reconstructed
+            ],
+        )
+        faithful_copy = os.path.join(root, "divergent-copy.zip")
+        rebuild(divergent, {}, faithful_copy)
+        expect_ok(
+            "rebuild did not copy a local header that disagrees with the central directory",
+            lambda: assert_faithful(divergent_snapshot, faithful_copy, {}),
+        )
+        expect_raises(
+            "the faithfulness check accepted an archive whose local headers were reconstructed",
+            lambda: assert_faithful(divergent_snapshot, _rebuilt_from_central(divergent, root), {}),
+        )
+
+        # Order, isolated from content: two members with identical content and metadata under
+        # different names, swapped. Only a check on the entry ORDER, or one on raw bytes that
+        # includes the member name, tells the two archives apart.
+        twins = os.path.join(root, "twins.zip")
+        swapped = os.path.join(root, "twins-swapped.zip")
+        for target, names in ((twins, ("one.bin", "two.bin")), (swapped, ("two.bin", "one.bin"))):
+            with zipfile.ZipFile(target, "w") as zf:
+                for name in names:
+                    info = zipfile.ZipInfo(name, date_time=(2026, 9, 12, 10, 0, 0))
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    zf.writestr(info, b"identical" * 40)
+        expect_raises(
+            "the faithfulness check accepted two same-content members in swapped order",
+            lambda: assert_faithful(snapshot(twins), swapped, {}),
         )
 
     for failure in failures:
