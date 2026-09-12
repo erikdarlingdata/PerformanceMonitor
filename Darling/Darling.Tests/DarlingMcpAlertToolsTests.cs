@@ -418,6 +418,77 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     }
 
     /// <summary>
+    /// #3297: the Retention Held tiers are writable, and the accepted range is the engine's clamp EXACTLY —
+    /// the same parity the file-growth, AG and delivery-cooldown bounds hold, for the same reason.
+    ///
+    /// <para>Driven off the CONSTANTS rather than literals, so this is a behavioural check of what the
+    /// parser does with the shared bounds rather than a second opinion about what they are (that identity is
+    /// the compiler's, and <c>RetentionHoldRatioKnobRungTests</c> pins that neither side carries a bare
+    /// literal). What the theory adds is the boundary behaviour: inclusive at both ends, refused just
+    /// outside, and an integer JSON number accepted for a double column — <c>2</c> rather than <c>2.0</c> is
+    /// what a client that read back 2.0 and re-serialized it is quite likely to send.</para>
+    ///
+    /// <para>The floor being the shipped WARNING default is the decision this issue took: healthy whole-chunk
+    /// granularity reaches 1.4x measured on production, so a lower threshold fires on a store that is working
+    /// correctly — the knobs raise the tiers and cannot lower them. Asserted as the identity rather than the
+    /// number so the reasoning and the bound cannot come apart.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("1.4", false)]
+    [InlineData("1.5", false)]
+    [InlineData("1.9", false)]
+    [InlineData("2.0", true)]
+    [InlineData("2", true)]
+    [InlineData("9.5", true)]
+    [InlineData("100.0", true)]
+    [InlineData("100.1", false)]
+    public void RetentionHoldWriteBounds_MatchTheEngineClamps(string value, bool accepted)
+    {
+        foreach (var field in new[] { "retention_hold_warn_ratio", "retention_hold_critical_ratio" })
+        {
+            var parsed = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(
+                $"{{\"self_alerts\":{{\"{field}\":{value}}}}}")!);
+
+            Assert.Equal(accepted, parsed.Error is null);
+            Assert.Equal(accepted ? 1 : 0, parsed.Targets.Count);
+            if (accepted)
+            {
+                Assert.Equal(
+                    (DarlingMcpAlertTools.AlertSettingsTable, field),
+                    Assert.Single(parsed.Targets));
+            }
+        }
+
+        /* The bound the theory's numbers came from, and the decision behind its floor. */
+        Assert.Equal(2.0, TimescaleSupport.RetentionHoldRatioFloor);
+        Assert.Equal(100.0, TimescaleSupport.RetentionHoldRatioCeiling);
+        Assert.Equal(TimescaleSupport.RetentionHoldWarnRatioDefault, TimescaleSupport.RetentionHoldRatioFloor);
+    }
+
+    /// <summary>
+    /// #3297: the two tiers are validated INDEPENDENTLY, so a body that puts critical below warn is accepted.
+    ///
+    /// <para>Pinned as a decision rather than left implicit. The alternative — refusing the pair, or
+    /// flooring critical at warn on read — would either reject a coherent configuration or accept a value
+    /// and then use a different one. Firing is gated on warn and severity on critical, so the degenerate
+    /// pair already means exactly one thing: every fire is Critical, with no Warning tier. That is what
+    /// setting it that way asks for, and <c>DarlingSelfAlertTests</c> holds the behaviour end.</para>
+    /// </summary>
+    [Fact]
+    public void RetentionHoldTiers_AreValidatedIndependently_SoAnInvertedPairIsAccepted()
+    {
+        var parsed = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(
+            "{\"self_alerts\":{\"retention_hold_warn_ratio\":8.0,\"retention_hold_critical_ratio\":2.0}}")!);
+
+        Assert.Null(parsed.Error);
+        Assert.Equal(2, parsed.Targets.Count);
+
+        /* Two DISTINCT columns, which is what makes both SET clauses land — the two-names-one-column guard
+           would otherwise be the thing that refused this pair, for the wrong reason. */
+        Assert.Equal(2, parsed.Targets.Distinct().Count());
+    }
+
+    /// <summary>
     /// The write bounds for everything #2417 made writable, against <c>DarlingAlertSettings</c>' clamps —
     /// the same parity <see cref="FileGrowthWriteBounds_MatchTheEngineClamps"/> holds for the file-growth
     /// knobs, and for the same reason: a bound that differs lets the tool ACCEPT a value the engine then
@@ -568,7 +639,10 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         AnalysisNotifyCooldownMinutes: 360,
         StoreJobCadenceWarnPercent: 80,
         FileGrowthEnabled: true, FileGrowthRiseMb: 1024, FileGrowthVolumePercent: 10,
-        FileGrowthLookbackMinutes: 60);
+        FileGrowthLookbackMinutes: 60,
+        /* #3297: deliberately NOT the shipped 2.0/4.0. A sample row equal to the defaults would let a
+           payload that emitted a constant instead of the row's value round-trip unnoticed. */
+        RetentionHoldWarnRatio: 3.0, RetentionHoldCriticalRatio: 7.5);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

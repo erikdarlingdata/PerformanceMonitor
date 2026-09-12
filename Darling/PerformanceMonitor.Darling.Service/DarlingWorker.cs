@@ -1574,6 +1574,11 @@ public sealed class DarlingWorker : BackgroundService
             agDisconnectRefireMinutes: () => alertSettings.AgDisconnectRefireMinutes,
             /* #2136: the cadence warning threshold, read live like the AG seams (clamped on the property). */
             storeJobCadenceWarnPercent: () => alertSettings.StoreJobCadenceWarnPercent,
+            /* #3297 (V119): the Retention Held tiers, read live like the cadence knob above — which is what
+               makes them tunable at all. Until this rung they were compile-time constants, so #3296's
+               operator got an hourly CRITICAL with nothing in Settings to reach. Clamped on the properties. */
+            retentionHoldWarnRatio: () => alertSettings.RetentionHoldWarnRatio,
+            retentionHoldCriticalRatio: () => alertSettings.RetentionHoldCriticalRatio,
             /* #3013: the same process counter the shared engine tallies on, so one number covers both
                halves of a server's alert work. */
             readFailures: AlertReadFailureCounter.Shared);

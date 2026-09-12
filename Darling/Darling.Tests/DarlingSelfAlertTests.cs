@@ -185,6 +185,16 @@ public sealed class DarlingSelfAlertTests
         /// ever reaches — the shape a stale literal survives in.</summary>
         public bool WireCadenceKnob { get; set; } = true;
 
+        /// <summary>#3297 (V119): the Retention Held tiers. Defaults are the shipped pair, taken from the
+        /// product rather than restated for the reason the cadence knob above is.</summary>
+        public double RetentionHoldWarnRatio { get; set; } = TimescaleSupport.RetentionHoldWarnRatioDefault;
+        public double RetentionHoldCriticalRatio { get; set; } = TimescaleSupport.RetentionHoldCriticalRatioDefault;
+
+        /// <summary>#3297: set false to build the evaluator with BOTH retention-hold seams unsupplied, so
+        /// the constructor's own fallbacks are what judge — the #3060 reasoning, applied to the seams this
+        /// issue added.</summary>
+        public bool WireRetentionHoldKnobs { get; set; } = true;
+
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
         /// <summary>#1681: captures what the evaluator writes to the service log, so the firing/recovery pair
@@ -202,7 +212,9 @@ public sealed class DarlingSelfAlertTests
             agLagAlertSeconds: () => AgLagAlertSeconds,
             agRedoQueueAlertKb: () => AgRedoQueueAlertKb,
             agDisconnectRefireMinutes: () => AgDisconnectRefireMinutes,
-            storeJobCadenceWarnPercent: WireCadenceKnob ? () => StoreJobCadenceWarnPercent : null);
+            storeJobCadenceWarnPercent: WireCadenceKnob ? () => StoreJobCadenceWarnPercent : null,
+            retentionHoldWarnRatio: WireRetentionHoldKnobs ? () => RetentionHoldWarnRatio : null,
+            retentionHoldCriticalRatio: WireRetentionHoldKnobs ? () => RetentionHoldCriticalRatio : null);
     }
 
     /* ---------------- #991 Availability Group fixtures ---------------- */
@@ -3116,12 +3128,135 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
     [Fact]
     public void RetentionHeld_TheWarnRatioClearsChunkGranularityAndCatchesTheIncident()
     {
-        /* Both bounds asserted, not just described. Below: whole-chunk granularity on the shipped raw tier
-           (4-day horizon, 1-day chunks) tops out at 1.25x, which must stay under the warn ratio. Above: the
-           motivating incident sat at 4.52x and must reach CRITICAL. */
-        Assert.True(DarlingSelfAlertEvaluator.RetentionHoldWarnRatio > 1.25);
+        /* Both bounds asserted, not just described. Below: whole-chunk granularity plus the retention job's
+           own schedule lag reaches 1.4x MEASURED on a healthy production store under 4-day horizons — two
+           relations holding 5.7 days against 4. The original figure here was 1.25x, from the arithmetic
+           rather than the store, and it understated the margin the shipped ratio actually has to clear
+           (#3297). Above: the motivating incident sat at 4.52x and must reach CRITICAL. */
+        Assert.True(DarlingSelfAlertEvaluator.RetentionHoldWarnRatio > 1.4);
         Assert.True(DarlingSelfAlertEvaluator.RetentionHoldCriticalRatio > DarlingSelfAlertEvaluator.RetentionHoldWarnRatio);
         Assert.True(4.52 >= DarlingSelfAlertEvaluator.RetentionHoldCriticalRatio);
+    }
+
+    /// <summary>
+    /// #3297: the tiers come from the STORE, so a tuned pair changes what fires — which is the whole rung,
+    /// and the one property that a store-backed knob can lack while looking complete. A bare constant left
+    /// in the decision would keep firing at the shipped 2.0x while <c>get_alert_settings</c> reported the
+    /// store's value, and no test over an UNTUNED store could tell the two apart, because there the shipped
+    /// default and the stored value agree.
+    ///
+    /// <para>So this drives the seam to a value the shipped constant would judge differently, in both
+    /// directions: a raised warn ratio must SILENCE a reading the default fires on, and a lowered one must
+    /// not be reachable at all (the clamp's floor is the default) — so the second case is the critical tier
+    /// instead, raised past a reading the default grades Critical.</para>
+    /// </summary>
+    [Fact]
+    public async Task RetentionHeld_TheTiersComeFromTheStore_NotTheShippedConstants()
+    {
+        /* The motivating reading, 4.52x: Critical on the shipped pair. */
+        var shipped = new Harness();
+        await shipped.Build().ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+        Assert.Equal(AlertSeverityLevel.Critical, Assert.Single(shipped.Deliverer.Outcomes).Severity);
+
+        /* Same reading, warn raised past it: nothing fires, and nothing is standing to resolve either. */
+        var quiet = new Harness { RetentionHoldWarnRatio = 5.0, RetentionHoldCriticalRatio = 10.0 };
+        await quiet.Build().ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+        Assert.Empty(quiet.Deliverer.Outcomes);
+        Assert.Empty(quiet.History.Records);
+
+        /* Same reading, critical raised past it but warn left under: it fires as a WARNING. The severity is
+           the assertion — a fire proves the warn seam is read, and the grade proves the critical one is. */
+        var graded = new Harness { RetentionHoldCriticalRatio = 9.0 };
+        await graded.Build().ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+        var warned = Assert.Single(graded.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Warning, warned.Severity);
+    }
+
+    /// <summary>
+    /// #3297: the threshold the alert STATES is the configured one, in both the fire and the resolution.
+    ///
+    /// <para>Separate from the decision test above because it fails differently and would be the last thing
+    /// caught: a decision reading the seam while the message read the constant produces an alert that fires
+    /// correctly and tells the operator a threshold nobody set. On the resolution side it is worse —
+    /// "back under 2.0x" on a store configured at 3.0x asserts a recovery against a line the tier has not
+    /// crossed.</para>
+    /// </summary>
+    [Fact]
+    public async Task RetentionHeld_StatesTheConfiguredThreshold_InTheFireAndTheResolution()
+    {
+        var h = new Harness { RetentionHoldWarnRatio = 3.0, RetentionHoldCriticalRatio = 9.0 };
+        var e = h.Build();
+
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("3.0x", fired.ThresholdValue);
+        Assert.Equal(3.0, fired.NumericThresholdValue);
+        Assert.DoesNotContain("2.0x", fired.ThresholdValue, StringComparison.Ordinal);
+
+        /* Now the tier comes back under the CONFIGURED ratio — 2.5x, which is over the shipped 2.0x, so a
+           constant in the decision would refuse to resolve at all and a constant in the MESSAGE would name
+           the wrong line. 2.5x of a 4-day horizon is 864,000 seconds. */
+        h.Deliverer.Outcomes.Clear();
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy(spanSeconds: 864_000) }, Ct);
+
+        var resolved = Assert.Single(h.History.Records, r => r.MetricName == "Retention Hold Cleared");
+        Assert.Contains("back under 3.0x", resolved.DetailText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("back under 2.0x", resolved.DetailText!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3297: a critical tier set BELOW the warning tier makes every fire Critical, with no Warning tier —
+    /// and that is the behaviour rather than a state to correct.
+    ///
+    /// <para>Pinned because the obvious "fix" is a <c>GREATEST</c> or a <c>Math.Max</c> on read, and that
+    /// would accept the operator's value and then use a different one, which is the failure the MCP
+    /// bound-equals-clamp parity exists to prevent — the setting reads back as what they set and behaves as
+    /// something else. Firing is gated on warn and severity on critical, so the degenerate pair already has
+    /// one coherent reading, which is also what setting it that way asks for.</para>
+    /// </summary>
+    [Fact]
+    public async Task RetentionHeld_ACriticalTierBelowTheWarningTier_MakesEveryFireCritical()
+    {
+        var h = new Harness { RetentionHoldWarnRatio = 4.0, RetentionHoldCriticalRatio = 2.0 };
+        var e = h.Build();
+
+        /* Under the WARNING tier despite being over the critical one: nothing fires, because warn is what
+           gates firing. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy(spanSeconds: 1_036_800) }, Ct);   /* 3.0x */
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* Over the warning tier: fires, and Critical rather than Warning. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);                          /* 4.52x */
+        Assert.Equal(AlertSeverityLevel.Critical, Assert.Single(h.Deliverer.Outcomes).Severity);
+    }
+
+    /// <summary>
+    /// #3297: an evaluator built with the seams UNSUPPLIED behaves like a store at the shipped defaults.
+    /// Otherwise the constructor fallbacks are a code path no test reaches, which is the shape a stale
+    /// literal survives in (#3060's finding, applied to the seams this issue added).
+    /// </summary>
+    [Fact]
+    public async Task RetentionHeld_UnwiredSeams_JudgeOnTheShippedDefaults()
+    {
+        var h = new Harness { WireRetentionHoldKnobs = false, RetentionHoldWarnRatio = 99.0 };
+        var e = h.Build();
+
+        /* The harness value would silence this reading; the fallback must fire it, and grade it Critical on
+           the shipped 4.0x. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+
+        /* Both thresholds the fire reports, derived from the shipped constants rather than written as
+           "2.0x"/"4.0x" — a literal here would agree with the old value after a moved default, which is the
+           one thing this pin exists to catch. The numeric slot carries the tier that GRADED it (critical,
+           at 4.52x) and the text slot always carries the warn line, so the two together cover both seams. */
+        Assert.Equal(TimescaleSupport.RetentionHoldCriticalRatioDefault, fired.NumericThresholdValue);
+        Assert.Equal(
+            TimescaleSupport.RetentionHoldWarnRatioDefault.ToString("0.0", CultureInfo.InvariantCulture) + "x",
+            fired.ThresholdValue);
     }
 
     [Fact]

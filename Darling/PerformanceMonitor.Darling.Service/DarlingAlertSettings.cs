@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -98,6 +99,27 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /// operator-facing knob's bound is not something to move as a side effect of correcting the sentence
     /// that justified it.</para></summary>
     public int StoreJobCadenceWarnPercent => Math.Clamp(_config.Alerts.StoreJobCadenceWarnPercent, 5, 100);
+
+    /// <summary>#3297 (V119): the Retention Held WARNING tier, clamped like its siblings so a hand-edited
+    /// store value cannot drive a nonsense threshold. Both bounds are named constants shared with the MCP
+    /// write bound, because a wider bound there would let <c>update_alert_settings</c> ACCEPT a value this
+    /// clamp then rewrites — the "setting did not stick" failure the write-bound parity pins exist for. The
+    /// floor's reasoning (it is the shipped default, so the knob raises and cannot lower) and the ceiling's
+    /// live on the constants.</summary>
+    public double RetentionHoldWarnRatio => Math.Clamp(
+        _config.Alerts.RetentionHoldWarnRatio,
+        TimescaleSupport.RetentionHoldRatioFloor,
+        TimescaleSupport.RetentionHoldRatioCeiling);
+
+    /// <summary>#3297 (V119): the Retention Held CRITICAL tier, clamped to the same bounds as its warning
+    /// sibling and INDEPENDENTLY of it. Not floored at the warning ratio: a critical tier below the warning
+    /// tier means every fire is Critical and the Warning tier is empty, which is a coherent reading of what
+    /// an operator who set it there asked for — where a <c>Math.Max</c> here would silently use a number
+    /// other than the one <c>get_alert_settings</c> reports back.</summary>
+    public double RetentionHoldCriticalRatio => Math.Clamp(
+        _config.Alerts.RetentionHoldCriticalRatio,
+        TimescaleSupport.RetentionHoldRatioFloor,
+        TimescaleSupport.RetentionHoldRatioCeiling);
     public int CollectionFailureThreshold => Math.Clamp(_config.Alerts.CollectionFailureThreshold, 1, 1000);
 
     /* #1984: percent clamped like low-disk's (0 = off); the GB floor merely floored at 0 — unlike

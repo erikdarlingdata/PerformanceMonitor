@@ -22,32 +22,38 @@ namespace Darling.Tests;
 
 /// <summary>
 /// V118 / #3282: the built-in alert catalog's persistence-gate state (config.alert_persistence_state).
-/// This carries the "I am the top rung" claims that moved off <see cref="MuteRuleReloadBeaconTests"/>
-/// (V117) when this rung landed — a fully-migrated store must map to EXACTLY this version, or the viewer's
-/// connect-time gate refuses a store that is actually current.
+///
+/// <para>The "I am the top rung" claims have MOVED OFF this file to
+/// <see cref="RetentionHoldRatioKnobRungTests"/> (V119), the same way they moved off
+/// <c>MuteRuleReloadBeaconTests</c> (V117) when this rung landed. What is left here is this rung's own
+/// claims, and they are stated against this rung's own NUMBER — read out of the ladder rather than taken
+/// from <see cref="StorageVersion.SchemaVersion"/>, which is no longer it.</para>
 /// </summary>
 public sealed class BuiltinAlertPersistenceRungTests
 {
-    private const int RungVersion = 118;
+    /// <summary>This rung's number, DERIVED from the ladder entry that owns the name rather than written as
+    /// a literal — so a renumber moves it here instead of leaving a silent copy, which is the property the
+    /// citation pin at the bottom of this file rests on.</summary>
+    private static int RungVersion =>
+        PgMigrations.Scripts.Single(s => s.Name == "builtin-alert-persistence").Version;
+
     private const int PreviousVersion = 117;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe.</summary>
     private const int ProbeOrdinal = 93;
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
-        Assert.Equal(
-            "builtin-alert-persistence",
-            PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
-
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
-
+        Assert.Equal(118, RungVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
+
+        /* Below the top now, and that has to be asserted rather than assumed: every probe claim in this
+           file is about a store that has THIS rung and not the ones above it, which is only a meaningful
+           distinction while something is above it. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
     }
 
     [Fact]
@@ -86,7 +92,7 @@ public sealed class BuiltinAlertPersistenceRungTests
     }
 
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeMapsAStoreAtThisRungToThisRung()
     {
         Assert.Contains(
             "table_name = 'alert_persistence_state'",
@@ -96,22 +102,19 @@ public sealed class BuiltinAlertPersistenceRungTests
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasBuiltinAlertPersistence", viewer, StringComparison.Ordinal);
 
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
-
         var method = typeof(ViewerDataService)
             .GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* A store that stopped at THIS rung: everything up to and including this sentinel is true, and
+           every sentinel ABOVE it is false. Built by reflection so the arity tracks the signature — and
+           expressed as "false above" rather than as one named ordinal, so a rung landing on top of this one
+           does not quietly turn this case into a test of that rung instead. */
+        var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
+        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
 
-        /* Every sentinel true = a fully-migrated store, which must map to exactly this version. Built by
-           reflection so the arity tracks the signature. */
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-
-        /* One rung behind: every sentinel EXCEPT this one reports 116 (the previous top rung). */
-        var behind = Enumerable.Repeat((object)true, arity).ToArray();
+        /* One rung behind: the same store WITHOUT this rung's sentinel reports the previous rung. */
+        var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
     }
@@ -333,8 +336,11 @@ public sealed class BuiltinAlertPersistenceRungTests
     /// three of which review found and two of which it did not. The repo leans on exactly these citations
     /// to check Lite/Darling parity, so a wrong one sends the next person to the wrong rung.</para>
     ///
-    /// <para><b>The number is derived from <see cref="StorageVersion.SchemaVersion"/></b> rather than
-    /// compared against a literal, so a future renumber reds this instead of leaving silent copies.</para>
+    /// <para><b>The number is derived from the ladder entry that owns this rung's NAME</b> rather than
+    /// compared against a literal, so a future renumber reds this instead of leaving silent copies. It was
+    /// derived from <see cref="StorageVersion.SchemaVersion"/> while this was the top rung, which was the
+    /// same claim then and the wrong one the moment V119 landed — a derivation is only as good as the
+    /// quantity it derives from still being the subject.</para>
     ///
     /// <para><b>And each phrase carries its own SUBJECT</b>, which is what makes a citation attributable
     /// without parsing comments at all. Two earlier spellings of this pin are the reason it is shaped this
@@ -348,7 +354,7 @@ public sealed class BuiltinAlertPersistenceRungTests
     [Fact]
     public void EveryCommentCitingThisRungsNumber_CitesTheRealOne()
     {
-        var rung = StorageVersion.SchemaVersion;
+        var rung = RungVersion;
 
         /* Each entry names a file and the citation in it, with {0} where the rung goes. The subject words
            are part of the phrase deliberately — see the remarks. A reword reds this, which is correct: the

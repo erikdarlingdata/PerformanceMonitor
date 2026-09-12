@@ -64,7 +64,9 @@ public sealed partial class ViewerDataService
         "store_job_cadence_warn_percent, " +
         /* #2391: V79 (#2349). APPENDED — this list drives the SELECT ordinals AND the upsert
            parameter positions, so inserting anywhere but the end re-maps both at once. */
-        "file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes";
+        "file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes, " +
+        /* #3297: V119's Retention Held tiers, APPENDED for the reason one line up. */
+        "retention_hold_warn_ratio, retention_hold_critical_ratio";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -73,12 +75,14 @@ public sealed partial class ViewerDataService
 
     /// <summary>Upserts the single global alert-settings row (Settings window Save). ON CONFLICT rewrites every
     /// column and bumps <c>modified_at</c> (and, via the V17 statement trigger, <c>config_version</c> — the
-    /// service reloads on its next sweep). $1..$47 bind the columns in <see cref="AlertSettingsColumns"/> order.</summary>
+    /// service reloads on its next sweep). The bound parameters bind the columns in
+    /// <see cref="AlertSettingsColumns"/> order, and <c>ViewerControlPlaneStage3bTests</c> pins that every
+    /// position exists — so the count lives there rather than as a numeral here.</summary>
     public const string AlertSettingsUpsertSql = @"
 INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_at)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
-        $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58,
+        $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -139,6 +143,8 @@ ON CONFLICT (id) DO UPDATE SET
     file_growth_rise_mb = EXCLUDED.file_growth_rise_mb,
     file_growth_volume_percent = EXCLUDED.file_growth_volume_percent,
     file_growth_lookback_minutes = EXCLUDED.file_growth_lookback_minutes,
+    retention_hold_warn_ratio = EXCLUDED.retention_hold_warn_ratio,
+    retention_hold_critical_ratio = EXCLUDED.retention_hold_critical_ratio,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -228,6 +234,8 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.FileGrowthRiseMb });               // $56 (#2349/#2391, V79)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.FileGrowthVolumePercent });        // $57 (#2349/#2391, V79)
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.FileGrowthLookbackMinutes });      // $58 (#2349/#2391, V79)
+        command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.RetentionHoldWarnRatio });     // $59 (#3297, V119)
+        command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.RetentionHoldCriticalRatio }); // $60 (#3297, V119)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -297,6 +305,9 @@ ON CONFLICT (id) DO UPDATE SET
         FileGrowthRiseMb = reader.GetInt32(55),
         FileGrowthVolumePercent = reader.GetInt32(56),
         FileGrowthLookbackMinutes = reader.GetInt32(57),
+        /* #3297 Retention Held tiers appended (V119) at ordinals 58-59. */
+        RetentionHoldWarnRatio = reader.GetDouble(58),
+        RetentionHoldCriticalRatio = reader.GetDouble(59),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -361,6 +372,13 @@ public sealed class AlertSettingsRow
        sits here, and a stale 25 after the grid moved would arm the alert past the point it exists to
        precede. */
     public int StoreJobCadenceWarnPercent { get; set; } = TimescaleSupport.RefreshSlotPercentOfHourlyCadence;
+
+    /* #3297 (V119): the Retention Held tiers. Derived from the shared constants rather than mirroring the
+       column defaults as literals, for the reason the cadence knob above is: BuildAlertRowFromControls only
+       overwrites these when the textbox parses inside the clamp, so out-of-range input persists whatever
+       sits here — and a frozen copy would survive a moved default and write a threshold nobody chose. */
+    public double RetentionHoldWarnRatio { get; set; } = TimescaleSupport.RetentionHoldWarnRatioDefault;
+    public double RetentionHoldCriticalRatio { get; set; } = TimescaleSupport.RetentionHoldCriticalRatioDefault;
 
     /* #2391: defaults mirror the V79 column defaults, so a viewer prefilling against a store that has
        not seeded the row shows what the store would have given it. Ships OFF, per #2349. */
@@ -501,6 +519,20 @@ public sealed class AlertSettingsRow
             && LongRunningQueryExcludeWaitFor == other.LongRunningQueryExcludeWaitFor
             && LongRunningQueryExcludeBackups == other.LongRunningQueryExcludeBackups
             && LongRunningQueryExcludeMiscWaits == other.LongRunningQueryExcludeMiscWaits
-            && LongRunningQueryExcludeCdc == other.LongRunningQueryExcludeCdc;
+            && LongRunningQueryExcludeCdc == other.LongRunningQueryExcludeCdc
+            /* Store-only knobs the viewer never projected: #2136's cadence warn percent, #2349/#2391's
+               file-growth gates and #3297's Retention Held tiers. They were missing here, and the
+               consequence was one-directional and silent — ShouldImportAlerts asks "is the store section
+               untouched", so a store whose ONLY customization lived in an uncompared column read as default
+               and had the whole row overwritten by the viewer's on the one-time migrate-in. Compared now,
+               and AlertSettingsRowValueEqualsTests holds the property by reflection rather than by this
+               list, so a column added to the row cannot go uncompared again. */
+            && StoreJobCadenceWarnPercent == other.StoreJobCadenceWarnPercent
+            && FileGrowthEnabled == other.FileGrowthEnabled
+            && FileGrowthRiseMb == other.FileGrowthRiseMb
+            && FileGrowthVolumePercent == other.FileGrowthVolumePercent
+            && FileGrowthLookbackMinutes == other.FileGrowthLookbackMinutes
+            && Math.Abs(RetentionHoldWarnRatio - other.RetentionHoldWarnRatio) < 0.0001
+            && Math.Abs(RetentionHoldCriticalRatio - other.RetentionHoldCriticalRatio) < 0.0001;
     }
 }
