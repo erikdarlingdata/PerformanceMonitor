@@ -244,9 +244,19 @@ internal static class McpHelpers
     public static string? ValidateMinMs(double? minMs, string paramName)
     {
         if (minMs is < 0)
-            return $"Invalid {paramName} value '{minMs}'. A duration floor cannot be negative — use 0 to admit every row, or omit it entirely.";
+            return $"Invalid {paramName} value '{Ms(minMs)}'. A duration floor cannot be negative — use 0 to admit every row, or omit it entirely.";
         return null;
     }
+
+    /// <summary>
+    /// A millisecond figure rendered for a MESSAGE, invariant-culture.
+    ///
+    /// <para>The JSON payload spells these numbers invariantly, so a refusal or a no-matches message that
+    /// rendered <c>2.5</c> as <c>2,5</c> under a comma-decimal host locale would give the caller two
+    /// spellings of the value they sent, in the two places they compare.</para>
+    /// </summary>
+    private static string Ms(double? value) =>
+        value?.ToString(CultureInfo.InvariantCulture) ?? "";
 
     /// <summary>
     /// The two values <c>get_collection_log</c>'s <c>order</c> field takes on BOTH SKUs.
@@ -274,10 +284,17 @@ internal static class McpHelpers
         var named = string.IsNullOrWhiteSpace(collectorName) ? null : collectorName.Trim();
 
         if (named != null && minDurationMs is not null)
-            return $"collector_name '{named}' with min_duration_ms {minDurationMs}";
+            return $"collector_name '{named}' with min_duration_ms {Ms(minDurationMs)}";
         if (named != null)
             return $"collector_name '{named}'";
-        return $"min_duration_ms {minDurationMs}";
+        if (minDurationMs is not null)
+            return $"min_duration_ms {Ms(minDurationMs)}";
+
+        /* Unreachable from the one caller, which asks only when a filter was supplied. Written out rather
+           than left to fall through the branch above, because that would emit "matched min_duration_ms "
+           with nothing after it -- a formatting bug in the one message whose whole job is to name what was
+           applied, and one that would read as a product defect rather than as a misuse of this helper. */
+        return "no filters";
     }
 
     /// <summary>
