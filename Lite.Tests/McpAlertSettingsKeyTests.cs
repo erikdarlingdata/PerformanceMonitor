@@ -381,7 +381,15 @@ public sealed class McpAlertSettingsKeyTests
             .Where(f => File.ReadAllText(f) is var text
                      && (text.Contains("ClassifyBand", StringComparison.Ordinal)
                       || text.Contains("OverallMetricSeverity", StringComparison.Ordinal)
-                      || text.Contains("ServerHealthMetrics", StringComparison.Ordinal)))
+                      || text.Contains("ServerHealthMetrics", StringComparison.Ordinal)
+                      /* The fourth term closes the one route the other three miss: a Lite surface could
+                         call the per-metric band DIRECTLY without ever building the bundle or folding it,
+                         and that is the route that would matter for THESE tiers, which feed
+                         DeadlockSeverity and nothing else. QUALIFIED deliberately - a bare
+                         "DeadlockSeverity" matches four Lite files today (GetDeadlockSeverityStatsAsync
+                         and the charts it feeds, a different quantity with a colliding name), so the
+                         unqualified term would make this test fail on code that has no band at all. */
+                      || text.Contains("ServerHealthClassifier.DeadlockSeverity", StringComparison.Ordinal)))
             .Select(f => Path.GetFileName(f))
             .ToArray();
 
