@@ -7,8 +7,11 @@
  */
 
 using System;
+using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -320,6 +323,86 @@ public sealed class BuiltinAlertPersistenceRungTests
         Assert.True(body.Length > 1500, $"the sliced body is only {body.Length} chars, which cannot be this method");
 
         return body;
+    }
+
+    /// <summary>
+    /// Every comment that cites this rung's NUMBER cites the right one.
+    ///
+    /// <para>A rung number in prose is a frozen claim, and this branch froze the wrong one: #3315 landed
+    /// V117 first, this rung renumbered to V118, and five comments across both SKUs kept saying V117 —
+    /// three of which review found and two of which it did not. The repo leans on exactly these citations
+    /// to check Lite/Darling parity, so a wrong one sends the next person to the wrong rung.</para>
+    ///
+    /// <para><b>The number is derived from <see cref="StorageVersion.SchemaVersion"/></b> rather than
+    /// compared against a literal, so a future renumber reds this instead of leaving silent copies.</para>
+    ///
+    /// <para><b>And each phrase carries its own SUBJECT</b>, which is what makes a citation attributable
+    /// without parsing comments at all. Two earlier spellings of this pin are the reason it is shaped this
+    /// way. Scoped to the file, it flagged nine correct citations — those files cite V32, V40, V44, V50,
+    /// V60, V61, V80 and V81 for their own tables, all right. Scoped to comment BLOCKS instead, it needed a
+    /// hand-rolled line-prefix comment filter, which <c>CommentFilterAdoptionTests</c> correctly refuses
+    /// without a stated bound — and the bound I measured for it came back unreliable on its own terms. A
+    /// phrase that names both the table and the rung needs neither: it cannot match another rung's citation
+    /// because it does not describe another rung's subject.</para>
+    /// </summary>
+    [Fact]
+    public void EveryCommentCitingThisRungsNumber_CitesTheRealOne()
+    {
+        var rung = StorageVersion.SchemaVersion;
+
+        /* Each entry names a file and the citation in it, with {0} where the rung goes. The subject words
+           are part of the phrase deliberately — see the remarks. A reword reds this, which is correct: the
+           prose and the pin are one claim, so the pin has to be edited with it. */
+        var citations = new (string Path, string Phrase)[]
+        {
+            (Path.Combine("Lite", "Database", "Schema.cs"),
+                "config.alert_persistence_state (PgMigrations V{0})"),
+            (Path.Combine("Lite", "Database", "DuckDbInitializer.cs"),
+                "persistence-gate state, porting Darling's V{0}"),
+            (Path.Combine("Lite", "Services", "DuckDbAlertHistoryStore.cs"),
+                "the Lite twin of Darling's V{0} table"),
+            (Path.Combine("Lite", "Services", "LiteAlertStateStore.cs"),
+                "Darling's V{0} table, so the shared engine's CPU gate"),
+            (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "PgAlertStateStore.cs"),
+                "persistence-gate record from the V{0}"),
+        };
+
+        foreach (var (relative, phrase) in citations)
+        {
+            var source = RepoFile.ReadRepoFileLf(relative);
+
+            /* EXACTLY once. Absent means the prose was reworded and this pin went stale with it; twice
+               means a copy was made that the next renumber would miss. */
+            var expected = string.Format(CultureInfo.InvariantCulture, phrase, rung);
+            Assert.Equal(1, CountOf(source, expected));
+
+            /* And the same phrase carrying ANY other rung number must not appear — the renumber case. The
+               regex is built from the phrase itself, so it cannot drift away from the string above. */
+            var pattern = Regex.Escape(phrase).Replace(@"V\{0}", @"V(\d+)", StringComparison.Ordinal);
+            var found = Regex.Matches(source, pattern, RegexOptions.CultureInvariant)
+                .Select(m => m.Groups[1].Value)
+                .ToArray();
+
+            /* The regex has to MATCH, or the assertion below is over an empty set and passes for the wrong
+               reason — the failure mode of building a pattern out of an escaped literal. */
+            Assert.NotEmpty(found);
+            Assert.All(found, n => Assert.Equal(rung.ToString(CultureInfo.InvariantCulture), n));
+        }
+    }
+
+    /// <summary>Non-overlapping occurrences of <paramref name="needle"/> — <c>IndexOf</c> in a loop, because
+    /// there is no overload that counts and a <c>Split</c> would allocate the whole file per call.</summary>
+    private static int CountOf(string haystack, string needle)
+    {
+        var count = 0;
+        var at = haystack.IndexOf(needle, StringComparison.Ordinal);
+        while (at >= 0)
+        {
+            count++;
+            at = haystack.IndexOf(needle, at + needle.Length, StringComparison.Ordinal);
+        }
+
+        return count;
     }
 
     /// <summary>

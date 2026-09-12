@@ -262,6 +262,14 @@
 
   // SMTP alert delivery (optional). Enabled when host + from + to are all set. For an
   // authenticated relay, set username and run --encrypt-password for the password blob.
+  //
+  // emailCooldownMinutes is NOT email-only despite living here and despite its name: it is the
+  // per-alert-fingerprint throttle the shared delivery paths apply to EVERY channel - Teams, Slack,
+  // PagerDuty, the generic webhook and email alike - so it governs channel volume on a deployment with
+  // no SMTP configured at all. Clamped 1-120. Read and written through the control plane as
+  // delivery.cooldown_minutes (get_alert_settings / update_alert_settings); the key keeps its name here
+  // so existing files keep working. To silence ONE recurring signature for a long stretch, add a mute
+  // rule rather than lengthening this - a mute is scoped, expires, and is listed back to you.
   "smtp": {
     "host": "",
     "port": 587,

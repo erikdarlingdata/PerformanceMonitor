@@ -41,7 +41,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// INSERT on <c>collect.analysis_findings</c> and <c>config.analysis_muted</c> (what <c>analyze_server</c>
 /// persists + the <c>mute</c> tool need), INSERT/UPDATE/DELETE on <c>config.custom_views</c> (the
 /// custom-view tools, #1599), the alert-tuning writes (INSERT/UPDATE/DELETE on
-/// <c>config.config_mute_rules</c> + UPDATE on the singleton <c>config.config_alert_settings</c>, plus the
+/// <c>config.config_mute_rules</c> + UPDATE on the singleton <c>config.config_alert_settings</c> + UPDATE on
+/// the single non-secret <c>email_cooldown_minutes</c> column of <c>config.config_notification</c>, plus the
 /// two beacon columns of <c>config.config_service</c> so the settings write's self-bump trigger can fire),
 /// and the server-onboarding writes (INSERT/UPDATE/DELETE on <c>config.config_monitored_servers</c> for the
 /// <c>add_servers</c>/<c>remove_server</c> tools — a single non-secret-KEY table; the credential column stays
@@ -243,7 +244,7 @@ public static class DarlingManagedRoles
         await command.ExecuteNonQueryAsync(cancellationToken);
 
         logger.LogInformation(
-            "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + write config.custom_views; mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_service reload beacon) + onboard servers (config_monitored_servers)) — the Viewer and MCP host no longer connect as the superuser");
+            "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + write config.custom_views; mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_notification.email_cooldown_minutes, config_service reload beacon) + onboard servers (config_monitored_servers)) — the Viewer and MCP host no longer connect as the superuser");
 
         /* CLAMPED, not raw: the batch above wrote the clamped form, so returning the raw read would hand the
            caller a baseline that differs from what the roles actually carry (a stored 0 provisions '15s').
@@ -704,8 +705,9 @@ GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
 --    / create_mute_rule / delete_mute_rule let a token-holder tune the SAME alert engine the Viewer's Settings
 --    window drives: INSERT/UPDATE/DELETE on config_mute_rules (the mute rules the delivery paths honor) and UPDATE
 --    on the SINGLETON config_alert_settings row (id=1 -- UPDATE only, never INSERT/DELETE: the row is a fixed
---    singleton the service seeds). Still NARROW -- never the config_command service-credential pivot, the
---    monitored-servers/notification secret tables, or a schema-wide config write.
+--    singleton the service seeds). Still NARROW -- never the config_command service-credential pivot, a
+--    schema-wide config write, or any SECRET column: the one config_notification write is a single column
+--    (see #3314 below), and the monitored-servers credential column stays SELECT-carved.
 --    The beacon caveat: a config_alert_settings write fires the existing statement-level bump trigger
 --    (trg_bump_alert_settings -> config_bump_version), which UPDATEs config_service.config_version AS THE CURRENT
 --    ROLE (the trigger function is SECURITY INVOKER). So mcp ALSO needs UPDATE on JUST the two beacon columns of
@@ -722,6 +724,20 @@ GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
 GRANT INSERT, UPDATE, DELETE ON {config}.config_mute_rules TO {mcp};
 GRANT UPDATE ON {config}.config_alert_settings TO {mcp};
 GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {mcp};
+-- #3314: the DELIVERY cooldown -- the sole throttle on a Slack/Teams/PagerDuty/webhook post -- is the one
+-- alert-engine knob stored on config_notification rather than config_alert_settings, so update_alert_settings
+-- spans two tables and needs a write here. This DOES widen mcp into a table holding bearer secrets (the SMTP
+-- password blob, the Teams/Slack/generic webhook URLs, the PagerDuty routing key), so the grant is
+-- COLUMN-level on exactly that one column -- the same shape as the config_service beacon grant above and for
+-- the same reason. MEASURED, not assumed: as mcp, the baseline UPDATE raises 42501; with this grant it
+-- succeeds; with the column SELECT revoked and this grant kept it STILL succeeds (so UPDATE is the privilege
+-- doing the work, not an ambient SELECT); and a write to smtp_encrypted_password, slack_url or even the
+-- non-secret sibling smtp_host stays 42501. A missing SELECT and a missing UPDATE both raise the identical
+-- 42501 permission-denied-for-table-config_notification message, so only isolating the grants separates them.
+-- The READ side needs nothing: email_cooldown_minutes is already in the section-6 non-secret column carve.
+-- The BEACON is already covered: config_notification carries trg_bump_notification -> config_bump_version
+-- (SECURITY INVOKER), which UPDATEs config_service.config_version AS mcp, and the column grant above serves it.
+GRANT UPDATE (email_cooldown_minutes) ON {config}.config_notification TO {mcp};
 
 -- 9. Server onboarding (the MCP server-admin write tools): the mcp role's monitored-server writes, mirroring
 --    sections 7/8's model (an EXPLICIT single-table statement, NO ALTER DEFAULT PRIVILEGES). add_servers /

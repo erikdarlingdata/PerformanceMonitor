@@ -119,7 +119,7 @@ CREATE TABLE IF NOT EXISTS config_edge_trigger_watermarks (
        fingerprint's NEXT incident would decay its already-counted mark to the new window count and report
        the recurrence as nothing new. */
     /* The BUILT-IN alert catalog's persistence-gate state (#3282), the twin of Darling's
-       config.alert_persistence_state (PgMigrations V117) — same columns, same key. "How long must this
+       config.alert_persistence_state (PgMigrations V118) — same columns, same key. "How long must this
        condition hold before it counts" for the gauge alerts: consecutive breaching samples so far,
        consecutive clearing samples so far, and whether an incident is currently open.
 
