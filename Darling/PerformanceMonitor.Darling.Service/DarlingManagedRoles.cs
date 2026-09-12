@@ -760,8 +760,9 @@ GRANT INSERT, UPDATE, DELETE ON {config}.config_monitored_servers TO {mcp};
 --     blanket INSERT grant on the history table to viewer/mcp (which would let those roles fabricate ARBITRARY
 --     history rows, including fake fires), a SECURITY DEFINER function confines the privileged write to EXACTLY
 --     a no-channel resolution row: every delivery-shape column is HARDCODED (alert_sent false, notification_type
---     'none', current/threshold 0, muted false, no send_error/context) -- byte-identical to what
---     BuildResolutionRecord + PgAlertHistoryStore.RecordAlertAsync write for a normal resolve -- so a caller can
+--     'none', current/threshold 0, muted false, no send_error/context) -- the same zeroed/unmuted resolution
+--     shape BuildResolutionRecord + PgAlertHistoryStore.RecordAlertAsync write, but pinned to a NO-CHANNEL row
+--     rather than a natural clear's 'tray' (a teardown surfaces no operator notification) -- so a caller can
 --     page nothing and fabricate no fire; only server_id/name and the already-sanitized title/detail vary.
 --     Definer-safe: owned by the store owner (the creating provisioning role, {owner}), an explicit pinned
 --     search_path so no injected path can redirect the unqualified config_alert_log or now(), and a fully
@@ -786,8 +787,10 @@ GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text,
     /// which holds the config_alert_log INSERT the body needs), an explicit <c>SET search_path = {config},
     /// pg_catalog</c> so neither the unqualified table nor <c>now()</c> can be redirected by a caller's
     /// search_path, and a fully parameterized INSERT that hardcodes the resolution shape (never a fire) with no
-    /// dynamic SQL. The 12-column list and its fixed values are kept identical to
-    /// <c>PgAlertHistoryStore.RecordAlertAsync</c>'s write for a <c>BuildResolutionRecord</c>.
+    /// dynamic SQL. The 12-column list matches <c>PgAlertHistoryStore.RecordAlertAsync</c>'s write for a
+    /// <c>BuildResolutionRecord</c> and so do the fixed values, EXCEPT this is pinned to a no-channel row
+    /// (<c>alert_sent</c> false, <c>notification_type</c> 'none') rather than a natural clear's 'tray': a
+    /// teardown surfaces no operator notification, and a grantee must never write a row claiming a delivery.
     /// </summary>
     internal static string BuildCustomAlertResolveFunctionSql(string config) => $@"
 CREATE OR REPLACE FUNCTION {config}.record_custom_alert_resolution(
