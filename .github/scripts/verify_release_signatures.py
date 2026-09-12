@@ -159,8 +159,23 @@ class Report:
     errors: list[str] = field(default_factory=list)
 
     @property
+    def allowed(self) -> list[tuple[Finding, AllowedUnsigned]]:
+        pairs = ((f, allowance_for(f.asset, f.path)) for f in self.findings if not f.signed)
+        return [(f, a) for f, a in pairs if a is not None]
+
+    @property
     def unsigned(self) -> list[Finding]:
-        return [f for f in self.findings if not f.signed]
+        """Unsigned and NOT allowed. The same allowlist the release guard applies.
+
+        Both modes read the same allowlist so that a correct release audits clean here. A mode
+        that reported the two allowed `.nupkg` members as failures would be red on every release
+        from now on, which is the state in which nobody reads it.
+        """
+        return [
+            f
+            for f in self.findings
+            if not f.signed and allowance_for(f.asset, f.path) is None
+        ]
 
 
 def fetch_range(url: str, start: int, length: int) -> bytes:
@@ -629,6 +644,33 @@ def self_test() -> int:
         len(ALLOWED_UNSIGNED) == 2,
     )
 
+    # The published-release mode and the release guard have to agree, or the audit is red on
+    # every correct release and stops being read.
+    def as_findings(layout: dict[str, object]) -> Report:
+        out = Report(tag="synthetic")
+        for asset, content in layout.items():
+            if isinstance(content, dict):
+                for member, signed in content.items():
+                    out.findings.append(Finding(asset, member, 1024, bool(signed)))
+            else:
+                out.findings.append(Finding(asset, "", 1024, bool(content)))
+        return out
+
+    fixed = as_findings(correct_release())
+    expect(
+        f"the published-release mode reports {len(fixed.unsigned)} unsigned on a correct release",
+        not fixed.unsigned,
+    )
+    expect(
+        f"the published-release mode reports {len(fixed.allowed)} allowances on a correct release",
+        len(fixed.allowed) == 2,
+    )
+    regressed = as_findings({**correct_release(), setup: False})
+    expect(
+        "the published-release mode passed an unsigned Setup.exe",
+        [f.label for f in regressed.unsigned] == [setup],
+    )
+
     for f in failures:
         print(f"SELF-TEST FAIL: {f}", file=sys.stderr)
     if failures:
@@ -683,10 +725,18 @@ def main() -> int:
                 {
                     "tag": report.tag,
                     "executables": [
-                        {"asset": f.asset, "path": f.path, "size": f.size, "signed": f.signed}
+                        {
+                            "asset": f.asset,
+                            "path": f.path,
+                            "size": f.size,
+                            "signed": f.signed,
+                            "allowed_unsigned": not f.signed
+                            and allowance_for(f.asset, f.path) is not None,
+                        }
                         for f in report.findings
                     ],
                     "unsigned_count": len(report.unsigned),
+                    "allowed_unsigned_count": len(report.allowed),
                     "errors": report.errors,
                 },
                 indent=2,
@@ -695,9 +745,17 @@ def main() -> int:
     else:
         print(f"{report.tag}: {len(report.findings)} executable(s) checked\n")
         width = max((len(f.label) for f in report.findings), default=0)
+        allowed_labels = {f.label for f, _ in report.allowed}
         for f in sorted(report.findings, key=lambda x: (x.signed, x.label)):
-            mark = "signed  " if f.signed else "UNSIGNED"
+            if f.signed:
+                mark = "signed  "
+            elif f.label in allowed_labels:
+                mark = "allowed "
+            else:
+                mark = "UNSIGNED"
             print(f"  {mark}  {f.label:<{width}}  {f.size:>10,} bytes")
+        for f, allowance in report.allowed:
+            print(f"\nallowed unsigned: {f.label}\n  {allowance.reason}")
         for e in report.errors:
             print(f"\n  ERROR  {e}", file=sys.stderr)
 
