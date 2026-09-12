@@ -960,11 +960,13 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
            no existing placeholder ordinal moves: #2349's four file-growth gates, then #3297's two
            Retention Held ratios (V119).
 
-           ANNOTATE HERE, NEVER INSIDE THE COLUMN LIST. ConfigSeedStatementArityTests parses this
-           statement with one regex that captures the column list up to the first ')' and splits it on
-           ',' — so a bracketed aside in there makes the whole INSERT unparseable (arity silently
-           unchecked), and a comma in one makes a comment clause count as a column (66 columns against
-           62 values). This branch produced both, in that order, on its first two pushes. */
+           ANNOTATE HERE. THE COLUMN LIST CARRIES NO COMMENTS AT ALL, and that is a hard rule rather
+           than a preference: ConfigSeedStatementArityTests parses this statement with one regex that
+           captures the column list up to the first ')' and splits it on ','. A closing parenthesis in
+           a comment there ends the capture early, so the whole INSERT stops matching and its arity is
+           unchecked rather than wrong; a comma makes a clause of the comment count as a column. Both
+           are invisible in the statement itself and loud only in that guard, so wording a comment
+           carefully is not the fix - the fix is that the prose lives up here. */
         using var command = new NpgsqlCommand(@"
 INSERT INTO config_alert_settings (
     id, enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, blocking_count_threshold,
@@ -984,7 +986,6 @@ INSERT INTO config_alert_settings (
     self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold,
     disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes,
     store_job_cadence_warn_percent,
-    /* #2349 appended LAST so no existing placeholder ordinal moves. */
     file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes,
     retention_hold_warn_ratio, retention_hold_critical_ratio)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,

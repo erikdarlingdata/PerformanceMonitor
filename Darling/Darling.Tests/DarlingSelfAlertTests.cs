@@ -3130,9 +3130,9 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
     {
         /* Both bounds asserted, not just described. Below: whole-chunk granularity plus the retention job's
            own schedule lag reaches 1.4x MEASURED on a healthy production store under 4-day horizons — two
-           relations holding 5.7 days against 4. The original figure here was 1.25x, from the arithmetic
-           rather than the store, and it understated the margin the shipped ratio actually has to clear
-           (#3297). Above: the motivating incident sat at 4.52x and must reach CRITICAL. */
+           relations holding 5.7 days against 4. The bound is that MEASUREMENT and not the ~1.25x the
+           horizon-plus-one-chunk arithmetic predicts, which understates the margin the shipped ratio has
+           to clear (#3297). Above: the motivating incident sat at 4.52x and must reach CRITICAL. */
         Assert.True(DarlingSelfAlertEvaluator.RetentionHoldWarnRatio > 1.4);
         Assert.True(DarlingSelfAlertEvaluator.RetentionHoldCriticalRatio > DarlingSelfAlertEvaluator.RetentionHoldWarnRatio);
         Assert.True(4.52 >= DarlingSelfAlertEvaluator.RetentionHoldCriticalRatio);

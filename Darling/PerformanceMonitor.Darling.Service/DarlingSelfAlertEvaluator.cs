@@ -317,10 +317,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <para><b>Why not read <c>MuteRuleDefaultExpiration</c> itself.</b> It is a VIEWER app setting — a
     /// per-install UI preference that prefills a dialog — and it is not in <c>config_alert_settings</c>, so
     /// the headless service does not have it and could not honor a change to it. A compile-time constant
-    /// rather than a store-backed knob because a knob needs a migration rung this change is deliberately not
-    /// taking; it belongs in the control plane the next time a rung is going in anyway. (#3297 took that step
-    /// for the Retention Held tiers, whose constants used to carry this same note; this one has not been
-    /// taken yet.)</para>
+    /// rather than a store-backed knob because a knob needs a migration rung, and it belongs in the control
+    /// plane the next time one is going in anyway. The Retention Held tiers are the worked example of that
+    /// step being taken (#3297, V119); this one is still outstanding.</para>
     /// </summary>
     internal static readonly TimeSpan StaleMuteAge = TimeSpan.FromDays(7);
 
