@@ -2,13 +2,13 @@
 """Report which published Windows executables carry an Authenticode signature (#3288).
 
 Every executable `vpk pack` GENERATES shipped unsigned on v3.6.0 and v3.7.0 -- the portable
-launcher stub, `Update.exe`, and `Setup.exe` -- while the app payload was signed. Nobody
-noticed for two releases because `build.yml` carries a comment saying the gap was closed, and
-because the only visible symptom is a Windows "unknown publisher" block on someone else's
-machine.
+launcher stub, `Update.exe`, and `Setup.exe` -- while the app payload was signed. It went
+unnoticed for two releases because the only visible symptom is a Windows "unknown publisher"
+block on someone else's machine, and because nothing asked the question.
 
-So this exists to be run against a PUBLISHED release, from any platform, and to answer the one
-question no other check asks: is there a signature attached to each thing a user can launch.
+So this asks it, from any platform: is there a signature attached to each thing a user can
+launch. `--verify-dir` asks it of artifacts still on disk in the release job, which is the step
+that refuses to publish. The tag form asks it of what a release actually shipped.
 
 WHAT IT CHECKS, AND WHAT IT DELIBERATELY DOES NOT
 
@@ -56,9 +56,9 @@ USAGE
   python3 .github/scripts/verify_release_signatures.py --verify-dir releases
   python3 .github/scripts/verify_release_signatures.py --self-test
 
-  Exit status is 1 if any executable is unsigned, 2 if a release or asset could not be read at
-  all, and 0 only when every executable found carried a signature. An empty executable list is
-  status 2, not 0: finding nothing to check is a broken run, not a clean one.
+  Exit status is 1 if any executable is unsigned and not covered by ALLOWED_UNSIGNED, 2 if a
+  release, asset or directory could not be read at all, and 0 otherwise. An empty executable
+  list is status 2, not 0: finding nothing to check is a broken run, not a clean one.
 
   `--verify-dir` is the release guard: the same reader over artifacts that are still on disk
   before upload, so it needs no HTTP and no published release. The tag form answers "what did we
