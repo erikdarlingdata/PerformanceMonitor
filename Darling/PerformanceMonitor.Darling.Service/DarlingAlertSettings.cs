@@ -120,6 +120,7 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
         _config.Alerts.RetentionHoldCriticalRatio,
         TimescaleSupport.RetentionHoldRatioFloor,
         TimescaleSupport.RetentionHoldRatioCeiling);
+
     public int CollectionFailureThreshold => Math.Clamp(_config.Alerts.CollectionFailureThreshold, 1, 1000);
 
     /* #1984: percent clamped like low-disk's (0 = off); the GB floor merely floored at 0 — unlike

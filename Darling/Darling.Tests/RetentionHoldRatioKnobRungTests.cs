@@ -213,24 +213,23 @@ public sealed class RetentionHoldRatioKnobRungTests
            because it is a THIRD accepted-bound: it assigns the row only when the box parses inside its own
            range, so a range of its own would make the WPF seat and the tool disagree about what is
            settable while both looked right. */
+        /* Each bound appears TWICE per surface — once per tier. Zero is the literalised case; ONE is what a
+           half-migration looks like, the warn ratio bounded by the constant and the critical ratio by a
+           literal beside it. Counted over the whole file rather than per call site because the three
+           surfaces spell the call differently and a shared count is the property that holds in all three.
+           The surface NAME rides in the failure message: an assertion that merely proves the loop ran is
+           one that cannot fail, and a count mismatch with no surface named sends the reader to three files. */
         foreach (var (what, text) in new[]
                  {
                      ("engine clamp", settings), ("mcp write bound", tools), ("settings window", window),
                  })
         {
-            Assert.Contains("TimescaleSupport.RetentionHoldRatioFloor", text, StringComparison.Ordinal);
-            Assert.Contains("TimescaleSupport.RetentionHoldRatioCeiling", text, StringComparison.Ordinal);
-            Assert.False(string.IsNullOrWhiteSpace(what));
-        }
-
-        /* Each bound appears TWICE per surface — once per tier. One occurrence is what a half-migration
-           looks like: the warn ratio bounded by the constant and the critical ratio by a literal beside it.
-           Counted over the whole file rather than per site because the three surfaces spell the call
-           differently and a shared count is the property that holds in all three. */
-        foreach (var text in new[] { settings, tools, window })
-        {
-            Assert.Equal(2, CountOf(text, "TimescaleSupport.RetentionHoldRatioFloor"));
-            Assert.Equal(2, CountOf(text, "TimescaleSupport.RetentionHoldRatioCeiling"));
+            Assert.True(
+                CountOf(text, "TimescaleSupport.RetentionHoldRatioFloor") == 2,
+                $"the {what} must reach the shared FLOOR constant once per tier, not a literal");
+            Assert.True(
+                CountOf(text, "TimescaleSupport.RetentionHoldRatioCeiling") == 2,
+                $"the {what} must reach the shared CEILING constant once per tier, not a literal");
         }
 
         /* The floor is the shipped warning default, which is the decision: these knobs RAISE the tiers and

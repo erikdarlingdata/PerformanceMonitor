@@ -955,6 +955,16 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
     {
         var a = config.Alerts;
         var an = config.Analysis;
+
+        /* Every knob rung APPENDS to this column list and to the bindings below in the same order, so
+           no existing placeholder ordinal moves: #2349's four file-growth gates, then #3297's two
+           Retention Held ratios (V119).
+
+           ANNOTATE HERE, NEVER INSIDE THE COLUMN LIST. ConfigSeedStatementArityTests parses this
+           statement with one regex that captures the column list up to the first ')' and splits it on
+           ',' — so a bracketed aside in there makes the whole INSERT unparseable (arity silently
+           unchecked), and a comma in one makes a comment clause count as a column (66 columns against
+           62 values). This branch produced both, in that order, on its first two pushes. */
         using var command = new NpgsqlCommand(@"
 INSERT INTO config_alert_settings (
     id, enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, blocking_count_threshold,
@@ -976,7 +986,6 @@ INSERT INTO config_alert_settings (
     store_job_cadence_warn_percent,
     /* #2349 appended LAST so no existing placeholder ordinal moves. */
     file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes,
-    /* #3297 (V119) appended after them, for the same reason. */
     retention_hold_warn_ratio, retention_hold_critical_ratio)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,

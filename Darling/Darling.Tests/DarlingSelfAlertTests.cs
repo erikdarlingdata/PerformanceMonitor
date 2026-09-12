@@ -3190,9 +3190,10 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
+        /* Equality rather than an absence check: "the text is 3.0x" already forbids the shipped 2.0x, where
+           a DoesNotContain beside it could not fail without this line failing first. */
         Assert.Equal("3.0x", fired.ThresholdValue);
         Assert.Equal(3.0, fired.NumericThresholdValue);
-        Assert.DoesNotContain("2.0x", fired.ThresholdValue, StringComparison.Ordinal);
 
         /* Now the tier comes back under the CONFIGURED ratio — 2.5x, which is over the shipped 2.0x, so a
            constant in the decision would refuse to resolve at all and a constant in the MESSAGE would name
