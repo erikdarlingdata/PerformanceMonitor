@@ -70,7 +70,7 @@ import struct
 import sys
 import zipfile
 import zlib
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import verify_release_signatures as vrs  # noqa: E402  the one PE parse in the repo
