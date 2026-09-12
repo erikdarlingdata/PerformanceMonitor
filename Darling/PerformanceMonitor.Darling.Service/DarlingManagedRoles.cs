@@ -750,8 +750,64 @@ GRANT UPDATE (email_cooldown_minutes) ON {config}.config_notification TO {mcp};
 --    which UPDATEs config_service.config_version AS mcp, and section 8 already granted mcp
 --    UPDATE (config_version, updated_at) ON config_service -- so no additional config_service grant is needed here.
 GRANT INSERT, UPDATE, DELETE ON {config}.config_monitored_servers TO {mcp};
+
+-- 10. Custom-alert resolve-on-delete privileged write (#3334). The recovery/resolution row a caller-initiated
+--     rule DELETE writes (CustomAlertEvaluator.WriteTeardownResolutionAsync) lands in config.config_alert_log,
+--     which ONLY admin/owner may INSERT (section 3's schema-wide grant). But that delete runs as the
+--     least-privilege caller -- mcp (the delete_custom_alert_rule tool) or viewer (DELETE /api/alerts) -- so a
+--     direct INSERT is permission-denied, the write is failure-isolated, and the resolution row #3305 intends
+--     was SILENTLY dropped, leaving a deleted firing rule showing ""open"" in history forever. Rather than a
+--     blanket INSERT grant on the history table to viewer/mcp (which would let those roles fabricate ARBITRARY
+--     history rows, including fake fires), a SECURITY DEFINER function confines the privileged write to EXACTLY
+--     a no-channel resolution row: every delivery-shape column is HARDCODED (alert_sent false, notification_type
+--     'none', current/threshold 0, muted false, no send_error/context) -- byte-identical to what
+--     BuildResolutionRecord + PgAlertHistoryStore.RecordAlertAsync write for a normal resolve -- so a caller can
+--     page nothing and fabricate no fire; only server_id/name and the already-sanitized title/detail vary.
+--     Definer-safe: owned by the store owner (the creating provisioning role, {owner}), an explicit pinned
+--     search_path so no injected path can redirect the unqualified config_alert_log or now(), and a fully
+--     parameterized INSERT with NO dynamic SQL. Created + REVOKEd-from-PUBLIC by the shared builder below;
+--     EXECUTE is the only privilege the least-privilege roles get, and admin/owner keep their direct INSERT and
+--     never call it. NOT a versioned migration: CREATE OR REPLACE is idempotent and owner-run every start and
+--     has no probeable schema footprint (the section-1c role-SET rationale), so a V-number would drag in the
+--     probe rung + ladder fixture + version-pin tests for no gain.
+{BuildCustomAlertResolveFunctionSql(config)}
+GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) TO {viewer}, {mcp};
 ";
     }
+
+    /// <summary>
+    /// The <c>SECURITY DEFINER</c> function (#3334) that lets the least-privilege viewer/mcp roles write the ONE
+    /// resolution row a caller-initiated custom-alert rule delete records in <c>config_alert_log</c> -- a table
+    /// they may not INSERT directly -- WITHOUT a blanket INSERT grant that would let them fabricate arbitrary
+    /// history. Returns the <c>CREATE OR REPLACE FUNCTION</c> plus the <c>REVOKE ALL ... FROM PUBLIC</c> (a
+    /// freshly created function is EXECUTE-able by PUBLIC by default, so revoking is mandatory); the caller adds
+    /// the narrow <c>GRANT EXECUTE</c>. Shared so the gated live proof test creates the IDENTICAL function rather
+    /// than a drifting hand-copy. Definer-safe by construction: owned by whoever runs it (the provisioning owner,
+    /// which holds the config_alert_log INSERT the body needs), an explicit <c>SET search_path = {config},
+    /// pg_catalog</c> so neither the unqualified table nor <c>now()</c> can be redirected by a caller's
+    /// search_path, and a fully parameterized INSERT that hardcodes the resolution shape (never a fire) with no
+    /// dynamic SQL. The 12-column list and its fixed values are kept identical to
+    /// <c>PgAlertHistoryStore.RecordAlertAsync</c>'s write for a <c>BuildResolutionRecord</c>.
+    /// </summary>
+    internal static string BuildCustomAlertResolveFunctionSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.record_custom_alert_resolution(
+   p_server_id integer,
+   p_server_name text,
+   p_metric_name text,
+   p_detail_text text)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = {config}, pg_catalog
+AS $fn$
+   INSERT INTO config_alert_log
+      (alert_time, server_id, server_name, metric_name, current_value, threshold_value,
+       alert_sent, notification_type, send_error, muted, detail_text, context_json)
+   VALUES
+      ((now() AT TIME ZONE 'UTC'), p_server_id, p_server_name, p_metric_name, 0, 0,
+       false, 'none', NULL, false, p_detail_text, NULL);
+$fn$;
+REVOKE ALL ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) FROM PUBLIC;";
 
     /// <summary>
     /// The generated passwords are alnum by construction; this fails closed if that ever changes,
