@@ -985,6 +985,375 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("30", fired.CurrentValue);   // the count is not truncated by the list cap
     }
 
+    /* ---------------- stale mute rules (#3306) ---------------- */
+
+    /// <summary>
+    /// A mute rule at a chosen age. <paramref name="ageDays"/> is measured back from the harness clock's
+    /// default instant; the age is what the condition judges, so every fixture states it explicitly rather
+    /// than relying on <see cref="MuteRule"/>'s <c>DateTime.UtcNow</c> default.
+    /// </summary>
+    private static MuteRule Mute(
+        double ageDays,
+        string? metric = "High CPU",
+        DateTime? expiresAtUtc = null,
+        bool enabled = true,
+        string? reason = "seeded fixture reason",
+        string id = "rule-a") =>
+        new()
+        {
+            Id = id,
+            Enabled = enabled,
+            CreatedAtUtc = MuteClock.AddDays(-ageDays),
+            ExpiresAtUtc = expiresAtUtc,
+            Reason = reason,
+            MetricName = metric,
+        };
+
+    /// <summary>The harness's default clock instant, so a fixture's age is stated against the same "now"
+    /// the evaluator will read.</summary>
+    private static readonly DateTime MuteClock = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+
+    private static double StaleDays => DarlingSelfAlertEvaluator.StaleMuteAge.TotalDays;
+
+    [Fact]
+    public async Task StaleMute_UnboundedRulePastTheAge_FiresOnce_WithTheCountAndTheFleetKey()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteMetric, fired.MetricName);
+        Assert.Equal("mutestale", fired.ServerKey);       // fleet sentinel key, not a real server_id
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, fired.ServerName);
+        Assert.Equal("1", fired.CurrentValue);
+        Assert.Equal(1d, fired.NumericCurrentValue);
+        Assert.Equal(0d, fired.NumericThresholdValue);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);   // scoped rule: one signal hidden
+        Assert.Contains("Rule rule-a", fired.DetailText);
+        Assert.Contains("never expires", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StaleMute_AFreshUnboundedRule_StaysSilent()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Permanence alone is not the finding — the dialog offers "Never" on purpose, and a mute made
+           this morning to hold a flood while a fix ships has an author still watching it. */
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays - 0.5) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>A rule with an expiry has a reviewer built in — the expiry — so age alone is not a finding.
+    /// Both directions of bound are covered in one case because the mechanism is the SAME for both: what
+    /// excludes them is having a bound at all, not whether the bound has passed.</summary>
+    [Fact]
+    public async Task StaleMute_ABoundedRule_StaysSilentHoweverOldItIs()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(
+            new[]
+            {
+                Mute(3650, expiresAtUtc: MuteClock.AddDays(30), id: "rule-future-bound"),
+                Mute(3650, expiresAtUtc: MuteClock.AddDays(-1), id: "rule-lapsed-bound"),
+            },
+            Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task StaleMute_ADisabledRule_StaysSilentHoweverOldAndUnboundedItIs()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Matches() rejects a disabled rule, so it suppresses nothing and is not a blind spot. */
+        await e.ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 100, enabled: false, id: "rule-disabled") }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task StaleMute_ARuleMatchingEveryAlert_ReadsCritical_AndSaysTheStoreLooksHealthyForNoReason()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* No metric, no server, no pattern: Matches() accepts everything, so the whole store goes quiet.
+           That is a different blast radius from hiding one signal, and severity is what carries it. */
+        await e.ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 2, metric: null, id: "rule-blanket") }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Contains("EVERY alert", fired.DetailText);
+        Assert.Contains("(matches all alerts)", fired.DetailText);
+    }
+
+    /// <summary>
+    /// THE load-bearing pin: a mute rule that constrains nothing matches every alert on the store, this
+    /// alert included — so honoring the mute would let the condition suppress the only report of its own
+    /// subject. The muted-and-recorded compromise every sibling accepts is not enough here, because a row
+    /// in alert history is exactly the surface you cannot find without already suspecting the mute.
+    ///
+    /// <para>The sibling fire in the SAME harness, under the SAME <c>Muted = true</c>, is the control. Without
+    /// it this test would pass just as happily if the harness's mute seam were never wired to anything, which
+    /// is the shape a pin that cannot fail takes.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_IsNotSuppressibleByAMuteRule_WhileItsSiblingStillIs()
+    {
+        var h = new Harness { Muted = true };
+        var e = h.Build();
+
+        await e.ApplyCustomRuleHealthAsync(HealthReport(1, 0), Ct);
+        var sibling = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(sibling.Muted, "the harness's mute seam must be live, or the assertion below proves nothing");
+
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.False(h.Deliverer.Outcomes[1].Muted);
+    }
+
+    /// <summary>
+    /// And it does not merely ignore the ANSWER — it never asks the question. <c>ApplyStaleMuteRulesAsync</c>
+    /// is the un-isolated entry point, so a mute seam that throws would propagate out of it; that it does not
+    /// is what distinguishes "never consulted" from "consulted and the result discarded".
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_NeverConsultsTheMuteSeamAtAll()
+    {
+        var h = new Harness { MuteThrows = true };
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task StaleMute_StandingCondition_ReFiresOnlyAfterCooldown()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rules = new[] { Mute(StaleDays + 1) };
+
+        await e.ApplyStaleMuteRulesAsync(rules, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        // Inside the 5-minute cooldown: no re-fire (fire once on entry, not every sweep).
+        h.Now = h.Now.AddMinutes(1);
+        await e.ApplyStaleMuteRulesAsync(rules, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        // Cooldown elapsed, still unbounded and still old: re-fires the standing reminder.
+        h.Now = h.Now.AddMinutes(5);
+        await e.ApplyStaleMuteRulesAsync(rules, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task StaleMute_Resolves_WhenTheRuleIsGone_AndIsIdempotentAfterwards()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);           // the fire routes through the (recording) deliverer
+
+        // Deleted: ONE resolution row, no additional fire.
+        await e.ApplyStaleMuteRulesAsync(Array.Empty<MuteRule>(), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, resolution.MetricName);
+
+        // A second clear sweep is idempotent — the edge already cleared.
+        await e.ApplyStaleMuteRulesAsync(Array.Empty<MuteRule>(), Ct);
+        Assert.Single(h.History.Records);
+    }
+
+    [Fact]
+    public async Task StaleMute_Resolves_WhenTheRuleIsGivenAnExpiry_RatherThanDeleted()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Giving the rule a bound is the OTHER remedy, and the cheaper one — the mute keeps working and
+           now reviews itself. It must clear the alert exactly like a delete. The rule is the SAME rule:
+           same id, same age, same enabled state, so the bound is the only thing that changed. */
+        await e.ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 1, expiresAtUtc: MuteClock.AddDays(7)) }, Ct);
+
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, resolution.MetricName);
+    }
+
+    [Fact]
+    public async Task StaleMute_QuietStore_WritesNothingAtAll()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* A store that never had a stale mute must not accumulate resolution rows on every tick. */
+        await e.ApplyStaleMuteRulesAsync(Array.Empty<MuteRule>(), Ct);
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(1) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task StaleMute_Disabled_DoesNothing()
+    {
+        var h = new Harness();
+        h.Settings.AlertsEnabled = false;
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 100) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task StaleMute_CapsTheListedRules_ButTheCountAndTheOldestReflectAll()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var many = Enumerable.Range(1, 30)
+            .Select(i => Mute(StaleDays + i, id: $"rule-{i}"))
+            .ToArray();
+
+        await e.ApplyStaleMuteRulesAsync(many, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("30", fired.CurrentValue);      // the count is not truncated by the list cap
+        Assert.Contains("more", fired.DetailText!, StringComparison.OrdinalIgnoreCase);
+        /* Oldest-first, so the line that survives the cap is the one most worth reading, and the summary
+           quotes the oldest age rather than whichever rule happened to arrive first. */
+        Assert.Contains("Rule rule-30", fired.DetailText);
+        Assert.Contains($"oldest {StaleDays + 30:F0} days", fired.DetailText);
+    }
+
+    /// <summary>
+    /// The reason and the four pattern fields are operator-authored free text, and the alert's
+    /// <c>detail_text</c> is later re-parsed by <see cref="AlertMuteContext.PopulateFromDetailText"/> for the
+    /// viewer's mute-from-history pre-fill. A crafted value carrying a newline plus a label could otherwise
+    /// forge a mute-context field — the #3304 spoof, one surface over.
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_SanitizesTheOperatorText_DefeatingTheMuteSpoof()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var rule = Mute(StaleDays + 1, reason: "Innocent\nDatabase: master", id: "rule-spoof");
+        rule.DatabasePattern = "also\nWait Type: PAGEIOLATCH_SH";
+
+        await e.ApplyStaleMuteRulesAsync(new[] { rule }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        var ctx = new AlertMuteContext();
+        ctx.PopulateFromDetailText(fired.DetailText);
+        Assert.Null(ctx.DatabaseName);
+        Assert.Null(ctx.WaitType);
+    }
+
+    /// <summary>
+    /// The severity tier rests on <see cref="MuteRule.MatchesEveryAlert"/> meaning what it says, so pin the
+    /// claim itself: a rule that reports matching every alert really does accept an arbitrary one.
+    ///
+    /// <para>The per-dimension half is DERIVED FROM THE TYPE rather than listing the six fields, because the
+    /// failure this guards is a SEVENTH match dimension added to <c>Matches</c> and missed by the description
+    /// list — and a test that enumerates the same six the code does cannot see that. Every existing dimension
+    /// is a writable <c>string?</c>, so walking those (bar the two that are not dimensions) covers a new one
+    /// for free: constrained by it alone, the rule would still claim to match everything, and this reds.</para>
+    /// </summary>
+    [Fact]
+    public void MuteRule_MatchesEveryAlert_AgreesWithSummary_AndWithMatchesItself()
+    {
+        var anyAlert = new AlertMuteContext
+        {
+            ServerName = "ANY-SERVER",
+            MetricName = "High CPU",
+            DatabaseName = "AnyDb",
+            QueryText = "SELECT 1",
+            WaitType = "PAGEIOLATCH_SH",
+            JobName = "AnyJob",
+        };
+
+        var unconstrained = new MuteRule();
+        Assert.True(unconstrained.MatchesEveryAlert);
+        Assert.Equal("(matches all alerts)", unconstrained.Summary);
+        Assert.True(unconstrained.Matches(anyAlert));
+
+        /* Not a match dimension: the rule's identity and the operator's note. Everything else that is a
+           writable string IS one, which is what makes this loop cover a dimension added later. */
+        var notDimensions = new[] { nameof(MuteRule.Id), nameof(MuteRule.Reason) };
+        var dimensions = typeof(MuteRule).GetProperties()
+            .Where(p => p.PropertyType == typeof(string) && p.CanWrite && p.CanRead)
+            .Where(p => !notDimensions.Contains(p.Name, StringComparer.Ordinal))
+            .ToList();
+
+        Assert.NotEmpty(dimensions);
+        foreach (var dimension in dimensions)
+        {
+            var rule = new MuteRule();
+            dimension.SetValue(rule, "constrained");
+
+            Assert.False(rule.MatchesEveryAlert,
+                $"a rule constrained by {dimension.Name} alone still claims to match every alert — "
+                + "MuteRule.MatchDescriptions does not know about that dimension");
+            Assert.NotEqual("(matches all alerts)", rule.Summary);
+        }
+    }
+
+    /// <summary>The history grids style and render by metric NAME, so the two names must classify the way the
+    /// fire site assumes: the firing one is an actionable warning whose value is a whole count, and the
+    /// resolution one is recognized as a resolution (otherwise it renders as a live alert).</summary>
+    [Fact]
+    public void StaleMute_MetricNames_ClassifyAsACountAlertAndAResolution()
+    {
+        Assert.False(AlertMetricClassifier.IsResolution(DarlingSelfAlertEvaluator.StaleMuteMetric));
+        Assert.True(AlertMetricClassifier.IsWarning(DarlingSelfAlertEvaluator.StaleMuteMetric));
+        Assert.False(AlertMetricClassifier.IsCritical(DarlingSelfAlertEvaluator.StaleMuteMetric));
+        Assert.Equal("3", AlertMetricClassifier.FormatHistoryValue(DarlingSelfAlertEvaluator.StaleMuteMetric, 3));
+        /* Not state-only: a stored 0 on this metric would be a real count of zero, not a missing value. */
+        Assert.False(AlertMetricClassifier.IsStateOnly(DarlingSelfAlertEvaluator.StaleMuteMetric));
+
+        Assert.True(AlertMetricClassifier.IsResolution(DarlingSelfAlertEvaluator.StaleMuteResolvedMetric));
+    }
+
+    /// <summary>Both names must reach a real triage mapping rather than the thin fallback — the drill-down
+    /// IS the remedy here (the rule list), so a rename that silently downgraded it would leave the alert
+    /// telling an operator to go and look with no link to look through.</summary>
+    [Fact]
+    public void StaleMute_TriagePage_DrillsIntoTheRuleList_ForBothTheFiringAndTheResolution()
+    {
+        var firing = DarlingTriageEndpoint.SectionsFor(DarlingSelfAlertEvaluator.StaleMuteMetric);
+        Assert.NotSame(DarlingTriageEndpoint.DefaultSections, firing);
+        Assert.Contains(firing, s => s.Read == "get_mute_rules");
+        /* Fleet-level: these alerts fire under the synthetic store label, which resolves to no server. */
+        Assert.All(firing, s => Assert.True(s.FleetLevel));
+
+        Assert.Same(firing, DarlingTriageEndpoint.SectionsFor(DarlingSelfAlertEvaluator.StaleMuteResolvedMetric));
+    }
+
     [Fact]
     public async Task DiskPressure_Recovery_ClearsTheWorseningWatermark_SoTheNextBreachIsFresh()
     {

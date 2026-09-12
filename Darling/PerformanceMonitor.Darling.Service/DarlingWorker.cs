@@ -99,6 +99,14 @@ public sealed class DarlingWorker : BackgroundService
        measure drift while the aggregated alert itself is cooldown-limited inside the self-alert evaluator. */
     private static readonly TimeSpan s_customAlertHealthInterval = TimeSpan.FromMinutes(5);
 
+    /* The stale-mute check's cadence (fleet-level, #3306). The condition it judges moves on a scale of DAYS —
+       a mute rule with no expiry, in force past every expiry the product offers — so the tick exists for the
+       RESOLUTION half rather than the firing half: an operator who deletes the rule should see the alert
+       clear promptly, not on the next hour. It costs a scan of the in-memory MuteRuleService cache (a handful
+       of rows on any real store) and the alert itself is cooldown-limited inside the evaluator, so matching
+       its #3304 neighbour costs nothing. */
+    private static readonly TimeSpan s_staleMuteCheckInterval = TimeSpan.FromMinutes(5);
+
     /* The compression-job self-heal check's cadence (fleet-level, #1581). Compression is a slow archival tier
        and a stuck policy job takes hours to matter, so hourly is ample and cheap (one job_stats read + at most
        one alter_job per stuck job) — no need for the 15s sweep or the 30s alert cadence. */
@@ -432,6 +440,10 @@ public sealed class DarlingWorker : BackgroundService
     /* MinValue = the first sweep after startup runs the custom-alert-rule health check (#3304), then every
        s_customAlertHealthInterval. Fleet-level (the rules are a fleet concept), so a single field. */
     private DateTime _nextCustomAlertHealthCheckUtc = DateTime.MinValue;
+
+    /* MinValue = the first sweep after startup evaluates the stale-mute check (#3306), then every
+       s_staleMuteCheckInterval. Fleet-level (mute rules are a store-wide concept), so a single field. */
+    private DateTime _nextStaleMuteCheckUtc = DateTime.MinValue;
 
     /* MinValue = the first sweep after startup evaluates the compression-job self-heal check (#1581), then
        every s_compressionCheckInterval. Fleet-level (one shared store), so it is a single field, not
@@ -1959,6 +1971,21 @@ public sealed class DarlingWorker : BackgroundService
                    disabled rules (which the enabled-only sweep would orphan) and of servers that have left a
                    rule's scope. Deleted rules are resolved on the delete path (their state cascades away). */
                 await ReconcileCustomAlertStateAsync(servers, stoppingToken);
+            }
+
+            /* #3306: a mute rule that has outlived its reason. A mute is a deliberate blind spot, and until
+               this there was no surface that reported one exists, how old it is, or whether it will ever
+               expire — the only way to find one was to already suspect it and call get_mute_rules. So a rule
+               created to stop a false-positive flood keeps suppressing the alert after the fix ships, and the
+               symptom is silence. Judged on the CONJUNCTION (still in force, no expiry, past every expiry the
+               product offers), never on permanence alone, which the dialog offers on purpose. Reads the live
+               MuteRuleService cache the engine matches against — so it sees exactly what is suppressing
+               alerts right now, and needs no store read of its own. Fleet-level, own slow cadence; the
+               Evaluate* wrapper is failure-isolated so a throw never stops the fleet loop. */
+            if (_selfAlerts is not null && DateTime.UtcNow >= _nextStaleMuteCheckUtc)
+            {
+                _nextStaleMuteCheckUtc = DateTime.UtcNow.Add(s_staleMuteCheckInterval);
+                await _selfAlerts.EvaluateStaleMuteRulesAsync(muteRuleService.GetRules(), stoppingToken);
             }
 
             /* #1581: the compression-job self-heal backstop. TimescaleDB compression policy jobs can silently

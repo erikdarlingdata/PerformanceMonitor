@@ -27,11 +27,13 @@ namespace PerformanceMonitor.Darling.Service;
 /// <summary>
 /// Stage 4 of the Darling control plane — the SERVICE's self-alerts: the "is my collection actually
 /// working" conditions that matter most for an unattended 24/7 headless service where nobody is
-/// watching a dashboard. Four conditions — the first three reframe a Dashboard health check onto Darling's
-/// own signals; the fourth (Store Disk Pressure) is net-new and guards the service's OWN store — all routed
-/// through the SAME <see cref="IAlertDeliverer"/> the shared alert engine uses (so they inherit its
-/// email/webhook delivery, per-fingerprint delivery cooldown, and restart replay) and the SAME
-/// <c>config_alert_log</c> history store:
+/// watching a dashboard. The FOUNDING conditions are listed below — the first three reframe a Dashboard
+/// health check onto Darling's own signals; Store Disk Pressure was net-new and guards the service's OWN
+/// store — and every condition added since is sectioned in the body under its own issue number. The list is
+/// not a census and carries no count: it named four while five sat in it. All of them route through the SAME
+/// <see cref="IAlertDeliverer"/> the shared alert engine uses (so they inherit its email/webhook delivery,
+/// per-fingerprint delivery cooldown, and restart replay) and the SAME <c>config_alert_log</c> history
+/// store:
 /// <list type="number">
 /// <item><b>Collection Stopped / collector failure</b> — the server's <c>collection_log</c> shows no
 ///   SUCCESS within a staleness window OR the last N runs all failed (reframes the Dashboard's
@@ -235,9 +237,11 @@ internal sealed class DarlingSelfAlertEvaluator
     internal const string DiskPressureResolvedMetric = "Store Disk Pressure Resolved";
 
     /// <summary>
-    /// The synthetic server label every FLEET-LEVEL store self-alert fires under — Store Disk Pressure,
-    /// Store Runtime Upgrade, Store Job Over Cadence and Compression Job Stuck, plus each one's resolution
-    /// edge. The monitoring store is not a SQL Server instance and is not in the monitored-server registry,
+    /// The synthetic server label every FLEET-LEVEL store self-alert fires under — each condition in this
+    /// class whose subject is the store or its configuration rather than one monitored server, plus each
+    /// one's resolution edge. Described rather than listed: the enumeration that used to sit here named
+    /// four of them and was two conditions behind by the time anyone read it.
+    /// The monitoring store is not a SQL Server instance and is not in the monitored-server registry,
     /// so this string deliberately resolves to NOTHING: <c>DarlingServerResolver</c> cannot match it, and the
     /// deliverer's #1236 int.TryParse override no-ops on it exactly like the non-numeric <see cref="DiskKey"/>.
     ///
@@ -275,6 +279,61 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>How many unhealthy rules the aggregated alert lists by name before eliding the rest — a pg_*
     /// rename can break many rules at once, and the whole point is ONE bounded alert, not a wall of text.</summary>
     private const int MaxListedUnhealthyRules = 20;
+
+    /* Stale mute-rule edge state (#3306). FLEET-level like custom-rule health (mute rules are a store-wide
+       concept, not per-server), so a single fixed sentinel key, and a STANDING condition: active flag +
+       cooldown re-fire while any mute rule is still suppressing without a bound, one resolution when none
+       is. The rule set is handed in by the worker from the live MuteRuleService cache — this evaluator only
+       decides fire/hold/resolve and renders the (sanitized) list. */
+    private readonly ConcurrentDictionary<string, bool> _activeStaleMute = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastStaleMuteAlert = new();
+
+    /// <summary>The fixed key for the fleet-level stale-mute edge (not a real server); non-numeric so the
+    /// deliverer's #1236 int.TryParse override no-ops on it exactly like <see cref="DiskKey"/>.</summary>
+    private const string StaleMuteKey = "mutestale";
+
+    /// <summary>The alert metric name the stale-mute self-alert fires under (#3306). A WEBHOOK AUTOMATION
+    /// KEY like its siblings, so it is a const and must stay stable across releases. Classified as a count
+    /// metric by <c>AlertMetricClassifier</c> (the value is the number of unbounded rules past the age).</summary>
+    internal const string StaleMuteMetric = "Stale Mute Rules";
+
+    /// <summary>The resolution title recorded when no unbounded mute rule is old enough to report any more —
+    /// every one of them was deleted, disabled, or given an expiry. Carries a recognized resolution suffix
+    /// ("Cleared") so the shared <c>AlertMetricClassifier.IsResolution</c> styles it green.</summary>
+    internal const string StaleMuteResolvedMetric = "Stale Mute Rules Cleared";
+
+    /// <summary>
+    /// How long a mute rule with NO expiry may be in force before this reports it (#3306).
+    ///
+    /// <para><b>Derived from the product's own expiry options, not picked.</b> The mute dialog offers
+    /// "1 hour", "24 hours", "7 days" and "Never" (<c>ViewerAppSettings.MuteRuleDefaultExpiration</c>), so
+    /// seven days is the longest BOUND an operator could have chosen. A rule that has outlived it, with no
+    /// bound at all, has by the product's own standard outlasted every expiry it offered — which is a
+    /// different statement from a threshold someone liked the sound of. It also sits clear of the case this
+    /// must not report: a mute made deliberately this morning to stop a flood while a fix ships, whose
+    /// author is still watching it.</para>
+    ///
+    /// <para><b>Why not read <c>MuteRuleDefaultExpiration</c> itself.</b> It is a VIEWER app setting — a
+    /// per-install UI preference that prefills a dialog — and it is not in <c>config_alert_settings</c>, so
+    /// the headless service does not have it and could not honor a change to it. A compile-time constant
+    /// rather than a store-backed knob for the <see cref="RetentionHoldWarnRatio"/> reason: that would need
+    /// a migration rung this change is deliberately not taking, and it belongs in the control plane the next
+    /// time a rung is going in anyway.</para>
+    /// </summary>
+    internal static readonly TimeSpan StaleMuteAge = TimeSpan.FromDays(7);
+
+    /// <summary>How many stale rules the aggregated alert lists before eliding the rest, on
+    /// <see cref="MaxListedUnhealthyRules"/>' reasoning — one bounded alert, not a wall of text.</summary>
+    private const int MaxListedStaleMuteRules = 20;
+
+    /// <summary>Length cap for one stale rule's operator-authored reason in the alert detail. Generous
+    /// enough to carry a real sentence, bounded so <see cref="MaxListedStaleMuteRules"/> lines cannot grow
+    /// the body without limit.</summary>
+    private const int MaxStaleMuteReasonLength = 160;
+
+    /// <summary>Length cap for one stale rule's rendered <c>MuteRule.Summary</c>. Also operator-authored in
+    /// part — the four pattern fields are free text — so it is sanitized and capped like the reason.</summary>
+    private const int MaxStaleMuteSummaryLength = 160;
 
     /* Compression-job self-heal edge state (#1581). FLEET-level like disk pressure (one shared store), but
        MULTI-keyed by job_id (a store has many compression policy jobs). The state is the re-arm-once/escalate
@@ -1689,6 +1748,210 @@ internal sealed class DarlingSelfAlertEvaluator
         return (shortMessage, sb.ToString());
     }
 
+    /* ---------------- stale mute rules (fleet-level, polled — #3306) ---------------- */
+
+    /// <summary>
+    /// Isolating wrapper for the fleet-level stale-mute self-alert (#3306), mirroring
+    /// <see cref="EvaluateCustomRuleHealthAsync"/>. The worker calls THIS; tests call the isolated
+    /// <see cref="ApplyStaleMuteRulesAsync"/> directly.
+    /// </summary>
+    public async Task EvaluateStaleMuteRulesAsync(
+        IReadOnlyList<MuteRule> rules, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyStaleMuteRulesAsync(rules, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the rules arrive as a parameter from the live
+               MuteRuleService cache and this method performs no store read. */
+            _logger?.LogError("Stale-mute self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Edge-applies the fleet-level "a mute rule has outlived its reason" condition (#3306): a rule that is
+    /// ENABLED, has NO expiry, and was created longer than <see cref="StaleMuteAge"/> ago.
+    ///
+    /// <para><b>Why this condition exists at all.</b> A mute is a deliberate blind spot in a monitoring
+    /// tool, and nothing else in this product reports that one is there. The only way to discover a mute is
+    /// to ask <c>get_mute_rules</c>, which requires already suspecting it — so a mute whose justification
+    /// has expired keeps suppressing a now-correct alert, and the symptom is silence. It is #2813's Retention
+    /// Held shape one surface over: a correct, deliberate pause that reads as health once made.</para>
+    ///
+    /// <para><b>All three halves are required.</b> Unbounded alone is not a finding — an operator may mean it,
+    /// and the product's own dialog offers "Never". Old alone is not either: a rule with an expiry has a
+    /// reviewer built in, namely the expiry. And a disabled rule suppresses nothing, so it is not a blind
+    /// spot however old and however unbounded. It is the conjunction — still suppressing, no bound, and past
+    /// every bound the product offers — that says the justification was never revisited.</para>
+    ///
+    /// <para><b>This never deletes or expires a rule.</b> Silent un-muting is its own incident: the channel
+    /// this was protecting floods unannounced, which is exactly the outcome a permanent rule was chosen to
+    /// avoid. Permanence plus visibility, so the operator decides.</para>
+    ///
+    /// <para>Severity follows BLAST RADIUS, not age. A rule that constrains nothing
+    /// (<see cref="MuteRule.MatchesEveryAlert"/>) suppresses every alert on the store, so the fleet reads
+    /// healthy for want of anything being measured — CRITICAL. A rule scoped to a metric, a server or a
+    /// pattern hides one signal — WARNING.</para>
+    ///
+    /// <para>A STANDING condition like Custom Alert Rules Unhealthy: fire once on entry, re-fire only per the
+    /// alert cooldown while any rule qualifies, and ONE resolution row when none does. Gated on the master
+    /// alerts switch. Internal so it pins directly with a recording deliverer and a controllable clock.</para>
+    /// </summary>
+    internal async Task ApplyStaleMuteRulesAsync(
+        IReadOnlyList<MuteRule> rules, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+
+        /* Unbounded, in force, and older than every expiry the product offers. Ordered oldest-first so the
+           elided tail is the least interesting end.
+
+           "In force" reduces to Enabled here: a rule with no expiry cannot have lapsed, so the expiry test
+           that belongs in the general predicate would be dead code in this one — and it reads MuteRule's
+           IsExpired, which consults DateTime.UtcNow rather than this evaluator's injected clock. Dropping it
+           leaves the whole condition judged on ONE clock, which is what makes the age assertions mean what
+           they say. A rule carrying ANY expiry is excluded either way, past or future: a bound is a bound,
+           and a rule that has one reviews itself. */
+        var stale = new List<MuteRule>();
+        foreach (var rule in rules)
+        {
+            if (rule is null || !rule.Enabled || rule.ExpiresAtUtc.HasValue)
+            {
+                continue;
+            }
+
+            if (now - rule.CreatedAtUtc >= StaleMuteAge)
+            {
+                stale.Add(rule);
+            }
+        }
+
+        stale.Sort(static (a, b) => a.CreatedAtUtc.CompareTo(b.CreatedAtUtc));
+
+        if (stale.Count == 0)
+        {
+            if (_activeStaleMute.TryRemove(StaleMuteKey, out var was) && was)
+            {
+                _lastStaleMuteAlert.TryRemove(StaleMuteKey, out _);
+                await RecordResolutionAsync(new AlertResolution(
+                    StaleMuteKey, StoreServerLabel, StaleMuteMetric, StaleMuteResolvedMetric,
+                    "No mute rule is suppressing alerts without an expiry any more"), cancellationToken);
+            }
+
+            return;
+        }
+
+        _activeStaleMute[StaleMuteKey] = true;
+
+        /* Standing condition: fire on entry, re-fire only per cooldown while any rule qualifies. The CURRENT
+           set is rendered each time, so a rule that ages past the bound later shows up on the next re-fire. */
+        if (!CooldownElapsed(_lastStaleMuteAlert, StaleMuteKey, now))
+        {
+            return;
+        }
+
+        _lastStaleMuteAlert[StaleMuteKey] = now;
+        bool blanket = stale.Exists(static r => r.MatchesEveryAlert);
+        var (shortMessage, detail) = RenderStaleMuteRules(stale, now, blanket);
+
+        await FireAsync(
+            StaleMuteKey, StoreServerLabel, StaleMuteMetric,
+            currentValue: stale.Count.ToString(CultureInfo.InvariantCulture),
+            thresholdValue: "0",
+            detail: detail,
+            severity: blanket ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+            shortMessage: shortMessage,
+            /* The count of stale rules is a genuine whole number (AlertMetricClassifier renders it as a
+               count); the healthy bound is 0. */
+            numericCurrentValue: stale.Count,
+            numericThresholdValue: 0,
+            cancellationToken,
+            context: null,
+            /* THE load-bearing deviation from every sibling: this one alert ignores mute rules.
+               FireAsync's mute check asks "does a rule match (Monitor Store, this metric)", and a rule that
+               constrains nothing matches EVERYTHING — including this. Two of the four rules that motivated
+               #3306 were exactly that shape, so honoring the mute here would let the condition suppress the
+               only report of itself, and the report would be a row in alert history that nobody reads
+               without already suspecting the mute. That is the blind spot, not a fix for it. A muted alert
+               is still recorded, which is enough for every other condition; it is not enough for the one
+               whose subject IS the muting. */
+            honorMuteRules: false);
+    }
+
+    /// <summary>
+    /// Renders the stale-mute alert's one-line summary and its multi-line <c>detail_text</c>. Each rule
+    /// occupies its own line led by <c>"- Rule &lt;id&gt;"</c>, which cannot be read as a mute-context label
+    /// by <see cref="AlertMuteContext.PopulateFromDetailText"/>; the operator-authored reason and the
+    /// rendered match summary are newline-stripped and capped through
+    /// <see cref="CustomAlertEvaluator.SanitizeDisplayText"/> — the SAME sanitizer #3304 uses — because
+    /// either one could otherwise carry a forged label line. The list is capped at
+    /// <see cref="MaxListedStaleMuteRules"/> with a "+N more" tail.
+    /// </summary>
+    private static (string ShortMessage, string Detail) RenderStaleMuteRules(
+        List<MuteRule> stale, DateTime nowUtc, bool blanket)
+    {
+        var oldestDays = (nowUtc - stale[0].CreatedAtUtc).TotalDays;
+        var shortMessage = string.Create(CultureInfo.InvariantCulture,
+            $"{stale.Count} mute rule(s) have been suppressing alerts with no expiry for over {StaleMuteAge.TotalDays:F0} days (oldest {oldestDays:F0} days)");
+
+        var sb = new StringBuilder();
+        sb.Append(shortMessage).Append('.');
+        sb.Append(
+            blanket
+                ? " At least one of them constrains nothing, so it suppresses EVERY alert on this store -"
+                  + " this store reads healthy because nothing is being reported, not because nothing is wrong."
+                : " Each one hides a specific alert.");
+        sb.Append(
+            " A mute is a deliberate blind spot and nothing else in this product reports that one exists, so"
+            + " the question this alert asks is whether the reason each rule was created for is still true."
+            + " Nothing has been un-muted: a silent expiry would flood the delivery channel unannounced,"
+            + " which is usually why the rule was made permanent in the first place. Review them with"
+            + " get_mute_rules and delete or re-scope the ones whose reason has passed.");
+
+        var listed = 0;
+        foreach (var rule in stale)
+        {
+            if (listed >= MaxListedStaleMuteRules)
+            {
+                break;
+            }
+
+            var ageDays = (nowUtc - rule.CreatedAtUtc).TotalDays;
+            var summary = CustomAlertEvaluator.SanitizeDisplayText(rule.Summary, MaxStaleMuteSummaryLength);
+            var reason = CustomAlertEvaluator.SanitizeDisplayText(rule.Reason, MaxStaleMuteReasonLength);
+
+            /* Leading "- Rule <id>" never matches a PopulateFromDetailText label; the two operator-authored
+               values on the line are sanitized above. */
+            sb.Append("\n- Rule ").Append(CustomAlertEvaluator.SanitizeDisplayText(rule.Id, 64))
+              .Append(string.Create(CultureInfo.InvariantCulture, $": {ageDays:F0} days old, never expires, matches "))
+              .Append(summary.Length == 0 ? "(matches all alerts)" : summary);
+            if (reason.Length > 0)
+            {
+                sb.Append(" [reason: ").Append(reason).Append(']');
+            }
+
+            listed++;
+        }
+
+        var remaining = stale.Count - listed;
+        if (remaining > 0)
+        {
+            sb.Append("\n+ ").Append(remaining.ToString(CultureInfo.InvariantCulture)).Append(" more (see get_mute_rules).");
+        }
+
+        return (shortMessage, sb.ToString());
+    }
+
     /* ---------------- compression-job self-heal (fleet-level, polled — #1581) ---------------- */
 
     /// <summary>
@@ -2579,18 +2842,27 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
     /// <param name="numericThresholdValue">The bound behind <paramref name="thresholdValue"/>, on the same
     /// terms. Almost every self-alert's threshold is an English phrase ("collecting", "Online", "running
     /// on schedule"), not a bound.</param>
+    /// <param name="honorMuteRules">Whether the operator's mute rules may suppress this alert's channels.
+    /// True for every condition but one. #3306's "Stale Mute Rules" passes FALSE because a mute rule that
+    /// constrains nothing matches every alert on the store, this one included — so honoring the mute would
+    /// let the condition suppress the only report of its own subject, and an alert whose whole point is
+    /// "you are not being told things" cannot be one of the things you are not told. Nothing else may pass
+    /// false without the same argument: muting is the operator's to decide, and a self-alert that cannot be
+    /// silenced is a self-alert that will be ignored instead.</param>
     /* The optional context TRAILS the cancellation token so the dozens of existing positional call
        sites stay untouched — only the callers that have discrete facts to carry (#2109: the AG
-       database alerts) name it. */
+       database alerts) name it. Same for honorMuteRules, which defaults to the sibling behavior. */
     private async Task FireAsync(
         string serverKey, string serverName, string metricName, string currentValue, string thresholdValue,
         string detail, AlertSeverityLevel? severity, string shortMessage,
         double? numericCurrentValue, double? numericThresholdValue, CancellationToken cancellationToken,
-        AlertContext? context = null)
+        AlertContext? context = null, bool honorMuteRules = true)
     {
         /* Same mute treatment as the engine: a muted self-alert is still recorded (flagged muted) but its
-           channels are skipped — the deliverer honors AlertOutcome.Muted. */
-        bool muted = _isAlertMuted(new AlertMuteContext { ServerName = serverName, MetricName = metricName });
+           channels are skipped — the deliverer honors AlertOutcome.Muted. The one condition that opts out
+           does not even ASK, so a throwing Matches() cannot reach it either. */
+        bool muted = honorMuteRules
+            && _isAlertMuted(new AlertMuteContext { ServerName = serverName, MetricName = metricName });
 
         /* #1681: log the FIRING, not just the recovery. RecordResolutionAsync has always logged at Information,
            so the service log showed "… Recovered" with nothing before it — which reads as a spontaneous
