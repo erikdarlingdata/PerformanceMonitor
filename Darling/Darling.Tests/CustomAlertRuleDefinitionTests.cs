@@ -347,4 +347,103 @@ public class CustomAlertRuleDefinitionTests
         Assert.Equal(">= 40", critText);
         Assert.Equal(40d, critNum);
     }
+
+    // ─────────────── #3373: the no-data (stalled-collector) count guard — scalar AND range ───────────────
+
+    /// <summary>A COUNT-aggregate Scalar metric. deadlocks/deadlock_count is a count-only per-event measure, so
+    /// the metric compiles to <c>COUNT(*)</c>, which reads 0 over an empty (stalled) window — never the NULL the
+    /// evaluator's no-data freeze catches. A '&lt;'/'&lt;=' scalar, or a range band that fires at 0, therefore
+    /// cannot tell "no events happened" from "the collector is dead".</summary>
+    private const string CountMetric =
+        "\"metric\":{\"source\":\"deadlocks\",\"measure\":\"deadlock_count\",\"aggregate\":\"count\",\"hours\":1}";
+
+    /// <summary>A range predicate over the COUNT metric above.</summary>
+    private static string CountRangePredicate(string op, double lower, double upper) =>
+        "{" + CountMetric + ",\"predicate\":{\"op\":\"" + op + "\",\"lowerBound\":" +
+        lower.ToString(System.Globalization.CultureInfo.InvariantCulture) + ",\"upperBound\":" +
+        upper.ToString(System.Globalization.CultureInfo.InvariantCulture) + "}}";
+
+    /// <summary>A range predicate over the shared NON-count metric (wait_stats/wait_time_ms/SUM).</summary>
+    private static string SumRangePredicate(string op, double lower, double upper) =>
+        "{" + Metric + ",\"predicate\":{\"op\":\"" + op + "\",\"lowerBound\":" +
+        lower.ToString(System.Globalization.CultureInfo.InvariantCulture) + ",\"upperBound\":" +
+        upper.ToString(System.Globalization.CultureInfo.InvariantCulture) + "}}";
+
+    [Theory]
+    [InlineData("lt")]
+    [InlineData("le")]
+    public void ScalarCountWithLessThanOrEqual_IsError_StalledCollectorTrap(string op)
+    {
+        // The scalar half of the count no-data guard (the range half is below): a stalled collector reads COUNT 0,
+        // indistinguishable from zero events, so a '<'/'<=' count alert would false-fire on a data gap.
+        var (def, error) = CustomAlertRuleDefinition.TryParse(
+            "{" + CountMetric + ",\"predicate\":{\"op\":\"" + op + "\",\"warnThreshold\":5}}");
+        Assert.Null(def);
+        Assert.NotNull(error);
+    }
+
+    [Theory]
+    // A COUNT range band that FIRES on a stalled-collector 0 is rejected (the #3373 range half of the guard).
+    [InlineData("outside", 1, 100)] // 0 < lower  => outside fires on 0
+    [InlineData("between", 0, 100)] // lower <= 0 <= upper => between fires on 0
+    public void CountRangeBandThatFiresOnZero_IsError_StalledCollectorTrap(string op, double lower, double upper)
+    {
+        var (def, error) = CustomAlertRuleDefinition.TryParse(CountRangePredicate(op, lower, upper));
+        Assert.Null(def);
+        Assert.NotNull(error);
+    }
+
+    [Theory]
+    // A COUNT range band that does NOT fire on 0 is fine: a stalled 0 simply does not breach, so there is no
+    // ambiguity to guard against and the rule parses normally.
+    [InlineData("outside", 0, 100)] // 0 is the inclusive lower edge => not outside => safe
+    [InlineData("between", 1, 100)] // 0 < lower => not between => safe
+    public void CountRangeBandThatDoesNotFireOnZero_Parses(string op, double lower, double upper)
+    {
+        var (def, error) = CustomAlertRuleDefinition.TryParse(CountRangePredicate(op, lower, upper));
+        Assert.Null(error);
+        Assert.NotNull(def);
+        Assert.True(def!.IsRange);
+        Assert.False(def.BreachesOnZero()); // the guard's predicate agrees the band is safe on a stalled 0
+        Assert.False(def.IsBreaching(0));   // and a stalled 0 genuinely does not breach
+    }
+
+    [Theory]
+    // The guard is COUNT-specific: a non-count aggregate (SUM) whose band fires on 0 is NOT rejected, because a
+    // stalled collector returns NULL for SUM/AVG (caught by the evaluator's no-data freeze), not a real 0.
+    [InlineData("outside", 1, 100)]
+    [InlineData("between", 0, 100)]
+    public void NonCountRangeBandThatFiresOnZero_Parses(string op, double lower, double upper)
+    {
+        var (def, error) = CustomAlertRuleDefinition.TryParse(SumRangePredicate(op, lower, upper));
+        Assert.Null(error);
+        Assert.NotNull(def);
+        Assert.True(def!.BreachesOnZero()); // the band WOULD fire on 0, but the metric is not a COUNT...
+        Assert.True(def.IsBreaching(0));    // ...so the guard leaves it alone.
+    }
+
+    [Theory]
+    // BreachesOnZero is the band-at-0 verdict for a range op, and it IS IsBreaching(0) — the single authority.
+    [InlineData("outside", 1, 100, true)]
+    [InlineData("outside", 0, 100, false)]
+    [InlineData("between", 0, 100, true)]
+    [InlineData("between", 1, 100, false)]
+    public void BreachesOnZero_EqualsIsBreachingAtZero_ForRangeOps(string op, double lower, double upper, bool expected)
+    {
+        // Use the non-count metric so a fires-on-0 band still PARSES (the count guard would reject it otherwise).
+        var (def, _) = CustomAlertRuleDefinition.TryParse(SumRangePredicate(op, lower, upper));
+        Assert.Equal(expected, def!.BreachesOnZero());
+        Assert.Equal(def.IsBreaching(0), def.BreachesOnZero());
+    }
+
+    [Fact]
+    public void BreachesOnZero_IsFalse_ForScalarOp_EvenWhenItBreachesAtZero()
+    {
+        // BreachesOnZero is a range-only concept; a scalar op's count trap is the separate '<'/'<=' rejection.
+        // 'le 0' on a SUM metric DOES breach at 0, yet BreachesOnZero is false because the op is not a range.
+        var (def, _) = CustomAlertRuleDefinition.TryParse(
+            "{" + Metric + ",\"predicate\":{\"op\":\"le\",\"warnThreshold\":0}}");
+        Assert.True(def!.IsBreaching(0));
+        Assert.False(def.BreachesOnZero());
+    }
 }
