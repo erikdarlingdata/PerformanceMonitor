@@ -105,9 +105,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", connection) { Comma
     /// A caller-initiated rule delete runs on the least-privilege viewer/mcp pool, which may not INSERT the
     /// history table; the function (owned by the store owner, EXECUTE-granted to viewer/mcp) performs the
     /// privileged write while confining it to exactly a no-channel resolution row -- the fixed delivery-shape
-    /// columns live in the function, so this passes only the four that vary. Shape-identical to what
-    /// <see cref="RecordAlertAsync"/> writes for a <see cref="Mcp.DarlingMcpCustomAlertTools"/>-adjacent
-    /// <c>BuildResolutionRecord</c>. NOT failure-isolated here: the sole caller
+    /// columns live in the function, so this passes only the four that vary. Maps the same way
+    /// <see cref="RecordAlertAsync"/> writes a <c>BuildResolutionRecord</c> (title -> metric_name, message ->
+    /// detail_text, zeroed/unmuted), but pinned to a no-channel row (<c>alert_sent</c> false,
+    /// <c>notification_type</c> 'none') rather than a natural clear's 'tray'. NOT failure-isolated here: the sole caller
     /// (<c>CustomAlertEvaluator.WriteTeardownResolutionAsync</c>) already wraps it best-effort, and swallowing
     /// here would hide a missing grant/function behind a silent no-op -- exactly the class of bug #3334 is.
     /// </summary>
