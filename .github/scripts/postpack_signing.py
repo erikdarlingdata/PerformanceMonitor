@@ -478,15 +478,23 @@ def apply(signed_dir: str, manifest_path: str) -> int:
         for member in product["portable"]["members"]:
             blobs[member["stage"]] = signed_blob(member["stage"])
 
-    # Nothing in the packed output is touched until every rebuild has been built AND verified,
-    # for every product. A rebuild that fails does so while the artifacts are still exactly as
-    # `vpk pack` left them, rather than after an earlier product has already been overwritten.
-    pending_setups: list[tuple[str, bytes]] = []
-    pending_archives: list[tuple[str, str, list[str], int]] = []
-    rebuilt_paths: list[str] = []
+    # Nothing in the packed output is touched until every replacement has been built AND
+    # verified, for every product. Each one is written beside its target and moved into place by
+    # a rename, so a write that is interrupted leaves the original intact rather than truncated:
+    # `Setup.exe` is 124 MB, and a half-written installer under the name the upload step reads
+    # is worse than a failed job.
+    pending: list[tuple[str, str]] = []
+    scratch_paths: list[str] = []
+    census: list[str] = []
     try:
         for product in manifest["products"]:
-            pending_setups.append((product["setup"]["path"], blobs[product["setup"]["stage"]]))
+            setup = product["setup"]["path"]
+            scratch = setup + ".signed"
+            scratch_paths.append(scratch)
+            with open(scratch, "wb") as handle:
+                handle.write(blobs[product["setup"]["stage"]])
+            pending.append((scratch, setup))
+            census.append(f"  {os.path.basename(setup)} signed")
 
             archive = product["portable"]["path"]
             replacements = {m["member"]: blobs[m["stage"]] for m in product["portable"]["members"]}
@@ -494,38 +502,44 @@ def apply(signed_dir: str, manifest_path: str) -> int:
                 raise PostPackError(f"{archive}: no members to replace")
             before = snapshot(archive)
             rebuilt = archive + ".rebuilt"
-            rebuilt_paths.append(rebuilt)
+            scratch_paths.append(rebuilt)
             rebuild(archive, replacements, rebuilt)
             assert_faithful(before, rebuilt, replacements)
-            pending_archives.append((archive, rebuilt, sorted(replacements), len(before)))
+            pending.append((rebuilt, archive))
+            census.append(
+                f"  {os.path.basename(archive)} rebuilt with {len(replacements)} signed "
+                f"member(s), {len(before)} entries preserved"
+            )
 
-        for path, blob in pending_setups:
-            with open(path, "wb") as handle:
-                handle.write(blob)
-        for archive, rebuilt, _, _ in pending_archives:
-            os.replace(rebuilt, archive)
+        for scratch, target in pending:
+            os.replace(scratch, target)
+    except OSError as exc:
+        # Reported rather than raised as a traceback: the staging write and the rename are the
+        # two places a full disk or a killed runner lands, and the operator needs to be told
+        # that the packed output is unchanged rather than shown a stack.
+        raise PostPackError(f"the write-back could not complete: {exc}") from exc
     finally:
-        for rebuilt in rebuilt_paths:
-            if os.path.exists(rebuilt):
-                os.remove(rebuilt)
+        for scratch in scratch_paths:
+            if os.path.isfile(scratch):
+                os.remove(scratch)
 
     written = 0
-    for path, _ in pending_setups:
-        if not is_signed(path):
-            raise PostPackError(f"{path}: unsigned after the write-back")
+    for product in manifest["products"]:
+        setup = product["setup"]["path"]
+        if not is_signed(setup):
+            raise PostPackError(f"{setup}: unsigned after the write-back")
         written += 1
-        print(f"  {os.path.basename(path)} signed")
-    for archive, _, replaced, entries in pending_archives:
+
+        archive = product["portable"]["path"]
         with zipfile.ZipFile(archive) as zf:
-            for member in replaced:
+            for member in (m["member"] for m in product["portable"]["members"]):
                 offset, length = vrs.certificate_table(zf.read(member)[: vrs.HEADER_BYTES])
                 if offset == 0 or length == 0:
                     raise PostPackError(f"{archive} :: {member}: unsigned after the rebuild")
-        written += len(replaced)
-        print(
-            f"  {os.path.basename(archive)} rebuilt with {len(replaced)} signed member(s), "
-            f"{entries} entries preserved"
-        )
+                written += 1
+
+    for line in census:
+        print(line)
 
     if not written:
         raise PostPackError("the manifest named no files. An empty write-back signs nothing.")
@@ -767,7 +781,10 @@ def self_test() -> int:
             out = {}
             for directory in (lite, viewer):
                 for name in sorted(os.listdir(directory)):
-                    with open(os.path.join(directory, name), "rb") as handle:
+                    path = os.path.join(directory, name)
+                    if not os.path.isfile(path):
+                        continue
+                    with open(path, "rb") as handle:
                         out[f"{directory}/{name}"] = hashlib.sha256(handle.read()).hexdigest()
             return out
 
@@ -841,6 +858,24 @@ def self_test() -> int:
             "apply committed the first product before the second product's rebuild failed",
             artifact_digests() == untouched,
         )
+
+        # An installer that cannot be staged beside its target. `Setup.exe` is 124 MB in a real
+        # release, so it is written to a scratch path and renamed; writing it in place would
+        # leave a truncated installer under the name the upload step reads. Making the scratch
+        # path a directory is the cheapest way to fail that write without a full disk.
+        blocked = os.path.join(lite, "PerformanceMonitorLite-lite-Setup.exe.signed")
+        os.makedirs(blocked, exist_ok=True)
+        whole = _sign_stage(stage, suffix="-whole")
+        untouched = artifact_digests()
+        expect_raises(
+            "apply accepted an installer it could not stage beside its target",
+            lambda: apply(whole, manifest),
+        )
+        expect(
+            "apply modified an artifact after failing to stage the installer",
+            artifact_digests() == untouched,
+        )
+        os.rmdir(blocked)
 
         signed = _sign_stage(stage)
         before_lite = snapshot(os.path.join(lite, "PerformanceMonitorLite-lite-Portable.zip"))
