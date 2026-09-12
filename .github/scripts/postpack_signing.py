@@ -421,11 +421,15 @@ def collect(stage: str, manifest_path: str, products: list[tuple[str, str]]) -> 
 
         stage_file(entry["setup"]["stage"], lambda dst: shutil.copyfile(setup, dst))
 
+        def write_blob(destination: str, blob: bytes) -> None:
+            with open(destination, "wb") as handle:
+                handle.write(blob)
+
         with zipfile.ZipFile(portable) as zf:
             for member in portable_root_executables(portable):
                 rel = f"{name}-portable/{member}"
                 blob = zf.read(member)
-                stage_file(rel, lambda dst, blob=blob: open(dst, "wb").write(blob))
+                stage_file(rel, lambda dst, blob=blob: write_blob(dst, blob))
                 entry["portable"]["members"].append({"member": member, "stage": rel})
 
         manifest["products"].append(entry)
@@ -489,9 +493,13 @@ def apply(signed_dir: str, manifest_path: str) -> int:
             raise PostPackError(f"{archive}: no members to replace")
         before = snapshot(archive)
         rebuilt = archive + ".rebuilt"
-        rebuild(archive, replacements, rebuilt)
-        assert_faithful(before, rebuilt, replacements)
-        os.replace(rebuilt, archive)
+        try:
+            rebuild(archive, replacements, rebuilt)
+            assert_faithful(before, rebuilt, replacements)
+            os.replace(rebuilt, archive)
+        finally:
+            if os.path.exists(rebuilt):
+                os.remove(rebuilt)
         with zipfile.ZipFile(archive) as zf:
             for member in replacements:
                 head = zf.read(member)[: vrs.HEADER_BYTES]
