@@ -1551,7 +1551,7 @@ public class DuckDbInitializer
 
         if (fromVersion < 58)
         {
-            /* v58 (#3282): the built-in alert catalog's persistence-gate state, porting Darling's V117.
+            /* v58 (#3282): the built-in alert catalog's persistence-gate state, porting Darling's V118.
                Before this no built-in alert required its condition to PERSIST — one sample over the bar
                fired and the next sample under it resolved — so a momentary CPU spike was indistinguishable
                from sustained saturation. New table only; fresh installs get it from

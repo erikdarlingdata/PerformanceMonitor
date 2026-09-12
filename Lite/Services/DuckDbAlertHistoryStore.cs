@@ -530,7 +530,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)";
 
     /// <summary>
     /// #3282: loads one subject's built-in persistence-gate record from <c>config_alert_persistence_state</c>
-    /// — the Lite twin of Darling's V117 table. Returns null when there is no row, which the engine reads as
+    /// — the Lite twin of Darling's V118 table. Returns null when there is no row, which the engine reads as
     /// "no memory" and arms the gate from zero.
     ///
     /// <para>Null on failure too, deliberately. A load failure cannot resurrect a <c>firing</c> bit it did
