@@ -58,7 +58,8 @@ public sealed class DarlingMcpCustomAlertTools
 {
     [McpServerTool(Name = "list_custom_alert_rules"), Description(
         "Lists every saved custom alert rule as a lightweight summary - id, name, description, whether it is " +
-        "enabled, version, and who/when it was last updated. No definition body. Use the id with " +
+        "enabled, version, who/when it was last updated, and when it last fired (last_fired, an ISO-8601 UTC " +
+        "instant, or null if the rule has never fired). No definition body. Use the id with " +
         "get_custom_alert_rule to fetch a rule's full spec, or with update_custom_alert_rule / " +
         "delete_custom_alert_rule.")]
     public static async Task<string> ListCustomAlertRules(NpgsqlDataSource postgres)

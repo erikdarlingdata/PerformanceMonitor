@@ -259,7 +259,7 @@ public sealed class DarlingWebEndpointsTests
         var summaries = new List<CustomAlertRuleSummary>
         {
             new(Id: 11, Name: "blocking", Description: null, Enabled: true, Version: 2,
-                UpdatedAt: new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc), UpdatedBy: "mcp"),
+                UpdatedAt: new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc), UpdatedBy: "mcp", LastFired: null),
         };
 
         var array = DarlingWebEndpoints.BuildRuleSummariesNode(summaries);
@@ -269,5 +269,29 @@ public sealed class DarlingWebEndpointsTests
         Assert.Equal("blocking", (string)only["name"]!);
         Assert.True((bool)only["enabled"]!);
         Assert.False(only.ContainsKey("definition"));  // the list projection never carries the definition body
+    }
+
+    [Fact]
+    public void BuildRuleSummariesNode_CarriesLastFired_OrNullWhenNeverFired()
+    {
+        var firedAt = new DateTime(2026, 3, 4, 5, 6, 7, DateTimeKind.Utc);
+        var summaries = new List<CustomAlertRuleSummary>
+        {
+            new(Id: 1, Name: "fired", Description: null, Enabled: true, Version: 1,
+                UpdatedAt: firedAt, UpdatedBy: null, LastFired: firedAt),
+            new(Id: 2, Name: "never", Description: null, Enabled: true, Version: 1,
+                UpdatedAt: firedAt, UpdatedBy: null, LastFired: null),
+        };
+
+        var array = DarlingWebEndpoints.BuildRuleSummariesNode(summaries);
+
+        var fired = Assert.IsType<JsonObject>(array[0]);
+        Assert.True(fired.ContainsKey("last_fired"));
+        Assert.Equal(firedAt, fired["last_fired"]!.GetValue<DateTime>());
+
+        // The key is ALWAYS present (a stable wire shape) — a never-fired rule carries JSON null, not an absent key.
+        var never = Assert.IsType<JsonObject>(array[1]);
+        Assert.True(never.ContainsKey("last_fired"));
+        Assert.Null(never["last_fired"]);
     }
 }
