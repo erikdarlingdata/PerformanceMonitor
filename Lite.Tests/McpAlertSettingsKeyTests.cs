@@ -132,9 +132,21 @@ public sealed class McpAlertSettingsKeyTests
         throw new FileNotFoundException($"Could not locate {relativePath} walking up from {AppContext.BaseDirectory}");
     }
 
-    /// <summary>Darling's one group Lite deliberately does not report. Named once so the omission reads as a
-    /// decision in both places that reference it.</summary>
+    /// <summary>A group Darling reports and Lite deliberately does not. Named once so the omission reads as a
+    /// decision in both places that reference it. Stated without a count, for the reason
+    /// <see cref="GetAlertSettings_OmitsSelfAlerts_WhichLiteHasNoEquivalentFor"/> gives about numerals in this
+    /// file: there is now more than one, and a numeral here would go stale without going red.</summary>
     private const string SelfAlertsGroup = "self_alerts";
+
+    /// <summary>#3368: the other group Darling reports and Lite does not. The health-band tiers decide what
+    /// colour a server's card reads and how the worst-first ranking and <c>get_fleet_overview</c> count bands
+    /// — and Lite has NO health band at all: it never constructs <c>ServerHealthMetrics</c>, never calls
+    /// <c>ClassifyBand</c> or <c>OverallMetricSeverity</c>, and drives its card brushes from
+    /// <c>ClassifyFreshness</c> plus the severity enum. So reporting these two would advertise a knob this
+    /// product cannot act on, which is the placeholder failure
+    /// <see cref="GetAlertSettings_OmitsSelfAlerts_WhichLiteHasNoEquivalentFor"/>'s own history rejected for
+    /// <c>ag.disconnect_refire_minutes</c>. Omission is the honest answer until Lite grows a band.</summary>
+    private const string HealthBandsGroup = "health_bands";
 
     /// <summary>#2417: the MEMBER-level counterpart to <see cref="SelfAlertsGroup"/> — Darling keys Lite
     /// genuinely has no equivalent for, exempted BY NAME so the hole is a decision someone justified here
@@ -258,7 +270,7 @@ public sealed class McpAlertSettingsKeyTests
 
         foreach (var (group, darlingKeys) in darling)
         {
-            if (group == SelfAlertsGroup) continue;
+            if (group == SelfAlertsGroup || group == HealthBandsGroup) continue;
 
             if (!root.TryGetProperty(group, out var element))
             {
@@ -344,6 +356,36 @@ public sealed class McpAlertSettingsKeyTests
     {
         Assert.Contains(SelfAlertsGroup, DarlingPayloadShape().Select(g => g.Key));
         Assert.DoesNotContain(SelfAlertsGroup, KeysOf(Settings()));
+    }
+
+    /// <summary>
+    /// #3368's counterpart, and the same two halves: Darling must still publish the group, or the omission
+    /// below is over a key nobody emits, and Lite must still not publish it.
+    ///
+    /// <para>The third assertion is the one that makes this an omission rather than a gap. Lite has no health
+    /// band anywhere in its source, so the tiers would be a knob with nothing behind it — and that is
+    /// checkable rather than assertable, which is why it is checked. If Lite ever grows a band, this test is
+    /// where that shows up, and the group stops being exempt from the shape comparison at the same time.</para>
+    /// </summary>
+    [Fact]
+    public void GetAlertSettings_OmitsHealthBands_BecauseLiteHasNoBandToTune()
+    {
+        Assert.Contains(HealthBandsGroup, DarlingPayloadShape().Select(g => g.Key));
+        Assert.DoesNotContain(HealthBandsGroup, KeysOf(Settings()));
+
+        var liteRoot = Path.GetDirectoryName(FindRepoFile(Path.Combine("Lite", "PerformanceMonitorLite.csproj")))!;
+        var bandCallers = Directory
+            .EnumerateFiles(liteRoot, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                     && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => File.ReadAllText(f) is var text
+                     && (text.Contains("ClassifyBand", StringComparison.Ordinal)
+                      || text.Contains("OverallMetricSeverity", StringComparison.Ordinal)
+                      || text.Contains("ServerHealthMetrics", StringComparison.Ordinal)))
+            .Select(f => Path.GetFileName(f))
+            .ToArray();
+
+        Assert.Empty(bandCallers);
     }
 
     /// <summary>
