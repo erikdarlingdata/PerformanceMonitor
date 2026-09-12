@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -780,9 +781,33 @@ public sealed class ServerSummaryItem
 
     public string DeadlockDisplay => DeadlockCount > 0 ? DeadlockCount.ToString() : "0";
 
-    /// <summary>The deadlock detail — how long since the last deadlock ever ("Last: N ago"), else blank.</summary>
-    public string DeadlockDetail =>
-        LastDeadlockMinutesAgo.HasValue ? $"Last: {FormatMinutesAgo(LastDeadlockMinutesAgo.Value)}" : "";
+    /// <summary>
+    /// The deadlock detail — the banded RATE, then how long since the last deadlock ever ("Last: N ago").
+    ///
+    /// <para><b>The rate leads because it is what coloured the dot</b> (#3368). The value beside it is the
+    /// COUNT, so without the rate here the row bands on a figure it does not show: "Deadlocks 3" against an
+    /// amber dot reads the same over an hour and over a day. The same pair the web fleet chip renders, in
+    /// the same order, so the two surfaces read alike. Omitted when the window was too short to normalise,
+    /// which is the reading the band itself had to go on.</para>
+    /// </summary>
+    public string DeadlockDetail
+    {
+        get
+        {
+            var parts = new List<string>(2);
+            if (DeadlockRatePerHour.HasValue)
+            {
+                parts.Add($"{DeadlockRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr");
+            }
+
+            if (LastDeadlockMinutesAgo.HasValue)
+            {
+                parts.Add($"Last: {FormatMinutesAgo(LastDeadlockMinutesAgo.Value)}");
+            }
+
+            return string.Join(" · ", parts);
+        }
+    }
 
     /// <summary>Threads value — the pressure headline (Dashboard's ThreadsDisplayText), or "--" with no snapshot.</summary>
     public string ThreadsDisplay

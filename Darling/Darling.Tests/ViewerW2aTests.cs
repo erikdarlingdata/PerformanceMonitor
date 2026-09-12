@@ -477,12 +477,51 @@ public sealed class ViewerServerSummaryDisplayTests
         Assert.Equal("", new ServerSummaryItem { BlockingCount = 0 }.BlockingDetail);
     }
 
+    /// <summary>
+    /// The deadlock detail leads with the banded RATE and then the last-seen age (#3368).
+    ///
+    /// <para>The rate has to be there because the VALUE beside this detail is the count while the dot is
+    /// coloured by the rate — "Deadlocks 3" against an amber dot is the same string over an hour and over a
+    /// day, which is the reading #3368 is about. The three original rows are kept and they still read
+    /// exactly as they did, because none of them declares a window and an unrateable window contributes no
+    /// rate segment; that is asserted here rather than left as a coincidence.</para>
+    /// </summary>
     [Fact]
-    public void DeadlockDetail_ShowsLastAgo_WhenKnown_BlankWhenNever()
+    public void DeadlockDetail_LeadsWithTheRate_ThenLastAgo_BlankWhenNeither()
     {
+        /* No window declared: the rate segment is absent and the row reads as it always has. */
         Assert.Equal("Last: 5m ago", new ServerSummaryItem { LastDeadlockMinutesAgo = 5 }.DeadlockDetail);
         Assert.Equal("Last: just now", new ServerSummaryItem { LastDeadlockMinutesAgo = 0 }.DeadlockDetail);
         Assert.Equal("", new ServerSummaryItem().DeadlockDetail);
+
+        /* A rateable window: the rate leads, and it is the figure the dot banded on. 24 over 1h and 24
+           over 24h, so both renderings are exact at one decimal and neither turns on a rounding rule. */
+        var tight = new ServerSummaryItem
+        {
+            DeadlockCount = 24,
+            DeadlockWindow = TimeSpan.FromHours(1),
+            LastDeadlockMinutesAgo = 5,
+        };
+        Assert.Equal("24.0/hr · Last: 5m ago", tight.DeadlockDetail);
+
+        /* The SAME count over a day is a different rate, so the detail differs where the value cannot —
+           the whole reason the rate is rendered at all. */
+        var wide = new ServerSummaryItem
+        {
+            DeadlockCount = 24,
+            DeadlockWindow = TimeSpan.FromHours(24),
+            LastDeadlockMinutesAgo = 5,
+        };
+        Assert.Equal("1.0/hr · Last: 5m ago", wide.DeadlockDetail);
+        Assert.NotEqual(tight.DeadlockDetail, wide.DeadlockDetail);
+
+        /* And the VALUE beside the detail is identical in both, which is the point. */
+        Assert.Equal(tight.DeadlockDisplay, wide.DeadlockDisplay);
+
+        /* A quiet, measured window still states the rate: 0.0/hr is a measurement, not an absence. */
+        Assert.Equal(
+            "0.0/hr",
+            new ServerSummaryItem { DeadlockCount = 0, DeadlockWindow = TimeSpan.FromHours(1) }.DeadlockDetail);
     }
 
     [Fact]
