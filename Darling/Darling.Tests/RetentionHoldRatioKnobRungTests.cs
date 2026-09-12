@@ -202,11 +202,11 @@ public sealed class RetentionHoldRatioKnobRungTests
     [Fact]
     public void TheMcpWriteBoundAndTheEngineClamp_AreTheSameConstants_NotMatchingLiterals()
     {
-        var tools = RepoFile.ReadRepoFileLf(
+        var tools = RepoFile.ReadRepoFile(
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs");
-        var settings = RepoFile.ReadRepoFileLf(
+        var settings = RepoFile.ReadRepoFile(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingAlertSettings.cs");
-        var window = RepoFile.ReadRepoFileLf(
+        var window = RepoFile.ReadRepoFile(
             "Darling", "PerformanceMonitor.Darling.Viewer", "SettingsWindow.xaml.cs");
 
         /* All three writable surfaces reach the same two named bounds. The Settings window is in here
@@ -261,13 +261,13 @@ public sealed class RetentionHoldRatioKnobRungTests
     {
         var surfaces = new (string What, string Text)[]
         {
-            ("AlertsConfig seed", RepoFile.ReadRepoFileLf(
+            ("AlertsConfig seed", RepoFile.ReadRepoFile(
                 "Darling", "PerformanceMonitor.Darling.Service", "DarlingConfig.cs")),
-            ("viewer row initializer", RepoFile.ReadRepoFileLf(
+            ("viewer row initializer", RepoFile.ReadRepoFile(
                 "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.AlertSettings.cs")),
-            ("Restore Defaults button", RepoFile.ReadRepoFileLf(
+            ("Restore Defaults button", RepoFile.ReadRepoFile(
                 "Darling", "PerformanceMonitor.Darling.Viewer", "SettingsWindow.xaml.cs")),
-            ("evaluator fallback", RepoFile.ReadRepoFileLf(
+            ("evaluator fallback", RepoFile.ReadRepoFile(
                 "Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs")),
         };
 
@@ -339,7 +339,7 @@ public sealed class RetentionHoldRatioKnobRungTests
     [Fact]
     public void TheWorkerWiresBothSeamsToTheClampedSettings()
     {
-        var worker = RepoFile.ReadRepoFileLf(
+        var worker = RepoFile.ReadRepoFile(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
 
         Assert.Contains("retentionHoldWarnRatio: () => alertSettings.RetentionHoldWarnRatio", worker, StringComparison.Ordinal);
@@ -357,7 +357,7 @@ public sealed class RetentionHoldRatioKnobRungTests
     [Fact]
     public void TheRunbookDocumentsTheKnobsRatherThanTheGap()
     {
-        var runbook = RepoFile.ReadRepoFileLf("docs", "retention-hold-runbook.md");
+        var runbook = RepoFile.ReadRepoFile("docs", "retention-hold-runbook.md");
 
         Assert.DoesNotContain("thresholds are not tunable", runbook, StringComparison.Ordinal);
         Assert.DoesNotContain("cannot be adjusted in Settings", runbook, StringComparison.Ordinal);
@@ -390,7 +390,7 @@ public sealed class RetentionHoldRatioKnobRungTests
     /// </summary>
     private static string RetentionHoldBodies()
     {
-        var source = RepoFile.ReadRepoFileLf(
+        var source = RepoFile.ReadRepoFile(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs");
 
         const string start = "internal async Task ApplyRetentionHoldsAsync(";
