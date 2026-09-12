@@ -592,12 +592,11 @@ jobs:
           wait-for-completion: true
           output-artifact-directory: 'signed/Lite-Velopack'
 
-      # The remote-seat viewer Setup.exe (#1555) is signed with its OWN 'DarlingViewer' artifact
-      # configuration — the co-located-zip 'Darling' slug signs a service+viewer\ tree layout, which
-      # does not match this self-contained viewer-at-root publish. Like the 'Darling' slug, the
-      # 'DarlingViewer' config (which files get signed) lives outside this repo on signpath.io; a
-      # step naming a slug that does not exist fails the release — the standing #1340 SignPath
-      # prerequisite.
+      # The remote-seat viewer (#1555) has its OWN 'DarlingViewer' artifact configuration — the
+      # co-located-zip 'Darling' slug signs a service+viewer\ tree layout, which does not match
+      # this self-contained viewer-at-root publish. Every artifact configuration named in this
+      # workflow lives outside the repo on signpath.io, and a step naming a slug that does not
+      # exist fails the release — the standing #1340 SignPath prerequisite.
       - name: Sign Darling Viewer (Velopack)
         if: github.event_name == 'release'
         uses: signpath/github-action-submit-signing-request@v2
@@ -653,8 +652,9 @@ jobs:
       # unsigned — allowlisted by member path AND container in verify_release_signatures.py, so
       # the same two names anywhere else still fail the guard below.
       #
-      # One request, six files, one approval: the staging layout puts each product in its own
-      # subdirectory because both portable archives contain an Update.exe.
+      # Both products go in one request, so this costs one approval however many files it
+      # carries. The staging layout gives each product its own subdirectory because both
+      # portable archives contain an Update.exe and a flat batch would collide.
       - name: Collect the executables Velopack generates
         if: github.event_name == 'release'
         shell: pwsh
@@ -696,7 +696,11 @@ jobs:
         run: |
           python3 .github/scripts/postpack_signing.py apply --signed postpack/signed --manifest postpack/manifest.json
 
-      # After the write-back, not before: signing changes the bytes of every asset it touches.
+      # After the write-back, so it records the bytes that ship. Its census is `releases/*.zip`,
+      # which is not recursive: it covers the two plain product archives and does not reach the
+      # Velopack assets in releases/velopack-*/, so Setup.exe and Portable.zip carry no entry
+      # here. releases.<channel>.json is the integrity record for the .nupkg files, and nothing
+      # publishes a checksum for the two files the step above signs.
       - name: Generate checksums
         if: github.event_name == 'release'
         shell: pwsh
