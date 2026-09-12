@@ -245,11 +245,17 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     /// UPDATE — and it would need an exemption entry, which is the same hand-maintained fact that let six
     /// columns go missing in the first place. If a genuinely read-only column ever arrives, exempt it BY NAME
     /// here with its reason; do not loosen the equality.</para>
+    ///
+    /// <para>#3314 made the tool span TWO config tables, so the equality is held PER TABLE and each read's
+    /// own SELECT list is the expectation for its own plane. A single equality over the union would be
+    /// satisfiable by compensating drift — a column dropped from one table's write set and a stray added to
+    /// the other's would net to the same set — and it is the weaker check precisely where the new plane is
+    /// thinnest.</para>
     /// </summary>
     [Fact]
     public void EveryColumnRead_IsEmittedByThePayload_AndAcceptedByTheWriter()
     {
-        var (columns, error) = ParseAsPartialUpdate(SerializedSettingsPayload(SampleSettingsRow()));
+        var (targets, error) = ParseAsPartialUpdate(SerializedSettingsPayload(SampleSettingsRow()));
 
         /* Every key the payload emits is accepted. The parse stops at the FIRST rejection, so a non-null
            error here names the exact key update_alert_settings would refuse from its own read. */
@@ -257,11 +263,158 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
 
         /* Each accepted key claimed its own column — two keys sharing one would make whichever lost the
            parse order a silent no-op, with the caller told both were updated. */
-        Assert.Equal(columns.Count, columns.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(targets.Count, targets.Distinct().Count());
+
+        /* Every table the writer can reach is compared, driven off the tool's own list — so a third plane
+           added without a read to match it fails here instead of going uncompared. */
+        foreach (var table in DarlingMcpAlertTools.WritableTables)
+        {
+            Assert.Equal(
+                SelectedColumnsOf(table).OrderBy(c => c, StringComparer.Ordinal).ToArray(),
+                ColumnsFor(targets, table).OrderBy(c => c, StringComparer.Ordinal).ToArray());
+        }
+
+        /* And the writer reaches no table outside that list — the direction the loop above cannot see. */
+        Assert.Empty(targets.Select(t => t.Table).Except(DarlingMcpAlertTools.WritableTables, StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// #3314: <c>updated_fields</c> reports BARE column names across two tables, which is only unambiguous
+    /// while no writable column name appears on both. Qualifying them instead would have redefined every
+    /// existing entry of a consumer-visible array, so the uniqueness is the thing being relied on — asserted
+    /// here rather than assumed, and it is the assertion that fails on the day a second table grows a
+    /// same-named column.
+    /// </summary>
+    [Fact]
+    public void WritableColumnNames_DoNotCollideAcrossTheTwoTables()
+    {
+        var byTable = DarlingMcpAlertTools.WritableTables
+            .Select(t => SelectedColumnsOf(t).ToArray())
+            .ToArray();
+
+        /* A count comparison is satisfied by two empty sets, and an emptied SELECT list is exactly the
+           accident that would produce them -- so each plane is asserted non-empty first. */
+        Assert.Equal(DarlingMcpAlertTools.WritableTables.Length, byTable.Length);
+        Assert.All(byTable, columns => Assert.NotEmpty(columns));
 
         Assert.Equal(
-            SelectedAlertSettingsColumns().OrderBy(c => c, StringComparer.Ordinal).ToArray(),
-            columns.OrderBy(c => c, StringComparer.Ordinal).ToArray());
+            byTable.Sum(columns => columns.Length),
+            byTable.SelectMany(columns => columns).Distinct(StringComparer.Ordinal).Count());
+    }
+
+    /// <summary>
+    /// #3314 round two: the two config tables are read under ONE snapshot, and the ISOLATION LEVEL is the
+    /// whole mechanism. PostgreSQL takes a fresh snapshot per statement under READ COMMITTED, so wrapping
+    /// the two SELECTs in a default transaction reads exactly like a fix and changes nothing — this is the
+    /// one line whose being wrong is invisible to every behavioural test that does not race a writer.
+    ///
+    /// <para>The split itself cannot come back by accident: the two single-table reads are private and take
+    /// the combined method's connection and transaction, so calling one alone does not compile. That is why
+    /// this test pins the LEVEL and the entry point rather than counting call sites — the compiler already
+    /// holds the part a test would be redundant for, and the level is the part it cannot.</para>
+    /// </summary>
+    [Fact]
+    public void TheTwoConfigTables_AreReadUnderOneRepeatableReadSnapshot()
+    {
+        var reader = ReadRepoFile(System.IO.Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingAlertReader.cs"));
+        var tools = ReadRepoFile(System.IO.Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs"));
+
+        Assert.Contains("System.Data.IsolationLevel.RepeatableRead", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("IsolationLevel.ReadCommitted", reader, StringComparison.Ordinal);
+
+        /* The single-table reads are private, so the split cannot be reintroduced -- asserted so that
+           widening either back to public is a decision someone makes here rather than a quiet edit. */
+        Assert.Contains("private static async Task<AlertSettingsReadRow?> ReadAlertSettingsAsync", reader, StringComparison.Ordinal);
+        Assert.Contains("private static async Task<int?> ReadDeliveryCooldownAsync", reader, StringComparison.Ordinal);
+
+        /* And both tool paths go through the combined entry point -- get_alert_settings and the post-write
+           re-read, which is the one described to the caller as the authoritative merged state. */
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(
+            tools, @"GetAlertConfigurationAsync\(postgres\)").Count);
+    }
+
+    /// <summary>
+    /// #3314: the delivery cooldown is reachable through the control plane under a CHANNEL-NEUTRAL name, and
+    /// the stored name still works. The whole defect was that the only throttle on a Slack / Teams /
+    /// PagerDuty / generic-webhook post was named for email, lived in the SMTP config block, and could not be
+    /// read or written by any MCP tool — so on a headless box with no SMTP at all the sole path to it was a
+    /// desktop app.
+    ///
+    /// <para>Both spellings are asserted to reach the SAME column, and sending BOTH in one body is asserted
+    /// to be REFUSED. Two SET clauses for one column is a Postgres error, so without the guard the failure
+    /// would surface as a dialect message naming neither key the caller sent; and were the duplicate ever
+    /// tolerated instead, one of the two values would win silently while the caller was told both applied.</para>
+    ///
+    /// <para>The canonical name is also asserted to be the ONLY one the read emits. An alias that round-trips
+    /// is an alias that becomes a second name for the same setting on the wire, which is its own defect for a
+    /// client diffing a read against a write.</para>
+    /// </summary>
+    [Fact]
+    public void DeliveryCooldown_IsWritableUnderBothNames_ButEmittedUnderOnlyOne()
+    {
+        var canonical = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(
+            "{\"delivery\":{\"cooldown_minutes\":45}}")!);
+        Assert.Null(canonical.Error);
+        Assert.Equal(
+            new[] { (DarlingMcpAlertTools.NotificationTable, DarlingMcpAlertTools.DeliveryCooldownColumn) },
+            canonical.Targets.ToArray());
+
+        var alias = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(
+            "{\"email_cooldown_minutes\":45}")!);
+        Assert.Null(alias.Error);
+        Assert.Equal(canonical.Targets.ToArray(), alias.Targets.ToArray());
+
+        /* Both spellings at once: refused, and the message names both so the caller knows which to drop. */
+        var both = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(
+            "{\"email_cooldown_minutes\":45,\"delivery\":{\"cooldown_minutes\":45}}")!);
+        Assert.NotNull(both.Error);
+        Assert.Contains("delivery.cooldown_minutes", both.Error!, StringComparison.Ordinal);
+        Assert.Contains(DarlingMcpAlertTools.DeliveryCooldownColumn, both.Error!, StringComparison.Ordinal);
+
+        /* The read emits the channel-neutral name and NOT the stored alias. */
+        var payload = SerializedSettingsPayload(SampleSettingsRow(), deliveryCooldownMinutes: 45);
+        Assert.Equal(45, payload["delivery"]!["cooldown_minutes"]!.GetValue<int>());
+        Assert.DoesNotContain(DarlingMcpAlertTools.DeliveryCooldownColumn, payload.Select(kv => kv.Key));
+    }
+
+    /// <summary>
+    /// #3314: the delivery cooldown's write bound is <c>DarlingAlertSettings</c>' clamp EXACTLY — the same
+    /// parity <see cref="FileGrowthWriteBounds_MatchTheEngineClamps"/> and
+    /// <see cref="AgConnectionAndBlockingWaitWriteBounds_MatchTheEngineClamps"/> hold, and for the same
+    /// reason: a wider bound lets the tool ACCEPT a value the engine silently rewrites on read, which
+    /// presents to the operator as the setting not sticking, with nothing saying no.
+    ///
+    /// <para>This is what makes the 120-minute ceiling an ENGINE decision rather than a bound edit. Raising
+    /// it here alone would reintroduce exactly that class of bug; raising it properly means moving the clamp
+    /// in both SKUs. The ceiling stayed: the cooldown is one global number applied to every fingerprint on
+    /// every server, so stretching it to silence ONE recurring signature silences everything else at the same
+    /// cadence — and a mute rule does that job scoped, expiring, and disclosed by get_mute_rules, where a
+    /// multi-hour cooldown suppresses posts that no tool reports.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    [InlineData(120, true)]
+    [InlineData(121, false)]
+    public void DeliveryCooldownWriteBounds_MatchTheEngineClamp(int minutes, bool accepted)
+    {
+        foreach (var body in new[]
+        {
+            $"{{\"delivery\":{{\"cooldown_minutes\":{minutes}}}}}",
+            $"{{\"email_cooldown_minutes\":{minutes}}}",
+        })
+        {
+            var parsed = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(body)!);
+            Assert.Equal(accepted, parsed.Error is null);
+            Assert.Equal(accepted ? 1 : 0, parsed.Targets.Count);
+        }
+
+        /* The engine's own clamp, so the numbers above are not a second opinion about the range. */
+        var settings = ReadRepoFile(System.IO.Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingAlertSettings.cs"));
+        Assert.Contains("Math.Clamp(_config.Smtp.EmailCooldownMinutes, 1, 120)", settings, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -309,11 +462,24 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     /// <summary>The reader's SELECT list, split from the SHIPPED constant the same way
     /// <see cref="AlertSettingsSelect_ColumnCount_MatchesTheOrdinalsRead"/> counts it — so it cannot drift
     /// from what the reader actually asks the store for.</summary>
-    private static IReadOnlyList<string> SelectedAlertSettingsColumns()
+    private static IReadOnlyList<string> SelectedAlertSettingsColumns() =>
+        SelectedColumnsOf(DarlingMcpAlertTools.AlertSettingsTable);
+
+    /// <summary>The SELECT list of whichever SHIPPED read constant serves <paramref name="table"/>, split the
+    /// same way. Mapped from the table name rather than taking the SQL as a parameter so a caller iterating
+    /// <c>WritableTables</c> cannot silently compare a plane against the wrong read — an unmapped table
+    /// throws here instead of being skipped.</summary>
+    private static IReadOnlyList<string> SelectedColumnsOf(string table)
     {
-        var sql = Reader.AlertSettingsSelectSql;
+        var sql = table switch
+        {
+            DarlingMcpAlertTools.AlertSettingsTable => Reader.AlertSettingsSelectSql,
+            DarlingMcpAlertTools.NotificationTable => Reader.DeliveryCooldownSelectSql,
+            _ => throw new ArgumentOutOfRangeException(nameof(table), table, "No MCP read constant is mapped to this table."),
+        };
+
         var select = sql[(sql.IndexOf("SELECT", StringComparison.Ordinal) + 6)..
-                          sql.IndexOf("FROM config_alert_settings", StringComparison.Ordinal)];
+                          sql.IndexOf("FROM " + table, StringComparison.Ordinal)];
         return select.Split(',', StringSplitOptions.RemoveEmptyEntries)
             .Select(c => c.Trim())
             .Where(c => c.Length > 0)
@@ -324,26 +490,38 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     /// serializes with and re-parsed. Runtime rather than source-parsing for the reason Lite's
     /// <c>McpAlertSettingsKeyTests</c> gives: the C# identifier is not automatically the wire key, so only
     /// serializing proves what a client receives — and therefore what it would hand back.</summary>
-    private static JsonObject SerializedSettingsPayload(Reader.AlertSettingsReadRow row)
+    private static JsonObject SerializedSettingsPayload(Reader.AlertSettingsReadRow row, int deliveryCooldownMinutes = 15)
     {
         var build = typeof(DarlingMcpAlertTools).GetMethod(
             "BuildAlertSettingsPayload", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var payload = build.Invoke(null, new object[] { row })!;
+        var payload = build.Invoke(null, new object[] { row, deliveryCooldownMinutes })!;
         var json = JsonSerializer.Serialize(payload, payload.GetType(), McpHelpers.JsonOptions);
         return (JsonObject)JsonNode.Parse(json)!;
     }
 
-    /// <summary>Runs a body through the tool's REAL partial-update parser and reports the columns it would
-    /// write plus the first validation error, if any.</summary>
-    private static (IReadOnlyList<string> Columns, string? Error) ParseAsPartialUpdate(JsonObject body)
+    /// <summary>Runs a body through the tool's REAL partial-update parser and reports the (table, column)
+    /// pairs it would write plus the first validation error, if any. Reflected over the UpdateTarget record's
+    /// properties rather than cast to a tuple shape, so adding a field to it does not silently change what
+    /// this reads.</summary>
+    private static (IReadOnlyList<(string Table, string Column)> Targets, string? Error) ParseAsPartialUpdate(JsonObject body)
     {
         var build = typeof(DarlingMcpAlertTools).GetMethod(
             "BuildAlertSettingsUpdate", BindingFlags.NonPublic | BindingFlags.Static)!;
         var result = build.Invoke(null, new object[] { body })!;
         var type = result.GetType();
-        var updates = (IEnumerable<(string Column, NpgsqlParameter Param)>)type.GetField("Item1")!.GetValue(result)!;
-        return (updates.Select(u => u.Column).ToList(), (string?)type.GetField("Item2")!.GetValue(result));
+        var updates = ((System.Collections.IEnumerable)type.GetField("Item1")!.GetValue(result)!).Cast<object>().ToList();
+        var targets = updates.Select(u =>
+        {
+            var t = u.GetType();
+            return ((string)t.GetProperty("Table")!.GetValue(u)!, (string)t.GetProperty("Column")!.GetValue(u)!);
+        }).ToList();
+        return (targets, (string?)type.GetField("Item2")!.GetValue(result));
     }
+
+    /// <summary>The columns the parser would write to one table.</summary>
+    private static IReadOnlyList<string> ColumnsFor(
+        IReadOnlyList<(string Table, string Column)> targets, string table) =>
+        targets.Where(t => t.Table == table).Select(t => t.Column).ToList();
 
     /// <summary>A plausible settings row whose every value sits INSIDE the writer's bounds, so the invariant
     /// above fails on a missing or unaccepted KEY rather than on a value. Named arguments deliberately: a new
@@ -545,9 +723,14 @@ public sealed class DarlingMcpAlertToolsLivePostgresTests
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
                 when, ServerId, ServerName, "High CPU", 92.5, 80.0, true, "email", null, false, "CPU sustained above threshold");
 
-            /* Seed the single global settings row — every column has a default, so id alone suffices. */
+            /* Seed the single global settings row — every column has a default, so id alone suffices.
+               BOTH singletons, because #3314 made get_alert_settings read the delivery cooldown off
+               config_notification: the service seeds the two in one pass, and the tool reports `unavailable`
+               rather than a fabricated default when either is missing. */
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 "INSERT INTO config_alert_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO config_notification (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
 
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 @"INSERT INTO config_mute_rules (id, enabled, created_at_utc, expires_at_utc, reason, server_name, metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern)
@@ -599,8 +782,14 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
         /* Seed the two singleton rows the writes touch (a no-op if they already exist on a shared store). */
         await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
         await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config_alert_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
+        await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config_notification (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
 
         var originalThreshold = Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT cpu_threshold_percent FROM config_alert_settings WHERE id = 1"));
+        /* #3314: captured for the same reason as the threshold — these two are SINGLETONS the whole store
+           shares, and the delivery cooldown now governs channel volume for every later test and every later
+           run on a reused database. */
+        var originalFireCooldown = Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT cooldown_minutes FROM config_alert_settings WHERE id = 1"));
+        var originalDeliveryCooldown = Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT email_cooldown_minutes FROM config_notification WHERE id = 1"));
         var versionBefore = Convert.ToInt64(await ScalarAsync(connection, ct, "SELECT config_version FROM config_service WHERE id = 1"));
         var newThreshold = originalThreshold == 91 ? 71 : 91;                 // a distinct, in-range value
         var muteTag = "mcp_alert_write_e2e_" + Guid.NewGuid().ToString("N");  // own-scoped cleanup tag
@@ -622,6 +811,46 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             Assert.Equal(newThreshold, Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT cpu_threshold_percent FROM config_alert_settings WHERE id = 1")));
             var versionAfter = Convert.ToInt64(await ScalarAsync(connection, ct, "SELECT config_version FROM config_service WHERE id = 1"));
             Assert.True(versionAfter > versionBefore, "config_version should self-bump on a config_alert_settings write");
+
+            /* #3314: the delivery cooldown round-trips THROUGH THE STORE, and through the OTHER table. The
+               shape pins prove the parser routes it; only this proves the two-table write executes, that the
+               value lands in config_notification, and that a read straight afterwards reports what was
+               written. Both spellings are exercised, since the alias exists so an existing config keeps
+               working and an alias nobody writes with is an alias nobody has tested. */
+            foreach (var (body, expected) in new[]
+            {
+                ("{\"delivery\":{\"cooldown_minutes\":37}}", 37),
+                ("{\"email_cooldown_minutes\":41}", 41),
+            })
+            {
+                var cooldown = await DarlingMcpAlertTools.UpdateAlertSettings(postgres, body);
+                Assert.Equal("updated", DarlingMcpTestData.StatusOf(cooldown));
+                using var doc = JsonDocument.Parse(cooldown);
+                Assert.Equal(expected, doc.RootElement.GetProperty("settings").GetProperty("delivery").GetProperty("cooldown_minutes").GetInt32());
+                Assert.Contains("email_cooldown_minutes", doc.RootElement.GetProperty("updated_fields").EnumerateArray().Select(e => e.GetString()));
+                Assert.Equal(expected, Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT email_cooldown_minutes FROM config_notification WHERE id = 1")));
+            }
+
+            /* One body spanning BOTH tables: two UPDATE statements in one transaction, and both land. A
+               partial application is the failure this transaction exists to prevent, and a same-table-only
+               body could never expose it. */
+            var spanning = await DarlingMcpAlertTools.UpdateAlertSettings(
+                postgres, $"{{\"cooldown_minutes\":7,\"delivery\":{{\"cooldown_minutes\":53}}}}");
+            Assert.Equal("updated", DarlingMcpTestData.StatusOf(spanning));
+            Assert.Equal(7, Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT cooldown_minutes FROM config_alert_settings WHERE id = 1")));
+            Assert.Equal(53, Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT email_cooldown_minutes FROM config_notification WHERE id = 1")));
+
+            /* Out of range on either spelling, and both spellings at once, write NOTHING. */
+            foreach (var rejected in new[]
+            {
+                "{\"delivery\":{\"cooldown_minutes\":121}}",
+                "{\"email_cooldown_minutes\":0}",
+                "{\"email_cooldown_minutes\":60,\"delivery\":{\"cooldown_minutes\":60}}",
+            })
+            {
+                Assert.Equal("invalid", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.UpdateAlertSettings(postgres, rejected)));
+                Assert.Equal(53, Convert.ToInt32(await ScalarAsync(connection, ct, "SELECT email_cooldown_minutes FROM config_notification WHERE id = 1")));
+            }
 
             /* An unknown field writes NOTHING (validated before the UPDATE). */
             Assert.Equal("invalid", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.UpdateAlertSettings(postgres, "{\"cpu\":{\"bogus\":1}}")));
@@ -655,7 +884,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
                run on a reused database — reading a CPU threshold this test invented. */
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
             {
-                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "UPDATE config_alert_settings SET cpu_threshold_percent = $1 WHERE id = 1", originalThreshold);
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "UPDATE config_alert_settings SET cpu_threshold_percent = $1, cooldown_minutes = $2 WHERE id = 1", originalThreshold, originalFireCooldown);
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "UPDATE config_notification SET email_cooldown_minutes = $1 WHERE id = 1", originalDeliveryCooldown);
                 await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM config_mute_rules WHERE reason = $1", muteTag);
             });
         }
