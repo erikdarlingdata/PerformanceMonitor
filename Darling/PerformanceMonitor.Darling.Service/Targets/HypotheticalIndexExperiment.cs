@@ -315,11 +315,29 @@ public static class HypotheticalIndexExperiment
     /// </para>
     ///
     /// <para>
-    /// So the statement travels as a VALUE into a transaction-local GUC, a <c>DO</c> block runs the EXPLAIN
-    /// through <c>EXECUTE</c> where <c>$1</c> is just text, and the plan comes back through a second GUC.
-    /// The bind step never sees a placeholder because the SQL never contains one. That the statement text
-    /// is a bound parameter for its whole journey is not incidental — it is the property that makes this
-    /// safe, and the first design did not have it.
+    /// So the statement travels as a VALUE into a transaction-local GUC (bound as <c>$1</c> to
+    /// <c>set_config</c>), a <c>DO</c> block runs the EXPLAIN through <c>EXECUTE</c>, and the plan comes back
+    /// through a second GUC. The bind step never sees a placeholder because the SQL passed to Npgsql never
+    /// contains one.
+    /// </para>
+    ///
+    /// <para>
+    /// <b>What keeps this safe is NOT the binding — do not read it that way (#3385).</b>
+    /// <c>current_setting('pm.stmt')</c> re-materializes the text and it is STRING-CONCATENATED into the
+    /// <c>EXECUTE</c> at <see cref="ExplainThroughGucSql"/>. Binding into the GUC solves the extended-protocol
+    /// placeholder problem above; it does NOT sanitize the value at the point it is concatenated. And the text
+    /// is untrusted: it originates in the monitored server's <c>pg_stat_statements</c> (resolved from this
+    /// product's <c>pg_statement_text</c> store by queryid), so anyone who can run queries on a monitored
+    /// server can influence it, and this EXPLAIN runs as the monitoring credential ON that server. Safety
+    /// rests, in order, on: (1) <c>EXPLAIN</c> WITHOUT <c>ANALYZE</c> only PLANS — a hostile statement is never
+    /// executed; (2) the text is a single NORMALIZED <c>pg_stat_statements</c> entry, not a script;
+    /// (3) <c>FOR line IN EXECUTE</c> rejects a multi-statement string outright; (4) the whole call runs in a
+    /// ROLLED-BACK transaction as a least-privilege role. Barriers (2) and (3) are today INCIDENTAL, not a
+    /// deliberate check — a real single-statement guard is tracked in #3385, and a naive semicolon scan is NOT
+    /// it (measured: ~5% of real normalized queries carry a <c>;</c> inside a block comment). So do NOT
+    /// "simplify" this to a plain <c>EXECUTE</c> of a bound value, and do not drop the
+    /// <c>GENERIC_PLAN</c>/no-<c>ANALYZE</c> shape, on the belief that the binding protects the concatenation:
+    /// it does not.
     /// </para>
     /// </summary>
     private const string ExplainThroughGucSql = """
