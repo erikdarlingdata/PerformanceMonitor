@@ -924,7 +924,7 @@ namespace PerformanceMonitorDashboard
                 if (!string.IsNullOrEmpty(firstXml))
                 {
                     context.AttachmentXml = firstXml;
-                    context.AttachmentFileName = "blocked_process_report.xml";
+                    context.AttachmentFileName = AlertIncidentAttachment.BlockedProcessReportFileName;
                 }
 
                 /* #1140: dedup by the resolved contentious object across the blocked-process rows
@@ -933,7 +933,17 @@ namespace PerformanceMonitorDashboard
                 AlertIncidentRenderer.Apply(context, BlockingIncidentGrouper.Group(
                     serverName,
                     events.Select(e => new BlockingIncidentGrouper.BlockedEvent(
-                        e.DatabaseName, e.ContentiousObject, e.QueryText, null, e.WaitTimeMs ?? 0, e.LockMode)))
+                        e.DatabaseName, e.ContentiousObject, e.QueryText, null, e.WaitTimeMs ?? 0, e.LockMode,
+                        /* #3330: the row's own report, so a per-event card attaches its own incident's.
+                           Wired here as well as in the shared builders because this app calls the same
+                           PerEventNotification.Split, which no longer copies the alert-level attachment
+                           onto every message — an unwired producer would deliver cards with no file at
+                           all. The alert-level value above still drives the Summary card. */
+                        string.IsNullOrEmpty(e.BlockedProcessReportXml)
+                            ? null
+                            : new AlertIncidentAttachment(
+                                e.BlockedProcessReportXml,
+                                AlertIncidentAttachment.BlockedProcessReportFileName))))
                     .Select(g => g.Incident).ToList());
 
                 return context;
@@ -1001,7 +1011,7 @@ namespace PerformanceMonitorDashboard
                 if (!string.IsNullOrEmpty(firstGraph))
                 {
                     context.AttachmentXml = firstGraph;
-                    context.AttachmentFileName = "deadlock_graph.xml";
+                    context.AttachmentFileName = AlertIncidentAttachment.DeadlockGraphFileName;
                 }
 
                 /* #1140: fingerprint each deadlock by its sorted involved-object set, parsed from the
@@ -1009,10 +1019,22 @@ namespace PerformanceMonitorDashboard
                    deadlock event across ALL events in the window. */
                 AlertIncidentRenderer.Apply(context, DeadlockIncidentGrouper.Group(
                     serverName,
-                    deadlocks.GroupBy(d => d.EventDate).Select(g => new DeadlockIncidentGrouper.DeadlockEvent(
-                        DeadlockObjectExtractor.FromGraphXml(
-                            g.Select(x => x.DeadlockGraph).FirstOrDefault(x => !string.IsNullOrEmpty(x))),
-                        DeadlockDetailFields(g))))
+                    deadlocks.GroupBy(d => d.EventDate).Select(g =>
+                    {
+                        /* One graph per deadlock EVENT: the participants of one deadlock all carry the same
+                           graph, so the first non-empty one is the event's. Bound once and used for both the
+                           object parse and #3330's attachment, rather than walked twice. */
+                        var graph = g.Select(x => x.DeadlockGraph).FirstOrDefault(x => !string.IsNullOrEmpty(x));
+                        return new DeadlockIncidentGrouper.DeadlockEvent(
+                            DeadlockObjectExtractor.FromGraphXml(graph),
+                            DeadlockDetailFields(g),
+                            /* #3330: see the blocking builder's note — this app shares
+                               PerEventNotification.Split, which now attaches the card's OWN graph. */
+                            string.IsNullOrEmpty(graph)
+                                ? null
+                                : new AlertIncidentAttachment(
+                                    graph, AlertIncidentAttachment.DeadlockGraphFileName));
+                    }))
                     .Select(g => g.Incident).ToList());
 
                 return context;
