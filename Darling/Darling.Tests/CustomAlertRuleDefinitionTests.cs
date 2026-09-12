@@ -446,4 +446,167 @@ public class CustomAlertRuleDefinitionTests
         Assert.True(def!.IsBreaching(0));
         Assert.False(def.BreachesOnZero());
     }
+
+    // ─────────────────────────── #3372: the optional Critical tier for range ops ───────────────────────────
+
+    private static string Inv(double d) => d.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>A two-tier range predicate over the shared (non-count) metric: a warn band [lower, upper] plus a
+    /// crit band [critLower, critUpper] (the more-severe extension — wider for 'outside', narrower for 'between').</summary>
+    private static string CritRangePredicate(string op, double lower, double upper, double critLower, double critUpper) =>
+        "{" + Metric + ",\"predicate\":{\"op\":\"" + op + "\",\"lowerBound\":" + Inv(lower) + ",\"upperBound\":" + Inv(upper) +
+        ",\"criticalLowerBound\":" + Inv(critLower) + ",\"criticalUpperBound\":" + Inv(critUpper) + "}}";
+
+    [Theory]
+    [InlineData("outside", 5, 200)]  // WIDER crit band, containing the warn band
+    [InlineData("between", 40, 60)]  // NARROWER crit band, contained by the warn band
+    public void TwoTierRange_Parses_WithCriticalBand(string op, double critLower, double critUpper)
+    {
+        var (def, error) = CustomAlertRuleDefinition.TryParse(CritRangePredicate(op, 10, 100, critLower, critUpper));
+
+        Assert.Null(error);
+        Assert.NotNull(def);
+        Assert.True(def!.IsRange);
+        Assert.Equal(10d, def.LowerBound);
+        Assert.Equal(100d, def.UpperBound);
+        Assert.Equal(critLower, def.CriticalLowerBound);
+        Assert.Equal(critUpper, def.CriticalUpperBound);
+    }
+
+    [Theory]
+    // outside, warn [10,100], crit [5,200] (WIDER, containing the warn band): further OUT is more severe.
+    [InlineData(50, false, AlertSeverityLevel.Warning)]   // inside the warn band -> no breach
+    [InlineData(7, true, AlertSeverityLevel.Warning)]     // below warn, still inside crit (low side) -> Warning
+    [InlineData(150, true, AlertSeverityLevel.Warning)]   // above warn, still inside crit (high side) -> Warning
+    [InlineData(3, true, AlertSeverityLevel.Critical)]    // beyond crit on the low side -> Critical
+    [InlineData(250, true, AlertSeverityLevel.Critical)]  // beyond crit on the high side -> Critical
+    public void Outside_TwoTier_SeverityByBand(double value, bool breaching, AlertSeverityLevel severity)
+    {
+        var (def, error) = CustomAlertRuleDefinition.TryParse(CritRangePredicate("outside", 10, 100, 5, 200));
+        Assert.Null(error);
+        Assert.Equal(breaching, def!.IsBreaching(value));
+        if (breaching)
+        {
+            Assert.Equal(severity, def.SeverityFor(value));
+        }
+    }
+
+    [Theory]
+    // between, warn [10,100], crit [40,60] (NARROWER, contained by the warn band): DEEPER in is more severe.
+    [InlineData(5, false, AlertSeverityLevel.Warning)]    // outside the warn band -> no breach
+    [InlineData(20, true, AlertSeverityLevel.Warning)]    // inside warn, outside crit -> Warning
+    [InlineData(100, true, AlertSeverityLevel.Warning)]   // warn upper edge, outside crit -> Warning
+    [InlineData(50, true, AlertSeverityLevel.Critical)]   // inside the crit band -> Critical
+    [InlineData(40, true, AlertSeverityLevel.Critical)]   // crit lower edge (inclusive) -> Critical
+    [InlineData(60, true, AlertSeverityLevel.Critical)]   // crit upper edge (inclusive) -> Critical
+    [InlineData(150, false, AlertSeverityLevel.Warning)]  // outside the warn band -> no breach
+    public void Between_TwoTier_SeverityByBand(double value, bool breaching, AlertSeverityLevel severity)
+    {
+        var (def, error) = CustomAlertRuleDefinition.TryParse(CritRangePredicate("between", 10, 100, 40, 60));
+        Assert.Null(error);
+        Assert.Equal(breaching, def!.IsBreaching(value));
+        if (breaching)
+        {
+            Assert.Equal(severity, def.SeverityFor(value));
+        }
+    }
+
+    [Fact]
+    public void OutsideCritBand_NarrowerThanWarn_IsError()
+    {
+        // 'outside' needs a WIDER crit band; a narrower one ([20,80] inside [10,100]) would make Critical unreachable.
+        var (def, error) = CustomAlertRuleDefinition.TryParse(CritRangePredicate("outside", 10, 100, 20, 80));
+        Assert.Null(def);
+        Assert.NotNull(error);
+    }
+
+    [Fact]
+    public void BetweenCritBand_WiderThanWarn_IsError()
+    {
+        // 'between' needs a NARROWER crit band; a wider one ([5,200] containing [10,100]) would make Critical fire
+        // before (outside) Warning.
+        var (def, error) = CustomAlertRuleDefinition.TryParse(CritRangePredicate("between", 10, 100, 5, 200));
+        Assert.Null(def);
+        Assert.NotNull(error);
+    }
+
+    [Fact]
+    public void BetweenCritBand_InvertedBounds_IsError()
+    {
+        // Even sitting inside the warn band, the crit bounds must be ordered (critLower <= critUpper); [60,40] fails.
+        var (def, error) = CustomAlertRuleDefinition.TryParse(CritRangePredicate("between", 10, 100, 60, 40));
+        Assert.Null(def);
+        Assert.NotNull(error);
+    }
+
+    [Theory]
+    // A lone crit bound is a half-specified band: the parser wants both or neither.
+    [InlineData("\"criticalLowerBound\":5")]
+    [InlineData("\"criticalUpperBound\":200")]
+    public void RangeCritBand_LoneBound_IsError(string critKey)
+    {
+        var (def, error) = CustomAlertRuleDefinition.TryParse(
+            "{" + Metric + ",\"predicate\":{\"op\":\"outside\",\"lowerBound\":10,\"upperBound\":100," + critKey + "}}");
+        Assert.Null(def);
+        Assert.NotNull(error);
+    }
+
+    [Fact]
+    public void RangeCritBand_NonNumeric_IsError()
+    {
+        var (def, error) = CustomAlertRuleDefinition.TryParse(
+            "{" + Metric + ",\"predicate\":{\"op\":\"outside\",\"lowerBound\":10,\"upperBound\":100," +
+            "\"criticalLowerBound\":\"x\",\"criticalUpperBound\":200}}");
+        Assert.Null(def);
+        Assert.NotNull(error);
+    }
+
+    [Fact]
+    public void TwoTier_FiredThreshold_Outside_ConveysBothBands()
+    {
+        // The delivered-alert render authority conveys BOTH bands, the crit band repeating the word for 'outside',
+        // with the plain " - " separator and no numeric twin (a band has no single threshold value).
+        var (def, _) = CustomAlertRuleDefinition.TryParse(CritRangePredicate("outside", 10, 100, 5, 200));
+        var (text, numeric) = def!.FiredThreshold(AlertSeverityLevel.Critical);
+        Assert.Equal("outside 10 - 100 (crit outside 5 - 200)", text);
+        Assert.Null(numeric);
+    }
+
+    [Fact]
+    public void TwoTier_FiredThreshold_Between_ConveysBothBands()
+    {
+        var (def, _) = CustomAlertRuleDefinition.TryParse(CritRangePredicate("between", 10, 100, 40, 60));
+        var (text, numeric) = def!.FiredThreshold(AlertSeverityLevel.Warning);
+        Assert.Equal("between 10 - 100 (crit 40 - 60)", text);
+        Assert.Null(numeric);
+    }
+
+    [Fact]
+    public void CountTwoTierRange_WarnBandFiresOnZero_IsError_EvenWithCritBand()
+    {
+        // The #3378 count guard still fires with a crit band present: the WARN band ('between' [0,100] fires on 0)
+        // is the outer firing envelope, so a valid crit band nested inside it cannot make the rule safe on a
+        // stalled-collector 0. (The crit band [40,60] nests correctly; the warn band is what trips the guard.)
+        var (def, error) = CustomAlertRuleDefinition.TryParse(
+            "{" + CountMetric + ",\"predicate\":{\"op\":\"between\",\"lowerBound\":0,\"upperBound\":100," +
+            "\"criticalLowerBound\":40,\"criticalUpperBound\":60}}");
+        Assert.Null(def);
+        Assert.NotNull(error);
+    }
+
+    [Fact]
+    public void CountTwoTierRange_WarnBandSafeOnZero_Parses_WithCritBand()
+    {
+        // WARN band safe on 0 ('between' [1,100] excludes 0) with a nested crit band [40,60] -> parses; and because
+        // the crit firing region is a subset of the warn firing region, the band is safe on a stalled 0 too.
+        var (def, error) = CustomAlertRuleDefinition.TryParse(
+            "{" + CountMetric + ",\"predicate\":{\"op\":\"between\",\"lowerBound\":1,\"upperBound\":100," +
+            "\"criticalLowerBound\":40,\"criticalUpperBound\":60}}");
+        Assert.Null(error);
+        Assert.NotNull(def);
+        Assert.True(def!.IsRange);
+        Assert.Equal(40d, def.CriticalLowerBound);
+        Assert.Equal(60d, def.CriticalUpperBound);
+        Assert.False(def.BreachesOnZero());
+    }
 }

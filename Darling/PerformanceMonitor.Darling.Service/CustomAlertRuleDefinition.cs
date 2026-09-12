@@ -64,6 +64,8 @@ public sealed record CustomAlertRuleDefinition(
     double? CriticalThreshold,
     double? LowerBound,
     double? UpperBound,
+    double? CriticalLowerBound,
+    double? CriticalUpperBound,
     int BreachSamples,
     int ClearSamples,
     CustomAlertScopeMode ScopeMode,
@@ -74,7 +76,9 @@ public sealed record CustomAlertRuleDefinition(
     /// <summary>Whether this rule's operator tests the value against a two-sided band
     /// (<see cref="LowerBound"/>/<see cref="UpperBound"/>) rather than a single scalar threshold (#3351). A
     /// range op carries both bounds and neither <see cref="WarnThreshold"/> nor <see cref="CriticalThreshold"/>;
-    /// a scalar op is the mirror image — the validator enforces that mutual exclusivity.</summary>
+    /// a scalar op is the mirror image — the validator enforces that mutual exclusivity. A range op may also carry
+    /// an OPTIONAL second, more-severe band (<see cref="CriticalLowerBound"/>/<see cref="CriticalUpperBound"/>,
+    /// #3372) for a Warning/Critical two-tier; absent, it fires Warning-only exactly as #3351/#3378.</summary>
     public bool IsRange => IsRangeOp(Op);
 
     /// <summary>Pure op-category test, usable by the validator before a definition is constructed.</summary>
@@ -132,14 +136,35 @@ public sealed record CustomAlertRuleDefinition(
     /// guard uses to reject such a rule, mirroring the scalar '&lt;'/'&lt;=' count rejection. Expressed as the
     /// band's own <see cref="IsBreaching"/> verdict at 0 so the band logic stays the single authority; meaningful
     /// only for a range op (a scalar op returns false here — its count trap is the separate '&lt;'/'&lt;=' rejection).
+    /// <para>This tests the WARN band, which is the OUTER firing envelope for both ops: under the #3372 nesting the
+    /// crit firing region is always a subset of the warn firing region ('outside' crit is wider so being outside it
+    /// implies outside warn; 'between' crit is narrower so being inside it implies inside warn). So a warn band that
+    /// does not fire on 0 guarantees the crit band does not either — the warn-band check is a complete 0-guard for
+    /// both bands, and needs no parallel crit-band test.</para>
     /// </summary>
     public bool BreachesOnZero() => IsRange && IsBreaching(0);
 
-    /// <summary>The tier a breaching value fires at: Critical when it also crosses the critical bar, else Warning.
-    /// A range op is Warning-only in v1 (a two-tier band would need a warn-band AND a crit-band = four bounds;
-    /// that escalation is a tracked follow-up, not this slice), so it always fires Warning.</summary>
-    public AlertSeverityLevel SeverityFor(double value) =>
-        !IsRange && CriticalThreshold is double c && Compare(value, c) ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning;
+    /// <summary>
+    /// The tier a breaching value fires at (called on an already-breaching value). A SCALAR op is Critical when it
+    /// also crosses the critical bar, else Warning. A RANGE op is Critical when it also breaches the OPTIONAL crit
+    /// band (#3372) — evaluated as just another (op, lower, upper) triple through the shared
+    /// <see cref="RangeBreaches"/> authority, so there is no parallel band math — else Warning; with no crit band it
+    /// stays Warning-only exactly as #3351/#3378. The crit band's firing region is a subset of the warn band's (the
+    /// validator enforces the op-specific nesting: 'outside' crit is WIDER/containing, 'between' crit is
+    /// NARROWER/contained), so a value that breaches the crit band necessarily breaches the warn band that
+    /// <see cref="IsBreaching"/> already confirmed.
+    /// </summary>
+    public AlertSeverityLevel SeverityFor(double value)
+    {
+        if (IsRange)
+        {
+            return CriticalLowerBound is double cl && CriticalUpperBound is double cu && RangeBreaches(Op, cl, cu, value)
+                ? AlertSeverityLevel.Critical
+                : AlertSeverityLevel.Warning;
+        }
+
+        return CriticalThreshold is double c && Compare(value, c) ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning;
+    }
 
     /// <summary>The scalar comparison — the single authority for a one-sided bar. Range ops go through the band
     /// logic in <see cref="IsBreaching"/> instead, never here.</summary>
@@ -167,16 +192,28 @@ public sealed record CustomAlertRuleDefinition(
     /// How the threshold reads in a fired alert body, plus the numeric twin persisted alongside it
     /// (<c>NumericThresholdValue</c>). A scalar op reports the crossed bar as "&lt;symbol&gt; &lt;value&gt;"
     /// (e.g. "&gt;= 25") with that bar as the numeric twin; a range op reports the band as "outside 10 - 100" /
-    /// "between 10 - 100" with a NULL numeric twin (a band has no single threshold value). The plain " - " band
-    /// separator keeps an em dash — a style tell — out of delivered text. Range ops are Warning-only, so the tier
-    /// only selects warn-vs-critical for a scalar op.
+    /// "between 10 - 100" with a NULL numeric twin (a band has no single threshold value), and — when a crit band is
+    /// set (#3372) — conveys BOTH bands as "outside 10 - 100 (crit outside 5 - 200)" / "between 10 - 100 (crit
+    /// 40 - 60)". The plain " - " band separator keeps an em dash — a style tell — out of delivered text. The range
+    /// band render is severity-independent (it always shows both bands when a crit tier exists); the tier only
+    /// selects warn-vs-critical for a scalar op's single bar.
     /// </summary>
     public (string Text, double? Numeric) FiredThreshold(AlertSeverityLevel severity)
     {
         if (IsRange)
         {
             var word = Op == CustomAlertOp.Between ? "between" : "outside";
-            return (string.Create(CultureInfo.InvariantCulture, $"{word} {LowerBound ?? 0:0.###} - {UpperBound ?? 0:0.###}"), null);
+            var band = string.Create(CultureInfo.InvariantCulture, $"{word} {LowerBound ?? 0:0.###} - {UpperBound ?? 0:0.###}");
+            if (CriticalLowerBound is double cl && CriticalUpperBound is double cu)
+            {
+                // The crit band is the more-severe extension of the warn band. For 'outside' it is a different
+                // (wider) outside test, so the word is repeated to read unambiguously; for 'between' the narrower
+                // inner band reads plainly under the leading "between". Same plain " - " separator as the warn band.
+                var critWord = Op == CustomAlertOp.Outside ? "outside " : string.Empty;
+                band += string.Create(CultureInfo.InvariantCulture, $" (crit {critWord}{cl:0.###} - {cu:0.###})");
+            }
+
+            return (band, null);
         }
 
         var bar = severity == AlertSeverityLevel.Critical && CriticalThreshold is double c ? c : WarnThreshold ?? 0;
@@ -272,6 +309,8 @@ public sealed record CustomAlertRuleDefinition(
         double? critical = null;
         double? lowerBound = null;
         double? upperBound = null;
+        double? criticalLowerBound = null;
+        double? criticalUpperBound = null;
 
         if (IsRangeOp(op))
         {
@@ -295,6 +334,56 @@ public sealed record CustomAlertRuleDefinition(
                 return (null, "'predicate.lowerBound' must be less than 'predicate.upperBound'.");
             }
 
+            // Optional Critical band (#3372): two more bounds that carve a MORE-SEVERE region out of the warn band,
+            // for a two-tier Warning/Critical range rule. All-or-nothing — both crit bounds or neither (a lone crit
+            // bound is a half-specified band, rejected). "More severe" means FURTHER from healthy, which flips the
+            // nesting between the two ops: 'outside' breaches further OUT, so its crit band is WIDER and CONTAINS the
+            // warn band (criticalLowerBound <= lowerBound < upperBound <= criticalUpperBound); 'between' breaches
+            // DEEPER in, so its crit band is NARROWER and is CONTAINED BY the warn band (lowerBound <=
+            // criticalLowerBound <= criticalUpperBound <= upperBound). In BOTH cases the crit firing region is a
+            // subset of the warn firing region, so IsBreaching (the warn band) stays the single "breaches at all"
+            // envelope and SeverityFor only asks whether the value ALSO breaches the crit band (the same
+            // RangeBreaches authority, given the crit triple). Absent -> Warning-only, exactly #3351/#3378.
+            var hasCritLower = predicate["criticalLowerBound"] is not null;
+            var hasCritUpper = predicate["criticalUpperBound"] is not null;
+            if (hasCritLower != hasCritUpper)
+            {
+                return (null, "a range predicate's critical band needs BOTH 'criticalLowerBound' and 'criticalUpperBound', or neither.");
+            }
+
+            if (hasCritLower)
+            {
+                if (predicate["criticalLowerBound"] is not JsonNode critLowerNode || !TryDouble(critLowerNode, out var critLower))
+                {
+                    return (null, "'predicate.criticalLowerBound' must be a number.");
+                }
+
+                if (predicate["criticalUpperBound"] is not JsonNode critUpperNode || !TryDouble(critUpperNode, out var critUpper))
+                {
+                    return (null, "'predicate.criticalUpperBound' must be a number.");
+                }
+
+                // Op-specific nesting (see above). 'outside': the crit band must be WIDER than (and contain) the warn
+                // band; because lower < upper is already established, criticalLowerBound <= lowerBound and upperBound
+                // <= criticalUpperBound gives the full criticalLowerBound <= lowerBound < upperBound <=
+                // criticalUpperBound chain. 'between': the crit band must be NARROWER than (and sit inside) the warn
+                // band, with its own bounds ordered — lowerBound <= criticalLowerBound <= criticalUpperBound <=
+                // upperBound. A band that does not nest would make Critical unreachable or fire before Warning.
+                var nested = op == CustomAlertOp.Outside
+                    ? critLower <= lower && upper <= critUpper
+                    : lower <= critLower && critLower <= critUpper && critUpper <= upper;
+                if (!nested)
+                {
+                    var nestingError = op == CustomAlertOp.Outside
+                        ? "for 'outside', the critical band must be WIDER than the warning band ('criticalLowerBound' <= 'lowerBound' and 'upperBound' <= 'criticalUpperBound') so a value further outside fires Critical."
+                        : "for 'between', the critical band must be NARROWER than the warning band ('lowerBound' <= 'criticalLowerBound' <= 'criticalUpperBound' <= 'upperBound') so a value deeper inside fires Critical.";
+                    return (null, nestingError);
+                }
+
+                criticalLowerBound = critLower;
+                criticalUpperBound = critUpper;
+            }
+
             // A range band that fires when the count is 0 has the SAME stalled-collector ambiguity as the scalar
             // '<'/'<=' count trap below: COUNT(*) over an empty window is 0 (never the NULL the evaluator's
             // no-data freeze catches), so a dead collector reads 0 and the band false-fires exactly when the true
@@ -302,6 +391,10 @@ public sealed record CustomAlertRuleDefinition(
             // through the same band authority (RangeBreaches) the live evaluation uses. 'outside' fires on 0 when
             // 0 < lower; 'between' when lower <= 0 <= upper; nudging the bounds so 0 falls outside the firing
             // region (outside -> lower 0, between -> lower above 0) makes the band safe on an empty window.
+            // This tests the WARN band, and that is a COMPLETE 0-guard for BOTH bands: the crit band was just
+            // validated to nest INSIDE the warn firing region (#3372), so if the warn band does not fire on 0 the
+            // crit band cannot either — no separate crit-band 0-check is needed (and a crit band that DID fire on 0
+            // could only do so with a warn band that also fires on 0, which is already rejected here).
             if (plan.Aggregate == ComposeAggregate.Count && RangeBreaches(op, lower, upper, 0))
             {
                 return (null, "a 'between'/'outside' alert on a count whose band fires when the count is 0 can't distinguish zero events from a stalled collector; set the bounds so a count of 0 does not fire.");
@@ -434,6 +527,7 @@ public sealed record CustomAlertRuleDefinition(
 
         var definition = new CustomAlertRuleDefinition(
             plan, plan.Measure.DisplayName, windowHours, op, warn, critical, lowerBound, upperBound,
+            criticalLowerBound, criticalUpperBound,
             breachSamples, clearSamples, scopeMode, scopeServers, scopeTagId, intervalSeconds);
         return (definition, null);
     }

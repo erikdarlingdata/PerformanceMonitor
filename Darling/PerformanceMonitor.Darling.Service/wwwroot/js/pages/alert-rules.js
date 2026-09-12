@@ -175,15 +175,23 @@ function describeMetric(metric) {
   return agg + name;
 }
 
-/** A compact condition label — a scalar bar ("≥ 30000 / crit 120000") or a range band ("outside 10–100"), or null. */
+/** A compact condition label — a scalar bar ("≥ 30000 / crit 120000") or a range band ("outside 10–100", or
+ *  "outside 10–100 (crit outside 5–200)" / "between 10–100 (crit 40–60)" with a critical tier), or null. */
 function describeCondition(pred) {
   if (!pred || typeof pred !== "object") return null;
 
   /* Range op (#3351): a two-sided band, rendered "outside 10–100" / "between 10–100" with an en dash (–)
-     between the bounds — a range predicate carries lowerBound/upperBound and no warnThreshold. */
+     between the bounds — a range predicate carries lowerBound/upperBound and no warnThreshold. An optional
+     critical band (#3372) appends " (crit ...)" so the chip conveys both tiers: the crit band is the more-severe
+     extension (wider for 'outside', narrower for 'between'), the word repeated only for 'outside' to read clearly. */
   if (pred.op === "between" || pred.op === "outside") {
     if (pred.lowerBound == null || pred.upperBound == null) return null;
-    return pred.op + " " + pred.lowerBound + "–" + pred.upperBound;
+    let band = pred.op + " " + pred.lowerBound + "–" + pred.upperBound;
+    if (pred.criticalLowerBound != null && pred.criticalUpperBound != null) {
+      const critWord = pred.op === "outside" ? "outside " : "";
+      band += " (crit " + critWord + pred.criticalLowerBound + "–" + pred.criticalUpperBound + ")";
+    }
+    return band;
   }
 
   if (pred.warnThreshold == null) return null;

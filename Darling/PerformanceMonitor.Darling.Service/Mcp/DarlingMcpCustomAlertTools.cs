@@ -109,8 +109,11 @@ public sealed class DarlingMcpCustomAlertTools
         "must reduce to a single value), a 'predicate' (either a SCALAR comparison - 'op' one of gt/ge/lt/le, a " +
         "numeric 'warnThreshold', and an optional 'criticalThreshold' that must be more extreme than warn in the " +
         "operator's direction; or a RANGE band - 'op' 'between' or 'outside', with numeric 'lowerBound' and " +
-        "'upperBound' where lowerBound < upperBound, which fires Warning-only and carries no warn/critical - the " +
-        "two shapes being mutually exclusive), an " +
+        "'upperBound' where lowerBound < upperBound, which fires Warning and carries no warn/critical but MAY add " +
+        "an optional critical band via 'criticalLowerBound'/'criticalUpperBound' (both or neither) for a second, " +
+        "more-severe tier - WIDER than the warn band for 'outside' (criticalLowerBound <= lowerBound and " +
+        "upperBound <= criticalUpperBound), NARROWER for 'between' (lowerBound <= criticalLowerBound <= " +
+        "criticalUpperBound <= upperBound); the scalar and range shapes being mutually exclusive), an " +
         "optional 'hysteresis' ('breachSamples'/'clearSamples', each an integer >= 1), an optional 'scope' " +
         "('mode' 'all', or 'servers' with a non-empty 'servers' list, or 'tag' with an integer 'tagId' fleet-tag " +
         "id whose directly-assigned servers the rule then evaluates), and an " +
