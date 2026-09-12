@@ -105,19 +105,53 @@ WHERE enabled
 ORDER BY id
 LIMIT $1";
 
-    /// <summary>Resolves each given fleet-tag id to the set of server ids DIRECTLY assigned to it (#3350 tag
-    /// scope) — one round-trip for every tag via <c>= ANY($1)</c>. Reads <c>config.server_tag_map</c> (bare
-    /// name; the pool's search_path resolves it, the same as <c>custom_alert_rules</c> above). $1 the tag ids.
+    /// <summary>Resolves each requested fleet-tag id to the set of server ids under its WHOLE SUBTREE (#3367 —
+    /// the tag itself plus every descendant tag's directly-assigned servers), in ONE round-trip for the full set
+    /// of requested roots via <c>= ANY($1)</c>. A recursive CTE walks <c>server_tags</c> from each requested id
+    /// down through <c>parent_id</c> (a child references its parent), carrying the REQUESTED ROOT id so the rows
+    /// it returns are still <c>(requested_root_tag_id, server_id)</c> — the caller's per-rule map keys on the tag
+    /// the RULE names, never a descendant. Reads <c>server_tags</c> / <c>server_tag_map</c> (bare names; the
+    /// pool's search_path resolves them, the same as <c>custom_alert_rules</c> above). $1 the tag ids.
     ///
-    /// <para>A tag with no rows — never assigned, or deleted so the map rows cascaded away — is simply absent
-    /// from the result, which the caller treats as "resolves to no server", so a tag-scoped rule on it never
-    /// fires (the #3350 integrity requirement; the 0-server case then flows to the #3304 never-firing surface).
-    /// Membership is DIRECT only: descendant tags' servers are NOT pulled in (a v1 decision — the tree is not
-    /// traversed here; that is a possible later slice).</para></summary>
+    /// <para><b>Leaf tags are unchanged.</b> A tag with no children resolves to exactly its direct members — the
+    /// recursive term finds no child, so the walk is only the anchor row, byte-for-byte the pre-#3367 direct
+    /// lookup. A parent tag that carries servers only under its children now resolves to those children's servers
+    /// (the point of #3367). A tag absent from <c>server_tags</c> (never created, or deleted so its rows cascaded
+    /// away) produces no anchor row and is simply absent from the result, which the caller treats as "resolves to
+    /// no server" so a tag-scoped rule on it never fires (the #3350 integrity requirement; the 0-server case flows
+    /// to the #3304 never-firing surface). The final <c>DISTINCT</c> collapses a server reachable under several
+    /// descendant tags of the same requested root to one row.</para>
+    ///
+    /// <para><b>Cycle- and dangling-parent-safe</b>, mirroring the frontend fleet-forest projection
+    /// (<c>wwwroot/js/pages/fleet.js</c>, which guards with a <c>visited</c> set and re-roots a dangling parent).
+    /// A well-formed tree terminates on its own — leaf tags have no children, so the recursion frontier empties
+    /// (long before the cap). The guaranteed terminator for a MALFORMED tree is <c>depth &lt; 64</c>: a cycle
+    /// (A→B→A, or a self-parent A→A) keeps the frontier non-empty forever, and the depth predicate stops it after
+    /// at most 64 iterations rather than looping or crashing. 64 is far above the 4-level nesting the Viewer
+    /// enforces app-side, so a legitimate subtree is never truncated; the cap only ever bites a malformed cycle.
+    /// A <c>parent_id</c> pointing at a missing or unrelated row needs no special handling — the child-join finds
+    /// no match, so that branch ends. <c>UNION</c> (not <c>UNION ALL</c>) collapses duplicate walk rows.</para></summary>
     public const string ListTagMembersSql = @"
-SELECT tag_id, server_id
-FROM server_tag_map
-WHERE tag_id = ANY($1)";
+WITH RECURSIVE tag_subtree (root_id, tag_id, depth) AS
+(
+    SELECT t.id, t.id, 1
+    FROM server_tags AS t
+    WHERE t.id = ANY($1)
+
+    UNION
+
+    SELECT s.root_id, c.id, s.depth + 1
+    FROM tag_subtree AS s
+    JOIN server_tags AS c
+      ON c.parent_id = s.tag_id
+    WHERE s.depth < 64
+)
+SELECT DISTINCT
+    s.root_id AS tag_id,
+    m.server_id
+FROM tag_subtree AS s
+JOIN server_tag_map AS m
+  ON m.tag_id = s.tag_id";
 
     /// <summary>Inserts a new rule at version 1. $1 name, $2 definition (jsonb), $3 description, $4 enabled, $5 updated_by.</summary>
     public const string InsertSql = @"
@@ -260,12 +294,16 @@ RETURNING id, name, definition, description, enabled, version, created_at, updat
     }
 
     /// <summary>
-    /// Resolves each fleet-tag id to the set of server ids directly assigned to it (#3350 tag scope), in ONE
-    /// round-trip. The single shared tag-membership read: the evaluator calls it on the owner pool each cache
-    /// refresh, and the evaluate-now test tool calls it on the least-privilege mcp/viewer pool — both of which
-    /// carry <c>SELECT</c> on <c>config.server_tag_map</c> (it holds no secret column). A tag with no assigned
-    /// servers is absent from the returned map (the caller reads that as an empty set → the rule matches no
-    /// server). Returns an empty map for an empty input without touching the store.
+    /// Resolves each fleet-tag id to the set of server ids under its whole subtree — the tag plus every
+    /// descendant tag's directly-assigned servers (#3367; #3350 introduced the direct-only form) — in ONE
+    /// round-trip via <see cref="ListTagMembersSql"/>. The single shared tag-membership read: the evaluator
+    /// calls it on the owner pool each cache refresh, and the evaluate-now test tool calls it on the
+    /// least-privilege mcp/viewer pool — both of which carry <c>SELECT</c> on <c>config.server_tags</c> and
+    /// <c>config.server_tag_map</c> (neither holds a secret column, so both are covered by the blanket
+    /// <c>GRANT … ON ALL TABLES IN SCHEMA config</c> provisioning re-runs on every start). A tag that resolves
+    /// to no servers (an empty subtree, or a tag absent from <c>server_tags</c>) is absent from the returned map
+    /// (the caller reads that as an empty set → the rule matches no server). Returns an empty map for an empty
+    /// input without touching the store.
     /// </summary>
     public async Task<IReadOnlyDictionary<int, IReadOnlySet<int>>> ListTagMembersAsync(
         IReadOnlyCollection<int> tagIds, CancellationToken cancellationToken = default)

@@ -651,9 +651,9 @@ function scopeSection(model, fleet, tags, onChange) {
     mount(box, [list, el("div", { class: "block-help", text: "The rule fires per server; pick the servers it applies to." })]);
   }
 
-  /* The tag picker: a single-select of the fleet tag forest, indented by depth. The rule evaluates the servers
-     DIRECTLY assigned the chosen tag, resolved fresh each sweep — so adding or removing a server from the tag
-     re-scopes the rule without editing it. */
+  /* The tag picker: a single-select of the fleet tag forest, indented by depth. The rule evaluates every server
+     under the chosen tag's whole subtree (the tag plus its descendant tags' servers), resolved fresh each sweep
+     — so adding or removing a server, or a sub-tag, re-scopes the rule without editing it. */
   function tagScope() {
     if (!tags.length) {
       return noticeStrip("No fleet tags are defined yet. Create and assign tags in the desktop viewer's fleet view, then scope a rule to one.");
@@ -679,7 +679,7 @@ function scopeSection(model, fleet, tags, onChange) {
       field("Tag", sel),
       el("div", {
         class: "block-help",
-        text: "The rule fires per server for every server DIRECTLY assigned this tag. Membership is resolved fresh each evaluation, so adding or removing a server from the tag re-scopes the rule automatically; an empty or deleted tag matches no server (the rule never fires).",
+        text: "The rule fires per server for every server assigned this tag OR any tag beneath it (the whole subtree). Membership is resolved fresh each evaluation, so adding or removing a server — or a sub-tag — re-scopes the rule automatically; a tag whose subtree has no servers matches nothing (the rule never fires).",
       }),
     ]);
   }
