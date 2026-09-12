@@ -75,10 +75,14 @@ CENSUS_HEADER = [
     "# needs the pre-split revision to compare against.",
 ]
 
-# Only a released 3.x version is archived. [Unreleased] is excluded because it is the authoring
-# surface; pre-3.0 is excluded because its entries are already terse - mean 157 bytes against
-# 1,916 in 3.7.0 - so compacting them would move nothing and delete the record's oldest half.
-ARCHIVED = re.compile(r"^## \[(3\.\d+\.\d+)\](?: |$)")
+# A released version at or after this floor is archived. [Unreleased] is excluded because it is
+# the authoring surface; pre-3.0 is excluded because its entries are already terse - mean 157
+# bytes against 1,916 in 3.7.0 - so compacting them would move nothing and delete the record's
+# oldest half. The floor is compared numerically rather than matched as a literal major, so the
+# next major archives on its own: a major-prefix test leaves 4.0.0 unarchived, which puts its
+# prose back in the index and regrows the single oversized file this tool exists to split.
+# ChangelogIndexAndArchiveTests.IndexSection.Archived carries the same floor.
+ARCHIVE_FLOOR = (3, 0, 0)
 
 VERSION_HEADING = re.compile(r"^## \[(\d+\.\d+\.\d+)\](?: |$)")
 ANY_HEADING = re.compile(r"^## \[")
@@ -142,7 +146,10 @@ class Section:
 
     @property
     def archived(self) -> bool:
-        return ARCHIVED.match(self.heading) is not None
+        version = self.version
+        if version is None:
+            return False
+        return tuple(int(part) for part in version.split(".")) >= ARCHIVE_FLOOR
 
     @property
     def lines(self) -> list[str]:
@@ -657,6 +664,22 @@ def cmd_self_test(repo: Path, rev: str) -> int:
             failures.append(name)
 
     expect("the uncorrupted tree round-trips", cmd_roundtrip(repo, rev, quiet=True) == 0)
+
+    # The floor decides which versions move their prose out, and a literal-major test answers
+    # every version this file currently holds correctly - it is wrong only about ones the file
+    # does not hold yet. So the cases that carry the assertion are the future majors, which no
+    # fixture drawn from the tree can supply.
+    for heading, want in (
+        ("## [4.0.0] - 2027-01-01", True),
+        ("## [10.2.3] - 2027-06-01", True),
+        ("## [3.0.0] - 2026-01-01", True),
+        ("## [3.7.0] - 2026-09-01", True),
+        ("## [2.11.0] - 2025-01-01", False),
+        ("## [1.0.0] - 2024-01-01", False),
+        ("## [Unreleased]", False),
+    ):
+        expect(f"archive floor: {heading} -> archived={want}",
+               Section(heading, [], []).archived == want)
 
     path = archive_path("3.7.0")
     pristine = (repo / path).read_bytes()

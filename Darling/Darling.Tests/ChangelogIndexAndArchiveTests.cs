@@ -66,6 +66,38 @@ public sealed class ChangelogIndexAndArchiveTests
     private static readonly Regex IssueReference = new(@"\[#(?<number>\d+)\]", RegexOptions.Compiled);
 
     /// <summary>
+    /// The archived range is every release from 3.0.0 up, and the bound is compared numerically.
+    /// </summary>
+    /// <remarks>
+    /// A major-version prefix test answers every version this repository currently contains correctly and is
+    /// wrong only about ones it does not contain yet, so the cases that carry the assertion are future majors.
+    /// Reading 4.0.0 as unarchived leaves that release's prose in the index — 3.7.0's alone is 559,066 bytes
+    /// against a 750 KB index ceiling — which undoes the split rather than failing it.
+    /// </remarks>
+    [Fact]
+    public void TheArchivedRange_IsEveryReleaseFrom300Up_AndComparesNumerically()
+    {
+        foreach (var (version, expected) in new[]
+        {
+            ("4.0.0", true), ("10.2.3", true), ("3.0.0", true), ("3.7.0", true),
+            ("2.11.0", false), ("1.0.0", false),
+        })
+        {
+            var section = new IndexSection
+            {
+                Heading = $"## [{version}] - 2026-01-01",
+                Prose = [],
+                Version = version,
+            };
+
+            Assert.Equal(expected, section.Archived);
+        }
+
+        var unreleased = new IndexSection { Heading = "## [Unreleased]", Prose = [], Version = null };
+        Assert.False(unreleased.Archived);
+    }
+
+    /// <summary>
     /// Every archive still holds, byte for byte, the prose that came out of <c>CHANGELOG.md</c> — and holds
     /// the same number of entries the index shows a line for.
     ///
@@ -231,8 +263,12 @@ public sealed class ChangelogIndexAndArchiveTests
         public required List<string> Prose { get; init; }
         public string? Version { get; init; }
 
-        /* 3.x is the archived range: from 3.0.0 on, entries carry the prose the split exists to move. */
-        public bool Archived => Version is not null && Version.StartsWith("3.", StringComparison.Ordinal);
+        /* From 3.0.0 on, entries carry the prose the split exists to move. The floor is compared
+           numerically, matching ARCHIVE_FLOOR in tools/changelog/changelog_archive.py: a major-version
+           prefix test reads 4.0.0 as unarchived and regrows the index this pin guards. */
+        public bool Archived => Version is not null && System.Version.Parse(Version) >= ArchiveFloor;
+
+        private static readonly System.Version ArchiveFloor = new(3, 0, 0);
     }
 
     private static Dictionary<string, Row> Census()

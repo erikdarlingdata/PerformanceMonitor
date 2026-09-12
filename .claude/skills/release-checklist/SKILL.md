@@ -44,7 +44,7 @@ If a week of parallel PRs left duplicate section headers in `[Unreleased]` (two 
 
 If the previous version's changelog entry is missing, add that too.
 
-#### 2a. Archive and compact the cut version
+### 2a. Archive and compact the cut version
 
 `CHANGELOG.md` is an **index**: from 3.0.0 on, each released entry is reduced to its bold title and the issues it references, and the prose lives in `docs/changelog/<major>.<minor>.md`. The single file had reached 2,160,009 bytes, which GitHub refuses to render. `[Unreleased]` keeps its full prose because that is where entries are written, so once the heading is renamed to the new version its prose has to move:
 
