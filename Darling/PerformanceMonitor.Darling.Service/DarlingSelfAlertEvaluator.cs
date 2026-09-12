@@ -30,7 +30,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// watching a dashboard. The FOUNDING conditions are listed below — the first three reframe a Dashboard
 /// health check onto Darling's own signals; Store Disk Pressure was net-new and guards the service's OWN
 /// store — and every condition added since is sectioned in the body under its own issue number. The list is
-/// not a census and carries no count: it named four while five sat in it. All of them route through the SAME
+/// not a census and deliberately carries no count, because a numeral here goes stale silently every time a
+/// condition is added and nothing checks it. All of them route through the SAME
 /// <see cref="IAlertDeliverer"/> the shared alert engine uses (so they inherit its email/webhook delivery,
 /// per-fingerprint delivery cooldown, and restart replay) and the SAME <c>config_alert_log</c> history
 /// store:
@@ -239,8 +240,8 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>
     /// The synthetic server label every FLEET-LEVEL store self-alert fires under — each condition in this
     /// class whose subject is the store or its configuration rather than one monitored server, plus each
-    /// one's resolution edge. Described rather than listed: the enumeration that used to sit here named
-    /// four of them and was two conditions behind by the time anyone read it.
+    /// one's resolution edge. Described rather than listed, because a list here goes stale silently every
+    /// time a condition is added and nothing checks it.
     /// The monitoring store is not a SQL Server instance and is not in the monitored-server registry,
     /// so this string deliberately resolves to NOTHING: <c>DarlingServerResolver</c> cannot match it, and the
     /// deliverer's #1236 int.TryParse override no-ops on it exactly like the non-numeric <see cref="DiskKey"/>.
@@ -329,9 +330,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <para><b>Because it cannot be muted, it must not shout.</b> Every sibling re-fires on
     /// <c>IAlertEngineSettings.CooldownMinutes</c> (shipped default 5, clamped to at most 120), which for a
     /// condition an operator can silence is a reasonable standing reminder. This one is deliberately
-    /// unsuppressible — see the <c>honorMuteRules</c> argument at its fire site — so on the shipped defaults
-    /// it would have produced a history row every five minutes and a notification every fifteen, forever,
-    /// about a fact that changes on a scale of DAYS. That is the channel flood a permanent mute rule was
+    /// unsuppressible — see the <c>honorMuteRules</c> argument at its fire site — and on the shipped defaults
+    /// the shared cooldown gives a history row every five minutes and a notification every fifteen, forever,
+    /// about a fact that changes on a scale of DAYS. That is the channel flood a permanent mute rule is
     /// usually created to prevent, arriving from the thing that reports the mute.</para>
     ///
     /// <para>Daily: unmistakable as a standing reminder, and bounded at one a day. It cannot be configured
@@ -1815,12 +1816,14 @@ internal sealed class DarlingSelfAlertEvaluator
     ///
     /// <para>Severity follows BLAST RADIUS, not age. A rule that constrains nothing
     /// (<see cref="MuteRule.MatchesEveryAlert"/>) suppresses every alert on the store, so the fleet reads
-    /// healthy for want of anything being measured — CRITICAL. A rule scoped to a metric, a server or a
+    /// healthy for want of anything being reported — CRITICAL. A rule scoped to a metric, a server or a
     /// pattern hides one signal — WARNING.</para>
     ///
-    /// <para>A STANDING condition like Custom Alert Rules Unhealthy: fire once on entry, re-fire only per the
-    /// alert cooldown while any rule qualifies, and ONE resolution row when none does. Gated on the master
-    /// alerts switch. Internal so it pins directly with a recording deliverer and a controllable clock.</para>
+    /// <para>A STANDING condition like Custom Alert Rules Unhealthy: fire once on entry, re-state it while
+    /// any rule qualifies, and ONE resolution row when none does. Unlike those siblings it re-states on its
+    /// own <see cref="StaleMuteRefire"/> rather than the shared alert cooldown — see there for why an
+    /// unsuppressible condition needs its own, longer interval. Gated on the master alerts switch. Internal
+    /// so it pins directly with a recording deliverer and a controllable clock.</para>
     /// </summary>
     internal async Task ApplyStaleMuteRulesAsync(
         IReadOnlyList<MuteRule> rules, CancellationToken cancellationToken)
@@ -1901,10 +1904,10 @@ internal sealed class DarlingSelfAlertEvaluator
             context: null,
             /* THE load-bearing deviation from every sibling: this one alert ignores mute rules.
                FireAsync's mute check asks "does a rule match (Monitor Store, this metric)", and a rule that
-               constrains nothing matches EVERYTHING — including this. Two of the four rules that motivated
-               #3306 were exactly that shape, so honoring the mute here would let the condition suppress the
-               only report of itself, and the report would be a row in alert history that nobody reads
-               without already suspecting the mute. That is the blind spot, not a fix for it. A muted alert
+               constrains nothing matches EVERYTHING — including this. A blanket rule is also the shape with
+               the largest blast radius, so honoring the mute would lose the report precisely where it
+               matters most: what survives is a row in alert history that nobody reads without already
+               suspecting the mute. That is the blind spot, not a fix for it. A muted alert
                is still recorded, which is enough for every other condition; it is not enough for the one
                whose subject IS the muting. */
             honorMuteRules: false);
