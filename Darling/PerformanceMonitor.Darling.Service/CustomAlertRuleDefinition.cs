@@ -105,14 +105,35 @@ public sealed record CustomAlertRuleDefinition(
     /// Whether a value breaches the predicate. A scalar op crosses its warning bar (the <see cref="Compare"/>
     /// authority); a range op falls IN (<see cref="CustomAlertOp.Between"/>) or OUT
     /// (<see cref="CustomAlertOp.Outside"/>) of the INCLUSIVE band [<see cref="LowerBound"/>,
-    /// <see cref="UpperBound"/>] (#3351). Bounds are guaranteed present for a range op by the validator.
+    /// <see cref="UpperBound"/>] (#3351), through the shared <see cref="RangeBreaches"/> band authority. Bounds
+    /// are guaranteed present for a range op by the validator.
     /// </summary>
-    public bool IsBreaching(double value) => Op switch
+    public bool IsBreaching(double value) => IsRange
+        ? RangeBreaches(Op, LowerBound, UpperBound, value)
+        : WarnThreshold is double warn && Compare(value, warn);
+
+    /// <summary>The pure band-membership decision a range op breaches on (#3351): <see cref="CustomAlertOp.Between"/>
+    /// breaches INSIDE the inclusive band [lower, upper], <see cref="CustomAlertOp.Outside"/> beyond it. Factored
+    /// out of <see cref="IsBreaching"/> so the band math lives in ONE place, shared by the live evaluation, the
+    /// <see cref="BreachesOnZero"/> no-data guard, and the parse-time count guard (#3373). Returns false for a
+    /// scalar op (whose bar is <see cref="Compare"/>) and whenever a bound is absent.</summary>
+    private static bool RangeBreaches(CustomAlertOp op, double? lowerBound, double? upperBound, double value) => op switch
     {
-        CustomAlertOp.Between => LowerBound is double lo && UpperBound is double hi && value >= lo && value <= hi,
-        CustomAlertOp.Outside => LowerBound is double lo && UpperBound is double hi && (value < lo || value > hi),
-        _ => WarnThreshold is double warn && Compare(value, warn),
+        CustomAlertOp.Between => lowerBound is double lo && upperBound is double hi && value >= lo && value <= hi,
+        CustomAlertOp.Outside => lowerBound is double lo && upperBound is double hi && (value < lo || value > hi),
+        _ => false,
     };
+
+    /// <summary>
+    /// Whether this range predicate's band treats a no-data 0 as a breach (#3373). A COUNT metric cannot tell
+    /// "zero events happened" from "the collector stalled and wrote no rows" — both read as <c>COUNT(*)</c> 0, a
+    /// real value (never the NULL the evaluator's no-data freeze catches, unlike SUM/AVG over an empty window) —
+    /// so a band that fires on 0 would false-fire on a dead collector. This is the predicate the parse-time count
+    /// guard uses to reject such a rule, mirroring the scalar '&lt;'/'&lt;=' count rejection. Expressed as the
+    /// band's own <see cref="IsBreaching"/> verdict at 0 so the band logic stays the single authority; meaningful
+    /// only for a range op (a scalar op returns false here — its count trap is the separate '&lt;'/'&lt;=' rejection).
+    /// </summary>
+    public bool BreachesOnZero() => IsRange && IsBreaching(0);
 
     /// <summary>The tier a breaching value fires at: Critical when it also crosses the critical bar, else Warning.
     /// A range op is Warning-only in v1 (a two-tier band would need a warn-band AND a crit-band = four bounds;
@@ -272,6 +293,18 @@ public sealed record CustomAlertRuleDefinition(
             if (!(lower < upper))
             {
                 return (null, "'predicate.lowerBound' must be less than 'predicate.upperBound'.");
+            }
+
+            // A range band that fires when the count is 0 has the SAME stalled-collector ambiguity as the scalar
+            // '<'/'<=' count trap below: COUNT(*) over an empty window is 0 (never the NULL the evaluator's
+            // no-data freeze catches), so a dead collector reads 0 and the band false-fires exactly when the true
+            // signal is "no data". Guard it the same way, keyed on the same COUNT-aggregate archetype and routed
+            // through the same band authority (RangeBreaches) the live evaluation uses. 'outside' fires on 0 when
+            // 0 < lower; 'between' when lower <= 0 <= upper; nudging the bounds so 0 falls outside the firing
+            // region (outside -> lower 0, between -> lower above 0) makes the band safe on an empty window.
+            if (plan.Aggregate == ComposeAggregate.Count && RangeBreaches(op, lower, upper, 0))
+            {
+                return (null, "a 'between'/'outside' alert on a count whose band fires when the count is 0 can't distinguish zero events from a stalled collector; set the bounds so a count of 0 does not fire.");
             }
 
             lowerBound = lower;

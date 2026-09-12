@@ -265,13 +265,21 @@ function alertSaveBlocker(model) {
   if (model.windowHours > MAX_WINDOW_HOURS) return "The evaluation window can be at most 24 hours (an alert window is recent).";
 
   if (isRangeOp(model.op)) {
-    /* Range op: both bounds required and ordered; no warn/critical and no count trap (the same rules the backend
-       enforces for a between/outside predicate). */
+    /* Range op: both bounds required and ordered; no warn/critical (the same rules the backend enforces for a
+       between/outside predicate). */
     const lower = parseNumOrNull(model.lower);
     const upper = parseNumOrNull(model.upper);
     if (lower == null) return "Enter a lower bound (a number).";
     if (upper == null) return "Enter an upper bound (a number).";
     if (!(lower < upper)) return "The lower bound must be less than the upper bound.";
+
+    /* A range band that fires when the count is 0 has the same stalled-collector ambiguity as the '<'/'<=' count
+       trap below (a dead collector reads COUNT 0, not "no data"), so the backend rejects it. 'outside' fires on 0
+       when 0 < lower; 'between' when lower <= 0 <= upper. Mirror that here so the operator gets the reason inline. */
+    if (metric.aggregate === "count" &&
+        (model.op === "outside" ? (0 < lower || 0 > upper) : (lower <= 0 && 0 <= upper))) {
+      return "A 'between' or 'outside' alert on a count whose band fires when the count is 0 can't tell zero events from a stalled collector — set the bounds so a count of 0 doesn't fire.";
+    }
   } else {
     const warn = parseNumOrNull(model.warn);
     if (warn == null) return "Enter a warning threshold (a number).";

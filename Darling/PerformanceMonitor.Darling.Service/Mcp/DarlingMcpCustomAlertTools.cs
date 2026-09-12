@@ -115,8 +115,10 @@ public sealed class DarlingMcpCustomAlertTools
         "('mode' 'all', or 'servers' with a non-empty 'servers' list, or 'tag' with an integer 'tagId' fleet-tag " +
         "id whose directly-assigned servers the rule then evaluates), and an " +
         "optional 'evaluationIntervalSeconds' (>= 30). Build the metric panel from the compose catalog exposed " +
-        "by describe_custom_view_catalog. A '<'/'<=' predicate on a count aggregate is rejected because it " +
-        "cannot tell zero events from a stalled collector; use '>=' instead.")]
+        "by describe_custom_view_catalog. On a count aggregate, a predicate that fires when the count is 0 is " +
+        "rejected because it cannot tell zero events from a stalled collector: a scalar '<'/'<=' (use '>=' " +
+        "instead), or a 'between'/'outside' band whose firing region includes 0 (set the bounds so a count of 0 " +
+        "does not fire).")]
     public static Task<string> ValidateCustomAlertRule(
         [Description("The rule definition JSON to validate (NOT persisted).")] string definition)
     {
