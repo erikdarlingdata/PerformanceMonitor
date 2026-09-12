@@ -58,7 +58,19 @@ public sealed class CustomAlertTeardownLiveTests
             SearchPath = "collect,config,public",
         }.ConnectionString;
 
-        return NpgsqlDataSource.Create(dataSourceConnectionString);
+        var dataSource = NpgsqlDataSource.Create(dataSourceConnectionString);
+
+        // #3334: the teardown resolution row is now written through the SECURITY DEFINER
+        // config.record_custom_alert_resolution function -- a PROVISIONING artifact, not a migration. These
+        // tests migrate but do not run role provisioning, so create the function here (as the owner, mirroring
+        // production where provisioning runs after migration); otherwise ResolveAndDeleteRuleAsync's resolve
+        // write would no-op against a missing function and the recovery-row assertions would fail.
+        await using (var fn = dataSource.CreateCommand(DarlingManagedRoles.BuildCustomAlertResolveFunctionSql("config")))
+        {
+            await fn.ExecuteNonQueryAsync(ct);
+        }
+
+        return dataSource;
     }
 
     private static async Task<int> CountAlertLogAsync(NpgsqlDataSource dataSource, string metricName, int serverId, CancellationToken ct)
