@@ -356,6 +356,66 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         }
     }
 
+    /// <summary>
+    /// <c>collector_name</c>'s example collectors: the SAME list on both SKUs, and every name a REAL collector.
+    ///
+    /// <para>Review caught Lite's list omitting <c>plan_correction</c> while Darling's named it, which reads as
+    /// the two products running different collectors. They do not — Lite schedules it, enabled, in
+    /// <c>ScheduleManager</c> — so the example was simply stale on one side.</para>
+    ///
+    /// <para>The catalog assertion is the one worth having. A stale list is a cosmetic parity bug; a list
+    /// naming a collector that does not exist is worse than useless on a filter matched EXACTLY, because a
+    /// caller copies the name, gets zero rows, and reads it as "this server never ran that". So the names are
+    /// checked against <see cref="CollectorCatalog"/> rather than only against each other — a frozen
+    /// enumeration in prose is right until the catalog moves under it.</para>
+    ///
+    /// <para><b>The two controls at the bottom are not decoration.</b> The first version of this pin parsed the
+    /// list with a capture that stopped at the first separator, so it compared <c>["query_store"]</c> against
+    /// <c>["query_store"]</c> — and passed while a name was dropped from one SKU and while a name was
+    /// misspelled into one the catalog does not have. Both mutations green. An <c>Assert.NotEmpty</c> is not a
+    /// control here: a one-element list is not empty. What discriminates is checking the capture reached the
+    /// END of the list.</para>
+    /// </summary>
+    [Fact]
+    public void CollectionLogCollectorExamples_AgreeAcrossSkus_AndNameRealCollectors()
+    {
+        var darling = CollectorNameExamples(File.ReadAllText(Path.Combine(
+            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs")));
+        var lite = CollectorNameExamples(File.ReadAllText(Path.Combine(
+            RepoRoot(), "Lite", "Mcp", "McpHealthTools.cs")));
+
+        /* Drift first, so a name present on one SKU and missing on the other reports as the difference it is
+           rather than as a parse complaint from whichever side came up short. */
+        Assert.Equal(darling, lite);
+
+        var real = CollectorCatalog.All.Select(d => d.Name).ToHashSet(StringComparer.Ordinal);
+        foreach (var name in darling)
+        {
+            Assert.Contains(name, real);
+        }
+
+        /* Controls on the PARSE, which is what makes everything above able to fail. Named rather than
+           positional, so reordering the examples is not a failure; counted, so a capture that stops at the
+           first separator cannot make the comparison vacuous. */
+        Assert.True(
+            darling.Length >= 3,
+            $"only parsed {darling.Length} example collector(s) [{string.Join(",", darling)}] — the capture is "
+            + "stopping short, which makes every assertion above vacuous");
+        Assert.Contains("wait_stats", darling);
+    }
+
+    /// <summary>The collector names listed as examples in a SKU's <c>collector_name</c> description.</summary>
+    private static string[] CollectorNameExamples(string source)
+    {
+        /* Bounded by the em dash that introduces the explanatory clause, so the capture spans the whole
+           parenthesised list rather than stopping at its first separator. */
+        var match = Regex.Match(source, "matched EXACTLY \\(([^\u2014)]+)\u2014");
+        Assert.True(match.Success, "collector_name's example list moved — this pin needs re-anchoring.");
+
+        return match.Groups[1].Value
+            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+    }
+
     /// <summary>One tool's <c>Description</c> text, sliced out of a SKU's source by tool name — the pattern
     /// #2839 established for reading across the Lite seam, used on both here so the two descriptions are held
     /// to the same claims by the same instrument.</summary>

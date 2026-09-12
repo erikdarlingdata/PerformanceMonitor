@@ -513,7 +513,7 @@ public sealed class McpHealthTools
             invokes by name, so the position costs a client nothing; a positional C# caller is the only
             observer, and appending keeps every existing one meaning what it already meant.
         */
-        [Description("Limit to one collector, matched EXACTLY (query_store, wait_stats — the names get_collection_health lists). Omit for every collector. A name this server has never run returns the no-matches status rather than a quiet-window one.")] string? collector_name = null,
+        [Description("Limit to one collector, matched EXACTLY (query_store, plan_correction, wait_stats — the names get_collection_health lists). Omit for every collector. A name this server has never run returns the no-matches status rather than a quiet-window one.")] string? collector_name = null,
         [Description("Return only runs whose total duration_ms is at or above this floor, AND rank the page SLOWEST FIRST rather than newest first — a floor under newest-first ordering still cannot reach the tail. Applied in SQL before the cap. 0 is a real value: it admits every run and is how you ask for the whole window ranked by cost. A negative is refused. Omit for no floor and newest-first order.")] double? min_duration_ms = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
