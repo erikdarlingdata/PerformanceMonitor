@@ -202,8 +202,10 @@ public sealed class AlertReadFailureSurfaceTests
     ///
     /// <para>So the set is derived from SOURCE (every <c>RecordReadFailure(null, ...)</c> call, matched
     /// across line breaks because those calls are wrapped) and each one must be represented in the single
-    /// constant every surface now concatenates. A fourth fleet-scoped site fails here until the constant
-    /// names it.</para>
+    /// constant every surface now concatenates. A site beyond the count asserted below fails here until
+    /// the constant names it — stated that way rather than as its own numeral, because the numeral here
+    /// was wrong from the day it was written (it said "a sixth" beside an asserted count of two) and a
+    /// second copy of a pinned number has nothing keeping it honest.</para>
     ///
     /// <para>Derived from the LITERAL, which is why the call sites spell the read name inline rather than
     /// through a constant: a named constant at the site would leave this regex finding nothing there, and
