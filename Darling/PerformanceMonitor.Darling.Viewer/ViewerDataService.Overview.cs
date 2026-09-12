@@ -181,7 +181,18 @@ WHERE server_id = $1";
     /// Memory-pressure reads take the newest snapshot; the Collectors row REUSES the viewer's 7-day
     /// <see cref="GetCollectionHealthAsync"/> banding.
     /// </summary>
-    public async Task<ServerSummaryItem> GetServerSummaryAsync(int serverId, string displayName, CancellationToken cancellationToken = default)
+    /// <param name="deadlockTiers">The store's deadlock-rate tiers (#3368), read ONCE by the caller for the
+    /// whole refresh. Hoisted out of this method rather than read here: the Overview fan-out calls it once
+    /// per server across concurrent lanes, so reading the settings row here would both add a round-trip per
+    /// card and let a store reload mid-refresh band some cards on the old pair and the rest on the new one
+    /// — the mixed reading <c>DarlingFleetReader.GetFleetOverviewAsync</c> hoists its own copy of this read
+    /// to avoid. Null bands on the shipped pair, which is what a single-card caller with no fleet refresh
+    /// around it gets; <c>GetDeadlockRateThresholdsAsync</c> is the read.</param>
+    public async Task<ServerSummaryItem> GetServerSummaryAsync(
+        int serverId,
+        string displayName,
+        DeadlockRateThresholds? deadlockTiers = null,
+        CancellationToken cancellationToken = default)
     {
         var nowUtc = DateTime.UtcNow;
         /* #3368: the window's LENGTH is named once and the start derived from it, so the card's deadlock
@@ -364,10 +375,6 @@ WHERE server_id = $1";
            SUM(CASE health_status = 'HEALTHY' / 'FAILING') over report.collection_health. */
         var (healthyCollectors, failingCollectors, deadlockBand) = await GetCollectorHealthCountsAsync(serverId, cancellationToken);
 
-        /* #3368: the deadlock band's tiers from the store's control-plane row, so this card and the
-           service's fleet card band on the same two numbers — the #1562 reason the thresholds live in one
-           place at all, extended to the ones that are now settable. */
-        var deadlockTiers = await GetDeadlockRateThresholdsAsync(cancellationToken);
 
         return new ServerSummaryItem
         {
@@ -422,7 +429,7 @@ WHERE id = 1";
     /// <para>Values come back RAW; <see cref="DeadlockRateThresholds"/> clamps on read, so a hand-edited row
     /// cannot drive a nonsense threshold.</para>
     /// </summary>
-    private async Task<DeadlockRateThresholds> GetDeadlockRateThresholdsAsync(CancellationToken cancellationToken)
+    public async Task<DeadlockRateThresholds> GetDeadlockRateThresholdsAsync(CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(DeadlockRateThresholdSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;

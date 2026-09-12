@@ -331,10 +331,56 @@ public sealed class DeadlockRateBandRungTests
             Assert.Contains("new DeadlockRateThresholds(reader.GetDouble(0), reader.GetDouble(1))", text, StringComparison.Ordinal);
         }
 
-        /* The service reads them ONCE per roll-up, not per card: a store reload mid-read would otherwise
-           band some servers on the old pair and the rest on the new one, and the band counts and the
-           worst-first ranking would be derived from a configuration that never existed. */
+        /* BOTH surfaces read them ONCE per refresh, not per card: a store reload mid-refresh would
+           otherwise band some servers on the old pair and the rest on the new one, and the viewer's band
+           counts and the service's worst-first ranking would both be derived from a configuration that
+           never existed.
+
+           Asserted for BOTH, and that symmetry is the point. An earlier spelling held the discipline for
+           the service only, and the viewer read the settings row inside its per-server summary - once per
+           card, across concurrent fan-out lanes. One-sided, the pin was satisfied by the side that was
+           already right while the side that was wrong went unexamined, which is the shape of a pin that
+           cannot fail. */
         Assert.Equal(1, CountOf(service, "ReadDeadlockRateThresholdsAsync(postgres"));
+        Assert.Equal(1, CountOf(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml.cs"),
+            "GetDeadlockRateThresholdsAsync("));
+
+        /* And the viewer's PER-SERVER read must not reach the settings row at all - it takes the tiers as a
+           parameter. Stated against the method's own body rather than the file, because the file
+           legitimately declares the read its caller hoists. */
+        Assert.DoesNotContain(
+            "GetDeadlockRateThresholdsAsync(", ViewerServerSummaryBody(), StringComparison.Ordinal);
+        Assert.Contains("DeadlockRateThresholds? deadlockTiers", viewer, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <c>ViewerDataService.GetServerSummaryAsync</c>'s body, sliced out - sliced rather than searched
+    /// whole-file because the settings read is DECLARED in the same file, so a whole-file
+    /// <c>DoesNotContain</c> could never pass.
+    /// </summary>
+    private static string ViewerServerSummaryBody()
+    {
+        var source = RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.Overview.cs");
+
+        const string start = "public async Task<ServerSummaryItem> GetServerSummaryAsync(";
+        var from = source.IndexOf(start, StringComparison.Ordinal);
+        Assert.True(from >= 0, "GetServerSummaryAsync was not found, so this pin would read nothing");
+
+        const string end = "/// <summary>The deadlock health band's two tiers";
+        var to = source.IndexOf(end, from, StringComparison.Ordinal);
+        Assert.True(to > from, "the end of GetServerSummaryAsync was not found, so this pin would read the rest of the file");
+
+        var body = source[from..to];
+
+        /* The slice has to be the method, not a fragment: an off-by-one on either bound silently shrinks it
+           and the DoesNotContain above starts passing for the wrong reason. */
+        Assert.Contains("DeadlockWindow = window,", body, StringComparison.Ordinal);
+        Assert.Contains("ServerSummaryDeadlockSql", body, StringComparison.Ordinal);
+        Assert.True(body.Length > 2000, $"the sliced body is only {body.Length} chars, which cannot be this method");
+
+        return body;
     }
 
     /* ─────────────────────── helpers ─────────────────────── */
