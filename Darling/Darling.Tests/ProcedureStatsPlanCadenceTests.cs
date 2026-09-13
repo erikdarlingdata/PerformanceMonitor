@@ -87,9 +87,12 @@ public class ProcedureStatsPlanCadenceTests
         var gated = BuiltQuery(capturePlanXml: false);
         var capturing = BuiltQuery(capturePlanXml: true);
 
+        /* Derived from the shared cap constant, not retyped, so this can't silently drift out of sync
+           with QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes the way a repeated literal could. */
+        var planXmlFragment = $",\r\n    query_plan_xml = CASE WHEN DATALENGTH(tqp.query_plan) > {QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes} THEN NULL ELSE tqp.query_plan END";
         var stripped = capturing
-            .Replace(",\r\n    query_plan_xml = tqp.query_plan", "", StringComparison.Ordinal)
-            .Replace(",\n    query_plan_xml = tqp.query_plan", "", StringComparison.Ordinal)
+            .Replace(planXmlFragment, "", StringComparison.Ordinal)
+            .Replace(planXmlFragment.Replace("\r\n", "\n", StringComparison.Ordinal), "", StringComparison.Ordinal)
             .Replace("\r\nOUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handle, 1), 0, -1) AS tqp", "", StringComparison.Ordinal)
             .Replace("\nOUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handle, 1), 0, -1) AS tqp", "", StringComparison.Ordinal);
 
