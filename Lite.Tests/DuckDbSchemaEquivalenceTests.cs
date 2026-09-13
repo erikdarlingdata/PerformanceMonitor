@@ -175,10 +175,20 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
     /// module (<c>schema.object</c>) captured at collection, so the hash-grouped top-queries reads can
     /// split INSERT...EXEC callers that share a <c>query_hash</c>. <see cref="DuckDbInitializer"/>'s
     /// v52 migration adds it to existing databases.</para>
+    ///
+    /// <para>#3392 / schema v59: <c>query_stats.query_plan_xml_bytes</c> and
+    /// <c>procedure_stats.query_plan_xml_bytes</c> — the <c>DATALENGTH</c> of the row's cached-plan XML as
+    /// the monitored server measured it, which on Darling tells a plan omitted for size apart from a plan
+    /// that was never there. Lite never captures plans, so it always writes NULL here; the column exists on
+    /// this side because the DuckDB appender writes one value per DECLARED payload column, so a database
+    /// without it fails the whole batch. <see cref="DuckDbInitializer"/>'s v59 migration adds it to existing
+    /// databases.</para>
     /// </summary>
     private static readonly HashSet<string> IntentionalAppendedColumns = new(StringComparer.Ordinal)
     {
         "query_stats.host_object_name",
+        "query_stats.query_plan_xml_bytes",
+        "procedure_stats.query_plan_xml_bytes",
     };
 
     [Fact]
