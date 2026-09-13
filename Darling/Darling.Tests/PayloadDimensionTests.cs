@@ -881,9 +881,7 @@ public sealed class PayloadDimensionTests
         {
             /* Build output, and the test project itself: tests legitimately seed inline payloads (that is
                how the pre-#1767 transition rows get written) and legitimately assert on raw column names. */
-            if (file.Contains(@"\bin\", StringComparison.OrdinalIgnoreCase)
-                || file.Contains(@"\obj\", StringComparison.OrdinalIgnoreCase)
-                || file.Contains(@"\Darling.Tests\", StringComparison.OrdinalIgnoreCase))
+            if (IsSkippedPath(Path.GetRelativePath(darling, file)))
             {
                 continue;
             }
@@ -1029,6 +1027,45 @@ public sealed class PayloadDimensionTests
 
         return count;
     }
+
+    /// <summary>
+    /// The skip is a property of the PATH, not of the host. <c>Darling.Tests</c> matters most: its files
+    /// deliberately seed inline payloads and name raw columns, so a skip that silently stops working off
+    /// Windows turns this guard into a generator of false offenders against its own suite.
+    /// </summary>
+    [Theory]
+    [InlineData(@"bin\Debug\net10.0\Foo.g.cs", true)]
+    [InlineData("bin/Debug/net10.0/Foo.g.cs", true)]
+    [InlineData(@"obj\Debug\Foo.g.cs", true)]
+    [InlineData("obj/Debug/Foo.g.cs", true)]
+    [InlineData(@"Darling.Tests\PayloadDimensionTests.cs", true)]
+    [InlineData("Darling.Tests/PayloadDimensionTests.cs", true)]
+    [InlineData("PerformanceMonitor.Darling.Storage/PayloadDimensions.cs", false)]
+    [InlineData("mybin/Thing.cs", false)]
+    [InlineData("obj-cache/Thing.cs", false)]
+    [InlineData("Objects/Thing.cs", false)]
+    public void TheGuardsSkip_ReadsBothSeparators_AndWholeSegmentsOnly(string relativePath, bool skipped)
+    {
+        Assert.Equal(skipped, IsSkippedPath(relativePath));
+    }
+
+    /// <summary>
+    /// True when any whole SEGMENT of <paramref name="relativePath"/> is build output or this test
+    /// project, reading both separator characters on every platform.
+    ///
+    /// <para>The reasoning is <c>DocCommentHygieneTests.HasBuildOutputSegment</c>'s, which records it at
+    /// length: a substring test for a backslash-delimited segment matches nothing where the separator is
+    /// <c>/</c>, so a guard whose scope depends on the host is two guards. Here the stakes are higher than
+    /// for build output alone — the skip also covers <c>Darling.Tests</c>, whose files legitimately seed
+    /// inline payloads and assert on raw column names, so off Windows this sweep would report its own
+    /// suite's deliberate fixtures as offenders. Whole segments rather than a substring, because
+    /// <c>Objects</c>, <c>obj-cache</c> and <c>mybin</c> are source directory names.</para>
+    /// </summary>
+    private static bool IsSkippedPath(string relativePath) =>
+        relativePath.Split('/', '\\')
+            .Any(segment => string.Equals(segment, "bin", StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(segment, "obj", StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(segment, "Darling.Tests", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Whether <paramref name="text"/> contains <paramref name="word"/> on both-side word
     /// boundaries — so <c>query_text_digest</c> does not count as a reference to <c>query_text</c>.</summary>
