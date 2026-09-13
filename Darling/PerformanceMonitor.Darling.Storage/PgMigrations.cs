@@ -107,7 +107,13 @@ public static class PgMigrations
            the standing hazard of generator-built rungs: any LATER column the generator learns must be
            pre-added in EVERY earlier rung that re-emits generated SQL over existing tables — pinned by
            MigrationLadderPins so the next collision fails in CI, not on an operator's store. */
-        new Migration(51, "query-stats-host-object", V51Sql + "\n" + V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
+        /* V121Sql rides along for the same reason V54Sql already does: the generated resolving view is
+           compiled from TODAY's payload column list, so this rung's re-emission names every payload
+           column the current build knows — including ones a LATER rung adds. A store climbing from an
+           older release reaches this rung first, so without the later rung's ADD COLUMN here the view
+           references a column that does not exist yet and the ladder stops at 42703. Both bodies are
+           ADD COLUMN IF NOT EXISTS, so a store that already has them is unaffected. */
+        new Migration(51, "query-stats-host-object", V51Sql + "\n" + V54Sql + "\n" + V121Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
         new Migration(52, "finding-drilldown-json", V52Sql),
         new Migration(53, "store-self-metrics", V53Sql),
         new Migration(54, "plan-dim-gzip", V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
