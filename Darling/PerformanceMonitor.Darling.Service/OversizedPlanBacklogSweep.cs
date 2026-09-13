@@ -179,10 +179,17 @@ WHERE tqp.query_plan IS NOT NULL;";
                    CancellationToken.None, so nothing measured is discarded. */
                 return;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex)
             {
-                /* Failure-isolated per server, the DarlingRetention posture: this is a best-effort errand on
-                   the fleet loop's thread and it must never take a tick down. */
+                /* Failure-isolated per server: this pass is launched and not awaited, so an escaping fault
+                   would be an UNOBSERVED exception rather than one anybody handles — and the fleet would
+                   lose the whole tick's sweep with nothing logged.
+
+                   Unfiltered on purpose, unlike the usual `ex is not OperationCanceledException` arm. That
+                   filter exists so a shutdown is never swallowed as a fault, and the arm ABOVE already
+                   answers the shutdown case on the token. What is left is a cancellation whose token is not
+                   ours, which is not a shutdown and so IS a per-server fault — filtered out, it would be
+                   the one exception shape that escapes. */
                 logger?.LogDebug(
                     "Oversized-plan backlog sweep on '{Server}' ended early: {Message}",
                     server.Config.DisplayName, ex.Message);
