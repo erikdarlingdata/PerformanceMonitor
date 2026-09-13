@@ -448,9 +448,13 @@ public sealed class DarlingWorker : BackgroundService
     /* MinValue = the first sweep after startup drains the oversized-plan backlog (#3392), then every
        OversizedPlanBacklogSweep.SweepInterval. The cadence constant lives with the sweep rather than here
        because the sweep's own doc derives it from the compile ages of the plans it fetches; this field is
-       only the stamp. Fleet-level (one field, the sweep iterates servers itself) so a slow server delays
-       nothing but its own turn within the tick. */
+       only the stamp. Fleet-level (one field, the sweep iterates servers itself). */
     private DateTime _nextOversizedPlanSweepUtc = DateTime.MinValue;
+
+    /* The in-flight backlog pass (#3392), tracked so the cadence above cannot start a second one on top of
+       it. A pass that is still running when its next slot comes round simply skips that slot: the backlog is
+       a best-effort errand and there is nothing in it that a later hour cannot do. */
+    private Task? _oversizedPlanSweep;
 
     /* MinValue = the first sweep after startup evaluates the compression-job self-heal check (#1581), then
        every s_compressionCheckInterval. Fleet-level (one shared store), so it is a single field, not
@@ -1960,12 +1964,21 @@ public sealed class DarlingWorker : BackgroundService
             /* #3392: drain the oversized-plan backlog. Its own low-frequency cadence off this loop, beside
                the purge, and deliberately NOT inside the per-server collector rotation: fetching a plan the
                capture cap declined is worth doing eventually and worth nothing if it competes with a live
-               collection cycle for that server's wall-clock budget. sweepTargets is this tick's snapshot,
-               already taken under the servers lock, so the sweep iterates a stable set. Awaited rather than
-               fire-and-forget, like the purge: it is bounded at
-               MaxPlansPerServerPerTick * PerPlanBudget per server and the fleet loop's own tick is what
-               should absorb it, not an untracked task. */
-            if (DateTime.UtcNow >= _nextOversizedPlanSweepUtc)
+               collection cycle for that server's wall-clock budget.
+
+               FIRE-AND-TRACK, not awaited — the #1553 launch-loop shape rather than the purge's. The purge
+               is awaited because it talks only to the store with bounded statements; this pass opens a
+               connection to every monitored server, and its worst case is
+               fleet width * MaxPlansPerServerPerTick * PerPlanBudget, which on a 42-server fleet whose
+               targets are all timing out is over half an hour. Awaited, that is half an hour in which this
+               loop launches no collection bodies at all — the 24-server field incident's exact shape, one
+               maintenance step over. Launched and tracked, a slow pass costs only its own next slot.
+
+               sweepTargets is this tick's snapshot, already taken under the servers lock, so the pass
+               iterates a stable set. RunAsync is failure-isolated per server and returns quietly on
+               cancellation, so the task can complete unobserved without an unhandled fault. */
+            if (DateTime.UtcNow >= _nextOversizedPlanSweepUtc
+                && (_oversizedPlanSweep is null || _oversizedPlanSweep.IsCompleted))
             {
                 _nextOversizedPlanSweepUtc = DateTime.UtcNow.Add(OversizedPlanBacklogSweep.SweepInterval);
 
@@ -1978,7 +1991,8 @@ public sealed class DarlingWorker : BackgroundService
                     }
                 }
 
-                await OversizedPlanBacklogSweep.RunAsync(postgres, backlogTargets, _logger, stoppingToken);
+                _oversizedPlanSweep = OversizedPlanBacklogSweep.RunAsync(
+                    postgres, backlogTargets, _logger, stoppingToken);
             }
 
             /* Stage 4 fleet-level self-alert: the store disk-pressure backstop. The daily purge is the ONLY

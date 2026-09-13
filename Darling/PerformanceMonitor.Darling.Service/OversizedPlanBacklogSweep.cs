@@ -171,6 +171,14 @@ WHERE tqp.query_plan IS NOT NULL;";
             {
                 await SweepServerAsync(postgres, server, logger, cancellationToken).ConfigureAwait(false);
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                /* Service shutdown ends the pass quietly. The caller tracks this task without awaiting it, so
+                   a fault escaping here would be an UNOBSERVED exception rather than one anybody handles —
+                   and a shutdown is not a fault. Outcomes already fetched were written on
+                   CancellationToken.None, so nothing measured is discarded. */
+                return;
+            }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 /* Failure-isolated per server, the DarlingRetention posture: this is a best-effort errand on

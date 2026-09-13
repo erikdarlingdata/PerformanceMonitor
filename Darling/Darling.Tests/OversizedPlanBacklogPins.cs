@@ -384,6 +384,14 @@ public sealed class OversizedPlanBacklogPins
         /* Its cadence comes from the sweep's own constant, so the interval and the reasoning that sized it
            live in one place. */
         Assert.Contains("OversizedPlanBacklogSweep.SweepInterval", worker, StringComparison.Ordinal);
+
+        /* And the pass is LAUNCHED, never awaited on the tick. Its worst case is fleet width times the
+           per-server plan budget times the per-plan budget — over half an hour on a 42-server fleet whose
+           targets are all timing out — and awaited that is half an hour in which the fleet loop launches no
+           collection bodies. The purge above it is awaited because it talks only to the store. */
+        Assert.DoesNotContain("await OversizedPlanBacklogSweep.RunAsync", worker, StringComparison.Ordinal);
+        Assert.Contains("_oversizedPlanSweep = OversizedPlanBacklogSweep.RunAsync", worker, StringComparison.Ordinal);
+        Assert.Contains("_oversizedPlanSweep.IsCompleted", worker, StringComparison.Ordinal);
     }
 
     /* ---- retention ---------------------------------------------------------------------------------- */
