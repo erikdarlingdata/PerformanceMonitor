@@ -115,12 +115,17 @@ public sealed partial class ViewerDataService
             MAX(sql_handle) AS sql_handle,
             MAX(plan_handle) AS plan_handle,
             CAST(SUM(delta_spills) AS double precision) / NULLIF(SUM(delta_execution_count), 0) AS avg_spills,
-            /* Whether the collector captured a plan for this object anywhere in the window — gates the grid's
-               per-row "Query Plan" Download button, matching the same filter GetProcedureStatsPlanXmlAsync
-               fetches on. A digest is enough to answer it: since #1767 the plan itself lives in
-               query_plan_dim and the row carries only the key, so joining the dimension just to prove
-               presence would buy nothing this test cannot see from the fact row. */
-            bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL) AS has_query_plan
+            /* Whether the monitored server had a plan for this object anywhere in the window — gates the
+               grid's per-row "Query Plan" Download button, matching what GetProcedureStatsPlanXmlAsync can
+               fetch. A digest is enough to answer it: since #1767 the plan itself lives in query_plan_dim and
+               the row carries only the key, so joining the dimension just to prove presence would buy nothing
+               this test cannot see from the fact row.
+
+               The third term is the capped rows (#3392), and it needs no cap literal to find them: DATALENGTH
+               of a NULL plan is NULL, so a non-null query_plan_xml_bytes means a plan existed, and a row with
+               a size but neither an inline plan nor a digest is one the size cap declined. A module-grain plan
+               is the shape most likely to be one. */
+            bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL OR query_plan_xml_bytes IS NOT NULL) AS has_query_plan
         FROM procedure_stats
         WHERE server_id = $1
         AND   collection_time >= $2

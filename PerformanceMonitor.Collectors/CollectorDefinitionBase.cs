@@ -95,4 +95,10 @@ public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
     public abstract ValueTask<List<TRow>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken);
 
     public abstract void WritePayload(TRow row, ICollectorRowWriter writer, CollectorContext context);
+
+    /* Declared here as well as on the interface, the RequiredPgExtensions pair and for the same reason: the
+       interface's default implementation is not reachable through the class type, so without this a derived
+       definition could not `override` it and the interface map would keep resolving to null no matter what
+       the definition said. */
+    public virtual OversizedPlanObservation? DescribeOversizedPlan(TRow row) => null;
 }

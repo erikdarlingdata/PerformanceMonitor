@@ -107,10 +107,23 @@ public static class PgMigrations
            the standing hazard of generator-built rungs: any LATER column the generator learns must be
            pre-added in EVERY earlier rung that re-emits generated SQL over existing tables — pinned by
            MigrationLadderPins so the next collision fails in CI, not on an operator's store. */
-        new Migration(51, "query-stats-host-object", V51Sql + "\n" + V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
+        /* The pre-adds ride along for the same reason V54Sql already does: the generated resolving view is
+           compiled from TODAY's payload column list, so this rung's re-emission names every payload column
+           the current build knows — including ones a LATER rung adds. A store climbing from an older release
+           reaches this rung first, so without those columns the view references one that does not exist yet
+           and the ladder stops at 42703.
+
+           Generated from the collector definition rather than by threading a specific later rung's SQL in
+           here: one column was the symptom, and the next payload column would need this edited again. Every
+           statement is ADD COLUMN IF NOT EXISTS, so a store that already has them is unaffected. */
+        new Migration(51, "query-stats-host-object",
+            V51Sql + "\n" + V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsPayloadColumnPreAdds()
+            + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
         new Migration(52, "finding-drilldown-json", V52Sql),
         new Migration(53, "store-self-metrics", V53Sql),
-        new Migration(54, "plan-dim-gzip", V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
+        new Migration(54, "plan-dim-gzip",
+            V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsPayloadColumnPreAdds()
+            + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
         new Migration(55, "self-alert-knobs", V55Sql),
         new Migration(56, "store-metrics-background-jobs", V56Sql),
         new Migration(57, "store-job-cadence-knob", V57Sql),
@@ -177,6 +190,10 @@ public static class PgMigrations
         new Migration(118, "builtin-alert-persistence", V118Sql),
         new Migration(119, "retention-hold-ratio-knobs", V119Sql),
         new Migration(120, "deadlock-rate-band-knobs", V120Sql),
+        new Migration(121, "oversized-plan-backlog",
+            V121Sql + "\n" + OversizedPlanBacklog.CreateTableSql + "\n" + V54Sql + "\n"
+            + PgSchemaGenerator.GenerateQueryStatsPayloadColumnPreAdds() + "\n"
+            + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
     };
 
     /// <summary>
@@ -437,6 +454,40 @@ ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS deadlock_warn_per_hour double precision NOT NULL DEFAULT 5.0;
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS deadlock_critical_per_hour double precision NOT NULL DEFAULT 20.0;";
+
+    /// <summary>
+    /// V121 — the measured size of each row's cached-plan XML, and the backlog of the plans the size cap
+    /// declined to capture (#3392).
+    ///
+    /// <para><b>The columns.</b> <c>query_plan_xml_bytes</c> on <c>query_stats</c> and
+    /// <c>procedure_stats</c> is the <c>DATALENGTH</c> the collectors' cap already evaluates, now also
+    /// selected. It is never gated by the cap, so a row over it carries a size and a NULL plan — the only
+    /// pairing that distinguishes "omitted for size" from "the handle aged out", which is what
+    /// <c>collect.oversized_plan_backlog</c> is keyed on. Nullable with no DEFAULT and no backfill, matching
+    /// every column-adding rung here: no measurement exists for rows already collected, and a 0 would claim
+    /// a plan of zero bytes. TimescaleDB accepts a nullable ADD COLUMN on a compressed hypertable.</para>
+    ///
+    /// <para><b>The table's DDL comes from <see cref="OversizedPlanBacklog.CreateTableSql"/></b>, appended
+    /// to this constant rather than transcribed here — the V38 idiom. The statements that address the table
+    /// live beside that DDL, so the shape a store gets and the shape the code writes cannot drift.</para>
+    ///
+    /// <para><b><c>v_query_stats</c> is NOT a passthrough on a V38+ store</b> — it is the #1767
+    /// payload-RESOLVING view (<see cref="PgSchemaGenerator.GenerateQueryStatsResolvingView"/>), so it must
+    /// be rebuilt from the generator rather than re-expanded as <c>SELECT *</c>, which would silently return
+    /// NULL query_text and NULL plan XML for every digest-era row. And because the generator emits payload
+    /// columns BEFORE the trailing digest columns, the new column lands mid-list — an alteration
+    /// <c>CREATE OR REPLACE VIEW</c> refuses (append-at-end only) — hence DROP + recreate, exactly as V51
+    /// did for <c>host_object_name</c>. Plain DROP, no CASCADE: nothing persistent depends on the view;
+    /// readers reference it per-query. <c>V54Sql</c> is concatenated ahead of the regenerated view because
+    /// that view references the plan dim's compressed-content column, which a store upgrading from below V54
+    /// does not have yet (<c>MigrationLadderPins</c> pins the ordering).</para>
+    /// </summary>
+    private const string V121Sql = @"
+ALTER TABLE query_stats
+    ADD COLUMN IF NOT EXISTS query_plan_xml_bytes bigint;
+ALTER TABLE procedure_stats
+    ADD COLUMN IF NOT EXISTS query_plan_xml_bytes bigint;
+DROP VIEW IF EXISTS v_query_stats;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

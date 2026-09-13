@@ -826,6 +826,24 @@ Both apps and every MCP tool decompress client-side, so nothing in the product i
 exists because the change altered the contract for direct SQL consumers and the v3.4.0 release notes did
 not say so. That omission is on us.
 
+**A `query_stats` / `procedure_stats` row can also have no dimension row at all.** Plan XML larger than
+512 KB for one row is not captured — see `QueryPlanXmlCaptureLimits` for the measured reason — so that row
+carries no digest and there is nothing in `query_plan_dim` to join to. `query_plan_xml_bytes` on the fact
+row is what tells those two cases apart: it is the size the monitored server measured, recorded whether or
+not the content was kept.
+
+| Fact row | Means |
+|---|---|
+| `query_plan_xml_bytes IS NULL` | The server had no plan for this row — the handle aged out before the plan was read, or this store's service does not capture plans |
+| `query_plan_xml_bytes IS NOT NULL` and a digest is present | Captured; resolve it through `query_plan_dim` as above |
+| `query_plan_xml_bytes IS NOT NULL` and no digest | Declined for size. Look in `collect.oversized_plan_backlog` |
+
+`collect.oversized_plan_backlog` is where those plans are eventually collected, by an hourly out-of-band
+sweep that fetches one plan at a time. Its `plan_xml` column is **plain text, never gzip** — the content
+never passes through the plan dimension. A row with `plan_xml IS NULL` has not been fetched yet;
+`expired_at` means the plan handle stopped resolving before the sweep reached it. `get_plan_xml` and the
+`analyze_*_plan` tools read this table automatically, so asking the product remains the shortest route.
+
 **Getting the XML back.** PostgreSQL has no built-in gunzip for arbitrary `bytea`, so a plain-SQL
 consumer cannot decompress in the database without an extension. Practical options, in the order most
 people should try them:

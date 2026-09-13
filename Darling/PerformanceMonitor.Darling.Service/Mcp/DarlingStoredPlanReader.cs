@@ -39,6 +39,15 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>IS NOT NULL</c> guard skips rows where no plan was captured. If a change here alters a stored
 /// column, the viewer's twin read must move with it.
 /// </para>
+///
+/// <para><b>The oversized-plan fallback (#3392).</b> A plan whose XML measured over
+/// <c>QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes</c> ships NULL for content, so it produces no
+/// plan-dimension row and the <c>IS NOT NULL</c> guards above skip it — correctly, since there is nothing
+/// there. When every collected row for a key is in that state the primary read returns nothing, and the
+/// answer is in <c>collect.oversized_plan_backlog</c> instead: the same plan, fetched later by the backlog
+/// sweep on its own connection. So each stored-plan read here tries the collected content first and the
+/// backlog second, and a caller sees one answer either way. Without this half nothing a user can see changes
+/// — the recording half alone just moves the blind spot into a table.</para>
 /// </summary>
 internal static class DarlingStoredPlanReader
 {
@@ -119,12 +128,30 @@ internal static class DarlingStoredPlanReader
             return null;
         }
 
-        await using var command = postgres.CreateCommand(QueryStatsPlanXmlByHashSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = queryHash });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)databaseName ?? DBNull.Value });
-        return await ReadPlanTextOrGzipAsync(command, cancellationToken);
+        await using (var command = postgres.CreateCommand(QueryStatsPlanXmlByHashSql))
+        {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = queryHash });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)databaseName ?? DBNull.Value });
+
+            var captured = await ReadPlanTextOrGzipAsync(command, cancellationToken);
+            if (captured is not null)
+            {
+                return captured;
+            }
+        }
+
+        /* #3392: nothing collected for this key carries a plan. That is also what an over-cap plan looks
+           like from here, so ask the backlog — the same statement's plan, fetched later out of band. Second,
+           never first: collected content is the fresher of the two, and the backlog is keyed on a handle
+           that only ever held one document. */
+        await using var backlog = postgres.CreateCommand(OversizedPlanBacklog.QueryStatsFallbackSql);
+        backlog.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        backlog.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        backlog.Parameters.Add(new NpgsqlParameter<string> { TypedValue = queryHash });
+        backlog.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)databaseName ?? DBNull.Value });
+        return await ReadBacklogPlanXmlAsync(backlog, cancellationToken);
     }
 
     /// <summary>
@@ -140,11 +167,26 @@ internal static class DarlingStoredPlanReader
             return null;
         }
 
-        await using var command = postgres.CreateCommand(ProcedurePlanXmlBySqlHandleSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = sqlHandle });
-        return await ReadPlanTextOrGzipAsync(command, cancellationToken);
+        await using (var command = postgres.CreateCommand(ProcedurePlanXmlBySqlHandleSql))
+        {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = sqlHandle });
+
+            var captured = await ReadPlanTextOrGzipAsync(command, cancellationToken);
+            if (captured is not null)
+            {
+                return captured;
+            }
+        }
+
+        /* #3392, the same second look as the query_stats read above — a module-grain plan is the shape most
+           likely to cross the capture cap, so this arm carries more of the population than its sibling. */
+        await using var backlog = postgres.CreateCommand(OversizedPlanBacklog.ProcedureStatsFallbackBySqlHandleSql);
+        backlog.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        backlog.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        backlog.Parameters.Add(new NpgsqlParameter<string> { TypedValue = sqlHandle });
+        return await ReadBacklogPlanXmlAsync(backlog, cancellationToken);
     }
 
     /// <summary>
@@ -163,6 +205,17 @@ internal static class DarlingStoredPlanReader
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)planId ?? DBNull.Value });
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return result is string s ? s : null;
+    }
+
+    /// <summary>
+    /// Executes a one-column backlog read (#3392). Plain text, never gzip: the backlog holds the content the
+    /// sweep fetched, and it does not route through the plan dimension — a capped row produced no dim row to
+    /// compress into.
+    /// </summary>
+    private static async Task<string?> ReadBacklogPlanXmlAsync(NpgsqlCommand command, CancellationToken cancellationToken)
+    {
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result is string plan ? plan : null;
     }
 
     /// <summary>

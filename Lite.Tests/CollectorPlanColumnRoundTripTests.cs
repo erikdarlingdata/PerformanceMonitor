@@ -47,8 +47,33 @@ public sealed class CollectorPlanColumnRoundTripTests : IClassFixture<SharedDuck
                 "DB", "dbo", "usp_X", "PROCEDURE",
                 new DateTime(2026, 7, 4, 1, 0, 0, DateTimeKind.Utc), new DateTime(2026, 7, 4, 2, 0, 0, DateTimeKind.Utc),
                 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L,
-                "0xSH", "0xPH", "<ShowPlanXML>proc</ShowPlanXML>"),
-            ("query_plan_xml", "<ShowPlanXML>proc</ShowPlanXML>"));
+                "0xSH", "0xPH", "<ShowPlanXML>proc</ShowPlanXML>", 4096L),
+            ("query_plan_xml", "<ShowPlanXML>proc</ShowPlanXML>"),
+            ("query_plan_xml_bytes", 4096L));
+    }
+
+    /// <summary>
+    /// #3392: query_stats' own trailing pair. query_plan_xml_bytes is the newest payload column on the
+    /// widest collector in the product, and the appender writes BY POSITION — so a DuckDB table missing it
+    /// fails EndRow() for the whole batch, not just the column. Reading the size back as a BIGINT also pins
+    /// the storage type: a VARCHAR column would accept the append and hand back a string.
+    /// </summary>
+    [Fact]
+    public async Task QueryStats_AppendWithPlan_RoundTripsTrailingPlanColumns()
+    {
+        var row = new QueryStatsCollector.Row
+        {
+            DatabaseName = "DB",
+            QueryHash = "0xQH",
+            QueryPlanXml = "<ShowPlanXML>query</ShowPlanXML>",
+            QueryPlanXmlBytes = 8_388_608L,
+            SqlHandle = "0xSH",
+            PlanHandle = "0xPH",
+        };
+
+        await AssertRoundTripsAsync(QueryStatsCollector.Instance, row,
+            ("query_plan_xml", "<ShowPlanXML>query</ShowPlanXML>"),
+            ("query_plan_xml_bytes", 8_388_608L));
     }
 
     [Fact]
@@ -86,7 +111,7 @@ public sealed class CollectorPlanColumnRoundTripTests : IClassFixture<SharedDuck
     /// throwing here would mean the Schema.cs table column count/order drifted from WritePayload.
     /// </summary>
     private async Task AssertRoundTripsAsync<TRow>(
-        ICollectorDefinition<TRow> definition, TRow row, params (string Column, string Expected)[] columns)
+        ICollectorDefinition<TRow> definition, TRow row, params (string Column, object? Expected)[] columns)
     {
         var context = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator());
 

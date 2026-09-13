@@ -28,24 +28,26 @@ namespace Darling.Tests;
 /// operator most needs per workload was one no surface exposed. #3297 is the precedent: a threshold whose
 /// right value differs per workload does not belong in a compile-time constant.</para>
 ///
-/// <para>This file carries the "I am the top rung" claims that moved off
-/// <see cref="RetentionHoldRatioKnobRungTests"/> (V119) when this rung landed — a fully-migrated store must
-/// map to EXACTLY this version, or the viewer's connect-time gate refuses a store that is actually
-/// current.</para>
+/// <para>The "I am the top rung" claims have moved ON to <see cref="OversizedPlanBacklogPins"/> (V121), the
+/// same handoff this file received from <see cref="RetentionHoldRatioKnobRungTests"/> (V119). What stays here
+/// is everything true of this rung wherever it sits in the ladder; what left is every claim that was really
+/// about being NEWEST. Keeping a copy of those would assert this rung is still the top, which is how the
+/// NEXT rung's build goes red — the note V119's file left for this one.</para>
 /// </summary>
 public sealed class DeadlockRateBandRungTests
 {
     private const int RungVersion = 120;
     private const int PreviousVersion = 119;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V121
+    /// appended its own — so this is a position within the signature rather than its end.</summary>
     private const int ProbeOrdinal = 95;
 
     private const string WarnColumn = "deadlock_warn_per_hour";
     private const string CriticalColumn = "deadlock_critical_per_hour";
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
@@ -55,7 +57,11 @@ public sealed class DeadlockRateBandRungTests
 
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+
+        /* Not `RungVersion == SchemaVersion` any more: that asserted this rung is the newest, which stopped
+           being true when V121 landed. The invariant that outlives the handoff is that the LADDER's top and
+           the declared version agree, which the two lines above already say. */
+        Assert.Equal(RungVersion, versions.Single(v => v == RungVersion));
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
@@ -104,7 +110,7 @@ public sealed class DeadlockRateBandRungTests
     }
 
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeCarriesThisRungsSentinel_AndAFullyMigratedStoreMapsToTheLaddersTop()
     {
         Assert.Contains($"column_name = '{WarnColumn}'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
 
@@ -118,16 +124,24 @@ public sealed class DeadlockRateBandRungTests
             .GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* The ordinal has to be a position that exists, and one that is no longer the last: `arity - 1`
+           asserted this rung is the NEWEST sentinel, which stopped being true the moment V121 appended its
+           own. Strictly-less is the form every other non-top rung's test here uses. */
+        Assert.True(ProbeOrdinal < arity - 1);
 
-        /* Every sentinel true = a fully-migrated store, which must map to exactly this version. Built by
-           reflection so the arity tracks the signature. */
+        /* Every sentinel true = a fully-migrated store, which must map to exactly the ladder's top. Stated
+           against StorageVersion rather than this rung's number, so it survives every later rung instead of
+           needing an edit per rung. Built by reflection so the arity tracks the signature. */
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
-        /* One rung behind: every sentinel EXCEPT this one reports the previous top rung. */
-        var behind = Enumerable.Repeat((object)true, arity).ToArray();
+        /* This rung's own arm still answers. Expressed as "false above" rather than as one named ordinal, so
+           a rung landing on top of this one does not quietly turn this case into a test of that rung. */
+        var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
+        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
+
+        /* One rung behind: the same store WITHOUT this rung's sentinel reports the previous rung. */
+        var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
     }

@@ -2585,7 +2585,53 @@ public sealed class DarlingCollectorRunner
             context.StoreWriteReattempts++;
         }
 
+        /* #3392: record the over-cap plans this batch saw. AFTER the rows are stored, deliberately — a write
+           that threw never reaches here, so the backlog cannot end up claiming a sighting for a cycle whose
+           rows were lost. */
+        await RecordOversizedPlanSightingsAsync(definition, rows, server, collectionTime, cancellationToken);
+
         return outcome.RowsWritten;
+    }
+
+    /// <summary>
+    /// Records this batch's over-cap cached plans in <c>collect.oversized_plan_backlog</c> so the
+    /// low-frequency sweep can go back for their content (#3392).
+    ///
+    /// <para><b>The definition decides, not this method.</b> <c>DescribeOversizedPlan</c> is what knows the
+    /// plan fetch's own arguments — statement offsets for <c>query_stats</c>, module-grain literals for
+    /// <c>procedure_stats</c> — and the deferred fetch is only the same call if it passes the same ones.
+    /// Every other collector returns null here and the loop costs one virtual call per row.</para>
+    ///
+    /// <para><b>Nothing over the cap means no connection at all.</b> The list is not even allocated until a
+    /// row describes an observation, so the overwhelmingly common batch pays a null check. The store write
+    /// itself is failure-isolated inside <see cref="OversizedPlanBacklog.RecordSightingsAsync"/>: a backlog
+    /// that cannot be written is a plan we will not go back for, never a reason to fail a cycle that stored
+    /// every row it read.</para>
+    /// </summary>
+    private async Task RecordOversizedPlanSightingsAsync<TRow>(
+        ICollectorDefinition<TRow> definition,
+        List<TRow> rows,
+        ServerRuntime server,
+        DateTime collectionTime,
+        CancellationToken cancellationToken)
+    {
+        List<OversizedPlanObservation>? observations = null;
+
+        foreach (var row in rows)
+        {
+            if (definition.DescribeOversizedPlan(row) is { } observation)
+            {
+                (observations ??= new List<OversizedPlanObservation>()).Add(observation);
+            }
+        }
+
+        if (observations is null)
+        {
+            return;
+        }
+
+        await OversizedPlanBacklog.RecordSightingsAsync(
+            _postgres, server.ServerId, definition.Name, observations, collectionTime, _logger, cancellationToken);
     }
 
     /// <summary>
