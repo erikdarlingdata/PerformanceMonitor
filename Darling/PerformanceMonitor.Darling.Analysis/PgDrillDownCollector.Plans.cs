@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.PlanAnalysis;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -122,12 +123,17 @@ LIMIT 1";
     }
 
     public const string PlanAdvisoryXmlSql = @"
-SELECT query_plan_xml
+SELECT query_plan_xml, query_plan_gz
 FROM v_query_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-AND   query_plan_xml IS NOT NULL
+/* #2069: plan content written since V54 lives as gzip bytes (query_plan_gz) with the text
+   column NULL, so the presence guard and the projection both carry BOTH forms and the read
+   loop resolves text-else-gz (PayloadDimensions.ResolveContent). A guard on query_plan_xml
+   alone matches nothing on a store using the default plan_xml_compression = 'gzip', which
+   costs this collector every MISSING_INDEX and PLAN_WARNING it exists to emit. */
+AND   (query_plan_xml IS NOT NULL OR query_plan_gz IS NOT NULL)
 ORDER BY delta_worker_time DESC
 LIMIT 10";
 
@@ -157,8 +163,11 @@ LIMIT 10";
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
-                    if (!reader.IsDBNull(0))
-                        planXmls.Add(reader.GetString(0));
+                    var planXml = PayloadDimensions.ResolveContent(
+                        reader.IsDBNull(0) ? null : reader.GetString(0),
+                        reader.IsDBNull(1) ? null : reader.GetFieldValue<byte[]>(1));
+                    if (!string.IsNullOrEmpty(planXml))
+                        planXmls.Add(planXml);
                 }
             }
 
