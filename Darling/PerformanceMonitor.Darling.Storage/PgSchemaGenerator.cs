@@ -545,19 +545,7 @@ public static class PgSchemaGenerator
               .Append(" ADD COLUMN IF NOT EXISTS ").Append(dimension.DigestColumn).Append(" bytea;\n");
         }
 
-        /* The resolving view below is generated from the CURRENT collector definition, so it references
-           every payload column the collector has TODAY — including ones whose ALTER migration sits LATER
-           in the ladder (host_object_name lands at V51). A store upgrading from <38 runs this body against
-           its old table, and the view would fail on the first such column. Pre-adding every payload column
-           here (no-op on any store that already has them, same TypeFor the table generator uses) keeps V38
-           self-sufficient from any starting version — permanently, for every future payload column too. */
-        var querySchema = QueryStatsCollector.Instance;
-        foreach (var column in querySchema.PayloadColumns)
-        {
-            sb.Append("ALTER TABLE ").Append(querySchema.TargetTable)
-              .Append(" ADD COLUMN IF NOT EXISTS ").Append(column.Name)
-              .Append(' ').Append(TypeFor(column)).Append(";\n");
-        }
+        sb.Append(GenerateQueryStatsPayloadColumnPreAdds());
 
         /* #2069, same reasoning as the payload-column pre-adds above: the generated view now
            references the plan dim's compressed-content column, whose ALTER migration sits at V54 —
@@ -566,6 +554,41 @@ public static class PgSchemaGenerator
           .Append(" ADD COLUMN IF NOT EXISTS ").Append(PayloadDimensions.CompressedContentColumn).Append(" bytea;\n");
 
         sb.Append('\n').Append(GenerateQueryStatsResolvingView());
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Every <c>query_stats</c> payload column as an idempotent <c>ADD COLUMN IF NOT EXISTS</c> — the guard
+    /// that has to precede <see cref="GenerateQueryStatsResolvingView"/> in EVERY rung that re-emits it.
+    ///
+    /// <para><b>The hazard is the generated-rung replay one <c>MigrationLadderPins</c> exists for.</b> The
+    /// view is generated from the CURRENT collector definition, so a rung that re-emits it carries whatever
+    /// payload columns the collector has TODAY — including ones whose own ALTER sits LATER in the ladder. A
+    /// store old enough to replay that rung runs the view against a table without them and the whole ladder
+    /// dies with 42703, at service start, on every upgrade from below that rung. Measured, not theorised:
+    /// V51 and V54 both re-emitted the view while pre-adding only the one column their own rung introduced,
+    /// and the 3.3.0 fixture store failed on <c>f.query_plan_xml_bytes</c> the moment a later rung added it.
+    ///
+    /// <para>Column-by-column from the definition rather than a list, and the same <see cref="TypeFor"/> the
+    /// table generator uses, so this covers every FUTURE payload column without anyone remembering to come
+    /// back. A no-op on any store that already has them.</para>
+    /// </summary>
+    public static string GenerateQueryStatsPayloadColumnPreAdds()
+    {
+        var schema = QueryStatsCollector.Instance;
+        var sb = new StringBuilder();
+
+        sb.Append("/* Pre-adds for the payload-resolving view below: it names every payload column the\n");
+        sb.Append("   collector has today, and a store replaying this rung may predate the ALTER that adds\n");
+        sb.Append("   one of them. Idempotent, so this is a no-op wherever they already exist. */\n");
+
+        foreach (var column in schema.PayloadColumns)
+        {
+            sb.Append("ALTER TABLE ").Append(schema.TargetTable)
+              .Append(" ADD COLUMN IF NOT EXISTS ").Append(column.Name)
+              .Append(' ').Append(TypeFor(column)).Append(";\n");
+        }
+
         return sb.ToString();
     }
 

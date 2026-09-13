@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -51,6 +53,69 @@ public sealed class MigrationLadderPins
             "that rung on current code fails the whole ladder with 42703 (#2119's field failure, which " +
             "broke every 3.3.0→3.4.0 upgrade). Pre-add the column in the rung (prepend V54Sql) or move " +
             $"the generated SQL to a later rung:\n{string.Join("\n", offenders)}");
+    }
+
+    /// <summary>
+    /// The GENERAL form of the fact above, which the gz-only version did not cover.
+    ///
+    /// <para>The gz pin guards ONE column. The hazard is not about that column: any rung that re-emits the
+    /// payload-resolving view carries whatever <c>query_stats</c> payload columns the collector has TODAY,
+    /// and a store old enough to replay that rung runs the view against a table that predates the later ones
+    /// — 42703, at service start, on every upgrade from below it. V38 pre-added every payload column for
+    /// exactly this reason and said so ("permanently, for every future payload column too"); V51 and V54
+    /// re-emitted the same view pre-adding only their own, so the guarantee was V38's alone.</para>
+    ///
+    /// <para>Measured, not theorised: #3392 appended <c>query_plan_xml_bytes</c>, and the 3.3.0 fixture
+    /// store failed climbing the ladder on <c>f.query_plan_xml_bytes</c> at V51. The live upgrade test
+    /// caught it, which is the right backstop and the wrong place to learn it — that test needs a
+    /// container and a fixture, so it is the slowest signal in the build. This is the fast one.</para>
+    /// </summary>
+    [Fact]
+    public void EveryRungReEmittingTheResolvingView_PreAddsEveryPayloadColumnItNames()
+    {
+        var definers = PgMigrations.Scripts
+            .Where(m => m.Sql.Contains("VIEW v_query_stats AS", StringComparison.Ordinal))
+            .ToList();
+
+        /* A scan that found no definers would pass while asserting nothing, and the whole file is about
+           generated rungs quietly changing shape. */
+        Assert.NotEmpty(definers);
+
+        var offenders = new List<string>();
+
+        foreach (var rung in definers)
+        {
+            foreach (var column in QueryStatsCollector.Instance.PayloadColumns)
+            {
+                var use = rung.Sql.IndexOf("f." + column.Name, StringComparison.Ordinal);
+                if (use < 0)
+                {
+                    continue;
+                }
+
+                /* PRESENCE before ORDER: IndexOf answers -1 for an absent guard, and -1 is less than every
+                   real offset, so an ordering comparison alone passes LOUDEST when the pre-add is missing
+                   entirely — which is the failure. */
+                var guard = rung.Sql.IndexOf(
+                    "ADD COLUMN IF NOT EXISTS " + column.Name + " ", StringComparison.Ordinal);
+
+                if (guard < 0)
+                {
+                    offenders.Add($"V{rung.Version} ({rung.Name}) names f.{column.Name} and never adds it");
+                }
+                else if (guard > use)
+                {
+                    offenders.Add($"V{rung.Version} ({rung.Name}) adds {column.Name} AFTER the view uses it");
+                }
+            }
+        }
+
+        Assert.True(offenders.Count == 0,
+            "Migration rung(s) re-emit the payload-resolving view naming a query_stats payload column the "
+            + "same rung does not establish first. A store replaying that rung fails the whole ladder with "
+            + "42703 at service start, permanently, on every upgrade from below it. Concatenate "
+            + "PgSchemaGenerator.GenerateQueryStatsPayloadColumnPreAdds() ahead of the view in the rung:\n"
+            + string.Join("\n", offenders));
     }
 
     [Fact]

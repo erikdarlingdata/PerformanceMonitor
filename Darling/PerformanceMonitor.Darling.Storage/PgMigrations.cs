@@ -107,16 +107,23 @@ public static class PgMigrations
            the standing hazard of generator-built rungs: any LATER column the generator learns must be
            pre-added in EVERY earlier rung that re-emits generated SQL over existing tables — pinned by
            MigrationLadderPins so the next collision fails in CI, not on an operator's store. */
-        /* V121Sql rides along for the same reason V54Sql already does: the generated resolving view is
-           compiled from TODAY's payload column list, so this rung's re-emission names every payload
-           column the current build knows — including ones a LATER rung adds. A store climbing from an
-           older release reaches this rung first, so without the later rung's ADD COLUMN here the view
-           references a column that does not exist yet and the ladder stops at 42703. Both bodies are
-           ADD COLUMN IF NOT EXISTS, so a store that already has them is unaffected. */
-        new Migration(51, "query-stats-host-object", V51Sql + "\n" + V54Sql + "\n" + V121Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
+        /* The pre-adds ride along for the same reason V54Sql already does: the generated resolving view is
+           compiled from TODAY's payload column list, so this rung's re-emission names every payload column
+           the current build knows — including ones a LATER rung adds. A store climbing from an older release
+           reaches this rung first, so without those columns the view references one that does not exist yet
+           and the ladder stops at 42703.
+
+           Generated from the collector definition rather than by threading a specific later rung's SQL in
+           here: one column was the symptom, and the next payload column would need this edited again. Every
+           statement is ADD COLUMN IF NOT EXISTS, so a store that already has them is unaffected. */
+        new Migration(51, "query-stats-host-object",
+            V51Sql + "\n" + V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsPayloadColumnPreAdds()
+            + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
         new Migration(52, "finding-drilldown-json", V52Sql),
         new Migration(53, "store-self-metrics", V53Sql),
-        new Migration(54, "plan-dim-gzip", V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
+        new Migration(54, "plan-dim-gzip",
+            V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsPayloadColumnPreAdds()
+            + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
         new Migration(55, "self-alert-knobs", V55Sql),
         new Migration(56, "store-metrics-background-jobs", V56Sql),
         new Migration(57, "store-job-cadence-knob", V57Sql),
@@ -185,6 +192,7 @@ public static class PgMigrations
         new Migration(120, "deadlock-rate-band-knobs", V120Sql),
         new Migration(121, "oversized-plan-backlog",
             V121Sql + "\n" + OversizedPlanBacklog.CreateTableSql + "\n" + V54Sql + "\n"
+            + PgSchemaGenerator.GenerateQueryStatsPayloadColumnPreAdds() + "\n"
             + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
     };
 
