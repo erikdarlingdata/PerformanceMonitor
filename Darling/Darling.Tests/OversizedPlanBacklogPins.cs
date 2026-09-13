@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
@@ -36,6 +37,8 @@ namespace Darling.Tests;
 public sealed class OversizedPlanBacklogPins
 {
     private const string SweepSource = "Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs";
+    private const string WorkerSource = "Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs";
+    private const string ConnectorSource = "Darling/PerformanceMonitor.Darling.Service/DarlingServerConnector.cs";
 
     private static PgMigrations.Migration V121 =>
         PgMigrations.Scripts.Single(m => m.Version == 121);
@@ -381,9 +384,13 @@ public sealed class OversizedPlanBacklogPins
             "Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs")).Code;
         Assert.Contains("OversizedPlanBacklogSweep.RunAsync", worker, StringComparison.Ordinal);
 
-        /* Its cadence comes from the sweep's own constant, so the interval and the reasoning that sized it
-           live in one place. */
-        Assert.Contains("OversizedPlanBacklogSweep.SweepInterval", worker, StringComparison.Ordinal);
+        /* Its cadence comes from the sweep, so the interval, the empty-target branch and the reasoning that
+           sized both live in one place. The NEGATIVE is the load-bearing half: naming SweepInterval at this
+           site is how the #3405 defect was written — an unconditional full-interval advance that a startup
+           tick reaching nothing paid in full — so the loop is not allowed to reach the constant at all, only
+           the function that decides between it and a short wait. */
+        Assert.Contains("OversizedPlanBacklogSweep.NextSweepDelay(", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("OversizedPlanBacklogSweep.SweepInterval", worker, StringComparison.Ordinal);
 
         /* And the pass is LAUNCHED, never awaited on the tick. Its worst case is fleet width times the
            per-server plan budget times the per-plan budget — over half an hour on a 42-server fleet whose
@@ -392,6 +399,286 @@ public sealed class OversizedPlanBacklogPins
         Assert.DoesNotContain("await OversizedPlanBacklogSweep.RunAsync", worker, StringComparison.Ordinal);
         Assert.Contains("_oversizedPlanSweep = OversizedPlanBacklogSweep.RunAsync", worker, StringComparison.Ordinal);
         Assert.Contains("_oversizedPlanSweep.IsCompleted", worker, StringComparison.Ordinal);
+    }
+
+    /* ---- the empty-tick schedule (#3405) ------------------------------------------------------------ */
+
+    /// <summary>
+    /// A host with NO sweepable target holds the full interval, on every tick, forever — and that is the
+    /// fact the whole change exists to protect rather than an edge case it tolerates.
+    ///
+    /// <para>A PostgreSQL-only monitoring host sweeps zero servers on EVERY tick and is RIGHT to: the cap,
+    /// the backlog and this sweep all live in the SQL Server plan-XML collectors. Three consecutive hourly
+    /// records of "Swept 0 server(s)" were measured on one, so it is a steady state, not a startup
+    /// transient. Every short-retry-on-empty shape proposed for the startup defect would have turned that
+    /// steady state into a re-attempt loop with no terminating condition, writing a sentinel row per retry
+    /// forever in the one table whose growth retention has to prune — ~1,440 rows/day where the correct
+    /// answer is 24.</para>
+    ///
+    /// <para>Simulated across 48 ticks rather than asserted on one, because "does not enter a loop" is a
+    /// claim about the SEQUENCE: a single call returning the interval would also pass for a function that
+    /// shortens on the second tick. The COUNT of decisions is asserted against a literal rather than
+    /// against the loop's own bound — a total written as <c>SweepInterval * ticks</c> is zero on both sides
+    /// when the loop stops running, and this pin passed that way until the crippling run caught it.</para>
+    /// </summary>
+    [Fact]
+    public void AHostWithNoSweepableTarget_HoldsTheFullInterval_OnEveryTickForever()
+    {
+        var delays = new List<TimeSpan>();
+        var waits = 0;
+
+        for (var tick = 0; tick < 48; tick++)
+        {
+            var (delay, next) = OversizedPlanBacklogSweep.NextSweepDelay(0, 0, waits);
+            delays.Add(delay);
+            waits = next;
+        }
+
+        /* The loop actually ran, 48 times — the discriminating assertion, and the reason it is a literal. */
+        Assert.Equal(48, delays.Count);
+
+        /* Two days of ticks at the full interval and not one minute less, which is what makes this a
+           statement about the whole sequence rather than about one call. */
+        Assert.All(delays, delay => Assert.Equal(OversizedPlanBacklogSweep.SweepInterval, delay));
+
+        /* And the budget was never touched, so nothing about this host is one tick away from a burst. */
+        Assert.Equal(0, waits);
+    }
+
+    /// <summary>
+    /// A tick that found sweepable targets but no connected runtime among them re-attempts SHORTLY instead
+    /// of paying a full interval — the startup defect — and the re-attempts are bounded.
+    ///
+    /// <para>The bound is asserted as a COUNT over a simulation in which nothing ever connects, which is the
+    /// pathological host this has to not punish: a fleet whose SQL Server targets are all unreachable spends
+    /// <see cref="OversizedPlanBacklogSweep.MaxConnectWaitAttempts"/> short waits once and then writes
+    /// exactly one record per interval for the rest of the process's life. Counting them is what separates
+    /// "bounded" from "short interval forever", and the two are indistinguishable from any single call.</para>
+    /// </summary>
+    [Fact]
+    public void AZeroTargetTickOnAHostWithTargets_ReattemptsShortly_AndOnlySoManyTimes()
+    {
+        /* The first re-attempt, from a fresh process: short, and it has spent one of the budget. */
+        Assert.Equal(
+            (OversizedPlanBacklogSweep.ConnectWaitDelay, 1),
+            OversizedPlanBacklogSweep.NextSweepDelay(42, 0, 0));
+
+        var waits = 0;
+        var shortWaits = 0;
+        var fullIntervals = 0;
+
+        for (var tick = 0; tick < 48; tick++)
+        {
+            var (delay, next) = OversizedPlanBacklogSweep.NextSweepDelay(42, 0, waits);
+
+            if (delay == OversizedPlanBacklogSweep.ConnectWaitDelay)
+            {
+                shortWaits++;
+            }
+            else
+            {
+                Assert.Equal(OversizedPlanBacklogSweep.SweepInterval, delay);
+                fullIntervals++;
+            }
+
+            waits = next;
+        }
+
+        Assert.Equal(OversizedPlanBacklogSweep.MaxConnectWaitAttempts, shortWaits);
+        Assert.Equal(48 - OversizedPlanBacklogSweep.MaxConnectWaitAttempts, fullIntervals);
+
+        /* Spent, not reset: the counter stays at the maximum, so the burst cannot recur without a tick that
+           actually reached a server in between. Clearing it here is how a short retry interval becomes a
+           fresh burst every hour on a permanently unreachable fleet. */
+        Assert.Equal(OversizedPlanBacklogSweep.MaxConnectWaitAttempts, waits);
+    }
+
+    /// <summary>
+    /// A tick that reached at least one connected target takes the full interval and CLEARS the budget,
+    /// whatever it had spent — so what a restart costs is bounded by the first server to connect rather
+    /// than by the whole fleet, and a later total disconnection gets its own short wait rather than
+    /// inheriting an exhausted one.
+    /// </summary>
+    [Theory]
+    [InlineData(42, 42, 0)]
+    [InlineData(42, 1, 0)]
+    [InlineData(42, 1, 3)]
+    [InlineData(1, 1, 5)]
+    public void ATickThatReachedAServer_TakesTheFullInterval_AndClearsTheBudget(
+        int sweepable, int connected, int spent)
+    {
+        Assert.Equal(
+            (OversizedPlanBacklogSweep.SweepInterval, 0),
+            OversizedPlanBacklogSweep.NextSweepDelay(sweepable, connected, spent));
+    }
+
+    /// <summary>
+    /// The short wait is SHORTER than the interval it replaces and COARSER than the loop it runs on, and
+    /// both halves matter.
+    ///
+    /// <para>Equal to the interval, the fix does nothing. At or below the fleet loop's own cadence, the gate
+    /// re-fires on every pass until the first connect and each pass writes a run-record — the burst that
+    /// makes "just do not advance the stamp" worse than the hour it saves. The loop's cadence is READ from
+    /// the worker rather than retyped here, so shortening the loop fails this pin instead of silently
+    /// eroding the ratio.</para>
+    /// </summary>
+    [Fact]
+    public void TheShortWait_IsShorterThanTheInterval_AndCoarserThanTheLoop()
+    {
+        var worker = CSharpMemberMap.Of(ReadRepoFile(WorkerSource)).Code;
+        var at = worker.IndexOf("s_sweepInterval = TimeSpan.FromSeconds(", StringComparison.Ordinal);
+        Assert.True(at > 0,
+            "the fleet loop's cadence is no longer a FromSeconds literal, so this pin can no longer read it");
+
+        var open = worker.IndexOf('(', at);
+        var loopCadence = TimeSpan.FromSeconds(int.Parse(
+            worker[(open + 1)..worker.IndexOf(')', open)], CultureInfo.InvariantCulture));
+
+        Assert.True(OversizedPlanBacklogSweep.ConnectWaitDelay < OversizedPlanBacklogSweep.SweepInterval,
+            "the short wait reached the full interval, so a startup tick pays the whole slot again");
+        Assert.True(OversizedPlanBacklogSweep.ConnectWaitDelay >= loopCadence * 4,
+            "the short wait is within a few passes of the fleet loop's own cadence, so the gate re-fires "
+            + "almost every pass until the first connect and writes a run-record for each");
+
+        /* And the budget is small enough that its worst case is legible: five short waits is five extra
+           sentinel rows per process, against a baseline of 24 a day. */
+        Assert.InRange(OversizedPlanBacklogSweep.MaxConnectWaitAttempts, 1, 10);
+    }
+
+    /// <summary>
+    /// The discriminator reads the REGISTRATION, and it admits exactly the registrations whose runtime
+    /// <see cref="OversizedPlanBacklogSweep.RunAsync"/> would then visit.
+    ///
+    /// <para>Two predicates have to agree and they are asked at different times:
+    /// <c>IsSweepableTarget</c> before a connect, on <c>MonitoredServer</c>, and the per-server skip inside
+    /// the pass after one, on <c>CollectorTargetInfo.Engine</c>. They agree because the connector branches
+    /// on the SAME property and only its PostgreSQL arm stamps an engine — so this asserts the arm count and
+    /// the enum default that the SQL Server side silently rests on, rather than trusting the two readings to
+    /// stay aligned.</para>
+    ///
+    /// <para>The PostgreSQL spellings are read OUT of the shipped switch instead of retyped, so a sixth
+    /// accepted token fails here rather than quietly becoming a target the gate waits a minute for and the
+    /// pass then skips.</para>
+    /// </summary>
+    [Fact]
+    public void TheDiscriminator_AdmitsExactlyWhatThePassWouldVisit()
+    {
+        /* !IsPostgres is a TWO-engine predicate. A third CollectorTargetEngine makes it admit a target the
+           pass skips, and the gate would then spend its short waits on a runtime it cannot use. */
+        Assert.Equal(2, Enum.GetValues<CollectorTargetEngine>().Length);
+
+        /* Of the connector's two connect paths, exactly ONE stamps an engine on the runtime it returns —
+           the PostgreSQL arm. The SQL Server arm sets none and inherits CollectorTargetInfo's own SqlServer
+           initialiser, so BOTH halves are asserted: the arm depends on that initialiser without saying so,
+           and together they are why a registration this predicate admits produces a runtime the pass does
+           not skip. Scoped to the Connect* members, because the same text appears as a defaulted record
+           parameter on ConnectionProbeResult, which returns no runtime and stamps nothing. */
+        Assert.Equal(CollectorTargetEngine.SqlServer, new CollectorTargetInfo().Engine);
+
+        var connector = CSharpMemberMap.Of(ReadRepoFile(ConnectorSource));
+        var stamping = new List<string>();
+        for (var i = connector.Code.IndexOf("Engine = CollectorTargetEngine.", StringComparison.Ordinal); i >= 0;
+             i = connector.Code.IndexOf("Engine = CollectorTargetEngine.", i + 1, StringComparison.Ordinal))
+        {
+            var member = CSharpMemberMap.EnclosingMember(connector, i);
+            if (member.StartsWith("Connect", StringComparison.Ordinal))
+            {
+                stamping.Add(member);
+            }
+        }
+
+        Assert.Equal(new[] { "ConnectPostgresAsync" }, stamping);
+
+        /* The accepted PostgreSQL spellings, lifted from the arm that maps them. */
+        var raw = ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs");
+        var armAt = raw.IndexOf("=> CollectorTargetEngine.PostgreSql,", StringComparison.Ordinal);
+        Assert.True(armAt > 0, "the engine-token switch no longer has a PostgreSql arm");
+
+        var lineStart = raw.LastIndexOf('\n', armAt) + 1;
+        var tokens = new List<string>();
+        for (var i = raw.IndexOf('"', lineStart); i >= 0 && i < armAt; i = raw.IndexOf('"', i + 1))
+        {
+            var close = raw.IndexOf('"', i + 1);
+            tokens.Add(raw[(i + 1)..close]);
+            i = close;
+        }
+
+        Assert.Equal(
+            new[] { "aurora", "aurora-postgresql", "pg", "postgres", "postgresql" },
+            tokens.OrderBy(t => t, StringComparer.Ordinal).ToArray());
+
+        /* Every one of them is REJECTED, so a PostgreSQL-only host counts zero sweepable targets. */
+        foreach (var token in tokens)
+        {
+            Assert.False(
+                OversizedPlanBacklogSweep.IsSweepableTarget(new MonitoredServer { Engine = token }),
+                $"engine token '{token}' maps to PostgreSQL but the gate counts it as sweepable");
+        }
+
+        /* And everything else is ADMITTED, including the shapes MonitoredServer.TargetEngine folds to SQL
+           Server rather than throwing: absent, empty, and misspelled. That direction is deliberate — the
+           connector will take its SQL Server arm for exactly these, so counting them as sweepable is what
+           keeps the two predicates agreeing on a typo instead of stranding it. */
+        foreach (var token in new[] { "sqlserver", "SQLSERVER", "  postgres  x", "postgrez", "", null })
+        {
+            Assert.True(
+                OversizedPlanBacklogSweep.IsSweepableTarget(new MonitoredServer { Engine = token! }),
+                $"engine token '{token}' resolves to SQL Server but the gate does not count it as sweepable");
+        }
+    }
+
+    /// <summary>
+    /// The gate at the cadence site actually USES the discriminator and the schedule, and it still LAUNCHES
+    /// the pass on a tick that found no targets.
+    ///
+    /// <para>The launch is the load-bearing half. The run-record is written in <c>RunAsync</c>'s
+    /// <c>finally</c>, so skipping the launch on an empty target list — the cheapest-looking fix, and the
+    /// one that removes the observability #3399 added — makes a PostgreSQL-only host stop answering "did the
+    /// sweep run" at all. Asserted as the ABSENCE of any branch between the schedule and the launch, which
+    /// is what makes that fix unexpressible here rather than merely absent today.</para>
+    /// </summary>
+    [Fact]
+    public void TheGate_DiscriminatesByRegistration_AndStillLaunchesAZeroTargetPass()
+    {
+        var worker = CSharpMemberMap.Of(ReadRepoFile(WorkerSource)).Code;
+
+        var gateAt = worker.IndexOf(
+            "DateTime.UtcNow >= _nextOversizedPlanSweepUtc", StringComparison.Ordinal);
+        Assert.True(gateAt > 0, "the oversized-plan sweep no longer has a cadence gate on the fleet loop");
+
+        var gate = CSharpSourceWalker.BraceBalanced(worker, worker.IndexOf('{', gateAt));
+
+        /* The count is taken off the REGISTRATION. A gate that discriminated on Runtime alone is the defect:
+           null means mid-connect on one host and forever on another. */
+        Assert.Contains("IsSweepableTarget(target.Config)", gate, StringComparison.Ordinal);
+
+        /* The stamp comes from the schedule function and from nothing else, so the two causes stay
+           distinguished at the only site that acts on the distinction. */
+        Assert.Contains("OversizedPlanBacklogSweep.NextSweepDelay(", gate, StringComparison.Ordinal);
+        Assert.Contains("_nextOversizedPlanSweepUtc = DateTime.UtcNow.Add(sweepDelay);", gate, StringComparison.Ordinal);
+        Assert.Contains("_oversizedPlanSweepConnectWaits = connectWaits;", gate, StringComparison.Ordinal);
+
+        /* Stamped BEFORE the launch: the IsCompleted guard on this gate only keeps a slow pass from stacking
+           if the stamp has already moved when the pass starts. */
+        var stamped = gate.IndexOf("_nextOversizedPlanSweepUtc = DateTime.UtcNow.Add", StringComparison.Ordinal);
+        var launched = gate.IndexOf("_oversizedPlanSweep = OversizedPlanBacklogSweep.RunAsync", StringComparison.Ordinal);
+        Assert.True(stamped > 0, "the gate no longer stamps its next due time");
+        Assert.True(launched > 0, "the gate no longer launches the pass");
+        Assert.True(stamped < launched, "the pass is launched before its slot is stamped, so a slow pass can stack");
+
+        /* And NOTHING branches between them. An `if` here is where "return before the record write when
+           there are no targets" would go, and on a host with no sweepable target that silences the run
+           record permanently. */
+        var between = gate[stamped..launched];
+        Assert.DoesNotContain("if (", between, StringComparison.Ordinal);
+        Assert.DoesNotContain("return", between, StringComparison.Ordinal);
+        Assert.DoesNotContain("continue", between, StringComparison.Ordinal);
+
+        /* The pass is handed the CONNECTED runtimes, not the registrations — the sweepable count exists to
+           schedule with, never to sweep with, since a registration without a runtime has no connection to
+           borrow. */
+        Assert.Contains("postgres, backlogTargets, _logger, stoppingToken", gate, StringComparison.Ordinal);
+        Assert.DoesNotContain("sweepableTargets, _logger", gate, StringComparison.Ordinal);
     }
 
     /* ---- retention ---------------------------------------------------------------------------------- */

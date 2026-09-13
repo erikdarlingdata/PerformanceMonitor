@@ -77,6 +77,35 @@ internal static class OversizedPlanBacklogSweep
     internal static readonly TimeSpan SweepInterval = TimeSpan.FromHours(1);
 
     /// <summary>
+    /// How long the gate waits before RE-ATTEMPTING a tick whose target list came back empty on a host that
+    /// HAS sweepable targets — the cold-start case, where the registrations exist and simply have not
+    /// finished connecting yet.
+    ///
+    /// <para>One minute is four passes of the fleet loop's own 15-second cadence, and that ratio is the
+    /// property that matters rather than the absolute value: a re-attempt scheduled at or below the loop's
+    /// cadence re-fires the gate on every pass until the first connect, and every one of those passes writes
+    /// a run-record. So this is deliberately coarse relative to the loop instead of as small as it could be.</para>
+    ///
+    /// <para>Sized from the measured cold start — the first tick landed 1m50s after service start and the
+    /// fleet's servers began connecting 30 seconds after that — so one minute clears the observed connect
+    /// latency with room, and the FIRST re-attempt is the one that finds a runtime.</para>
+    /// </summary>
+    internal static readonly TimeSpan ConnectWaitDelay = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// How many consecutive <see cref="ConnectWaitDelay"/> re-attempts the gate may spend waiting for a
+    /// first runtime before falling back to <see cref="SweepInterval"/>. Five, so the wait covers five
+    /// minutes — about ten times the measured connect latency — for at most five extra run-records.
+    ///
+    /// <para><b>Spent, not reset, when it runs out.</b> <see cref="NextSweepDelay"/> HOLDS the count at this
+    /// maximum rather than clearing it, so a host whose SQL Server targets never connect at all pays the
+    /// burst once per process and then writes exactly one run-record per interval forever. Clearing it there
+    /// would turn a permanently unreachable fleet into a fresh burst every hour, which is the row-growth
+    /// objection to a plain short retry interval.</para>
+    /// </summary>
+    internal const int MaxConnectWaitAttempts = 5;
+
+    /// <summary>
     /// Plans one pass may fetch for one server. Three, and the number is the RATE bound; the per-fetch
     /// isolation above is the MEMORY bound, and the two are independent — raising this would not batch
     /// anything, it would take longer. The measured population is 13 over-cap plans at once on the fleet's
@@ -227,10 +256,68 @@ WHERE tqp.query_plan IS NOT NULL;";
         return (status, message);
     }
 
+    /// <summary>
+    /// Whether one monitored-server registration could EVER carry a runtime this sweep would visit — the
+    /// pre-connect half of the per-server skip inside <see cref="RunAsync"/>, which asks the same question
+    /// of a runtime that already exists.
+    ///
+    /// <para><b>It reads the registration, not the runtime, and that is the whole point.</b> The gate has to
+    /// separate "no target has connected yet" from "this host has no sweepable target at all", and a runtime
+    /// answers neither — <c>ServerLoopState.Runtime</c> is null in both cases. <c>MonitoredServer.IsPostgres</c>
+    /// is the only fact available before a connect that settles it, and it settles it exactly:
+    /// <c>DarlingServerConnector.ConnectAsync</c> branches on that same property and only its PostgreSQL arm
+    /// stamps <c>CollectorTargetInfo.Engine</c>, so a registration this admits produces a runtime whose
+    /// engine is SQL Server, and one it rejects produces a runtime <see cref="RunAsync"/> skips.</para>
+    ///
+    /// <para>Total, with no third state: <c>MonitoredServer.TargetEngine</c> folds an absent or misspelled
+    /// engine token to SQL Server rather than throwing, so a typo counts as sweepable here — the direction
+    /// that matches what the connector will then actually do with it.</para>
+    /// </summary>
+    internal static bool IsSweepableTarget(MonitoredServer config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+
+        return !config.IsPostgres;
+    }
+
+    /// <summary>
+    /// When the next tick is due and what is left of the connect-wait budget — the whole schedule decision,
+    /// pure, so the branch is pinnable without a worker, a store or a fleet.
+    ///
+    /// <para><b>Two causes of an empty target list, meaning opposite things.</b> A tick with sweepable
+    /// targets and no connected runtime among them is TRANSIENT: those registrations are mid-connect and
+    /// will carry a runtime within a minute, so a full <see cref="SweepInterval"/> spends an hour of
+    /// draining on a pass that reached nothing. A tick with NO sweepable target is PERMANENT — a
+    /// PostgreSQL-only monitoring host, where the cap, the backlog and this sweep all live in the SQL Server
+    /// plan-XML collectors, so there is nothing to sweep and never will be. That host takes the full
+    /// interval and writes its one run-record an hour, exactly as before, because a re-attempt there is a
+    /// retry loop with no terminating condition.</para>
+    ///
+    /// <para>Any connected target at all ends the wait and clears the budget, so what a restart costs is
+    /// bounded by how fast the FIRST server connects rather than by the whole fleet: on the measured fleet
+    /// that is one extra run-record, not <see cref="MaxConnectWaitAttempts"/> of them.</para>
+    /// </summary>
+    /// <param name="sweepableTargets">Registrations <see cref="IsSweepableTarget"/> admits, connected or not.</param>
+    /// <param name="connectedTargets">Those of them carrying a runtime now — what this pass will visit.</param>
+    /// <param name="connectWaitAttempts">Re-attempts already spent waiting for a first runtime.</param>
+    internal static (TimeSpan Delay, int ConnectWaitAttempts) NextSweepDelay(
+        int sweepableTargets, int connectedTargets, int connectWaitAttempts)
+    {
+        if (sweepableTargets <= 0 || connectedTargets > 0)
+        {
+            return (SweepInterval, 0);
+        }
+
+        return connectWaitAttempts < MaxConnectWaitAttempts
+            ? (ConnectWaitDelay, connectWaitAttempts + 1)
+            : (SweepInterval, connectWaitAttempts);
+    }
+
     /// <summary>One pass over the fleet. Never throws; a server that fails is logged and the pass continues.</summary>
     /// <param name="servers">
-    /// The tick's stable server snapshot. Entries with no live runtime are skipped — a server that is not
-    /// connected has no connection to borrow and will be here again next hour.
+    /// The connected runtimes from the tick's stable server snapshot. A registration with no live runtime
+    /// has no connection to borrow, so the gate leaves it out; whether it is worth waiting a minute for one
+    /// is <see cref="NextSweepDelay"/>'s question, not this pass's.
     /// </param>
     internal static async Task RunAsync(
         NpgsqlDataSource postgres,
