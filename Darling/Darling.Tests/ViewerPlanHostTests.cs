@@ -115,7 +115,7 @@ public sealed class ViewerPlanHostSqlTests
            arm keeps that flag true for rows written since #1767, where the plan lives in query_plan_dim and
            the fact row carries only the key — a digest answers presence without resolving the dimension. */
         var sql = ViewerDataService.TopQueriesSql;
-        Assert.Contains("bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL) AS has_query_plan", sql, StringComparison.Ordinal);
+        Assert.Contains("bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL OR query_plan_xml_bytes IS NOT NULL) AS has_query_plan", sql, StringComparison.Ordinal);
         Assert.Contains("r.has_query_plan", sql, StringComparison.Ordinal);
     }
 

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -59,7 +60,13 @@ public sealed class ProcedureStatsCollector : CollectorDefinitionBase<ProcedureS
         long MaxSpills,
         string? SqlHandle,
         string? PlanHandle,
-        string? QueryPlanXml);
+        string? QueryPlanXml,
+
+        /* #3392: DATALENGTH of this module's plan XML as measured on the monitored server, or null when the
+           host captures no plans or the handle aged out before the plan apply ran. Carries the SIZE whether
+           or not QueryPlanXml carries the CONTENT, which is what tells a plan omitted for size apart from a
+           plan that was never there. */
+        long? QueryPlanXmlBytes);
 
     private const string StandardQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -289,12 +296,34 @@ OPTION(RECOMPILE);";
        MANY rows render one — see QueryPlanXmlCaptureLimits. A whole-procedure plan is exactly the
        shape most likely to cross it: this DMV aggregates at the module grain, so one heavy stored
        proc's plan can dwarf a single statement's. tqp.query_plan is read twice (DATALENGTH, then the
-       value) — one materialized OUTER APPLY column read twice, not a second TVF invocation. */
-    private static readonly string PlanSelectFragment = @",
-    query_plan_xml = CASE WHEN DATALENGTH(tqp.query_plan) > " + QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes + @" THEN NULL ELSE tqp.query_plan END";
+       value) — one materialized OUTER APPLY column read twice, not a second TVF invocation.
 
-    private const string PlanApplyFragment = @"
-OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handle, 1), 0, -1) AS tqp";
+       query_plan_xml_bytes selects that same DATALENGTH a THIRD time, free for the same reason. It is never
+       gated by the cap — a row over the cap reports its size and a NULL plan, the only pairing that
+       distinguishes "omitted for size" from "the handle aged out". #3392's backlog is keyed on that
+       distinction. Both plan columns sit INSIDE this fragment, so a host with CapturePlanXml off (Lite)
+       emits neither and its SQL stays byte-identical to the no-plan form. */
+    private static readonly string PlanSelectFragment = @",
+    query_plan_xml = CASE WHEN DATALENGTH(tqp.query_plan) > " + QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes + @" THEN NULL ELSE tqp.query_plan END,
+    query_plan_xml_bytes = DATALENGTH(tqp.query_plan)";
+
+    /// <summary>
+    /// The plan fetch's start offset for this collector: the documented "beginning of batch" literal. The
+    /// three module-level DMVs aggregate at the whole-object grain and expose no
+    /// <c>statement_start_offset</c>, so there is nothing per-row to pass.
+    ///
+    /// <para>Named rather than inlined because #3392's deferred fetch has to pass the SAME pair to get the
+    /// SAME document back, and two copies of a literal are how those quietly stop agreeing.</para>
+    /// </summary>
+    public const int ModuleStatementStartOffset = 0;
+
+    /// <summary>The plan fetch's end offset: the documented "end of batch" literal. See
+    /// <see cref="ModuleStatementStartOffset"/> for why it is named.</summary>
+    public const int ModuleStatementEndOffset = -1;
+
+    private static readonly string PlanApplyFragment = @"
+OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handle, 1), "
+        + ModuleStatementStartOffset + ", " + ModuleStatementEndOffset + @") AS tqp";
 
     public override string Name => "procedure_stats";
 
@@ -391,6 +420,10 @@ OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handl
            pre-plan shape gets it via one ADD COLUMN — fresh (V1) and upgraded (V6) Darling stores keep
            an identical physical order. NULL on Lite (flag off) and for any procedure whose plan aged out. */
         new CollectorColumn("query_plan_xml", CollectorColumnType.Varchar),
+        /* #3392, appended after it for the same reason. BigInt because DATALENGTH over an nvarchar(max)
+           expression returns bigint, and a module-grain plan is measured in megabytes on the tail this
+           exists to describe. */
+        new CollectorColumn("query_plan_xml_bytes", CollectorColumnType.BigInt),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -429,7 +462,14 @@ OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handl
                 reader.IsDBNull(26) ? null : reader.GetString(26),
                 /* query_plan_xml is the trailing column present only when CapturePlanXml spliced it
                    into every branch's SELECT (ordinal 27); the short-circuit skips it entirely when off. */
-                context.CapturePlanXml && !reader.IsDBNull(27) ? reader.GetString(27) : null));
+                context.CapturePlanXml && !reader.IsDBNull(27) ? reader.GetString(27) : null,
+                /* #3392: the plan's measured size rides the same splice at ordinal 28, so the same
+                   short-circuit covers it. Convert rather than GetInt64: DATALENGTH's return type widens to
+                   bigint only for the max types, and a provider that hands back an Int32 here would throw on
+                   a strict accessor. */
+                context.CapturePlanXml && !reader.IsDBNull(28)
+                    ? Convert.ToInt64(reader.GetValue(28), CultureInfo.InvariantCulture)
+                    : null));
         }
 
         return rows;
@@ -483,6 +523,34 @@ OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handl
             .Value(deltaWrites)
             .Value(deltaPhysReads)
             .Value(deltaSpills)
-            .Value(row.QueryPlanXml);          /* null unless CapturePlanXml captured it (Darling) */
+            .Value(row.QueryPlanXml)           /* null unless CapturePlanXml captured it (Darling) */
+            .Value(row.QueryPlanXmlBytes);     /* #3392: measured size, never gated by the cap */
+    }
+
+    /// <summary>
+    /// #3392: this row is a backlog candidate when its plan measured over the cap and both cache handles are
+    /// present. The offsets handed back are <see cref="ModuleStatementStartOffset"/> /
+    /// <see cref="ModuleStatementEndOffset"/> — the same pair <see cref="PlanApplyFragment"/> passes — so the
+    /// deferred fetch re-issues the identical module-grain call rather than a plausible-looking variant of it.
+    /// </summary>
+    public override OversizedPlanObservation? DescribeOversizedPlan(Row row)
+    {
+        if (!QueryPlanXmlCaptureLimits.ExceedsCaptureCap(row.QueryPlanXmlBytes)
+            || row.PlanHandle is null
+            || row.SqlHandle is null)
+        {
+            return null;
+        }
+
+        /* No query_hash: sys.dm_exec_procedure_stats has none, and this collector's readers key on the
+           sql_handle and on the object name, both of which are recoverable without one. */
+        return new OversizedPlanObservation(
+            row.PlanHandle,
+            row.SqlHandle,
+            ModuleStatementStartOffset,
+            ModuleStatementEndOffset,
+            row.DatabaseName,
+            null,
+            row.QueryPlanXmlBytes!.Value);
     }
 }

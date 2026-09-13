@@ -40,12 +40,14 @@ namespace PerformanceMonitor.Collectors;
 /// full — only the XML projection is gated — so an oversized plan costs its plan-view fetch, not its
 /// place in the ranking or its resource accounting.</para>
 ///
-/// <para>This NULL is permanent, not "not yet": a plan over the cap ships NULL every cycle it recurs,
-/// with no path back to its content today. #3392 proposes eventually collecting these — a small backlog
-/// table plus a low-frequency, deliberately one-plan-at-a-time sweep, keyed on the measured finding that
-/// this fleet's over-cap plans are long-lived cache residents (13.6 hours to 144.6 days observed on
-/// the outlier server, all `Proc`-grain, multi-million execution counts) rather than the volatile handles a naive
-/// reading of <c>sys.dm_exec_query_stats.plan_handle</c> would assume — unbuilt as of this cap shipping.</para>
+/// <para>The NULL this cap writes is a CONTENT decision, not a "not yet": the same plan ships NULL again
+/// every cycle it recurs, because nothing about the next cycle makes the plan smaller. Getting that content
+/// eventually is therefore a separate errand, and it is one — <c>collect.oversized_plan_backlog</c> plus the
+/// deliberately one-plan-at-a-time sweep that drains it (#3392). Both rest on the measured finding that this
+/// fleet's over-cap plans are long-lived cache residents (13.6 hours to 144.6 days observed on the outlier
+/// server, all `Proc`-grain, multi-million execution counts) rather than the volatile handles a naive reading
+/// of <c>sys.dm_exec_query_stats.plan_handle</c> would assume. <see cref="ExceedsCaptureCap"/> is the shared
+/// comparison that decides which rows the backlog takes.</para>
 ///
 /// <para><b>512 KB is a measured choice, not a guess — a first attempt at 2 MB was.</b> Live on
 /// the outlier server (2026-09-12), the actual 200-row candidate set for one cycle carried 27.08 MB of plan XML.
@@ -110,4 +112,21 @@ namespace PerformanceMonitor.Collectors;
 public static class QueryPlanXmlCaptureLimits
 {
     public const int MaxCapturedPlanXmlBytes = 512 * 1024;
+
+    /// <summary>
+    /// Whether a measured plan-XML size is over the cap — the same comparison the collectors' SQL
+    /// <c>CASE</c> makes, expressed once so "this row shipped NULL for size, back it up" and "ship NULL for
+    /// size" cannot disagree about which rows they are talking about.
+    ///
+    /// <para><b>Strictly greater, matching the SQL.</b> A plan measuring EXACTLY
+    /// <see cref="MaxCapturedPlanXmlBytes"/> is captured, so it is not a candidate for the deferred
+    /// fetch.</para>
+    ///
+    /// <para><b>Null is false, and both null sources mean the same thing: no measurement.</b> A host with
+    /// plan capture off never selects the size at all, and a row whose <c>plan_handle</c> aged out before the
+    /// OUTER APPLY ran has a NULL plan and therefore a NULL <c>DATALENGTH</c>. Neither is an oversized plan,
+    /// and reading an absent measurement as one would fill the backlog with rows that have no content to go
+    /// back for.</para>
+    /// </summary>
+    public static bool ExceedsCaptureCap(long? measuredBytes) => measuredBytes > MaxCapturedPlanXmlBytes;
 }

@@ -93,7 +93,11 @@ public sealed class ViewerQueriesSqlTests
            carries only the key, so a bare `query_plan_xml IS NOT NULL` would report "no plan captured" for
            every new row — and silently, since the grid just stops offering the download. A digest is enough
            to answer presence without resolving the dimension. */
-        Assert.Contains("bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL) AS has_query_plan", sql, StringComparison.Ordinal);
+        /* #3392 widened the flag by one term: a non-null query_plan_xml_bytes with neither an inline plan
+           nor a digest is a row the size cap declined, which the backlog goes back for and
+           GetQueryStatsPlanXmlAsync reads. No cap literal is needed to find them — DATALENGTH of a NULL plan
+           is NULL, so a size at all means the server had a plan for the row. */
+        Assert.Contains("bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL OR query_plan_xml_bytes IS NOT NULL) AS has_query_plan", sql, StringComparison.Ordinal);
         Assert.Contains("r.has_query_plan", sql, StringComparison.Ordinal); /* the flag rides from the ranked CTE, not the LATERAL */
     }
 
@@ -166,7 +170,7 @@ public sealed class ViewerQueriesSqlTests
            query_plan_dim and the fact row carries only the digest, so the flag needs the digest arm: without
            it every row written since the migration reports "no plan captured" and the Download button
            silently disappears, with nothing anywhere reporting an error. */
-        Assert.Contains("bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL) AS has_query_plan", sql, StringComparison.Ordinal);
+        Assert.Contains("bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL OR query_plan_xml_bytes IS NOT NULL) AS has_query_plan", sql, StringComparison.Ordinal);
     }
 
     // ── Query Store ──

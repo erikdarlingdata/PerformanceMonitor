@@ -445,6 +445,13 @@ public sealed class DarlingWorker : BackgroundService
        s_staleMuteCheckInterval. Fleet-level (mute rules are a store-wide concept), so a single field. */
     private DateTime _nextStaleMuteCheckUtc = DateTime.MinValue;
 
+    /* MinValue = the first sweep after startup drains the oversized-plan backlog (#3392), then every
+       OversizedPlanBacklogSweep.SweepInterval. The cadence constant lives with the sweep rather than here
+       because the sweep's own doc derives it from the compile ages of the plans it fetches; this field is
+       only the stamp. Fleet-level (one field, the sweep iterates servers itself) so a slow server delays
+       nothing but its own turn within the tick. */
+    private DateTime _nextOversizedPlanSweepUtc = DateTime.MinValue;
+
     /* MinValue = the first sweep after startup evaluates the compression-job self-heal check (#1581), then
        every s_compressionCheckInterval. Fleet-level (one shared store), so it is a single field, not
        per-server; only consulted when _timescaleAvailable. */
@@ -1948,6 +1955,30 @@ public sealed class DarlingWorker : BackgroundService
                    CAGG windows). Rides the daily purge; failure-isolated inside RefreshAsync. */
                 await using var moduleMapConnection = await postgres.OpenConnectionAsync(stoppingToken);
                 await DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, stoppingToken);
+            }
+
+            /* #3392: drain the oversized-plan backlog. Its own low-frequency cadence off this loop, beside
+               the purge, and deliberately NOT inside the per-server collector rotation: fetching a plan the
+               capture cap declined is worth doing eventually and worth nothing if it competes with a live
+               collection cycle for that server's wall-clock budget. sweepTargets is this tick's snapshot,
+               already taken under the servers lock, so the sweep iterates a stable set. Awaited rather than
+               fire-and-forget, like the purge: it is bounded at
+               MaxPlansPerServerPerTick * PerPlanBudget per server and the fleet loop's own tick is what
+               should absorb it, not an untracked task. */
+            if (DateTime.UtcNow >= _nextOversizedPlanSweepUtc)
+            {
+                _nextOversizedPlanSweepUtc = DateTime.UtcNow.Add(OversizedPlanBacklogSweep.SweepInterval);
+
+                var backlogTargets = new List<ServerRuntime>(sweepTargets.Length);
+                foreach (var target in sweepTargets)
+                {
+                    if (target.Runtime is { } runtime)
+                    {
+                        backlogTargets.Add(runtime);
+                    }
+                }
+
+                await OversizedPlanBacklogSweep.RunAsync(postgres, backlogTargets, _logger, stoppingToken);
             }
 
             /* Stage 4 fleet-level self-alert: the store disk-pressure backstop. The daily purge is the ONLY

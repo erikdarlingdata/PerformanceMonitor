@@ -271,7 +271,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 58;
+    internal const int CurrentSchemaVersion = 59;
 
     private readonly string _archivePath;
 
@@ -1574,6 +1574,36 @@ public class DuckDbInitializer
             catch (Exception ex)
             {
                 _logger?.LogWarning("Migration to v58 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 59)
+        {
+            /* v59 (#3392): query_stats and procedure_stats gain query_plan_xml_bytes — the measured
+               DATALENGTH of the row's cached-plan XML, selected beside the plan itself on the hosts that
+               capture plans. Appended at the end of both PayloadColumns lists, so the positional appender
+               and old parquet are unaffected.
+
+               Lite never sets CapturePlanXml, so this column is always NULL here and the query text Lite
+               sends is unchanged. It is still REQUIRED on this side: the appender writes one value per
+               declared payload column, so a database without the column fails EndRow() on the first
+               query_stats or procedure_stats batch — the whole batch, not the column. Fresh installs get
+               it from DuckDbSchemaGenerator; this ALTER is for an existing database and is idempotent.
+
+               Non-fatal per column, matching v35's posture — the plan-column rung this mirrors. */
+            _logger?.LogInformation("Running migration to v59: query_stats + procedure_stats gain query_plan_xml_bytes");
+
+            foreach (var table in new[] { "query_stats", "procedure_stats" })
+            {
+                try
+                {
+                    await ExecuteNonQueryAsync(connection,
+                        $"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS query_plan_xml_bytes BIGINT");
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning("Migration to v59 on {Table} encountered an error (non-fatal): {Error}", table, ex.Message);
+                }
             }
         }
     }
