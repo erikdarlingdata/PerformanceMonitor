@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -53,6 +54,17 @@ namespace PerformanceMonitor.Darling.Service;
 /// expected outcome for a best-effort backlog. A fetch that could not COMPLETE is deliberately not that — it
 /// stamps only the attempt, so the row stays claimable. Conflating the two would retire a row over a
 /// transient connect failure and recreate the blind spot this exists to close.</para>
+///
+/// <para><b>And every TICK is a recorded state too, including the empty ones (#3399).</b> The per-plan
+/// verdicts above describe rows; they cannot describe a pass that claimed nothing, and a pass that claimed
+/// nothing is the ordinary case on a deployment whose backlog is drained. So one
+/// <c>collection_log</c> run-record lands per tick under the fleet sentinel
+/// (<see cref="DarlingObservability.LogOversizedPlanSweepRunAsync"/>), whatever the tick found — which is
+/// what makes an ABSENT row past <see cref="SweepInterval"/> mean the pass did not run, rather than meaning
+/// nothing needed fetching. The write is in a <c>finally</c> and takes
+/// <see cref="CancellationToken.None"/>, the <see cref="RecordOutcomeAsync"/> reasoning one level up: a tick
+/// interrupted by shutdown still measured everything it did, and a run-record that is skipped on the paths
+/// that end a pass early is a run-record whose absence no longer means anything.</para>
 /// </summary>
 internal static class OversizedPlanBacklogSweep
 {
@@ -137,6 +149,84 @@ WHERE tqp.query_plan IS NOT NULL;";
         Failed,
     }
 
+    /// <summary>
+    /// What one tick did, accumulated across the fleet pass so the run-record can report it (#3399).
+    ///
+    /// <para>Mutable and passed down rather than returned up, because the per-server step is failure-isolated:
+    /// a server that faults mid-pass has already contributed captures and expiries, and a return value would
+    /// discard them on exactly the tick whose counts matter most. Not thread-safe and does not need to be —
+    /// the pass is a serial <c>foreach</c> by design, since concurrent plan fetches are the regression the
+    /// whole class is shaped to prevent.</para>
+    /// </summary>
+    internal sealed class SweepTally
+    {
+        /// <summary>Servers the pass REACHED — incremented before the attempt, so it is the denominator
+        /// <see cref="ServersFaulted"/> is read against rather than a count of clean ones.</summary>
+        internal int ServersSwept { get; set; }
+
+        /// <summary>Servers whose pass ended on an unexpected fault (logged and isolated per server).</summary>
+        internal int ServersFaulted { get; set; }
+
+        /// <summary>Backlog rows the claims returned across the fleet.</summary>
+        internal int PlansClaimed { get; set; }
+
+        /// <summary>Plans fetched and stored — what <c>rows_collected</c> reports.</summary>
+        internal int PlansCaptured { get; set; }
+
+        /// <summary>Handles that no longer render a plan, stamped <c>expired_at</c>.</summary>
+        internal int PlansExpired { get; set; }
+
+        /// <summary>Fetches that could not complete. The rows stay claimable, so this is a retry count.</summary>
+        internal int FetchFailures { get; set; }
+
+        /// <summary>Milliseconds inside <see cref="FetchOnePlanAsync"/> — what <c>sql_duration_ms</c> means.</summary>
+        internal long TargetMs { get; set; }
+
+        /// <summary>Whether shutdown ended the pass before it reached every server.</summary>
+        internal bool Interrupted { get; set; }
+    }
+
+    /// <summary>
+    /// The status and the human summary for one tick's run-record. SUCCESS when every fetch and every
+    /// server's pass completed; WARNING when a fetch failed, a server faulted, or shutdown cut the pass
+    /// short — the <see cref="DarlingRetention.BuildRunRecordSummary"/> vocabulary, so the sentinel
+    /// population reads with one set of words rather than two.
+    ///
+    /// <para>The four counts the outcome is made of are emitted UNCONDITIONALLY, empty tick included, so
+    /// every row of this collector says the same things in the same order and a zero is a measurement rather
+    /// than an omission. The fault and interrupt clauses are appended only when they happened, which is where
+    /// this follows the retention summary rather than leading with noise.</para>
+    ///
+    /// <para>Pure, so the branch and the text are pinnable without a store or a fleet.</para>
+    /// </summary>
+    internal static (string Status, string Message) BuildRunRecordSummary(SweepTally tally)
+    {
+        ArgumentNullException.ThrowIfNull(tally);
+
+        var status = tally.FetchFailures == 0 && tally.ServersFaulted == 0 && !tally.Interrupted
+            ? "SUCCESS"
+            : "WARNING";
+
+        var message =
+            $"Swept {tally.ServersSwept.ToString(CultureInfo.InvariantCulture)} server(s): "
+            + $"{tally.PlansClaimed.ToString(CultureInfo.InvariantCulture)} plan(s) claimed, "
+            + $"{tally.PlansCaptured.ToString(CultureInfo.InvariantCulture)} captured, "
+            + $"{tally.PlansExpired.ToString(CultureInfo.InvariantCulture)} expired, "
+            + $"{tally.FetchFailures.ToString(CultureInfo.InvariantCulture)} fetch failure(s)";
+
+        if (tally.ServersFaulted > 0)
+        {
+            message += $", {tally.ServersFaulted.ToString(CultureInfo.InvariantCulture)} server(s) faulted (see prior warnings)";
+        }
+
+        if (tally.Interrupted)
+        {
+            message += "; interrupted by service shutdown";
+        }
+
+        return (status, message);
+    }
+
     /// <summary>One pass over the fleet. Never throws; a server that fails is logged and the pass continues.</summary>
     /// <param name="servers">
     /// The tick's stable server snapshot. Entries with no live runtime are skipped — a server that is not
@@ -151,49 +241,78 @@ WHERE tqp.query_plan IS NOT NULL;";
         ArgumentNullException.ThrowIfNull(postgres);
         ArgumentNullException.ThrowIfNull(servers);
 
-        foreach (var server in servers)
+        var tally = new SweepTally();
+        var sw = Stopwatch.StartNew();
+
+        try
         {
-            if (cancellationToken.IsCancellationRequested)
+            foreach (var server in servers)
             {
-                return;
-            }
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    tally.Interrupted = true;
+                    return;
+                }
 
-            /* The engine gate lives HERE, at the boundary a query would cross, rather than resting on the
-               backlog never holding a PostgreSQL server's rows — the PlanForceBot's reasoning. Only the two
-               SQL Server collectors describe observations, so a PostgreSQL row is unreachable today, and this
-               is what keeps it unreachable if that ever stops being true. */
-            if (server.Config.IsPostgres || server.Target.Engine != CollectorTargetEngine.SqlServer)
-            {
-                continue;
-            }
+                /* The engine gate lives HERE, at the boundary a query would cross, rather than resting on the
+                   backlog never holding a PostgreSQL server's rows — the PlanForceBot's reasoning. Only the two
+                   SQL Server collectors describe observations, so a PostgreSQL row is unreachable today, and this
+                   is what keeps it unreachable if that ever stops being true. */
+                if (server.Config.IsPostgres || server.Target.Engine != CollectorTargetEngine.SqlServer)
+                {
+                    continue;
+                }
 
-            try
-            {
-                await SweepServerAsync(postgres, server, logger, cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                /* Service shutdown ends the pass quietly. The caller tracks this task without awaiting it, so
-                   a fault escaping here would be an UNOBSERVED exception rather than one anybody handles —
-                   and a shutdown is not a fault. Outcomes already fetched were written on
-                   CancellationToken.None, so nothing measured is discarded. */
-                return;
-            }
-            catch (Exception ex)
-            {
-                /* Failure-isolated per server: this pass is launched and not awaited, so an escaping fault
-                   would be an UNOBSERVED exception rather than one anybody handles — and the fleet would
-                   lose the whole tick's sweep with nothing logged.
+                /* Counted BEFORE the attempt, so it is the number of servers this tick REACHED. Counting only
+                   clean passes would make the run-record's fault clause a fraction of itself. */
+                tally.ServersSwept++;
 
-                   Unfiltered on purpose, unlike the usual `ex is not OperationCanceledException` arm. That
-                   filter exists so a shutdown is never swallowed as a fault, and the arm ABOVE already
-                   answers the shutdown case on the token. What is left is a cancellation whose token is not
-                   ours, which is not a shutdown and so IS a per-server fault — filtered out, it would be
-                   the one exception shape that escapes. */
-                logger?.LogDebug(
-                    "Oversized-plan backlog sweep on '{Server}' ended early: {Message}",
-                    server.Config.DisplayName, ex.Message);
+                try
+                {
+                    await SweepServerAsync(postgres, server, tally, logger, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    /* Service shutdown ends the pass quietly. The caller tracks this task without awaiting it, so
+                       a fault escaping here would be an UNOBSERVED exception rather than one anybody handles —
+                       and a shutdown is not a fault. Outcomes already fetched were written on
+                       CancellationToken.None, so nothing measured is discarded. */
+                    tally.Interrupted = true;
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    /* Failure-isolated per server: this pass is launched and not awaited, so an escaping fault
+                       would be an UNOBSERVED exception rather than one anybody handles — and the fleet would
+                       lose the whole tick's sweep with nothing logged.
+
+                       Unfiltered on purpose, unlike the usual `ex is not OperationCanceledException` arm. That
+                       filter exists so a shutdown is never swallowed as a fault, and the arm ABOVE already
+                       answers the shutdown case on the token. What is left is a cancellation whose token is not
+                       ours, which is not a shutdown and so IS a per-server fault — filtered out, it would be
+                       the one exception shape that escapes. */
+                    tally.ServersFaulted++;
+
+                    logger?.LogDebug(
+                        "Oversized-plan backlog sweep on '{Server}' ended early: {Message}",
+                        server.Config.DisplayName, ex.Message);
+                }
             }
+        }
+        finally
+        {
+            /* ONE run-record per tick, on every exit path (#3399) — the early returns above are the
+               interesting ones, because a record written only after a complete pass is a record whose
+               absence means either "the sweep is dead" or "the last pass was interrupted", and those need
+               opposite responses. CancellationToken.None for the RecordOutcomeAsync reason: the tick's
+               measurements are already paid for, so a shutdown arriving here must not discard them.
+               Failure-isolated inside the writer, so this cannot fault the task the worker tracks. */
+            sw.Stop();
+
+            var (status, message) = BuildRunRecordSummary(tally);
+            await DarlingObservability.LogOversizedPlanSweepRunAsync(
+                postgres, status, tally.PlansCaptured, sw.ElapsedMilliseconds, tally.TargetMs, message,
+                logger, CancellationToken.None).ConfigureAwait(false);
         }
     }
 
@@ -204,10 +323,13 @@ WHERE tqp.query_plan IS NOT NULL;";
     private static async Task SweepServerAsync(
         NpgsqlDataSource postgres,
         ServerRuntime server,
+        SweepTally tally,
         ILogger? logger,
         CancellationToken cancellationToken)
     {
         var pending = await ClaimAsync(postgres, server.ServerId, cancellationToken).ConfigureAwait(false);
+        tally.PlansClaimed += pending.Count;
+
         if (pending.Count == 0)
         {
             return;
@@ -217,17 +339,26 @@ WHERE tqp.query_plan IS NOT NULL;";
         {
             if (cancellationToken.IsCancellationRequested)
             {
+                tally.Interrupted = true;
                 return;
             }
 
+            /* Timed around the fetch ALONE, which is the only step here that touches a monitored server —
+               so the sum is what sql_duration_ms claims to be on the run-record, and the claim and the
+               outcome write fall to the storage phase where they belong. */
+            var fetchStart = Stopwatch.GetTimestamp();
+
             var (verdict, planXml, error) = await FetchOnePlanAsync(server, plan, logger, cancellationToken)
                 .ConfigureAwait(false);
+
+            tally.TargetMs += (long)Stopwatch.GetElapsedTime(fetchStart).TotalMilliseconds;
 
             await RecordOutcomeAsync(postgres, server, plan, verdict, planXml, logger).ConfigureAwait(false);
 
             switch (verdict)
             {
                 case PlanFetchVerdict.Captured:
+                    tally.PlansCaptured++;
                     logger?.LogInformation(
                         "Oversized-plan backlog: captured a {Bytes}-byte {Collector} plan on '{Server}' that exceeded the {Cap}-byte capture cap (#3392)",
                         plan.Observation.ObservedBytes, plan.CollectorName, server.Config.DisplayName,
@@ -235,12 +366,14 @@ WHERE tqp.query_plan IS NOT NULL;";
                     break;
 
                 case PlanFetchVerdict.Expired:
+                    tally.PlansExpired++;
                     logger?.LogDebug(
                         "Oversized-plan backlog: the {Collector} plan handle for a {Bytes}-byte plan on '{Server}' no longer renders a plan — recorded as expired (#3392)",
                         plan.CollectorName, plan.Observation.ObservedBytes, server.Config.DisplayName);
                     break;
 
                 default:
+                    tally.FetchFailures++;
                     logger?.LogDebug(
                         "Oversized-plan backlog: the {Collector} fetch for a {Bytes}-byte plan on '{Server}' did not complete ({Message}) — the row stays claimable (#3392)",
                         plan.CollectorName, plan.Observation.ObservedBytes, server.Config.DisplayName, error);

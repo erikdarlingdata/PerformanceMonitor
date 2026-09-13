@@ -211,8 +211,10 @@ public class CollectionLogPhaseSplitStoreTests
             .Select(m => m.Index)
             .ToList();
 
-        /* Two today. If this count changes, the new writer needs the same audit - which is the point. */
-        Assert.Equal(2, writerStarts.Count);
+        /* Three today: the per-collector writer, the fleet retention run-record, and the oversized-plan
+           backlog sweep's run-record (#3399). If this count changes, the new writer needs the same audit -
+           which is the point, and the sweep's writer is what it caught. */
+        Assert.Equal(3, writerStarts.Count);
 
         foreach (var start in writerStarts)
         {
