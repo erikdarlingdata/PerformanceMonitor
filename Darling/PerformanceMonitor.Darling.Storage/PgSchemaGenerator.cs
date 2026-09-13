@@ -567,7 +567,8 @@ public static class PgSchemaGenerator
     /// store old enough to replay that rung runs the view against a table without them and the whole ladder
     /// dies with 42703, at service start, on every upgrade from below that rung. Measured, not theorised:
     /// V51 and V54 both re-emitted the view while pre-adding only the one column their own rung introduced,
-    /// and the 3.3.0 fixture store failed on <c>f.query_plan_xml_bytes</c> the moment a later rung added it.
+    /// and the 3.3.0 fixture store failed on <c>f.query_plan_xml_bytes</c> the moment a later rung added
+    /// it.</para>
     ///
     /// <para>Column-by-column from the definition rather than a list, and the same <see cref="TypeFor"/> the
     /// table generator uses, so this covers every FUTURE payload column without anyone remembering to come
