@@ -76,6 +76,63 @@ ORDER BY server_name";
     }
 
     /// <summary>
+    /// The one-line disclosure appended to a miss from
+    /// <see cref="ResolveOrErrorWithFleetSentinelAsync"/>. A const so a pin can assert that the read which
+    /// accepts the sentinel actually tells a caller the name exists — a reserved name documented only in a
+    /// tool description is a name nobody finds at the moment they need it.
+    /// </summary>
+    internal const string FleetSentinelDisclosure =
+        "The reserved name (fleet) is also accepted by this read: it returns the FLEET-MAINTENANCE "
+        + "run-records - data_retention for the daily purge, oversized_plan_sweep for the hourly "
+        + "oversized-plan backlog drain - rather than a monitored server's collector runs.";
+
+    /// <summary>
+    /// Resolves a server name, additionally accepting the reserved FLEET-SENTINEL name — the second
+    /// headless-only addition to this resolver, beside the #2339 peer disclosure (#3399).
+    ///
+    /// <para>The sentinel is <c>server_id = 0</c> / <c>(fleet)</c>, the row the fleet-wide maintenance passes
+    /// write their run-records under because they iterate the whole fleet and so have no one server to
+    /// attribute a run to. It is deliberately absent from <c>collect.servers</c>, so
+    /// <see cref="ResolveOrErrorAsync"/> cannot reach it and every read routed through that one stays scoped
+    /// to a real monitored server — which is right for all of them but one. The collection log is the single
+    /// surface whose subject IS the log, and a run-record no client can name is a run-record whose presence
+    /// answers nothing.</para>
+    ///
+    /// <para>EXACT match only, trimmed and case-insensitive: never a partial match, and never the
+    /// auto-selection an omitted name gets on a single-server store. The sentinel has to be asked for by
+    /// name, so no ordinary call can land on it by accident.</para>
+    /// </summary>
+    public static async Task<((int ServerId, string ServerName) resolved, string? error)>
+        ResolveOrErrorWithFleetSentinelAsync(
+            NpgsqlDataSource postgres,
+            string? serverName)
+    {
+        /* BEFORE the registry read, and the order is the correctness rather than a saved round trip. The
+           fallback below matches partially, so a registry row whose name merely CONTAINED the sentinel's
+           would shadow it on the other ordering — and the shadowing would be silent, because a resolved
+           real server is a perfectly ordinary answer. */
+        if (IsFleetSentinelName(serverName))
+        {
+            return ((DarlingObservability.FleetServerId, DarlingObservability.FleetServerName), null);
+        }
+
+        var (resolved, error) = await ResolveOrErrorAsync(postgres, serverName).ConfigureAwait(false);
+
+        return error is null
+            ? (resolved, null)
+            : (default, $"{error}{Environment.NewLine}{Environment.NewLine}{FleetSentinelDisclosure}");
+    }
+
+    /// <summary>
+    /// Whether a caller named the fleet sentinel. EXACT, trimmed, case-insensitive — never the
+    /// <c>Contains</c> match <see cref="Resolve"/> falls back to, because a reserved name that answered to
+    /// any substring of itself would be reachable by accident from a typo.
+    /// </summary>
+    internal static bool IsFleetSentinelName(string? serverName) =>
+        serverName is not null
+        && string.Equals(serverName.Trim(), DarlingObservability.FleetServerName, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// The pure matching half — Lite's semantics over materialized registry rows, separated
     /// from the Postgres read so the resolution rules unit-test without a live store. Reads the ambient
     /// peer declaration (#2339) for the miss message; the overload below takes it explicitly.

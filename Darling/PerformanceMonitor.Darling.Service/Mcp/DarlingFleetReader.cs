@@ -295,11 +295,21 @@ WHERE id = 1";
     /// history" mistake fixed elsewhere today (pg_statement_stats #2691, pg_wait_stats #2695). The window is
     /// 48 hours, not the OfflineThreshold this feeds: a server genuinely offline for HOURS must still
     /// report its true last-seen time (age computed correctly, still bands Offline) rather than falling out of
-    /// the result entirely and being treated as having no history at all.</summary>
+    /// the result entirely and being treated as having no history at all.
+    ///
+    /// <para>Excludes <c>server_id = 0</c>, the fleet-maintenance run-record sentinel
+    /// (<c>DarlingObservability.FleetServerId</c>) — the retention purge and the oversized-plan backlog sweep
+    /// write their per-run records there because they are fleet-wide and have no one server to attribute a
+    /// run to. It is not a real server, so it must not appear as a phantom group a key-iterating consumer
+    /// could render as "server 0"; the Viewer's twin of this read
+    /// (<c>ViewerDataService.ServerFreshnessSql</c>) already carries the same clause. The rollup happens to
+    /// read this map only by <c>TryGetValue</c> on a registry id today, so the phantom is currently inert —
+    /// which is exactly why the guard belongs in the SQL rather than in that reading habit.</para></summary>
     public const string FleetLastCollectionSql = @"
 SELECT server_id, MAX(collection_time) AS last_collection_time
 FROM v_collection_log
 WHERE collection_time >= $1
+AND   server_id <> 0
 GROUP BY server_id";
 
     /// <summary>Cross-server per-collector 7-day health aggregate — one row per (server, collector) pair carrying
@@ -308,7 +318,13 @@ GROUP BY server_id";
     /// trailing 7 days, naive UTC). <c>last_run_time</c> (any status, not just success) feeds the STOPPED band
     /// — a collector that has gone dark entirely (its AppliesTo gate flipped off, say) must not read as
     /// FAILING just because its last SUCCESS is old; a collector still being invoked and erroring every cycle
-    /// has a recent last_run_time and correctly stays FAILING.</summary>
+    /// has a recent last_run_time and correctly stays FAILING.
+    ///
+    /// <para>Excludes the <c>server_id = 0</c> fleet-maintenance sentinel for the reason
+    /// <see cref="FleetLastCollectionSql"/> gives, and one further one that is specific to this read: the
+    /// rows there are NOT collector runs, so banding them through <c>CollectorHealth.HealthStatus</c> would
+    /// apply a staleness ladder built for a per-server cadence to a fleet-wide maintenance pass that has
+    /// none.</para></summary>
     public const string FleetCollectionHealthSql = $@"
 SELECT
     server_id,
@@ -349,6 +365,7 @@ SELECT
     SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count
 FROM v_collection_log
 WHERE collection_time >= $1
+AND   server_id <> 0
 GROUP BY server_id, collector_name";
 
     /// <summary>The default depth of the worst-first "Needs attention" ranking.</summary>
