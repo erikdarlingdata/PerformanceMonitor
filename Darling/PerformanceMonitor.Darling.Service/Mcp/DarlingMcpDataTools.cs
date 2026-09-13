@@ -1249,6 +1249,60 @@ public sealed class DarlingMcpDataTools
             .FromFreshness(ServerHealthClassifier.ClassifyFreshness(lastCollectionUtc, nowUtc))
             .McpToken();
 
+    /// <summary>
+    /// The empty-read sentence for the FLEET SENTINEL's log, which is a different population from a
+    /// monitored server's and needs different words (#3399).
+    ///
+    /// <para><b>The unfiltered quiet-window sentence is the one that matters.</b> For a monitored server
+    /// "this window is genuinely quiet rather than broken" is true and useful. For a maintenance pass it is
+    /// backwards: the passes run on a FIXED cadence, so a window wider than the cadence with no row in it
+    /// means a pass stopped running — which is the whole reason the row is written on every tick. Emitting
+    /// the server sentence here would answer the question this population was added to answer with a
+    /// reassurance, in the one direction a wrong answer costs something.</para>
+    ///
+    /// <para>The filtered sentence is wrong a second way: it tells a caller to check the name against what
+    /// <c>get_collection_health</c> lists, and that read is scoped to monitored servers, so it lists neither
+    /// of these names and never will.</para>
+    ///
+    /// <para>Pure, so all three branches are pinnable without a store.</para>
+    /// </summary>
+    internal static (string State, string Message) FleetMaintenanceLogMiss(
+        bool everRecorded,
+        string? collectorName,
+        double? minDurationMs,
+        int hoursBack)
+    {
+        var hours = hoursBack.ToString(CultureInfo.InvariantCulture);
+
+        if (!everRecorded)
+        {
+            return ("unavailable",
+                "No fleet-maintenance run-records have EVER been recorded. Both passes write one on their "
+                + "FIRST pass after the service starts — data_retention for the daily purge, "
+                + "oversized_plan_sweep for the hourly oversized-plan backlog drain — so this is a service "
+                + "that has not completed a maintenance pass, not an empty window. Check that the service is "
+                + "running, and check its log: these writes are failure-isolated and report at Debug.");
+        }
+
+        var cadence =
+            "The passes run on a FIXED cadence — hourly for oversized_plan_sweep, daily for data_retention — "
+            + "and every tick writes a row whatever it found, including one that found nothing to do. So an "
+            + "absent row over a window wider than the cadence means the pass did not RUN, which is the "
+            + "reading these rows exist for. Do NOT check get_collection_health for these names: it is scoped "
+            + "to monitored servers and lists neither of them.";
+
+        if (!string.IsNullOrWhiteSpace(collectorName) || minDurationMs is not null)
+        {
+            return ("empty",
+                $"No fleet-maintenance run-records in the last {hours} hour(s) matched "
+                + $"{McpHelpers.DescribeCollectionLogFilters(collectorName, minDurationMs)}. "
+                + cadence);
+        }
+
+        return ("empty",
+            $"No fleet-maintenance run-records at all in the last {hours} hour(s). " + cadence);
+    }
+
     [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, NEWEST FIRST by default and SLOWEST FIRST whenever min_duration_ms is supplied: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the store, rows collected, status and any error. get_collection_health rolls seven days of these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window. READ THE PAGE-SPAN FIELDS BEFORE CONCLUDING ANYTHING FROM THE ROWS. hours_back is the span you ASKED for; oldest_returned_collection_time and newest_returned_collection_time bound the page you GOT, and on a busy fleet those are wildly different — roughly 500 log rows a minute across 50 servers means a 24-hour request at the 200-row default is satisfied by about the last 25 seconds of activity. truncated says the cap bit; the two timestamps say what the page holds. THE TWO FIELDS MEAN DIFFERENT THINGS UNDER THE TWO ORDERINGS and the difference matters: under the default newest-first ordering the page is a contiguous slice of the window's tail, so oldest_returned_collection_time IS how far back this read reached; under a min_duration_ms floor the page is a cost-RANKED sample drawn from the whole window, so it tells you how old the slowest matching runs are and NOTHING about reach. Read order to know which you have. Neither field is a window floor: nothing here probes for the oldest row the window could have held. A read whose newest and oldest are seconds apart has told you nothing about the window you named, and raising limit does NOT fix it under the default ordering because the slow runs are not the recent ones — min_duration_ms is the knob for that, because supplying it ranks by duration instead of by time. Both filters are applied in SQL, BEFORE the cap, so truncated and run_count describe the MATCHING rows rather than the unfiltered window. order names which ordering you got, so a caller never has to infer it from the filters it sent. Also carries the phase decomposition where the run recorded one, as nested blocks that are null when the run took a path that does not report them — and a row carries at most ONE family. Server-scoped collectors fill sql_phases (open_ms, drain_ms, other_ms which is derived, watermark_ms) and drain (rows_read, bytes_read, last_read_ms, target_session_id). Per-database collectors that perform a deferred plan or statement-text fetch instead fill plan_fetch and/or text_fetch, each carrying probe_ms, target_ms, write_ms, ids_attempted and probe_ids summed across that run's databases. sweep_peer_max_ms is flat and present on every row: it is the slowest peer collector in the same sweep, the denominator for asking whether a slow run was slow alone or the whole sweep was. A null block means the run took the other path, not that the phase was free — most runs perform no deferred fetch at all. Divide target_ms by ids_attempted for the per-id target cost, probe_ms by probe_ids for the per-reference probe cost. CRITICAL for reading sql_duration_ms on a fetching collector: it is NOT purely target-side there. The deferred fetches run inside the driver's per-item SQL stopwatch and each one round-trips the MONITORING STORE to decide what plan XML and statement text are already held before writing back what came off the target, so the store's probe and write are billed to the column documented as the monitored server's. The probe is the largest single term in both fetches on this fleet — 55.4% of plan_fetch and 80.6% of text_fetch — and on one production run it was 107,334 ms of a 124,972 ms sql_duration_ms, 86%, against a plan-plus-text target time of 6,494 ms. sql_store_ms is that store share, derived from the two fetch blocks (probe_ms + write_ms of each) and null when no fetch ran. It is a FLOOR, not the whole: the per-item watermark refresh is also a store read inside the same stopwatch, the enumerated path records no watermark_ms, and that component is stored nowhere — so sql_duration_ms minus sql_store_ms is an UPPER bound on target-side time rather than the target-side time. store_duration_ms is not where the probe went either: it is the binary COPY of the collected rows and nothing else. Do NOT conclude a monitored server is slow from a large sql_duration_ms on query_store without reading sql_store_ms beside it. THE RESERVED server_name (fleet) READS THE FLEET-MAINTENANCE RUN-RECORDS instead of a monitored server's collector runs: the passes that iterate the whole fleet have no one server to attribute a run to, so they log under a sentinel that is not in the server list — data_retention for the daily purge, oversized_plan_sweep for the hourly oversized-plan backlog drain. Read those rows by their ABSENCE as much as their contents: every tick writes one whatever it found, including a tick that found an empty backlog and captured nothing, so rows_collected = 0 means the pass ran and had nothing to fetch while a MISSING row past the pass's cadence means the pass did not run at all. That is the only way to tell those two apart. error_message carries the tick's counts on a SUCCESS row (servers swept, plans claimed, captured, expired, fetch failures); sql_duration_ms is the time inside the monitored-server fetches and store_duration_ms the rest of the tick. These rows are excluded from get_collection_health and from get_fleet_overview by design — they are maintenance passes, not collectors, so a per-server staleness ladder does not apply to them.")]
     public static async Task<string> GetCollectionLog(
         NpgsqlDataSource postgres,
@@ -1342,6 +1396,18 @@ public sealed class DarlingMcpDataTools
                     path that already returned no rows.
                 */
                 var everCollected = await DarlingDataReader.HasAnyCollectionLogAsync(postgres, resolved.ServerId);
+
+                /* The sentinel gets its OWN three sentences, ahead of the server-shaped ones, because all
+                   three of those are false about a maintenance pass — and one is false in the reassuring
+                   direction on exactly the question this population exists to answer. See
+                   FleetMaintenanceLogMiss. The server branches below are untouched. */
+                if (resolved.ServerId == DarlingObservability.FleetServerId)
+                {
+                    var (state, text) = FleetMaintenanceLogMiss(
+                        everCollected, collector_name, min_duration_ms, Math.Abs(hours_back));
+
+                    return McpHelpers.Status(state, text);
+                }
 
                 if (!everCollected)
                 {
