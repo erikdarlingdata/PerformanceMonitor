@@ -808,10 +808,7 @@ public class CrossAppGuardCiGateTests
         }
         finally
         {
-            if (Directory.Exists(scratch))
-            {
-                Directory.Delete(scratch, recursive: true);
-            }
+            TryDeleteTree(scratch);
         }
     }
 
@@ -2062,6 +2059,33 @@ public class CrossAppGuardCiGateTests
     /// for a process started by <c>dotnet run</c>, which is how this suite runs. A missing <c>dotnet</c>
     /// on PATH surfaces as a non-zero exit with the exception text, so it fails loudly rather than as an
     /// empty answer.</para></summary>
+    /// <summary>
+    /// Deletes a scratch tree and treats a locked file as cleanup, not as a verdict.
+    ///
+    /// <para>The timeout case above starts <c>dotnet msbuild</c> with a one-millisecond budget precisely so
+    /// the run does NOT finish, so the abandoned process and its MSBuild nodes can still hold handles inside
+    /// the tree when this runs. On Windows the recursive delete then throws and fails a test whose assertions
+    /// have all already passed — the outcome reports a locked temp file as a guard regression. Same shape and
+    /// same reasoning as <c>DarlingDeployRollbackRetentionTests.TryDeleteTree</c>; separate assemblies, so the
+    /// helper cannot be shared.</para>
+    /// </summary>
+    private static void TryDeleteTree(string path)
+    {
+        if (!Directory.Exists(path))
+        {
+            return;
+        }
+
+        try
+        {
+            Directory.Delete(path, recursive: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            /* A leftover temp tree is not a test failure. */
+        }
+    }
+
     private static (int ExitCode, string StdOut, string StdErr) RunDotnet(
         string workingDirectory, IEnumerable<string> arguments, TimeSpan? deadline = null)
     {
