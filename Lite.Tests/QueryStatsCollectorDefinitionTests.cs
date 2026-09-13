@@ -101,7 +101,7 @@ public sealed class QueryStatsCollectorDefinitionTests
            statement offsets (the text DMV, so large/deep plans still return). */
         var plan = QueryStatsCollector.Instance.BuildQuery(MakeContext(capturePlanXml: true));
 
-        Assert.Contains("query_plan_xml = tqp.query_plan", plan.Text, StringComparison.Ordinal);
+        AssertPlanXmlSizeGuarded(plan.Text);
         Assert.Contains(
             "sys.dm_exec_text_query_plan(qs.plan_handle,qs.statement_start_offset,qs.statement_end_offset)AStqp",
             Collapse(plan.Text), StringComparison.Ordinal);
@@ -111,6 +111,21 @@ public sealed class QueryStatsCollectorDefinitionTests
         Assert.Contains("ORDER BY", plan.Text, StringComparison.Ordinal);
 
         AssertAppliesRunAgainstSurvivorsOnly(plan.Text);
+    }
+
+    /// <summary>
+    /// The drain-time fix: a per-row DATALENGTH cap on the captured plan XML, sourced from the single
+    /// shared constant rather than a literal repeated in each collector. Pins the shape (CASE/DATALENGTH
+    /// present, tqp.query_plan still the value on the non-NULL arm) and the literal byte count actually
+    /// used, so a change to QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes is required to move this
+    /// test, not merely a change to this collector's SQL in isolation.
+    /// </summary>
+    private static void AssertPlanXmlSizeGuarded(string sql)
+    {
+        var collapsed = Collapse(sql);
+        Assert.Contains(
+            "query_plan_xml=CASEWHENDATALENGTH(tqp.query_plan)>" + QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes + "THENNULLELSEtqp.query_planEND",
+            collapsed, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -148,7 +163,7 @@ public sealed class QueryStatsCollectorDefinitionTests
     {
         var plan = QueryStatsCollector.Instance.BuildQuery(MakeContext(isAzureSqlDb: true, capturePlanXml: true));
 
-        Assert.Contains("query_plan_xml = tqp.query_plan", plan.Text, StringComparison.Ordinal);
+        AssertPlanXmlSizeGuarded(plan.Text);
         Assert.Contains(
             "sys.dm_exec_text_query_plan(qs.plan_handle,qs.statement_start_offset,qs.statement_end_offset)AStqp",
             Collapse(plan.Text), StringComparison.Ordinal);
