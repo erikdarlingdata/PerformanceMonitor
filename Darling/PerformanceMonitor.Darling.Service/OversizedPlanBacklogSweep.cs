@@ -35,7 +35,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>sys.dm_exec_text_query_plan</c> call taking three SCALAR parameters — there is no set-valued input to
 /// widen — and <see cref="FetchOnePlanAsync"/> is the only method here that touches a monitored server, takes
 /// exactly one plan, and opens and disposes its OWN connection, so N plans cost N connections by
-/// construction. <c>OversizedPlanBacklogSweepPins</c> holds each of those properties.</para>
+/// construction. <c>OversizedPlanBacklogPins</c> holds each of those properties.</para>
 ///
 /// <para><b>Its own cadence, off the host loop, never the collector rotation.</b> Invoked from
 /// <c>DarlingWorker</c>'s fleet-level cadence checks beside the daily purge — the

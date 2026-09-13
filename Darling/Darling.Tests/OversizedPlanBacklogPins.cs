@@ -634,6 +634,24 @@ public sealed class OversizedPlanBacklogPins
             viewer[v121..], StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void TheSweepsDocCommentNamesThisClassCorrectly()
+    {
+        /* The sweep's class doc points a reader here for the properties it claims are structural. It has to
+           say the name in <c>, not <see cref>, because a product assembly cannot reference a test one — so
+           the compiler cannot catch the pointer going stale, and it already had: the doc said
+           "OversizedPlanBacklogSweepPins", which has never existed. A reviewer found that, and a name that
+           resolves to nothing is worse here than no pointer at all, because the claim it carries is exactly
+           the one a future reader would want to check before widening the fetch.
+
+           Derived from the type rather than retyped, so renaming this class fails here instead of leaving
+           the sweep pointing at a ghost. */
+        var sweep = ReadRepoFile(SweepSource);
+
+        Assert.Contains("<c>" + nameof(OversizedPlanBacklogPins) + "</c>", sweep, StringComparison.Ordinal);
+        Assert.DoesNotContain("OversizedPlanBacklogSweepPins", sweep, StringComparison.Ordinal);
+    }
+
     /* ---- helpers ------------------------------------------------------------------------------------ */
 
     private static ProcedureStatsCollector.Row MakeProcRow(long bytes) => new(
