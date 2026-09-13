@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using Xunit;
 
@@ -69,6 +70,63 @@ public sealed class LivePostgresCollectionHygieneTests
 
     /// <summary>The recorded-exemption marker. Prose, deliberately: the point is that a human wrote down why.</summary>
     private const string OwnStoreMarker = "#1776 own-store";
+
+    /// <summary>
+    /// True when any whole SEGMENT of <paramref name="relativePath"/> is <c>bin</c> or <c>obj</c>, reading
+    /// both separator characters on every platform.
+    ///
+    /// <para>Same shape and the same reasoning as <c>DocCommentHygieneTests.HasBuildOutputSegment</c>, which
+    /// records why at length: a substring test for a backslash-delimited segment matches nothing where the
+    /// separator is <c>/</c>, so the sweep above reads every generated <c>.AssemblyInfo.cs</c> and
+    /// <c>.g.cs</c> off Windows while skipping them on it — and a guard whose scope depends on the host is
+    /// two guards. Whole segments rather than a substring, because <c>Objects</c>, <c>obj-cache</c> and
+    /// <c>mybin</c> are source directory names.</para>
+    /// </summary>
+
+
+    /// <summary>
+    /// The build-output skip is a property of the PATH, not of the host it runs on.
+    ///
+    /// <para>Before this pin the skip was <c>Contains(@"\bin\")</c>, which matches nothing where the
+    /// separator is <c>/</c> — so off Windows the sweep read generated sources out of <c>bin</c> and
+    /// <c>obj</c> and could report a generated file as an offender, while on Windows it skipped them. The
+    /// suite targets <c>net10.0-windows</c> so CI never saw it, which is exactly why a pin rather than a
+    /// comment: the defect is invisible on the only platform that runs it.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(@"bin\Debug\net10.0\Foo.AssemblyInfo.cs", true)]
+    [InlineData("bin/Debug/net10.0/Foo.AssemblyInfo.cs", true)]
+    [InlineData(@"obj\Debug\Foo.g.cs", true)]
+    [InlineData("obj/Debug/Foo.g.cs", true)]
+    [InlineData("sub/obj/Debug/Foo.g.cs", true)]
+    [InlineData("LivePostgresStoreFixture.cs", false)]
+    [InlineData("mybin/Thing.cs", false)]
+    [InlineData("obj-cache/Thing.cs", false)]
+    [InlineData("Objects/Thing.cs", false)]
+    public void TheBuildOutputSkip_ReadsBothSeparators_AndWholeSegmentsOnly(string relativePath, bool skipped)
+    {
+        Assert.Equal(skipped, HasBuildOutputSegment(relativePath));
+    }
+
+    /// <summary>
+    /// The sweep routes its skip through <see cref="HasBuildOutputSegment"/> rather than testing the path
+    /// inline, so the behaviour the theory above pins is the behaviour the sweep actually gets.
+    /// </summary>
+    [Fact]
+    public void TheSweep_SkipsBuildOutputThroughTheSeparatorAwareHelper()
+    {
+        var source = File.ReadAllText(ThisSourceFile());
+
+        Assert.Contains("HasBuildOutputSegment(Path.GetRelativePath(", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(@"file.Contains(@""\bin\""", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(@"file.Contains(@""\obj\""", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>This file's own path, for the source pin above.</summary>
+    private static string ThisSourceFile([CallerFilePath] string? path = null) => path!;    private static bool HasBuildOutputSegment(string relativePath) =>
+        relativePath.Split('/', '\\')
+            .Any(segment => string.Equals(segment, "bin", StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(segment, "obj", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// The collection's own fixture (<see cref="LivePostgresStoreFixture"/>) reaches the shared store and
@@ -140,8 +198,7 @@ public sealed class LivePostgresCollectionHygieneTests
            collection even if it wanted to, and the quoted literal appears nowhere else in the repo. */
         foreach (var file in Directory.EnumerateFiles(directory!, "*.cs", SearchOption.AllDirectories))
         {
-            if (file.Contains(@"\bin\", StringComparison.OrdinalIgnoreCase)
-                || file.Contains(@"\obj\", StringComparison.OrdinalIgnoreCase))
+            if (HasBuildOutputSegment(Path.GetRelativePath(directory!, file)))
             {
                 continue;
             }
