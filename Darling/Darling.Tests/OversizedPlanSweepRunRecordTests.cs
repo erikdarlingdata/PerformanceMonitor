@@ -507,6 +507,86 @@ public sealed class OversizedPlanSweepRunRecordTests
         Assert.Equal(new[] { "GetCollectionLog" }, callers);
     }
 
+    /* ---- what an EMPTY read of the sentinel says ---------------------------------------------------- */
+
+    /// <summary>
+    /// An empty read of the sentinel never borrows the monitored-server reassurance. "This window is
+    /// genuinely quiet rather than broken" is true of a server that collected nothing for an hour and FALSE
+    /// of a maintenance pass, which writes a row on every tick — so on the sentinel that sentence answers
+    /// the question this population was added to answer with the opposite of the truth, in the direction a
+    /// wrong answer costs something.
+    ///
+    /// <para>Asserted over all three branches, because the defect is a sentence LEAKING rather than a
+    /// specific branch being wrong, and the branch that would leak it is not the one a reader traces first.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(false, null, null)]
+    [InlineData(true, null, null)]
+    [InlineData(true, "oversized_plan_sweep", null)]
+    [InlineData(true, null, 500d)]
+    public void AnEmptySentinelReadNeverBorrowsTheMonitoredServerReassurance(
+        bool everRecorded, string? collectorName, double? minDurationMs)
+    {
+        var (state, message) = DarlingMcpDataTools.FleetMaintenanceLogMiss(
+            everRecorded, collectorName, minDurationMs, 24);
+
+        Assert.False(string.IsNullOrWhiteSpace(state));
+        Assert.DoesNotContain("genuinely quiet rather than broken", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("This server", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("widen hours_back", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The three branches say the three different things they have to. A never-recorded sentinel is a
+    /// service that has not completed a maintenance pass — <c>unavailable</c>, not an empty window, because
+    /// both passes run at startup. A window with rows elsewhere but none here carries the cadence rule,
+    /// which is what turns an absence into an answer. And a filtered miss names its filter back without
+    /// sending the caller to <c>get_collection_health</c>, which is scoped to monitored servers and lists
+    /// neither maintenance name.
+    /// </summary>
+    [Fact]
+    public void TheThreeSentinelBranchesCarryTheCadenceRule_AndNameTheirFilterBack()
+    {
+        var never = DarlingMcpDataTools.FleetMaintenanceLogMiss(false, null, null, 24);
+        Assert.Equal("unavailable", never.State);
+        Assert.Contains("has not completed a maintenance pass", never.Message, StringComparison.Ordinal);
+
+        var quiet = DarlingMcpDataTools.FleetMaintenanceLogMiss(true, null, null, 6);
+        Assert.Equal("empty", quiet.State);
+        Assert.Contains("last 6 hour(s)", quiet.Message, StringComparison.Ordinal);
+        Assert.Contains("means the pass did not RUN", quiet.Message, StringComparison.Ordinal);
+        Assert.Contains("Do NOT check get_collection_health", quiet.Message, StringComparison.Ordinal);
+
+        var filtered = DarlingMcpDataTools.FleetMaintenanceLogMiss(
+            true, DarlingObservability.OversizedPlanSweepCollectorName, null, 24);
+        Assert.Equal("empty", filtered.State);
+        Assert.Contains(
+            $"collector_name '{DarlingObservability.OversizedPlanSweepCollectorName}'",
+            filtered.Message,
+            StringComparison.Ordinal);
+        Assert.Contains("means the pass did not RUN", filtered.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The sentinel branch is reached BEFORE the three server-shaped ones. Structure, because the server
+    /// branches return early: placed after them, this arm would be dead code on every path that can reach it
+    /// — and a dead arm is exactly as invisible as a missing one.
+    /// </summary>
+    [Fact]
+    public void TheSentinelBranchPreemptsTheServerShapedOnes()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(ReadRepoFile(DataToolsSource));
+
+        /* Anchored on the GATE, not on the helper's name: the helper is declared earlier in the file, so a
+           name search would find the declaration and compare the wrong two offsets. */
+        var sentinel = code.IndexOf("resolved.ServerId == DarlingObservability.FleetServerId", StringComparison.Ordinal);
+        var neverCollected = code.IndexOf("if (!everCollected)", StringComparison.Ordinal);
+
+        Assert.True(sentinel > 0, "The sentinel arm is no longer in the empty-read block.");
+        Assert.True(neverCollected > 0, "The never-collected arm is no longer there.");
+        Assert.True(sentinel < neverCollected, "The server-shaped arms pre-empt the sentinel arm.");
+    }
+
     /* ---- the sentinel row's blast radius ------------------------------------------------------------ */
 
     /// <summary>
