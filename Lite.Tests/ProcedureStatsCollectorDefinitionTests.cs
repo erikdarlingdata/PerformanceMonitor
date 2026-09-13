@@ -29,6 +29,12 @@ public sealed class ProcedureStatsCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();
 
+    /// <summary>The drain-time fix (shared with query_stats): a per-row DATALENGTH cap on the captured
+    /// plan XML, sourced from QueryPlanXmlCaptureLimits rather than a literal repeated per collector.
+    /// Built from the constant so a change to the cap moves this expectation with it.</summary>
+    private static readonly string PlanXmlSizeGuardedFragment =
+        "query_plan_xml=CASEWHENDATALENGTH(tqp.query_plan)>" + QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes + "THENNULLELSEtqp.query_planEND";
+
     private static string Collapse(string sql) => Regex.Replace(sql, @"\s+", "");
 
     [Fact]
@@ -148,7 +154,7 @@ public sealed class ProcedureStatsCollectorDefinitionTests
         var plan = ProcedureStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas, capturePlanXml: true));
         var collapsed = Collapse(plan.Text);
 
-        Assert.Single(Regex.Matches(collapsed, Regex.Escape("query_plan_xml=tqp.query_plan")));
+        Assert.Single(Regex.Matches(collapsed, Regex.Escape(PlanXmlSizeGuardedFragment)));
         Assert.Single(Regex.Matches(collapsed, Regex.Escape("sys.dm_exec_text_query_plan(CONVERT(varbinary(64),ranked.plan_handle,1),0,-1)AStqp")));
         Assert.DoesNotContain("dm_exec_text_query_plan(s.plan_handle", collapsed, StringComparison.Ordinal);
 
@@ -170,7 +176,7 @@ public sealed class ProcedureStatsCollectorDefinitionTests
         var plan = ProcedureStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas, isAzureSqlDb: true, capturePlanXml: true));
         var collapsed = Collapse(plan.Text);
 
-        Assert.Contains("query_plan_xml=tqp.query_plan", collapsed, StringComparison.Ordinal);
+        Assert.Contains(PlanXmlSizeGuardedFragment, collapsed, StringComparison.Ordinal);
         Assert.Contains("sys.dm_exec_text_query_plan(CONVERT(varbinary(64),ranked.plan_handle,1),0,-1)AStqp", collapsed, StringComparison.Ordinal);
         Assert.True(
             collapsed.IndexOf("dm_exec_text_query_plan", StringComparison.Ordinal)
