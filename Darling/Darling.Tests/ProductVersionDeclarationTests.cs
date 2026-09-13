@@ -534,7 +534,7 @@ public class ProductVersionDeclarationTests
                 line,
                 sources.Count == 0 ? new[] { "(unresolved)" } : sources,
                 lines.Skip(index + 1).Take(GuardWindowLines)
-                 .Any(candidate => IsGuardLine(candidate, AssignedVariable(line)))));
+                    .Any(candidate => IsGuardLine(candidate, AssignedVariable(line)))));
         }
 
         return found;
