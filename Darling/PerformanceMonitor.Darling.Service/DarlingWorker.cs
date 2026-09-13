@@ -445,11 +445,20 @@ public sealed class DarlingWorker : BackgroundService
        s_staleMuteCheckInterval. Fleet-level (mute rules are a store-wide concept), so a single field. */
     private DateTime _nextStaleMuteCheckUtc = DateTime.MinValue;
 
-    /* MinValue = the first sweep after startup drains the oversized-plan backlog (#3392), then every
-       OversizedPlanBacklogSweep.SweepInterval. The cadence constant lives with the sweep rather than here
-       because the sweep's own doc derives it from the compile ages of the plans it fetches; this field is
-       only the stamp. Fleet-level (one field, the sweep iterates servers itself). */
+    /* MinValue = the first sweep after startup drains the oversized-plan backlog (#3392), then on whatever
+       OversizedPlanBacklogSweep.NextSweepDelay returns for what that tick found. Both the cadence and the
+       decision live with the sweep rather than here: its own doc derives the interval from the compile ages
+       of the plans it fetches, and the empty-target branch from what an empty target list means on the host
+       in question. This field is only the stamp. Fleet-level (one field, the sweep iterates servers itself). */
     private DateTime _nextOversizedPlanSweepUtc = DateTime.MinValue;
+
+    /* Re-attempts already spent waiting for a first connected SQL Server runtime (#3405) — the counter
+       OversizedPlanBacklogSweep.NextSweepDelay advances and bounds. Zero in steady state: any tick that
+       reaches a connected target clears it, and a tick on a host with no sweepable target never spends it.
+       Held at the maximum once spent rather than cleared, so a fleet whose targets never connect pays the
+       short-wait burst once per process. Read and written only on the fleet-loop thread, like the stamp
+       above. */
+    private int _oversizedPlanSweepConnectWaits;
 
     /* The in-flight backlog pass (#3392), tracked so the cadence above cannot start a second one on top of
        it. A pass that is still running when its next slot comes round simply skips that slot: the backlog is
@@ -1980,16 +1989,36 @@ public sealed class DarlingWorker : BackgroundService
             if (DateTime.UtcNow >= _nextOversizedPlanSweepUtc
                 && (_oversizedPlanSweep is null || _oversizedPlanSweep.IsCompleted))
             {
-                _nextOversizedPlanSweepUtc = DateTime.UtcNow.Add(OversizedPlanBacklogSweep.SweepInterval);
-
+                /* #3405: count BOTH populations, because an empty target list has two causes that mean
+                   opposite things and the pass itself cannot tell them apart. sweepableTargets is the
+                   registrations that could ever carry a runtime this pass would visit — read off the
+                   registration, since Runtime is null both mid-connect and forever. backlogTargets is the
+                   ones carrying one now. Counted in one walk rather than two so the pair describes the same
+                   snapshot. */
                 var backlogTargets = new List<ServerRuntime>(sweepTargets.Length);
+                var sweepableTargets = 0;
                 foreach (var target in sweepTargets)
                 {
+                    if (!OversizedPlanBacklogSweep.IsSweepableTarget(target.Config))
+                    {
+                        continue;
+                    }
+
+                    sweepableTargets++;
+
                     if (target.Runtime is { } runtime)
                     {
                         backlogTargets.Add(runtime);
                     }
                 }
+
+                /* Stamped BEFORE the launch, like every other cadence on this loop: the IsCompleted guard
+                   above is what keeps a slow pass from stacking, and it only works against a stamp that has
+                   already moved. The delay itself is the sweep's decision, not this loop's. */
+                var (sweepDelay, connectWaits) = OversizedPlanBacklogSweep.NextSweepDelay(
+                    sweepableTargets, backlogTargets.Count, _oversizedPlanSweepConnectWaits);
+                _oversizedPlanSweepConnectWaits = connectWaits;
+                _nextOversizedPlanSweepUtc = DateTime.UtcNow.Add(sweepDelay);
 
                 _oversizedPlanSweep = OversizedPlanBacklogSweep.RunAsync(
                     postgres, backlogTargets, _logger, stoppingToken);
