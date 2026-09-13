@@ -601,6 +601,39 @@ public sealed class OversizedPlanBacklogPins
         Assert.Contains("plain text, never gzip", readme, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void TheViewersStoreProbe_HasAV121Sentinel_AtTheTopOfTheMap()
+    {
+        /* The viewer refuses a store below RequiredStoreSchemaVersion, which is StorageVersion.SchemaVersion.
+           MapProbedSchemaVersion answers newest-arm-first from capability sentinels, so a rung that bumps the
+           version WITHOUT adding a sentinel makes a fully-migrated store map one rung low and the viewer show
+           an upgrade banner on a store that is current. StoreLogViewerGateTests asserts that invariant through
+           reflection and needs the WPF assembly to do it; this reads the three source sites instead, so the
+           same property is checkable on a machine that cannot load the viewer.
+
+           The sentinel earns its place beyond that invariant: below V121 the viewer's two stored-plan reads
+           have no backlog to fall back to and the grids' presence flags read a column that does not exist. */
+        var viewer = ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.cs");
+
+        /* The probe asks the question, the caller reads the answer, the map has the parameter — three sites,
+           and a sentinel present at only some of them shifts every LATER ordinal onto the wrong column. */
+        Assert.Contains("table_name = 'oversized_plan_backlog'", viewer, StringComparison.Ordinal);
+        Assert.Contains("bool hasOversizedPlanBacklog = false)", viewer, StringComparison.Ordinal);
+        Assert.Contains("reader.GetBoolean(96));", viewer, StringComparison.Ordinal);
+
+        /* And it is the TOP arm, above V120's. Newest-first is the whole contract of that method. */
+        var v121 = viewer.IndexOf("if (hasOversizedPlanBacklog)", StringComparison.Ordinal);
+        var v120 = viewer.IndexOf("if (hasDeadlockRateBandKnobs)", StringComparison.Ordinal);
+        Assert.True(v121 >= 0, "the viewer has no V121 sentinel arm — a fully-migrated store would map to 120");
+        Assert.True(v120 >= 0, "the V120 arm is gone, so this pin is comparing against nothing");
+        Assert.True(v121 < v120, "the V121 arm sits below V120's, so a current store maps one rung low");
+
+        /* The arm returns this build's version rather than a literal that could drift from it. */
+        Assert.Contains(
+            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            viewer[v121..], StringComparison.Ordinal);
+    }
+
     /* ---- helpers ------------------------------------------------------------------------------------ */
 
     private static ProcedureStatsCollector.Row MakeProcRow(long bytes) => new(
