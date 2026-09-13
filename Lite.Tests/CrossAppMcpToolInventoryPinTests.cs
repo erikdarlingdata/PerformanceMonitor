@@ -416,6 +416,47 @@ public sealed class CrossAppMcpToolInventoryPinTests
         }
     }
 
+    /// <summary>
+    /// <c>llms.txt</c>'s tool figure is a RANGE across the two current editions, and both endpoints are the
+    /// scanned inventories — Lite at the low end and Darling at the high end today.
+    ///
+    /// <para><b>Why a range rather than one number.</b> That file is one paragraph describing the product,
+    /// not an edition-by-edition table, and the sentence it sits in names both current editions in its next
+    /// clause. A single figure there would have to pick an edition and would read as the product's total.</para>
+    ///
+    /// <para><b>Why min/max rather than naming which edition is which.</b> Asserting "low is Lite" bakes in
+    /// today's ordering; the claim that has to hold is that the range SPANS the editions, so the endpoints
+    /// are compared to the smaller and the larger of the two counts.</para>
+    ///
+    /// <para>It read <c>51-63</c> against real counts of 87 and 148 — wrong at both ends, by an amount whose
+    /// origin is no longer recoverable, because nothing pinned it. <c>README.md</c>'s Darling figure sat at
+    /// 139 through eight tools of drift for the same reason, which is the argument for pinning over
+    /// hand-correcting. Deleting the number is the other sanctioned outcome (#3072) and needs this pin
+    /// deleted with it.</para>
+    /// </summary>
+    [Fact]
+    public void LlmsTxtToolCensus_SpansTheTwoCurrentEditions()
+    {
+        var lite = ExtractToolNames(LiteMcpDir);
+        var darling = ExtractToolNames(DarlingMcpDir);
+        var llms = ParitySource.ReadFile("llms.txt");
+
+        var pattern = new Regex(@"a built-in MCP server with (\d+)-(\d+) tools");
+        var match = pattern.Match(llms);
+
+        Assert.True(match.Success,
+            $"llms.txt no longer states the tool count in the pinned shape ({pattern}). Keep it parseable so "
+            + "this pin can hold it to the real inventories — or delete the number, which is the other "
+            + "sanctioned outcome (#3072) and needs this pin deleted with it.");
+
+        var low = int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
+        var high = int.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture);
+
+        Assert.True(low == Math.Min(lite.Count, darling.Count) && high == Math.Max(lite.Count, darling.Count),
+            $"llms.txt reads {low}-{high} tools, but Lite/Mcp exposes {lite.Count} and "
+            + $"Darling/PerformanceMonitor.Darling.Service/Mcp exposes {darling.Count}. Update the sentence.");
+    }
+
     private static string Format(IEnumerable<string> names) =>
         string.Join(", ", names.OrderBy(n => n, StringComparer.Ordinal));
 
