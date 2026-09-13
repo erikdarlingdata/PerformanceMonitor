@@ -174,6 +174,19 @@ public sealed class CrossAppMcpToolInventoryPinTests
            forensics, port this and delete the entry; the ratchet only shrinks. */
         "get_collector_stall_probes",
 
+        /* #3398: the oversized-plan backlog read (get_oversized_plan_backlog) over
+           collect.oversized_plan_backlog - which cached plans the capture cap declined, and what the hourly
+           out-of-band sweep has since done about each one. Darling-ONLY by architecture rather than a porting
+           to-do, and the SOURCE is the reason: the sweep that drains that table is invoked from the headless
+           worker's fleet-level cadence checks beside the daily retention purge, a loop Lite's single-instance
+           app has no counterpart of, and Lite's store has no such table for a twin to read.
+
+           The cap itself is SHARED - QueryPlanXmlCaptureLimits lives in the collectors project and Lite
+           declines the same oversized plans - so Lite has the blind spot and not the record of it. If Lite
+           ever gains the backlog table and a sweep, port this and delete the entry; the ratchet only
+           shrinks. */
+        "get_oversized_plan_backlog",
+
         /* #1562: the pre-banded fleet-overview read born from the web dashboard's DarlingFleetReader.
            Lite twin = a DuckDB fleet reader over the SAME shared ServerHealthClassifier (Common) — tracked
            in #1573 alongside unifying Lite's own card banding onto that classifier; port it, then remove
@@ -362,6 +375,44 @@ public sealed class CrossAppMcpToolInventoryPinTests
             Assert.True(lite.Count == int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture),
                 $"README.md's Lite tool count in {where} reads {match.Groups[1].Value} but Lite/Mcp exposes "
                 + $"{lite.Count}. Update the sentence.");
+        }
+    }
+
+    /// <summary>
+    /// The root <c>README.md</c>'s DARLING tool census, held to the same standard as its Lite sibling above.
+    ///
+    /// <para>#3072 pinned the Lite figure and left this one, and it drifted exactly as predicted: it read 139
+    /// while <c>Darling/…/Mcp</c> exposed 147, eight tools behind, and nothing anywhere failed. The Dashboard's
+    /// figure in the same two sentences stays deliberately unpinned because <c>deprecated/</c> is frozen and a
+    /// pin over it could only ever be noise — that argument does NOT extend to Darling, which is the edition
+    /// gaining tools.</para>
+    ///
+    /// <para>Its own <c>[Fact]</c> rather than two more sites in the Lite one, so a failure names which of the
+    /// two censuses to edit.</para>
+    /// </summary>
+    [Fact]
+    public void RootReadmeDarlingToolCensus_MatchesTheScannedInventory()
+    {
+        var darling = ExtractToolNames(DarlingMcpDir);
+        var readme = ParitySource.ReadFile("README.md");
+
+        var sites = new (string Where, Regex Pattern)[]
+        {
+            ("the edition-comparison table", new Regex(@"MCP server \(LLM integration\) \| Built-in \(\d+ tools\) \| On request \((\d+) tools\)")),
+            ("the Available Tools paragraph", new Regex(@"\*\*Darling\*\* exposes (\d+)")),
+        };
+
+        foreach (var (where, pattern) in sites)
+        {
+            var match = pattern.Match(readme);
+            Assert.True(match.Success,
+                $"README.md no longer states the Darling tool count in {where} in the pinned shape ({pattern}). "
+                + "Keep it parseable so this pin can hold it to the real inventory — or delete the number, which "
+                + "is the other sanctioned outcome (#3072) and needs this site removed from the list above.");
+
+            Assert.True(darling.Count == int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture),
+                $"README.md's Darling tool count in {where} reads {match.Groups[1].Value} but "
+                + $"Darling/PerformanceMonitor.Darling.Service/Mcp exposes {darling.Count}. Update the sentence.");
         }
     }
 
