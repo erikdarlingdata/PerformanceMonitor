@@ -72,19 +72,6 @@ public sealed class LivePostgresCollectionHygieneTests
     private const string OwnStoreMarker = "#1776 own-store";
 
     /// <summary>
-    /// True when any whole SEGMENT of <paramref name="relativePath"/> is <c>bin</c> or <c>obj</c>, reading
-    /// both separator characters on every platform.
-    ///
-    /// <para>Same shape and the same reasoning as <c>DocCommentHygieneTests.HasBuildOutputSegment</c>, which
-    /// records why at length: a substring test for a backslash-delimited segment matches nothing where the
-    /// separator is <c>/</c>, so the sweep above reads every generated <c>.AssemblyInfo.cs</c> and
-    /// <c>.g.cs</c> off Windows while skipping them on it — and a guard whose scope depends on the host is
-    /// two guards. Whole segments rather than a substring, because <c>Objects</c>, <c>obj-cache</c> and
-    /// <c>mybin</c> are source directory names.</para>
-    /// </summary>
-
-
-    /// <summary>
     /// The build-output skip is a property of the PATH, not of the host it runs on.
     ///
     /// <para>Before this pin the skip was <c>Contains(@"\bin\")</c>, which matches nothing where the
@@ -123,7 +110,20 @@ public sealed class LivePostgresCollectionHygieneTests
     }
 
     /// <summary>This file's own path, for the source pin above.</summary>
-    private static string ThisSourceFile([CallerFilePath] string? path = null) => path!;    private static bool HasBuildOutputSegment(string relativePath) =>
+    private static string ThisSourceFile([CallerFilePath] string? path = null) => path!;
+
+    /// <summary>
+    /// True when any whole SEGMENT of <paramref name="relativePath"/> is <c>bin</c> or <c>obj</c>, reading
+    /// both separator characters on every platform.
+    ///
+    /// <para>Same shape and the same reasoning as <c>DocCommentHygieneTests.HasBuildOutputSegment</c>, which
+    /// records why at length: a substring test for a backslash-delimited segment matches nothing where the
+    /// separator is <c>/</c>, so the sweep above reads every generated <c>.AssemblyInfo.cs</c> and
+    /// <c>.g.cs</c> off Windows while skipping them on it — and a guard whose scope depends on the host is
+    /// two guards. Whole segments rather than a substring, because <c>Objects</c>, <c>obj-cache</c> and
+    /// <c>mybin</c> are source directory names.</para>
+    /// </summary>
+    private static bool HasBuildOutputSegment(string relativePath) =>
         relativePath.Split('/', '\\')
             .Any(segment => string.Equals(segment, "bin", StringComparison.OrdinalIgnoreCase)
                             || string.Equals(segment, "obj", StringComparison.OrdinalIgnoreCase));
