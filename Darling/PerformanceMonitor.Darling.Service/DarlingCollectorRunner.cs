@@ -458,6 +458,27 @@ public sealed class DarlingCollectorRunner
     private readonly ConcurrentDictionary<(int ServerId, string Database, string Collector), long[]> _textFetchCarryover = new();
 
     /// <summary>
+    /// Memoizes <see cref="QueryStoreFetchProbe.TouchAndProbePlansAsync"/>'s verdict so a plan id
+    /// already confirmed resolved-and-current recently skips the store round trip entirely (#3189,
+    /// #3216 — see <see cref="QueryStoreProbeCache"/> for the measurement and why this differs from
+    /// the carryover dictionaries' collector-scoped key). Not per-collector, on purpose.
+    /// </summary>
+    private readonly QueryStoreProbeCache _planProbeCache = new();
+
+    /// <summary>Text twin of <see cref="_planProbeCache"/> — same memoization, keyed by query_id.</summary>
+    private readonly QueryStoreProbeCache _textProbeCache = new();
+
+    /// <summary>
+    /// How long <see cref="_planProbeCache"/> / <see cref="_textProbeCache"/> trust a confirmed verdict.
+    /// Deliberately the SAME width as <see cref="QueryStoreLivenessTouchGuard.GuardHours"/> rather than
+    /// an independently chosen number: that is the staleness the store's own touch guard already
+    /// accepts for these rows ("a row that stays referenced is re-stamped at least once per guard
+    /// window"), so reusing it means this cache changes the CADENCE a live reference pays the round trip
+    /// at, not the liveness contract itself.
+    /// </summary>
+    private static readonly TimeSpan s_probeCacheTtl = TimeSpan.FromHours(QueryStoreLivenessTouchGuard.GuardHours);
+
+    /// <summary>
     /// Consecutive-failure count for the TEXT fetch (#2776), the backoff input its
     /// <see cref="QueryStorePlanXmlState.NarrowForFailures"/> call reads.
     ///
@@ -3343,24 +3364,62 @@ public sealed class DarlingCollectorRunner
 
             if (references.Count > 0)
             {
-                /* #2823: the probe's INPUT size, stamped where the input is known. probe: scales with
-                   this (~0.61ms/reference), not with PerItemPlanIdsAttempted, which counts only what came
-                   back missing — so a pass probing hundreds of references and owing nothing logs 0 ids
-                   while doing real store work. Logging one and dividing by the other produced a phantom
-                   140x gap twice (#2819, #2822). */
-                context.PerItemPlanProbeIds = references.Count;
-                var verdicts = await QueryStoreFetchProbe.TouchAndProbePlansAsync(
-                    storeConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
-                foreach (var verdict in verdicts)
+                /* #3189/#3216: skip the store round trip entirely for references a recent probe already
+                   confirmed resolved-and-current — see QueryStoreProbeCache for the measurement (77-80%
+                   fleet recurrence) and why the TTL is the same GuardHours the touch guard already treats
+                   as an acceptable staleness bound for these rows. Cache hits are implicitly resolved and
+                   current; only misses reach the probe below. */
+                var toProbe = _planProbeCache.SelectNeedingProbe(
+                    server.ServerId, databaseName, references, context.CollectionTime, s_probeCacheTtl);
+                if (toProbe.Count < references.Count)
                 {
-                    if (!verdict.Resolved || verdict.HashStale)
+                    var toProbeIds = new HashSet<long>(toProbe.Count);
+                    foreach (var reference in toProbe)
                     {
-                        missing.Add(verdict.Id);
+                        toProbeIds.Add(reference.Id);
                     }
-                    else
+
+                    foreach (var reference in references)
                     {
-                        /* Resolved and current: if it was carried debt, it is paid. */
-                        missing.Remove(verdict.Id);
+                        if (!toProbeIds.Contains(reference.PlanId))
+                        {
+                            /* Cache-confirmed resolved and current: if it was carried debt, it is paid. */
+                            missing.Remove(reference.PlanId);
+                        }
+                    }
+                }
+
+                /* #2823: the probe's INPUT size, stamped where the input is known — now the size of what
+                   actually reaches the store, which is the figure that determines the round trip's cost
+                   post-cache. probe: scales with this (~0.61ms/reference), not with PerItemPlanIdsAttempted,
+                   which counts only what came back missing — so a pass probing hundreds of references and
+                   owing nothing logs 0 ids while doing real store work. Logging one and dividing by the
+                   other produced a phantom 140x gap twice (#2819, #2822). */
+                context.PerItemPlanProbeIds = toProbe.Count;
+                if (toProbe.Count > 0)
+                {
+                    var verdicts = await QueryStoreFetchProbe.TouchAndProbePlansAsync(
+                        storeConnection, server.ServerId, databaseName, toProbe, context.CollectionTime, itemTimeout, cancellationToken);
+                    var hashById = new Dictionary<long, string?>(toProbe.Count);
+                    foreach (var reference in toProbe)
+                    {
+                        hashById[reference.Id] = reference.Hash;
+                    }
+
+                    foreach (var verdict in verdicts)
+                    {
+                        if (!verdict.Resolved || verdict.HashStale)
+                        {
+                            missing.Add(verdict.Id);
+                        }
+                        else
+                        {
+                            /* Resolved and current: if it was carried debt, it is paid, and the cache
+                               remembers this exact (id, hash) so the NEXT cycle that still references it
+                               can skip the round trip too. */
+                            missing.Remove(verdict.Id);
+                            _planProbeCache.Confirm(server.ServerId, databaseName, verdict.Id, hashById[verdict.Id], context.CollectionTime);
+                        }
                     }
                 }
             }
@@ -3712,19 +3771,50 @@ public sealed class DarlingCollectorRunner
 
             if (references.Count > 0)
             {
-                /* #2823: probe input size — see the plan-side comment. */
-                context.PerItemTextProbeIds = references.Count;
-                var verdicts = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
-                    storeConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
-                foreach (var verdict in verdicts)
+                /* #3189/#3216: same cache-before-probe shape as the plan side — see QueryStoreProbeCache
+                   and _planProbeCache's call site for the measurement and the correctness argument. */
+                var toProbe = _textProbeCache.SelectNeedingProbe(
+                    server.ServerId, databaseName, references, context.CollectionTime, s_probeCacheTtl);
+                if (toProbe.Count < references.Count)
                 {
-                    if (!verdict.Resolved || verdict.HashStale)
+                    var toProbeIds = new HashSet<long>(toProbe.Count);
+                    foreach (var reference in toProbe)
                     {
-                        missing.Add(verdict.Id);
+                        toProbeIds.Add(reference.Id);
                     }
-                    else
+
+                    foreach (var reference in references)
                     {
-                        missing.Remove(verdict.Id);
+                        if (!toProbeIds.Contains(reference.QueryId))
+                        {
+                            missing.Remove(reference.QueryId);
+                        }
+                    }
+                }
+
+                /* #2823: probe input size — see the plan-side comment. Now the post-cache size. */
+                context.PerItemTextProbeIds = toProbe.Count;
+                if (toProbe.Count > 0)
+                {
+                    var verdicts = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
+                        storeConnection, server.ServerId, databaseName, toProbe, context.CollectionTime, itemTimeout, cancellationToken);
+                    var hashById = new Dictionary<long, string?>(toProbe.Count);
+                    foreach (var reference in toProbe)
+                    {
+                        hashById[reference.Id] = reference.Hash;
+                    }
+
+                    foreach (var verdict in verdicts)
+                    {
+                        if (!verdict.Resolved || verdict.HashStale)
+                        {
+                            missing.Add(verdict.Id);
+                        }
+                        else
+                        {
+                            missing.Remove(verdict.Id);
+                            _textProbeCache.Confirm(server.ServerId, databaseName, verdict.Id, hashById[verdict.Id], context.CollectionTime);
+                        }
                     }
                 }
             }

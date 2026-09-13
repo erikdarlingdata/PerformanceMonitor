@@ -285,8 +285,13 @@ OPTION(RECOMPILE);";
        the varchar(130) the payload already carries, so no extra column threads through the branches
        and the stored shape is untouched. Placement inside the shell keeps the fragment identical for
        the standard (dynamic SQL) and Azure variants. */
-    private const string PlanSelectFragment = @",
-    query_plan_xml = tqp.query_plan";
+    /* The DATALENGTH guard bounds the SIZE of one module-grain plan, on top of #1959's bound on how
+       MANY rows render one — see QueryPlanXmlCaptureLimits. A whole-procedure plan is exactly the
+       shape most likely to cross it: this DMV aggregates at the module grain, so one heavy stored
+       proc's plan can dwarf a single statement's. tqp.query_plan is read twice (DATALENGTH, then the
+       value) — one materialized OUTER APPLY column read twice, not a second TVF invocation. */
+    private static readonly string PlanSelectFragment = @",
+    query_plan_xml = CASE WHEN DATALENGTH(tqp.query_plan) > " + QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes + @" THEN NULL ELSE tqp.query_plan END";
 
     private const string PlanApplyFragment = @"
 OUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handle, 1), 0, -1) AS tqp";

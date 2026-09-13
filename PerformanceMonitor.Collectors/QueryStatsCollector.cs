@@ -240,9 +240,15 @@ OPTION(RECOMPILE);";
        no-plan form. Mirrors the full Dashboard's @collect_plan path in
        install/08_collect_query_stats.sql: the STATEMENT-level plan from sys.dm_exec_text_query_plan
        keyed on the same plan_handle + statement offsets (the text DMV, not dm_exec_query_plan, so
-       large/deep plans that overflow the xml type still return), with no size guard. */
-    private const string PlanSelectFragment = @",
-    query_plan_xml = tqp.query_plan";
+       large/deep plans that overflow the xml type still return).
+
+       The DATALENGTH guard is the size bound this comment used to say did not exist: see
+       QueryPlanXmlCaptureLimits for why 200 rows still let one oversized plan dominate the cycle's
+       drain time, and why the answer is a per-row cap rather than the running-budget shape
+       QueryStoreCollector uses. tqp.query_plan is read twice (DATALENGTH, then the value) — that is
+       one materialized OUTER APPLY column read twice, not a second invocation of the TVF. */
+    private static readonly string PlanSelectFragment = @",
+    query_plan_xml = CASE WHEN DATALENGTH(tqp.query_plan) > " + QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes + @" THEN NULL ELSE tqp.query_plan END";
 
     private const string PlanApplyFragment = @"
 OUTER APPLY
