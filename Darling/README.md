@@ -844,6 +844,14 @@ never passes through the plan dimension. A row with `plan_xml IS NULL` has not b
 `expired_at` means the plan handle stopped resolving before the sweep reached it. `get_plan_xml` and the
 `analyze_*_plan` tools read this table automatically, so asking the product remains the shortest route.
 
+`get_oversized_plan_backlog` reports the table itself rather than one plan out of it: per server the
+pending / captured / expired counts, the newest capture and expiry instants, and `observed_bytes`
+min/median/max, with an optional per-server row listing that carries each plan's claim key,
+`database_name` and `query_hash`. That is where a `query_hash` worth passing to `get_plan_xml` comes
+from, and it is also the read that answers whether the sweep's fetch half has ever succeeded on a given
+server. `observed_bytes` is the same measurement, in the same UTF-16 bytes, as `query_plan_xml_bytes` on
+the fact row — a `length(plan_xml)` in PostgreSQL is CHARACTERS and comes back at half of it.
+
 **Getting the XML back.** PostgreSQL has no built-in gunzip for arbitrary `bytea`, so a plain-SQL
 consumer cannot decompress in the database without an extension. Practical options, in the order most
 people should try them:
