@@ -41,10 +41,10 @@ namespace Darling.Tests;
 /// so.</para>
 ///
 /// <para>The SQL is asserted from the shipped constants rather than from the file text, and then EXECUTED
-/// against a live store in <see cref="TheRollupAgreesWithTheClaimAndWithTheListing_AgainstDevPostgres"/> —
-/// the two halves that a text pin alone cannot cover are whether the statement parses at all and whether
-/// the buckets really partition, and the fixture there carries the <c>expired_at</c> and
-/// both-stamps states that no production store has produced yet.</para>
+/// against a live store in <see cref="OversizedPlanBacklogReadLivePostgresTests"/> — the two halves a text
+/// pin alone cannot cover are whether the statements parse at all and whether the buckets really partition,
+/// and the fixture there carries the <c>expired_at</c> and both-stamps states that no production store has
+/// produced yet.</para>
 /// </summary>
 public sealed class OversizedPlanBacklogReadPins
 {
@@ -219,8 +219,8 @@ public sealed class OversizedPlanBacklogReadPins
            round(double precision, integer), and an arm of a statement that errors takes the whole statement
            with it. percentile_disc returns a value that is IN the column and keeps its bigint type, so
            every byte figure this read prints is a size something really measured and is comparable to the
-           cap without arithmetic. TheContinuousPercentileWithATwoArgumentRound_IsRejectedByPostgres proves
-           the failure mode is real rather than remembered. */
+           cap without arithmetic. OversizedPlanBacklogReadLivePostgresTests proves the failure mode is
+           real rather than remembered. */
         var roundWithPrecision = new Regex(@"round\s*\([^()]*(?:\([^()]*\)[^()]*)*,", RegexOptions.IgnoreCase);
 
         foreach (var sql in new[]
@@ -389,247 +389,7 @@ public sealed class OversizedPlanBacklogReadPins
         Assert.DoesNotContain("by_collector", refusal, StringComparison.Ordinal);
     }
 
-    /* ---- executed against a live store -------------------------------------------------------------- */
-
-    /// <summary>
-    /// The half no text pin reaches: that the three statements PARSE, and that the buckets really
-    /// partition every row state — including the two the field has never produced.
-    ///
-    /// <para><c>expired_at</c> was zero on both production stores the day after the V121 install, so every
-    /// expiry-shaped branch of this read was untested by the fleet and would have stayed that way. The
-    /// fixture carries a pending row never attempted, a pending row attempted twice, a captured row, an
-    /// expired row, a row carrying BOTH stamps, and a row for a <c>server_id</c> that is not in the
-    /// registry.</para>
-    ///
-    /// <para>And it runs <see cref="OversizedPlanBacklog.ClaimSql"/> beside the read, asserting the claim
-    /// takes exactly the rows the listing calls pending — the assertion
-    /// <see cref="PendingCountsExactlyWhatTheSweepsClaimWouldTake"/> can only make about text.</para>
-    /// </summary>
-    [Fact]
-    public async Task TheRollupAgreesWithTheClaimAndWithTheListing_AgainstDevPostgres()
-    {
-        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the live oversized-plan backlog read test (it mints its own scratch database).");
-
-        var ct = TestContext.Current.CancellationToken;
-
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
-
-        await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
-        {
-            await migrate.OpenAsync(ct);
-            await PgMigrations.MigrateAsync(migrate, null, ct);
-            await ExecuteAsync(migrate, FixtureSql, ct);
-        }
-
-        /* The reads resolve `servers` through the search path, exactly as the MCP host's pool does. */
-        var readConnectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
-        {
-            SearchPath = PgSchemaGenerator.SearchPath,
-        }.ConnectionString;
-
-        await using var postgres = NpgsqlDataSource.Create(readConnectionString);
-
-        var census = await DarlingOversizedPlanBacklogReader.GetCollectorCensusAsync(postgres, null, ct);
-        var servers = await DarlingOversizedPlanBacklogReader.GetPerServerRollupAsync(postgres, null, ct);
-
-        /* Two collectors seeded, two servers seeded — one registered, one not. */
-        Assert.Equal(
-            new[] { OversizedPlanBacklog.ProcedureStatsCollectorName, OversizedPlanBacklog.QueryStatsCollectorName },
-            census.Select(c => c.CollectorName).OrderBy(n => n, StringComparer.Ordinal).ToArray());
-
-        Assert.Equal(2, servers.Count);
-
-        /* THE partition, on both grains. Nothing may be counted twice and nothing may be missed. */
-        foreach (var c in census)
-        {
-            Assert.Equal(c.TotalRows, c.PendingRows + c.CapturedRows + c.ExpiredRows);
-        }
-
-        foreach (var s in servers)
-        {
-            Assert.Equal(s.TotalRows, s.PendingRows + s.CapturedRows + s.ExpiredRows);
-        }
-
-        Assert.Equal(6L, servers.Sum(s => s.TotalRows));
-
-        var registered = servers.Single(s => s.ServerId == RegisteredServerId);
-        var orphaned = servers.Single(s => s.ServerId == UnregisteredServerId);
-
-        /* A row whose server has left the registry is still a row in the table. An inner join would have
-           dropped it and reported a five-row backlog. */
-        Assert.Equal("fixture-server", registered.ServerName);
-        Assert.Null(orphaned.ServerName);
-        Assert.Equal(1L, orphaned.TotalRows);
-
-        /* The both-stamps row lands in captured and NOT in expired: 5 rows on the registered server are
-           2 pending + 2 captured (one of them also carrying an expiry) + 1 expired. */
-        Assert.Equal(5L, registered.TotalRows);
-        Assert.Equal(2L, registered.PendingRows);
-        Assert.Equal(2L, registered.CapturedRows);
-        Assert.Equal(1L, registered.ExpiredRows);
-
-        /* rows_with_content is not captured_rows: one captured row was seeded with a null plan_xml, which
-           is precisely the state get_plan_xml cannot serve and the rollup would otherwise call done. */
-        Assert.Equal(1L, registered.RowsWithContent);
-
-        /* Attempts are counted on STILL-PENDING rows only — a captured row's attempt is not a failure. */
-        Assert.Equal(1L, registered.PendingRowsAttempted);
-        Assert.Equal(2L, registered.PendingAttempts);
-        Assert.Equal(2, registered.MaxAttemptsOnAPendingRow);
-
-        /* The two verdict clocks, which are the whole point: they move only when the sweep decides. */
-        Assert.Equal<DateTime?>(new DateTime(2026, 9, 13, 12, 0, 0), registered.LastCapturedAt);
-        Assert.Equal<DateTime?>(new DateTime(2026, 9, 13, 11, 0, 0), registered.LastExpiredAt);
-
-        /* A discrete median is one of the seeded sizes, never an interpolation between two of them. */
-        var seeded = new long[] { 600_000, 700_000, 800_000, 900_000, 1_000_000 };
-        Assert.Contains(registered.MedianObservedBytes, seeded);
-        Assert.Equal(600_000L, registered.MinObservedBytes);
-        Assert.Equal(1_000_000L, registered.MaxObservedBytes);
-
-        /* Every seeded size is over the cap, which is what makes these rows exist at all. */
-        Assert.True(registered.MinObservedBytes > QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes);
-
-        /* The listing's per-row verdict reproduces the rollup's counts exactly. */
-        var rows = await DarlingOversizedPlanBacklogReader.GetRowsAsync(postgres, RegisteredServerId, 100, ct);
-        Assert.Equal(5, rows.Count);
-        Assert.Equal(
-            registered.PendingRows,
-            (long)rows.Count(r => r.Verdict == DarlingOversizedPlanBacklogReader.VerdictPending));
-        Assert.Equal(
-            registered.CapturedRows,
-            (long)rows.Count(r => r.Verdict == DarlingOversizedPlanBacklogReader.VerdictCaptured));
-        Assert.Equal(
-            registered.ExpiredRows,
-            (long)rows.Count(r => r.Verdict == DarlingOversizedPlanBacklogReader.VerdictExpired));
-
-        /* Largest first, and the cap applies. */
-        Assert.Equal(1_000_000L, rows[0].ObservedBytes);
-        Assert.Equal(3, (await DarlingOversizedPlanBacklogReader.GetRowsAsync(postgres, RegisteredServerId, 3, ct)).Count);
-
-        /* AND the claim agrees. This is the assertion the text pin cannot make: the sweep's own statement,
-           run against the same fixture, takes exactly the rows the read calls pending. */
-        var claimed = new List<string>();
-        await using (var connection = await postgres.OpenConnectionAsync(ct))
-        {
-            await using var command = new NpgsqlCommand(OversizedPlanBacklog.ClaimSql(100), connection);
-            command.Parameters.AddWithValue(RegisteredServerId);
-            await using var reader = await command.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
-            {
-                claimed.Add(reader.GetString(1));
-            }
-        }
-
-        Assert.Equal(
-            rows.Where(r => r.Verdict == DarlingOversizedPlanBacklogReader.VerdictPending)
-                .Select(r => r.PlanHandle).OrderBy(h => h, StringComparer.Ordinal).ToArray(),
-            claimed.OrderBy(h => h, StringComparer.Ordinal).ToArray());
-
-        /* Server scoping narrows both grains to the one server, rather than filtering only the listing. */
-        var scoped = await DarlingOversizedPlanBacklogReader.GetPerServerRollupAsync(postgres, RegisteredServerId, ct);
-        Assert.Equal(RegisteredServerId, scoped.Single().ServerId);
-        Assert.Equal(5L, (await DarlingOversizedPlanBacklogReader.GetCollectorCensusAsync(postgres, RegisteredServerId, ct)).Sum(c => c.TotalRows));
-    }
-
-    /// <summary>
-    /// The trap the median's shape exists to dodge, demonstrated rather than remembered: PostgreSQL has no
-    /// <c>round(double precision, integer)</c>, so the shape a reviewer would reach for to "tidy" an
-    /// interpolated median fails the WHOLE statement, taking every other column with it.
-    ///
-    /// <para>This asserts a property of the store rather than of our code, which is the point — it is what
-    /// makes <see cref="TheMedianIsADiscretePercentile_AndNothingRoundsADoublePrecisionValue"/> a rule with
-    /// a reason instead of a preference, and it fails loudly if a future PostgreSQL adds the overload and
-    /// the rule stops being necessary.</para>
-    /// </summary>
-    [Fact]
-    public async Task TheContinuousPercentileWithATwoArgumentRound_IsRejectedByPostgres()
-    {
-        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the live percentile/round demonstration.");
-
-        var ct = TestContext.Current.CancellationToken;
-
-        await using var postgres = NpgsqlDataSource.Create(baseConnectionString!);
-        await using var connection = await postgres.OpenConnectionAsync(ct);
-
-        /* The discrete form, over a literal series: returns a member of the series, as a bigint. */
-        await using (var ok = new NpgsqlCommand(
-            "SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY v) FROM (VALUES (1::bigint), (2), (4)) AS t(v)",
-            connection))
-        {
-            Assert.Equal(2L, Convert.ToInt64(await ok.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture));
-        }
-
-        /* The continuous form rounded to two places: does not resolve, at all. */
-        await using (var bad = new NpgsqlCommand(
-            "SELECT round(percentile_cont(0.5) WITHIN GROUP (ORDER BY v), 2) FROM (VALUES (1::bigint), (2), (4)) AS t(v)",
-            connection))
-        {
-            Exception? thrown = null;
-            try
-            {
-                await bad.ExecuteScalarAsync(ct);
-            }
-            catch (Exception ex)
-            {
-                thrown = ex;
-            }
-
-            Assert.NotNull(thrown);
-            Assert.Contains("round", thrown!.Message, StringComparison.OrdinalIgnoreCase);
-        }
-    }
-
-    /* ---- fixture + helpers -------------------------------------------------------------------------- */
-
-    private const int RegisteredServerId = 4001;
-    private const int UnregisteredServerId = 4002;
-
-    /// <summary>
-    /// The six row states, written as SQL rather than through the writer so the two states production has
-    /// never reached are reachable at all: the sweep cannot be made to produce a both-stamps row on demand,
-    /// and no store has produced an expiry yet.
-    /// </summary>
-    private const string FixtureSql = @"
-INSERT INTO collect.servers (server_id, server_name, is_enabled)
-VALUES (4001, 'fixture-server', TRUE);
-
-INSERT INTO collect.oversized_plan_backlog
-(server_id, collector_name, plan_handle, sql_handle, statement_start_offset, statement_end_offset,
- database_name, query_hash, observed_bytes, first_seen_at, last_seen_at,
- plan_xml, captured_at, expired_at, last_attempt_at, attempt_count)
-VALUES
-    /* pending, never attempted */
-    (4001, 'query_stats', '0xPENDING_NEW', '0xSQL1', 0, 400, 'fixture_db', '0xHASH1',
-     1000000, '2026-09-10 08:00:00', '2026-09-13 08:00:00', NULL, NULL, NULL, NULL, 0),
-    /* pending, attempted twice and still nothing learned */
-    (4001, 'query_stats', '0xPENDING_TRIED', '0xSQL2', 0, 400, 'fixture_db', '0xHASH2',
-     900000, '2026-09-10 08:00:00', '2026-09-13 08:00:00', NULL, NULL, NULL, '2026-09-13 10:00:00', 2),
-    /* captured, content held */
-    (4001, 'query_stats', '0xCAPTURED', '0xSQL3', 0, 400, 'fixture_db', '0xHASH3',
-     800000, '2026-09-10 08:00:00', '2026-09-13 08:00:00', '<ShowPlanXML />', '2026-09-13 12:00:00', NULL,
-     '2026-09-13 12:00:00', 1),
-    /* captured stamp with NO content — the state the plan fallbacks cannot serve */
-    (4001, 'procedure_stats', '0xCAPTURED_EMPTY', '0xSQL4', 0, 0, 'fixture_db', NULL,
-     700000, '2026-09-10 08:00:00', '2026-09-13 08:00:00', NULL, '2026-09-13 09:00:00', '2026-09-13 07:00:00',
-     '2026-09-13 09:00:00', 1),
-    /* expired: the handle stopped resolving */
-    (4001, 'procedure_stats', '0xEXPIRED', '0xSQL5', 0, 0, 'fixture_db', NULL,
-     600000, '2026-09-10 08:00:00', '2026-09-13 08:00:00', NULL, NULL, '2026-09-13 11:00:00',
-     '2026-09-13 11:00:00', 1),
-    /* a server that is not in the registry */
-    (4002, 'query_stats', '0xORPHAN', '0xSQL6', 0, 400, 'fixture_db', '0xHASH6',
-     650000, '2026-09-10 08:00:00', '2026-09-13 08:00:00', NULL, NULL, NULL, NULL, 0);";
-
-    private static async Task ExecuteAsync(NpgsqlConnection connection, string sql, CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand(sql, connection);
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
+    /* ---- helpers ----------------------------------------------------------------------------------- */
 
     /// <summary>
     /// A data source pointed at nothing reachable. Constructing one opens no connection, so a refusal that
