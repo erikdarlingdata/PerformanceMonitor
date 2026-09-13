@@ -580,6 +580,27 @@ public sealed class OversizedPlanBacklogPins
         }
     }
 
+    [Fact]
+    public void TheDirectSqlContract_IsDocumented()
+    {
+        /* The store's "Reading the store directly" section exists BECAUSE a silent contract change for
+           direct-SQL consumers shipped once already (#2171: query_plan_xml went NULL for every new row and
+           the release notes did not say so). This change adds a THIRD state to the same question — a fact row
+           with a measured size and no digest, whose content is in a different table entirely — so the section
+           that answers "why is this NULL" has to name it or it misleads by omission.
+
+           Derived from the shipped names, not retyped, so a rename fails here instead of leaving the README
+           confidently wrong. */
+        var readme = ReadRepoFile("Darling", "README.md");
+
+        Assert.Contains(OversizedPlanBacklog.TableName, readme, StringComparison.Ordinal);
+        Assert.Contains("query_plan_xml_bytes", readme, StringComparison.Ordinal);
+
+        /* And it says the backlog's content is NOT gzip — the one thing a reader of that section would
+           otherwise reasonably assume, since every other plan column there is. */
+        Assert.Contains("plain text, never gzip", readme, StringComparison.Ordinal);
+    }
+
     /* ---- helpers ------------------------------------------------------------------------------------ */
 
     private static ProcedureStatsCollector.Row MakeProcRow(long bytes) => new(
