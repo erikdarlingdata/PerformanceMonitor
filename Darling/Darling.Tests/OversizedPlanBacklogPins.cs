@@ -417,27 +417,29 @@ public sealed class OversizedPlanBacklogPins
     ///
     /// <para>Simulated across 48 ticks rather than asserted on one, because "does not enter a loop" is a
     /// claim about the SEQUENCE: a single call returning the interval would also pass for a function that
-    /// shortens on the second tick. The delays are SUMMED and the sum asserted, so a loop that never ran —
-    /// this pin crippled — fails instead of passing vacuously.</para>
+    /// shortens on the second tick. The COUNT of decisions is asserted against a literal rather than
+    /// against the loop's own bound — a total written as <c>SweepInterval * ticks</c> is zero on both sides
+    /// when the loop stops running, and this pin passed that way until the crippling run caught it.</para>
     /// </summary>
     [Fact]
     public void AHostWithNoSweepableTarget_HoldsTheFullInterval_OnEveryTickForever()
     {
-        const int ticks = 48;
+        var delays = new List<TimeSpan>();
         var waits = 0;
-        var total = TimeSpan.Zero;
 
-        for (var tick = 0; tick < ticks; tick++)
+        for (var tick = 0; tick < 48; tick++)
         {
             var (delay, next) = OversizedPlanBacklogSweep.NextSweepDelay(0, 0, waits);
-            Assert.Equal(OversizedPlanBacklogSweep.SweepInterval, delay);
-            total += delay;
+            delays.Add(delay);
             waits = next;
         }
 
-        /* Two days of ticks at the full interval and not one minute less, which is what makes the
-           per-tick assertion above a statement about the whole sequence. */
-        Assert.Equal(OversizedPlanBacklogSweep.SweepInterval * ticks, total);
+        /* The loop actually ran, 48 times — the discriminating assertion, and the reason it is a literal. */
+        Assert.Equal(48, delays.Count);
+
+        /* Two days of ticks at the full interval and not one minute less, which is what makes this a
+           statement about the whole sequence rather than about one call. */
+        Assert.All(delays, delay => Assert.Equal(OversizedPlanBacklogSweep.SweepInterval, delay));
 
         /* And the budget was never touched, so nothing about this host is one tick away from a burst. */
         Assert.Equal(0, waits);
