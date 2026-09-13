@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
@@ -1027,6 +1028,30 @@ public sealed class PayloadDimensionTests
 
         return count;
     }
+
+    /// <summary>
+    /// The sweep routes its skip through <see cref="IsSkippedPath"/> rather than testing the path inline,
+    /// so the behaviour the theory below pins is the behaviour the sweep actually gets.
+    ///
+    /// <para>This pin carries more weight here than in the sibling guard: this file references the WPF
+    /// Viewer project, so it compiles only on Windows and a local harness cannot execute the theory at all.
+    /// A revert of the call site to the inline substring form would therefore show up nowhere until CI.</para>
+    /// </summary>
+    [Fact]
+    public void TheSweep_SkipsPathsThroughTheSeparatorAwareHelper()
+    {
+        var source = File.ReadAllText(ThisSourceFile());
+
+        /* Built by concatenation on purpose: spelled as one literal, this assertion's OWN text
+           satisfies it, so the pin passes with the call site deleted. Measured on the sibling guard. */
+        Assert.Contains("IsSkippedPath(" + "Path.GetRelativePath(", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(@"file.Contains(@""\bin\""", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(@"file.Contains(@""\obj\""", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(@"file.Contains(@""\Darling.Tests\""", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>This file's own path, for the source pin above.</summary>
+    private static string ThisSourceFile([CallerFilePath] string? path = null) => path!;
 
     /// <summary>
     /// The skip is a property of the PATH, not of the host. <c>Darling.Tests</c> matters most: its files

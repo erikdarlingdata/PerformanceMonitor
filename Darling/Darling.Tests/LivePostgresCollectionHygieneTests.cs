@@ -104,7 +104,9 @@ public sealed class LivePostgresCollectionHygieneTests
     {
         var source = File.ReadAllText(ThisSourceFile());
 
-        Assert.Contains("HasBuildOutputSegment(Path.GetRelativePath(", source, StringComparison.Ordinal);
+        /* Built by concatenation on purpose: spelled as one literal, this assertion's OWN text
+           satisfies it, so the pin passes with the call site deleted. Measured — it did. */
+        Assert.Contains("HasBuildOutputSegment(" + "Path.GetRelativePath(", source, StringComparison.Ordinal);
         Assert.DoesNotContain(@"file.Contains(@""\bin\""", source, StringComparison.Ordinal);
         Assert.DoesNotContain(@"file.Contains(@""\obj\""", source, StringComparison.Ordinal);
     }
