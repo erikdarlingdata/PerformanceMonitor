@@ -247,10 +247,11 @@ public sealed class DarlingMcpPgServerStateTools
                order is relevance band, then state band, then database and extension name - a partition,
                not a ranking of the created rows by anything a reader would act on. So a cut here leaves
                SOME DATABASES AND NOT OTHERS, and RankedTail's claim that the withheld rows rank below the
-               returned ones is false on this surface at every row count. Declaring the grouping is what
-               makes that claim unreachable instead of merely unlikely: the previous argument was that
-               RankedTail needed rowsAhead to be zero here, which is a statement about today's fleet and not
-               about this read's contract. */
+               returned ones is false on this surface at every row count.
+
+               Declared rather than left to the figures, because the figures cannot carry it: the arm turns
+               on whether anything sorts ahead of the created rows, which is a count this server's contents
+               decide. A declaration makes the false claim unreachable at every count. */
             var createdRows = census.Sum(row => row.DatabasesInstalled + row.DatabasesOutdated);
 
             var reach = PgCappedRead.Classify(

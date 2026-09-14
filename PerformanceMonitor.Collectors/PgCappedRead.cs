@@ -106,9 +106,9 @@ public enum PgCappedReach
     /// GROUPS - there the rows lost are a different group, not a lower-ranked one - so this arm is not
     /// selected for a grouped read and is not representable on one: <see cref="PgCappedReachVerdict.Reach"/>
     /// is derived from the verdict's own figures and its declared order rather than stored beside them, so
-    /// there is no verdict in which this name sits next to
-    /// <see cref="PgOrderSemantics.Grouped"/>. Before #3435 the arm carried a sentence disclaiming the
-    /// ranking instead, which left both meanings under one name and relied on the reader noticing.</para>
+    /// there is no verdict in which this name sits next to <see cref="PgOrderSemantics.Grouped"/>. The
+    /// alternative is a sentence on the arm disclaiming the ranking, which leaves both meanings under one
+    /// name and rests on the reader applying the caveat.</para>
     /// </summary>
     RankedTail,
 

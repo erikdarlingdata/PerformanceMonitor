@@ -352,14 +352,14 @@ public sealed class PgCappedReadTests
     ///
     /// <para><b>The figures are the same in both halves, which is the point.</b> Everything a count-only
     /// classifier can see is held constant and only the declared meaning of the order changes, so this fails
-    /// if the order is ignored AND fails if it is consulted the wrong way round. Before #3435 both halves
-    /// answered <see cref="PgCappedReach.RankedTail"/>, whose sentence tells the caller the rows it lost rank
-    /// below the rows it got - which over a grouping is not a weaker claim, it is a false one: the rows lost
-    /// are a different group.</para>
+    /// if the order is ignored AND fails if it is consulted the wrong way round. A classifier deciding from
+    /// counts alone answers <see cref="PgCappedReach.RankedTail"/> on both, and that arm's sentence tells
+    /// the caller the rows it lost rank below the rows it got - which over a grouping is not a weaker claim,
+    /// it is a false one: the rows lost are a different group.</para>
     ///
-    /// <para><b>And it is not an assertion about today's fleet.</b> #3431 argued that a grouped surface only
-    /// reaches this shape when <c>rowsAhead</c> is zero, which "the fleet does not produce". That is the
-    /// reasoning #3423 retired: <c>EXISTS(... collection_log ...)</c> was a correct proxy for "the collector
+    /// <para><b>And it is not an assertion about today's fleet.</b> "A grouped surface only reaches this
+    /// shape when <c>rowsAhead</c> is zero, which the fleet does not produce" is a claim about a census, of
+    /// the kind #3423 retired: <c>EXISTS(... collection_log ...)</c> was a correct proxy for "the collector
     /// runs here" right up to the moment the rows feeding it stopped being written. The figures below are
     /// simply handed to the classifier, so the arm is a property of the contract and not of a census.</para>
     /// </summary>
@@ -401,8 +401,8 @@ public sealed class PgCappedReadTests
         /* AND THE PARTIAL CAUSE DOES NOT ASSERT DISPLACEMENT AS A FACT, because this route has nothing
            ahead of the population at all: RowsAhead is zero and the limit did the cutting. The arm carries
            ONE sentence - which is what keeps the arms comparable - so that sentence has to be true on both
-           routes into it, and the sentence this arm shipped with named displacement outright. Pinned as
-           that exact phrase's absence, since reverting to it is how the cause goes false again. */
+           routes into it, and a sentence naming displacement outright is not. Pinned as that phrasing's
+           absence, since it is the natural way to word this arm and the way that makes it false here. */
         Assert.Equal(0L, grouped.RowsAhead);
         Assert.DoesNotContain("displaced part of it", grouped.Cause, StringComparison.Ordinal);
     }
@@ -412,8 +412,8 @@ public sealed class PgCappedReadTests
     /// unreached, it is UNREPRESENTABLE - there is no verdict in which those two values sit together.
     ///
     /// <para><b>Why this is the acceptance test and a call-site scan is not.</b> "No caller does it" is a
-    /// statement about today's callers, which is the defence #3431 offered and #3423 disproved one evening
-    /// later. The claim here is about the type: <see cref="PgCappedReachVerdict.Reach"/> and
+    /// statement about today's callers, and a type that can represent a wrong answer eventually does. The
+    /// claim here is about the type: <see cref="PgCappedReachVerdict.Reach"/> and
     /// <see cref="PgCappedReachVerdict.Cause"/> are DERIVED from the figures and the declared order rather
     /// than stored beside them, so there is no constructor parameter to pass the wrong arm to, no setter for
     /// an object initializer or a <c>with</c> expression to reach, and no backing field for reflection or

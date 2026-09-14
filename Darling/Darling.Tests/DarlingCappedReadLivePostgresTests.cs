@@ -716,12 +716,13 @@ public sealed class DarlingCappedReadLivePostgresTests
                which the two order semantics part company. Read at a limit of ten, this response holds ten
                rows of an eighteen-row product: some databases complete, others cut.
 
-               On dev this answered RankedTail and printed "these are the FIRST rows of it in this read's own
-               order" over a page whose missing rows are a different DATABASE, not a lower-ranked anything.
-               #3431 defended the arm on the grounds that this shape is "not one the fleet produces" - which
-               is a claim about a census, and the claim #3423 retired the same evening when the rows feeding
-               an EXISTS proxy stopped being written. Seeded here, so the contract is tested rather than the
-               fleet. */
+               A RankedTail here would print "these are the FIRST rows of it in this read's own ranking"
+               over a page whose missing rows are a different DATABASE, not a lower-ranked anything. This
+               read declares its order Grouped, so the arm is unreachable and the answer is Partial.
+
+               The shape is SEEDED rather than argued about. "Not one the fleet produces" is a claim about a
+               census, of the kind #3423 retired when the rows feeding an EXISTS proxy stopped being
+               written, so the contract is what gets tested here. */
             var later = now.AddHours(-1);
 
             foreach (var database in new[] { "appdb", "hangfire", "postgres" })
