@@ -116,9 +116,16 @@ public static class ServerTimeHelper
     /// <summary>
     /// Formats a timestamp that is ALREADY the monitored server's own wall clock: the
     /// <c>sys.dm_exec_*</c> family (<c>creation_time</c>, <c>cached_time</c>, <c>last_execution_time</c>),
-    /// <c>plan_correction</c>'s recommendation and action stamps, the blocked-process report's
-    /// <c>*_last_tran_started</c> / <c>*_last_batch_*</c> attributes, <c>query_snapshots.tran_start_time</c>
-    /// and msdb Agent's <c>start_execution_date</c>.
+    /// the blocked-process report's <c>*_last_tran_started</c> / <c>*_last_batch_*</c> attributes,
+    /// <c>query_snapshots.tran_start_time</c>, the ADR cleaner times and msdb Agent's
+    /// <c>start_execution_date</c>.
+    ///
+    /// <para><c>plan_correction</c>'s recommendation and action stamps are deliberately NOT in that
+    /// list: <c>sys.dm_db_tuning_recommendations</c> reports them in UTC, so they take
+    /// <see cref="FormatServerTime"/> instead. The frame is measured against the collector-written UTC
+    /// <c>collection_time</c> rather than inferred from the collector shipping the DMV verbatim, and
+    /// naming the exception here is the point — this list is what a reader consults to pick a
+    /// renderer.</para>
     ///
     /// <para><see cref="ConvertForDisplay"/> already takes the server's clock and honours the selected
     /// display mode, so this is <see cref="FormatServerTime"/> with the offset add removed rather than a

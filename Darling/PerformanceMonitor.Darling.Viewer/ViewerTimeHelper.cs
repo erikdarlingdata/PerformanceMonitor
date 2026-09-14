@@ -76,8 +76,8 @@ public static class ViewerTimeHelper
 
     /// <summary>
     /// Converts a stored SERVER-CLOCK timestamp — one already in the monitored server's own frame, which
-    /// is what the <c>sys.dm_exec_*</c> family, <c>plan_correction</c>'s action stamps, msdb Agent's job
-    /// start time and the blocked-process report's attributes hold — to the current display mode.
+    /// is what the <c>sys.dm_exec_*</c> family, msdb Agent's job start time, the ADR cleaner times and
+    /// the blocked-process report's attributes hold — to the current display mode.
     ///
     /// <para>It composes out of <see cref="ConvertToDisplay"/>'s existing arms rather than adding new
     /// ones: the naive-UTC twin of a server-clock value is <c>serverLocal - offset</c>, so subtracting

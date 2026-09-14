@@ -604,8 +604,8 @@ public sealed partial class ViewerDataService
 
     /// <summary>
     /// Formats a SQL-server-local wall-clock time (dm_exec_* last_execution_time / creation_time /
-    /// cached_time, plan_correction's action stamps, msdb Agent's job start time — NOT naive UTC) for
-    /// the grid, in the current display mode. Empty when null.
+    /// cached_time, msdb Agent's job start time, the blocked-process report's transaction and batch
+    /// stamps — NOT naive UTC) for the grid, in the current display mode. Empty when null.
     ///
     /// <para>The counterpart to <see cref="FormatStoredUtc"/>. Exactly one of the pair applies the
     /// collected offset, and which one depends only on the column's frame; picking the wrong one is

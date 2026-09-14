@@ -814,20 +814,20 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// A ONE-HOP RENDER WRAPPER: a static formatter in the render roots that reaches one of the
     /// <see cref="Renderers"/> instead of being one. A wrapper hides the renderer's NAME from the
     /// render scan, which keys on it - so a column rendered through one is invisible to a census that
-    /// calls itself closed. That is not hypothetical: four server-local <c>plan_correction</c> stamps
-    /// reached <c>ForDisplay</c> through <c>ViewerDataService.PlanCorrection</c>'s <c>Local()</c>, in
-    /// the wrong frame, and no scan here could see them.
+    /// calls itself closed. That is not hypothetical: the four <c>plan_correction</c> stamps reached
+    /// <c>ForDisplay</c> through <c>ViewerDataService.PlanCorrection</c>'s <c>Local()</c>, and no scan
+    /// here could see which renderer they were getting.
     ///
     /// <para>Declared with the renderer each one reaches and pinned at SET EQUALITY against the
     /// derived set by <see cref="TheOneHopRenderWrappers_AreExactlyTheDeclaredSet"/>, so a new or
     /// renamed wrapper fails the build and has to declare its frame rather than quietly reopening the
     /// hole.</para>
     ///
-    /// <para><b>The frame those four stamps are in is UTC</b> (#3419, and see
-    /// <see cref="RelationMarkers"/>), so their sites now name a UTC renderer directly and are not in
-    /// <see cref="Inventory"/> at all. The wrapper hazard this list exists for is unchanged by that: a
-    /// wrapper still hides the renderer's name from a scan that keys on it, whichever frame turns out to
-    /// be right.</para>
+    /// <para><b>Those four stamps are UTC</b> (#3419, and see <see cref="RelationMarkers"/>), so their
+    /// sites name a UTC renderer directly and are not in <see cref="Inventory"/> at all. The wrapper
+    /// hazard this list exists for is untouched by which frame they turned out to be in: a wrapper
+    /// hides the renderer's name from a scan that keys on it either way, and invisibility is what lets
+    /// a wrong frame survive long enough to be argued about.</para>
     /// </summary>
     private static readonly (string File, string Method, string Renderer)[] RenderWrappers =
     [
@@ -1127,8 +1127,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /* The render sites the scan JUDGES - resolved to one frame and compared against their renderer.
        Measured on this branch at 43: the 38 #3220 measured, plus Lite's running-job start time (which
        reached DateTime.ToLocalTime() rather than any renderer, so nothing judged it) and the four
-       plan_correction stamps in the Darling viewer that now name FormatServerClock at the site
-       instead of reaching ForDisplay through a wrapper. */
+       plan_correction stamps in the Darling viewer, which name their renderer at the site instead of
+       reaching one through a wrapper (FormatStoredUtc since #3419, FormatServerClock before it - the
+       site count is the same either way, which is why this figure did not move). */
     private const int JudgedRenderSites = 43;
 
     /* Call sites of a declared RenderWrapper passing a census column, and how many (file, method)
