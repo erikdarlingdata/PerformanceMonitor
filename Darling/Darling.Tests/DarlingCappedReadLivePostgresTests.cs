@@ -186,7 +186,7 @@ public sealed class DarlingCappedReadLivePostgresTests
         }
         finally
         {
-            await CleanupAsync(connection, bodySucceeded);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteRowsAsync);
         }
     }
 
@@ -328,7 +328,7 @@ public sealed class DarlingCappedReadLivePostgresTests
         }
         finally
         {
-            await CleanupAsync(connection, bodySucceeded);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteRowsAsync);
         }
     }
 
@@ -413,7 +413,7 @@ public sealed class DarlingCappedReadLivePostgresTests
         }
         finally
         {
-            await CleanupAsync(connection, bodySucceeded);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteRowsAsync);
         }
     }
 
@@ -463,7 +463,7 @@ public sealed class DarlingCappedReadLivePostgresTests
         }
         finally
         {
-            await CleanupAsync(connection, bodySucceeded);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteRowsAsync);
         }
     }
 
@@ -672,7 +672,7 @@ public sealed class DarlingCappedReadLivePostgresTests
         }
         finally
         {
-            await CleanupAsync(connection, bodySucceeded);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteRowsAsync);
         }
     }
 
@@ -751,7 +751,7 @@ public sealed class DarlingCappedReadLivePostgresTests
         }
         finally
         {
-            await CleanupAsync(connection, bodySucceeded);
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteRowsAsync);
         }
     }
 
@@ -791,22 +791,6 @@ INSERT INTO collection_log
 VALUES ($1::bigint, $2::integer, $3::text, 'pg_index_bloat', $4::timestamp, $5::text)",
             CollectionIdGenerator.Next(), ServerId, ServerName,
             DarlingMcpTestData.Naive(collectionTimeUtc), status);
-
-    /// <summary>
-    /// Teardown that runs on BOTH paths, and swallows only on the failing one: a cleanup exception masking
-    /// the assertion that actually failed would report the wrong defect.
-    /// </summary>
-    private static async Task CleanupAsync(NpgsqlConnection connection, bool bodySucceeded)
-    {
-        try
-        {
-            await DeleteRowsAsync(connection, CancellationToken.None);
-        }
-        catch (Exception) when (!bodySucceeded)
-        {
-            /* The body already failed and its exception is the interesting one. */
-        }
-    }
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
