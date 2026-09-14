@@ -83,7 +83,7 @@ ORDER BY server_name";
     /// </summary>
     internal const string FleetSentinelDisclosure =
         "The reserved name (fleet) is also accepted by this read: it returns the FLEET-MAINTENANCE "
-        + "run-records - data_retention for the daily purge, oversized_plan_sweep for the hourly "
+        + "run-records - data_retention for the daily purge, oversized_plan_sweep for the fifteen-minute "
         + "oversized-plan backlog drain - rather than a monitored server's collector runs.";
 
     /// <summary>

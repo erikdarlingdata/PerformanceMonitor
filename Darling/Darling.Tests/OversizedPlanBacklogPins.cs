@@ -29,8 +29,8 @@ namespace Darling.Tests;
 /// is the client materializing each plan as one managed string, and the Large-Object-Heap churn that produces
 /// stalls unrelated collectors on unrelated connections. So "fetch a few at once, it will be faster" reads
 /// like an optimization and IS the regression. A future reader looking only at the sweep sees three
-/// single-row fetches an hour and a loop, and the cheapest-looking change available to them is to widen the
-/// loop into the query. These pins make that fail in the author's own test run.</para>
+/// single-row fetches a quarter-hour and a loop, and the cheapest-looking change available to them is to
+/// widen the loop into the query. These pins make that fail in the author's own test run.</para>
 ///
 /// <para>Every fact here was verified red-first by mutating the shipped behaviour it describes.</para>
 /// </summary>
@@ -341,18 +341,60 @@ public sealed class OversizedPlanBacklogPins
             "LIMIT " + OversizedPlanBacklogSweep.MaxPlansPerServerPerTick.ToString(CultureInfo.InvariantCulture),
             OversizedPlanBacklog.ClaimSql(OversizedPlanBacklogSweep.MaxPlansPerServerPerTick),
             StringComparison.Ordinal);
-        Assert.InRange(OversizedPlanBacklogSweep.MaxPlansPerServerPerTick, 1, 3);
 
-        /* Hourly or slower: the population's shortest measured compile age is 13.6 hours, so the cadence has
-           room by orders of magnitude, and nothing about a faster pass would batch anything. */
-        Assert.True(OversizedPlanBacklogSweep.SweepInterval >= TimeSpan.FromHours(1),
-            "the backlog sweep's cadence dropped below hourly — it is a background errand, not a collector");
+        /* Two-sided, and both ends are reasoned. Slower than a quarter-hour and the drain falls under the
+           ~1,400-an-hour over-cap arrival measured on the store class it is sized for; faster and the
+           sentinel row rate and the connect-wait budget below both start paying for it. The per-server load
+           the cap itself bounds is asserted as a product in
+           TheDrainRate_IsTheRaisedOne_AndItsWorstCaseIsStillBounded rather than as a digit here. */
+        Assert.InRange(
+            OversizedPlanBacklogSweep.SweepInterval, TimeSpan.FromMinutes(15), TimeSpan.FromHours(1));
 
         /* The wall clock is the binding bound; the command timeout can only ever fire at or before it. */
         Assert.InRange(OversizedPlanBacklogSweep.PerPlanBudget, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(15));
         Assert.True(
             OversizedPlanBacklogSweep.FetchCommandTimeoutSeconds <= OversizedPlanBacklogSweep.PerPlanBudget.TotalSeconds,
             "the fetch's command timeout outgrew the wall-clock budget, so the budget is no longer the bound");
+    }
+
+    /// <summary>
+    /// The drain RATE, and the two costs that bound it — the fact #3416 exists to establish.
+    ///
+    /// <para>Asserted as the rate rather than as either knob, because either one can supply it: the
+    /// measurement was that over-cap identities arrive on one store class at ~1,400 an hour fleet-wide
+    /// against what 3 plans per server per hour drains, and that ~90% of them aged out unfetched at the
+    /// 30-day sighting horizon. A pin on one constant is satisfied by moving the other.</para>
+    ///
+    /// <para>Every figure is compared against a LITERAL rather than against a product this test builds,
+    /// which is the trap a sibling pin in this file was caught by: a total written as the shipped values
+    /// multiplied together is equal to itself however either value moves.</para>
+    /// </summary>
+    [Fact]
+    public void TheDrainRate_IsTheRaisedOne_AndItsWorstCaseIsStillBounded()
+    {
+        /* The deliverable: 40 plans per server per hour, which on a 42-server fleet is 1,680 against the
+           ~1,400 measured arrival — a drain that exceeds arrival rather than one that merely tracks it. */
+        var plansPerServerPerHour =
+            OversizedPlanBacklogSweep.MaxPlansPerServerPerTick
+            * (TimeSpan.FromHours(1) / OversizedPlanBacklogSweep.SweepInterval);
+
+        Assert.True(plansPerServerPerHour >= 40d,
+            "the oversized-plan drain fell below 40 plans per server per hour, which is under the over-cap "
+            + "arrival rate measured on the store class this rate is sized for");
+
+        /* Cost of the per-server knob. One server's pass is serial under the per-plan budget, so the cap
+           times the budget IS the worst-case wall clock one monitored server spends being swept, and 150
+           seconds is the figure the raise was priced at. */
+        Assert.InRange(
+            OversizedPlanBacklogSweep.PerPlanBudget * OversizedPlanBacklogSweep.MaxPlansPerServerPerTick,
+            TimeSpan.FromSeconds(15),
+            TimeSpan.FromSeconds(150));
+
+        /* Cost of the cadence knob. One collection_log row lands per tick under the fleet sentinel whatever
+           the tick found (#3399), so a shorter interval buys drain with rows in the one table retention has
+           to prune: 96 a day here, against a 24-a-day floor at the slowest cadence the pin above admits. */
+        var sentinelRowsPerDay = TimeSpan.FromDays(1) / OversizedPlanBacklogSweep.SweepInterval;
+        Assert.InRange(sentinelRowsPerDay, 24d, 96d);
     }
 
     [Fact]
@@ -393,8 +435,8 @@ public sealed class OversizedPlanBacklogPins
         Assert.DoesNotContain("OversizedPlanBacklogSweep.SweepInterval", worker, StringComparison.Ordinal);
 
         /* And the pass is LAUNCHED, never awaited on the tick. Its worst case is fleet width times the
-           per-server plan budget times the per-plan budget — over half an hour on a 42-server fleet whose
-           targets are all timing out — and awaited that is half an hour in which the fleet loop launches no
+           per-server plan budget times the per-plan budget — 105 minutes on a 42-server fleet whose targets
+           are all timing out — and awaited that is 105 minutes in which the fleet loop launches no
            collection bodies. The purge above it is awaited because it talks only to the store. */
         Assert.DoesNotContain("await OversizedPlanBacklogSweep.RunAsync", worker, StringComparison.Ordinal);
         Assert.Contains("_oversizedPlanSweep = OversizedPlanBacklogSweep.RunAsync", worker, StringComparison.Ordinal);
@@ -408,12 +450,12 @@ public sealed class OversizedPlanBacklogPins
     /// fact the whole change exists to protect rather than an edge case it tolerates.
     ///
     /// <para>A PostgreSQL-only monitoring host sweeps zero servers on EVERY tick and is RIGHT to: the cap,
-    /// the backlog and this sweep all live in the SQL Server plan-XML collectors. Three consecutive hourly
-    /// records of "Swept 0 server(s)" were measured on one, so it is a steady state, not a startup
-    /// transient. Every short-retry-on-empty shape proposed for the startup defect would have turned that
-    /// steady state into a re-attempt loop with no terminating condition, writing a sentinel row per retry
-    /// forever in the one table whose growth retention has to prune — ~1,440 rows/day where the correct
-    /// answer is 24.</para>
+    /// the backlog and this sweep all live in the SQL Server plan-XML collectors. Three consecutive
+    /// records of "Swept 0 server(s)", an hour apart, were measured on one, so it is a steady state, not a
+    /// startup transient. Every short-retry-on-empty shape proposed for the startup defect would have turned
+    /// that steady state into a re-attempt loop with no terminating condition, writing a sentinel row per
+    /// retry forever in the one table whose growth retention has to prune — ~1,440 rows/day where the
+    /// correct answer is 96.</para>
     ///
     /// <para>Simulated across 48 ticks rather than asserted on one, because "does not enter a loop" is a
     /// claim about the SEQUENCE: a single call returning the interval would also pass for a function that
@@ -437,7 +479,7 @@ public sealed class OversizedPlanBacklogPins
         /* The loop actually ran, 48 times — the discriminating assertion, and the reason it is a literal. */
         Assert.Equal(48, delays.Count);
 
-        /* Two days of ticks at the full interval and not one minute less, which is what makes this a
+        /* Half a day of ticks at the full interval and not one minute less, which is what makes this a
            statement about the whole sequence rather than about one call. */
         Assert.All(delays, delay => Assert.Equal(OversizedPlanBacklogSweep.SweepInterval, delay));
 
@@ -540,8 +582,19 @@ public sealed class OversizedPlanBacklogPins
             "the short wait is within a few passes of the fleet loop's own cadence, so the gate re-fires "
             + "almost every pass until the first connect and writes a run-record for each");
 
+        /* And the WHOLE budget stays a minority of the interval it shortens. Five one-minute waits is five
+           minutes of a fifteen-minute slot; a budget that covered a whole interval would be that interval
+           under another name and the gate would have no short path left to take. This is the relationship a
+           shorter interval puts pressure on, so it is asserted rather than left to two absolute values
+           happening to stay apart. */
+        Assert.True(
+            OversizedPlanBacklogSweep.ConnectWaitDelay * OversizedPlanBacklogSweep.MaxConnectWaitAttempts
+                < OversizedPlanBacklogSweep.SweepInterval,
+            "the connect-wait budget grew to cover a whole sweep interval, so the short wait no longer "
+            + "shortens anything");
+
         /* And the budget is small enough that its worst case is legible: five short waits is five extra
-           sentinel rows per process, against a baseline of 24 a day. */
+           sentinel rows per process, against a baseline of 96 a day. */
         Assert.InRange(OversizedPlanBacklogSweep.MaxConnectWaitAttempts, 1, 10);
     }
 

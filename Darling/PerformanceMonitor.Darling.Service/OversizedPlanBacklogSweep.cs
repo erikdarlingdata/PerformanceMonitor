@@ -42,8 +42,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>DarlingWorker</c>'s fleet-level cadence checks beside the daily purge — the
 /// <see cref="DarlingRetention"/> shape — so it cannot compete with, queue behind, or extend a live
 /// collection cycle's wall-clock budget. <see cref="SweepInterval"/> is generously below every compile age
-/// measured on the population it drains (13.6 hours to 144.6 days on the fleet's outlier server), so an
-/// hourly pass is not racing cache eviction.</para>
+/// measured on the population it drains (13.6 hours to 144.6 days on the fleet's outlier server), so a
+/// pass every fifteen minutes is not racing cache eviction.</para>
 ///
 /// <para><b>An empty backlog costs one indexed SELECT per server per tick.</b> A deployment that captures no
 /// plans at all never records a sighting, so its backlog is permanently empty and its claim returns nothing —
@@ -69,12 +69,20 @@ namespace PerformanceMonitor.Darling.Service;
 internal static class OversizedPlanBacklogSweep
 {
     /// <summary>
-    /// How often one pass runs. Hourly: far below the shortest compile age measured on the plans this drains
-    /// (13.6 hours), so the handles are still resolvable, and far above any cadence that would make the pass
-    /// worth thinking about as load — at <see cref="MaxPlansPerServerPerTick"/> it is at most three single-row
-    /// DMV reads per server per hour.
+    /// How often one pass runs. Every fifteen minutes: far below the shortest compile age measured on the
+    /// plans this drains (13.6 hours, which is fifty-four passes), so the handles are still resolvable many
+    /// passes over, and with <see cref="MaxPlansPerServerPerTick"/> it is at most forty single-row DMV reads
+    /// per server per hour — 1,680 across a 42-server fleet, against the ~1,400 new over-cap identities an
+    /// hour measured on the store class whose arrival outruns its drain.
+    ///
+    /// <para><b>It is also the sentinel run-record rate</b>, since every tick writes one
+    /// <c>collection_log</c> row under the fleet sentinel whatever it found (#3399): four an hour, 96 a day,
+    /// held for <see cref="DarlingRetention.CollectionLogRetentionDays"/> days. Shortening it buys drain with
+    /// rows in the one table retention has to prune, and eats into the connect-wait budget below, which only
+    /// shortens anything while <see cref="ConnectWaitDelay"/> times <see cref="MaxConnectWaitAttempts"/>
+    /// stays a minority of one interval.</para>
     /// </summary>
-    internal static readonly TimeSpan SweepInterval = TimeSpan.FromHours(1);
+    internal static readonly TimeSpan SweepInterval = TimeSpan.FromMinutes(15);
 
     /// <summary>
     /// How long the gate waits before RE-ATTEMPTING a tick whose target list came back empty on a host that
@@ -95,7 +103,10 @@ internal static class OversizedPlanBacklogSweep
     /// <summary>
     /// How many consecutive <see cref="ConnectWaitDelay"/> re-attempts the gate may spend waiting for a
     /// first runtime before falling back to <see cref="SweepInterval"/>. Five, so the wait covers five
-    /// minutes — about ten times the measured connect latency — for at most five extra run-records.
+    /// minutes — about ten times the measured connect latency — for at most five extra run-records, and a
+    /// third of one <see cref="SweepInterval"/>. That ratio is the bound worth watching rather than the
+    /// count: a budget covering a whole interval is that interval under another name, and the gate would
+    /// have no short path left to take.
     ///
     /// <para><b>Spent, not reset, when it runs out.</b> <see cref="NextSweepDelay"/> HOLDS the count at this
     /// maximum rather than clearing it, so a host whose SQL Server targets never connect at all pays the
@@ -106,13 +117,25 @@ internal static class OversizedPlanBacklogSweep
     internal const int MaxConnectWaitAttempts = 5;
 
     /// <summary>
-    /// Plans one pass may fetch for one server. Three, and the number is the RATE bound; the per-fetch
+    /// Plans one pass may fetch for one server. Ten, and the number is the RATE bound; the per-fetch
     /// isolation above is the MEMORY bound, and the two are independent — raising this would not batch
-    /// anything, it would take longer. The measured population is 13 over-cap plans at once on the fleet's
-    /// worst server, so three per hour clears a worst-case backlog in a few hours and a normal one in one
-    /// pass.
+    /// anything, it would take longer.
+    ///
+    /// <para><b>A ceiling on a LIMIT, not a quota.</b> <c>OversizedPlanBacklog.ClaimSql</c> takes at most
+    /// this many rows, so a server whose backlog is drained claims what is there and its tick costs one
+    /// indexed store SELECT and no target work at all. That is why the two measured store classes — one
+    /// arriving at a handful of long-lived cache residents per server, one at ~1,400 new identities an hour
+    /// fleet-wide — need no separate values: the same ceiling produces the rate each one's own backlog depth
+    /// asks for.</para>
+    ///
+    /// <para><b>What it costs at the top of the range.</b> One server's pass is serial under
+    /// <see cref="PerPlanBudget"/>, so the worst case for one monitored server is ten times fifteen seconds,
+    /// 150 seconds; the fleet pass is serial too, so 42 servers all timing out at the cap is 105 minutes.
+    /// That pass skips its own next slots rather than stacking — <c>DarlingWorker</c> tracks it and launches
+    /// nothing on top of it — which is the right shape for a fleet whose fetches are all failing. The
+    /// measured pass is nowhere near it: 126 plans in 6,155 ms, ~49 ms each.</para>
     /// </summary>
-    internal const int MaxPlansPerServerPerTick = 3;
+    internal const int MaxPlansPerServerPerTick = 10;
 
     /// <summary>
     /// WALL-CLOCK ceiling for one plan's fetch — connect, execute AND drain. It is the binding constraint,
@@ -286,12 +309,12 @@ WHERE tqp.query_plan IS NOT NULL;";
     ///
     /// <para><b>Two causes of an empty target list, meaning opposite things.</b> A tick with sweepable
     /// targets and no connected runtime among them is TRANSIENT: those registrations are mid-connect and
-    /// will carry a runtime within a minute, so a full <see cref="SweepInterval"/> spends an hour of
+    /// will carry a runtime within a minute, so a full <see cref="SweepInterval"/> spends a whole slot of
     /// draining on a pass that reached nothing. A tick with NO sweepable target is PERMANENT — a
     /// PostgreSQL-only monitoring host, where the cap, the backlog and this sweep all live in the SQL Server
     /// plan-XML collectors, so there is nothing to sweep and never will be. That host takes the full
-    /// interval and writes its one run-record an hour, exactly as before, because a re-attempt there is a
-    /// retry loop with no terminating condition.</para>
+    /// interval and writes exactly one run-record per interval, because a re-attempt there is a retry loop
+    /// with no terminating condition.</para>
     ///
     /// <para>Any connected target at all ends the wait and clears the budget, so what a restart costs is
     /// bounded by how fast the FIRST server connects rather than by the whole fleet: on the measured fleet
@@ -551,7 +574,7 @@ WHERE tqp.query_plan IS NOT NULL;";
             /* One managed string, up to a few megabytes, once per fetch. That allocation is the thing the
                capture cap exists to bound — and it is bounded here by the shape rather than by a size: one
                plan at a time, on a connection nothing else is using, off the collection path, at most
-               MaxPlansPerServerPerTick per server per hour. The cap's problem was two hundred of these inside
+               MaxPlansPerServerPerTick per server per pass. The cap's problem was two hundred of these inside
                a cycle's drain, not one of them. */
             var planXml = reader.GetString(0);
 

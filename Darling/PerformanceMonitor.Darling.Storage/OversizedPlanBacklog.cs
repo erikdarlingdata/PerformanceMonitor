@@ -35,11 +35,15 @@ namespace PerformanceMonitor.Darling.Storage;
 /// carries many statements at different offsets. A re-sighting touches <c>last_seen_at</c>; it does not
 /// insert a second row and does not re-fetch content already held.</para>
 ///
-/// <para><b>Growth is bounded by the horizon, not by a queue design.</b> Measured on the fleet's outlier
-/// server for this collector, 13 plans were over the cap at once, with compile ages from 13.6 hours to
-/// 144.6 days — the arrival rate is a handful of long-lived cache residents per server, not a stream.
-/// Retention prunes on <c>last_seen_at</c> (<c>DarlingRetention</c>), so a plan that stops recurring leaves
-/// with the fact rows it explained rather than accumulating forever.</para>
+/// <para><b>Growth is bounded by the horizon, not by a queue design.</b> Retention prunes on
+/// <c>last_seen_at</c> (<c>DarlingRetention</c>), so a plan that stops recurring leaves with the fact rows
+/// it explained rather than accumulating forever — and that horizon is the only bound there is, because
+/// arrival is not uniformly a trickle. One production store class presents a handful of long-lived cache
+/// residents per server: 13 plans over the cap at once on its outlier server, compile ages from 13.6 hours
+/// to 144.6 days. Another presents ~1,400 new over-cap identities an hour fleet-wide and never saturates,
+/// because plan-cache churn re-keys the same logical queries under fresh <c>plan_handle</c> and offsets. The
+/// drain rate is sized for the second (<c>OversizedPlanBacklogSweep.MaxPlansPerServerPerTick</c>); this
+/// table holds either population without a different shape.</para>
 ///
 /// <para><b>One index, deliberately: the primary key.</b> Its leading column is <c>server_id</c>, which is
 /// the leading predicate of all three access paths — the sweep's claim, the read-surface fallback and the
