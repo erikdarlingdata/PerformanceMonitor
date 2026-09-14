@@ -1007,16 +1007,16 @@ public class EntraDeviceCodeTests
             }
         }
 
-        /* The walk happened, and it produced all three values. Counted against literals rather than
-           against the table, so a table crippled to zero rows fails here instead of reporting a pass
-           on nine assertions it never reached. */
+        /* The walk happened, against a literal, so a table crippled to zero rows fails here rather
+           than reporting a pass on nine assertions it never reached. */
         Assert.Equal(9, walked);
         Assert.Equal(3, reported.Distinct().Count());
-        Assert.Equal(
-            3, reported.Count(d => d == EntraDeviceCodeDegradation.NoAcquisitionIdentity));
-        Assert.Equal(
-            2, reported.Count(d => d == EntraDeviceCodeDegradation.SignInStillAwaitingItsOwnCode));
-        Assert.Equal(4, reported.Count(d => d == EntraDeviceCodeDegradation.None));
+
+        /* And the sequence, in order, rather than a tally of each value. Measured: inverting the
+           waiting-sign-in condition PERMUTES this list without changing any of its three counts -
+           rows move between None and SignInStillAwaitingItsOwnCode in matching pairs - so counting
+           them reconciles perfectly while every token means something else. */
+        Assert.Equal(routes.Select(route => route.Degradation).ToArray(), reported);
     }
 
     [Fact]
@@ -1240,15 +1240,27 @@ public class EntraDeviceCodeTests
         Assert.Equal(
             2, Regex.Matches(claimBody, @"AppLogger\s*\.\s*Warn\s*\(").Count);
 
-        /* ONE copy of each condition in the whole method. This is the load-bearing assertion: a
+        /* ONE copy of each condition on the degraded path. This is the load-bearing assertion: a
            second copy, written to pick a log line, is a condition nothing covers - it could be
-           inverted on its own while the returned reason went on agreeing with the pin above. */
-        Assert.Equal(1, Regex.Matches(claimBody, @"acquiredTarget is null").Count);
-        Assert.Equal(1, Regex.Matches(claimBody, @"Challenge:\s*null").Count);
+           inverted on its own while the returned reason went on agreeing with the behavioural pin.
 
-        var noIdentity = claimBody.IndexOf("acquiredTarget is " + "null", StringComparison.Ordinal);
-        var stillWaiting = claimBody.IndexOf("Challenge: " + "null", StringComparison.Ordinal);
-        var firstWarn = claimBody.IndexOf("AppLogger", StringComparison.Ordinal);
+           Measured below the vouching decision, because the vouch reads acquiredTarget too and a
+           whole-method count would be two before anything was wrong. Blind to which way each
+           condition is written, so this counts COPIES rather than agreeing with one spelling: an
+           inverted condition is the behavioural pin's to catch, and a source pin that also happened
+           to catch it would read as coverage it does not provide. */
+        var degraded = claimBody.IndexOf("unowned = " + "true;", StringComparison.Ordinal);
+        Assert.True(degraded >= 0, "Claim must still mark the unvouched path unowned");
+
+        var degradedPath = claimBody[degraded..];
+
+        Assert.Equal(
+            1, Regex.Matches(degradedPath, @"acquiredTarget is (not )?null").Count);
+        Assert.Equal(1, Regex.Matches(degradedPath, @"Challenge:\s*(not )?null").Count);
+
+        var noIdentity = Regex.Match(degradedPath, @"acquiredTarget is (not )?null").Index;
+        var stillWaiting = Regex.Match(degradedPath, @"Challenge:\s*(not )?null").Index;
+        var firstWarn = degradedPath.IndexOf("AppLogger", StringComparison.Ordinal);
 
         Assert.True(firstWarn >= 0, "both degradations must still reach the log");
         Assert.True(
@@ -1261,7 +1273,7 @@ public class EntraDeviceCodeTests
         /* And what is left below the conditions is the classification being read back. The positive
            half of the same property: a body that stopped branching altogether would satisfy a bare
            "only one copy of each condition" and select no warning at all. */
-        var belowTheConditions = claimBody[Math.Max(noIdentity, stillWaiting)..];
+        var belowTheConditions = degradedPath[Math.Max(noIdentity, stillWaiting)..];
 
         Assert.Contains(
             "degradation is " + "EntraDeviceCodeDegradation.NoAcquisitionIdentity",
