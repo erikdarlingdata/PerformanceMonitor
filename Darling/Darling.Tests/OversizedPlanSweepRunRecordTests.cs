@@ -591,9 +591,9 @@ public sealed class OversizedPlanSweepRunRecordTests
 
     /// <summary>
     /// Every cross-server aggregate over <c>v_collection_log</c> in the fleet reader excludes the sentinel.
-    /// The sweep's row joins a population that was a DAILY single row and is now an hourly one, so a
-    /// <c>GROUP BY server_id</c> with no guard gains a phantom "server 0" group in every window an hour or
-    /// wider rather than in the rare window that straddles the purge.
+    /// The sweep's row joins a population the daily purge contributes a single row a day to, and it lands
+    /// four times an hour, so a <c>GROUP BY server_id</c> with no guard gains a phantom "server 0" group in
+    /// every window a quarter-hour or wider rather than in the rare window that straddles the purge.
     ///
     /// <para>Scoped to this one file, which is where the two unguarded aggregates were, and the literal
     /// count is asserted so the loop cannot pass by matching nothing — a renamed view would otherwise turn

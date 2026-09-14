@@ -469,9 +469,10 @@ ON CONFLICT (server_id) DO UPDATE SET
     /// iterates the whole fleet in one pass, so it has no single monitored server to attribute a tick to.
     ///
     /// <para><b>An empty-backlog tick writes its row like any other</b>, with <c>rows_collected = 0</c>. That
-    /// is the case this exists for — the sweep's per-tick outcome was otherwise an <c>ILogger</c> line only, so
-    /// a tick that found nothing to fetch left no trace in the store at all and "has the sweep run in the last
-    /// N hours" had no answer from any client. An absent row past the hourly cadence is now the signal.</para>
+    /// is the case this exists for: a tick that found nothing to fetch would otherwise leave no trace in the
+    /// store at all — its outcome an <c>ILogger</c> line only — and "has the sweep run in the last N hours"
+    /// would have no answer from any client. An absent row past the sweep's own cadence
+    /// (<c>OversizedPlanBacklogSweep.SweepInterval</c>) is the signal.</para>
     ///
     /// <para><paramref name="plansCaptured"/> lands in <c>rows_collected</c>; the tick's remaining counts —
     /// servers swept, plans claimed, expiries, fetch failures — are summarized in <paramref name="message"/>,

@@ -175,7 +175,7 @@ public sealed class CrossAppMcpToolInventoryPinTests
         "get_collector_stall_probes",
 
         /* #3398: the oversized-plan backlog read (get_oversized_plan_backlog) over
-           collect.oversized_plan_backlog - which cached plans the capture cap declined, and what the hourly
+           collect.oversized_plan_backlog - which cached plans the capture cap declined, and what the
            out-of-band sweep has since done about each one. Darling-ONLY by architecture rather than a porting
            to-do, and the SOURCE is the reason: the sweep that drains that table is invoked from the headless
            worker's fleet-level cadence checks beside the daily retention purge, a loop Lite's single-instance

@@ -1979,9 +1979,9 @@ public sealed class DarlingWorker : BackgroundService
                is awaited because it talks only to the store with bounded statements; this pass opens a
                connection to every monitored server, and its worst case is
                fleet width * MaxPlansPerServerPerTick * PerPlanBudget, which on a 42-server fleet whose
-               targets are all timing out is over half an hour. Awaited, that is half an hour in which this
-               loop launches no collection bodies at all — the 24-server field incident's exact shape, one
-               maintenance step over. Launched and tracked, a slow pass costs only its own next slot.
+               targets are all timing out is 105 minutes. Awaited, that is 105 minutes in which this loop
+               launches no collection bodies at all — the 24-server field incident's exact shape, one
+               maintenance step over. Launched and tracked, a slow pass costs only its own next slots.
 
                sweepTargets is this tick's snapshot, already taken under the servers lock, so the pass
                iterates a stable set. RunAsync is failure-isolated per server and returns quietly on
