@@ -1486,6 +1486,14 @@ export const POSTGRES_TABS = [
          because it is the answer to most of the empty panels elsewhere on the page — a state of
          'available' means the files are there and one CREATE EXTENSION fills a grid that currently reads
          as a permanent absence. */
+      /* `noteKey` for the same reason the index bloat panel has one (#3434). Rows here are the PRODUCT of
+         databases and extension names - 102 names per database on the measured fleet - so 50 rows is one
+         database's slice of a multi-database host, and the ordering puts the non-relevant INSTALLED rows
+         behind every non-relevant AVAILABLE one, so what the cap removes first is precisely what an
+         install census needs. The read computes all of that (#3425): its note carries the truncation
+         caveat, the reach verdict saying whether a larger limit would help, and the pointer to
+         install_census and database_name. Without the note this page rendered a capped census with no
+         caveat at all, which is a weaker version of the same defect - a page that looks complete. */
       table(
         "Extensions",
         "get_pg_extensions",
@@ -1493,7 +1501,9 @@ export const POSTGRES_TABS = [
         "extensions",
         PG_EXTENSION_COLUMNS,
         ctx.label + ", per DATABASE not per cluster; 'available' means CREATE EXTENSION would work",
-        "No extension inventory in this window. This collector runs DAILY, so a short window can be empty on a healthy server."
+        "No extension inventory in this window. This collector runs DAILY, so a short window can be empty on a healthy server.",
+        2,
+        "note"
       ),
     ],
   },
@@ -2050,6 +2060,32 @@ export const POSTGRES_TABS = [
         PG_INDEX_BLOAT_COLUMNS,
         ctx.label + ", ESTIMATED from catalog statistics with no page reads; a row with a reason instead of a number has NO answer, not a healthy one",
         "Nothing recorded for this server. That is not the same as no bloat: this collector runs DAILY, so a short window or a fresh install is legitimately empty here. Read the coverage sentence for which it is.",
+        2,
+        "note"
+      ),
+      /* THE ANSWERS, REACHED (#3434). The panel above keeps #3278's answerless-first order, and on a census
+         whose answerless population outnumbers 25 that page is 100% of them - structurally rather than by
+         chance - so every answered index sits behind a block no row cap on this page pages past. Measured
+         on the fleet: 1,779 answerless rows ahead of 726 answers covering 213.8 GB on the largest census,
+         and 268 ahead of 79 covering 191.0 GB on the next. answered_only (#3431) asks the read for that
+         population directly, ranked by reclaimable bytes with nothing ahead of it.
+
+         A SECOND PANEL rather than a filter on the first: the order above is deliberate and stays. And not
+         a client-side merge of the two reads either - the caveat over each grid is composed by the SERVER
+         from population figures the browser does not have, so merging two reads into one grid would mean
+         merging two censuses into one sentence, and a note describing a population its grid is not showing
+         is the very defect this closes.
+
+         Not fanout(): that is several panels over ONE fetch, and these two differ in a PARAMETER, so there
+         is no shared response to slice. */
+      table(
+        "Index Bloat (answered ranking)",
+        "get_pg_index_bloat",
+        { server, hours: ctx.hours, limit: 25, answered_only: true },
+        "indexes",
+        PG_INDEX_BLOAT_COLUMNS,
+        ctx.label + ", only the indexes that HAVE an answer, biggest reclaimable bytes first",
+        "No row came back for this server. The read answers no_answers with the census when nothing here has an answer, so reaching this sentence instead means the collector recorded nothing in the window - it runs DAILY.",
         2,
         "note"
       ),
