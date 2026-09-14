@@ -207,15 +207,16 @@ public class PlanCorrectionRow
 
     public string CollectionTimeLocal => Local(CollectionTime);
 
-    /* sys.dm_db_tuning_recommendations reports these four in the instance's own clock, so they convert
-       through FormatServerClock while CollectionTime above, which the collector stamps in UTC, goes
-       through Local. The renderer is named at the site rather than reached through Local: a
-       one-hop wrapper hides the renderer from the clock-frame census, which is how the frame these
-       four are in went unread. */
-    public string ValidSinceLocal => ViewerDataService.FormatServerClock(ValidSince);
-    public string LastRefreshLocal => ViewerDataService.FormatServerClock(LastRefresh);
-    public string ExecuteActionInitiatedTimeLocal => ViewerDataService.FormatServerClock(ExecuteActionInitiatedTime);
-    public string RevertActionInitiatedTimeLocal => ViewerDataService.FormatServerClock(RevertActionInitiatedTime);
+    /* sys.dm_db_tuning_recommendations reports these four in UTC, the same frame CollectionTime above is
+       in, so they render through FormatStoredUtc and not through FormatServerClock. The frame is measured
+       against the collector-written UTC collection_time rather than inferred from PlanCorrectionCollector
+       shipping the DMV verbatim; DarlingPlanCorrectionReader's remarks carry the measurement. The renderer
+       is named at the site rather than reached through a one-hop wrapper, because a wrapper hides the
+       renderer's name from the clock-frame census that keys on it. */
+    public string ValidSinceLocal => ViewerDataService.FormatStoredUtc(ValidSince);
+    public string LastRefreshLocal => ViewerDataService.FormatStoredUtc(LastRefresh);
+    public string ExecuteActionInitiatedTimeLocal => ViewerDataService.FormatStoredUtc(ExecuteActionInitiatedTime);
+    public string RevertActionInitiatedTimeLocal => ViewerDataService.FormatStoredUtc(RevertActionInitiatedTime);
 
     /* Tri-state: the flags are NULL when Query Store aged the plan out, which is not the same as "No". */
     public string ForcedDisplay => YesNo(LastGoodPlanIsForced);

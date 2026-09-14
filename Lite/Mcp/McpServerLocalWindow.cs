@@ -22,11 +22,18 @@ namespace PerformanceMonitorLite.Mcp;
 /// <para><b>A returned VALUE that has to be de-skewed:</b> <c>get_default_trace_events</c> again, plus
 /// <c>get_running_jobs</c> (<c>running_jobs.start_time</c>, the msdb Agent clock),
 /// <c>get_blocked_process_reports</c> (the six blocked_/blocking_ transaction and batch stamps),
-/// <c>get_index_usage</c> (<c>last_user_access</c>, off <c>sys.dm_db_index_usage_stats</c>),
-/// <c>get_pvs_stats</c> (the four ADR cleaner times) and <c>get_plan_corrections</c> (the four
-/// <c>sys.dm_db_tuning_recommendations</c> lifecycle times). Those five need the offset only for the value:
-/// their windows and their snapshot self-subqueries all run on <c>collection_time</c>, so the de-skew
-/// changes no row selection.</para>
+/// <c>get_index_usage</c> (<c>last_user_access</c>, off <c>sys.dm_db_index_usage_stats</c>) and
+/// <c>get_pvs_stats</c> (the four ADR cleaner times). Those four need the offset only for the value: their
+/// windows and their snapshot self-subqueries all run on <c>collection_time</c>, so the de-skew changes no
+/// row selection.</para>
+///
+/// <para><b>What does NOT belong here, and why it is worth naming.</b> <c>get_plan_corrections</c>' four
+/// <c>sys.dm_db_tuning_recommendations</c> lifecycle times are already UTC in the store and take no offset.
+/// The tempting inference is that they are server-local because the collector ships the DMV verbatim, and
+/// that is evidence about the collector rather than about the frame: an offset applied to them lands four
+/// hours in the FUTURE. Every column above has its frame MEASURED against the collector-written UTC
+/// <c>collection_time</c> rather than inferred, and <c>DarlingPlanCorrectionReader</c>'s remarks carry that
+/// measurement.</para>
 ///
 /// <para><b>Why an MCP tool cannot use the desktop's offset.</b> <c>ServerTimeHelper.UtcOffsetMinutes</c> is
 /// process-wide state written only by the WPF tab paths, so it holds whichever server the UI last selected —

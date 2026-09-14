@@ -21,8 +21,17 @@ namespace Darling.Tests;
 /// #3206: an MCP payload may not carry a server-LOCAL timestamp beside the naive-UTC fields every other
 /// timestamp on that payload uses. This is the fourth instance of the class — #2991/#2992 was
 /// <c>query_stats.creation_time</c> in analysis SQL, #3198 was <c>default_trace_events.event_time</c> in one
-/// MCP tool, and #3206's sweep found sixteen more fields across five more tools — so what is pinned here is
+/// MCP tool, and #3206's sweep found twelve more fields across four more tools — so what is pinned here is
 /// the PAYLOAD BOUNDARY across every affected read at once, in both SKUs.
+///
+/// <para><b>Shipping a DMV verbatim is not evidence of its frame, and the census below may not rest on
+/// it.</b> #3419: <c>PlanCorrectionsSql</c>' four lifecycle times were declared server-local on exactly
+/// that reasoning and are UTC, so de-skewing them put every actively-refreshing recommendation four hours
+/// after the read that observed it — the same defect with the sign flipped. Every (read, column) pair in
+/// <see cref="ServerLocalPayloadColumns"/> therefore carries provenance the DMV's OWN frame decides, and
+/// <see cref="AlreadyUtcReads"/> names the measurement that keeps a pair out. Both halves are live-verified
+/// against the collector-written UTC <c>collection_time</c> by
+/// <c>PlanCorrectionFrameLiveTests</c>.</para>
 ///
 /// <para><b>The frame cannot be judged by column name, and this file does not try.</b>
 /// <c>StoreSqlClockDisciplineTests</c> maintains <c>AmbiguousFrameColumns</c> because <c>sample_time</c>,
@@ -106,22 +115,47 @@ public sealed class McpPayloadClockFrameDisciplineTests
 
     /// <summary>
     /// Every (Darling read, column) pair whose STORED value is the monitored server's local wall clock and
-    /// which reaches an MCP caller, with the collector evidence for each. Sixteen columns across five reads;
-    /// <c>default_trace_events.event_time</c> is the seventeenth and belongs to #3198/#3202.
+    /// which reaches an MCP caller, with the evidence for each. Twelve columns across four reads;
+    /// <c>default_trace_events.event_time</c> is the thirteenth and belongs to #3198/#3202.
+    ///
+    /// <para><b>Ten of the twelve are measured, and the two that are not say so.</b> The frame of each was
+    /// read off the live stores against the collector-written UTC <c>collection_time</c> on the same row:
+    /// the newest value of a column in the server's local clock cannot come nearer than the offset behind
+    /// <c>collection_time</c>, and on a fleet at -240 every one of the ten lands between -238.9 and -242.1
+    /// minutes on two independent stores, while <c>blocked_process_reports.event_time</c> and
+    /// <c>deadlocks.deadlock_time</c> — the two UTC controls in the same run — land at 0.0. The instrument
+    /// therefore discriminates rather than answering the same way to everything, which is the property a
+    /// census resting on "the collector ships the DMV verbatim" never had.</para>
     /// </summary>
     public static readonly (string Read, PayloadColumn[] Columns, string Evidence)[] ServerLocalPayloadColumns =
     [
+        /* The one column in the set whose frame is NOT live-measured, and it is the one whose T-SQL says it
+           outright: running_jobs holds no rows on either store — the collector has logged SUCCESS with
+           rows_collected 0 on every one of 41,278 and 105,134 runs, because no Agent job has been mid-flight
+           at a collection instant — so there is nothing to compare against collection_time. What decides it
+           is the collector's own arithmetic rather than the fact that it projects the column: the next line
+           DATEDIFFs the same value against GETDATE(), which is local-vs-local and only correct if the stored
+           value is local. */
         ("RunningJobsSql", [new("start_time")],
             "RunningJobsCollector ships start_time = ja.start_execution_date, the msdb Agent local clock, and "
             + "computes current_duration_seconds against GETDATE() on the next line"),
+        /* blocking_last_tran_started is the other unmeasured one, and only on THIS read: the column is NULL
+           in all 4,066 blocked_process_reports rows across both stores, because a blocker holding no open
+           transaction has no lasttranstarted to render. Its frame is inherited from the sibling parsed out
+           of the same XML document by the same collector line — blocked_last_tran_started, measured at
+           -240.2 — and it is measured directly on DmvBlockingSnapshotsSql below. */
         ("BlockedProcessReportsSql",
             [new("blocked_last_tran_started"), new("blocking_last_tran_started"),
              new("blocked_last_batch_started"), new("blocking_last_batch_started"),
              new("blocked_last_batch_completed"), new("blocking_last_batch_completed")],
             "BlockedProcessReportCollector parses lasttranstarted / lastbatchstarted / lastbatchcompleted out "
-            + "of the blocked-process-report XML, which SQL Server renders in the server's local clock"),
+            + "of the blocked-process-report XML, which SQL Server renders in the server's local clock; the "
+            + "five populated columns measure -240.2 to -242.1 against the UTC event_time on the same row, "
+            + "and de-skewing them takes (event_time - blocked_last_batch_started) - wait_time_ms from an "
+            + "impossible +240.0 minutes to 0.0"),
         ("DmvBlockingSnapshotsSql", [new("blocked_last_tran_started"), new("blocking_last_tran_started")],
-            "DmvBlockingSnapshotCollector ships sys.dm_tran_active_transactions.transaction_begin_time verbatim"),
+            "DmvBlockingSnapshotCollector ships sys.dm_tran_active_transactions.transaction_begin_time "
+            + "verbatim, and both columns measure -239.9 to -240.1 against collection_time on two stores"),
         /* The one DERIVED column in the set: the alias is last_user_access, but the expression de-skewed is
            the GREATEST of the four stored DMV columns, so its source has to be named explicitly. All four
            share one offset, which is what makes subtracting once, after the GREATEST, equivalent to
@@ -131,15 +165,14 @@ public sealed class McpPayloadClockFrameDisciplineTests
                  "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)",
                  BareForm: "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) AS last_user_access,")],
             "IndexObjectStatsCollector ships us.last_user_seek/scan/lookup/update from "
-            + "sys.dm_db_index_usage_stats verbatim; the read GREATESTs the four"),
+            + "sys.dm_db_index_usage_stats verbatim; the read GREATESTs the four, and the GREATEST measures "
+            + "-238.9 against collection_time over 1,989,067 rows and -239.4 over 266,073 on the other store"),
         ("PvsStatsLatestSql",
             [new("aborted_version_cleaner_start_time"), new("aborted_version_cleaner_end_time"),
              new("offrow_version_cleaner_start_time"), new("offrow_version_cleaner_end_time")],
-            "PvsStatsCollector ships sys.dm_tran_persistent_version_store_stats verbatim"),
-        ("PlanCorrectionsSql",
-            [new("valid_since"), new("last_refresh"), new("execute_action_initiated_time"),
-             new("revert_action_initiated_time")],
-            "PlanCorrectionCollector ships sys.dm_db_tuning_recommendations verbatim"),
+            "PvsStatsCollector ships sys.dm_tran_persistent_version_store_stats verbatim, and all four "
+            + "measure -240.0 against collection_time on two stores — the offrow pair with every one of "
+            + "5,754 and 1,008 rows inside a 10-minute band around -240, the cleaner running continuously"),
     ];
 
     /// <summary>
@@ -154,6 +187,20 @@ public sealed class McpPayloadClockFrameDisciplineTests
         ("IndexUsageMatchCountSql", "returns a count, no timestamp at all"),
         ("PvsTrendSql", "returns only collection_time, which the collector stamps in naive UTC"),
         ("AutomaticTuningSql", "returns only collection_time"),
+        /* #3419, and the one entry here that had to be MEASURED to earn its place rather than reasoned
+           into it. PlanCorrectionCollector ships sys.dm_db_tuning_recommendations verbatim exactly as
+           PvsStatsCollector ships its DMV verbatim, so the provenance sentence is word-for-word the one
+           that put four columns in ServerLocalPayloadColumns above — and the DMV's answer is the opposite.
+           What separates them is the measurement, not the sentence. */
+        ("PlanCorrectionsSql",
+            "sys.dm_db_tuning_recommendations reports valid_since, last_refresh and the two action-initiated "
+            + "times in UTC: against the collector-written UTC collection_time on the same row, the newest "
+            + "value of each lands within +0.2 minutes of it over 27,719,040 rows on one store and +0.7 over "
+            + "637,558 on the other, where a value in a -240 server's local clock could not come nearer than "
+            + "240 minutes behind. The two stored-but-unread siblings, execute_action_start_time and "
+            + "revert_action_start_time, measure the same. De-skewing these puts every actively-refreshing "
+            + "recommendation AFTER the read that observed it — 189,701 rows of one 24-hour window did "
+            + "exactly that"),
     ];
 
     private static string DarlingSql(string name) => name switch
@@ -270,11 +317,15 @@ public sealed class McpPayloadClockFrameDisciplineTests
     /* ───────────────────────── Lite parity ───────────────────────── */
 
     /// <summary>
-    /// The same sixteen fields in Lite, which serves them from DuckDB. Lite de-skews in C# at the MCP
+    /// The same twelve fields in Lite, which serves them from DuckDB. Lite de-skews in C# at the MCP
     /// projection rather than in SQL, for two reasons worth stating: DuckDB has no <c>make_interval</c>, and
     /// the underlying <c>LocalDataService</c> reads are shared with the WPF grids, which render through
-    /// <c>ServerTimeHelper</c> and have their own frame defect under #3207 — de-skewing in the data service
-    /// would fix the MCP surface by breaking the desktop one.
+    /// <c>ServerTimeHelper</c> and pick their renderer per column.
+    ///
+    /// <para><c>Lite/Mcp/McpPlanCorrectionTools.cs</c> is deliberately absent: its four fields are UTC in
+    /// the store (see <see cref="AlreadyUtcReads"/>) and it emits them unconverted, which is why
+    /// <see cref="EveryLiteToolSite_ResolvesThisServersOffset_AndDeSkewsEveryAffectedField"/> must not
+    /// reach it — that test would otherwise demand the offset resolution the tool has no use for.</para>
     /// </summary>
     public static readonly (string RelativePath, string[] Properties)[] LiteToolSites =
     [
@@ -285,6 +336,17 @@ public sealed class McpPayloadClockFrameDisciplineTests
         ("Lite/Mcp/McpObjectStatsTools.cs", ["LastUserAccess"]),
         ("Lite/Mcp/McpPvsTools.cs",
             ["AbortedCleanerStartTime", "AbortedCleanerEndTime", "OffrowCleanerStartTime", "OffrowCleanerEndTime"]),
+    ];
+
+    /// <summary>
+    /// Lite MCP tools that emit a <c>plan_correction</c> lifecycle time and must NOT apply an offset to it,
+    /// with the property whose bare emission is the correct form. The mirror of
+    /// <see cref="AlreadyUtcReads"/> on the Lite side: without it, removing the tool from
+    /// <see cref="LiteToolSites"/> would drop the file out of every assertion in this file, and a
+    /// re-introduced <c>AddMinutes(-utcOffsetMinutes)</c> would be invisible here.
+    /// </summary>
+    public static readonly (string RelativePath, string[] Properties)[] LiteAlreadyUtcToolSites =
+    [
         ("Lite/Mcp/McpPlanCorrectionTools.cs",
             ["ValidSince", "LastRefresh", "ExecuteActionInitiatedTime", "RevertActionInitiatedTime"]),
     ];
@@ -326,18 +388,70 @@ public sealed class McpPayloadClockFrameDisciplineTests
     }
 
     /// <summary>
-    /// Darling and Lite must cover the SAME sixteen payload FIELDS. Pinned as a count rather than a name
+    /// The Lite half of <see cref="AlreadyUtcReads"/>, asserted in BOTH directions on the same matcher the
+    /// test above uses: the field is emitted bare, and no <c>AddMinutes(-utcOffsetMinutes)</c> reaches it.
+    /// The offset resolution must be gone from the file too — left behind it is a call whose result nothing
+    /// consumes, which is the state a partly-reverted fix sits in.
+    /// </summary>
+    [Fact]
+    public void EveryLiteAlreadyUtcToolSite_EmitsTheFieldUnconverted_AndResolvesNoOffset()
+    {
+        foreach (var (relativePath, properties) in LiteAlreadyUtcToolSites)
+        {
+            var path = RepoPath(relativePath);
+            Assert.True(File.Exists(path), $"{relativePath} is gone — update this guard deliberately");
+            var text = File.ReadAllText(path);
+
+            Assert.DoesNotContain("McpServerLocalWindow", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("utcOffsetMinutes", text, StringComparison.Ordinal);
+
+            foreach (var property in properties)
+            {
+                Assert.False(
+                    LiteDeSkew(property).IsMatch(text),
+                    $"{relativePath} subtracts an offset from {property}, but the stored value is already "
+                    + "naive UTC — measured within +0.7 minutes of the collector-written collection_time on "
+                    + "the same row, on two stores. Subtracting a -240 offset ADDS four hours, which places "
+                    + "an actively-refreshing recommendation after the read that observed it.");
+
+                Assert.Contains(
+                    $"= r.{property}?.ToString(\"o\")",
+                    text,
+                    StringComparison.Ordinal);
+            }
+        }
+    }
+
+    /// <summary>
+    /// No Lite tool file appears in both lists. Without this the two censuses could disagree about one file
+    /// and each pass on its own half, which is how a de-skew gets asserted and denied at once.
+    /// </summary>
+    [Fact]
+    public void TheLiteToolSiteLists_AreDisjoint()
+    {
+        Assert.Empty(LiteToolSites
+            .Select(s => s.RelativePath)
+            .Intersect(LiteAlreadyUtcToolSites.Select(s => s.RelativePath), StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// Darling and Lite must cover the SAME twelve payload FIELDS. Pinned as a count rather than a name
     /// mapping, because the two SKUs legitimately spell the same column differently (snake_case SQL alias vs
     /// PascalCase row property) and a name map would be either a second source of truth or a tautology. What
     /// must not drift is the arity: a field de-skewed on one SKU and not the other is the one-sided port that
     /// #2992 found nothing guarding against.
     ///
-    /// <para><b>Distinct fields, not per-read declarations.</b> Darling declares EIGHTEEN (read, column)
-    /// pairs for sixteen fields, because <c>get_blocking</c> is served by two reads and the always-on DMV
+    /// <para><b>Distinct fields, not per-read declarations.</b> Darling declares FOURTEEN (read, column)
+    /// pairs for twelve fields, because <c>get_blocking</c> is served by two reads and the always-on DMV
     /// fallback arm re-serves <c>blocked_last_tran_started</c> and <c>blocking_last_tran_started</c> — the
     /// two columns a DMV snapshot has. Lite reaches the same six through one <c>LocalDataService</c> call, so
     /// it declares them once. Comparing the raw sums asserted 18 == 16 and failed for a reason that had
     /// nothing to do with parity, which is what CI caught.</para>
+    ///
+    /// <para><b>The already-UTC side is pinned with the same arity discipline</b>, so removing a field from
+    /// one census and forgetting the other fails here rather than shrinking both lists to nothing. #3419
+    /// moved four fields across; the two totals must still add to the sixteen a payload-boundary sweep
+    /// reaches in each SKU.</para>
     /// </summary>
     [Fact]
     public void TheTwoSkus_DeSkewTheSameNumberOfFields()
@@ -349,12 +463,19 @@ public sealed class McpPayloadClockFrameDisciplineTests
             .Count();
         var liteFields = LiteToolSites.Sum(x => x.Properties.Length);
 
-        Assert.Equal(16, darlingFields);
+        Assert.Equal(12, darlingFields);
         Assert.Equal(darlingFields, liteFields);
 
         /* And the overlap is exactly the DMV fallback's two columns — named as a number so that a THIRD read
            quietly re-serving a field has to be a deliberate edit here rather than absorbed silently. */
         Assert.Equal(2, darlingDeclarations - darlingFields);
+
+        /* Both censuses together, per SKU, so a field cannot leave one list without joining the other. */
+        var liteAlreadyUtcFields = LiteAlreadyUtcToolSites.Sum(x => x.Properties.Length);
+
+        Assert.Equal(4, liteAlreadyUtcFields);
+        Assert.Equal(16, darlingFields + liteAlreadyUtcFields);
+        Assert.Equal(16, liteFields + liteAlreadyUtcFields);
     }
 
     /* ───────────────────────── the discriminators, both directions ───────────────────────── */

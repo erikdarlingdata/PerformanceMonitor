@@ -189,10 +189,22 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             ["aborted_version_cleaner_start_time", "aborted_version_cleaner_end_time",
              "offrow_version_cleaner_start_time", "offrow_version_cleaner_end_time"],
             ClockFrame.ServerLocal, "a dm_tran_* DMV shipped verbatim"),
+        /* #3419: the one relation here whose frame is NOT the frame "shipped verbatim" would predict, and the
+           reason the Why column above and below says what the DMV DOES rather than what the collector does.
+           PlanCorrectionCollector ships this DMV exactly as PvsStatsCollector ships dm_tran_persistent_
+           version_store_stats two entries up, and the two answers are opposite — so the verbatim shipping was
+           never the evidence. Measured against the collector-written UTC collection_time on the same row:
+           every one of the six lands within +1.4 minutes of it at its maximum over 27.7M rows on one store
+           and +0.7 over 637,558 on the other, where a value in a -240 server's local clock could not come
+           nearer than 240 minutes behind. The small POSITIVE residual is the collector's own staging cost —
+           collection_time is stamped before the DMV is read. */
         ("sys.dm_db_tuning_recommendations",
             ["valid_since", "last_refresh", "execute_action_initiated_time", "execute_action_start_time",
              "revert_action_initiated_time", "revert_action_start_time"],
-            ClockFrame.ServerLocal, "an automatic-tuning DMV shipped verbatim"),
+            ClockFrame.Utc,
+            "the automatic-tuning DMV reports all six in UTC — measured against collection_time on two "
+            + "stores, and NOT inferred from the collector shipping the DMV verbatim, which is evidence "
+            + "about the collector and not about the frame; #3419"),
         ("msdb.dbo.sysjobactivity", ["start_execution_date"], ClockFrame.ServerLocal,
             "Agent writes msdb in the server's local clock; RunningJobsCollector's own next line "
             + "DATEDIFFs it against GETDATE()"),
@@ -250,8 +262,8 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     ];
 
     private const int NonTsqlProvenanceCount = 9;
-    private const int TsqlServerLocalCount = 34;
-    private const int TsqlUtcCount = 6;
+    private const int TsqlServerLocalCount = 28;
+    private const int TsqlUtcCount = 12;
 
     /// <summary>The assignment's balanced right-hand side. Balanced rather than to-end-of-line because four
     /// of the columns are assigned a multi-line <c>DATEADD</c> or a correlated subquery, and a line-scoped
@@ -736,6 +748,12 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// derived set by <see cref="TheOneHopRenderWrappers_AreExactlyTheDeclaredSet"/>, so a new or
     /// renamed wrapper fails the build and has to declare its frame rather than quietly reopening the
     /// hole.</para>
+    ///
+    /// <para><b>The frame those four stamps are in is UTC</b> (#3419, and see
+    /// <see cref="RelationMarkers"/>), so their sites now name a UTC renderer directly and are not in
+    /// <see cref="Inventory"/> at all. The wrapper hazard this list exists for is unchanged by that: a
+    /// wrapper still hides the renderer's name from a scan that keys on it, whichever frame turns out to
+    /// be right.</para>
     /// </summary>
     private static readonly (string File, string Method, string Renderer)[] RenderWrappers =
     [
@@ -820,14 +838,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             "last_user_access", "index_object_stats", 1,
             "get_index_usage, and the only offending payload with NO UTC field beside it, so nothing in the "
             + "object contradicted the wrong reading; de-skewed at the read by #3206"),
-        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanCorrectionTools.cs",
-            "valid_since", "plan_correction", 1, "get_plan_corrections; as_of and collection_time are UTC; de-skewed at the read by #3206"),
-        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanCorrectionTools.cs",
-            "last_refresh", "plan_correction", 1, "get_plan_corrections; de-skewed at the read by #3206"),
-        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanCorrectionTools.cs",
-            "execute_action_initiated_time", "plan_correction", 1, "get_plan_corrections; de-skewed at the read by #3206"),
-        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanCorrectionTools.cs",
-            "revert_action_initiated_time", "plan_correction", 1, "get_plan_corrections; de-skewed at the read by #3206"),
         (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPvsTools.cs",
             "aborted_version_cleaner_start_time", "pvs_stats", 1, "get_pvs_stats; as_of in the same object is UTC; de-skewed at the read by #3206"),
         (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPvsTools.cs",
@@ -859,14 +869,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
         (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpObjectStatsTools.cs", "last_user_access", "index_object_stats", 1,
             "Lite get_index_usage, same shape as Darling's and same absence of a UTC neighbour; de-skewed at "
             + "the read by #3206"),
-        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpPlanCorrectionTools.cs", "valid_since", "plan_correction", 1,
-            "Lite get_plan_corrections; de-skewed at the read by #3206"),
-        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpPlanCorrectionTools.cs", "last_refresh", "plan_correction", 1,
-            "Lite get_plan_corrections; de-skewed at the read by #3206"),
-        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpPlanCorrectionTools.cs", "execute_action_initiated_time",
-            "plan_correction", 1, "Lite get_plan_corrections; de-skewed at the read by #3206"),
-        (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpPlanCorrectionTools.cs", "revert_action_initiated_time",
-            "plan_correction", 1, "Lite get_plan_corrections; de-skewed at the read by #3206"),
         (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpPvsTools.cs", "aborted_version_cleaner_start_time", "pvs_stats", 1,
             "Lite get_pvs_stats; de-skewed at the read by #3206"),
         (SiteLabel.DeSkewedAtRead, "Lite/Mcp/McpPvsTools.cs", "aborted_version_cleaner_end_time", "pvs_stats", 1,
@@ -902,10 +904,15 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /* #3206 (via #3212) took the MCP label from 33 to 1 by de-skewing at the read; the survivor is
        Lite get_plan_cache_bloat's oldest_plan_create_time, which that lane does not touch. #3207 took
        the render label from 22 to 0. Both labels moved by fixing their sites and deleting their rows in
-       the same change, which is the ratchet working in the removing direction. */
+       the same change, which is the ratchet working in the removing direction.
+
+       #3419 took the de-skewed label from 34 to 26 without fixing anything: the eight plan_correction
+       sites are not sites at all, because the column is UTC in the store and the four surfaces that reach
+       it now emit it unconverted. A site whose column and whose consumer are in the same frame has nothing
+       for this census to say about it. */
     private const int McpPayloadUnmarkedSites = 1;
     private const int DesktopRenderMismatchSites = 0;
-    private const int DeSkewedAtReadSites = 34;
+    private const int DeSkewedAtReadSites = 26;
 
     /* ═══════════════════════ 5. resolving which table a site's column came from ═══════════════════════ */
 
@@ -1549,9 +1556,9 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
     /// <summary>
     /// No declared wrapper is handed a census column that EVERY table declaring it frames the other
-    /// way. That was the shape of the four <c>plan_correction</c> stamps: <c>valid_since</c>,
-    /// <c>last_refresh</c> and the two action stamps are server-local in the only table that declares
-    /// them, and they reached <c>ForDisplay</c> through a wrapper named <c>Local</c>.
+    /// way. The shape it looks for is a column with one unanimous frame reaching a renderer that takes
+    /// the other — which is what a one-hop wrapper makes unreadable, and why every wrapper in the tree
+    /// is declared above with the renderer it reaches.
     ///
     /// <para><b>Unanimous disagreement only, and that bound is deliberate.</b> Where a column NAME
     /// spans both frames - <c>event_time</c> is five tables and two of them - a wrapper site cannot be
@@ -1673,14 +1680,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                 "start_time - make_interval(mins => svr.offset_minutes) AS start_time"),
             ("last_user_access", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingObjectStatsReader.cs",
                 "GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update) - make_interval(mins => svr.offset_minutes) AS last_user_access"),
-            ("valid_since", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPlanCorrectionReader.cs",
-                "valid_since - make_interval(mins => svr.offset_minutes) AS valid_since"),
-            ("last_refresh", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPlanCorrectionReader.cs",
-                "last_refresh - make_interval(mins => svr.offset_minutes) AS last_refresh"),
-            ("execute_action_initiated_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPlanCorrectionReader.cs",
-                "execute_action_initiated_time - make_interval(mins => svr.offset_minutes) AS execute_action_initiated_time"),
-            ("revert_action_initiated_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPlanCorrectionReader.cs",
-                "revert_action_initiated_time - make_interval(mins => svr.offset_minutes) AS revert_action_initiated_time"),
             ("aborted_version_cleaner_start_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPvsReader.cs",
                 "aborted_version_cleaner_start_time - make_interval(mins => svr.offset_minutes) AS aborted_version_cleaner_start_time"),
             ("aborted_version_cleaner_end_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingPvsReader.cs",
@@ -1705,14 +1704,6 @@ public sealed class ConsumedTimestampFrameDisciplineTests
                 "StartTime.AddMinutes(-utcOffsetMinutes)"),
             ("last_user_access", "Lite/Mcp/McpObjectStatsTools.cs",
                 "LastUserAccess?.AddMinutes(-utcOffsetMinutes)"),
-            ("valid_since", "Lite/Mcp/McpPlanCorrectionTools.cs",
-                "ValidSince?.AddMinutes(-utcOffsetMinutes)"),
-            ("last_refresh", "Lite/Mcp/McpPlanCorrectionTools.cs",
-                "LastRefresh?.AddMinutes(-utcOffsetMinutes)"),
-            ("execute_action_initiated_time", "Lite/Mcp/McpPlanCorrectionTools.cs",
-                "ExecuteActionInitiatedTime?.AddMinutes(-utcOffsetMinutes)"),
-            ("revert_action_initiated_time", "Lite/Mcp/McpPlanCorrectionTools.cs",
-                "RevertActionInitiatedTime?.AddMinutes(-utcOffsetMinutes)"),
             ("aborted_version_cleaner_start_time", "Lite/Mcp/McpPvsTools.cs",
                 "AbortedCleanerStartTime?.AddMinutes(-utcOffsetMinutes)"),
             ("aborted_version_cleaner_end_time", "Lite/Mcp/McpPvsTools.cs",
