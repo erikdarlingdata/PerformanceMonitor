@@ -278,13 +278,22 @@ public static class DarlingPgIndexBloatReader
             ORDER BY database_name, schema_name, table_name, index_name,
                      (skipped_reason IS NULL) DESC, collection_time DESC
         ) AS latest
-        /* THE ANSWERED-ONLY GATE, and it sits OUTSIDE the DISTINCT ON rather than inside it (#3424). The
-           inner ORDER BY is what makes a measured row beat a newer label for the same index, so a
-           skipped_reason filter applied in there would be filtering a population before that tie-break has
-           chosen which row represents each index - and for an index whose newest row is a label over an
-           older answer, the two orders of operations are only accidentally equivalent. Out here the
-           tie-break has already run, so this drops exactly the indexes the window holds no answer for and
-           changes nothing about which row any other index is represented by.
+        /* THE ANSWERED-ONLY GATE, and it sits OUTSIDE the DISTINCT ON scope (#3424).
+
+           THE TWO PLACEMENTS RETURN THE SAME ROWS, and saying otherwise was wrong: the inner tie-break
+           already prefers an answered row over a newer label, so filtering before the distinct keeps each
+           index's newest ANSWERED row and filtering after it keeps the same row. Measured by moving the
+           predicate inside and watching every assertion stay green.
+
+           It belongs out here because of COUPLING rather than behaviour. The inner scope defines which row
+           REPRESENTS each index, and PgIndexBloatCoverageTests pins that definition to be the same text the
+           coverage census uses - so the census and the grid cannot disagree, index by index, about what is
+           current. A caller-controlled predicate inside that scope makes the two texts diverge while the
+           pin, which compares the distinct key and the tie-break, still passes. The equivalence above then
+           becomes load-bearing and undefended: it survives only while the tie-break prefers answered rows,
+           and nothing would fail if that changed. A presentation filter applied after the representative
+           row has been chosen cannot acquire that dependency, and a pin asserts no parameter enters the
+           inner scope.
 
            Default FALSE at every caller, so the answerless-first order below is what an unasked-for read
            still gets - #3278's sort is the thing that stops an unmeasured index reading as a clean one, and

@@ -107,16 +107,24 @@ public sealed class PgCappedReadSurfaceTests
     }
 
     /// <summary>
-    /// The answered-only gate sits OUTSIDE the <c>DISTINCT ON</c>, and #3278's tie-break is untouched.
+    /// NO caller-controlled parameter enters the <c>DISTINCT ON</c> scope, #3278's tie-break is still in it,
+    /// and the answered-only gate sits outside it.
     ///
-    /// <para>Two properties, one pin, because the failure is the same either way. Inside the distinct scope
-    /// the filter would run BEFORE the measured-row-wins tie-break chooses which row represents each index,
-    /// so an index whose newest row is a label over an older answer would be decided by a different rule
-    /// than the coverage census decides it by - and <c>PgIndexBloatCoverageTests</c> pins those two to
-    /// agree. Positions rather than mere presence: "contains both" passes on the wrong nesting.</para>
+    /// <para><b>The claim is about COUPLING, not about which rows come back.</b> Mutation testing settled
+    /// that: moving the predicate inside the scope left every assertion in this suite green, because the
+    /// inner tie-break already prefers an answered row over a newer label, so both placements keep each
+    /// index's newest answered row. What the placement protects is the inner scope's TEXT, which
+    /// <c>PgIndexBloatCoverageTests</c> pins to match the coverage census so the two cannot disagree about
+    /// which row is current. A predicate inside it makes the texts diverge while that pin - it compares the
+    /// distinct key and the tie-break - keeps passing, and the equivalence becomes a dependency on the
+    /// tie-break's preference that nothing defends.</para>
+    ///
+    /// <para>So the assertion is the parameter's ABSENCE from the inner scope, which is the property that
+    /// fails under exactly that edit, rather than the gate's presence after it - which a second copy added
+    /// inside would satisfy.</para>
     /// </summary>
     [Fact]
-    public void TheAnsweredGateIsOutsideTheDistinctOn()
+    public void NoCallerParameterEntersTheDistinctOnScope()
     {
         var sql = DarlingPgIndexBloatReader.PgIndexBloatSql;
 
@@ -129,7 +137,16 @@ public sealed class PgCappedReadSurfaceTests
 
         Assert.True(distinct > 0, "the row read's distinct key is gone or renamed");
         Assert.True(tieBreak > distinct, "#3278's measured-row-wins tie-break is gone from the inner scope");
-        Assert.True(gate > closingAlias, "the answered-only gate moved INSIDE the DISTINCT ON scope");
+        Assert.True(closingAlias > distinct, "the inner scope's closing alias is gone or renamed");
+        Assert.True(gate > closingAlias, "the answered-only gate is not after the inner scope");
+
+        /* THE INNER SCOPE, and it may mention only the three parameters the census's own scope mentions -
+           server_id and the two window ends. $4 is the LIMIT and $5 is the caller's filter, and neither has
+           any business deciding which row represents an index. */
+        var innerScope = sql[distinct..closingAlias];
+
+        Assert.DoesNotContain("$5", innerScope, StringComparison.Ordinal);
+        Assert.DoesNotContain("$4", innerScope, StringComparison.Ordinal);
 
         /* The gate is a no-op by default, so the shipped order is still the one #3278 established. */
         Assert.Contains(
