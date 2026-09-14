@@ -105,17 +105,44 @@ public sealed class BulkServerOnboardingTests
         Assert.True(server.TrustServerCertificate);
     }
 
-    [Fact]
-    public void BuildServerConnection_ResolvedEntraMfa_IsRejected_TheBelt()
+    [Theory]
+    [InlineData(AuthenticationTypes.EntraMFA, "Entra MFA")]
+    [InlineData(AuthenticationTypes.EntraDeviceCode, "Device Code")]
+    public void BuildServerConnection_ResolvedInteractiveMode_IsRejected_TheBelt(string authType, string named)
     {
-        // No supported bulk path mints MFA (no MFA radio; the editor never creates an MFA profile), but the
-        // mapping helper still rejects a resolved EntraMFA at the single choke point covering Test All + Add.
+        // No supported bulk path mints either one (neither radio exists; the profile editor creates neither),
+        // but the mapping helper still rejects a resolved interactive mode at the single choke point covering
+        // Test All + Add. Parameterised because the belt now asks RequiresInteractiveSignIn rather than
+        // testing EntraMFA, so both modes must reach the same refusal through the same line.
         var (server, error) = AddMultipleServersDialog.BuildServerConnection(
             Line("azure.database.windows.net"),
-            new BulkSharedSettings { AuthType = AuthenticationTypes.EntraMFA });
+            new BulkSharedSettings { AuthType = authType });
 
         Assert.Null(server);
-        Assert.Contains("Entra MFA", error, System.StringComparison.OrdinalIgnoreCase);
+
+        // The refusal NAMES the mode, so a row's status says which of the shared settings was the problem.
+        Assert.Contains(named, error, System.StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(AuthenticationTypes.Windows)]
+    [InlineData(AuthenticationTypes.SqlServer)]
+    [InlineData(AuthenticationTypes.ServicePrincipal)]
+    [InlineData(AuthenticationTypes.ManagedIdentity)]
+    [InlineData(AuthenticationTypes.EntraDefaultCredential)]
+    public void BuildServerConnection_NonInteractiveModes_StillPassTheBelt(string authType)
+    {
+        /* The other half of the pin above, and the reason it is not vacuous: a belt that rejected
+           everything would satisfy every assertion there. EntraDefaultCredential is the case that
+           discriminates - it is an Azure mode, it is NOT interactive, and bulk add must keep
+           accepting it. */
+        var (server, error) = AddMultipleServersDialog.BuildServerConnection(
+            Line("azure.database.windows.net"),
+            new BulkSharedSettings { AuthType = authType });
+
+        Assert.Null(error);
+        Assert.NotNull(server);
+        Assert.Equal(authType, server!.AuthenticationType);
     }
 
     [Fact]

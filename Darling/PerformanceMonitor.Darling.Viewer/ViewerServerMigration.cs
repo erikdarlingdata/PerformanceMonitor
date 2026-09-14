@@ -163,7 +163,9 @@ public sealed class ViewerServerMigration
         var storeAuth = ServerStoreCredential.MapAuth(effectiveAuthType);
         if (storeAuth is null)
         {
-            /* Entra MFA / Service Principal / Managed Identity — no Darling service connect path. */
+            /* Any Entra mode — the Darling service has no connect path that acquires a token, so
+               MapAuth's whitelist answers null for every one of them, including modes added after
+               this line was written. */
             return (null, $"auth '{effectiveAuthType}' is not supported by the service");
         }
 

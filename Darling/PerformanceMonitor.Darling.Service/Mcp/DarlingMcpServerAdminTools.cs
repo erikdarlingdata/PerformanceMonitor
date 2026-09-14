@@ -337,9 +337,9 @@ public sealed class DarlingMcpServerAdminTools
         else
         {
             return (null, Invalid(
-                "auth must be \"Windows\" or \"SQL\". Microsoft Entra / MFA / Service Principal / Managed Identity " +
-                "are not supported for headless onboarding — the Darling service connects with Windows (integrated) " +
-                "or SQL authentication only."));
+                "auth must be \"Windows\" or \"SQL\". No Microsoft Entra mode is supported for headless " +
+                "onboarding — the Darling service connects with Windows (integrated) or SQL authentication " +
+                "only and acquires no Azure tokens at all."));
         }
 
         string? username = null;

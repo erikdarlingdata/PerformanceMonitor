@@ -1,0 +1,66 @@
+<Window x:Class="PerformanceMonitorLite.Windows.EntraDeviceCodeWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Microsoft Entra sign-in"
+        SizeToContent="Height" Width="420"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        Icon="/EDD.ico"
+        Closing="Window_Closing"
+        KeyDown="Window_KeyDown"
+        Background="{DynamicResource BackgroundDarkBrush}">
+    <!-- Modeless on purpose: the connection attempt is still in flight behind this window, and the
+         user has to be able to read the code, go to a browser, and come back. A modal dialog would
+         also be shown from the driver's callback while the Add Server dialog is already modal, which
+         is a nesting nothing here needs. -->
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" TextWrapping="Wrap" Margin="0,0,0,10"
+                   Foreground="{DynamicResource ForegroundBrush}"
+                   Text="Open this page in a browser — on this machine or on your phone — and enter the code below. It does not have to be this machine, and it does not use the Windows sign-in prompt."/>
+
+        <!-- Read-only TextBoxes rather than TextBlocks: both values have to be selectable, because a
+             user whose clipboard is locked down by policy still needs to be able to read and retype
+             them, and because the whole point of this mode is reaching it from a machine where the
+             normal sign-in path is blocked. -->
+        <TextBox Grid.Row="1" x:Name="VerificationUrlBox"
+                 IsReadOnly="True" IsReadOnlyCaretVisible="True"
+                 FontFamily="Consolas" Padding="6" Margin="0,0,0,10"
+                 Background="{DynamicResource BackgroundBrush}"
+                 Foreground="{DynamicResource ForegroundBrush}"
+                 BorderBrush="{DynamicResource BorderBrush}"/>
+
+        <TextBlock Grid.Row="2" Text="Code" FontWeight="Bold" Margin="0,0,0,4"
+                   Foreground="{DynamicResource ForegroundBrush}"/>
+
+        <TextBox Grid.Row="3" x:Name="UserCodeBox"
+                 IsReadOnly="True" IsReadOnlyCaretVisible="True"
+                 FontFamily="Consolas" FontSize="20" Padding="6" Margin="0,0,0,10"
+                 Background="{DynamicResource BackgroundBrush}"
+                 Foreground="{DynamicResource ForegroundBrush}"
+                 BorderBrush="{DynamicResource BorderBrush}"/>
+
+        <TextBlock Grid.Row="4" TextWrapping="Wrap" FontSize="11"
+                   Foreground="{DynamicResource ForegroundMutedBrush}"
+                   Text="The connection stops waiting about three minutes after the code is issued. Close this window to give up and return to the dialog."/>
+
+        <StackPanel Grid.Row="5" Orientation="Horizontal"
+                    HorizontalAlignment="Right" Margin="0,14,0,0">
+            <Button Content="_Copy code" Width="100" Margin="0,0,8,0" Click="CopyCode_Click"/>
+            <Button Content="_Open page" Width="100" Margin="0,0,8,0" Click="OpenPage_Click"/>
+            <!-- No IsCancel. On a MODELESS window that property routes through Window.OnDialogCancel,
+                 whose dialog branch assigns DialogResult - which throws on a window that was never
+                 shown with ShowDialog. Escape is wired in code-behind instead, so the button, the
+                 key and the title-bar X all arrive at Closing, where the cancellation lives. -->
+            <Button Content="Cancel" Width="90" Click="Cancel_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

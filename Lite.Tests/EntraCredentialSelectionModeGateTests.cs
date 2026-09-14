@@ -67,7 +67,7 @@ public class EntraCredentialSelectionModeGateTests
         var modes = AllAuthenticationModes();
 
         Assert.True(
-            modes.Count >= 6,
+            modes.Count >= 7,
             $"reflected {modes.Count} authentication modes off AuthenticationTypes; the sweep below is "
                 + "vacuous unless it is enumerating the real set");
 

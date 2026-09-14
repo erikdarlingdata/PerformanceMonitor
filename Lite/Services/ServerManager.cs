@@ -12,6 +12,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
@@ -237,10 +238,11 @@ public class ServerManager
         else if (server.AuthenticationType == AuthenticationTypes.Windows ||
                  server.AuthenticationType == AuthenticationTypes.ManagedIdentity ||
                  server.AuthenticationType == AuthenticationTypes.EntraDefaultCredential ||
+                 server.AuthenticationType == AuthenticationTypes.EntraDeviceCode ||
                  server.AuthenticationType == AuthenticationTypes.EntraMFA)
         {
-            // Zero-touch auth (Windows / Managed Identity / existing Azure sign-in): remove any
-            // stored credential. This also deletes an orphaned secret left behind when switching
+            // Zero-touch auth (Windows / Managed Identity / existing Azure sign-in / device code):
+            // remove any stored credential. This also deletes an orphaned secret left behind when switching
             // away from SqlServer or ServicePrincipal (e.g. SP -> MI, SP -> Windows).
             //
             // EntraMFA reaches this arm ONLY when the MFA username is blank, because the
@@ -457,11 +459,19 @@ public class ServerManager
                a login failure with the selection already captured, and that is the case this whole
                feature exists for. It is also the only chance to see it: the driver caches the
                credential the moment a token is acquired, so a retry raises nothing. */
+            /* Device code is reachable from here too, not only from the Add/Edit dialog: this method
+               is what "Test connection" on a saved server calls with allowInteractiveAuth: true. The
+               attempt is what the driver's callback publishes the code into and what the prompt
+               window cancels; for every other mode Begin returns null, the using disposes nothing
+               and the token is the default one, which is never cancelled. A site that opened a
+               device-code connection without this would display no code and fail three minutes
+               later. */
+            using (var deviceCode = EntraDeviceCodeAuth.Begin(builder))
             using (var credentialSelection = EntraCredentialSelectionLog.Begin(builder))
             {
                 try
                 {
-                    await connection.OpenAsync();
+                    await connection.OpenAsync(deviceCode?.Token ?? CancellationToken.None);
                 }
                 finally
                 {
@@ -562,6 +572,19 @@ public class ServerManager
                 status.UserCancelledMfa = true;
                 status.ErrorMessage = "Authentication cancelled by user";
                 _logger?.LogInformation("MFA authentication cancelled by user for server '{DisplayName}'", server.DisplayName);
+            }
+            else if (ex is OperationCanceledException)
+            {
+                /* The user closed the device-code window. Recognised by exception TYPE rather than by
+                   a message pattern, and deliberately not gated on the authentication mode: the
+                   device-code attempt's token is the only cancellation token anything on this path
+                   is handed - the three commands below the open are passed none, and
+                   CancellationToken.None cannot fire - so this has exactly one source. Recorded on
+                   the same flag as a cancelled MFA prompt, which is what stops the sweep from
+                   raising another prompt at someone who just declined one. */
+                status.UserCancelledMfa = true;
+                status.ErrorMessage = "Authentication cancelled by user";
+                _logger?.LogInformation("Device-code sign-in cancelled by user for server '{DisplayName}'", server.DisplayName);
             }
             else
             {

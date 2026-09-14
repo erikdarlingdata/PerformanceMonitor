@@ -578,14 +578,21 @@ public partial class AddMultipleServersDialog : Window
     };
 
     /// <summary>Maps one parsed row + the shared settings into a <see cref="ServerConnection"/> (the single
-    /// source of truth feeding BOTH the Test-All probes and the Add path). REJECTS a resolved
-    /// <see cref="AuthenticationTypes.EntraMFA"/> at this one choke point (the MFA belt) — no supported bulk
-    /// path mints MFA, but a hand-edited profiles.json could, and bulk would amplify it into a popup storm.</summary>
+    /// source of truth feeding BOTH the Test-All probes and the Add path). REJECTS any resolved
+    /// INTERACTIVE mode at this one choke point (the interactive belt) — no supported bulk path mints one,
+    /// but a hand-edited profiles.json could, and bulk would amplify it into a prompt storm.
+    ///
+    /// <para>The belt asks <see cref="AuthenticationTypes.RequiresInteractiveSignIn"/> rather than testing
+    /// against <see cref="AuthenticationTypes.EntraMFA"/>, so a new interactive mode is rejected here on the
+    /// day it is added rather than on the day someone remembers to add it — the whitelist reasoning
+    /// <c>ServerStoreCredential.MapAuth</c> spells out, applied to the one gate bulk add has. Device code
+    /// makes the amplification worse than MFA does rather than the same: each row would mint its own code,
+    /// each code lives about three minutes, and they cannot be entered in parallel.</para></summary>
     internal static (ServerConnection? Server, string? Error) BuildServerConnection(BulkServerParseLine row, BulkSharedSettings shared)
     {
-        if (shared.AuthType == AuthenticationTypes.EntraMFA)
+        if (AuthenticationTypes.RequiresInteractiveSignIn(shared.AuthType))
         {
-            return (null, "Entra MFA is not supported in bulk add — use Add Server");
+            return (null, $"{ServerConnection.AuthenticationDisplayFor(shared.AuthType)} needs a sign-in per server and is not supported in bulk add — use Add Server");
         }
 
         var databaseName = string.IsNullOrWhiteSpace(row.DatabaseName) ? null : row.DatabaseName.Trim();

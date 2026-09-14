@@ -88,6 +88,9 @@
                 <RadioButton x:Name="EntraDefaultAuthRadio" Content="Azure — Existing Sign-_In (az login)" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed" Margin="0,4,0,0"
                              ToolTip="Signs in as the Azure identity already established on this machine — an az login session, an Azure PowerShell session, a Visual Studio sign-in, the AZURE_CLIENT_ID/AZURE_CLIENT_SECRET environment variables, or a managed identity. Never prompts, and does not use the Windows account broker that Microsoft Entra MFA depends on. Requires one of those to exist already."/>
+                <RadioButton x:Name="EntraDeviceCodeAuthRadio" Content="Azure — _Device Code (browser on any device)" Foreground="{DynamicResource ForegroundBrush}"
+                             Checked="AuthMode_Changed" Margin="0,4,0,0"
+                             ToolTip="Shows a short code and a URL. You sign in by entering that code in a browser on any device, including a phone, and this app receives the token. It does not use the Windows account broker and does not read a cached credential from a user profile, so it works when Microsoft Entra MFA and Existing Sign-In do not — including from a process launched as a different Windows account."/>
             </StackPanel>
         </StackPanel>
 
@@ -139,6 +142,23 @@
                        Text="Because the list is searched in that order, this connects as whichever identity comes first — not necessarily the one you signed into Windows with. If several are set up on this machine and you need a specific identity, use Azure — Service Principal, which names it."/>
             <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,6,0,0"
                        Text="Unlike Microsoft Entra MFA, this never asks the Windows account broker for anything, so the broker cannot refuse it. That is the failure this option exists to route around — but it has not yet been confirmed against a live Microsoft Entra tenant, so please report what happens."/>
+        </StackPanel>
+
+        <!-- Device code (ActiveDirectoryDeviceCodeFlow). No input fields, for a different reason than
+             the panel above: this mode takes no parameters because the identity is chosen in the
+             browser, not here. A username box would look exactly like the Entra MFA hint beside it
+             and pre-fill nothing - see ServerConnection.ApplyAuthentication for the line-level
+             reason. The panel exists to say what will happen before Test is pressed, because what
+             happens is a window with a code in it and a three-minute clock. -->
+        <StackPanel Grid.Row="7" x:Name="EntraDeviceCodePanel" Visibility="Collapsed" Margin="0,0,0,12">
+            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"
+                       Text="When you press Test or Save, a small window appears with a short code and a sign-in URL. Open that URL in a browser — on this machine or on a phone — enter the code, and sign in as you normally would, MFA included. This app never sees your password."/>
+            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,6,0,0"
+                       Text="You have about three minutes. That limit is the SQL driver's, not this app's, and it cannot be raised from here. Closing the code window gives up and returns you to this dialog."/>
+            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,6,0,0"
+                       Text="Choose this when Microsoft Entra MFA fails with a broker error (0x80070520) or when Existing Sign-In cannot find your az login session: it uses neither the Windows account broker nor your user profile, so neither can be the thing that blocks it. Interactive, so background collection skips these servers — the same as Microsoft Entra MFA."/>
+            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11" Margin="0,6,0,0"
+                       Text="Not yet confirmed against a live Microsoft Entra tenant, so please report what happens."/>
         </StackPanel>
 
         <!-- Connection Options -->
