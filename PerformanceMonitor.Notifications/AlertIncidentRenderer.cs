@@ -81,8 +81,10 @@ public static class AlertIncidentRenderer
            for a total must not have the field vanish on the incident's first delivery. */
         if (incident.TotalOccurrences is long total)
             item.Fields.Add(("Total Occurrences", total.ToString(CultureInfo.InvariantCulture)));
+        /* Through AlertTimestamp rather than an inline format so the UTC marker every alert-body stamp
+           carries has one producer. Byte-identical to the format literal it replaces. */
         if (incident.IncidentStartedUtc is DateTime started)
-            item.Fields.Add(("Incident Since", started.ToString("yyyy-MM-dd HH:mm:ss'Z'", CultureInfo.InvariantCulture)));
+            item.Fields.Add(("Incident Since", AlertTimestamp.Utc(started)));
         if (!string.IsNullOrEmpty(incident.WaitRange))
             item.Fields.Add(("Wait Range", incident.WaitRange));
         return item;
