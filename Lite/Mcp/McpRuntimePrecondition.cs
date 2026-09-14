@@ -73,8 +73,8 @@ internal static class McpRuntimePrecondition
     }
 
     /// <summary>
-    /// The <c>precondition</c> envelope when the collector serving this read has never run against this
-    /// server while the server is collecting normally — i.e. its <c>AppliesTo</c> gate is off — or
+    /// The <c>precondition</c> envelope when the collector serving this read is not being invoked against
+    /// this server while the server is collecting normally — i.e. its <c>AppliesTo</c> gate is off — or
     /// <c>null</c> otherwise. Darling's twin (#2559).
     ///
     /// <para>Call this AFTER <see cref="StatusAsync"/>, never instead of it: a collector that ran and
@@ -91,13 +91,13 @@ internal static class McpRuntimePrecondition
         string collectorName,
         string gateCandidates)
     {
-        bool everRan;
+        DateTime? collectorLastRunUtc;
         DateTime? serverLastCollectedUtc;
 
         try
         {
-            (everRan, serverLastCollectedUtc) =
-                await dataService.GetCollectorEverRanAsync(serverId, collectorName);
+            (collectorLastRunUtc, serverLastCollectedUtc) =
+                await dataService.GetCollectorLastRunAsync(serverId, collectorName);
         }
         catch (Exception)
         {
@@ -105,7 +105,7 @@ internal static class McpRuntimePrecondition
         }
 
         var message = CollectorRuntimePrecondition.GatedOffMessage(
-            serverName, collectorName, gateCandidates, everRan, serverLastCollectedUtc);
+            serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc);
 
         return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message);
     }

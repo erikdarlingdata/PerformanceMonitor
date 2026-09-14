@@ -293,22 +293,27 @@ public sealed class CollectorRuntimePreconditionTests
     /* ---- #2559: the gated-off collector, which records nothing to read ---- */
 
     /// <summary>
+    /// The candidate text the shipped tool passes, so these assertions exercise what <c>get_running_jobs</c>
+    /// actually says rather than a string invented here. Since the dispatch half of #2559 removed
+    /// HasMsdbAccess from the gate, AWS RDS is the sole candidate — a login without msdb access now
+    /// dispatches and is denied, so it never reaches this arm.
+    /// </summary>
+    private const string GateCandidates = "this is an AWS RDS instance.";
+
+    /// <summary>
     /// The case the recorded-outcome reader structurally cannot see. A collector whose <c>AppliesTo</c> gate
-    /// is off never runs, and the runner returns before writing any <c>collection_log</c> row — so there is
-    /// no status to report, the outcome reader answers null, and the read falls through to its <c>empty</c>
-    /// miss. For <c>get_running_jobs</c> that miss asserts "No running SQL Agent jobs found" about a server
-    /// nobody was permitted to look at, which is the exact claim this vocabulary exists to stop.
+    /// is off is never dispatched, and the runner returns before writing any <c>collection_log</c> row — so
+    /// there is no status to report, the outcome reader answers null, and the read falls through to its
+    /// <c>empty</c> miss. For <c>get_running_jobs</c> that miss asserts "No running SQL Agent jobs found"
+    /// about a server nobody was permitted to look at, which is the exact claim this vocabulary exists to
+    /// stop.
     /// </summary>
     [Fact]
     public void AGatedOffCollector_IsReportedAsAPrecondition_NotAsNothingToReport()
     {
-        /* The candidate text is the caller's, so this passes what the shipped tool passes rather than a
-           string invented here. Since the dispatch half of #2559 removed HasMsdbAccess from the gate, that
-           is AWS RDS alone — a login without msdb access now dispatches and is denied, so it never reaches
-           this arm. */
         var message = CollectorRuntimePrecondition.GatedOffMessage(
-            Server, "running_jobs", "this is an AWS RDS instance.",
-            collectorEverRan: false, serverLastCollectedUtc: DateTime.UtcNow.AddMinutes(-3));
+            Server, "running_jobs", GateCandidates,
+            collectorLastRunUtc: null, serverLastCollectedUtc: DateTime.UtcNow.AddMinutes(-3));
 
         Assert.NotNull(message);
         Assert.Contains("never run", message, StringComparison.Ordinal);
@@ -317,15 +322,103 @@ public sealed class CollectorRuntimePreconditionTests
     }
 
     /// <summary>
-    /// Both halves of the inference are required. A collector that HAS run is not gated off — whatever its
-    /// miss is, it is the recorded-outcome reader's business and this must stand aside so the specific
-    /// sentence the monitored server gave wins over an inference from an absence.
+    /// The arm has to DISCRIMINATE, which is the only property worth pinning: a guard that answered the same
+    /// thing for both populations would be the defect rather than the check on it. Driven twice over one
+    /// function — a collector the dispatcher has stopped reaching for, and a collector that ran in the very
+    /// sweep that collected the server and stored no rows because the Agent is genuinely idle.
+    ///
+    /// <para>The idle case must answer NULL specifically, not merely something different: null is what lets
+    /// the caller fall through to its own <c>empty</c> miss, which is the honest answer there. A non-null
+    /// "different" message would be a gate claim about a working collector.</para>
     /// </summary>
     [Fact]
-    public void ACollectorThatHasRun_IsNeverCalledGatedOff()
-        => Assert.Null(CollectorRuntimePrecondition.GatedOffMessage(
-            Server, "running_jobs", "candidates", collectorEverRan: true,
-            serverLastCollectedUtc: DateTime.UtcNow.AddMinutes(-3)));
+    public void TheGatedOffArm_TellsADarkCollectorApartFromAGenuinelyIdleOne()
+    {
+        var serverLastCollected = DateTime.UtcNow.AddMinutes(-2);
+
+        var dark = CollectorRuntimePrecondition.GatedOffMessage(
+            Server, "running_jobs", GateCandidates,
+            collectorLastRunUtc: serverLastCollected.AddDays(-20),
+            serverLastCollectedUtc: serverLastCollected);
+
+        var idle = CollectorRuntimePrecondition.GatedOffMessage(
+            Server, "running_jobs", GateCandidates,
+            collectorLastRunUtc: serverLastCollected,
+            serverLastCollectedUtc: serverLastCollected);
+
+        Assert.NotNull(dark);
+        Assert.Null(idle);
+        Assert.NotEqual(idle, dark);
+    }
+
+    /// <summary>
+    /// The inference is RECENCY, and this is the population that proves it has to be. A store written before
+    /// #2580 holds one zero-duration, zero-row <c>SUCCESS</c> per cycle for exactly this collector — the
+    /// pre-dispatch skip recording itself as a success — and <c>collection_log</c> keeps
+    /// <c>DarlingRetention.CollectionLogRetentionDays</c> of rows. A PRESENCE probe reads those as runs and
+    /// answers "this collector has run", silencing the declaration for the whole retention window on
+    /// precisely the fleet the declaration was built for. Measured live: rows 20 days old suppressing the
+    /// answer on a server whose newest collection was two minutes old.
+    ///
+    /// <para>A genuine gate FLIP reaches the same state by a different route and does not age out of it, so
+    /// this is not a one-off.</para>
+    /// </summary>
+    [Fact]
+    public void RowsThatRecordASkipRatherThanARun_DoNotSilenceTheDeclaration()
+    {
+        var serverLastCollected = DateTime.UtcNow.AddMinutes(-2);
+
+        var message = CollectorRuntimePrecondition.GatedOffMessage(
+            Server, "running_jobs", GateCandidates,
+            collectorLastRunUtc: serverLastCollected.AddDays(-20),
+            serverLastCollectedUtc: serverLastCollected);
+
+        Assert.NotNull(message);
+        Assert.Contains("no longer being invoked", message, StringComparison.Ordinal);
+        Assert.Contains("AWS RDS", message, StringComparison.Ordinal);
+
+        /* Those rows are real and the reader can query them, so denying them would be a falsifiable claim
+           in operator-facing text. The message reports the instant instead. */
+        Assert.DoesNotContain("never run", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A collector still being dispatched is at most one cadence behind the sweep that collected the server,
+    /// so an ordinary gap must stand aside and let the recorded-outcome reader or the read's own miss answer.
+    /// Pinned at the cutoff from both sides, because a comparison with the wrong sense passes one of them.
+    /// </summary>
+    [Fact]
+    public void ACollectorStillBeingDispatched_IsNeverCalledGatedOff()
+    {
+        var serverLastCollected = DateTime.UtcNow.AddMinutes(-3);
+
+        Assert.Null(CollectorRuntimePrecondition.GatedOffMessage(
+            Server, "running_jobs", GateCandidates,
+            collectorLastRunUtc: serverLastCollected.AddHours(-(CollectorRuntimePrecondition.GoneDarkHours - 1)),
+            serverLastCollectedUtc: serverLastCollected));
+
+        Assert.NotNull(CollectorRuntimePrecondition.GatedOffMessage(
+            Server, "running_jobs", GateCandidates,
+            collectorLastRunUtc: serverLastCollected.AddHours(-(CollectorRuntimePrecondition.GoneDarkHours + 1)),
+            serverLastCollectedUtc: serverLastCollected));
+    }
+
+    /// <summary>
+    /// The gap is measured between two STORED instants, never against the wall clock. Both halves age
+    /// together when the service stops visiting a server, so a wall-clock comparison would call every
+    /// collector on it gated off at once — a whole server's worth of confident structural claims produced by
+    /// an outage. Measured against the server's own last collection the gap stays small, which is the
+    /// <c>unavailable</c> answer collection health owns.
+    /// </summary>
+    [Fact]
+    public void AServerTheServiceStoppedVisiting_IsAnOutage_NotAFleetOfGates()
+    {
+        var stopped = DateTime.UtcNow.AddDays(-3);
+
+        Assert.Null(CollectorRuntimePrecondition.GatedOffMessage(
+            Server, "running_jobs", GateCandidates,
+            collectorLastRunUtc: stopped, serverLastCollectedUtc: stopped.AddMinutes(1)));
+    }
 
     /// <summary>
     /// The other half, and the one that would turn an outage into a lie. A server that has collected NOTHING
@@ -335,23 +428,50 @@ public sealed class CollectorRuntimePreconditionTests
     [Fact]
     public void AServerCollectingNothingAtAll_IsAnOutage_NotAGate()
         => Assert.Null(CollectorRuntimePrecondition.GatedOffMessage(
-            Server, "running_jobs", "candidates", collectorEverRan: false, serverLastCollectedUtc: null));
+            Server, "running_jobs", GateCandidates,
+            collectorLastRunUtc: null, serverLastCollectedUtc: null));
 
     /// <summary>
-    /// A gated-off collector cannot re-derive its own precondition, so its message must NOT carry the general
-    /// promise that nothing needs restarting. The deciding fact is read once at connect and cached for the
-    /// connection's life — that is the whole of #2559 — and a message telling the operator to grant and retry
-    /// sends them round a loop that never terminates.
+    /// One cutoff, two surfaces. <c>STOPPED</c> bands a collector that has attempted nothing for longer than
+    /// the FAILING cutoff and names this exact RDS case in its own comment; this arm says the same thing in a
+    /// sentence. Held as a separate constant because <c>PerformanceMonitor.Collectors</c> references nothing,
+    /// so this equality is what stops the copy drifting — without it the two surfaces could disagree about
+    /// every server sitting between their cutoffs, with nothing to tell the reader which to believe.
     /// </summary>
     [Fact]
-    public void TheGatedOffMessage_SaysAReconnectIsNeeded_NotThatNothingNeedsRestarting()
-    {
-        var message = CollectorRuntimePrecondition.GatedOffMessage(
-            Server, "running_jobs", "candidates", collectorEverRan: false,
-            serverLastCollectedUtc: DateTime.UtcNow.AddMinutes(-3))!;
+    public void TheGoneDarkCutoff_IsTheOneTheStoppedBandAlreadyUses()
+        => Assert.Equal(
+            CollectorHealthClassifier.FailingThresholdHours(
+                CollectorScheduleDefaults.All["running_jobs"].FrequencyMinutes),
+            CollectorRuntimePrecondition.GoneDarkHours);
 
-        Assert.Contains("reconnect", message, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("nothing to restart", message, StringComparison.OrdinalIgnoreCase);
+    /// <summary>
+    /// A gated-off collector cannot re-derive its own precondition, so BOTH its messages must carry the
+    /// connect-scoped epilogue rather than the general promise that nothing needs restarting. The deciding
+    /// fact is read once at connect and cached for the connection's life — that is the whole of #2559 — and a
+    /// message telling the operator to grant and retry sends them round a loop that never terminates. Pinned
+    /// over both wordings, because an arm added without the epilogue reintroduces the contradiction in the
+    /// half nobody re-read.
+    /// </summary>
+    [Fact]
+    public void BothGatedOffMessages_SayAReconnectIsNeeded_NotThatNothingNeedsRestarting()
+    {
+        var serverLastCollected = DateTime.UtcNow.AddMinutes(-3);
+
+        var neverRan = CollectorRuntimePrecondition.GatedOffMessage(
+            Server, "running_jobs", GateCandidates,
+            collectorLastRunUtc: null, serverLastCollectedUtc: serverLastCollected)!;
+
+        var goneDark = CollectorRuntimePrecondition.GatedOffMessage(
+            Server, "running_jobs", GateCandidates,
+            collectorLastRunUtc: serverLastCollected.AddDays(-20),
+            serverLastCollectedUtc: serverLastCollected)!;
+
+        foreach (var message in new[] { neverRan, goneDark })
+        {
+            Assert.Contains("reconnect", message, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("nothing to restart", message, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     /// <summary>
