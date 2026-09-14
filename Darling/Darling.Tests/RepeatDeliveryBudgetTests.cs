@@ -592,6 +592,40 @@ public sealed class RepeatDeliveryBudgetTests
     }
 
     /// <summary>
+    /// Email is bounded too, on its own budget, and this is a separate pin rather than an extra assertion
+    /// because a fix applied to the webhook fan-out alone passes every webhook assertion above. The two
+    /// channels hold separate cooldown key spaces by design (#1154's <c>keyPrefix</c>), so they hold separate
+    /// budgets for the same reason: an email that failed to send left its key unstamped and its incident is
+    /// still owed a delivery even where the webhook's is not.
+    /// <para>SMTP only, no webhook, so one delivered message is one captured message.</para>
+    /// </summary>
+    [Fact]
+    public async Task OnTheWire_TheEmailChannelIsBoundedOnItsOwnBudget()
+    {
+        using var smtp = new CapturingSmtpEndpoint();
+        var repeats = Fleet.Skip(1).ToArray();
+        var history = new SeedingSetHistoryStore(
+            repeats.Select(Fingerprint), DateTime.UtcNow - StaleDelivery);
+        var deliverer = BuildEmailOnlyDeliverer(smtp, history);
+
+        foreach (var server in repeats)
+        {
+            await deliverer.DeliverAsync(Outcome(server), TestContext.Current.CancellationToken);
+        }
+
+        await deliverer.DeliverAsync(Outcome(Fleet[0]), TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, smtp.Messages.Count);
+
+        var withRoster = smtp.Messages[1];
+        Assert.Contains(RepeatDeliveryBudget.RosterHeading, withRoster, StringComparison.Ordinal);
+        foreach (var server in repeats.Skip(1))
+        {
+            Assert.Contains(server, withRoster, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
     /// The history row is whole on a folded delivery as well as a carried one. #3313 drew this split for the
     /// render — delivery filters, persistence does not — and a fold is the same split one step earlier: the
     /// card did not go out, and the row still carries the alert, its detail text and its context JSON, so
@@ -733,6 +767,24 @@ public sealed class RepeatDeliveryBudgetTests
         var config = new DarlingConfig();
         config.Webhooks.TeamsUrl = endpoint.Url;
         configure?.Invoke(config);
+
+        var settings = new DarlingAlertSettings(config);
+        var webhooks = new WebhookAlertService(
+            settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
+        return new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
+    }
+
+    /* SMTP only and no webhook, the mirror of BuildDeliverer: one delivered message is one captured
+       message, so the email channel's own budget is measured rather than inferred from the webhook's. */
+    private static DarlingAlertDeliverer BuildEmailOnlyDeliverer(
+        CapturingSmtpEndpoint smtp, IAlertHistoryStore history)
+    {
+        var config = new DarlingConfig();
+        config.Smtp.Host = "127.0.0.1";
+        config.Smtp.Port = smtp.Port;
+        config.Smtp.UseSsl = false;
+        config.Smtp.From = "monitor@example.invalid";
+        config.Smtp.To = "operator@example.invalid";
 
         var settings = new DarlingAlertSettings(config);
         var webhooks = new WebhookAlertService(
