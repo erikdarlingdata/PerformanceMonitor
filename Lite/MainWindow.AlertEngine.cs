@@ -179,6 +179,12 @@ public partial class MainWindow : Window
             AppLogger.Warn("Alerts", AlertFiringLog.Fired(
                 serverName, metricName, "Critical", currentValue, isMuted));
 
+            /* #3430: the effective delivery mode, so this alert obeys the same per-metric repeat ceiling
+               every alert the deliverer carries obeys. A network blip that drops several monitored servers
+               at once is exactly the fan-out that bound exists for — without this the connection edge would
+               be the one family on this store still costing one post per affected server. Read straight off
+               the ServerConnection in hand rather than through ServerManager's scan, which exists for the
+               callers that only have the hashed id. */
             _ = _emailAlertService.TrySendAlertEmailAsync(
                 metricName,
                 serverName,
@@ -187,7 +193,9 @@ public partial class MainWindow : Window
                 serverId,
                 context: null,
                 muted: isMuted,
-                detailText: detailText);
+                detailText: detailText,
+                deliveryMode: AlertDeliveryModeResolver.Resolve(
+                    server.AlertDeliveryModeOverride, App.AlertDeliveryMode));
         }
         catch (Exception ex)
         {
@@ -380,6 +388,10 @@ public partial class MainWindow : Window
                     serverName, alert.MetricName, "Warning", alert.CurrentValue, isMuted));
             }
 
+            /* #3430: the effective delivery mode, for the reason the connection edge above gives — AG
+               replicas on one availability group flap together, so this family fans out across servers the
+               same way. Through ServerManager's scan because this path carries the hashed id, not the
+               ServerConnection. */
             _ = _emailAlertService.TrySendAlertEmailAsync(
                 alert.MetricName,
                 serverName,
@@ -388,7 +400,9 @@ public partial class MainWindow : Window
                 serverId,
                 context: alert.Context,
                 muted: isMuted,
-                detailText: alert.DetailText);
+                detailText: alert.DetailText,
+                deliveryMode: AlertDeliveryModeResolver.Resolve(
+                    _serverManager.ResolveAlertDeliveryModeOverride(serverId), App.AlertDeliveryMode));
         }
         catch (Exception ex)
         {

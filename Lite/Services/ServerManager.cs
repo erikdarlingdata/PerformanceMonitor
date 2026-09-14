@@ -19,6 +19,7 @@ using Microsoft.Extensions.Logging;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -114,6 +115,32 @@ public class ServerManager
                           .ThenByDescending(s => s.LastConnected)
                           .ToList();
         }
+    }
+
+    /// <summary>
+    /// The #1236 per-server alert delivery-mode override for the id the alert engine keys on, or <c>null</c>
+    /// to inherit <c>App.AlertDeliveryMode</c>. The id is the deterministic hash of the storage name, which
+    /// is not stored on the <see cref="ServerConnection"/>, so the mapping back is a scan.
+    ///
+    /// <para>One authority rather than a copy per caller. Three places need it — the deliverer, the
+    /// connection-edge alert and the AG alert — and #3430 gave the answer a second consumer beyond the
+    /// #1141 split: it now also decides whether the shared send core's per-metric repeat ceiling applies,
+    /// so a caller that resolved it differently, or not at all, would silently exempt its own alerts from a
+    /// bound every other alert on the same store obeys. A caller holding the
+    /// <see cref="ServerConnection"/> itself should read
+    /// <see cref="ServerConnection.AlertDeliveryModeOverride"/> directly and skip the scan.</para>
+    /// </summary>
+    public AlertNotificationMode? ResolveAlertDeliveryModeOverride(int serverId)
+    {
+        foreach (var server in GetAllServers())
+        {
+            if (RemoteCollectorService.GetServerId(server) == serverId)
+            {
+                return server.AlertDeliveryModeOverride;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

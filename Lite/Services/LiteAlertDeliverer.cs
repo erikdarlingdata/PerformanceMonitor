@@ -98,20 +98,11 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
                 muted: muted, detailText: detailText, deliveryMode: deliveryMode);
 
         /* #1236: the per-server delivery-mode override for serverId, or null to inherit the global
-           App.AlertDeliveryMode. serverId is the deterministic hash of the storage name (the same
-           mapping the alert engine keys on), so map it back to the ServerConnection to read its
-           override — moved verbatim from the pre-forwarding MainWindow.ResolveServerDeliveryOverride. */
-        _resolveServerDeliveryOverride = serverId =>
-        {
-            foreach (var s in serverManager.GetAllServers())
-            {
-                if (RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)) == serverId)
-                {
-                    return s.AlertDeliveryModeOverride;
-                }
-            }
-            return null;
-        };
+           App.AlertDeliveryMode. serverId is the deterministic hash of the storage name (the same mapping
+           the alert engine keys on), so the lookup back to the ServerConnection is a scan — and it lives on
+           ServerManager rather than here because the connection-edge and AG alerts, which bypass this
+           deliverer entirely, have to reach the same answer. */
+        _resolveServerDeliveryOverride = serverManager.ResolveAlertDeliveryModeOverride;
     }
 
     /// <summary>Test ctor: injected toast/send/override seams, no WPF or SMTP dependencies.</summary>
