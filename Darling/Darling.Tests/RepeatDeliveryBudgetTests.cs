@@ -540,6 +540,20 @@ public sealed class RepeatDeliveryBudgetTests
             Assert.Contains(server, withRoster, StringComparison.Ordinal);
             Assert.Contains(Fingerprint(server).Substring(0, 12), withRoster, StringComparison.Ordinal);
         }
+
+        /* And the roster is a DELIVERY view only: no history row carries it, in either column, so the
+           Alerts tab, the MCP reader, the triage page and AlertMuteContext.PopulateFromDetailText read
+           exactly what they read before. The same split #3313 drew, asserted at the wire rather than
+           inferred from the copy — an append to the caller's own context would be invisible to every
+           assertion above and visible only here. */
+        Assert.Equal(Fleet.Length, history.Records.Count);
+        Assert.All(history.Records, record =>
+        {
+            Assert.DoesNotContain(
+                RepeatDeliveryBudget.RosterHeading, record.DetailText ?? string.Empty, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                RepeatDeliveryBudget.RosterHeading, record.ContextJson ?? string.Empty, StringComparison.Ordinal);
+        });
     }
 
     /// <summary>
