@@ -94,11 +94,20 @@ public sealed class EntraDeviceCodeAttempt : IDisposable
     }
 
     /// <summary>
-    /// Ends the attempt: raises <see cref="Finished"/> once so the window closes, then releases the
-    /// token source.
+    /// Ends the attempt: gives up the slot the driver's callback publishes into, raises
+    /// <see cref="Finished"/> once so the window closes, then releases the token source.
+    ///
+    /// <para><b>The slot has to be released, not merely finished.</b> A disposed attempt left in that
+    /// slot is worse than an empty one: the next device-code connection would publish its challenge
+    /// onto an object whose <see cref="Finished"/> has already fired and whose token source is gone,
+    /// so the window it opens never closes and its Cancel button does nothing. Released
+    /// conditionally, so an attempt that was already displaced by a newer one does not take the
+    /// newer one's slot with it on the way out.</para>
     /// </summary>
     public void Dispose()
     {
+        EntraDeviceCodeAuth.Release(this);
+
         if (Interlocked.Exchange(ref _finished, 1) == 0)
         {
             Finished?.Invoke();
@@ -228,6 +237,19 @@ public static class EntraDeviceCodeAuth
 
         return attempt;
     }
+
+    /// <summary>
+    /// Whether an attempt currently owns the slot the driver's callback publishes into.
+    ///
+    /// <para>Internal, and it exists to be asserted on. "A disposed attempt no longer owns the slot"
+    /// has no other observable consequence until the next device-code connection arrives, which is
+    /// exactly the shape of defect that ships.</para>
+    /// </summary>
+    internal static bool SignInInFlight => Volatile.Read(ref s_current) is not null;
+
+    /// <summary>Gives up the slot, but only if <paramref name="attempt"/> still holds it.</summary>
+    internal static void Release(EntraDeviceCodeAttempt attempt) =>
+        Interlocked.CompareExchange(ref s_current, null, attempt);
 
     /// <summary>
     /// Forgets the registration flag and any in-flight attempt so a test can observe registration

@@ -329,6 +329,73 @@ public class EntraDeviceCodeTests
         Assert.Null(attempt.Challenge);
     }
 
+    [Fact]
+    public void Attempt_GivesUpTheCallbackSlotWhenItEnds()
+    {
+        /* A disposed attempt left owning the slot is worse than an empty slot: the NEXT device-code
+           connection publishes its code onto an object whose Finished has already fired and whose
+           token source is gone, so the window it opens never closes and its Cancel does nothing.
+           Nothing about a single attempt's own lifetime reveals that, which is why it is pinned
+           rather than left to the next connection to discover. */
+        var builder = new SqlConnectionStringBuilder();
+        ServerConnection.ApplyAuthentication(
+            builder, AuthenticationTypes.EntraDeviceCode, null, null, null, null);
+
+        EntraDeviceCodeAuth.ResetForTests();
+        try
+        {
+            Assert.False(EntraDeviceCodeAuth.SignInInFlight);
+
+            var attempt = EntraDeviceCodeAuth.Begin(builder);
+            Assert.NotNull(attempt);
+            Assert.True(EntraDeviceCodeAuth.SignInInFlight);
+
+            attempt!.Dispose();
+            Assert.False(EntraDeviceCodeAuth.SignInInFlight);
+        }
+        finally
+        {
+            EntraDeviceCodeAuth.ResetForTests();
+        }
+    }
+
+    [Fact]
+    public void Attempt_DisposingADisplacedAttemptDoesNotEvictTheNewerOne()
+    {
+        /* The conditional half of the release, and the reason it is a CompareExchange rather than an
+           assignment. Two attempts can overlap only in a shape the UI does not produce today, but the
+           failure if it ever does is the quiet kind: the older attempt finishes, clears the slot, and
+           the newer one's code is then published onto nothing - a sign-in with no window at all,
+           replacing one with a window showing the wrong code. */
+        var builder = new SqlConnectionStringBuilder();
+        ServerConnection.ApplyAuthentication(
+            builder, AuthenticationTypes.EntraDeviceCode, null, null, null, null);
+
+        EntraDeviceCodeAuth.ResetForTests();
+        try
+        {
+            var older = EntraDeviceCodeAuth.Begin(builder);
+            var newer = EntraDeviceCodeAuth.Begin(builder);
+
+            Assert.NotNull(older);
+            Assert.NotNull(newer);
+            Assert.NotSame(older, newer);
+
+            older!.Dispose();
+
+            Assert.True(
+                EntraDeviceCodeAuth.SignInInFlight,
+                "the displaced attempt must not take the newer attempt's slot with it");
+
+            newer!.Dispose();
+            Assert.False(EntraDeviceCodeAuth.SignInInFlight);
+        }
+        finally
+        {
+            EntraDeviceCodeAuth.ResetForTests();
+        }
+    }
+
     // ---- The challenge must not carry the secret half ------------------------------------
 
     [Fact]
