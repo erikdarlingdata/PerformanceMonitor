@@ -50,6 +50,18 @@ public sealed class RepeatDeliveryBudgetTests
     private static readonly TimeSpan Window = TimeSpan.FromMinutes(15);
     private static readonly DateTime T0 = new(2026, 9, 14, 21, 48, 33, DateTimeKind.Utc);
 
+    /// <summary>
+    /// How long ago the wire fixtures' seeded deliveries went out. Well past
+    /// <c>DarlingConfig.Smtp.EmailCooldownMinutes</c>' default fifteen, because a repeat only reaches the
+    /// budget once the per-fingerprint cooldown has already cleared it — a seed INSIDE the window suppresses
+    /// the delivery at the cooldown and the aggregate is never consulted, which reads as the budget folding
+    /// and is not.
+    /// <para>Three days is the measured case rather than an arbitrary large number: alerting was re-enabled
+    /// on the 43-server store after a three-day blanket mute, so every fingerprint's last delivery was days
+    /// old and every one of them was a repeat.</para>
+    /// </summary>
+    private static readonly TimeSpan StaleDelivery = TimeSpan.FromDays(3);
+
     /* Fifteen servers, the fan-out width of the measurement. Invented labels; SRV-A..SRV-O rather than
        anything a fleet would issue. */
     private static readonly string[] Fleet =
@@ -97,6 +109,14 @@ public sealed class RepeatDeliveryBudgetTests
                 budget.Commit(decision);
             }
         }
+
+        /* The fixture's own width, asserted rather than assumed — and this is the assertion that makes the
+           two below mean anything. At N = 1 a per-fingerprint throttle and a per-metric one deliver the
+           same four posts over four windows, so a fleet narrowed to one server turns the whole pin vacuous
+           while leaving it green. Measured: narrowing Fleet to a single entry passes every other assertion
+           in this method. */
+        Assert.Equal(15, Fleet.Length);
+        Assert.Equal(60, Fleet.Length * 4);
 
         /* Four windows, one post each — and NOT the 60 the same fixture costs per fingerprint. */
         Assert.Equal(4, posts);
@@ -266,14 +286,18 @@ public sealed class RepeatDeliveryBudgetTests
     {
         var budget = new RepeatDeliveryBudget();
         budget.Commit(budget.Evaluate(Metric, "SRV-A", Repeat(T0, Fingerprint("SRV-A")), Window, true));
-        budget.Evaluate(Metric, "SRV-B", Repeat(T0 + TimeSpan.FromMinutes(1), Fingerprint("SRV-B")), Window, true);
+        budget.Evaluate(
+            Metric, "SRV-B", Repeat(T0 + TimeSpan.FromMinutes(1), Fingerprint("SRV-B")), Window, true,
+            Incidents("SRV-B"));
 
         var carrier = budget.Evaluate(
             Metric, "SRV-A", Repeat(T0 + Window, Fingerprint("SRV-A")), Window, true);
         Assert.Equal(new[] { "SRV-B (srvb01234567, 4 occurrence(s))" }, RosterEntries(carrier));
 
         /* Folded between the decision and the commit — the window the four channel posts occupy. */
-        budget.Evaluate(Metric, "SRV-C", Repeat(T0 + Window + TimeSpan.FromSeconds(1), Fingerprint("SRV-C")), Window, true);
+        budget.Evaluate(
+            Metric, "SRV-C", Repeat(T0 + Window + TimeSpan.FromSeconds(1), Fingerprint("SRV-C")), Window, true,
+            Incidents("SRV-C"));
         budget.Commit(carrier);
 
         var next = budget.Evaluate(
@@ -488,7 +512,7 @@ public sealed class RepeatDeliveryBudgetTests
         using var endpoint = new CapturingWebhookEndpoint();
         var repeats = Fleet.Skip(1).ToArray();
         var history = new SeedingSetHistoryStore(
-            repeats.Select(Fingerprint), DateTime.UtcNow - TimeSpan.FromMinutes(1));
+            repeats.Select(Fingerprint), DateTime.UtcNow - StaleDelivery);
         var deliverer = BuildDeliverer(endpoint, history);
 
         foreach (var server in repeats)
@@ -533,7 +557,7 @@ public sealed class RepeatDeliveryBudgetTests
         using var endpoint = new CapturingWebhookEndpoint();
         var repeats = Fleet.Skip(1).ToArray();
         var history = new SeedingSetHistoryStore(
-            repeats.Select(Fingerprint), DateTime.UtcNow - TimeSpan.FromMinutes(1));
+            repeats.Select(Fingerprint), DateTime.UtcNow - StaleDelivery);
         var deliverer = BuildDeliverer(
             endpoint, history, config => config.Alerts.DeliveryMode = AlertNotificationMode.PerEvent);
 
@@ -579,7 +603,7 @@ public sealed class RepeatDeliveryBudgetTests
         using var endpoint = new CapturingWebhookEndpoint();
         var repeats = new[] { Fleet[1], Fleet[2] };
         var history = new SeedingSetHistoryStore(
-            repeats.Select(Fingerprint), DateTime.UtcNow - TimeSpan.FromMinutes(1));
+            repeats.Select(Fingerprint), DateTime.UtcNow - StaleDelivery);
         var deliverer = BuildDeliverer(endpoint, history);
 
         foreach (var server in repeats)
