@@ -156,6 +156,7 @@ public class EntraDefaultCredentialTests
 
     [Theory]
     [InlineData(AuthenticationTypes.EntraDefaultCredential)]
+    [InlineData(AuthenticationTypes.EntraDeviceCode)]
     [InlineData(AuthenticationTypes.Windows)]
     [InlineData(AuthenticationTypes.EntraMFA)]
     [InlineData(AuthenticationTypes.ManagedIdentity)]
@@ -187,21 +188,38 @@ public class EntraDefaultCredentialTests
     // ---- Which modes can raise a window ---------------------------------------------------
 
     [Fact]
-    public void ExactlyOneModeRequiresAnInteractiveSignIn()
+    public void ExactlyTwoModesRequireAnInteractiveSignIn()
     {
-        /* Enumerated from the constants by reflection rather than listed here, so a seventh mode
-           cannot be added without this pin having an opinion about it. Entra MFA is the only mode
-           that can put a window in front of the user; the new mode cannot, because the driver
-           excludes the interactive browser from its credential chain outright, which is why it may
-           run on an unattended collection cycle. */
+        /* Enumerated from the constants by reflection rather than listed here, so an eighth mode
+           cannot be added without this pin having an opinion about it - which is what happened when
+           #3196's device-code mode became the seventh and this test, then asserting six and a
+           single interactive mode, failed on the day it was added rather than on the day someone
+           noticed.
+
+           The ORDER is asserted with it, because Equal on an array is order-sensitive and the
+           constants are reflected in declaration order: EntraMFA is declared before EntraDeviceCode
+           on AuthenticationTypes, so this also pins that the list here is derived from that file
+           rather than retyped from memory. */
         var modes = AuthenticationModeConstants();
 
-        Assert.Equal(6, modes.Length);
+        Assert.Equal(7, modes.Length);
 
         var interactive = modes.Where(AuthenticationTypes.RequiresInteractiveSignIn).ToArray();
 
-        Assert.Equal(new[] { AuthenticationTypes.EntraMFA }, interactive);
+        Assert.Equal(
+            new[] { AuthenticationTypes.EntraMFA, AuthenticationTypes.EntraDeviceCode },
+            interactive);
+
+        /* The complement, stated separately, because Equal above is satisfied by any set with those
+           two in it and would not notice a THIRD mode joining if the reflection helper ever narrowed
+           - and because these are the two modes whose absence is the deliberate decision:
+           EntraDefaultCredential never prompts (the driver excludes the interactive browser from its
+           credential chain), and ManagedIdentity has no user in the loop at all. */
         Assert.False(AuthenticationTypes.RequiresInteractiveSignIn(AuthenticationTypes.EntraDefaultCredential));
+        Assert.False(AuthenticationTypes.RequiresInteractiveSignIn(AuthenticationTypes.ManagedIdentity));
+        Assert.False(AuthenticationTypes.RequiresInteractiveSignIn(AuthenticationTypes.Windows));
+        Assert.False(AuthenticationTypes.RequiresInteractiveSignIn(AuthenticationTypes.SqlServer));
+        Assert.False(AuthenticationTypes.RequiresInteractiveSignIn(AuthenticationTypes.ServicePrincipal));
     }
 
     [Fact]
@@ -478,9 +496,10 @@ public class EntraDefaultCredentialTests
     [Fact]
     public void TheReadmeAuthenticationCountMatchesTheConstants()
     {
-        /* A count in prose is a partial list with a numeral welded on: this file adds a sixth mode,
-           and the README's "five authentication types" was correct until it did. Derived from
-           reflection rather than restated, so the numeral cannot go stale silently again. */
+        /* A count in prose is a partial list with a numeral welded on: #3214 added a sixth mode and
+           the README's "five authentication types" was correct until it did, then #3196's device
+           code added a seventh. Derived from reflection rather than restated, so the numeral cannot
+           go stale silently again - and it has now caught the same drift twice. */
         var readme = ReadRepoFile("README.md");
         var expected = AuthenticationModeConstants().Length;
 

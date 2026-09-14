@@ -17,9 +17,9 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <see cref="Integrated"/> (Windows / integrated security) and <see cref="Sql"/> (SQL login + password) —
 /// so those are the only two the control-plane writes.
 ///
-/// <para>The viewer UI (a faithful Lite port) also offers Microsoft Entra MFA, Azure Service Principal, and
-/// Azure Managed Identity. The Darling service has NO Azure/AAD connect path (verified: nothing in the
-/// Service project builds an access token), so writing one of those into the store would produce a row the
+/// <para>The viewer UI (a faithful Lite port) also offers three Entra modes of its own, and Lite offers
+/// more than the viewer does. The Darling service has NO Azure/AAD connect path (verified: nothing in the
+/// Service project builds an access token), so writing any of those into the store would produce a row the
 /// service rejects or silently mis-connects as integrated. Rather than persist an un-honorable definition,
 /// the write path BLOCKS those modes with <see cref="UnsupportedAuthMessage"/>. Adding an Azure connect path
 /// is a Service-project feature, out of scope here — surfaced in the PR, not silently dropped.</para>
@@ -28,9 +28,12 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <see cref="MapAuth"/> names the two honorable modes and returns null for everything else, so a mode added
 /// to <see cref="AuthenticationTypes"/> is rejected here on the day it is added rather than on the day someone
 /// remembers to reject it — #3214's broker-free Entra mode arrived that way and needed no edit to this file.
-/// A blacklist would have admitted it silently and written a row the service cannot connect with. The reason
-/// is the same for every Azure mode and does not weaken as more are added: the service acquires no tokens at
-/// all, so there is nothing for a new Entra mode to be honored BY.</para>
+/// A blacklist would have admitted it silently and written a row the service cannot connect with. #3196's
+/// device-code mode arrived the same way and also needed no edit here, and is Lite-only for a second reason
+/// besides the missing connect path: it is INTERACTIVE, and the Darling service is a headless 24/7 collector
+/// with nobody in front of it to read a code that expires in three minutes. The reason is the same for every
+/// Azure mode and does not weaken as more are added: the service acquires no tokens at all, so there is
+/// nothing for a new Entra mode to be honored BY.</para>
 /// </summary>
 public static class ServerStoreCredential
 {
@@ -58,9 +61,18 @@ public static class ServerStoreCredential
     public static bool RequiresSecret(string? authenticationType) =>
         MapAuth(authenticationType) == Sql;
 
-    /// <summary>The user-facing message shown when an Azure/Entra auth mode is chosen (service can't honor it).</summary>
+    /// <summary>
+    /// The user-facing message shown when an Azure/Entra auth mode is chosen (service can't honor it).
+    ///
+    /// <para>States the two modes that ARE honored rather than listing the ones that are not, because
+    /// the list of Azure modes grows: this message named three of them and was already a mode behind by
+    /// the time <see cref="AuthenticationTypes.EntraDefaultCredential"/> shipped, and would have been two
+    /// behind after <see cref="AuthenticationTypes.EntraDeviceCode"/>. The whitelist in
+    /// <see cref="MapAuth"/> is the thing that stays correct as modes are added; the message now says the
+    /// same thing the whitelist says instead of restating its complement.</para>
+    /// </summary>
     public const string UnsupportedAuthMessage =
-        "The Darling service connects with Windows (integrated) or SQL authentication only. " +
-        "Microsoft Entra MFA, Service Principal, and Managed Identity aren't supported by the service's " +
-        "collection path yet — choose Windows or SQL authentication, or a SQL credential profile.";
+        "The Darling service connects with Windows (integrated) or SQL authentication only — it acquires " +
+        "no Azure tokens at all, so no Microsoft Entra mode is supported by its collection path yet. " +
+        "Choose Windows or SQL authentication, or a SQL credential profile.";
 }

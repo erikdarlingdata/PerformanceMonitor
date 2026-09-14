@@ -967,13 +967,15 @@ public partial class MainWindow : Window
             return;
         }
 
-        // Clear MFA cancellation flag when user explicitly connects
-        // This gives them a fresh attempt at authentication
+        /* Clear a previously declined interactive sign-in when the user explicitly connects: opening
+           a server IS the fresh attempt. Asked about the mode rather than tested against EntraMFA,
+           so a new interactive mode is not stuck declined for the session because this line did not
+           know about it. */
         var currentStatus = _serverManager.GetConnectionStatus(server.Id);
-        if (server.AuthenticationType == AuthenticationTypes.EntraMFA && currentStatus.UserCancelledMfa)
+        if (AuthenticationTypes.RequiresInteractiveSignIn(server.AuthenticationType) && currentStatus.UserCancelledMfa)
         {
             currentStatus.UserCancelledMfa = false;
-            StatusText.Text = "Retrying MFA authentication...";
+            StatusText.Text = "Retrying authentication...";
         }
 
         // Ensure connection status is populated with UTC offset before opening tab

@@ -426,7 +426,7 @@ Common issues:
 
 ## Authentication
 
-`PerformanceMonitor.Common.AuthenticationTypes` supports six authentication types, defined once there and named the same way in every edition. **Not every edition connects with all six**, so the table says which does what: Lite offers all of them, while the Darling service builds Windows-integrated or SQL-login connections only and acquires no tokens at all, so its viewer rejects every Azure mode at the credential step.
+`PerformanceMonitor.Common.AuthenticationTypes` supports seven authentication types, defined once there and named the same way in every edition. **Not every edition connects with all seven**, so the table says which does what: Lite offers all of them, while the Darling service builds Windows-integrated or SQL-login connections only and acquires no tokens at all, so its viewer rejects every Azure mode at the credential step.
 
 | Type | Editions | Interactive? | Credential stored? | Where |
 |---|---|---|---|---|
@@ -436,6 +436,7 @@ Common issues:
 | Service Principal | Lite | No | Client secret | Windows Credential Manager |
 | Managed Identity | Lite | No | None | — |
 | Existing Azure Sign-In | Lite | No | None | — (established outside the app, e.g. `az login`) |
+| Device Code | Lite | Yes, once per session | None | — (entered in a browser, on any device) |
 
 **Managed Identity and Service Principal** are non-interactive Azure AD (Entra ID) authentication modes, added for fleet onboarding of Azure SQL Database / Managed Instance without a per-server interactive MFA prompt (see [#1038](https://github.com/erikdarlingdata/PerformanceMonitor/issues/1038)). Both map directly to `Microsoft.Data.SqlClient`'s native `SqlAuthenticationMethod` (`ActiveDirectoryServicePrincipal` / `ActiveDirectoryManagedIdentity`) — PerformanceMonitor never acquires, caches, or stores a token itself; the official Microsoft driver handles that internally.
 
@@ -455,6 +456,27 @@ It signs in as **whichever Azure identity is already established on the machine*
 Darling does not offer this mode: the Darling service's connect path builds Windows-integrated or SQL-login connections only and acquires no tokens at all, so its viewer rejects every Azure mode at the credential step.
 
 **Not yet confirmed against a live Entra tenant.** The mechanism above is read off the pinned `Microsoft.Data.SqlClient` 7.0.2 and `Azure.Identity` 1.18.0 sources, and the behaviour is pinned by tests; nobody here has a tenant to run it against. Treat it as worth trying rather than as known to work, and please report what happens.
+
+### Device Code (Lite only, `ActiveDirectoryDeviceCodeFlow`)
+
+Labelled **Azure — Device Code (browser on any device)** in Lite's connection dialog. It shows a short code and a URL; you open that URL in a browser — on the same machine or on a phone — enter the code, and sign in normally, MFA included. Lite never sees your password, and the browser does not have to be on the machine running Lite.
+
+It exists because **the other two Entra paths each depend on something an elevated process cannot reach**, and for different reasons (see [#3196](https://github.com/erikdarlingdata/PerformanceMonitor/issues/3196)):
+
+- **Entra ID (MFA)** hands sign-in to the Windows account broker (WAM), which cannot reach the interactive user's logon session from a process launched as a different account. It fails with `0x80070520` / `unknown_broker_error`, and there is no app-side opt-out — `ActiveDirectoryAuthenticationProviderOptions.UseWamBroker` looks like one and is not.
+- **Existing Azure Sign-In** reads the credential cached under `%USERPROFILE%`, which under elevation is the *launching* account's profile. An `az login` done in your own session is not there.
+
+Device code has neither dependency. `DeviceCodeRequest` in `Microsoft.Identity.Client` POSTs to the tenant's device-code endpoint, invokes the callback with the code, and polls the token endpoint — no broker, no profile, no cached credential. `WithBroker` governs interactive and silent acquisition and has nothing to say about a device-code request, which is why the mode is broker-free even though the driver attaches a broker to the MSAL application it shares with the other modes.
+
+Two things worth knowing before you pick it:
+
+- **You have about three minutes.** That limit is the SQL driver's, not Lite's: its device-code arm builds its own three-minute cancellation and passes that rather than the `Connect Timeout`-derived one, so raising `Connect Timeout` does not extend it. Closing the code window gives up and hands the dialog back.
+- **It is interactive, so it behaves like Entra ID (MFA) does.** The periodic connectivity sweep skips these servers rather than raising a code at nobody, but **data collection does not skip them**: expect one code window per run of the app, including on an unattended collection cycle shortly after Lite starts, after which the driver's cached token serves the rest of the run. Declining a prompt stops it being raised again until you open the server yourself. It is also not offered in **Add Multiple Servers**, where one code per server would be a prompt storm of codes that expire faster than they can be entered.
+- **Only one device-code sign-in can be in flight at a time**, and a second is refused with a message rather than queued. The driver's callback carries no connection id, so two at once cannot be told apart — the first sign-in's code would be displayed on the second one's window. Finish or close the one on screen and try again.
+
+Darling does not offer this mode, for two reasons rather than one: the Darling service's connect path builds Windows-integrated or SQL-login connections only and acquires no tokens at all, and the service is a headless collector with nobody in front of it to read a code.
+
+**Not yet confirmed against a live Entra tenant.** The mechanism above is read off the pinned `Microsoft.Data.SqlClient` 7.0.2 and `Microsoft.Identity.Client` 4.84.2 sources, and the behaviour is pinned by tests; nobody here has a tenant to run it against. Treat it as worth trying rather than as known to work, and please report what happens.
 
 ### Credential Profiles (Lite, fleet onboarding)
 

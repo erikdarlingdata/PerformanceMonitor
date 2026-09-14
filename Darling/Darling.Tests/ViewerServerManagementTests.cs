@@ -268,6 +268,7 @@ public sealed class ServerStoreCredentialTests
     [InlineData(AuthenticationTypes.ServicePrincipal)]
     [InlineData(AuthenticationTypes.ManagedIdentity)]
     [InlineData(AuthenticationTypes.EntraDefaultCredential)]
+    [InlineData(AuthenticationTypes.EntraDeviceCode)]
     public void MapAuth_AzureModes_AreUnsupported(string authType)
     {
         Assert.Null(ServerStoreCredential.MapAuth(authType));
@@ -383,6 +384,7 @@ public sealed class ViewerServerMigrationTests
     [InlineData(AuthenticationTypes.ServicePrincipal)]
     [InlineData(AuthenticationTypes.ManagedIdentity)]
     [InlineData(AuthenticationTypes.EntraDefaultCredential)]
+    [InlineData(AuthenticationTypes.EntraDeviceCode)]
     public void Projection_AzureAuth_IsSkipped(string authType)
     {
         using var fixture = new Fixture();
@@ -555,6 +557,7 @@ public sealed class BulkServerOnboardingMappingTests
     [InlineData(AuthenticationTypes.ServicePrincipal)]
     [InlineData(AuthenticationTypes.ManagedIdentity)]
     [InlineData(AuthenticationTypes.EntraDefaultCredential)]
+    [InlineData(AuthenticationTypes.EntraDeviceCode)]
     public void BuildMonitoredServerRow_AzureAuth_IsRejected_TheBelt(string authType)
     {
         // The trimmed radios never offer these, but a picked profile could resolve to one — the mapping helper

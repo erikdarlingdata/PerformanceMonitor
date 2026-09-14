@@ -168,7 +168,15 @@ public class ServerConnection : INotifyPropertyChanged
     /// Display-only property for showing authentication type in UI.
     /// </summary>
     [JsonIgnore]
-    public string AuthenticationDisplay => AuthenticationType switch
+    public string AuthenticationDisplay => AuthenticationDisplayFor(AuthenticationType);
+
+    /// <summary>
+    /// The same label for a mode this class does not have an instance of — the bulk-add belt names
+    /// the mode it is refusing, and building a throwaway <see cref="ServerConnection"/> to ask would
+    /// be the second copy of this switch that the two-build-site comments keep warning about.
+    /// </summary>
+    /// <param name="authenticationType">One of the <see cref="AuthenticationTypes"/> constants.</param>
+    public static string AuthenticationDisplayFor(string? authenticationType) => authenticationType switch
     {
         AuthenticationTypes.EntraMFA => "Microsoft Entra MFA",
         AuthenticationTypes.SqlServer => "SQL Server",
@@ -179,6 +187,12 @@ public class ServerConnection : INotifyPropertyChanged
            fails outright on a machine with no Azure sign-in on it, so the requirement belongs in
            the name rather than only in a failure message. */
         AuthenticationTypes.EntraDefaultCredential => "Azure — Existing Sign-In (az login)",
+        /* Named for what the user has to do, for the same reason as the label above it. "Device Code
+           Flow" is the driver's phrase and describes a grant type; what a user needs to know before
+           choosing it is that they will read a code off this screen and type it into a browser, and
+           that the browser does not have to be on this machine - which is the whole reason the mode
+           survives an elevated process. */
+        AuthenticationTypes.EntraDeviceCode => "Azure — Device Code (browser on any device)",
         _ => "Windows"
     };
 
@@ -560,6 +574,44 @@ public class ServerConnection : INotifyPropertyChanged
             builder.IntegratedSecurity = false;
             builder.Authentication = SqlAuthenticationMethod.ActiveDirectoryDefault;
         }
+        else if (authenticationType == AuthenticationTypes.EntraDeviceCode)
+        {
+            /* Microsoft Entra by device authorization grant: the user reads a code off a window and
+               types it into a browser on whatever device they like (see
+               AuthenticationTypes.EntraDeviceCode for why that is the mode that survives an
+               elevated process).
+
+               Three keywords are deliberately NOT set, and each omission is load-bearing:
+
+               No Password. There is no secret on this path at either end - the app never holds one,
+               and the credential the tenant checks is the user's own, presented to the tenant in a
+               browser this process has no handle on.
+
+               No UserID, and the reason is specific to this arm rather than borrowed from the one
+               above. SqlClient does forward UserId here (GetFedAuthToken's arm for methods 2 and
+               4-8 calls WithUserId), but the device-code request never reads it:
+               AcquireTokenInteractiveDeviceFlowAsync consumes userId only inside its
+               authenticationMethod == 4 branch, as WithLoginHint for the INTERACTIVE flow, and the
+               device-code branch below it passes scopes and the callback alone (Extensions.Azure
+               7.0.2, :668-689). All a UPN could still reach is TryAcquireTokenSilent's account
+               match, which searches MSAL's in-memory cache - empty until this same process has
+               already completed a device-code sign-in. So the field would look exactly like the
+               Entra MFA username hint beside it while pre-filling nothing: the browser asks who you
+               are regardless, and a typo would silently cost the one cache hit it could have bought.
+
+               No IntegratedSecurity = true; it is set false explicitly to match the siblings, so a
+               builder arriving pre-populated cannot leave integrated auth on beside an
+               Authentication keyword.
+
+               ConnectTimeout is deliberately NOT raised here either. The three minutes the user
+               gets are the driver's own, from a CancellationTokenSource this connection string
+               cannot reach, and a Connect Timeout overrun mid-sign-in is absorbed by
+               AttemptRetryADAuthWithTimeoutError - the same path Entra MFA has always used. Raising
+               it would buy nothing and would make an unreachable server hang for minutes in this
+               mode alone. */
+            builder.IntegratedSecurity = false;
+            builder.Authentication = SqlAuthenticationMethod.ActiveDirectoryDeviceCodeFlow;
+        }
     }
 
     /// <summary>
@@ -590,11 +642,14 @@ public class ServerConnection : INotifyPropertyChanged
         // Zero-touch auth modes need no stored secret. EntraDefaultCredential belongs here for a
         // reason unlike the other three: its credential exists, but it lives outside this app
         // entirely (an az login session, the environment, a managed identity), so there is nothing
-        // for Credential Manager to hold and nothing for this check to look for.
+        // for Credential Manager to hold and nothing for this check to look for. EntraDeviceCode is
+        // a fifth reason again: its credential does not exist until the user creates it, in a
+        // browser, per sign-in - there is nothing to store even in principle.
         if (server.AuthenticationType == AuthenticationTypes.Windows ||
             server.AuthenticationType == AuthenticationTypes.EntraMFA ||
             server.AuthenticationType == AuthenticationTypes.ManagedIdentity ||
-            server.AuthenticationType == AuthenticationTypes.EntraDefaultCredential)
+            server.AuthenticationType == AuthenticationTypes.EntraDefaultCredential ||
+            server.AuthenticationType == AuthenticationTypes.EntraDeviceCode)
         {
             return true;
         }

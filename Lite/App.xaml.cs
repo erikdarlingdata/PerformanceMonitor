@@ -481,6 +481,14 @@ public partial class App : Application
            itself is resolved lazily per prompt, so registering this early is safe. */
         Services.EntraInteractiveAuth.Register(ActiveWindowHandle);
 
+        /* Device code has a human step in the middle of the connection open: the driver calls back
+           with a code and a URL and then polls for the token. With no callback installed the driver
+           writes the code to a console this process does not have, so the sign-in waits three
+           minutes for something nobody was shown. Registered here for the same reason as the line
+           above - SqlAuthenticationProvider installs against the METHOD, so this covers Test
+           Connection and the Manage Servers connectivity check without per-site wiring. */
+        Services.EntraDeviceCodeAuth.Register(ShowDeviceCodePrompt);
+
         // Create and show main window (StartupUri removed for Velopack custom Main)
         _mainWindow = new MainWindow();
         _mainWindow.Show();
@@ -489,6 +497,68 @@ public partial class App : Application
            been sitting in AppLogger's buffer since; this is the visible half, and it is here rather than
            beside the loaders so that it has a window behind it and so that startup order is untouched. */
         ReportUnreadableSettingsToUser();
+    }
+
+    /// <summary>
+    /// Puts one device-code challenge in front of the user.
+    ///
+    /// <para>Marshaled with <c>BeginInvoke</c> rather than <c>Invoke</c>, and that is the difference
+    /// between this and <see cref="ActiveWindowHandle"/> beside it. The driver <b>awaits</b> its
+    /// device-code callback before it starts polling for the token, so anything this blocks on is
+    /// time taken off the user's own deadline; a fire-and-forget post returns to the driver at once
+    /// and the window appears on the next dispatcher turn. The UI thread is free to take it: every
+    /// connection open on these paths is awaited, never blocked on.</para>
+    ///
+    /// <para>Owned by whichever window is in front, for <see cref="ActiveWindowHandle"/>'s reason —
+    /// usually the Add/Edit Server dialog, which is modal, and a window it owns stays enabled while
+    /// it is. An unowned window would be disabled by that modality and the user could not dismiss
+    /// it.</para>
+    /// </summary>
+    private static void ShowDeviceCodePrompt(Services.EntraDeviceCodeAttempt attempt)
+    {
+        var app = Current;
+        var dispatcher = app?.Dispatcher;
+
+        if (app is null || dispatcher is null)
+        {
+            /* No dispatcher means no window is possible, and a device-code sign-in with nothing
+               displaying the code cannot succeed - so end it now rather than after three minutes of
+               polling for a code the user never saw. */
+            AppLogger.Warn("App", "No dispatcher to show the device-code prompt on; sign-in cancelled.");
+            attempt.Cancel();
+            return;
+        }
+
+        dispatcher.BeginInvoke(new Action(() =>
+        {
+            try
+            {
+                Window? active = null;
+                foreach (Window window in app.Windows)
+                {
+                    if (window.IsActive)
+                    {
+                        active = window;
+                        break;
+                    }
+                }
+
+                var prompt = new Windows.EntraDeviceCodeWindow(attempt)
+                {
+                    Owner = active ?? app.MainWindow,
+                };
+                prompt.Show();
+            }
+            catch (Exception ex)
+            {
+                /* This runs on the dispatcher, after the driver's callback has already returned, so
+                   there is nobody left to propagate to: an unhandled throw here would reach
+                   DispatcherUnhandledException. Cancelling turns a window that failed to open into a
+                   failed connection the user is told about, instead of a three-minute wait. */
+                AppLogger.Error("App", "Could not show the device-code prompt; sign-in cancelled.", ex);
+                attempt.Cancel();
+            }
+        }));
     }
 
     /// <summary>
