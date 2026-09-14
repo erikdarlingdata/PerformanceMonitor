@@ -263,12 +263,26 @@ public sealed class PgCappedReadTests
     [Fact]
     public void TheRemedyAppearsOnExactlyTheArmsThatNeedOne()
     {
+        var carried = 0;
+        var withheld = 0;
+
         foreach (var verdict in EveryArm())
         {
             var needsOne = verdict.Reach is PgCappedReach.Partial or PgCappedReach.Unreachable;
 
             Assert.Equal(needsOne, verdict.Cause.Contains(Remedy, StringComparison.Ordinal));
+
+            if (needsOne) { carried++; } else { withheld++; }
         }
+
+        /* BOTH BRANCHES EXERCISED, because a foreach over an empty sequence asserts nothing and the loop
+           above is the entire test. Measured: crippling EveryArm() to yield nothing left this green while
+           it was the only assertion, so the tally is not decoration - it is what makes the pin a
+           measurement. Counted rather than pinned to a literal, so adding an arm does not make this stale
+           while still refusing a vacuous run. */
+        Assert.True(carried > 0, "no arm needing a remedy was exercised, so the positive half asserts nothing");
+        Assert.True(withheld > 0, "no arm without a remedy was exercised, so the negative half asserts nothing");
+        Assert.Equal(EveryArm().Count(), carried + withheld);
     }
 
     /// <summary>
