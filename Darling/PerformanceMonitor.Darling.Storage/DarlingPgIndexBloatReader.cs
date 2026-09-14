@@ -278,9 +278,34 @@ public static class DarlingPgIndexBloatReader
             ORDER BY database_name, schema_name, table_name, index_name,
                      (skipped_reason IS NULL) DESC, collection_time DESC
         ) AS latest
+        /* THE ANSWERED-ONLY GATE, and it sits OUTSIDE the DISTINCT ON scope (#3424).
+
+           THE TWO PLACEMENTS RETURN THE SAME ROWS, and saying otherwise was wrong: the inner tie-break
+           already prefers an answered row over a newer label, so filtering before the distinct keeps each
+           index's newest ANSWERED row and filtering after it keeps the same row. Measured by moving the
+           predicate inside and watching every assertion stay green.
+
+           It belongs out here because of COUPLING rather than behaviour. The inner scope defines which row
+           REPRESENTS each index, and PgIndexBloatCoverageTests pins that definition to be the same text the
+           coverage census uses - so the census and the grid cannot disagree, index by index, about what is
+           current. A caller-controlled predicate inside that scope makes the two texts diverge while the
+           pin, which compares the distinct key and the tie-break, still passes. The equivalence above then
+           becomes load-bearing and undefended: it survives only while the tie-break prefers answered rows,
+           and nothing would fail if that changed. A presentation filter applied after the representative
+           row has been chosen cannot acquire that dependency, and a pin asserts no parameter enters the
+           inner scope.
+
+           Default FALSE at every caller, so the answerless-first order below is what an unasked-for read
+           still gets - #3278's sort is the thing that stops an unmeasured index reading as a clean one, and
+           this parameter exists to give the answers a route rather than to demote it. */
+        WHERE (NOT $5 OR latest.skipped_reason IS NULL)
         /* Unmeasured first - a skipped index is the likeliest big win and must not be ranked below measured
            ones by a reclaimable figure it does not have. Then by reclaimable bytes, never by density: a
-           small index at 40% is worth nothing next to a large one at 70%. */
+           small index at 40% is worth nothing next to a large one at 70%.
+
+           Under the gate above the first key is constant false, so the remaining keys are the ranking on
+           their own: reclaimable bytes descending over the answered population, which is the order #3424
+           asks for and needs no second ORDER BY to obtain. */
         ORDER BY (skipped_reason IS NOT NULL) DESC,
                  latest.estimated_reclaimable_bytes DESC NULLS LAST,
                  index_bytes DESC
@@ -540,8 +565,21 @@ LEFT JOIN grouped ON true";
         return groups;
     }
 
+    /// <param name="answeredOnly">Drop the indexes the window holds no answer for, so the answered
+    /// population is REQUESTED rather than paged past (#3424). Defaults to false, which leaves #3278's
+    /// answerless-first order exactly as it is for every caller that has not asked.
+    ///
+    /// <para><b>Why a filter and not just a different order.</b> An <c>ORDER BY</c> admitting reclaimable
+    /// bytes would also put the answers first - they are the only rows with a figure to rank on - so a limit
+    /// smaller than the answered population would hide every answerless row instead, which is #3278's defect
+    /// pointed the other way and with no coverage census aimed at it. A filter says what it did.</para>
+    ///
+    /// <para>The caller still owes the reader the population figures:
+    /// <see cref="GetCoverageVerdictAsync"/> is unaffected by this parameter by design, so a filtered
+    /// ranking carries the same denominator an unfiltered one does.</para></param>
     public static async Task<List<PgIndexBloatRow>> GetPgIndexBloatAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
+        bool answeredOnly = false,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
@@ -557,6 +595,9 @@ LEFT JOIN grouped ON true";
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(limit);
+        /* $5, appended rather than inserted: renumbering the existing four would be a silent re-aim if any
+           one of them were missed, and the compiler cannot see a parameter index inside a string. */
+        command.Parameters.AddWithValue(answeredOnly);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

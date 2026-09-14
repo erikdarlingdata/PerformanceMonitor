@@ -46,12 +46,19 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgIndexTools
 {
-    [McpServerTool(Name = "get_pg_index_bloat"), Description("Gets ESTIMATED PostgreSQL btree index bloat, computed from catalog statistics with NO page reads: how many bytes a REINDEX could plausibly reclaim, the modelled tuple width and leaf-page count it rests on, and the parent row count and fillfactor those came from. Ranked by reclaimable BYTES and never by percentage - a 64 kB index at 20% tops a percentage-ranked list and is worth 50 kB next to a 10 GB index at 45% worth 5.37 GB. Read measurement_kind: 'estimated' rows come from the statistics model, 'measured' rows are older pgstatindex measurements still inside the retention window. Accuracy against pgstatindex ground truth on a live 2,500-index target: median absolute error 2.79 percentage points, p90 6.63. A row with a skipped_reason has NO answer rather than a healthy one - never read a missing estimate as a clean bill of health - and the reason says whether it is remediable: a never-analyzed parent needs an ANALYZE, invisible column widths need the pg_read_all_data grant, while a PARTIAL index and a DEDUPLICATED one (low-cardinality, non-unique) are structurally unmodellable at any grant or statistics freshness and need the exact function instead. Every row carries exact_measurement_command, which is the pgstatindex call for that index: it walks every page, so run it deliberately on the one index you are about to act on rather than on a schedule - the same relationship SQL Server has between LIMITED and DETAILED index physical stats. This is the COMPLETE btree census with no size floor, so it returns MORE rows than get_pg_index_usage, which floors at 64 kB - 2,500 against 1,517 on one measured target. Neither census is missing objects. ALWAYS read the coverage field before concluding anything about how much of a server this covers, and never infer that from the rows: answerless rows sort FIRST by design, so any limit smaller than the answerless population returns 100% skipped rows structurally rather than by chance, and raising the limit does not fix it while that population is still larger. coverage comes from a separate population-level query that no limit touches - candidate indexes, trusted versus suppressed, and each suppression reason - and every count carries its BYTES because the two rankings disagree: on a live fleet the reason that is second largest by row count is the SMALLEST by footprint at 0.0004% of it, while the fourth largest by rows is second by bytes at 1.4 TB. Judge the gap by bytes. And skipped_reason IS NULL is the ONLY trust predicate here: est_tuple_bytes is populated on 100% of the rows that have no answer and est_bloat_pct on 0% of them, so filtering on est_tuple_bytes returns every row and reads as complete coverage.")]
+    [McpServerTool(Name = "get_pg_index_bloat"), Description("Gets ESTIMATED PostgreSQL btree index bloat, computed from catalog statistics with NO page reads: how many bytes a REINDEX could plausibly reclaim, the modelled tuple width and leaf-page count it rests on, and the parent row count and fillfactor those came from. Ranked by reclaimable BYTES and never by percentage - a 64 kB index at 20% tops a percentage-ranked list and is worth 50 kB next to a 10 GB index at 45% worth 5.37 GB. Read measurement_kind: 'estimated' rows come from the statistics model, 'measured' rows are older pgstatindex measurements still inside the retention window. Accuracy against pgstatindex ground truth on a live 2,500-index target: median absolute error 2.79 percentage points, p90 6.63. A row with a skipped_reason has NO answer rather than a healthy one - never read a missing estimate as a clean bill of health - and the reason says whether it is remediable: a never-analyzed parent needs an ANALYZE, invisible column widths need the pg_read_all_data grant, while a PARTIAL index and a DEDUPLICATED one (low-cardinality, non-unique) are structurally unmodellable at any grant or statistics freshness and need the exact function instead. Every row carries exact_measurement_command, which is the pgstatindex call for that index: it walks every page, so run it deliberately on the one index you are about to act on rather than on a schedule - the same relationship SQL Server has between LIMITED and DETAILED index physical stats. This is the COMPLETE btree census with no size floor, so it returns MORE rows than get_pg_index_usage, which floors at 64 kB - 2,500 against 1,517 on one measured target. Neither census is missing objects. ALWAYS read the coverage field before concluding anything about how much of a server this covers, and never infer that from the rows: answerless rows sort FIRST by design, so any limit smaller than the answerless population returns 100% skipped rows structurally rather than by chance, and raising the limit does not fix it while that population is still larger. coverage comes from a separate population-level query that no limit touches - candidate indexes, trusted versus suppressed, and each suppression reason - and every count carries its BYTES because the two rankings disagree: on a live fleet the reason that is second largest by row count is the SMALLEST by footprint at 0.0004% of it, while the fourth largest by rows is second by bytes at 1.4 TB. Judge the gap by bytes. And skipped_reason IS NULL is the ONLY trust predicate here: est_tuple_bytes is populated on 100% of the rows that have no answer and est_bloat_pct on 0% of them, so filtering on est_tuple_bytes returns every row and reads as complete coverage. To READ the answers, pass answered_only: true - the answerless-first sort means that on a big server the answers sort behind more answerless rows than any permitted limit can page past, measured at 1,779 answerless ahead of 726 answers covering 213.8 GB against a 1000-row maximum, so raising the limit cannot reach them and answered_only is the only route. The reach field says which situation you are in and whether a larger limit would help: Unreachable means it would not, at any value, ever. answered_only leaves the default order alone and the coverage census unchanged, so a filtered ranking still carries its denominator - and answered_only over a server where NOTHING has an answer returns status no_answers rather than an empty, because \"nothing measurable\" is not \"nothing to reclaim\".")]
     public static async Task<string> GetPgIndexBloat(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 168 (7 days) - this collector runs daily.")] int hours_back = 168,
         [Description("Maximum rows to return. Default 25.")] int limit = 25,
+        [Description("Return ONLY the indexes that have an answer, ranked by reclaimable bytes descending. "
+            + "Default false, which leaves the answerless-first order alone. Set this when you want the "
+            + "RANKING: answerless rows sort first by design, so on a server whose answerless population "
+            + "exceeds the 1000-row maximum the answers cannot be reached at any limit - measured at 1,779 "
+            + "answerless ahead of 726 answers covering 213.8 GB. The coverage census is unaffected by "
+            + "this, so a filtered ranking still carries the same denominator; read the reach field to see "
+            + "which situation you are in.")] bool answered_only = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
@@ -65,7 +72,8 @@ public sealed class DarlingMcpPgIndexTools
         try
         {
             var rows = await DarlingPgIndexBloatReader.GetPgIndexBloatAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit);
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit,
+                answered_only);
 
             /* Asked on BOTH paths, not just the empty one (#3278). A returned page that is 100% suppressed
                rows is the same defect as an unexplained empty and strictly harder to see: the read looks
@@ -92,6 +100,42 @@ public sealed class DarlingMcpPgIndexTools
                 coverage = await DarlingPgIndexBloatReader.GetCoverageVerdictAsync(
                     postgres, resolved.ServerId, windowEnd, rows.Count);
 
+                /* ANSWERED-ONLY OVER A SERVER THAT HAS INDEXES IS ITS OWN REFUSAL, not an empty (#3424).
+                   The filter removes the answerless rows, so "no rows" here means NOT ONE of this server's
+                   indexes has an answer - which is the NothingTrusted state, and the "widen the window"
+                   sentence below would be advice for a different situation entirely. Worse, an empty
+                   status over a filtered read is the exact failure both these issues are about: it reads
+                   as "nothing to reclaim" when the truth is "nothing measurable". Its own token, for the
+                   reason EXTENSION_MISSING has one (#3240) - a refusal with its own cause and its own
+                   remedy bands apart rather than folding into the nearest existing label. */
+                if (answered_only && coverage.Candidates.IndexCount > 0)
+                {
+                    return McpHelpers.Status(
+                        "no_answers",
+                        $"answered_only excluded every row: {resolved.ServerName} has "
+                        + $"{coverage.Candidates.IndexCount:N0} candidate btree index(es) in this window and "
+                        + "NOT ONE of them has a trusted bloat answer. This is not a clean bill of health "
+                        + "and it is not an empty server - the suppression breakdown below says why each "
+                        + "index has no answer and which reasons are remediable. Re-run without "
+                        + "answered_only to see the rows and their reasons. " + coverage.Message,
+                        new
+                        {
+                            arm = coverage.Arm.ToString(),
+                            candidate_index_count = coverage.Candidates.IndexCount,
+                            candidate_index_bytes = coverage.Candidates.IndexBytes,
+                            trusted_index_count = coverage.Trusted.IndexCount,
+                            trusted_index_bytes = coverage.Trusted.IndexBytes,
+                            suppressed_by_reason = coverage.Suppressed.Select(bucket => new
+                            {
+                                reason = bucket.Reason.ToString(),
+                                label = PgIndexBloatCoverage.Label(bucket.Reason),
+                                index_count = bucket.IndexCount,
+                                index_bytes = bucket.IndexBytes,
+                                remedy = PgIndexBloatCoverage.Remedy(bucket.Reason),
+                            }),
+                        });
+                }
+
                 return McpHelpers.Status(
                     "empty",
                     $"No index bloat rows for {resolved.ServerName} in the last {hours_back} "
@@ -104,6 +148,33 @@ public sealed class DarlingMcpPgIndexTools
                 postgres, resolved.ServerId, windowEnd, rows.Count);
 
             var truncated = rows.Count >= limit;
+
+            /* WHETHER THE ANSWERS ARE REACHABLE AT ALL, which `truncated` cannot say (#3424). #3278 gave
+               this read a denominator and that shipped; it did not give the answers a route, and its own
+               opening sentence says why raising the limit is not one. The population figures are already in
+               hand here, so the arithmetic is: the answerless rows sort FIRST, so they are what stands
+               between the caller's limit and the trusted rows - and once that leading block is at least
+               McpHelpers.MaxTop, no permitted limit reaches a single answer.
+
+               Under answered_only the leading block is GONE, so nothing is ahead of the answered population
+               and a capped page is the top N of it by reclaimable bytes - the RankedTail arm, which is the
+               ranking this tool exists to produce rather than a gap in it.
+
+               MaxTop is passed as the symbol rather than 1000: this classifier decides the difference
+               between "raise the limit" and "raising the limit cannot help", and deciding it against a
+               literal that has drifted from what ValidateTop enforces would answer confidently for a
+               surface that does not exist. */
+            var reach = PgCappedRead.Classify(
+                rowsAhead: answered_only ? 0 : coverage.Suppressed.Sum(bucket => bucket.IndexCount),
+                wantedRows: coverage.Trusted.IndexCount,
+                returnedRows: rows.Count,
+                limit: limit,
+                maxLimit: McpHelpers.MaxTop,
+                remedy: "Pass answered_only: true to request the answered indexes directly, ranked by "
+                      + "reclaimable bytes descending. That leaves the default answerless-first order "
+                      + "untouched for readers who have not asked, and the coverage census below still "
+                      + "reports what the filter excluded.");
+
             var answered = rows.Count(r => r.SkippedReason is null);
             var estimated = rows.Count(r => r.SkippedReason is null && r.IsEstimate);
             var measured = rows.Count(r => r.SkippedReason is null && !r.IsEstimate);
@@ -173,6 +244,27 @@ public sealed class DarlingMcpPgIndexTools
                 hours_back,
                 index_count = rows.Count,
                 truncated,
+                /* ECHOED, because a saved payload has to say which population it describes. A ranking of
+                   726 answered indexes and a ranking of 2,505 candidates are different answers and nothing
+                   else in the response distinguishes them. */
+                answered_only,
+                /* WHETHER THE ANSWERS CAN BE REACHED, beside `truncated` rather than instead of it: one
+                   says the page stopped, the other says whether what it stopped short of is obtainable at
+                   all. Named arms rather than a boolean because "raise the limit" and "raising the limit
+                   cannot help" are different instructions. */
+                reach = new
+                {
+                    arm = reach.Reach.ToString(),
+                    is_complete = reach.IsComplete,
+                    a_raised_limit_would_help = reach.ARaisedLimitWouldHelp,
+                    answerless_rows_ahead = reach.RowsAhead,
+                    answered_rows_on_server = reach.WantedRows,
+                    answered_rows_reachable_here = reach.ReachableRows,
+                    answered_rows_reachable_at_max_limit = reach.ReachableAtMaxRows,
+                    answered_rows_withheld = reach.WithheldRows,
+                    limit,
+                    max_limit = McpHelpers.MaxTop,
+                },
                 /* Over the returned rows, and withheld when they are only a page of them: "12 of 25
                    measured" reads as a statement about the server's indexes and would not be one. */
                 /* Over the RETURNED rows, and withheld when they are only a page of them: "12 of 25
@@ -262,7 +354,11 @@ public sealed class DarlingMcpPgIndexTools
                         finishes on. A page that ranks four answered indexes while six thousand are
                         withheld reads as a ranking of the server, and nothing in the rows themselves shows
                         the difference. */
-                     + " " + coverage.Message,
+                     + " " + coverage.Message
+                     /* THE REACH SENTENCE LAST, after the census, because it is the one that tells a reader
+                        whether to make a different call. #3278's census says the answers exist; this says
+                        whether this response could ever have contained them. */
+                     + " " + reach.Message,
                 indexes,
             }, McpHelpers.JsonOptions);
         }

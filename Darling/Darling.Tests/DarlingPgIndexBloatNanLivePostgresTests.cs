@@ -202,7 +202,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ServerId, ServerName);
             // ── ARM 1: the read serves at all ────────────────────────────────────────────────────────
             var rows = await DarlingPgIndexBloatReader.GetPgIndexBloatAsync(
                 postgres, ServerId, DarlingMcpTestData.Naive(DateTime.UtcNow.AddHours(-24)),
-                DarlingMcpTestData.Naive(DateTime.UtcNow.AddHours(1)), ReadLimit, ct);
+                DarlingMcpTestData.Naive(DateTime.UtcNow.AddHours(1)), ReadLimit, cancellationToken: ct);
 
             // ── ARM 2: nothing was dropped to achieve arm 1 ──────────────────────────────────────────
             /* Stated as accounting over the whole seeded set rather than as a lookup of the NaN row: a
