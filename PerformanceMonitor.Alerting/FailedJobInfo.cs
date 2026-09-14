@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Alerting;
 
@@ -30,5 +31,28 @@ public class FailedJobInfo
     public string StepName { get; set; } = "";
     public string Message { get; set; } = "";
 
-    public string RunDateTimeFormatted => RunDateTime.ToString("yyyy-MM-dd HH:mm:ss");
+    /// <summary>
+    /// The monitored server's UTC offset in minutes, measured by
+    /// <see cref="FailedJobsQuery.Sql"/> in the same statement that read
+    /// <see cref="RunDateTime"/> — negative west of UTC. Null when the row came from somewhere that
+    /// supplied no offset, which leaves <see cref="RunDateTime"/> unconvertible rather than assumed.
+    /// <para>Measured on the server rather than read from collected <c>server_properties</c> because this
+    /// feed is a live msdb query: the server is already on the other end of the connection, so its own
+    /// clock answers at the same instant and for the same login, with no dependency on a collector having
+    /// run.</para>
+    /// </summary>
+    public int? UtcOffsetMinutes { get; set; }
+
+    /// <summary>
+    /// <see cref="RunDateTime"/> in naive UTC, or null when <see cref="UtcOffsetMinutes"/> is absent. The
+    /// frame the alert body and <c>alert_time</c> share.
+    /// </summary>
+    public DateTime? RunDateTimeUtc => AlertTimestamp.ToUtc(RunDateTime, UtcOffsetMinutes);
+
+    /// <summary>
+    /// The failure instant as an alert body renders it: UTC with a <c>Z</c>, or the server's own clock
+    /// explicitly marked unconverted when no offset accompanied the row. Never a bare instant — see
+    /// <see cref="AlertTimestamp"/> for why the marker rides on the value.
+    /// </summary>
+    public string RunDateTimeFormatted => AlertTimestamp.ForServerInstant(RunDateTime, UtcOffsetMinutes);
 }

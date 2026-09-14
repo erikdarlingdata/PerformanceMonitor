@@ -1751,6 +1751,43 @@ public sealed class AlertEngineTests
         Assert.Equal(firstFailure.AddMinutes(30), h.StateStore.FailedJobWatermarks[Key]);
     }
 
+    /// <summary>
+    /// #3421: the engine hands the builder the window it actually read, so the body states the span it
+    /// reports rather than leaving a reader to infer it from a repeat. A wiring pin: the builder's own
+    /// tests prove the item's shape, and nothing else would notice the two arguments being dropped.
+    /// <para>The body is deliberately NOT narrowed to "new since the last alert" — see
+    /// <see cref="AlertContextBuilders.BuildFailedJobContext"/> for why the watermark cannot tell an
+    /// already-reported failure from one that appeared late with an older run start.</para>
+    /// </summary>
+    [Fact]
+    public async Task FailedJobs_BodyStatesTheWindowTheEngineRead()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Settings.FailedJobLookbackMinutes = 45;
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var firedAt = h.Now;
+        h.FailedJobs.Add(new FailedJobInfo
+        {
+            JobName = "Backup.Full", JobId = "j1",
+            RunDateTime = firedAt.AddMinutes(-10), UtcOffsetMinutes = 0
+        });
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.NotNull(fired.DetailText);
+        Assert.Contains(AlertContextBuilders.FailureWindowHeading, fired.DetailText!, StringComparison.Ordinal);
+        Assert.Contains(
+            $"{AlertContextBuilders.FailureWindowToLabel}: {AlertTimestamp.Utc(firedAt)}",
+            fired.DetailText!, StringComparison.Ordinal);
+        /* The CONFIGURED length, not a constant: a hardcoded 60 would pass at the shipped default. */
+        Assert.Contains(
+            $"{AlertContextBuilders.FailureWindowFromLabel}: {AlertTimestamp.Utc(firedAt.AddMinutes(-45))}",
+            fired.DetailText!, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task FailedJobs_GatedOnOnlineAndNotAzure_AndSuppressionHoldsTheWatermark()
     {

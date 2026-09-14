@@ -753,7 +753,10 @@ public static class AlertContextBuilders
                     ("Avg Duration", FormatDuration(j.AvgDurationSeconds)),
                     ("P95 Duration", FormatDuration(j.P95DurationSeconds)),
                     ("% of Average", j.PercentOfAverage.HasValue ? $"{j.PercentOfAverage:F0}%" : "N/A"),
-                    ("Started", j.StartTime.ToString("yyyy-MM-dd HH:mm:ss"))
+                    /* The run start is the monitored server's own clock; the alert time beside it, and
+                       "Incident Since" below it, are UTC. Rendered through AlertTimestamp so the value
+                       states which. */
+                    ("Started", AlertTimestamp.ForServerInstant(j.StartTime, j.UtcOffsetMinutes))
                 }
             });
         }
@@ -763,9 +766,30 @@ public static class AlertContextBuilders
         return context;
     }
 
+    /// <summary>
+    /// The failed-Agent-job context: one item per failure in the lookback window, capped at five.
+    /// </summary>
+    /// <param name="windowEndUtc">
+    /// The instant the window was read, in UTC, and <paramref name="lookbackMinutes"/> its length — together
+    /// the <see cref="FailureWindowHeading"/> item.
+    /// <para><b>Why the body states its own window.</b> The window is longer than the interval between
+    /// firings, so consecutive alerts overlap and a failure appears in every body whose window contains it.
+    /// That is what a window report does, and it is NOT narrowed to "new since the last alert": the only
+    /// discriminator available is the engine's failed-job watermark, which holds the newest RUN START it has
+    /// reported — and a job whose run started before that instant and failed after it is new, not repeated,
+    /// so filtering on it would drop a failure nobody has been told about. Losing a repeat costs a reader a
+    /// second look; losing a first report costs them the page. So the repeat stays and the window is
+    /// declared, which is what lets a reader tell "this failed again" from "this is the same failure in a
+    /// later window". <c>sysjobhistory.instance_id</c> is the append cursor that would make a cursored body
+    /// exact; the watermark is not it.</para>
+    /// <para>Null omits the item, for a caller with no clock — the window is a fact about the read, not
+    /// about the rows, so it is stated only when the reader actually supplied it.</para>
+    /// </param>
+    /// <param name="lookbackMinutes">The window's length in minutes, as configured.</param>
     public static AlertContext? BuildFailedJobContext(
         string serverName, List<FailedJobInfo> jobs,
-        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null)
+        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null,
+        DateTime? windowEndUtc = null, int lookbackMinutes = 0)
     {
         if (jobs.Count == 0) return null;
 
@@ -783,12 +807,36 @@ public static class AlertContextBuilders
             context.Details.Add(item);
         }
 
+        if (windowEndUtc is DateTime endUtc && lookbackMinutes > 0)
+        {
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = FailureWindowHeading,
+                Fields = new()
+                {
+                    (FailureWindowFromLabel, AlertTimestamp.Utc(endUtc.AddMinutes(-lookbackMinutes))),
+                    (FailureWindowToLabel, AlertTimestamp.Utc(endUtc))
+                }
+            });
+        }
+
         /* #1140: dedup key per job (job name, scoped to the instance via serverName) — mirrors
            BuildAnomalousJobContext so two distinct failed jobs are distinct incidents under the
            #1154 per-fingerprint cooldown instead of coalescing on the metric key. */
         AlertIncidentRenderer.Apply(context, Decorate(FailedJobIncidents(serverName, shown).ToList(), decorateIncidents));
         return context;
     }
+
+    /// <summary>Heading of the failed-job body's window item. Declared, not spelled inline, because a
+    /// heading is what a reader keys on and the tests assert it.</summary>
+    public const string FailureWindowHeading = "Failure Window";
+
+    /// <summary>Label of the window's start fact. A fact name is a consumer API — see
+    /// <see cref="AlertIncidentRenderer"/>.</summary>
+    public const string FailureWindowFromLabel = "From";
+
+    /// <summary>Label of the window's end fact.</summary>
+    public const string FailureWindowToLabel = "To";
 
     /// <summary>
     /// Flattens an <see cref="AlertContext"/> into the plain-text detail block persisted in alert

@@ -245,6 +245,13 @@ public sealed class DarlingAlertReadAdapterTests
                 "INSERT INTO tempdb_stats (collection_id, collection_time, server_id, server_name, user_object_reserved_mb, internal_object_reserved_mb, version_store_reserved_mb, total_reserved_mb, unallocated_mb, top_session_id, top_session_tempdb_mb) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
                 1L, collectionTime, TestServerId, TestServerName, 500m, 250m, 50m, 800m, 200m, 55, 123.4m);
 
+            /* --- the server's UTC offset, so the anomalous-jobs read can state its server-local
+                   start_time in UTC (#3421). Non-zero on purpose: at 0 the conversion asserted below
+                   would pass whether or not the offset was read at all. --- */
+            await InsertAsync(connection,
+                "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, utc_offset_minutes) VALUES ($1, $2, $3, $4, $5)",
+                1L, collectionTime, TestServerId, TestServerName, -240);
+
             /* --- running jobs: one anomalous, one under the 60-second average noise floor --- */
             await InsertAsync(connection,
                 "INSERT INTO running_jobs (collection_time, server_id, server_name, job_name, job_id, start_time, current_duration_seconds, avg_duration_seconds, p95_duration_seconds, percent_of_average) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
@@ -320,6 +327,24 @@ public sealed class DarlingAlertReadAdapterTests
             Assert.Equal(3661L, job.CurrentDurationSeconds);
             Assert.Equal(350.0m, job.PercentOfAverage);
 
+            /* #3421: start_time is the monitored server's own clock, so this read carries the server's
+               collected offset beside it and the row states the same instant in UTC. Asserted as
+               INSTANTS, not as formatted strings — a pinned string passes under a sign error as readily
+               as under the right sign. The offset assertion is what proves the projection resolves
+               against a live store at all rather than compiling.
+
+               The round trip is asserted to POSTGRES's resolution, not .NET's: a timestamp column is
+               microsecond-precision and a planted DateTime carries 100 ns ticks, so the value comes back
+               truncated by up to 9 ticks. Comparing the converted value against the locally-computed
+               plant instead of against what the store returned asserts that truncation, which fails on a
+               plant whose sub-microsecond digits happen to be non-zero and passes on one where they are
+               not - measured, at 4 ticks. */
+            Assert.Equal(-240, job.UtcOffsetMinutes);
+            Assert.True(
+                (utcNow.AddHours(-1) - job.StartTime).Duration() < TimeSpan.FromMicroseconds(1),
+                $"start_time round-tripped as {job.StartTime:O}, further than a microsecond from the planted {utcNow.AddHours(-1):O}");
+            Assert.Equal(job.StartTime.AddMinutes(240), job.StartTimeUtc);
+
             /* #1812: age the SAME snapshot past the freshness bound (default 2-minute cadence → 10
                minutes) — the read becomes no evidence: not fresh, rows skipped, exactly the state that
                used to re-alert a historical run every cooldown forever.
@@ -379,7 +404,8 @@ public sealed class DarlingAlertReadAdapterTests
             $"DELETE FROM query_snapshots WHERE server_id = {TestServerId};" +
             $"DELETE FROM database_size_stats WHERE server_id = {TestServerId};" +
             $"DELETE FROM tempdb_stats WHERE server_id = {TestServerId};" +
-            $"DELETE FROM running_jobs WHERE server_id = {TestServerId};", connection);
+            $"DELETE FROM running_jobs WHERE server_id = {TestServerId};" +
+            $"DELETE FROM server_properties WHERE server_id = {TestServerId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

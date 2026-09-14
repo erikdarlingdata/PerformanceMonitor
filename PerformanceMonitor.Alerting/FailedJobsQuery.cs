@@ -47,7 +47,15 @@ public static class FailedJobsQuery
 
     /// <summary>
     /// run_date/run_time integers are converted to a SERVER-LOCAL datetime (GETDATE()-relative
-    /// lookback filter) — <see cref="FailedJobInfo.RunDateTime"/> is server-local, not UTC.
+    /// lookback filter) — <see cref="FailedJobInfo.RunDateTime"/> is server-local, not UTC. The server's
+    /// own UTC offset rides along as <c>utc_offset_minutes</c> so
+    /// <see cref="FailedJobInfo.RunDateTimeUtc"/> can state the same instant in the frame the alert body
+    /// and <c>alert_time</c> share.
+    /// <para>The offset is the CURRENT one, applied to instants up to the lookback window old, so a
+    /// window straddling a DST transition converts the far side by an hour too much. Accepted: SQL Server
+    /// can only do better with <c>AT TIME ZONE</c> and a named zone, which the product does not collect,
+    /// and the alternative is being wrong by the whole offset every day of the year instead of by an hour
+    /// twice. The store-side de-skews apply a single scalar offset for the same reason.</para>
     /// </summary>
     public const string Sql = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -66,7 +74,8 @@ SELECT TOP (50)
         ),
     step_id = ISNULL(fs.step_id, jh.step_id),
     step_name = ISNULL(fs.step_name, jh.step_name),
-    message = ISNULL(fs.message, jh.message)
+    message = ISNULL(fs.message, jh.message),
+    utc_offset_minutes = DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())
 FROM msdb.dbo.sysjobhistory AS jh
 JOIN msdb.dbo.sysjobs AS j
   ON j.job_id = jh.job_id
@@ -112,10 +121,11 @@ OPTION(RECOMPILE);";
 
     /// <summary>
     /// Maps <see cref="Sql"/>'s result rows (job_name, job_id, run_datetime, step_id, step_name,
-    /// message — in that ordinal order) into <see cref="FailedJobInfo"/>. Moved verbatim from the
-    /// two host copies; the ONE reconciled difference at extraction time: the step_id conversion
-    /// adopts the Dashboard's explicit <see cref="CultureInfo.InvariantCulture"/> (Lite omitted
+    /// message, utc_offset_minutes — in that ordinal order) into <see cref="FailedJobInfo"/>. Moved
+    /// verbatim from the two host copies; the ONE reconciled difference at extraction time: the step_id
+    /// conversion adopts the Dashboard's explicit <see cref="CultureInfo.InvariantCulture"/> (Lite omitted
     /// the provider — behaviorally identical for an int column).
+    /// <para>The offset is last so the six original ordinals are untouched.</para>
     /// </summary>
     public static async Task<List<FailedJobInfo>> ReadAsync(DbDataReader reader, CancellationToken cancellationToken)
     {
@@ -130,7 +140,15 @@ OPTION(RECOMPILE);";
                 RunDateTime = reader.GetDateTime(2),
                 StepId = reader.IsDBNull(3) ? 0 : Convert.ToInt32(reader.GetValue(3), CultureInfo.InvariantCulture),
                 StepName = reader.IsDBNull(4) ? "" : reader.GetString(4),
-                Message = reader.IsDBNull(5) ? "" : reader.GetString(5)
+                Message = reader.IsDBNull(5) ? "" : reader.GetString(5),
+                /* Read by ordinal like every other column, with no FieldCount guard: a guard would turn a
+                   mapper-versus-SQL divergence into every alert quietly reporting "offset not collected"
+                   forever, where the bare read makes it a logged fault the hosts already degrade to an
+                   empty list. DBNull stays a real outcome — it is what a provider that cannot evaluate
+                   the expression returns. */
+                UtcOffsetMinutes = reader.IsDBNull(6)
+                    ? null
+                    : Convert.ToInt32(reader.GetValue(6), CultureInfo.InvariantCulture)
             });
         }
 

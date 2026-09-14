@@ -1758,7 +1758,9 @@ public sealed class AlertEngine
                     /* :679-682 — persist the SERVER-LOCAL watermark on-change only (#1145 parity). */
                     await _stateStore.SaveFailedJobWatermarkAsync(key, newestFailure);
 
-                    var failedJobContext = AlertContextBuilders.BuildFailedJobContext(serverName, failedJobs, failedJobOccurrences.Decorate); /* :695 */
+                    var failedJobContext = AlertContextBuilders.BuildFailedJobContext(
+                        serverName, failedJobs, failedJobOccurrences.Decorate,
+                        windowEndUtc: now, lookbackMinutes: _settings.FailedJobLookbackMinutes); /* :695 */
                     var detailText = AlertContextBuilders.ContextToDetailText(failedJobContext);               /* :696 */
 
                     /* :698-708. ShortMessage = the toast body of :690. */

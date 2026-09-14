@@ -749,6 +749,11 @@ LIMIT 1";
     /// <summary>
     /// Lite's anomalous-jobs read verbatim (running_jobs table). $2 is the threshold percent
     /// (multiplier x 100, as numeric — percent_of_average is numeric(10,1)).
+    /// <para><c>start_time</c> is the monitored server's own clock, so the server's collected UTC offset
+    /// is projected beside it — NOT <c>COALESCE(..., 0)</c>: the alert body renders an absent offset as an
+    /// explicitly unconverted server-clock instant rather than as UTC (see
+    /// <c>AlertTimestamp</c>), and coalescing here would take that choice away from it. Rides on this
+    /// statement rather than a second command so the pass's command count is unchanged.</para>
     /// </summary>
     public const string AnomalousJobsSql = @"
 SELECT
@@ -758,7 +763,15 @@ SELECT
     avg_duration_seconds,
     p95_duration_seconds,
     percent_of_average,
-    start_time
+    start_time,
+    (
+        SELECT sp.utc_offset_minutes
+        FROM server_properties AS sp
+        WHERE sp.server_id = $1
+        AND   sp.utc_offset_minutes IS NOT NULL
+        ORDER BY sp.collection_time DESC
+        LIMIT 1
+    ) AS utc_offset_minutes
 FROM running_jobs
 WHERE server_id = $1
 AND collection_time = (SELECT MAX(collection_time) FROM running_jobs WHERE server_id = $1)
@@ -808,7 +821,8 @@ LIMIT 5";
                 AvgDurationSeconds = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                 P95DurationSeconds = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                 PercentOfAverage = reader.IsDBNull(5) ? null : reader.GetDecimal(5),
-                StartTime = reader.IsDBNull(6) ? DateTime.MinValue : reader.GetDateTime(6)
+                StartTime = reader.IsDBNull(6) ? DateTime.MinValue : reader.GetDateTime(6),
+                UtcOffsetMinutes = reader.IsDBNull(7) ? null : reader.GetInt32(7)
             });
         }
 

@@ -11,6 +11,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace PerformanceMonitorDashboard.Tests;
@@ -61,6 +62,11 @@ public class FailedJobsQueryTests
         Assert.Contains("step_id = ISNULL(fs.step_id, jh.step_id)", sql);
         Assert.Contains("step_name = ISNULL(fs.step_name, jh.step_name)", sql);
         Assert.Contains("message = ISNULL(fs.message, jh.message)", sql);
+
+        /* #3421: the server's own UTC offset, measured in the same statement that read the
+           server-local run_datetime, so FailedJobInfo can state the failure instant in the frame the
+           alert body and alert_time share. */
+        Assert.Contains("utc_offset_minutes = DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())", sql);
     }
 
     [Fact]
@@ -89,7 +95,8 @@ public class FailedJobsQueryTests
             runTime,
             3,
             "Load fact table",
-            "Executed as user: NT SERVICE\\SQLSERVERAGENT. The step failed."
+            "Executed as user: NT SERVICE\\SQLSERVERAGENT. The step failed.",
+            -240
         });
 
         var items = await FailedJobsQuery.ReadAsync(reader, CancellationToken.None);
@@ -98,6 +105,10 @@ public class FailedJobsQueryTests
         Assert.Equal("Nightly ETL", job.JobName);
         Assert.Equal("3f2504e0-4f89-11d3-9a0c-0305e82c3301", job.JobId);
         Assert.Equal(runTime, job.RunDateTime);
+        /* #3421: the offset is ordinal 6, and the row states the run instant in UTC from it. */
+        Assert.Equal(-240, job.UtcOffsetMinutes);
+        Assert.Equal(runTime.AddMinutes(240), job.RunDateTimeUtc);
+        Assert.Equal("2026-07-01 03:45:12Z", job.RunDateTimeFormatted);
         Assert.Equal(3, job.StepId);
         Assert.Equal("Load fact table", job.StepName);
         Assert.Equal("Executed as user: NT SERVICE\\SQLSERVERAGENT. The step failed.", job.Message);
@@ -115,6 +126,7 @@ public class FailedJobsQueryTests
             new DateTime(2026, 6, 30, 23, 45, 12),
             DBNull.Value,
             DBNull.Value,
+            DBNull.Value,
             DBNull.Value
         });
 
@@ -125,6 +137,12 @@ public class FailedJobsQueryTests
         Assert.Equal(0, job.StepId);
         Assert.Equal("", job.StepName);
         Assert.Equal("", job.Message);
+
+        /* #3421: a provider that could not evaluate the offset expression leaves the instant
+           unconvertible, and the rendering SAYS so rather than claiming UTC it has not earned. */
+        Assert.Null(job.UtcOffsetMinutes);
+        Assert.Null(job.RunDateTimeUtc);
+        Assert.EndsWith(AlertTimestamp.UnknownOffsetMarker, job.RunDateTimeFormatted, StringComparison.Ordinal);
     }
 
     [Fact]
