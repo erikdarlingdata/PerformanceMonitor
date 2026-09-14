@@ -111,16 +111,21 @@ public sealed class AlertReadFailureSurfaceTests
             .Where(n => n != "EqualityContract")
             .ToList();
 
-        Assert.Equal(7, readingMembers.Count);
+        Assert.Equal(14, readingMembers.Count);
 
-        /* Seven from the record plus the two composed values. */
-        Assert.Equal(9, rendered.Count);
+        /* Fourteen from the record plus the two composed values. The record's members are three counts and
+           three newest-failure trios plus the pass denominator and counting_since, so the set below reads
+           as four groups: this server's, the fleet-scoped conditions', the instance-wide newest, and the
+           two figures that frame them. */
+        Assert.Equal(16, rendered.Count);
         Assert.Equal(
             new[]
             {
-                "counting_since", "finding", "instance_read_failures", "last_failure_at",
-                "last_failure_elapsed_ms", "last_failure_read", "note", "server_alert_passes",
-                "server_read_failures",
+                "counting_since", "finding", "fleet_last_failure_at", "fleet_last_failure_elapsed_ms",
+                "fleet_last_failure_read", "fleet_read_failures", "instance_last_failure_at",
+                "instance_last_failure_elapsed_ms", "instance_last_failure_read",
+                "instance_read_failures", "last_failure_at", "last_failure_elapsed_ms",
+                "last_failure_read", "note", "server_alert_passes", "server_read_failures",
             },
             rendered.OrderBy(f => f, StringComparer.Ordinal).ToArray());
     }

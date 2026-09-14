@@ -74,10 +74,23 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Equal(new[] { "101", "202" }, counter.ServerKeys());
 
         /* And the instance-wide read sees it, so a caller with no server in hand is not blind to it. */
-        var (instanceFailures, instanceStamp, instanceRead) = counter.ReadInstance();
+        var (instanceFailures, instanceStamp, instanceRead, instanceElapsed) = counter.ReadInstance();
         Assert.Equal(3, instanceFailures);
         Assert.NotNull(instanceStamp);
         Assert.Equal("store background-job health reads", instanceRead);
+        Assert.Equal(4_211, instanceElapsed);
+
+        /* Held apart from every server AND reported on every server's reading, which are not the same
+           claim: the separation above stops a server being blamed for it, and this stops it being
+           unnameable. The fleet count and its trio are the same whichever key was asked for. */
+        foreach (var key in new[] { "101", "202", "never-seen" })
+        {
+            var reading = counter.ReadFor(key);
+            Assert.Equal(1, reading.FleetReadFailures);
+            Assert.Equal("store background-job health reads", reading.FleetLastFailureRead);
+            Assert.Equal(4_211, reading.FleetLastFailureElapsedMs);
+            Assert.NotNull(reading.FleetLastFailureAtUtc);
+        }
     }
 
     [Fact]
@@ -94,8 +107,13 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Equal(0, reading.ServerReadFailures);
         Assert.Equal(0, reading.ServerAlertPasses);
         Assert.Equal(0, reading.InstanceReadFailures);
+        Assert.Equal(0, reading.FleetReadFailures);
         Assert.Null(reading.LastFailureAtUtc);
         Assert.Null(reading.LastFailureRead);
+        Assert.Null(reading.FleetLastFailureAtUtc);
+        Assert.Null(reading.FleetLastFailureRead);
+        Assert.Null(reading.InstanceLastFailureAtUtc);
+        Assert.Null(reading.InstanceLastFailureRead);
         Assert.Equal(started, reading.CountingSinceUtc);
     }
 
@@ -118,6 +136,500 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.NotNull(finding);
         Assert.Contains("No alerting-side store read has failed for this server", finding, StringComparison.Ordinal);
         Assert.Contains("2 failed elsewhere", finding, StringComparison.Ordinal);
+
+        /* And it says which of the two things, rather than offering the reader a disjunction. One of those
+           two failures belongs to no server and one is on another server, so the sentence states both
+           numbers and names the fleet-scoped one — the only one of the pair it can attribute, since the
+           other lives in a bucket this reading did not ask for. */
+        Assert.Contains("1 on store self-alerts that belong to no server", finding, StringComparison.Ordinal);
+        Assert.Contains("1 on other servers", finding, StringComparison.Ordinal);
+        Assert.Contains("store background-job health reads", finding, StringComparison.Ordinal);
+        Assert.Contains("10004 ms", finding, StringComparison.Ordinal);
+
+        /* The disjunction itself is gone. It was correct and it was the defect: the surface said out loud
+           that it could not tell the two apart. Pinned as an absence so a later edit cannot restore the
+           wording while the fields stay. */
+        Assert.DoesNotContain("or on a store self-alert", finding, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AFleetScopedFailure_IsNameableFromEveryServersReading()
+    {
+        /* The defect this pins. A failure recorded under a null key belongs to no server, so no server's
+           bucket holds it and no ReadFor key can reach the per-server trio — a fleet-scoped failure was
+           countable through instance_read_failures and identifiable through nothing, on exactly the
+           conditions the null key exists to give a home to. Two of those conditions are the store
+           background-job health reads, whose alerts are what would say the store is in trouble, so the
+           count is likeliest to be nonzero when the unnameable thing is the thing you need named.
+
+           Every per-server reading now carries the fleet count and its trio, so the read is nameable from
+           whichever server the caller happened to ask about — including one that has never failed and one
+           that does not exist. */
+        var counter = new AlertReadFailureCounter();
+
+        counter.RecordPass("101");
+        counter.RecordReadFailure(null, "retention-hold health read", 30_004);
+        counter.RecordReadFailure(null, "collector-cost regression self-alert", 9_998);
+
+        foreach (var key in new[] { "101", "not-a-server" })
+        {
+            var reading = counter.ReadFor(key);
+
+            /* The per-server trio stays null and that is CORRECT — these failures are not this server's,
+               and attributing them here would be worse than leaving them unnamed. The fleet trio is the
+               one that answers for them. */
+            Assert.Equal(0, reading.ServerReadFailures);
+            Assert.Null(reading.LastFailureAtUtc);
+            Assert.Null(reading.LastFailureRead);
+            Assert.Null(reading.LastFailureElapsedMs);
+
+            Assert.Equal(2, reading.InstanceReadFailures);
+            Assert.Equal(2, reading.FleetReadFailures);
+            Assert.Equal("collector-cost regression self-alert", reading.FleetLastFailureRead);
+            Assert.Equal(9_998, reading.FleetLastFailureElapsedMs);
+            Assert.NotNull(reading.FleetLastFailureAtUtc);
+
+            /* The instance trio agrees here because the newest failure anywhere IS the fleet one. It is
+               reported separately rather than folded into the fleet trio because it will not always agree:
+               a newer per-server failure on another server would move it and leave the fleet trio where it
+               is, which is the whole reason both exist. */
+            Assert.Equal("collector-cost regression self-alert", reading.InstanceLastFailureRead);
+            Assert.Equal(9_998, reading.InstanceLastFailureElapsedMs);
+            Assert.NotNull(reading.InstanceLastFailureAtUtc);
+
+            /* The subtraction that names the third population: nothing on other servers. */
+            Assert.Equal(
+                0,
+                reading.InstanceReadFailures - reading.ServerReadFailures - reading.FleetReadFailures);
+        }
+
+        /* And the two trios diverge as soon as a per-server failure is newer, which is the case that makes
+           a single instance-wide trio insufficient: it would name the deadlocks read and leave the
+           fleet-scoped pair unnamed all over again. */
+        counter.RecordReadFailure("999", "deadlocks", 12);
+
+        var afterwards = counter.ReadFor("101");
+        Assert.Equal("deadlocks", afterwards.InstanceLastFailureRead);
+        Assert.Equal("collector-cost regression self-alert", afterwards.FleetLastFailureRead);
+        Assert.Equal(2, afterwards.FleetReadFailures);
+        Assert.Equal(3, afterwards.InstanceReadFailures);
+        Assert.Equal(
+            1,
+            afterwards.InstanceReadFailures - afterwards.ServerReadFailures - afterwards.FleetReadFailures);
+    }
+
+    /// <summary>
+    /// Every count a reading carries is reported with the newest-failure trio that identifies it.
+    ///
+    /// <para>The category, rather than the instance. A count on this surface never ages out of a window, so
+    /// a bare number cannot separate a healed startup artefact from a live episode — <c>last_error</c>'s
+    /// #3010 lesson — and that applies once per POPULATION, not once per surface. The per-server count had
+    /// its trio from the start and the other two did not, which is how a fleet-scoped failure came to be
+    /// counted and unidentifiable.</para>
+    ///
+    /// <para>The counts are ENUMERATED from the record and the trio answering each one is DECLARED here,
+    /// because reflection can find the counts but cannot infer the pairing: the per-server trio is
+    /// unprefixed. So a fourth count added to the record fails the coverage assertion until its trio is
+    /// named, which is the property a hand-written list of three scopes could not have.</para>
+    /// </summary>
+    [Fact]
+    public void EveryCountOnAReading_CarriesTheTrioThatIdentifiesIt()
+    {
+        var reading = typeof(AlertReadFailureCounter.Reading);
+
+        var counts = reading
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Select(p => p.Name)
+            .Where(n => n.EndsWith("ReadFailures", StringComparison.Ordinal))
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+        var trios = new Dictionary<string, (string At, string Read, string Elapsed)>(StringComparer.Ordinal)
+        {
+            ["FleetReadFailures"] =
+                ("FleetLastFailureAtUtc", "FleetLastFailureRead", "FleetLastFailureElapsedMs"),
+            ["InstanceReadFailures"] =
+                ("InstanceLastFailureAtUtc", "InstanceLastFailureRead", "InstanceLastFailureElapsedMs"),
+            ["ServerReadFailures"] =
+                ("LastFailureAtUtc", "LastFailureRead", "LastFailureElapsedMs"),
+        };
+
+        /* Both directions. A count with no declared trio is the defect; a declared trio for a count the
+           record no longer carries means this table describes a shape that is gone. */
+        Assert.Equal(3, counts.Count);
+        Assert.Equal(counts, trios.Keys.OrderBy(k => k, StringComparer.Ordinal).ToList());
+
+        /* Every member named above really exists, so a typo in the table cannot make the behavioural half
+           below skip a scope while reporting clean. */
+        foreach (var (count, trio) in trios)
+        {
+            foreach (var member in new[] { count, trio.At, trio.Read, trio.Elapsed })
+            {
+                Assert.NotNull(reading.GetProperty(member));
+            }
+        }
+
+        static void AssertEveryScopeAgrees(
+            AlertReadFailureCounter.Reading value,
+            Dictionary<string, (string At, string Read, string Elapsed)> map)
+        {
+            var type = typeof(AlertReadFailureCounter.Reading);
+
+            foreach (var (count, trio) in map)
+            {
+                var n = (long)type.GetProperty(count)!.GetValue(value)!;
+                var at = type.GetProperty(trio.At)!.GetValue(value);
+                var read = type.GetProperty(trio.Read)!.GetValue(value);
+                var elapsed = type.GetProperty(trio.Elapsed)!.GetValue(value);
+
+                if (n == 0)
+                {
+                    /* No count, no facts. A stamp with no event behind it would be worse than a null. */
+                    Assert.Null(at);
+                    Assert.Null(read);
+                    Assert.Null(elapsed);
+                }
+                else
+                {
+                    /* A count, and all three facts that identify it. Asserted as a trio rather than one
+                       field at a time because the failure mode is a scope that gained a count and kept
+                       only some of its identity — which reads as an instrument that half-works. */
+                    Assert.NotNull(at);
+                    Assert.NotNull(read);
+                    Assert.NotNull(elapsed);
+                }
+            }
+        }
+
+        var counter = new AlertReadFailureCounter();
+
+        /* Quiet: three counts at zero, nine nulls. */
+        AssertEveryScopeAgrees(counter.ReadFor("101"), trios);
+
+        /* This server only: its trio and the instance trio fill, the fleet's stays empty. */
+        counter.RecordReadFailure("101", "deadlocks", 41);
+        var own = counter.ReadFor("101");
+        Assert.Equal(1, own.ServerReadFailures);
+        Assert.Equal(0, own.FleetReadFailures);
+        AssertEveryScopeAgrees(own, trios);
+
+        /* And a fleet-scoped one: all three fill. */
+        counter.RecordReadFailure(null, "mute-rule reload", 10_002);
+        var both = counter.ReadFor("101");
+        Assert.Equal(1, both.FleetReadFailures);
+        AssertEveryScopeAgrees(both, trios);
+
+        /* A server that has never failed, on the same degraded service: its own scope empty, the other two
+           full. This is the reading the whole change exists for, so it is asserted through the same
+           generic check rather than by hand. */
+        var bystander = counter.ReadFor("202");
+        Assert.Equal(0, bystander.ServerReadFailures);
+        Assert.Equal(1, bystander.FleetReadFailures);
+        Assert.Equal(2, bystander.InstanceReadFailures);
+        AssertEveryScopeAgrees(bystander, trios);
+    }
+
+    /// <summary>
+    /// Under concurrency the instance total never trails the two parts a reading subtracts from it, so the
+    /// figure that names the failures on OTHER servers cannot render negative.
+    ///
+    /// <para>That population has no count of its own — nothing here holds a newest failure for it, and a
+    /// fourth count with nothing to date it would be the defect rather than the fix — so the total less
+    /// this server's less the fleet's is the only route to it.</para>
+    ///
+    /// <para>It is a property of the publication order in <c>RecordReadFailure</c> together with the
+    /// sampling order in <c>ReadFor</c>, and it is invisible to a single-threaded test: the two orders only
+    /// differ while a write is in flight. This assertion earned its place — it found the write order wrong
+    /// the first time it ran, at about six negative readings per thousand, on a change whose comment
+    /// confidently asserted that sampling the total last was sufficient on its own. It is not; the writer
+    /// has to increment the total first as well, or a reader samples a bucket the total has not counted.
+    /// Reverting either half reds this test.</para>
+    ///
+    /// <para><b>What this does NOT cover</b>, stated because it was attempted here first: the other half of
+    /// the publication order, identity ahead of the count it identifies. That window is one instruction
+    /// wide and reachable only on the FIRST failure a bucket ever records, since the trio is permanently
+    /// populated afterwards — a loop like this one asserting it passed with the writer's order reversed AND
+    /// with the reader's reversed, measured both ways, so it asserted nothing. It is pinned from source by
+    /// <see cref="ThePublicationAndSamplingOrders_ArePinnedFromSource"/> instead, and the two pins are split
+    /// by what each can discriminate rather than sharing a name that overstates both.</para>
+    /// </summary>
+    [Fact]
+    public async Task UnderConcurrency_TheInstanceTotalNeverTrailsItsParts()
+    {
+        const string Key = "700";
+        const int WritesPerWriter = 150_000;
+
+        var counter = new AlertReadFailureCounter();
+
+        var writers = new[] { "deadlocks", "mute-rule reload" }
+            .Select(name => Task.Factory.StartNew(
+                () =>
+                {
+                    for (var i = 0; i < WritesPerWriter; i++)
+                    {
+                        counter.RecordReadFailure(Key, name, 10);
+                        counter.RecordReadFailure(null, name, 20);
+                    }
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default))
+            .ToArray();
+
+        /* The reader is THIS thread rather than another queued work item, so it cannot go unscheduled on a
+           small runner and report a vacuous pass. */
+        var negatives = new List<string>();
+        var observations = 0;
+        var observedBothParts = 0;
+
+        while (!writers.All(w => w.IsCompleted))
+        {
+            var reading = counter.ReadFor(Key);
+            observations++;
+
+            var others =
+                reading.InstanceReadFailures - reading.ServerReadFailures - reading.FleetReadFailures;
+
+            if (others < 0)
+            {
+                negatives.Add(
+                    $"instance {reading.InstanceReadFailures} - server {reading.ServerReadFailures} - "
+                    + $"fleet {reading.FleetReadFailures} = {others}");
+            }
+
+            if (reading.ServerReadFailures > 0 && reading.FleetReadFailures > 0)
+            {
+                observedBothParts++;
+            }
+        }
+
+        await Task.WhenAll(writers);
+
+        /* Liveness, so a silent pass cannot be the reader never running or never seeing a populated
+           reading: the subtraction has to have been exercised over two NONZERO parts, which is the only
+           state in which a wrong sampling order can show. */
+        Assert.True(observations > 0, "the reader observed nothing, so its silence proves nothing");
+        Assert.True(
+            observedBothParts > 0,
+            $"none of {observations} observation(s) saw both parts nonzero, so the subtraction was never "
+            + "exercised over a state where a wrong sampling order could show");
+
+        Assert.True(
+            negatives.Count == 0,
+            $"{negatives.Count} negative other-server count(s) over {observations} observation(s): "
+            + string.Join(" | ", negatives.Take(5)));
+
+        /* Settled: only these two buckets were written, so the total equals their sum exactly and the third
+           population is empty. An exact equality here is what proves the total is the sum of the parts and
+           not an independently-maintained number that happens to track them. */
+        var settled = counter.ReadFor(Key);
+        Assert.Equal(2 * WritesPerWriter, settled.ServerReadFailures);
+        Assert.Equal(2 * WritesPerWriter, settled.FleetReadFailures);
+        Assert.Equal(
+            settled.ServerReadFailures + settled.FleetReadFailures,
+            settled.InstanceReadFailures);
+    }
+
+    /// <summary>
+    /// The publication order in <c>RecordReadFailure</c> and the sampling order in <c>ReadFor</c>, pinned
+    /// from source.
+    ///
+    /// <para>Three orderings carry the block's two cross-scope guarantees. Two of them — identity ahead of
+    /// the count it identifies, on each side — are NOT behaviourally reachable: the window is one
+    /// instruction wide and only exists on the first failure a bucket ever records, because the trio is
+    /// permanently populated afterwards. A concurrency loop asserting them was written first and passed
+    /// with the writer's order reversed and again with the reader's reversed, so it asserted nothing; this
+    /// pin exists because that one could not. The third, the total leading its parts, is reachable and is
+    /// pinned behaviourally by <see cref="UnderConcurrency_TheInstanceTotalNeverTrailsItsParts"/> — it is
+    /// covered here as well, cheaply, so a reorder reds on the fast pin too.</para>
+    ///
+    /// <para>The detector is exercised against reordered fixtures below, so its silence on the real file is
+    /// a real absence rather than a matcher that matches whatever it is given.</para>
+    /// </summary>
+    [Fact]
+    public void ThePublicationAndSamplingOrders_ArePinnedFromSource()
+    {
+        var source = ReadSource(Path.Combine(
+            "PerformanceMonitor.Alerting", "AlertReadFailureCounter.cs"));
+
+        var write = MethodBody(source, "public void RecordReadFailure(");
+        var read = MethodBody(source, "public Reading ReadFor(");
+
+        Assert.Empty(OrderViolations(write, read));
+
+        /* Every statement the detector keys on is present, in both bodies, so an "Empty" above cannot be a
+           scan that found nothing to compare. */
+        foreach (var statement in new[]
+        {
+            "Interlocked.Exchange(ref _instanceNewest, newest)",
+            "Interlocked.Exchange(ref bucket.Newest, newest)",
+            "Interlocked.Increment(ref _instanceReadFailures)",
+            "Interlocked.Increment(ref bucket.ReadFailures)",
+        })
+        {
+            Assert.Contains(statement, write, StringComparison.Ordinal);
+        }
+
+        foreach (var statement in new[]
+        {
+            "Interlocked.Read(ref bucket.ReadFailures)",
+            "Interlocked.Read(ref _fleet.ReadFailures)",
+            "Interlocked.Read(ref _instanceReadFailures)",
+            "Volatile.Read(ref bucket.Newest)",
+            "Volatile.Read(ref _fleet.Newest)",
+            "Volatile.Read(ref _instanceNewest)",
+        })
+        {
+            Assert.Contains(statement, read, StringComparison.Ordinal);
+        }
+
+        /* The detector, against each reordering it exists to catch, one at a time — so a rule that stopped
+           working cannot hide behind the others. Each fixture is the real body with exactly two statements
+           swapped, which is what a careless edit produces. */
+        var swaps = new (string What, string A, string B, bool InWriteBody)[]
+        {
+            ("the instance identity behind its count",
+             "Interlocked.Exchange(ref _instanceNewest, newest)",
+             "Interlocked.Increment(ref _instanceReadFailures)", true),
+            ("the bucket identity behind its count",
+             "Interlocked.Exchange(ref bucket.Newest, newest)",
+             "Interlocked.Increment(ref bucket.ReadFailures)", true),
+            ("the total incremented after its part",
+             "Interlocked.Increment(ref _instanceReadFailures)",
+             "Interlocked.Increment(ref bucket.ReadFailures)", true),
+            ("the total sampled before its part",
+             "Interlocked.Read(ref _instanceReadFailures)",
+             "Interlocked.Read(ref bucket.ReadFailures)", false),
+            ("a trio sampled before its count",
+             "Volatile.Read(ref _fleet.Newest)",
+             "Interlocked.Read(ref _fleet.ReadFailures)", false),
+        };
+
+        foreach (var swap in swaps)
+        {
+            var mutatedWrite = swap.InWriteBody ? Swap(write, swap.A, swap.B) : write;
+            var mutatedRead = swap.InWriteBody ? read : Swap(read, swap.A, swap.B);
+
+            Assert.NotEmpty(OrderViolations(mutatedWrite, mutatedRead));
+        }
+    }
+
+    /// <summary>
+    /// Which of the documented orderings the two bodies break, by the position of the statements that
+    /// carry them. Returns an empty list when every one holds.
+    /// </summary>
+    private static List<string> OrderViolations(string write, string read)
+    {
+        var broken = new List<string>();
+
+        void Before(string body, string first, string second, string why)
+        {
+            var a = body.IndexOf(first, StringComparison.Ordinal);
+            var b = body.IndexOf(second, StringComparison.Ordinal);
+
+            /* A missing statement is a violation rather than a pass: a rule whose subject has been renamed
+               away is a rule that stopped being checked, which is the failure mode this whole file exists
+               to avoid one level up. */
+            if (a < 0 || b < 0 || a > b)
+            {
+                broken.Add($"{why} ({first} at {a}, {second} at {b})");
+            }
+        }
+
+        /* Identity before the count it identifies, on each side, so a count is never visible with nothing
+           beside it to date or name it. */
+        Before(
+            write,
+            "Interlocked.Exchange(ref _instanceNewest, newest)",
+            "Interlocked.Increment(ref _instanceReadFailures)",
+            "the instance trio must be published before the instance count");
+        Before(
+            write,
+            "Interlocked.Exchange(ref bucket.Newest, newest)",
+            "Interlocked.Increment(ref bucket.ReadFailures)",
+            "a bucket's trio must be published before that bucket's count");
+
+        /* The total before the part, so the total leads and the other-server subtraction cannot go
+           negative. */
+        Before(
+            write,
+            "Interlocked.Increment(ref _instanceReadFailures)",
+            "Interlocked.Increment(ref bucket.ReadFailures)",
+            "the instance total must be incremented before the bucket it counts for");
+
+        /* And the reader's mirror: every count before its trio, and the total last of the counts. */
+        Before(
+            read,
+            "Interlocked.Read(ref bucket.ReadFailures)",
+            "Volatile.Read(ref bucket.Newest)",
+            "the server count must be sampled before the server trio");
+        Before(
+            read,
+            "Interlocked.Read(ref _fleet.ReadFailures)",
+            "Volatile.Read(ref _fleet.Newest)",
+            "the fleet count must be sampled before the fleet trio");
+        Before(
+            read,
+            "Interlocked.Read(ref _instanceReadFailures)",
+            "Volatile.Read(ref _instanceNewest)",
+            "the instance count must be sampled before the instance trio");
+        Before(
+            read,
+            "Interlocked.Read(ref bucket.ReadFailures)",
+            "Interlocked.Read(ref _instanceReadFailures)",
+            "the instance total must be sampled after the buckets it is subtracted from");
+        Before(
+            read,
+            "Interlocked.Read(ref _fleet.ReadFailures)",
+            "Interlocked.Read(ref _instanceReadFailures)",
+            "the instance total must be sampled after the fleet bucket");
+
+        return broken;
+    }
+
+    /// <summary>The body of a method, from its signature to the brace that closes it.</summary>
+    private static string MethodBody(string source, string signature)
+    {
+        var at = source.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(at > 0, $"#3426 order pin: '{signature}' is no longer in AlertReadFailureCounter.cs");
+
+        var open = source.IndexOf('{', at);
+        Assert.True(open > at, $"#3426 order pin: '{signature}' has no body");
+
+        var depth = 0;
+        for (var i = open; i < source.Length; i++)
+        {
+            if (source[i] == '{')
+            {
+                depth++;
+            }
+            else if (source[i] == '}')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    return source[open..i];
+                }
+            }
+        }
+
+        Assert.Fail($"#3426 order pin: '{signature}' body never closes");
+        return string.Empty;
+    }
+
+    /// <summary>The same text with the first occurrence of two statements exchanged.</summary>
+    private static string Swap(string body, string first, string second)
+    {
+        var a = body.IndexOf(first, StringComparison.Ordinal);
+        var b = body.IndexOf(second, StringComparison.Ordinal);
+
+        Assert.True(a >= 0, $"#3426 order pin: fixture statement not found: {first}");
+        Assert.True(b >= 0, $"#3426 order pin: fixture statement not found: {second}");
+        Assert.NotEqual(a, b);
+
+        var (lo, loText, hi, hiText) = a < b ? (a, first, b, second) : (b, second, a, first);
+
+        return body[..lo] + hiText + body[(lo + loText.Length)..hi] + loText + body[(hi + hiText.Length)..];
     }
 
     [Fact]
@@ -280,15 +792,27 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Equal(legal[settled.LastFailureRead!], settled.LastFailureElapsedMs);
         Assert.NotNull(settled.LastFailureAtUtc);
 
-        /* The fleet bucket reaches no per-server reading by design, so its trio is checked through the
-           instance read, which carries the stamp and the name. The elapsed is not on that surface — stated
-           because it bounds what this half proves. */
-        var (instanceFailures, instanceStamp, instanceRead) = counter.ReadInstance();
+        /* The fleet bucket's trio, which the writers above hammered through the null key, checked on the
+           SAME reading rather than through a second call: a per-server reading carries it, so the blend
+           question applies to it too and a torn fleet trio would pair one writer's elapsed with another's
+           name exactly as a torn per-server one would. The instance trio gets the same treatment on the
+           same reading — three trios, one snapshot, each internally consistent. */
+        Assert.True(settled.FleetReadFailures > 0);
+        Assert.NotNull(settled.FleetLastFailureRead);
+        Assert.Equal(legal[settled.FleetLastFailureRead!], settled.FleetLastFailureElapsedMs);
+        Assert.NotNull(settled.FleetLastFailureAtUtc);
+
+        Assert.NotNull(settled.InstanceLastFailureRead);
+        Assert.Equal(legal[settled.InstanceLastFailureRead!], settled.InstanceLastFailureElapsedMs);
+        Assert.NotNull(settled.InstanceLastFailureAtUtc);
+
+        var (instanceFailures, instanceStamp, instanceRead, instanceElapsed) = counter.ReadInstance();
         Assert.True(instanceFailures > 0);
         Assert.NotNull(instanceStamp);
         Assert.True(
             legal.ContainsKey(instanceRead!),
             $"the instance-wide newest read name is '{instanceRead}', which no writer recorded");
+        Assert.Equal(legal[instanceRead!], instanceElapsed);
     }
 
     [Fact]
@@ -1688,7 +2212,7 @@ public sealed class AlertReadFailureSurfaceTests
             .Where(n => n != "EqualityContract")
             .ToList();
 
-        Assert.Equal(7, readingMembers.Count);
+        Assert.Equal(14, readingMembers.Count);
 
         foreach (var member in readingMembers)
         {
@@ -1726,8 +2250,9 @@ public sealed class AlertReadFailureSurfaceTests
         /* DERIVED from the tool's own payload, not listed. A hardcoded key list here was blind to the
            field this pin exists to protect: #3099 added last_failure_elapsed_ms to the tool and to the
            JS, and the guard whose stated purpose is "a field added to the tool and not to a descriptor is
-           silently dropped" would have passed with the descriptor row deleted. A list of six keys cannot
-           notice the seventh — the exact shape this file warns about one level up, reproduced inside it.
+           silently dropped" would have passed with the descriptor row deleted. A hardcoded list cannot
+           notice the key added after it was written — the exact shape this file warns about one level up,
+           reproduced inside it.
 
            The chain is now complete and each link is pinned: the record is tied to the tool payload by
            TheDarlingSurface_CarriesEveryFieldOfTheReading, and the tool payload is tied to the panel
@@ -1746,8 +2271,10 @@ public sealed class AlertReadFailureSurfaceTests
             .ToList();
 
         /* Both directions, so an extractor that stopped matching cannot report clean. */
-        Assert.Equal(7, payloadFields.Count);
+        Assert.Equal(14, payloadFields.Count);
         Assert.Contains("last_failure_elapsed_ms", payloadFields);
+        Assert.Contains("fleet_last_failure_read", payloadFields);
+        Assert.Contains("instance_last_failure_read", payloadFields);
 
         foreach (var field in payloadFields)
         {
