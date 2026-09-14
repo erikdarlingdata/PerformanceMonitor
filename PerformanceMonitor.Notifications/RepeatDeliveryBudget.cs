@@ -77,9 +77,11 @@ public sealed class RepeatDeliveryBudget
     public const string RosterHeading = "Other Servers Affected";
 
     /// <summary>
-    /// Fact naming how many (server, fingerprint) pairs the roster covers. Its own fact so automation reads
-    /// the number without parsing <see cref="RosterListFactName"/>; a fact name is a consumer API (see
-    /// <see cref="AlertIncidentRenderer"/>), so it is declared here rather than spelled inline.
+    /// Fact naming how many (server, fingerprint) pairs the roster covers. A bare count, not a sentence:
+    /// the point of giving it its own fact is that a consumer reads the number without parsing
+    /// <see cref="RosterListFactName"/>, and a fact whose value is prose asks it to parse anyway. The
+    /// heading carries the words. A fact name is a consumer API (see <see cref="AlertIncidentRenderer"/>),
+    /// so it is declared here rather than spelled inline.
     /// </summary>
     public const string RosterCountFactName = "Affected";
 
@@ -193,9 +195,11 @@ public sealed class RepeatDeliveryBudget
             }
 
             /* Reserve BEFORE the send so a concurrent sibling folds rather than posting a second card, and
-               stamp it with the evaluation instant so a Release that never runs (an exception between here
-               and the caller's finally) expires on its own at the end of the window instead of muting the
-               metric's repeats forever. Two barriers, because the one that matters is the one that fails. */
+               stamp it with the evaluation instant so a Release that never runs expires on its own at the end
+               of the window instead of muting the metric's repeats forever. Neither caller releases from a
+               finally — each decides on its send outcome and both sit inside an outer catch that swallows —
+               so an exception escaping the send path skips Release, and the expiry is what bounds that.
+               Two barriers, because the one that matters is the one that fails. */
             if (repeat)
             {
                 state.LastCarrierUtc = cooldown.EvaluatedAtUtc;
@@ -411,11 +415,7 @@ public sealed class RepeatDeliveryBudget
             }
 
             var item = new AlertDetailItem { Heading = RosterHeading };
-            item.Fields.Add((RosterCountFactName,
-                string.Format(
-                    CultureInfo.InvariantCulture,
-                    "{0} already-reported incident(s) on other servers",
-                    keys.Count)));
+            item.Fields.Add((RosterCountFactName, keys.Count.ToString(CultureInfo.InvariantCulture)));
             item.Fields.Add((RosterListFactName, list.ToString()));
             if (keys.Count > enumerated)
             {

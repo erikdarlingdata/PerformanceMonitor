@@ -253,7 +253,7 @@ public sealed class RepeatDeliveryBudgetTests
         Assert.Equal(
             Extra.ToString(System.Globalization.CultureInfo.InvariantCulture),
             Fact(carrier, RepeatDeliveryBudget.RosterOmittedFactName));
-        Assert.Contains(
+        Assert.Equal(
             (RepeatDeliveryBudget.MaxEnumeratedEntries + Extra).ToString(System.Globalization.CultureInfo.InvariantCulture),
             Fact(carrier, RepeatDeliveryBudget.RosterCountFactName));
     }
