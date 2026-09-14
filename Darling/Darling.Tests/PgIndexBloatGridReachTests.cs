@@ -461,14 +461,48 @@ public sealed class PgIndexBloatGridReachTests
         Assert.Contains("\"get_pg_index_bloat\"", defaultPanel, StringComparison.Ordinal);
         Assert.DoesNotContain("answered_only", defaultPanel, StringComparison.Ordinal);
 
-        /* The extension inventory prints the read's own caveat too - the same shape of capped census, and
-           before this it rendered with no caveat at all. */
-        var extensions = tabs.IndexOf("\"Extensions\",", StringComparison.Ordinal);
+    }
 
-        Assert.True(extensions > 0, "the extensions panel is gone or renamed");
-        Assert.Contains(
-            "\"note\"", tabs[extensions..Math.Min(tabs.Length, extensions + 1_200)],
-            StringComparison.Ordinal);
+    /// <summary>
+    /// The extension inventory is the same shape of capped census on the same page, and it now carries both
+    /// halves: the read's own caveat over the rows, and the aggregated answer that caveat points at.
+    ///
+    /// <para><b>Both halves, because the note alone would be the defect inverted.</b> The read's caveat says
+    /// to read <c>install_census</c>; a page printing that sentence while rendering no census tells an
+    /// operator to consult something the surface does not offer. The rows are the PRODUCT of databases and
+    /// extension names and the ordering takes the CREATED rows first, so the row list is what a cap breaks
+    /// and the census is what no cap touches (#3425).</para>
+    ///
+    /// <para><b>And the hook is asserted to be WIRED, not merely configured.</b> <c>noteKey</c> on a fanout
+    /// spec was inert before this change — a spec carrying it would have looked right and rendered nothing,
+    /// which is correct narration over absent behaviour.</para>
+    /// </summary>
+    [Fact]
+    public void TheWebDashboardRendersTheLimitIndependentExtensionCensus()
+    {
+        var tabs = RepoFile.ReadRepoFileLf(WebTabs);
+
+        /* ONE fetch feeding both panels - fanout's whole purpose, and what keeps this off the
+           duplicate-fetch rule that the index bloat pair needed a named exemption for. */
+        var fetch = tabs.IndexOf("fanout(\"get_pg_extensions\"", StringComparison.Ordinal);
+
+        Assert.True(fetch > 0, "the extension inventory is no longer one fetch feeding its panels");
+
+        var block = tabs[fetch..Math.Min(tabs.Length, fetch + 2_000)];
+
+        Assert.Contains("title: \"Extensions\"", block, StringComparison.Ordinal);
+        Assert.Contains("noteKey: \"note\"", block, StringComparison.Ordinal);
+        Assert.Contains("rowsKey: \"install_census\"", block, StringComparison.Ordinal);
+
+        /* The mechanism behind that noteKey, in fanout's own body. */
+        var composite = tabs.IndexOf("function fanout(read, params, specs)", StringComparison.Ordinal);
+
+        Assert.True(composite > 0, "fanout is gone - remap this pin rather than deleting it");
+
+        var fanout = tabs[composite..Math.Min(tabs.Length, composite + 2_000)];
+
+        Assert.Contains("getPath(res.data, spec.noteKey)", fanout, StringComparison.Ordinal);
+        Assert.Contains("noticeStrip(note)", fanout, StringComparison.Ordinal);
     }
 
     /// <summary>
