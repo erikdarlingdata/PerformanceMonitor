@@ -556,6 +556,22 @@ public class EntraDeviceCodeTests
         var closingBody = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', closing));
         Assert.Contains("_attempt." + "Cancel()", closingBody, StringComparison.Ordinal);
 
+        /* And the close from the attempt's side is GUARDED, so a queued BeginInvoke that lands after
+           the user has already closed the window does not issue a second Close(). Measured, that
+           second call is currently discarded by Window.InternalClose's `if (_disposed) return;` -
+           but that is a fact about undocumented internals in a framework this app does not version,
+           and no test can reach the race to notice a change. The guard is asserted to be read INSIDE
+           the handler, not merely present in the file, because a flag assigned and never tested is
+           the shape this pin exists to catch. */
+        var guardAssigned = code.IndexOf("_closed = true", StringComparison.Ordinal);
+        Assert.True(guardAssigned >= 0, "Window_Closing must record that the window has closed");
+
+        Assert.Contains("if (_closed)", finishedBody, StringComparison.Ordinal);
+        Assert.True(
+            finishedBody.IndexOf("if (_closed)", StringComparison.Ordinal)
+                < finishedBody.IndexOf("Close" + "()", StringComparison.Ordinal),
+            "the guard must be read BEFORE the close it guards");
+
         /* The cancellation lives in Closing rather than in the button handler, so the button, Escape
            and the title-bar X all reach it. A Cancel() in the click handler INSTEAD would leave two
            of those three routes closing the window without ending the attempt. */

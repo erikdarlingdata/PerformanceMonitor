@@ -39,6 +39,7 @@ public partial class EntraDeviceCodeWindow : Window
 {
     private readonly EntraDeviceCodeAttempt _attempt;
     private bool _closingBecauseAttemptFinished;
+    private bool _closed;
 
     /// <summary>
     /// Binds the window to one attempt. The challenge is read here rather than bound, because it is
@@ -70,17 +71,19 @@ public partial class EntraDeviceCodeWindow : Window
     /// thread completed the connection; flagged, so <see cref="Window_Closing"/> can tell this close
     /// apart from the user giving up and does not cancel an attempt that already succeeded.
     ///
-    /// <para><b>A second close is a no-op, and that is checked rather than assumed.</b> There is one
-    /// ordering in which this runs after the window is already gone: the attempt ends on a
+    /// <para><b>Guarded, so the second close is never issued rather than merely tolerated.</b> There
+    /// is one ordering that reaches here after the window is already gone: the attempt ends on a
     /// background thread and queues the <c>BeginInvoke</c> below, and the user then closes the window
     /// on the dispatcher before that delegate is pumped — <see cref="Window_Closing"/>'s unsubscribe
-    /// cannot recall an invocation already queued. <c>Window.InternalClose</c> answers
-    /// <c>if (_disposed) return;</c> immediately after its <c>VerifyNotClosing</c>, and
-    /// <c>VerifyNotClosing</c> throws only while a close is IN FLIGHT (<c>_isClosing</c>) or on an
-    /// invalid composition target, which a closed window does not have because its source window is
-    /// null (PresentationFramework 10.0.10, <c>Window.InternalClose</c> / <c>VerifyNotClosing</c>).
-    /// So no guard flag is needed for that ordering, and one would be defensive code for a call the
-    /// framework already discards.</para>
+    /// cannot recall an invocation already queued.
+    ///
+    /// <para>Measured, that second <c>Close()</c> is harmless today:
+    /// <c>Window.InternalClose</c> answers <c>if (_disposed) return;</c> straight after its
+    /// <c>VerifyNotClosing</c>, which throws only while a close is IN FLIGHT or on an invalid
+    /// composition target — and a closed window has neither, its source window being null
+    /// (<c>PresentationFramework</c> 10.0.10). The flag is here anyway, because that is a fact about
+    /// undocumented internals in a framework this app does not version, and no test can reach the
+    /// race to notice if it changes. Not making the call costs one field and depends on nothing.</para>
     /// </summary>
     private void OnAttemptFinished()
     {
@@ -90,12 +93,18 @@ public partial class EntraDeviceCodeWindow : Window
             return;
         }
 
+        if (_closed)
+        {
+            return;
+        }
+
         _closingBecauseAttemptFinished = true;
         Close();
     }
 
     private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {
+        _closed = true;
         _attempt.Finished -= OnAttemptFinished;
 
         if (!_closingBecauseAttemptFinished)

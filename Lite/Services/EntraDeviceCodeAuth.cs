@@ -210,6 +210,20 @@ public static class EntraDeviceCodeAuth
     /// <c>EntraCredentialSelectionLog.Begin</c> gives: this is the keyword the driver will actually
     /// act on, so the gate cannot disagree with the connection string, and it would follow a
     /// credential profile into this mode for free if one were ever offered there.</para>
+    ///
+    /// <para><b>ONE attempt may be in flight at a time, and this is the method's precondition rather
+    /// than an implementation detail.</b> A second overlapping <c>Begin</c> takes the slot the
+    /// driver's callback publishes into, so the earlier caller's code is then displayed on the later
+    /// caller's window — whose Cancel cancels the later caller's token, not the sign-in the displayed
+    /// code belongs to. There is no fix available here, only the constraint: MSAL hands the callback
+    /// a <c>DeviceCodeResult</c> and SqlClient's wrapper drops the
+    /// <c>SqlAuthenticationParameters</c>, including its <c>ConnectionId</c>, before invoking it — so
+    /// nothing reaches this type that could tell two attempts apart. The displacement is logged,
+    /// which is a diagnosis and not a mitigation. Today's call sites cannot overlap (the Add/Edit
+    /// dialog is modal and disables its own buttons while a test runs, and the connectivity sweep
+    /// refuses interactive modes while that dialog is open); a NEW concurrent call site has to
+    /// serialize itself, the way <c>RemoteCollectorService</c> does behind its interactive-auth
+    /// semaphore.</para>
     /// </summary>
     public static EntraDeviceCodeAttempt? Begin(SqlConnectionStringBuilder? builder)
     {
