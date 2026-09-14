@@ -290,7 +290,7 @@ public class WebhookAlertService
                 _cooldown.Stamp(decision);
 
                 /* #3430: clear only the roster entries this card named, so anything folded while the four
-                   posts were in flight is named by the next carrier instead of being commit-ed away by this
+                   posts were in flight is named by the next carrier instead of being committed away by this
                    one. Logged at Information because it is the once-per-window aggregate — it states how
                    many servers this single post stood in for. */
                 _repeatBudget.Commit(budget);
