@@ -28,7 +28,7 @@ namespace Darling.Tests;
 /// one result set is the exact mechanism <see cref="QueryPlanXmlCaptureLimits"/> exists to prevent: the cost
 /// is the client materializing each plan as one managed string, and the Large-Object-Heap churn that produces
 /// stalls unrelated collectors on unrelated connections. So "fetch a few at once, it will be faster" reads
-/// like an optimization and IS the regression. A future reader looking only at the sweep sees three
+/// like an optimization and IS the regression. A future reader looking only at the sweep sees ten
 /// single-row fetches a quarter-hour and a loop, and the cheapest-looking change available to them is to
 /// widen the loop into the query. These pins make that fail in the author's own test run.</para>
 ///
@@ -342,11 +342,11 @@ public sealed class OversizedPlanBacklogPins
             OversizedPlanBacklog.ClaimSql(OversizedPlanBacklogSweep.MaxPlansPerServerPerTick),
             StringComparison.Ordinal);
 
-        /* Two-sided, and both ends are reasoned. Slower than a quarter-hour and the drain falls under the
-           ~1,400-an-hour over-cap arrival measured on the store class it is sized for; faster and the
-           sentinel row rate and the connect-wait budget below both start paying for it. The per-server load
-           the cap itself bounds is asserted as a product in
-           TheDrainRate_IsTheRaisedOne_AndItsWorstCaseIsStillBounded rather than as a digit here. */
+        /* Two-sided, and each end holds a different cost. The FLOOR is what a shorter cadence charges:
+           the sentinel run-record rate and the connect-wait budget, both derived in
+           TheDrainRate_ClearsTheMeasuredArrival_AndBothItsCostsAreBounded. The CEILING keeps the drain
+           inside reach of the ~1,400-an-hour over-cap arrival measured on the store class this rate is
+           sized for; the rate itself is asserted there too, since either constant can supply it. */
         Assert.InRange(
             OversizedPlanBacklogSweep.SweepInterval, TimeSpan.FromMinutes(15), TimeSpan.FromHours(1));
 
@@ -358,19 +358,19 @@ public sealed class OversizedPlanBacklogPins
     }
 
     /// <summary>
-    /// The drain RATE, and the two costs that bound it — the fact #3416 exists to establish.
+    /// The drain RATE, and the two costs that bound it (#3416).
     ///
-    /// <para>Asserted as the rate rather than as either knob, because either one can supply it: the
-    /// measurement was that over-cap identities arrive on one store class at ~1,400 an hour fleet-wide
-    /// against what 3 plans per server per hour drains, and that ~90% of them aged out unfetched at the
-    /// 30-day sighting horizon. A pin on one constant is satisfied by moving the other.</para>
+    /// <para>Asserted as the rate rather than as either knob, because either one supplies it: over-cap
+    /// identities arrive on one store class at ~1,400 an hour fleet-wide, and at 3 plans per server per hour
+    /// ~90% of them aged out unfetched at the 30-day sighting horizon. A pin on one constant is satisfied by
+    /// moving the other.</para>
     ///
     /// <para>Every figure is compared against a LITERAL rather than against a product this test builds,
-    /// which is the trap a sibling pin in this file was caught by: a total written as the shipped values
-    /// multiplied together is equal to itself however either value moves.</para>
+    /// which is the trap a sibling pin in this file guards explicitly: a total written as the shipped values
+    /// multiplied together equals itself however either value moves.</para>
     /// </summary>
     [Fact]
-    public void TheDrainRate_IsTheRaisedOne_AndItsWorstCaseIsStillBounded()
+    public void TheDrainRate_ClearsTheMeasuredArrival_AndBothItsCostsAreBounded()
     {
         /* The deliverable: 40 plans per server per hour, which on a 42-server fleet is 1,680 against the
            ~1,400 measured arrival — a drain that exceeds arrival rather than one that merely tracks it. */
