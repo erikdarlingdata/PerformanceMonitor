@@ -176,7 +176,7 @@ public static class DarlingPgExtensionAvailabilityReader
        reduced relation is what stops the two describing different populations.
 
        Every output column is aliased with AS — an unaliased count(*) comes back named `count`, and there are
-       four of them here. $1 server_id, $2 window start, $3 window end. */
+       four of them here. $1 server_id, $2 window start, $3 window end, $4 database or NULL. */
     public const string InstallCensusSql = """
         WITH latest AS (
             SELECT DISTINCT ON (database_name, extension_name)
@@ -185,6 +185,11 @@ public static class DarlingPgExtensionAvailabilityReader
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
+            /* THE SAME DATABASE FILTER THE ROW READ APPLIES, so one response describes ONE scope. A census
+               measured over the whole server beside rows narrowed to one database puts a denominator of
+               1,632 next to a complete 102-row answer and reports it unreachable - a filtered caller told
+               they cannot see what they are holding. Found in review of this change, not in theory. */
+            AND   ($4::text IS NULL OR database_name = $4::text)
             ORDER BY database_name, extension_name, collection_time DESC
         ),
         totals AS (
@@ -225,12 +230,19 @@ public static class DarlingPgExtensionAvailabilityReader
     /// deliberate: extension state is a config fact a reader asks about over the same span they asked the
     /// rows over, and an accepted-but-ignored parameter is worse than an absent one.</para>
     ///
+    /// <para><b>And the same <paramref name="databaseName"/> the row read took</b>, so a response describes
+    /// ONE scope. A server-wide census beside one database's rows reports a denominator the rows were never
+    /// measured against - on a sixteen-database host, 1,632 against a complete 102-row answer, which the
+    /// reach classifier then correctly calls unreachable. Omit it for the server-wide census, which is the
+    /// scope the install question is normally asked at.</para>
+    ///
     /// <para>Raises rather than swallowing. This census is not an explanation bolted onto a result the caller
     /// already has — it is the only complete answer in the response, so a caller that got an exception knows
     /// it has nothing, where a caller handed an empty census would read zero installations.</para>
     /// </summary>
     public static async Task<List<PgExtensionInstallCensusRow>> GetInstallCensusAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        string? databaseName = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
@@ -245,6 +257,10 @@ public static class DarlingPgExtensionAvailabilityReader
            nothing would report zero installations on a server that has them. */
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        /* Blank counts as absent, the same normalisation the row read applies - the two have to agree about
+           what "no filter" means or one narrows while the other does not. */
+        command.Parameters.AddWithValue(
+            string.IsNullOrWhiteSpace(databaseName) ? (object)DBNull.Value : databaseName.Trim());
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

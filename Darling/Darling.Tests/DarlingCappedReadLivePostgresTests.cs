@@ -295,7 +295,7 @@ public sealed class DarlingCappedReadLivePostgresTests
 
             // ── THE CENSUS: aggregated, and unaffected by any of that ─────────────────────────────────
             var census = await DarlingPgExtensionAvailabilityReader.GetInstallCensusAsync(
-                postgres, ServerId, start, end, ct);
+                postgres, ServerId, start, end, cancellationToken: ct);
 
             /* ONE ROW PER EXTENSION CREATED ANYWHERE, so two rows out of six extension names — the HAVING
                doing its job. Eighteen (database, extension) pairs across 36 stored rows, so DISTINCT ON is
@@ -382,7 +382,8 @@ public sealed class DarlingCappedReadLivePostgresTests
 
             var census = await DarlingPgExtensionAvailabilityReader.GetInstallCensusAsync(
                 postgres, ServerId,
-                DarlingMcpTestData.Naive(now.AddHours(-48)), DarlingMcpTestData.Naive(now.AddHours(1)), ct);
+                DarlingMcpTestData.Naive(now.AddHours(-48)), DarlingMcpTestData.Naive(now.AddHours(1)),
+                cancellationToken: ct);
 
             var byName = census.ToDictionary(row => row.ExtensionName!, StringComparer.Ordinal);
 
@@ -448,7 +449,8 @@ public sealed class DarlingCappedReadLivePostgresTests
 
             var census = await DarlingPgExtensionAvailabilityReader.GetInstallCensusAsync(
                 postgres, ServerId,
-                DarlingMcpTestData.Naive(now.AddHours(-48)), DarlingMcpTestData.Naive(now.AddHours(1)), ct);
+                DarlingMcpTestData.Naive(now.AddHours(-48)), DarlingMcpTestData.Naive(now.AddHours(1)),
+                cancellationToken: ct);
 
             var row = Assert.Single(census);
 
@@ -638,6 +640,33 @@ public sealed class DarlingCappedReadLivePostgresTests
                 "plpgsql",
                 oneDatabase.RootElement.GetProperty("extensions").EnumerateArray()
                     .Select(row => row.GetProperty("extension_name").GetString()));
+
+            /* ONE RESPONSE, ONE SCOPE - the assertion that found a real defect in review. The census must
+               narrow with the rows: measured against a server-wide census beside one database's rows, a
+               sixteen-database host put a denominator of 1,632 next to a complete 102-row answer and the
+               reach classifier correctly answered Unreachable, telling a filtered caller they could not see
+               what they were holding. Here the filtered call is Complete, over a census of one database. */
+            var filteredCensus = oneDatabase.RootElement.GetProperty("census");
+
+            Assert.Equal(1, filteredCensus.GetProperty("databases_total").GetInt64());
+            Assert.Equal(6, filteredCensus.GetProperty("rows_available").GetInt64());
+            Assert.Equal(1, filteredCensus.GetProperty("databases_in_page").GetInt32());
+            Assert.Equal(1, filteredCensus.GetProperty("databases_complete_in_page").GetInt32());
+            Assert.Equal(0, filteredCensus.GetProperty("databases_absent_from_page").GetInt64());
+
+            var oneDatabaseReach = oneDatabase.RootElement.GetProperty("reach");
+
+            Assert.Equal("Complete", oneDatabaseReach.GetProperty("arm").GetString());
+            Assert.True(oneDatabaseReach.GetProperty("is_complete").GetBoolean());
+            Assert.Equal(2, oneDatabaseReach.GetProperty("created_rows_on_server").GetInt64());
+            Assert.Equal(0, oneDatabaseReach.GetProperty("created_rows_withheld").GetInt64());
+
+            /* And the install census narrowed with it: plpgsql in 1 of 1, not 3 of 3. */
+            var filteredInstalled = oneDatabase.RootElement.GetProperty("install_census").EnumerateArray()
+                .ToDictionary(row => row.GetProperty("extension_name").GetString()!, StringComparer.Ordinal);
+
+            Assert.Equal(1, filteredInstalled["plpgsql"].GetProperty("databases_installed").GetInt64());
+            Assert.Equal(1, filteredInstalled["plpgsql"].GetProperty("databases_total").GetInt64());
 
             bodySucceeded = true;
         }

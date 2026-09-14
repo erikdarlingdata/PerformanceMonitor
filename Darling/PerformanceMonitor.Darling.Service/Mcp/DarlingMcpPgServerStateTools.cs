@@ -172,9 +172,14 @@ public sealed class DarlingMcpPgServerStateTools
                Asked on the POPULATED path too, and not only when truncated. A reader with 50 rows of a
                1,632-row product has the same wrong impression as one with 1,000 of them, and a census that
                only appeared once the response was capped would be missing exactly when somebody was
-               sampling. */
+               sampling.
+
+               SAME SCOPE AS THE ROWS: database_name goes to both, so one response describes one
+               population. Found in review of this change: a server-wide census beside one database's rows
+               put 1,632 against a complete 102-row answer and the reach classifier correctly answered
+               Unreachable, telling a filtered caller they could not see what they were holding. */
             var census = await DarlingPgExtensionAvailabilityReader.GetInstallCensusAsync(
-                postgres, resolved.ServerId, windowStart, windowEnd);
+                postgres, resolved.ServerId, windowStart, windowEnd, database_name);
 
             /* FROM THE CENSUS, not from the rows. Every row carries the same two scalars — they hang off a
                one-row relation the per-extension groups join to — so the first row is the whole answer, and
