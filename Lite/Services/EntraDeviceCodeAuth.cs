@@ -42,6 +42,7 @@ public sealed record EntraDeviceCodeChallenge(string UserCode, string Verificati
 public sealed class EntraDeviceCodeAttempt : IDisposable
 {
     private readonly CancellationTokenSource _cancellation = new();
+    private EntraDeviceCodeChallenge? _challenge;
     private int _finished;
 
     /// <summary>
@@ -65,7 +66,35 @@ public sealed class EntraDeviceCodeAttempt : IDisposable
     /// normal state for the first second or so of an attempt, and the permanent state of an attempt
     /// that failed before reaching the tenant.
     /// </summary>
-    public EntraDeviceCodeChallenge? Challenge { get; internal set; }
+    public EntraDeviceCodeChallenge? Challenge => Volatile.Read(ref _challenge);
+
+    /// <summary>
+    /// The server this attempt is signing in to, for the prompt to name, or <c>null</c> when the
+    /// connection was not opened through <see cref="EntraDeviceCodeAuth.Begin"/> and there is
+    /// therefore nothing to name it with.
+    ///
+    /// <para>It exists because two prompts can legitimately be on screen at once — a sign-in a user
+    /// started and an unattributable one from a background read — and two anonymous windows holding
+    /// different codes is a trap. See <see cref="TryPublish"/>.</para>
+    /// </summary>
+    public string? Target { get; internal set; }
+
+    /// <summary>
+    /// Publishes the tenant's challenge onto this attempt, once. Returns false if a challenge is
+    /// already published, in which case the caller must NOT assume the new one belongs here.
+    ///
+    /// <para><b>This is the only discriminator available, and it is exact.</b> The driver's callback
+    /// carries no connection id, so "which attempt is this code for" cannot be answered directly —
+    /// but the driver invokes the callback exactly once per acquisition, so a second challenge
+    /// arriving while one is already published cannot belong to the attempt that published it. That
+    /// turns an unanswerable question into an answerable one: not "whose code is this" but "can this
+    /// be the code of the attempt holding the slot", which a published challenge settles as no.</para>
+    ///
+    /// <para>Atomic, because two connections' callbacks can arrive on different threads at the same
+    /// instant and a read-then-write pair would let both conclude they were first.</para>
+    /// </summary>
+    internal bool TryPublish(EntraDeviceCodeChallenge challenge) =>
+        Interlocked.CompareExchange(ref _challenge, challenge, null) is null;
 
     /// <summary>
     /// Raised exactly once, when the connection attempt ends for any reason — success, failure or
@@ -251,7 +280,10 @@ public static class EntraDeviceCodeAuth
             return null;
         }
 
-        var attempt = new EntraDeviceCodeAttempt();
+        /* The target, so a prompt can name the server it belongs to. Read off the builder rather
+           than passed in, for the same reason the mode gate is: the builder is what the connection
+           will actually use, so the label cannot disagree with the connection. */
+        var attempt = new EntraDeviceCodeAttempt { Target = DescribeTarget(builder) };
 
         /* CompareExchange, so the claim is atomic and the loser knows it lost. Exchange would hand
            the slot over and leave the previous holder's callback publishing onto this attempt. */
@@ -298,6 +330,23 @@ public static class EntraDeviceCodeAuth
         Interlocked.CompareExchange(ref s_current, null, attempt);
 
     /// <summary>
+    /// How a prompt names the server it is signing in to: the data source, plus the database when
+    /// one is named. Never credentials — the builder holds them for other modes and this reads two
+    /// non-secret keywords by name rather than rendering the string.
+    /// </summary>
+    internal static string? DescribeTarget(SqlConnectionStringBuilder builder)
+    {
+        var server = builder.DataSource;
+        if (string.IsNullOrWhiteSpace(server))
+        {
+            return null;
+        }
+
+        var database = builder.InitialCatalog;
+        return string.IsNullOrWhiteSpace(database) ? server : $"{server} ({database})";
+    }
+
+    /// <summary>
     /// Forgets the registration flag and any in-flight attempt so a test can observe registration
     /// order. Registration itself is irreversible in production —
     /// <see cref="SqlAuthenticationProvider"/> offers no unregister — and tests open no connections,
@@ -330,10 +379,29 @@ public static class EntraDeviceCodeAuth
     /// </summary>
     private static Task OnDeviceCodeIssued(Microsoft.Identity.Client.DeviceCodeResult result)
     {
-        var attempt = Volatile.Read(ref s_current);
-        var unowned = attempt is null;
+        /* DeviceCode is deliberately not copied across - see EntraDeviceCodeChallenge. */
+        var challenge = new EntraDeviceCodeChallenge(
+            result.UserCode ?? string.Empty,
+            result.VerificationUrl ?? string.Empty);
 
-        if (attempt is null)
+        var owner = Volatile.Read(ref s_current);
+
+        /* Occupied is NOT the same as "this challenge belongs to the occupant", and conflating the
+           two was a real misattribution bug. Four sites in Lite open a server connection without
+           going through Begin (a plan fetch, an MCP read, a Query Store backfill, the
+           excluded-databases picker), so a device-code callback can arrive while an unrelated,
+           Begin-owned sign-in holds the slot. Reusing the occupant then overwrote ITS code with the
+           unrelated server's and re-invoked the presenter - a second window on the same attempt,
+           showing a code for a server the user was not looking at, with no exception anywhere
+           because the unwrapped caller never called Begin.
+
+           TryPublish is the discriminator: the driver invokes its callback once per acquisition, so
+           a challenge arriving at an attempt that already has one cannot be that attempt's. It takes
+           a fresh unowned attempt instead, with its own window and its own bounded lifetime. */
+        var attempt = owner;
+        var unowned = attempt is null || !attempt.TryPublish(challenge);
+
+        if (unowned)
         {
             /* A device-code connection opened somewhere that does not wrap it in Begin. The code is
                still shown, because a code nobody can read is a guaranteed failure and this is the
@@ -352,6 +420,7 @@ public static class EntraDeviceCodeAuth
                else will dispose an attempt nobody owns, and a prompt left on screen after the driver
                gave up is a code that no longer works. */
             attempt = new EntraDeviceCodeAttempt();
+            attempt.TryPublish(challenge);
 
             var orphan = attempt;
             _ = Task.Delay(UnownedPromptLifetime).ContinueWith(
@@ -361,19 +430,14 @@ public static class EntraDeviceCodeAuth
                 TaskScheduler.Default);
         }
 
-        /* DeviceCode is deliberately not copied across - see EntraDeviceCodeChallenge. */
-        attempt.Challenge = new EntraDeviceCodeChallenge(
-            result.UserCode ?? string.Empty,
-            result.VerificationUrl ?? string.Empty);
-
         /* The user code is short, single-use, and useless without the device code the app never
            holds; the URL is public. Logged because "did the tenant issue a code at all" is the first
            question a failure report has to answer, and a screenshot cannot be searched. */
         AppLogger.Info(
             LogSource,
-            $"Device code issued: enter {attempt.Challenge.UserCode} at "
-                + $"{attempt.Challenge.VerificationUrl}. The driver stops waiting after three "
-                + "minutes."
+            $"Device code issued for {attempt.Target ?? "a background connection"}: enter "
+                + $"{challenge.UserCode} at {challenge.VerificationUrl}. The driver stops waiting "
+                + "after three minutes."
                 + (unowned
                     ? " This connection was not opened through EntraDeviceCodeAuth.Begin, so closing "
                         + "the prompt hides the code without ending the attempt."

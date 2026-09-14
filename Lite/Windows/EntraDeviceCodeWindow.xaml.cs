@@ -57,6 +57,13 @@ public partial class EntraDeviceCodeWindow : Window
         UserCodeBox.Text = challenge?.UserCode ?? string.Empty;
         VerificationUrlBox.Text = challenge?.VerificationUrl ?? string.Empty;
 
+        /* An unowned attempt has no target to name, and saying so is better than leaving the line
+           blank: a user looking at two of these windows needs to be able to tell which one belongs
+           to the server they were working on. */
+        TargetText.Text = string.IsNullOrWhiteSpace(attempt.Target)
+            ? "Signing in for a background connection"
+            : $"Signing in to {attempt.Target}";
+
         attempt.Finished += OnAttemptFinished;
 
         Loaded += (_, _) =>

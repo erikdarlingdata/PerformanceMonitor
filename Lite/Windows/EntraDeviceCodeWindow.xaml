@@ -21,9 +21,17 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <TextBlock Grid.Row="0" TextWrapping="Wrap" Margin="0,0,0,10"
+        <!-- Which server this code is for. Not decoration: two prompts can be on screen at once - a
+             sign-in the user started and an unattributable one raised by a background read - and two
+             anonymous windows holding different codes is a trap. Filled from the attempt's Target,
+             which only a Begin-wrapped connection has; an unowned one says so instead of guessing. -->
+        <TextBlock Grid.Row="0" x:Name="TargetText" TextWrapping="Wrap" FontWeight="Bold" Margin="0,0,0,8"
+                   Foreground="{DynamicResource ForegroundBrush}"/>
+
+        <TextBlock Grid.Row="1" TextWrapping="Wrap" Margin="0,0,0,10"
                    Foreground="{DynamicResource ForegroundBrush}"
                    Text="Open this page in a browser — on this machine or on your phone — and enter the code below. It does not have to be this machine, and it does not use the Windows sign-in prompt."/>
 
@@ -31,28 +39,28 @@
              user whose clipboard is locked down by policy still needs to be able to read and retype
              them, and because the whole point of this mode is reaching it from a machine where the
              normal sign-in path is blocked. -->
-        <TextBox Grid.Row="1" x:Name="VerificationUrlBox"
+        <TextBox Grid.Row="2" x:Name="VerificationUrlBox"
                  IsReadOnly="True" IsReadOnlyCaretVisible="True"
                  FontFamily="Consolas" Padding="6" Margin="0,0,0,10"
                  Background="{DynamicResource BackgroundBrush}"
                  Foreground="{DynamicResource ForegroundBrush}"
                  BorderBrush="{DynamicResource BorderBrush}"/>
 
-        <TextBlock Grid.Row="2" Text="Code" FontWeight="Bold" Margin="0,0,0,4"
+        <TextBlock Grid.Row="3" Text="Code" FontWeight="Bold" Margin="0,0,0,4"
                    Foreground="{DynamicResource ForegroundBrush}"/>
 
-        <TextBox Grid.Row="3" x:Name="UserCodeBox"
+        <TextBox Grid.Row="4" x:Name="UserCodeBox"
                  IsReadOnly="True" IsReadOnlyCaretVisible="True"
                  FontFamily="Consolas" FontSize="20" Padding="6" Margin="0,0,0,10"
                  Background="{DynamicResource BackgroundBrush}"
                  Foreground="{DynamicResource ForegroundBrush}"
                  BorderBrush="{DynamicResource BorderBrush}"/>
 
-        <TextBlock Grid.Row="4" TextWrapping="Wrap" FontSize="11"
+        <TextBlock Grid.Row="5" TextWrapping="Wrap" FontSize="11"
                    Foreground="{DynamicResource ForegroundMutedBrush}"
                    Text="The connection stops waiting about three minutes after the code is issued. Close this window to give up and return to the dialog."/>
 
-        <StackPanel Grid.Row="5" Orientation="Horizontal"
+        <StackPanel Grid.Row="6" Orientation="Horizontal"
                     HorizontalAlignment="Right" Margin="0,14,0,0">
             <Button Content="_Copy code" Width="100" Margin="0,0,8,0" Click="CopyCode_Click"/>
             <Button Content="_Open page" Width="100" Margin="0,0,8,0" Click="OpenPage_Click"/>

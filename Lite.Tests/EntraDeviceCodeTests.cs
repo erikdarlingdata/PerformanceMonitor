@@ -452,6 +452,116 @@ public class EntraDeviceCodeTests
             StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void AnAttemptTakesOneChallengeOnly_SoAnUnrelatedCallbackCannotOverwriteIt()
+    {
+        /* The deeper half of the misattribution class, and the one the claim-not-overwrite fix did
+           NOT cover: Begin-vs-Begin was guarded, but four sites in Lite open a server connection
+           without going through Begin at all, so a device-code callback can arrive while an
+           unrelated Begin-owned sign-in holds the slot. The callback used to reuse the occupant
+           whenever the slot was non-null, overwriting ITS code with the unrelated server's and
+           opening a second window on the same attempt - silently, because the unwrapped caller never
+           calls Begin and nothing throws.
+
+           TryPublish is the discriminator and it is exact rather than heuristic: the driver invokes
+           its callback once per acquisition, so a challenge arriving at an attempt that already has
+           one cannot be that attempt's. Asserted in both directions - the first publish must take,
+           the second must be refused AND must leave the original in place. */
+        using var attempt = new EntraDeviceCodeAttempt();
+
+        var mine = new EntraDeviceCodeChallenge("MINE-1234", "https://example.invalid/devicelogin");
+        var theirs = new EntraDeviceCodeChallenge("THEIRS-9999", "https://example.invalid/other");
+
+        Assert.True(attempt.TryPublish(mine), "the first challenge must publish");
+        Assert.Same(mine, attempt.Challenge);
+
+        Assert.False(attempt.TryPublish(theirs), "a second challenge cannot belong to this attempt");
+
+        /* The half that discriminates: a TryPublish that returned false but still assigned would
+           satisfy the assertion above and leave the user reading the wrong code. */
+        Assert.Same(mine, attempt.Challenge);
+        Assert.Equal("MINE-1234", attempt.Challenge!.UserCode);
+    }
+
+    [Fact]
+    public void TheCallbackTakesAFreshAttemptWhenItCannotClaimTheSlotHolders()
+    {
+        /* The wiring half of the pin above, asserted in source because OnDeviceCodeIssued is private
+           and needs a live driver callback to reach. Two things have to be true together: the
+           callback must decide ownership through TryPublish rather than through a null check on the
+           slot, and the unowned branch must publish onto the attempt it creates. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            ParitySource.ReadFile("Lite/Services/EntraDeviceCodeAuth.cs"));
+
+        var at = code.IndexOf("OnDeviceCodeIssued(Microsoft.Identity.Client.DeviceCodeResult", StringComparison.Ordinal);
+        Assert.True(at >= 0, "the driver callback must exist");
+
+        var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', at));
+
+        Assert.Contains("TryPublish" + "(challenge)", body, StringComparison.Ordinal);
+
+        /* And NOT the test it replaced. "attempt is null" alone as the ownership decision is the
+           defect; the null check may remain only as one half of a condition that also asks
+           TryPublish, which the assertion above requires. */
+        var decision = body.IndexOf("var unowned", StringComparison.Ordinal);
+        Assert.True(decision >= 0, "the callback must decide whether it owns the slot");
+        Assert.Contains(
+            "TryPublish", body[decision..Math.Min(body.Length, decision + 160)], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ThePromptNamesTheServerItIsSigningInTo()
+    {
+        /* Two prompts can now legitimately be on screen at once - a sign-in the user started and an
+           unattributable one from a background read - so an anonymous window is a trap rather than
+           merely terse. Begin records the target off the BUILDER, so the label cannot disagree with
+           the connection it belongs to. */
+        var builder = new SqlConnectionStringBuilder
+        {
+            DataSource = "example.database.windows.net",
+            InitialCatalog = "mydb",
+        };
+
+        Assert.Equal("example.database.windows.net (mydb)", EntraDeviceCodeAuth.DescribeTarget(builder));
+
+        /* No database named, so no parenthetical - and not the word "master", which the connection
+           string builder does not put there and the prompt must not invent. */
+        var serverOnly = new SqlConnectionStringBuilder { DataSource = "example.database.windows.net" };
+        Assert.Equal("example.database.windows.net", EntraDeviceCodeAuth.DescribeTarget(serverOnly));
+
+        /* Nothing to name rather than an empty label. */
+        Assert.Null(EntraDeviceCodeAuth.DescribeTarget(new SqlConnectionStringBuilder()));
+
+        /* Credentials must not travel into a window caption. The builder holds them for other modes,
+           and this reads two named non-secret keywords rather than rendering the string - so a
+           password present on the builder cannot reach the label. */
+        var withSecret = new SqlConnectionStringBuilder
+        {
+            DataSource = "example.database.windows.net",
+            UserID = "someone@contoso.com",
+            Password = "a-secret-that-must-not-travel",
+        };
+        var described = EntraDeviceCodeAuth.DescribeTarget(withSecret)!;
+        Assert.DoesNotContain("secret", described, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("contoso", described, StringComparison.OrdinalIgnoreCase);
+
+        /* And Begin actually puts it on the attempt, or the window has nothing to read. */
+        var deviceCode = new SqlConnectionStringBuilder { DataSource = "example.database.windows.net" };
+        ServerConnection.ApplyAuthentication(
+            deviceCode, AuthenticationTypes.EntraDeviceCode, null, null, null, null);
+
+        EntraDeviceCodeAuth.ResetForTests();
+        try
+        {
+            using var attempt = EntraDeviceCodeAuth.Begin(deviceCode);
+            Assert.Equal("example.database.windows.net", attempt!.Target);
+        }
+        finally
+        {
+            EntraDeviceCodeAuth.ResetForTests();
+        }
+    }
+
     // ---- The challenge must not carry the secret half ------------------------------------
 
     [Fact]
