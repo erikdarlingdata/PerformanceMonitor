@@ -873,7 +873,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// below are: Darling is correct exactly where Lite is wrong.
     ///
     /// <para><b>The render rows are still unrepaired; the MCP rows are not.</b> #3206 landed and moved
-    /// thirty MCP rows to <see cref="SiteLabel.DeSkewedAtRead"/>; the seventeen render rows remain #3207's
+    /// twenty-four MCP rows to <see cref="SiteLabel.DeSkewedAtRead"/>; the seventeen render rows remain #3207's
     /// work. Set equality is the ratchet in both directions: adding an offender fails, and so does fixing
     /// one without moving its row to the label that says so.</para>
     ///
@@ -884,7 +884,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// </summary>
     private static readonly (SiteLabel Label, string File, string Column, string Tables, int Sites, string Why)[] Inventory =
     [
-        /* ── MCP payloads. #3206 de-skewed thirty of these at the read, by the collected
+        /* ── MCP payloads. #3206 de-skewed twenty-four of these at the read, by the collected
            server_properties.utc_offset_minutes (Darling in SQL, Lite in C# at the projection), so the
            payload FIELD still carries the column's name while the VALUE is naive UTC — which is why they
            are relabelled here rather than deleted. The one still unmarked is a Lite-only surface with no

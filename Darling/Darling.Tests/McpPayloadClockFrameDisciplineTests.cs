@@ -79,7 +79,7 @@ public sealed class McpPayloadClockFrameDisciplineTests
     ///
     /// <para>The <c>?.</c> is OPTIONAL because nullability is a property of the row type rather than of this
     /// convention — <c>RunningJobRow.StartTime</c> is a non-nullable <c>DateTime</c> and ships without it,
-    /// the other fifteen are <c>DateTime?</c> and ship with it. Requiring the null-conditional made this
+    /// the other eleven are <c>DateTime?</c> and ship with it. Requiring the null-conditional made this
     /// assertion vacuous for the one field that cannot carry it, which is what CI caught.</para>
     /// </summary>
     private static Regex LiteDeSkew(string property) =>
@@ -88,7 +88,7 @@ public sealed class McpPayloadClockFrameDisciplineTests
     /// <summary>
     /// One payload column: its output alias, the SQL expression whose value must be de-skewed, and the bare
     /// select-list form that must NOT survive. <paramref name="Source"/> defaults to the alias because
-    /// fifteen of the sixteen are stored columns projected straight through; only <c>last_user_access</c>
+    /// eleven of the twelve are stored columns projected straight through; only <c>last_user_access</c>
     /// differs, and defaulting rather than requiring it keeps that one visible as the exception it is.
     /// </summary>
     public readonly record struct PayloadColumn(string Alias, string? Source = null, string? BareForm = null)
@@ -115,8 +115,9 @@ public sealed class McpPayloadClockFrameDisciplineTests
 
     /// <summary>
     /// Every (Darling read, column) pair whose STORED value is the monitored server's local wall clock and
-    /// which reaches an MCP caller, with the evidence for each. Twelve columns across four reads;
-    /// <c>default_trace_events.event_time</c> is the thirteenth and belongs to #3198/#3202.
+    /// which reaches an MCP caller, with the evidence for each. Twelve columns across five reads — four
+    /// tools, because <c>get_blocking</c> is served by two. <c>default_trace_events.event_time</c> is the
+    /// thirteenth and belongs to #3198/#3202.
     ///
     /// <para><b>Ten of the twelve are measured, and the two that are not say so.</b> The frame of each was
     /// read off the live stores against the collector-written UTC <c>collection_time</c> on the same row:
@@ -237,7 +238,7 @@ public sealed class McpPayloadClockFrameDisciplineTests
             {
                 /* The de-skew must be spelled on the expression the read actually projects — which for
                    last_user_access is a GREATEST over four columns, not a column of that name. Deriving the
-                   assertion from the alias alone passed the other five reads and quietly asserted nothing
+                   assertion from the alias alone passed the other four reads and quietly asserted nothing
                    here, which is how this guard first shipped and what its own red run caught. */
                 Assert.Contains(column.DeSkewed, sql, StringComparison.Ordinal);
 
