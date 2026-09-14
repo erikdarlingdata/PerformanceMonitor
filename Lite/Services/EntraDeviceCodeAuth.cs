@@ -33,6 +33,46 @@ namespace PerformanceMonitorLite.Services;
 public sealed record EntraDeviceCodeChallenge(string UserCode, string VerificationUrl);
 
 /// <summary>
+/// Which of the two ways attribution can degrade happened on one attribution, or
+/// <see cref="None"/> when neither did.
+///
+/// <para><b>A return value because the prompt cannot carry it.</b> Both degradations leave a prompt
+/// that looks like a prompt — one merely unnamed, one merely slow to cancel — so the warning
+/// <c>Claim</c> writes is the only thing an operator sees, and a warning is not something a test can
+/// assert on: <see cref="AppLogger"/> is static and has no sink to capture. Reported instead of
+/// merely logged so the DECISION is observable, which is what makes an inverted condition a red
+/// test rather than a silence nobody notices.</para>
+///
+/// <para>Three values rather than four: this answers "did attribution degrade, and which way",
+/// which is a different question from <c>Claim</c>'s <c>unowned</c> — that one answers whether the
+/// prompt's Cancel completes a waiting <c>OpenAsync</c>. The two are orthogonal, and an unowned
+/// prompt is usually <see cref="None"/>: a background read with no sign-in waiting is the ordinary
+/// case, and so is a stray code arriving for a sign-in that already holds its own.</para>
+/// </summary>
+internal enum EntraDeviceCodeDegradation
+{
+    /// <summary>
+    /// Attribution did not degrade. Either the challenge took the waiting sign-in's slot, or it had
+    /// nothing to take: no sign-in was waiting, or the one waiting already held its own code.
+    /// </summary>
+    None,
+
+    /// <summary>
+    /// No acquisition identity reached the callback at all, so the challenge was shown unnamed.
+    /// Every acquisition through Lite's own provider records one, so this means the driver refused
+    /// that provider at startup or the execution context no longer reaches the callback.
+    /// </summary>
+    NoAcquisitionIdentity,
+
+    /// <summary>
+    /// A challenge naming one server arrived while a sign-in to a different one was still waiting
+    /// for its own code. The challenge is shown as its own prompt, correctly named; what the waiting
+    /// caller loses is its early return, because its prompt's Cancel is not the one on screen.
+    /// </summary>
+    SignInStillAwaitingItsOwnCode,
+}
+
+/// <summary>
 /// One in-flight device-code sign-in: the rendezvous between the driver's callback, the window that
 /// shows the code, and the connection attempt that can be cancelled.
 ///
@@ -480,9 +520,12 @@ public static class EntraDeviceCodeAuth
     /// getting its thread back. That is the direction this has to fail in: a vague or slow prompt is
     /// recoverable and a confidently mislabelled one is not.</para>
     ///
-    /// <para>Both ways attribution can degrade are logged from here, off the same read the decision
-    /// used: a challenge with no acquisition identity at all, and one whose acquisition names a
-    /// different server than the sign-in currently waiting.</para>
+    /// <para>Both ways attribution can degrade are CLASSIFIED here, off the same read the decision
+    /// used, and reported through <paramref name="degradation"/>: a challenge with no acquisition
+    /// identity at all, and one whose acquisition names a different server than the sign-in
+    /// currently waiting. The warning each one writes is selected by that classification rather than
+    /// by a second reading of the state, so the condition a log line rests on is the condition the
+    /// returned value rests on and there is no second copy to drift.</para>
     ///
     /// <para><b>What the identity does NOT separate, stated because the guarantee is narrower than
     /// it reads.</b> Two acquisitions for the SAME server describe identically, so an unwrapped
@@ -493,8 +536,24 @@ public static class EntraDeviceCodeAuth
     /// a provider but which <see cref="Begin"/> cannot know: it runs before the connection
     /// exists.</para>
     /// </summary>
+    /// <param name="challenge">The code and URL the tenant issued.</param>
+    /// <param name="acquiredTarget">
+    /// What the acquisition that produced <paramref name="challenge"/> is signing in to, or
+    /// <c>null</c> when no identity reached the callback.
+    /// </param>
+    /// <param name="unowned">
+    /// True when the challenge did not take a waiting caller's slot, so cancelling its prompt
+    /// completes no <c>OpenAsync</c>.
+    /// </param>
+    /// <param name="degradation">
+    /// Which way attribution degraded, or <see cref="EntraDeviceCodeDegradation.None"/>. The same
+    /// classification that selects the warning below, so the two cannot disagree.
+    /// </param>
     internal static EntraDeviceCodeAttempt Claim(
-        EntraDeviceCodeChallenge challenge, string? acquiredTarget, out bool unowned)
+        EntraDeviceCodeChallenge challenge,
+        string? acquiredTarget,
+        out bool unowned,
+        out EntraDeviceCodeDegradation degradation)
     {
         ArgumentNullException.ThrowIfNull(challenge);
 
@@ -508,17 +567,36 @@ public static class EntraDeviceCodeAuth
         if (vouched && owner!.TryPublish(challenge))
         {
             unowned = false;
+            degradation = EntraDeviceCodeDegradation.None;
             return owner;
         }
 
         unowned = true;
 
-        /* The two ways attribution degrades, reported here rather than by the caller because they
+        /* The two ways attribution degrades, classified here rather than by the caller because they
            are facts about the state THIS decision was made on. A caller re-reading the slot
            afterwards would be describing a later instant, and a diagnostic that names the wrong
            instant is worse than none. Neither degradation is visible in the prompt: a prompt that is
-           merely unnamed, or merely slow to cancel, looks like a prompt. */
-        if (acquiredTarget is null)
+           merely unnamed, or merely slow to cancel, looks like a prompt - so the classification is
+           RETURNED as well as logged, because a log line is the one diagnostic nothing here can
+           assert on. */
+        degradation =
+            acquiredTarget is null
+                ? EntraDeviceCodeDegradation.NoAcquisitionIdentity
+                : owner is { Challenge: null }
+                    ? EntraDeviceCodeDegradation.SignInStillAwaitingItsOwnCode
+                    : EntraDeviceCodeDegradation.None;
+
+        /* The operator's half, selected BY the classification above rather than by asking the state
+           again. The prose is deliberately not asserted on anywhere - a message pinned word for word
+           rots into a test that fails on an improvement - but the condition each line rests on is
+           now the condition a caller can read, so an inverted one is a red test and not a silently
+           missing warning.
+
+           The second warning suppresses a null on the owner it names. SignInStillAwaitingItsOwnCode is
+           reachable only through a pattern that matched a slot holder, which the compiler cannot see
+           through an enum. */
+        if (degradation is EntraDeviceCodeDegradation.NoAcquisitionIdentity)
         {
             AppLogger.Warn(
                 LogSource,
@@ -527,11 +605,11 @@ public static class EntraDeviceCodeAuth
                     + "either the driver refused that provider at startup or the execution context "
                     + "no longer reaches the callback.");
         }
-        else if (owner is { Challenge: null })
+        else if (degradation is EntraDeviceCodeDegradation.SignInStillAwaitingItsOwnCode)
         {
             AppLogger.Warn(
                 LogSource,
-                $"A device code for {acquiredTarget} arrived while a sign-in to {owner.Target} was "
+                $"A device code for {acquiredTarget} arrived while a sign-in to {owner!.Target} was "
                     + "still waiting for its own code, so it was shown as its own prompt. A code "
                     + "takes a waiting sign-in's slot only when the acquisition that produced it "
                     + "names that sign-in's own server.");
@@ -647,7 +725,7 @@ public static class EntraDeviceCodeAuth
            does not have is the early return: cancelling it closes the window without completing a
            waiting OpenAsync, and there is no waiting OpenAsync behind an unwrapped read. */
         var acquired = CurrentAcquisitionTarget;
-        var attempt = Claim(challenge, acquired, out var unowned);
+        var attempt = Claim(challenge, acquired, out var unowned, out _);
 
         /* The user code is short, single-use, and useless without the device code the app never
            holds; the URL is public. Logged because "did the tenant issue a code at all" is the first

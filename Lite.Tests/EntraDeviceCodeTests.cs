@@ -621,9 +621,15 @@ public class EntraDeviceCodeTests
             Assert.Null(owner.Challenge);
 
             var theirs = new EntraDeviceCodeChallenge("THEIRS-9999", "https://example.invalid/other");
-            var shown = EntraDeviceCodeAuth.Claim(theirs, "other.example.invalid", out var unowned);
+            var shown = EntraDeviceCodeAuth.Claim(
+                theirs, "other.example.invalid", out var unowned, out var degradation);
 
             Assert.True(unowned, "a code from another connection must not take a waiting sign-in's slot");
+
+            /* And the refusal is REPORTED, not only taken. This ordering is the one a user cannot see
+               - a correctly named prompt whose Cancel belongs to someone else - so the reason it
+               happened is the only evidence it did. */
+            Assert.Equal(EntraDeviceCodeDegradation.SignInStillAwaitingItsOwnCode, degradation);
             Assert.NotSame(owner, shown);
 
             /* The slot is still the owner's, so the owner's own code can still land in it. Without
@@ -642,9 +648,16 @@ public class EntraDeviceCodeTests
                a blanket: the owner's own code must take the slot it is waiting on. */
             var own = new EntraDeviceCodeChallenge("MINE-1234", "https://example.invalid/devicelogin");
             var ownShown = EntraDeviceCodeAuth.Claim(
-                own, EntraDeviceCodeAuth.DescribeTarget(mine), out var ownUnowned);
+                own,
+                EntraDeviceCodeAuth.DescribeTarget(mine),
+                out var ownUnowned,
+                out var ownDegradation);
 
             Assert.False(ownUnowned, "a sign-in's own code must take the slot it is waiting on");
+
+            /* Nothing degraded on the vouched path, which is what keeps the assertion above evidence
+               rather than a reason reported unconditionally. */
+            Assert.Equal(EntraDeviceCodeDegradation.None, ownDegradation);
             Assert.Same(owner, ownShown);
             Assert.Same(own, owner.Challenge);
             Assert.Equal("mine.example.invalid (mydb)", owner.Target);
@@ -675,9 +688,11 @@ public class EntraDeviceCodeTests
             Assert.NotNull(owner);
 
             var unidentified = new EntraDeviceCodeChallenge("NOID-4321", "https://example.invalid/devicelogin");
-            var shown = EntraDeviceCodeAuth.Claim(unidentified, null, out var unowned);
+            var shown = EntraDeviceCodeAuth.Claim(
+                unidentified, null, out var unowned, out var degradation);
 
             Assert.True(unowned);
+            Assert.Equal(EntraDeviceCodeDegradation.NoAcquisitionIdentity, degradation);
             Assert.NotSame(owner, shown);
             Assert.Null(owner!.Challenge);
 
@@ -690,7 +705,11 @@ public class EntraDeviceCodeTests
             Assert.Same(
                 owner,
                 EntraDeviceCodeAuth.Claim(
-                    identified, EntraDeviceCodeAuth.DescribeTarget(mine), out _));
+                    identified,
+                    EntraDeviceCodeAuth.DescribeTarget(mine),
+                    out _,
+                    out var identifiedDegradation));
+            Assert.Equal(EntraDeviceCodeDegradation.None, identifiedDegradation);
         }
         finally
         {
@@ -720,13 +739,22 @@ public class EntraDeviceCodeTests
             Assert.NotNull(owner);
 
             var first = new EntraDeviceCodeChallenge("FIRST-1111", "https://example.invalid/devicelogin");
-            Assert.Same(owner, EntraDeviceCodeAuth.Claim(first, target, out var firstUnowned));
+            Assert.Same(
+                owner,
+                EntraDeviceCodeAuth.Claim(first, target, out var firstUnowned, out var firstDegradation));
             Assert.False(firstUnowned);
+            Assert.Equal(EntraDeviceCodeDegradation.None, firstDegradation);
 
             var second = new EntraDeviceCodeChallenge("SECOND-2222", "https://example.invalid/devicelogin");
-            var secondShown = EntraDeviceCodeAuth.Claim(second, target, out var secondUnowned);
+            var secondShown = EntraDeviceCodeAuth.Claim(
+                second, target, out var secondUnowned, out var secondDegradation);
 
             Assert.True(secondUnowned);
+
+            /* Unowned, and NOT a degradation. The slot holder already has its own code, so nothing
+               was misattributed and nothing was lost - this is the outcome #3408 established as
+               correct, and a reason reported here would be a warning an operator cannot act on. */
+            Assert.Equal(EntraDeviceCodeDegradation.None, secondDegradation);
             Assert.NotSame(owner, secondShown);
             Assert.Same(first, owner!.Challenge);
             Assert.Equal("FIRST-1111", owner.Challenge!.UserCode);
@@ -758,9 +786,13 @@ public class EntraDeviceCodeTests
             Assert.False(EntraDeviceCodeAuth.SignInInFlight);
 
             var challenge = new EntraDeviceCodeChallenge("BKGD-7777", "https://example.invalid/devicelogin");
-            var named = EntraDeviceCodeAuth.Claim(challenge, "reader.example.invalid (plans)", out var unowned);
+            var named = EntraDeviceCodeAuth.Claim(
+                challenge, "reader.example.invalid (plans)", out var unowned, out var degradation);
 
             Assert.True(unowned);
+
+            /* The ordinary case for the four unwrapped sites: unowned, and nothing degraded. */
+            Assert.Equal(EntraDeviceCodeDegradation.None, degradation);
             Assert.Equal("reader.example.invalid (plans)", named.Target);
             Assert.Same(challenge, named.Challenge);
 
@@ -771,10 +803,12 @@ public class EntraDeviceCodeTests
             var anonymous = EntraDeviceCodeAuth.Claim(
                 new EntraDeviceCodeChallenge("BKGD-8888", "https://example.invalid/devicelogin"),
                 null,
-                out var anonymousUnowned);
+                out var anonymousUnowned,
+                out var anonymousDegradation);
 
             Assert.True(anonymousUnowned);
             Assert.Null(anonymous.Target);
+            Assert.Equal(EntraDeviceCodeDegradation.NoAcquisitionIdentity, anonymousDegradation);
         }
         finally
         {
@@ -835,14 +869,15 @@ public class EntraDeviceCodeTests
                         EntraDeviceCodeAuth.Claim(
                             new EntraDeviceCodeChallenge("HELD-0000", "https://example.invalid/devicelogin"),
                             mineTarget,
-                            out var heldUnowned);
+                            out var heldUnowned,
+                            out _);
                         Assert.False(heldUnowned, route.Name);
                         Assert.NotNull(owner!.Challenge);
                     }
                 }
 
                 var challenge = new EntraDeviceCodeChallenge("CODE-1234", "https://example.invalid/devicelogin");
-                var shown = EntraDeviceCodeAuth.Claim(challenge, route.Acquired, out _);
+                var shown = EntraDeviceCodeAuth.Claim(challenge, route.Acquired, out _, out _);
 
                 /* The invariant. Not "the label is non-null" and not "the label is the owner's" -
                    the label is the CODE'S, on every route. */
@@ -856,6 +891,132 @@ public class EntraDeviceCodeTests
                 EntraDeviceCodeAuth.ResetForTests();
             }
         }
+    }
+
+    [Fact]
+    public void EachWayAttributionDegrades_IsReportedAndTheOthersAreNot()
+    {
+        /* The two warnings Claim writes are the ONLY signal that attribution degraded - the file says
+           so itself, because neither degradation is visible in the prompt: one is merely unnamed and
+           one is merely slow to cancel, and both look like a prompt. A log line is also the one
+           diagnostic nothing here can assert on, AppLogger being static with no sink, so the shipping
+           change left both conditions unpinned: inverting either of them kept the whole suite green.
+
+           So the classification is a return value and this is the pin on it. The same route table as
+           the label invariant above, because the same two axes decide both - what state the rendezvous
+           slot is in, and what the acquisition that produced the challenge is for - and every row
+           carries its expected reason as a LITERAL rather than anything read back out of the service.
+
+           Both directions, on purpose. A classification hard-wired to report a degradation would
+           satisfy the five degraded rows alone, and one hard-wired to None would satisfy the four that
+           are not; requiring the exact value of each is what makes either inversion red. The rows that
+           carry the most weight are the two that differ only in whether the slot holder already has
+           its own code: waiting is a degradation and holding is not, which is precisely the condition
+           the second warning rests on. */
+        var mine = DeviceCodeBuilder("mine.example.invalid", "mydb");
+        var mineTarget = EntraDeviceCodeAuth.DescribeTarget(mine);
+
+        var routes =
+            new (string Name, bool Owner, bool OwnerHoldsAChallenge, string? Acquired, bool Unowned,
+                EntraDeviceCodeDegradation Degradation)[]
+            {
+                ("no sign-in waiting, a named background read", false, false,
+                    "reader.example.invalid", true, EntraDeviceCodeDegradation.None),
+                ("no sign-in waiting, no identity at all", false, false,
+                    null, true, EntraDeviceCodeDegradation.NoAcquisitionIdentity),
+                ("a sign-in waiting, its own code", true, false,
+                    mineTarget, false, EntraDeviceCodeDegradation.None),
+                ("a sign-in waiting, another server's code", true, false,
+                    "other.example.invalid", true,
+                    EntraDeviceCodeDegradation.SignInStillAwaitingItsOwnCode),
+                ("a sign-in waiting, another server and database", true, false,
+                    "other.example.invalid (otherdb)", true,
+                    EntraDeviceCodeDegradation.SignInStillAwaitingItsOwnCode),
+                ("a sign-in waiting, no identity at all", true, false,
+                    null, true, EntraDeviceCodeDegradation.NoAcquisitionIdentity),
+                ("a sign-in holding its code, its own server again", true, true,
+                    mineTarget, true, EntraDeviceCodeDegradation.None),
+                ("a sign-in holding its code, another server's code", true, true,
+                    "other.example.invalid", true, EntraDeviceCodeDegradation.None),
+                ("a sign-in holding its code, no identity at all", true, true,
+                    null, true, EntraDeviceCodeDegradation.NoAcquisitionIdentity),
+            };
+
+        /* Population floor on the table, and on each value it has to produce. A table that lost its
+           unidentified rows, or its waiting-versus-holding contrast, would still walk and would still
+           pass every row it kept - which is the shape of a pin that asserts nothing. */
+        Assert.Equal(9, routes.Length);
+        Assert.Equal(
+            3, routes.Count(r => r.Degradation == EntraDeviceCodeDegradation.NoAcquisitionIdentity));
+        Assert.Equal(
+            2,
+            routes.Count(r =>
+                r.Degradation == EntraDeviceCodeDegradation.SignInStillAwaitingItsOwnCode));
+        Assert.Equal(4, routes.Count(r => r.Degradation == EntraDeviceCodeDegradation.None));
+
+        var walked = 0;
+        var reported = new List<EntraDeviceCodeDegradation>();
+
+        foreach (var route in routes)
+        {
+            EntraDeviceCodeAuth.ResetForTests();
+            try
+            {
+                EntraDeviceCodeAttempt? owner = null;
+                if (route.Owner)
+                {
+                    owner = EntraDeviceCodeAuth.Begin(mine);
+                    Assert.NotNull(owner);
+
+                    if (route.OwnerHoldsAChallenge)
+                    {
+                        EntraDeviceCodeAuth.Claim(
+                            new EntraDeviceCodeChallenge("HELD-0000", "https://example.invalid/devicelogin"),
+                            mineTarget,
+                            out var heldUnowned,
+                            out var heldDegradation);
+                        Assert.False(heldUnowned, route.Name);
+                        Assert.Equal(EntraDeviceCodeDegradation.None, heldDegradation);
+                        Assert.NotNull(owner!.Challenge);
+                    }
+                }
+
+                var challenge = new EntraDeviceCodeChallenge("CODE-1234", "https://example.invalid/devicelogin");
+                var shown = EntraDeviceCodeAuth.Claim(
+                    challenge, route.Acquired, out var unowned, out var degradation);
+
+                Assert.True(
+                    degradation == route.Degradation,
+                    $"{route.Name}: expected {route.Degradation}, got {degradation}");
+
+                /* The vouching decision, asserted on the same rows, because this change must not move
+                   it. A reason reported correctly beside a slot handed to the wrong attempt would be a
+                   better diagnostic of a worse defect. */
+                Assert.True(unowned == route.Unowned, $"{route.Name}: unowned was {unowned}");
+                Assert.Equal(route.Acquired, shown.Target);
+                Assert.Same(challenge, shown.Challenge);
+
+                walked++;
+                reported.Add(degradation);
+
+                owner?.Dispose();
+            }
+            finally
+            {
+                EntraDeviceCodeAuth.ResetForTests();
+            }
+        }
+
+        /* The walk happened, against a literal, so a table crippled to zero rows fails here rather
+           than reporting a pass on nine assertions it never reached. */
+        Assert.Equal(9, walked);
+        Assert.Equal(3, reported.Distinct().Count());
+
+        /* And the sequence, in order, rather than a tally of each value. Measured: inverting the
+           waiting-sign-in condition PERMUTES this list without changing any of its three counts -
+           rows move between None and SignInStillAwaitingItsOwnCode in matching pairs - so counting
+           them reconciles perfectly while every token means something else. */
+        Assert.Equal(routes.Select(route => route.Degradation).ToArray(), reported);
     }
 
     [Fact]
@@ -1020,7 +1181,8 @@ public class EntraDeviceCodeTests
         var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', at));
 
         Assert.Contains("CurrentAcquisition" + "Target", body, StringComparison.Ordinal);
-        Assert.Contains("Claim" + "(challenge, acquired, out var unowned)", body, StringComparison.Ordinal);
+        Assert.Contains(
+            "Claim" + "(challenge, acquired, out var unowned, out _)", body, StringComparison.Ordinal);
 
         /* And the decision is NOT taken here. A callback that published for itself could publish
            onto the slot holder without asking whose the code is, which is the whole defect. */
@@ -1043,6 +1205,83 @@ public class EntraDeviceCodeTests
         Assert.Contains(
             "acquiredTarget",
             claimBody[vouch..Math.Min(claimBody.Length, vouch + 260)],
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheWarningsAreSelectedByTheClassificationRatherThanBySecondGuesses()
+    {
+        /* What makes the behavioural pin on the reason cover the warnings too, rather than merely
+           sitting beside them. Two properties, and neither is about the prose:
+
+           Both warnings still exist. The reason being a return value is what a test can assert on;
+           the warning is what an operator sees, and deleting one while keeping the other would leave
+           a green suite and a silent degradation - which is the state this change was made to end,
+           reached from the other side.
+
+           And each warning is chosen BY the classification, not by asking the state again. A second
+           copy of either condition, written to select a log line, is a condition no pin covers: it
+           could be inverted on its own and the returned reason would go on agreeing with the tests.
+           So the conditions must appear once, ahead of the classification, and not after it.
+
+           The prose itself is deliberately unpinned. A message asserted word for word fails on an
+           improvement to its wording, which is a test that costs more than it catches - the sibling
+           refusal log in Begin is unpinned for the same reason. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            ParitySource.ReadFile("Lite/Services/EntraDeviceCodeAuth.cs"));
+
+        var claim = code.IndexOf("EntraDeviceCodeAttempt Claim(", StringComparison.Ordinal);
+        Assert.True(claim >= 0, "the attribution decision must live in Claim");
+
+        var claimBody = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', claim));
+
+        /* Two warnings, because there are two ways attribution degrades. Counted rather than merely
+           found: one of the two going missing is exactly the loss this pin exists to catch. */
+        Assert.Equal(
+            2, Regex.Matches(claimBody, @"AppLogger\s*\.\s*Warn\s*\(").Count);
+
+        /* ONE copy of each condition on the degraded path. This is the load-bearing assertion: a
+           second copy, written to pick a log line, is a condition nothing covers - it could be
+           inverted on its own while the returned reason went on agreeing with the behavioural pin.
+
+           Measured below the vouching decision, because the vouch reads acquiredTarget too and a
+           whole-method count would be two before anything was wrong. Blind to which way each
+           condition is written, so this counts COPIES rather than agreeing with one spelling: an
+           inverted condition is the behavioural pin's to catch, and a source pin that also happened
+           to catch it would read as coverage it does not provide. */
+        var degraded = claimBody.IndexOf("unowned = " + "true;", StringComparison.Ordinal);
+        Assert.True(degraded >= 0, "Claim must still mark the unvouched path unowned");
+
+        var degradedPath = claimBody[degraded..];
+
+        Assert.Equal(
+            1, Regex.Matches(degradedPath, @"acquiredTarget is (not )?null").Count);
+        Assert.Equal(1, Regex.Matches(degradedPath, @"Challenge:\s*(not )?null").Count);
+
+        var noIdentity = Regex.Match(degradedPath, @"acquiredTarget is (not )?null").Index;
+        var stillWaiting = Regex.Match(degradedPath, @"Challenge:\s*(not )?null").Index;
+        var firstWarn = degradedPath.IndexOf("AppLogger", StringComparison.Ordinal);
+
+        Assert.True(firstWarn >= 0, "both degradations must still reach the log");
+        Assert.True(
+            noIdentity >= 0 && noIdentity < firstWarn,
+            "the missing-identity condition must be asked above the warnings, not by one of them");
+        Assert.True(
+            stillWaiting >= 0 && stillWaiting < firstWarn,
+            "the waiting-sign-in condition must be asked above the warnings, not by one of them");
+
+        /* And what is left below the conditions is the classification being read back. The positive
+           half of the same property: a body that stopped branching altogether would satisfy a bare
+           "only one copy of each condition" and select no warning at all. */
+        var belowTheConditions = degradedPath[Math.Max(noIdentity, stillWaiting)..];
+
+        Assert.Contains(
+            "degradation is " + "EntraDeviceCodeDegradation.NoAcquisitionIdentity",
+            belowTheConditions,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "degradation is " + "EntraDeviceCodeDegradation.SignInStillAwaitingItsOwnCode",
+            belowTheConditions,
             StringComparison.Ordinal);
     }
 
