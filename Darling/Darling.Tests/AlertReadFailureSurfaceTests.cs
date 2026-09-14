@@ -330,21 +330,29 @@ public sealed class AlertReadFailureSurfaceTests
     }
 
     /// <summary>
-    /// The instance total is never smaller than the two parts a reading names, so the reader's subtraction
-    /// for the third population cannot come out negative.
+    /// Under concurrency, every count is backed by the trio that identifies it, and the instance total
+    /// never trails the two parts a reading subtracts from it.
     ///
-    /// <para>The failures on OTHER servers have no count of their own — nothing here holds a newest failure
-    /// for them, and a fourth count with nothing to date it would be the defect rather than the fix — so
-    /// the total less this server's less the fleet's is the only route to that population. A reading that
-    /// sampled the TOTAL before its parts can make that negative: the total is read, a failure lands in the
-    /// fleet bucket, and the fleet count read afterwards exceeds the share the total counted. Every count
-    /// only rises, so sampling the total last is safe and sampling it first is not.</para>
+    /// <para>Both properties are consequences of the publication order in
+    /// <c>RecordReadFailure</c> and the sampling order in <c>ReadFor</c>, and neither is visible to a
+    /// single-threaded test: the orders only differ while a write is in flight. This is the assertion that
+    /// discriminates them, and it earned its place — it found the write order wrong the first time it ran,
+    /// at about six negative readings per thousand, on a change whose comment confidently asserted that
+    /// sampling the total last was sufficient. It is not: the writer has to increment the total first as
+    /// well, or a reader sees a bucket the total has not counted.</para>
     ///
-    /// <para>Pinned under concurrency because a single-threaded test cannot tell the two orders apart at
-    /// all — it is the ordering, not the arithmetic, that this discriminates.</para>
+    /// <para><b>The trio half.</b> A count published before the trio beside it is observable for as long as
+    /// the next instruction takes as a count with nothing to date or name it — the exact reading this whole
+    /// block exists to make impossible, reduced to microseconds rather than removed. Identity is therefore
+    /// published first and the count sampled first, so a nonzero count always has its trio.</para>
+    ///
+    /// <para><b>The subtraction half.</b> The failures on OTHER servers have no count of their own —
+    /// nothing here holds a newest failure for them, and a fourth count with nothing to date it would be
+    /// the defect rather than the fix — so the total less this server's less the fleet's is the only route
+    /// to that population, and it must not render as a negative number.</para>
     /// </summary>
     [Fact]
-    public async Task TheInstanceTotal_IsNeverLessThanTheSumOfItsNamedParts()
+    public async Task UnderConcurrency_EveryCountKeepsItsTrio_AndTheTotalNeverTrailsItsParts()
     {
         const string Key = "700";
         const int WritesPerWriter = 150_000;
@@ -369,6 +377,7 @@ public sealed class AlertReadFailureSurfaceTests
         /* The reader is THIS thread rather than another queued work item, so it cannot go unscheduled on a
            small runner and report a vacuous pass. */
         var negatives = new List<string>();
+        var undated = new List<string>();
         var observations = 0;
         var observedBothParts = 0;
 
@@ -385,6 +394,33 @@ public sealed class AlertReadFailureSurfaceTests
                 negatives.Add(
                     $"instance {reading.InstanceReadFailures} - server {reading.ServerReadFailures} - "
                     + $"fleet {reading.FleetReadFailures} = {others}");
+            }
+
+            /* The trio half, per scope, on the same snapshot: a count with no stamp, no name or no elapsed
+               beside it. Checked here rather than only after the writers stop, because the whole hazard is
+               an in-flight write — the settled value always agrees. */
+            if (reading.ServerReadFailures > 0
+                && (reading.LastFailureAtUtc is null
+                    || reading.LastFailureRead is null
+                    || reading.LastFailureElapsedMs is null))
+            {
+                undated.Add($"server count {reading.ServerReadFailures} with an incomplete trio");
+            }
+
+            if (reading.FleetReadFailures > 0
+                && (reading.FleetLastFailureAtUtc is null
+                    || reading.FleetLastFailureRead is null
+                    || reading.FleetLastFailureElapsedMs is null))
+            {
+                undated.Add($"fleet count {reading.FleetReadFailures} with an incomplete trio");
+            }
+
+            if (reading.InstanceReadFailures > 0
+                && (reading.InstanceLastFailureAtUtc is null
+                    || reading.InstanceLastFailureRead is null
+                    || reading.InstanceLastFailureElapsedMs is null))
+            {
+                undated.Add($"instance count {reading.InstanceReadFailures} with an incomplete trio");
             }
 
             if (reading.ServerReadFailures > 0 && reading.FleetReadFailures > 0)
@@ -408,6 +444,11 @@ public sealed class AlertReadFailureSurfaceTests
             negatives.Count == 0,
             $"{negatives.Count} negative other-server count(s) over {observations} observation(s): "
             + string.Join(" | ", negatives.Take(5)));
+
+        Assert.True(
+            undated.Count == 0,
+            $"{undated.Count} count(s) observed without the trio that identifies them over "
+            + $"{observations} observation(s): " + string.Join(" | ", undated.Take(5)));
 
         /* Settled: only these two buckets were written, so the total equals their sum exactly and the third
            population is empty. An exact equality here is what proves the total is the sum of the parts and

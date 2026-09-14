@@ -247,16 +247,31 @@ public sealed class AlertReadFailureCounter
         var newest = new LastFailure(nowTicks, name, elapsed);
 
         var bucket = string.IsNullOrWhiteSpace(serverKey) ? _fleet : Bucket(serverKey!);
-        Interlocked.Increment(ref bucket.ReadFailures);
-        Interlocked.Exchange(ref bucket.Newest, newest);
 
-        /* The instance side carries the same trio, and all three of its facts reach a surface: every
-           reading renders the instance stamp, read name and elapsed beside the instance count, so that
-           count is dated and named exactly the way the per-server one is. The value is shared with the
-           bucket above rather than recomputed, because a second construction is a second chance to
-           disagree. */
-        Interlocked.Increment(ref _instanceReadFailures);
+        /* PUBLICATION ORDER, and both halves of it are load-bearing. The instance side carries the same
+           trio as the bucket — every reading renders the instance stamp, read name and elapsed beside the
+           instance count, so that count is dated and named exactly the way the per-server one is — and the
+           value is shared with the bucket rather than recomputed, because a second construction is a second
+           chance to disagree.
+
+           IDENTITY BEFORE COUNT, per scope. A count published first is observable for as long as the next
+           instruction takes with nothing beside it to date or name it, which is precisely the reading this
+           block exists to make impossible. Published this way round, a reader that has seen a nonzero count
+           has already had the trio available, so "every count carries its trio" holds at every instant and
+           not merely once the writer has finished. The reverse pairing — a trio published with the count
+           still at zero — is the harmless one: it claims no count it cannot identify.
+
+           INSTANCE BEFORE BUCKET. The instance total is what the two parts are subtracted from to name the
+           failures on OTHER servers, so it must never trail them; if a bucket were incremented first, a
+           reader could see a bucket that the total had not counted yet and the subtraction would come out
+           NEGATIVE, which on a health surface reads as a broken instrument rather than a small number.
+           Incremented this way round the total leads by however many writes are in flight, so the
+           subtraction can read transiently high and never below zero. High is a number; negative is not.
+           ReadFor's own sampling order is the other half of both guarantees and says so. */
         Interlocked.Exchange(ref _instanceNewest, newest);
+        Interlocked.Exchange(ref bucket.Newest, newest);
+        Interlocked.Increment(ref _instanceReadFailures);
+        Interlocked.Increment(ref bucket.ReadFailures);
     }
 
     /// <summary>
@@ -301,6 +316,13 @@ public sealed class AlertReadFailureCounter
     /// OTHER servers. That remainder is deliberately not a member here: this counter holds no newest
     /// failure for it, and a count with nothing to date or name it is the gap the three stamps on this
     /// record exist to close.</para>
+    ///
+    /// <para>This total LEADS its two parts by however many failures are in flight while the reading is
+    /// taken, by construction — see the publication and sampling orders in
+    /// <see cref="RecordReadFailure"/> and <see cref="ReadFor"/>. So the remainder can read a failure or
+    /// two high on a service that is failing reads concurrently, and can never read below zero. That
+    /// direction is the deliberate one: a count slightly high is a number, and a negative count on a
+    /// health surface is a broken instrument.</para>
     /// </param>
     /// <param name="LastFailureAtUtc">
     /// When the newest failure for this server happened, or null if it has none. The currency term: a
@@ -402,30 +424,38 @@ public sealed class AlertReadFailureCounter
     public Reading ReadFor(string? serverKey)
     {
         var bucket = string.IsNullOrWhiteSpace(serverKey) ? null : Lookup(serverKey!);
+
+        /* SAMPLING ORDER — the mirror of RecordReadFailure's publication order, and the other half of both
+           guarantees it states. Every count first, the instance total LAST of the three, and only then the
+           trios.
+
+           COUNTS BEFORE TRIOS, because identity is published before the count it identifies: a reader that
+           has already seen a nonzero count is guaranteed a trio, since the trio was in place before that
+           count became visible and is never cleared. Sampling a trio FIRST would allow a null trio beside a
+           count read afterwards — a count with nothing to date it, which is the defect and not the fix.
+
+           THE TOTAL LAST, because the writer increments it before the bucket: the total therefore leads the
+           buckets, and sampling it after them keeps it at least their sum, so the subtraction that names the
+           failures on OTHER servers cannot come out negative. Both orders are needed — reading the total
+           last while the writer incremented the bucket first still reads a bucket the total has not counted.
+           Not a theoretical pairing: the assertion that discriminates them found the write order wrong the
+           first time it ran, at about six negative readings per thousand. */
         var serverFailures = bucket is null ? 0L : Interlocked.Read(ref bucket.ReadFailures);
         var serverPasses = bucket is null ? 0L : Interlocked.Read(ref bucket.Passes);
 
-        /* ONE read of the trio, so the stamp, the name and the elapsed on the returned reading always
+        /* The fleet bucket is read on EVERY reading, not only when the caller has no server: these failures
+           belong to no server, so a reader who asked about one still needs them to make sense of the
+           instance total standing beside their own zero. */
+        var fleetFailures = Interlocked.Read(ref _fleet.ReadFailures);
+        var instanceFailures = Interlocked.Read(ref _instanceReadFailures);
+
+        /* ONE read of each trio, so the stamp, the name and the elapsed on the returned reading always
            describe the same failure. Taking them from three fields could pair one failure's elapsed with
            another's name, which would make the client-versus-server classification wrong rather than
            merely stale — and would pass every single-threaded test. */
         var newest = bucket is null ? null : Volatile.Read(ref bucket.Newest);
-
-        /* The fleet bucket, read the same way and for the same reason. It is read on EVERY reading, not
-           only when the caller has no server: these failures belong to no server, so a reader who asked
-           about one still needs them to make sense of the instance total standing beside their own zero. */
-        var fleetFailures = Interlocked.Read(ref _fleet.ReadFailures);
         var fleetNewest = Volatile.Read(ref _fleet.Newest);
         var instanceNewest = Volatile.Read(ref _instanceNewest);
-
-        /* The instance total is read LAST, and the order is load-bearing rather than incidental. Every
-           count here only rises, and the instance total increments on every failure that lands in any
-           bucket, so a total sampled AFTER its two parts can never be smaller than their sum. That is what
-           makes the reader's own subtraction — the instance total less this server's count less the fleet
-           count, the failures on OTHER servers — a figure that cannot come out negative. Sampling the
-           total first would allow it, and a negative count on a health surface reads as a broken
-           instrument rather than as a small one. */
-        var instanceFailures = Interlocked.Read(ref _instanceReadFailures);
 
         /* Named arguments, not positional. Fourteen of them repeat four shapes across three scopes, so a
            reordering compiles while pairing one scope's stamp with another scope's read name — a confident
@@ -511,8 +541,10 @@ public sealed class AlertReadFailureCounter
            fleet-scoped ones that belong to no server. Stated as arithmetic over three figures the block
            also carries, so a reader can check it, and NOT rendered as a field of its own — this counter
            holds no newest failure for that population, and a fourth count with nothing to date or name it
-           would be the same defect the three stamps here exist to close. ReadFor samples the total after
-           the two parts and every count only rises, so this cannot come out negative. */
+           would be the same defect the three stamps here exist to close. The writer increments the total
+           before either part and the reader samples it after both, so the total leads and this cannot come
+           out negative; it can read a failure or two high while failures are landing concurrently, which
+           is the direction chosen deliberately. */
         var otherServers =
             reading.InstanceReadFailures - reading.ServerReadFailures - reading.FleetReadFailures;
 
