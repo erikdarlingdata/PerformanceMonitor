@@ -145,7 +145,8 @@ internal static class OversizedPlanBacklogSweep
     /// wait for a network read and SqlClient RESETS it on every read that arrives, so a large result that
     /// trickles never trips it. Fifteen seconds is the top of the issue's range, and a plan that cannot be
     /// read in fifteen seconds on the collector's own same-region path is one this pass should abandon and
-    /// re-attempt next hour rather than hold a connection for.
+    /// re-attempt on a later pass rather than hold a connection for — later rather than next, because the
+    /// claim sends an attempted row to the back of the queue so nothing can starve.
     /// </summary>
     internal static readonly TimeSpan PerPlanBudget = TimeSpan.FromSeconds(15);
 

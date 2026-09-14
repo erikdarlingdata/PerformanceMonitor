@@ -560,7 +560,7 @@ public sealed class OversizedPlanBacklogPins
     ///
     /// <para>Equal to the interval, the fix does nothing. At or below the fleet loop's own cadence, the gate
     /// re-fires on every pass until the first connect and each pass writes a run-record — the burst that
-    /// makes "just do not advance the stamp" worse than the hour it saves. The loop's cadence is READ from
+    /// makes "just do not advance the stamp" worse than the slot it saves. The loop's cadence is READ from
     /// the worker rather than retyped here, so shortening the loop fails this pin instead of silently
     /// eroding the ratio.</para>
     /// </summary>
