@@ -420,10 +420,12 @@ public class EntraDeviceCodeTests
 
         Assert.Null(challenge.GetProperty("DeviceCode"));
 
-        /* And the members it DOES have are exactly the four the window needs, so a later addition is
-           a decision rather than a copy of the driver's type. */
+        /* And the members it DOES have are exactly the two the window uses, so a later addition is a
+           decision rather than a copy of the driver's type. Every other member of DeviceCodeResult -
+           Message, ExpiresOn, Interval, ClientId, Scopes - is absent because nothing reads it; see
+           EntraDeviceCodeChallenge for why showing ExpiresOn would be showing the wrong number. */
         Assert.Equal(
-            new[] { "ExpiresOn", "Message", "UserCode", "VerificationUrl" },
+            new[] { "UserCode", "VerificationUrl" },
             challenge.GetProperties(BindingFlags.Public | BindingFlags.Instance)
                      .Select(property => property.Name)
                      .OrderBy(name => name, StringComparer.Ordinal)

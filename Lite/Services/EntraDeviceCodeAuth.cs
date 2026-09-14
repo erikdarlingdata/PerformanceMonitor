@@ -14,28 +14,23 @@ using Microsoft.Data.SqlClient;
 namespace PerformanceMonitorLite.Services;
 
 /// <summary>
-/// What the tenant issued for one device-code sign-in, reduced to the four values a user needs.
+/// What the tenant issued for one device-code sign-in, reduced to the two values a user acts on.
 ///
-/// <para>A copy rather than the driver's own <c>DeviceCodeResult</c> on purpose. The rest of this
-/// app has no reference to <c>Microsoft.Identity.Client</c> and should not grow one for a window,
-/// and <c>DeviceCodeResult</c> also carries <c>DeviceCode</c> — the <b>secret</b> half of the
-/// exchange, which whoever holds it can redeem the token with. That value is not on this type, so
-/// no window, log line or crash dump downstream of here can carry it.</para>
+/// <para>A copy rather than the driver's own <c>DeviceCodeResult</c> on purpose, and a deliberately
+/// short one. The rest of this app has no reference to <c>Microsoft.Identity.Client</c> and should
+/// not grow one for a window; <c>DeviceCodeResult</c> also carries <c>DeviceCode</c> — the
+/// <b>secret</b> half of the exchange, which whoever holds it can redeem the token with — so that
+/// value is not on this type and no window, log line or crash dump downstream of here can carry it.
+/// The remaining members it does not copy are omitted because nothing uses them, not because they
+/// are sensitive: <c>Message</c> is the tenant's own instruction text, which the prompt window
+/// states in its own words, and <c>ExpiresOn</c> is when the TENANT stops accepting the code, which
+/// is not the deadline the user is racing — the driver gives up after three minutes regardless (see
+/// <see cref="PerformanceMonitor.Common.AuthenticationTypes.EntraDeviceCode"/>) and tenants
+/// typically issue fifteen, so showing it would be showing the wrong number.</para>
 /// </summary>
 /// <param name="UserCode">The short code the user types into the browser.</param>
 /// <param name="VerificationUrl">The page to type it into.</param>
-/// <param name="Message">The tenant's own instruction text, already naming both of the above.</param>
-/// <param name="ExpiresOn">
-/// When the tenant stops accepting the code. Note this is NOT the deadline the user is racing: the
-/// driver cancels the acquisition after three minutes regardless (see
-/// <see cref="PerformanceMonitor.Common.AuthenticationTypes.EntraDeviceCode"/>), and tenants
-/// typically issue fifteen.
-/// </param>
-public sealed record EntraDeviceCodeChallenge(
-    string UserCode,
-    string VerificationUrl,
-    string Message,
-    DateTimeOffset ExpiresOn);
+public sealed record EntraDeviceCodeChallenge(string UserCode, string VerificationUrl);
 
 /// <summary>
 /// One in-flight device-code sign-in: the rendezvous between the driver's callback, the window that
@@ -318,9 +313,7 @@ public static class EntraDeviceCodeAuth
         /* DeviceCode is deliberately not copied across - see EntraDeviceCodeChallenge. */
         attempt.Challenge = new EntraDeviceCodeChallenge(
             result.UserCode ?? string.Empty,
-            result.VerificationUrl ?? string.Empty,
-            result.Message ?? string.Empty,
-            result.ExpiresOn);
+            result.VerificationUrl ?? string.Empty);
 
         /* The user code is short, single-use, and useless without the device code the app never
            holds; the URL is public. Logged because "did the tenant issue a code at all" is the first
