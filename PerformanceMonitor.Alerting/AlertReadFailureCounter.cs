@@ -114,9 +114,18 @@ namespace PerformanceMonitor.Alerting;
 /// of boxed holders so an increment never replaces an entry. The newest failure's stamp, name and elapsed
 /// are one immutable value exchanged as a reference, so those three ARE atomic together — that one is
 /// load-bearing, because the elapsed is only meaningful as the elapsed of the read the other two name, and
-/// a blend of two failures would be a wrong classification rather than a stale one. The COUNTS carry no
-/// such guarantee and need none: a total and a per-server count sampled a microsecond apart is not a defect
-/// this surface can be misread on.</para>
+/// a blend of two failures would be a wrong classification rather than a stale one.</para>
+///
+/// <para>The COUNTS are not atomic together and cannot be, but their relative ORDER is load-bearing and is
+/// stated at both ends. Two of the block's readings are cross-scope — a count read against the trio that
+/// identifies it, and a total read against the two parts subtracted from it — so a pair sampled a
+/// microsecond apart is a defect this surface can be misread on, in two specific directions. Both are
+/// closed by ordering rather than by locking: <see cref="RecordReadFailure"/> publishes a failure's
+/// identity ahead of the count it identifies and the instance total ahead of either bucket, and
+/// <see cref="ReadFor"/> mirrors it, sampling every count before its trio and the total last of the three.
+/// One half of that was wrong when the cross-scope subtraction was first written, and the assertion that
+/// found it reported about six negative readings per thousand — so neither half is a stylistic
+/// preference.</para>
 /// </summary>
 public sealed class AlertReadFailureCounter
 {
