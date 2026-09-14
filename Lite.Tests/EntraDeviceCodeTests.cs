@@ -13,6 +13,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 using Darling.Tests;
 using Lite.Tests;
 using Microsoft.Data.SqlClient;
@@ -455,18 +456,18 @@ public class EntraDeviceCodeTests
     [Fact]
     public void AnAttemptTakesOneChallengeOnly_SoAnUnrelatedCallbackCannotOverwriteIt()
     {
-        /* The deeper half of the misattribution class, and the one the claim-not-overwrite fix did
-           NOT cover: Begin-vs-Begin was guarded, but four sites in Lite open a server connection
-           without going through Begin at all, so a device-code callback can arrive while an
-           unrelated Begin-owned sign-in holds the slot. The callback used to reuse the occupant
-           whenever the slot was non-null, overwriting ITS code with the unrelated server's and
-           opening a second window on the same attempt - silently, because the unwrapped caller never
-           calls Begin and nothing throws.
+        /* One half of the misattribution class: four sites in Lite open a server connection without
+           going through Begin at all, so a device-code callback can arrive while an unrelated
+           Begin-owned sign-in holds the slot, and reusing the occupant whenever the slot was
+           non-null overwrote ITS code with the unrelated server's - silently, because the unwrapped
+           caller never calls Begin and nothing throws.
 
-           TryPublish is the discriminator and it is exact rather than heuristic: the driver invokes
-           its callback once per acquisition, so a challenge arriving at an attempt that already has
-           one cannot be that attempt's. Asserted in both directions - the first publish must take,
-           the second must be refused AND must leave the original in place. */
+           This is the narrow guarantee that closes it, and the narrowness is the point: the driver
+           invokes its callback once per acquisition, so a challenge arriving at an attempt that
+           already has one cannot be that attempt's. What it does NOT settle is whose an arriving
+           challenge is when the slot is EMPTY, which is #3409 and is decided before this by Claim.
+           Asserted in both directions - the first publish must take, the second must be refused AND
+           must leave the original in place. */
         using var attempt = new EntraDeviceCodeAttempt();
 
         var mine = new EntraDeviceCodeChallenge("MINE-1234", "https://example.invalid/devicelogin");
@@ -481,32 +482,6 @@ public class EntraDeviceCodeTests
            satisfy the assertion above and leave the user reading the wrong code. */
         Assert.Same(mine, attempt.Challenge);
         Assert.Equal("MINE-1234", attempt.Challenge!.UserCode);
-    }
-
-    [Fact]
-    public void TheCallbackTakesAFreshAttemptWhenItCannotClaimTheSlotHolders()
-    {
-        /* The wiring half of the pin above, asserted in source because OnDeviceCodeIssued is private
-           and needs a live driver callback to reach. Two things have to be true together: the
-           callback must decide ownership through TryPublish rather than through a null check on the
-           slot, and the unowned branch must publish onto the attempt it creates. */
-        var code = CSharpSourceWalker.StripCommentsAndStrings(
-            ParitySource.ReadFile("Lite/Services/EntraDeviceCodeAuth.cs"));
-
-        var at = code.IndexOf("OnDeviceCodeIssued(Microsoft.Identity.Client.DeviceCodeResult", StringComparison.Ordinal);
-        Assert.True(at >= 0, "the driver callback must exist");
-
-        var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', at));
-
-        Assert.Contains("TryPublish" + "(challenge)", body, StringComparison.Ordinal);
-
-        /* And NOT the test it replaced. "attempt is null" alone as the ownership decision is the
-           defect; the null check may remain only as one half of a condition that also asks
-           TryPublish, which the assertion above requires. */
-        var decision = body.IndexOf("var unowned", StringComparison.Ordinal);
-        Assert.True(decision >= 0, "the callback must decide whether it owns the slot");
-        Assert.Contains(
-            "TryPublish", body[decision..Math.Min(body.Length, decision + 160)], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -560,6 +535,646 @@ public class EntraDeviceCodeTests
         {
             EntraDeviceCodeAuth.ResetForTests();
         }
+    }
+
+    // ---- #3409: attribution comes from the acquisition, not from the slot ----------------
+
+    /// <summary>
+    /// A device-code connection string for <paramref name="server"/>, shaped the way the three
+    /// wrapped call sites shape theirs: a builder whose authentication keyword is the one
+    /// <c>Begin</c> gates on.
+    /// </summary>
+    private static SqlConnectionStringBuilder DeviceCodeBuilder(string server, string? database)
+    {
+        var builder = new SqlConnectionStringBuilder { DataSource = server };
+        if (!string.IsNullOrEmpty(database))
+        {
+            builder.InitialCatalog = database;
+        }
+
+        ServerConnection.ApplyAuthentication(
+            builder, AuthenticationTypes.EntraDeviceCode, null, null, null, null);
+
+        return builder;
+    }
+
+    /// <summary>
+    /// Reads the acquisition identity back after the kinds of await the driver puts between the
+    /// provider and the callback — a yield, a thread-pool hop, a timer.
+    /// </summary>
+    private static async Task<string?> AcquisitionTargetAfterHopsAsync()
+    {
+        await Task.Yield();
+        await Task.Run(() => { }).ConfigureAwait(false);
+        await Task.Delay(1).ConfigureAwait(false);
+        return EntraDeviceCodeAuth.CurrentAcquisitionTarget;
+    }
+
+    /// <summary>
+    /// Reads the acquisition identity back on a DEDICATED thread, and reports which thread that
+    /// was so the caller can require it was not the calling one.
+    ///
+    /// <para><b>The awaits above cannot do this job, which was measured rather than assumed.</b>
+    /// A thread-pool hop may resume on the thread it started from, so a value that in fact lived on
+    /// the THREAD rather than on the async flow can survive those awaits by luck — crippling the
+    /// helper above to a single completed await left a <c>[ThreadStatic]</c> implementation of the
+    /// identity passing. <c>LongRunning</c> asks the default scheduler for a thread of its own, so
+    /// this read happens somewhere a thread-local value cannot be, while an async-local still
+    /// arrives because <c>StartNew</c> captures the execution context.</para>
+    /// </summary>
+    private static async Task<(string? Value, int ThreadId)> AcquisitionTargetOnItsOwnThreadAsync() =>
+        await Task.Factory.StartNew(
+            () => (EntraDeviceCodeAuth.CurrentAcquisitionTarget, Environment.CurrentManagedThreadId),
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default).ConfigureAwait(false);
+
+    [Fact]
+    public void AnUnrelatedCodeCannotTakeTheSlotOfASignInStillWaitingForItsOwn()
+    {
+        /* #3409, and the ordering #3408's fix did not close. That fix discriminated on whether the
+           slot holder ALREADY HELD a challenge, which answers "can this be the code of the attempt
+           holding the slot" - but an attempt that has not yet received its own code holds an empty
+           slot too, and an empty slot is equally consistent with "the owner's code has arrived" and
+           with "an unrelated connection's code arrived first".
+
+           In that second ordering the old decision published the stray onto the owner and the
+           prompt named the owner's server beside the stray's code: authoritative and wrong, which
+           is worse than anonymous, because it tells a user confidently to authenticate something
+           they did not choose.
+
+           The discriminator now is the identity of the acquisition that produced the challenge,
+           which EntraDeviceCodeProvider records one frame above the callback. Asserted in BOTH
+           directions in one test, because a Claim that refused everything would satisfy the
+           refusal half alone. */
+        var mine = DeviceCodeBuilder("mine.example.invalid", "mydb");
+
+        EntraDeviceCodeAuth.ResetForTests();
+        try
+        {
+            using var owner = EntraDeviceCodeAuth.Begin(mine);
+
+            Assert.NotNull(owner);
+            Assert.Equal("mine.example.invalid (mydb)", owner!.Target);
+
+            /* The ordering's premise, and without it this test is the one #3408 already passes. */
+            Assert.Null(owner.Challenge);
+
+            var theirs = new EntraDeviceCodeChallenge("THEIRS-9999", "https://example.invalid/other");
+            var shown = EntraDeviceCodeAuth.Claim(theirs, "other.example.invalid", out var unowned);
+
+            Assert.True(unowned, "a code from another connection must not take a waiting sign-in's slot");
+            Assert.NotSame(owner, shown);
+
+            /* The slot is still the owner's, so the owner's own code can still land in it. Without
+               this, a Claim that consumed the slot and merely relabelled would pass the assertions
+               above and strand the user's own sign-in. */
+            Assert.Null(owner.Challenge);
+
+            Assert.Same(theirs, shown.Challenge);
+
+            /* And the prompt names the stray's OWN server. Not the owner's, which is the defect,
+               and not nothing, which would be the cheap fix. */
+            Assert.Equal("other.example.invalid", shown.Target);
+            Assert.DoesNotContain("mine", shown.Target!, StringComparison.OrdinalIgnoreCase);
+
+            /* The legitimate direction, which is what makes the refusal above evidence rather than
+               a blanket: the owner's own code must take the slot it is waiting on. */
+            var own = new EntraDeviceCodeChallenge("MINE-1234", "https://example.invalid/devicelogin");
+            var ownShown = EntraDeviceCodeAuth.Claim(
+                own, EntraDeviceCodeAuth.DescribeTarget(mine), out var ownUnowned);
+
+            Assert.False(ownUnowned, "a sign-in's own code must take the slot it is waiting on");
+            Assert.Same(owner, ownShown);
+            Assert.Same(own, owner.Challenge);
+            Assert.Equal("mine.example.invalid (mydb)", owner.Target);
+        }
+        finally
+        {
+            EntraDeviceCodeAuth.ResetForTests();
+        }
+    }
+
+    [Fact]
+    public void ACodeWithNoAcquisitionIdentityIsShownUnnamedRatherThanBorrowingAName()
+    {
+        /* The fail-safe, and the direction this whole mechanism has to fail in. The acquisition
+           identity travels on an async-local set by Lite's own provider; if the driver ever refuses
+           that provider, or an execution context stops reaching the callback, the identity is
+           absent rather than wrong. Absent must mean "show it unnamed", never "assume it is the
+           waiting sign-in's" - which is the defect with an extra step.
+
+           Paired with its positive control: the same slot, the same waiting owner, and an identity
+           that DOES name the owner is claimed. Without that, a Claim hard-wired to refuse passes. */
+        var mine = DeviceCodeBuilder("mine.example.invalid", "mydb");
+
+        EntraDeviceCodeAuth.ResetForTests();
+        try
+        {
+            using var owner = EntraDeviceCodeAuth.Begin(mine);
+            Assert.NotNull(owner);
+
+            var unidentified = new EntraDeviceCodeChallenge("NOID-4321", "https://example.invalid/devicelogin");
+            var shown = EntraDeviceCodeAuth.Claim(unidentified, null, out var unowned);
+
+            Assert.True(unowned);
+            Assert.NotSame(owner, shown);
+            Assert.Null(owner!.Challenge);
+
+            /* Unnamed, so the window says it is a background connection rather than naming a server
+               nothing established. */
+            Assert.Null(shown.Target);
+            Assert.Same(unidentified, shown.Challenge);
+
+            var identified = new EntraDeviceCodeChallenge("MINE-1234", "https://example.invalid/devicelogin");
+            Assert.Same(
+                owner,
+                EntraDeviceCodeAuth.Claim(
+                    identified, EntraDeviceCodeAuth.DescribeTarget(mine), out _));
+        }
+        finally
+        {
+            EntraDeviceCodeAuth.ResetForTests();
+        }
+    }
+
+    [Fact]
+    public void ACodeThatNamesTheSlotHolderStillCannotOverwriteAChallengeAlreadyThere()
+    {
+        /* #3408's ordering, re-asserted through the new decision path so the older guarantee cannot
+           be lost while closing the newer one. The driver invokes its callback once per
+           acquisition, so a second challenge naming the same target is a second acquisition to the
+           same server - the one pair no identity separates - and overwriting would replace a code
+           the user may already be typing.
+
+           Asserted on the OCCUPANT as well as on the return value: a Claim that returned a fresh
+           attempt while still assigning over the occupant would satisfy the first half and leave
+           the user reading a dead code. */
+        var mine = DeviceCodeBuilder("mine.example.invalid", "mydb");
+        var target = EntraDeviceCodeAuth.DescribeTarget(mine);
+
+        EntraDeviceCodeAuth.ResetForTests();
+        try
+        {
+            using var owner = EntraDeviceCodeAuth.Begin(mine);
+            Assert.NotNull(owner);
+
+            var first = new EntraDeviceCodeChallenge("FIRST-1111", "https://example.invalid/devicelogin");
+            Assert.Same(owner, EntraDeviceCodeAuth.Claim(first, target, out var firstUnowned));
+            Assert.False(firstUnowned);
+
+            var second = new EntraDeviceCodeChallenge("SECOND-2222", "https://example.invalid/devicelogin");
+            var secondShown = EntraDeviceCodeAuth.Claim(second, target, out var secondUnowned);
+
+            Assert.True(secondUnowned);
+            Assert.NotSame(owner, secondShown);
+            Assert.Same(first, owner!.Challenge);
+            Assert.Equal("FIRST-1111", owner.Challenge!.UserCode);
+
+            /* Still named, because the identity is still known - a refused claim does not make a
+               code anonymous. */
+            Assert.Same(second, secondShown.Challenge);
+            Assert.Equal(target, secondShown.Target);
+        }
+        finally
+        {
+            EntraDeviceCodeAuth.ResetForTests();
+        }
+    }
+
+    [Fact]
+    public void ACodeWithNoSignInWaitingIsNamedFromItsOwnAcquisition()
+    {
+        /* The route the four unwrapped sites take - a plan fetch, an MCP read, a Query Store
+           backfill, the excluded-databases picker. Nothing called Begin, so there is no slot to
+           take and never was; what changed is that the prompt is no longer anonymous, because the
+           provider knows which server the acquisition is for even when no call site announced it.
+
+           The anonymous case is kept and asserted beside it: no slot AND no identity is the only
+           state left that the window labels as a background connection. */
+        EntraDeviceCodeAuth.ResetForTests();
+        try
+        {
+            Assert.False(EntraDeviceCodeAuth.SignInInFlight);
+
+            var challenge = new EntraDeviceCodeChallenge("BKGD-7777", "https://example.invalid/devicelogin");
+            var named = EntraDeviceCodeAuth.Claim(challenge, "reader.example.invalid (plans)", out var unowned);
+
+            Assert.True(unowned);
+            Assert.Equal("reader.example.invalid (plans)", named.Target);
+            Assert.Same(challenge, named.Challenge);
+
+            /* A claim that never held the slot must not take it on the way out, or the next
+               wrapped sign-in publishes into a disposed object. */
+            Assert.False(EntraDeviceCodeAuth.SignInInFlight);
+
+            var anonymous = EntraDeviceCodeAuth.Claim(
+                new EntraDeviceCodeChallenge("BKGD-8888", "https://example.invalid/devicelogin"),
+                null,
+                out var anonymousUnowned);
+
+            Assert.True(anonymousUnowned);
+            Assert.Null(anonymous.Target);
+        }
+        finally
+        {
+            EntraDeviceCodeAuth.ResetForTests();
+        }
+    }
+
+    [Fact]
+    public void EveryRouteToAPrompt_NamesTheServerOfTheCodesOwnAcquisition()
+    {
+        /* The enumeration, asserted as ONE invariant rather than route by route, because the routes
+           differ only in what happens to the SLOT and the label is what the user acts on. Every way
+           a challenge can reach a window is a combination of two things: what state the rendezvous
+           slot is in, and what the acquisition that produced the challenge is for. This walks all of
+           them and requires the same property of each - the prompt names the server of the
+           acquisition that produced its code, or names nothing when no acquisition identity
+           reached the callback.
+
+           It covers a case the individual pins do not, and one the identity cannot separate: an
+           unwrapped read of the server a user is already signing in to. That challenge DOES take
+           the waiting attempt's slot, because two acquisitions for one server describe identically.
+           The invariant still holds - both prompts name that server, both codes are that server's -
+           and pinning the invariant rather than the slot outcome is deliberate, so this does not
+           freeze a limitation in place. */
+        var mine = DeviceCodeBuilder("mine.example.invalid", "mydb");
+        var mineTarget = EntraDeviceCodeAuth.DescribeTarget(mine);
+
+        var routes = new (string Name, bool Owner, bool OwnerHoldsAChallenge, string? Acquired)[]
+        {
+            ("no sign-in waiting, a named background read", false, false, "reader.example.invalid"),
+            ("no sign-in waiting, no identity at all", false, false, null),
+            ("a sign-in waiting, its own code", true, false, mineTarget),
+            ("a sign-in waiting, another server's code", true, false, "other.example.invalid"),
+            ("a sign-in waiting, no identity at all", true, false, null),
+            ("a sign-in holding its code, its own server again", true, true, mineTarget),
+            ("a sign-in holding its code, another server's code", true, true, "other.example.invalid"),
+            ("a sign-in holding its code, no identity at all", true, true, null),
+        };
+
+        /* Population floor: the walk below is vacuous if the table ever empties, and a table that
+           lost its two unidentified rows would stop covering the fail-safe entirely. */
+        Assert.Equal(8, routes.Length);
+        Assert.Equal(3, routes.Count(route => route.Acquired is null));
+
+        foreach (var route in routes)
+        {
+            EntraDeviceCodeAuth.ResetForTests();
+            try
+            {
+                EntraDeviceCodeAttempt? owner = null;
+                if (route.Owner)
+                {
+                    owner = EntraDeviceCodeAuth.Begin(mine);
+                    Assert.NotNull(owner);
+
+                    if (route.OwnerHoldsAChallenge)
+                    {
+                        EntraDeviceCodeAuth.Claim(
+                            new EntraDeviceCodeChallenge("HELD-0000", "https://example.invalid/devicelogin"),
+                            mineTarget,
+                            out var heldUnowned);
+                        Assert.False(heldUnowned, route.Name);
+                        Assert.NotNull(owner!.Challenge);
+                    }
+                }
+
+                var challenge = new EntraDeviceCodeChallenge("CODE-1234", "https://example.invalid/devicelogin");
+                var shown = EntraDeviceCodeAuth.Claim(challenge, route.Acquired, out _);
+
+                /* The invariant. Not "the label is non-null" and not "the label is the owner's" -
+                   the label is the CODE'S, on every route. */
+                Assert.Equal(route.Acquired, shown.Target);
+                Assert.Same(challenge, shown.Challenge);
+
+                owner?.Dispose();
+            }
+            finally
+            {
+                EntraDeviceCodeAuth.ResetForTests();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task TheAcquisitionIdentityReachesWhatTheAcquisitionAwaits()
+    {
+        /* The mechanism the attribution rests on, exercised rather than assumed. The provider
+           records the identity and then AWAITS the driver's acquisition; MSAL awaits the device-code
+           callback inside that acquisition (one await in DeviceCodeRequest.ExecuteAsync,
+           Microsoft.Identity.Client 4.84.2), so the value has to survive the awaits in between.
+           This asserts that property of the runtime through the same shapes - a yield, a thread-pool
+           hop, a timer - rather than through MSAL, which needs a tenant.
+
+           ConfigureAwait(false) is used deliberately in the helper: it governs the synchronization
+           context and not the execution context an async-local lives in, and a reader who believed
+           otherwise would conclude this cannot work. */
+        EntraDeviceCodeAuth.ResetForTests();
+
+        Assert.Null(EntraDeviceCodeAuth.CurrentAcquisitionTarget);
+
+        string? inside;
+        using (EntraDeviceCodeAuth.EnterAcquisition("scoped.example.invalid (db)"))
+        {
+            Assert.Equal("scoped.example.invalid (db)", EntraDeviceCodeAuth.CurrentAcquisitionTarget);
+            inside = await AcquisitionTargetAfterHopsAsync();
+
+            /* The discriminating read. The hops above are the SHAPE the driver uses; this is the
+               one that can tell an async-local apart from a thread-local, because a dedicated
+               thread has never held either. The thread id is asserted to differ as well, or a
+               scheduler that inlined the delegate would make the check vacuous. */
+            var (elsewhere, elsewhereThread) = await AcquisitionTargetOnItsOwnThreadAsync();
+
+            Assert.NotEqual(Environment.CurrentManagedThreadId, elsewhereThread);
+            Assert.Equal("scoped.example.invalid (db)", elsewhere);
+        }
+
+        Assert.Equal("scoped.example.invalid (db)", inside);
+
+        /* And it does not outlive its acquisition. A value left behind would attribute the NEXT
+           connection's code to the previous connection - the same defect, one cycle later - so the
+           closing half is asserted through the same hops as the opening one. */
+        Assert.Null(EntraDeviceCodeAuth.CurrentAcquisitionTarget);
+        Assert.Null(await AcquisitionTargetAfterHopsAsync());
+        Assert.Null((await AcquisitionTargetOnItsOwnThreadAsync()).Value);
+
+        /* Nested scopes restore rather than clear, so an inner acquisition cannot leave its parent
+           looking like no acquisition at all. */
+        using (EntraDeviceCodeAuth.EnterAcquisition("outer.example.invalid"))
+        {
+            using (EntraDeviceCodeAuth.EnterAcquisition("inner.example.invalid"))
+            {
+                Assert.Equal("inner.example.invalid", EntraDeviceCodeAuth.CurrentAcquisitionTarget);
+            }
+
+            Assert.Equal("outer.example.invalid", EntraDeviceCodeAuth.CurrentAcquisitionTarget);
+        }
+
+        Assert.Null(EntraDeviceCodeAuth.CurrentAcquisitionTarget);
+    }
+
+    [Fact]
+    public void Register_InstallsLitesOwnProviderAndTheDriverAcceptsIt()
+    {
+        /* Verified by STATE, not by the call. SqlAuthenticationProviderManager.SetProvider asks
+           IsSupported and REFUSES a provider that says no (Microsoft.Data.SqlClient 7.0.2 and
+           7.0.3), leaving the driver's own callback installed - which writes the code to a console
+           a WPF process does not have. So "Register called SetProvider" is not evidence the driver
+           took it, and the whole feature can be dead with nothing on screen. */
+        EntraDeviceCodeAuth.ResetForTests();
+        try
+        {
+            Assert.True(EntraDeviceCodeAuth.Register(_ => { }));
+
+            var installed = SqlAuthenticationProvider.GetProvider(
+                SqlAuthenticationMethod.ActiveDirectoryDeviceCodeFlow);
+
+            Assert.NotNull(installed);
+            Assert.IsType<EntraDeviceCodeProvider>(installed);
+
+            Assert.True(
+                installed!.IsSupported(SqlAuthenticationMethod.ActiveDirectoryDeviceCodeFlow),
+                "the provider must support the method it is installed against or the driver refuses it");
+
+            /* Negative control: IsSupported must ANSWER rather than agree. A forwarding override
+               replaced by `=> true` passes the assertion above and would claim methods the inner
+               provider cannot serve. */
+            Assert.False(installed.IsSupported(SqlAuthenticationMethod.NotSpecified));
+            Assert.False(installed.IsSupported(SqlAuthenticationMethod.SqlPassword));
+
+            /* And the methods the inner provider does serve are still served, so the forwarding is
+               not a device-code special case. */
+            Assert.True(installed.IsSupported(SqlAuthenticationMethod.ActiveDirectoryInteractive));
+        }
+        finally
+        {
+            EntraDeviceCodeAuth.ResetForTests();
+        }
+    }
+
+    [Fact]
+    public void TheProviderRecordsTheAcquisitionBeforeRunningIt()
+    {
+        /* The wiring, in source, because reaching it behaviourally needs a tenant: an acquisition
+           that gets as far as MSAL needs an authority to talk to. Three things have to hold
+           together, and each is its own silent failure - an identity read off the wrong source
+           labels every prompt with the same string, a scope disposed before the inner task is
+           awaited labels every prompt with nothing, and an IsSupported that answers from a literal
+           gets the whole provider refused. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            ParitySource.ReadFile("Lite/Services/EntraDeviceCodeAuth.cs"));
+
+        var at = code.IndexOf("class EntraDeviceCodeProvider", StringComparison.Ordinal);
+        Assert.True(at >= 0, "the provider that records each acquisition must exist");
+
+        var provider = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', at));
+
+        var acquire = provider.IndexOf(
+            "override async Task<SqlAuthenticationToken>", StringComparison.Ordinal);
+        Assert.True(acquire >= 0, "the provider must override the acquisition it wraps");
+
+        var body = CSharpSourceWalker.BraceBalanced(provider, provider.IndexOf('{', acquire));
+
+        /* Off the driver's own parameters for THIS acquisition, which is the only per-connection
+           fact anywhere in the call path. */
+        Assert.Contains(
+            "DescribeTarget" + "(parameters.ServerName, parameters.DatabaseName)",
+            body,
+            StringComparison.Ordinal);
+
+        var enter = body.IndexOf("EnterAcquisition" + "(", StringComparison.Ordinal);
+        Assert.True(enter >= 0, "the acquisition's identity must be recorded for the callback to read");
+
+        /* AWAITED inside the scope rather than returned from it. The callback fires partway through
+           the inner task, so `return _inner.AcquireTokenAsync(parameters);` would dispose the scope
+           first and leave every prompt unnamed - a change that compiles, passes a source pin
+           looking only for the two calls, and silently degrades the feature to the old behaviour. */
+        var delegated = body.IndexOf("await _inner." + "AcquireTokenAsync(", StringComparison.Ordinal);
+        Assert.True(delegated >= 0, "the wrapped acquisition must be awaited inside the scope");
+        Assert.True(enter < delegated, "the acquisition must be recorded before it is run");
+
+        var supported = provider.IndexOf("IsSupported(SqlAuthenticationMethod", StringComparison.Ordinal);
+        Assert.True(supported >= 0, "the provider must answer IsSupported or the driver refuses it");
+        Assert.Contains(
+            "_inner.IsSupported" + "(",
+            provider[supported..Math.Min(provider.Length, supported + 200)],
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheCallbackAttributesThroughClaimRatherThanTakingTheSlotItself()
+    {
+        /* OnDeviceCodeIssued is private and its parameter type has no public constructor, so the
+           callback cannot be driven from a test - the behaviour above is pinned on Claim, and this
+           pins that the callback is wired to it. Two halves: the callback must read the acquisition
+           identity, and it must not publish onto anything itself. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            ParitySource.ReadFile("Lite/Services/EntraDeviceCodeAuth.cs"));
+
+        var at = code.IndexOf(
+            "OnDeviceCodeIssued(Microsoft.Identity.Client.DeviceCodeResult", StringComparison.Ordinal);
+        Assert.True(at >= 0, "the driver callback must exist");
+
+        var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', at));
+
+        Assert.Contains("CurrentAcquisition" + "Target", body, StringComparison.Ordinal);
+        Assert.Contains("Claim" + "(challenge, acquired, out var unowned)", body, StringComparison.Ordinal);
+
+        /* And the decision is NOT taken here. A callback that published for itself could publish
+           onto the slot holder without asking whose the code is, which is the whole defect. */
+        Assert.DoesNotContain("TryPublish", body, StringComparison.Ordinal);
+
+        var claim = code.IndexOf("EntraDeviceCodeAttempt Claim(", StringComparison.Ordinal);
+        Assert.True(claim >= 0, "the attribution decision must live in Claim");
+
+        var claimBody = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', claim));
+
+        var vouch = claimBody.IndexOf("var vouched", StringComparison.Ordinal);
+        Assert.True(vouch >= 0, "Claim must decide whether the acquisition names the slot holder");
+
+        var publish = claimBody.IndexOf("TryPublish", StringComparison.Ordinal);
+        Assert.True(publish >= 0, "Claim must still refuse a slot that already holds a challenge");
+
+        /* The ORDER is the fix. Asking TryPublish first and the identity second - or asking the
+           identity and ignoring the answer - is #3408's decision with extra code. */
+        Assert.True(vouch < publish, "the acquisition must be checked before the slot is");
+        Assert.Contains(
+            "acquiredTarget",
+            claimBody[vouch..Math.Min(claimBody.Length, vouch + 260)],
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("srv.example.invalid", "mydb", "srv.example.invalid (mydb)")]
+    [InlineData("srv.example.invalid", "", "srv.example.invalid")]
+    [InlineData("tcp:srv.example.invalid,1433", "mydb", "tcp:srv.example.invalid,1433 (mydb)")]
+    [InlineData("srv.example.invalid\\SQL2022", "", "srv.example.invalid\\SQL2022")]
+    [InlineData("", "mydb", null)]
+    public void BothSourcesOfATargetNameDescribeItIdentically(
+        string server, string database, string? expected)
+    {
+        /* Begin describes the builder a caller is about to open; the provider describes the
+           SqlAuthenticationParameters the driver hands it; and a challenge takes a waiting
+           attempt's slot only when those two strings AGREE. Two spellings of the same server would
+           make that comparison fail on correct code - costing every prompt its Cancel - so there is
+           one formatter and this asserts the builder path routes through it rather than carrying a
+           second copy.
+
+           The shapes are the ones that would expose a divergence if one existed: a port suffix, a
+           named instance, a backslash. */
+        Assert.Equal(expected, EntraDeviceCodeAuth.DescribeTarget(server, database));
+
+        var builder = new SqlConnectionStringBuilder();
+        if (server.Length > 0)
+        {
+            builder.DataSource = server;
+        }
+
+        if (database.Length > 0)
+        {
+            builder.InitialCatalog = database;
+        }
+
+        Assert.Equal(expected, EntraDeviceCodeAuth.DescribeTarget(builder));
+
+        /* The round trip the comparison actually depends on, measured rather than reasoned about:
+           Begin reads the builder, the DRIVER re-parses the connection string text, and SqlClient
+           hands the provider what it parsed - ConnectionOptions.DataSource and
+           ConnectionOptions.InitialCatalog, which are those keywords with nothing but a length
+           check applied (Microsoft.Data.SqlClient 7.0.2 and 7.0.3). A driver that began normalising
+           them would fail here rather than in the field. */
+        Assert.Equal(
+            expected,
+            EntraDeviceCodeAuth.DescribeTarget(new SqlConnectionStringBuilder(builder.ConnectionString)));
+    }
+
+    [Fact]
+    public void TargetIsOnlyEverAssignedFromAnAcquisition()
+    {
+        /* The invariant the label rests on: every value Target holds is acquisition-derived, either
+           read off the acquisition directly or verified to agree with it. There are exactly two
+           assignments in the service and none anywhere else in Lite; a third is how a slot-derived
+           label comes back, and it would be invisible in behaviour until the racing ordering
+           happened to a user. */
+        var service = CSharpSourceWalker.StripCommentsAndStrings(
+            ParitySource.ReadFile("Lite/Services/EntraDeviceCodeAuth.cs"));
+
+        var assignment = new Regex(@"\bTarget\s*=(?!=)", RegexOptions.Compiled);
+
+        Assert.Equal(2, assignment.Matches(service).Count);
+
+        /* Both of them inside the two methods entitled to set one, so two assignments in the wrong
+           places cannot satisfy the count. */
+        var begin = service.IndexOf("Begin(SqlConnectionStringBuilder", StringComparison.Ordinal);
+        Assert.True(begin >= 0, "Begin must exist to record a caller's own target");
+        Assert.True(
+            assignment.IsMatch(CSharpSourceWalker.BraceBalanced(service, service.IndexOf('{', begin))),
+            "Begin must record the target of the builder its caller is about to open");
+
+        var claim = service.IndexOf("EntraDeviceCodeAttempt Claim(", StringComparison.Ordinal);
+        Assert.True(claim >= 0, "Claim must exist to name an attempt it creates");
+        Assert.True(
+            assignment.IsMatch(CSharpSourceWalker.BraceBalanced(service, service.IndexOf('{', claim))),
+            "Claim must name the attempt it creates from the acquisition");
+
+        /* And nowhere else under Lite, because the setter is internal rather than private. */
+        foreach (var file in Directory.GetFiles(
+                     Path.Combine(ParitySource.RepoRoot(), "Lite"), "*.cs", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(ParitySource.RepoRoot(), file).Replace('\\', '/');
+            if (relative.Contains("/obj/", StringComparison.Ordinal) ||
+                relative.Contains("/bin/", StringComparison.Ordinal) ||
+                relative.Equals("Lite/Services/EntraDeviceCodeAuth.cs", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var other = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(file));
+            if (!other.Contains("EntraDeviceCodeAttempt", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            Assert.False(
+                assignment.IsMatch(other),
+                $"{relative} touches an attempt and assigns a Target; only the service may");
+        }
+    }
+
+    [Fact]
+    public void NoDocStillExplainsTheMisattributionByCallingItUnfixable()
+    {
+        /* #3408's review caught prose that had gone stale inside the change that made it stale, and
+           this is the same hazard one level on. Both the service and the README explained
+           misattribution by saying no correlation exists anywhere. One does - the driver hands every
+           authentication provider the server, database and connection id of the acquisition it is
+           running - so an unqualified "cannot be told apart" is now false, and false in a
+           user-facing doc.
+
+           Each absence is paired with the statement that replaced it, because deleting a paragraph
+           satisfies a bare DoesNotContain. */
+        var readme = ParitySource.ReadFile("README.md");
+
+        Assert.DoesNotContain(
+            "The driver's callback carries no connection id, so two at once cannot be told apart",
+            readme,
+            StringComparison.Ordinal);
+
+        Assert.Contains(
+            "Every code window names the server its code is for", readme, StringComparison.Ordinal);
+        Assert.Contains(
+            "Two sign-ins to the same server describe identically", readme, StringComparison.Ordinal);
+
+        var service = ParitySource.ReadFile("Lite/Services/EntraDeviceCodeAuth.cs");
+
+        Assert.DoesNotContain("no key to route on even in principle", service, StringComparison.Ordinal);
+        Assert.DoesNotContain("The constraint is unfixable", service, StringComparison.Ordinal);
+
+        /* And it names where the provenance does live, so a reader is not left with the old
+           conclusion and no replacement. */
+        Assert.Contains("the provenance the callback lacks is one", service, StringComparison.Ordinal);
     }
 
     // ---- The challenge must not carry the secret half ------------------------------------

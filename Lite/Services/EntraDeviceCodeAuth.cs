@@ -69,13 +69,20 @@ public sealed class EntraDeviceCodeAttempt : IDisposable
     public EntraDeviceCodeChallenge? Challenge => Volatile.Read(ref _challenge);
 
     /// <summary>
-    /// The server this attempt is signing in to, for the prompt to name, or <c>null</c> when the
-    /// connection was not opened through <see cref="EntraDeviceCodeAuth.Begin"/> and there is
-    /// therefore nothing to name it with.
+    /// The server this attempt is signing in to, for the prompt to name, or <c>null</c> when
+    /// nothing names it.
     ///
     /// <para>It exists because two prompts can legitimately be on screen at once — a sign-in a user
-    /// started and an unattributable one from a background read — and two anonymous windows holding
-    /// different codes is a trap. See <see cref="TryPublish"/>.</para>
+    /// started and one from a background read — and two anonymous windows holding different codes
+    /// is a trap.</para>
+    ///
+    /// <para><b>Every value this holds comes from a token acquisition, directly or by agreement
+    /// with one.</b> On an attempt <see cref="EntraDeviceCodeAuth.Begin"/> created it is read off
+    /// that caller's own builder, and a challenge reaches such an attempt only when the acquisition
+    /// that produced the challenge names the same target — see <c>Claim</c>. On an attempt the
+    /// driver's callback created for itself it is that acquisition's own server and database. So
+    /// this never names a server other than the one the code beside it is signing in to, which is
+    /// the one failure a labelled prompt has that an anonymous one does not.</para>
     /// </summary>
     public string? Target { get; internal set; }
 
@@ -83,12 +90,14 @@ public sealed class EntraDeviceCodeAttempt : IDisposable
     /// Publishes the tenant's challenge onto this attempt, once. Returns false if a challenge is
     /// already published, in which case the caller must NOT assume the new one belongs here.
     ///
-    /// <para><b>This is the only discriminator available, and it is exact.</b> The driver's callback
-    /// carries no connection id, so "which attempt is this code for" cannot be answered directly —
-    /// but the driver invokes the callback exactly once per acquisition, so a second challenge
-    /// arriving while one is already published cannot belong to the attempt that published it. That
-    /// turns an unanswerable question into an answerable one: not "whose code is this" but "can this
-    /// be the code of the attempt holding the slot", which a published challenge settles as no.</para>
+    /// <para><b>The second of the two tests a challenge passes to take this attempt's slot, and
+    /// the weaker one.</b> It answers "can this be the code of the attempt holding the slot": the
+    /// driver invokes its callback exactly once per acquisition, so a challenge arriving while one
+    /// is already published cannot belong to the attempt that published it. What it cannot answer
+    /// is whether an arriving challenge came from THIS attempt's connection, because an empty slot
+    /// looks identical whether the code reaching it is the owner's own or an unrelated
+    /// connection's. That question is settled first, by <c>Claim</c>, off the identity of the
+    /// acquisition that produced the challenge.</para>
     ///
     /// <para>Atomic, because two connections' callbacks can arrive on different threads at the same
     /// instant and a read-then-write pair would let both conclude they were first.</para>
@@ -142,6 +151,77 @@ public sealed class EntraDeviceCodeAttempt : IDisposable
 }
 
 /// <summary>
+/// The device-code provider Lite installs with the driver: the driver's own
+/// <see cref="ActiveDirectoryAuthenticationProvider"/>, with the identity of each token acquisition
+/// recorded around it so the callback that acquisition triggers knows which connection it is for.
+///
+/// <para><b>This exists because the callback cannot be told, but the frame above it can.</b>
+/// <c>Microsoft.Identity.Client.DeviceCodeResult</c> carries a user code, a device code, a URL, an
+/// expiry, a client id and a scope list and nothing that names a SQL connection, and SqlClient
+/// invokes the callback with that result alone (<c>Extensions.Azure</c> 7.0.2 and 7.0.3,
+/// <c>AcquireTokenInteractiveDeviceFlowAsync</c>). A <see cref="SqlAuthenticationProvider"/>, by
+/// contrast, is handed <see cref="SqlAuthenticationParameters"/> on every acquisition, which names
+/// the server, the database and the connection id. So the provenance the callback lacks is one
+/// frame up, and this class is that frame.</para>
+///
+/// <para><b>Carried on an async-local, which is what makes it reach the callback.</b> MSAL awaits
+/// the device-code callback directly inside the request the provider started — one <c>await</c> in
+/// <c>DeviceCodeRequest.ExecuteAsync</c> (<c>Microsoft.Identity.Client</c> 4.84.2) — and neither
+/// that assembly nor <c>Extensions.Azure</c> suppresses execution-context flow, so a value written
+/// here is in scope when the callback runs. <c>ConfigureAwait(false)</c> along that chain does not
+/// change it: it governs the synchronization context, not the execution context an async-local
+/// lives in.</para>
+///
+/// <para><b>A wrapper rather than a subclass because the driver's provider is sealed</b>, and a
+/// wrapper anyway: this delegates every member, adding nothing to the acquisition but a record of
+/// whose it is. Installing a provider the driver refuses would leave the mode silently dead, so
+/// <see cref="IsSupported"/> answers from the inner provider rather than from a literal —
+/// <c>SqlAuthenticationProviderManager.SetProvider</c> asks it and rejects a provider that says no
+/// (<c>Microsoft.Data.SqlClient</c> 7.0.2 and 7.0.3).</para>
+/// </summary>
+internal sealed class EntraDeviceCodeProvider : SqlAuthenticationProvider
+{
+    private readonly ActiveDirectoryAuthenticationProvider _inner;
+
+    /// <summary>Wraps the driver's provider, which must already carry the device-code callback.</summary>
+    internal EntraDeviceCodeProvider(ActiveDirectoryAuthenticationProvider inner)
+    {
+        ArgumentNullException.ThrowIfNull(inner);
+        _inner = inner;
+    }
+
+    /// <summary>The inner provider's answer, never a literal — see the remarks on this type.</summary>
+    public override bool IsSupported(SqlAuthenticationMethod authenticationMethod) =>
+        _inner.IsSupported(authenticationMethod);
+
+    /// <inheritdoc/>
+    public override void BeforeLoad(SqlAuthenticationMethod authenticationMethod) =>
+        _inner.BeforeLoad(authenticationMethod);
+
+    /// <inheritdoc/>
+    public override void BeforeUnload(SqlAuthenticationMethod authenticationMethod) =>
+        _inner.BeforeUnload(authenticationMethod);
+
+    /// <summary>
+    /// Records who this acquisition is for, then runs it.
+    ///
+    /// <para>Awaited inside the scope rather than returning the inner task, because the scope has
+    /// to still be open when the callback fires — and the callback fires partway through the task,
+    /// not before it is returned.</para>
+    /// </summary>
+    public override async Task<SqlAuthenticationToken> AcquireTokenAsync(
+        SqlAuthenticationParameters parameters)
+    {
+        ArgumentNullException.ThrowIfNull(parameters);
+
+        using var acquisition = EntraDeviceCodeAuth.EnterAcquisition(
+            EntraDeviceCodeAuth.DescribeTarget(parameters.ServerName, parameters.DatabaseName));
+
+        return await _inner.AcquireTokenAsync(parameters).ConfigureAwait(false);
+    }
+}
+
+/// <summary>
 /// Makes <c>Authentication=ActiveDirectoryDeviceCodeFlow</c> usable from a GUI by giving the driver
 /// somewhere to put the code.
 ///
@@ -179,11 +259,11 @@ public static class EntraDeviceCodeAuth
     private static bool _registered;
     private static Action<EntraDeviceCodeAttempt>? _present;
 
-    /* The attempt the driver's callback will publish into. A single slot, because the callback
-       cannot be correlated to a connection: MSAL hands the callback a DeviceCodeResult and nothing
-       else, and SqlClient's wrapper drops the SqlAuthenticationParameters (including its
-       ConnectionId) before invoking it (Extensions.Azure 7.0.2, :689). So there is no key to route
-       on even in principle, and a per-connection map would be a map with no lookup.
+    /* The attempt a waiting caller's challenge publishes into, and whose token that caller's
+       prompt cancels. ONE slot, because what it holds is a rendezvous with a caller that is
+       awaiting an OpenAsync, and widening it to a map keyed on the acquisition identity
+       EntraDeviceCodeProvider records would still collide on the one pair a single slot already
+       refuses: two sign-ins to the same server produce the same identity.
 
        The slot is CLAIMED, not overwritten, and that is a correctness requirement rather than
        tidiness. Three sites call Begin - the Add/Edit dialog's connection test, ServerManager's
@@ -223,11 +303,27 @@ public static class EntraDeviceCodeAuth
 
             _present = present;
 
-            var provider = new ActiveDirectoryAuthenticationProvider();
-            provider.SetDeviceCodeFlowCallback(OnDeviceCodeIssued);
+            var driverProvider = new ActiveDirectoryAuthenticationProvider();
+            driverProvider.SetDeviceCodeFlowCallback(OnDeviceCodeIssued);
 
-            SqlAuthenticationProvider.SetProvider(
-                SqlAuthenticationMethod.ActiveDirectoryDeviceCodeFlow, provider);
+            /* Wrapped, so every acquisition the driver runs for this method records whose it is
+               before the callback it triggers asks - see EntraDeviceCodeProvider. */
+            var provider = new EntraDeviceCodeProvider(driverProvider);
+
+            /* Checked, not called and forgotten. SetProvider REFUSES a provider whose IsSupported
+               says no for the method (SqlAuthenticationProviderManager.SetProvider,
+               Microsoft.Data.SqlClient 7.0.2 and 7.0.3), and a refusal leaves the driver's own
+               callback installed - which writes the code to a console a WPF process does not have.
+               That is the whole feature dead with nothing on screen and nothing in the log. */
+            if (!SqlAuthenticationProvider.SetProvider(
+                    SqlAuthenticationMethod.ActiveDirectoryDeviceCodeFlow, provider))
+            {
+                AppLogger.Error(
+                    LogSource,
+                    "The driver refused Lite's device-code provider, so no device-code sign-in can "
+                        + "display a code. Servers using Azure device-code authentication will fail "
+                        + "to connect after the driver's three-minute wait.");
+            }
 
             _registered = true;
             return true;
@@ -250,14 +346,14 @@ public static class EntraDeviceCodeAuth
     /// documenting it.</b> A second overlapping call throws
     /// <see cref="InvalidOperationException"/> with <see cref="ConcurrentSignInMessage"/>.</para>
     ///
-    /// <para>The constraint is unfixable, so it has to be enforced. MSAL hands the callback a
-    /// <c>DeviceCodeResult</c> and SqlClient's wrapper drops the
-    /// <c>SqlAuthenticationParameters</c>, including its <c>ConnectionId</c>, before invoking it — so
-    /// nothing reaches this type that could tell two attempts apart, and there is no key a
-    /// per-connection map could use. What a second claim would otherwise do is the worst outcome
-    /// available: publish the EARLIER attempt's code onto the LATER attempt's window, so the user
-    /// reads a code labelled as one server's and completes a sign-in for another's, while the
-    /// connection they were watching fails three minutes later for no visible reason.</para>
+    /// <para>The constraint outlives the provenance <c>EntraDeviceCodeProvider</c> recovers, so it
+    /// is enforced rather than documented. That provenance is the acquisition's own server and
+    /// database, which separates two sign-ins to DIFFERENT servers — but two to the same server
+    /// describe identically, and there is one slot regardless, so a second claim has nowhere to go
+    /// that is certainly its own. What it would otherwise do is the worst outcome available:
+    /// publish the EARLIER attempt's code onto the LATER attempt's window, so the user reads a code
+    /// labelled as one server's and completes a sign-in for another's, while the connection they
+    /// were watching fails three minutes later for no visible reason.</para>
     ///
     /// <para><b>And the overlap is reachable, which is why enforcing it is not belt-and-braces.</b>
     /// Three sites call this — the Add/Edit dialog's connection test,
@@ -296,9 +392,9 @@ public static class EntraDeviceCodeAuth
             AppLogger.Warn(
                 LogSource,
                 "A device-code sign-in was requested while one was already in flight, and was "
-                    + "refused. Two at once cannot be told apart: the driver's callback carries no "
-                    + "connection id, so the first sign-in's code would be shown on the second "
-                    + "one's window.");
+                    + "refused. There is one slot for a sign-in a caller is waiting on, and two "
+                    + "sign-ins to the same server describe identically, so the first one's code "
+                    + "could be shown on the second one's window.");
 
             throw new InvalidOperationException(ConcurrentSignInMessage);
         }
@@ -314,7 +410,7 @@ public static class EntraDeviceCodeAuth
     public const string ConcurrentSignInMessage =
         "A device code sign-in is already in progress. Finish it in your browser, or close the code "
             + "window to cancel it, and then try again. Only one device code sign-in can run at a "
-            + "time because the SQL driver gives no way to tell two of them apart.";
+            + "time because two sign-ins to the same server cannot be told apart.";
 
     /// <summary>
     /// Whether an attempt currently owns the slot the driver's callback publishes into.
@@ -325,6 +421,112 @@ public static class EntraDeviceCodeAuth
     /// </summary>
     internal static bool SignInInFlight => Volatile.Read(ref s_current) is not null;
 
+    /* The identity of the token acquisition running on this async flow, or null outside one. Set
+       by EntraDeviceCodeProvider, read by the driver's callback; async-local because that is the
+       only thing the two share - the callback is handed a DeviceCodeResult and nothing else, and
+       it runs inside the acquisition the provider started. */
+    private static readonly AsyncLocal<string?> s_acquisitionTarget = new();
+
+    /// <summary>
+    /// What the acquisition on this async flow is signing in to, or <c>null</c> outside one — which
+    /// is every caller that is not the driver asking for a token, and also the state a broken
+    /// execution-context flow would leave. Both are handled the same way, and it is the safe way:
+    /// an unidentified challenge is presented unnamed rather than borrowing a name. See <c>Claim</c>.
+    /// </summary>
+    internal static string? CurrentAcquisitionTarget => s_acquisitionTarget.Value;
+
+    /// <summary>
+    /// Marks this async flow as running a token acquisition for <paramref name="target"/> until the
+    /// returned scope is disposed.
+    /// </summary>
+    internal static AcquisitionScope EnterAcquisition(string? target) => new(target);
+
+    /// <summary>
+    /// The lifetime of one acquisition's identity. Restores the previous value rather than clearing
+    /// it, so a nested acquisition cannot end by declaring its parent's flow to be outside one.
+    /// </summary>
+    internal readonly struct AcquisitionScope : IDisposable
+    {
+        private readonly string? _previous;
+
+        internal AcquisitionScope(string? target)
+        {
+            _previous = s_acquisitionTarget.Value;
+            s_acquisitionTarget.Value = target;
+        }
+
+        /// <inheritdoc/>
+        public void Dispose() => s_acquisitionTarget.Value = _previous;
+    }
+
+    /// <summary>
+    /// Decides which attempt a challenge belongs to, and returns the attempt whose window will show
+    /// it. <paramref name="unowned"/> is true when the challenge did not take a waiting caller's
+    /// slot, in which case the returned attempt is a fresh one with a bounded lifetime and nothing
+    /// awaiting its token.
+    ///
+    /// <para><b>Two tests, in this order, and the first is the one that matters.</b> A challenge may
+    /// take the waiting attempt's slot only when the acquisition that produced it names that
+    /// attempt's own target, and only then when the slot is still empty. The second test alone —
+    /// "is the slot empty" — is not attribution: it is true of an attempt whose own code has just
+    /// arrived AND of an attempt still waiting while some other connection's code arrives first,
+    /// and those two orderings are the difference between a correct prompt and a prompt that names
+    /// a user's server beside a different connection's code.</para>
+    ///
+    /// <para><b>Every failure of the first test costs a prompt its early return, never its
+    /// label.</b> An unvouched challenge is shown on its own attempt, named from its own
+    /// acquisition; what is lost is that the prompt's Cancel no longer completes a waiting
+    /// <c>OpenAsync</c>, so a caller who gives up waits out the driver's three minutes instead of
+    /// getting its thread back. That is the direction this has to fail in: a vague or slow prompt is
+    /// recoverable and a confidently mislabelled one is not.</para>
+    ///
+    /// <para><b>What the identity does NOT separate, stated because the guarantee is narrower than
+    /// it reads.</b> Two acquisitions for the SAME server describe identically, so an unwrapped
+    /// read of the server a user is signing in to can still take that sign-in's slot. Both prompts
+    /// then name that server and both codes are that server's, so nobody is pointed at another
+    /// server — what can happen is that the Cancel belonging to the user's own attempt sits on the
+    /// other prompt. Separating those two would need the connection id, which the driver does give
+    /// a provider but which <see cref="Begin"/> cannot know: it runs before the connection
+    /// exists.</para>
+    /// </summary>
+    internal static EntraDeviceCodeAttempt Claim(
+        EntraDeviceCodeChallenge challenge, string? acquiredTarget, out bool unowned)
+    {
+        ArgumentNullException.ThrowIfNull(challenge);
+
+        var owner = Volatile.Read(ref s_current);
+
+        var vouched =
+            owner is not null
+            && acquiredTarget is not null
+            && string.Equals(owner.Target, acquiredTarget, StringComparison.OrdinalIgnoreCase);
+
+        if (vouched && owner!.TryPublish(challenge))
+        {
+            unowned = false;
+            return owner;
+        }
+
+        unowned = true;
+
+        /* Named from the acquisition rather than left anonymous: this is the only name anything has
+           for this code, and it is the right one. */
+        var orphan = new EntraDeviceCodeAttempt { Target = acquiredTarget };
+        orphan.TryPublish(challenge);
+
+        /* Bounded, so the window cannot outlive the sign-in it describes: nothing else will dispose
+           an attempt nobody owns, and a prompt left on screen after the driver gave up is a code
+           that no longer works. */
+        var expiring = orphan;
+        _ = Task.Delay(UnownedPromptLifetime).ContinueWith(
+            _ => expiring.Dispose(),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+        return orphan;
+    }
+
     /// <summary>Gives up the slot, but only if <paramref name="attempt"/> still holds it.</summary>
     internal static void Release(EntraDeviceCodeAttempt attempt) =>
         Interlocked.CompareExchange(ref s_current, null, attempt);
@@ -334,15 +536,34 @@ public static class EntraDeviceCodeAuth
     /// one is named. Never credentials — the builder holds them for other modes and this reads two
     /// non-secret keywords by name rather than rendering the string.
     /// </summary>
-    internal static string? DescribeTarget(SqlConnectionStringBuilder builder)
+    internal static string? DescribeTarget(SqlConnectionStringBuilder builder) =>
+        DescribeTarget(builder.DataSource, builder.InitialCatalog);
+
+    /// <summary>
+    /// The same name, built from the two values the driver hands an authentication provider rather
+    /// than from a builder.
+    ///
+    /// <para><b>One implementation, because the two callers' results are COMPARED.</b>
+    /// <see cref="Begin"/> describes the builder a caller is about to open,
+    /// <c>EntraDeviceCodeProvider</c> describes the acquisition the driver is running, and a
+    /// challenge takes a waiting attempt's slot only when those two strings agree. Two spellings of
+    /// the same server would make that comparison fail on correct code.</para>
+    ///
+    /// <para>The comparison holds because the driver passes both values through: SqlClient builds
+    /// its <see cref="SqlAuthenticationParameters"/> from <c>ConnectionOptions.DataSource</c> and
+    /// <c>ConnectionOptions.InitialCatalog</c>, which are the connection string's own
+    /// <c>Data Source</c> and <c>Initial Catalog</c> with nothing but a length check applied
+    /// (<c>Microsoft.Data.SqlClient</c> 7.0.2 and 7.0.3). A driver that started normalising them, or a
+    /// failover that re-resolved the data source mid-login, would make the two disagree — which
+    /// costs a prompt its early return and not its label, as <c>Claim</c> describes.</para>
+    /// </summary>
+    internal static string? DescribeTarget(string? server, string? database)
     {
-        var server = builder.DataSource;
         if (string.IsNullOrWhiteSpace(server))
         {
             return null;
         }
 
-        var database = builder.InitialCatalog;
         return string.IsNullOrWhiteSpace(database) ? server : $"{server} ({database})";
     }
 
@@ -359,12 +580,13 @@ public static class EntraDeviceCodeAuth
             _registered = false;
             _present = null;
             Interlocked.Exchange(ref s_current, null);
+            s_acquisitionTarget.Value = null;
         }
     }
 
     /// <summary>
-    /// The driver's callback. Publishes the challenge onto the current attempt and hands it to the
-    /// presenter.
+    /// The driver's callback. Attributes the challenge, then hands the attempt that will show it to
+    /// the presenter.
     ///
     /// <para><b>Returns a completed task rather than the presenter's own work.</b> The driver awaits
     /// this before it begins polling, so anything awaited here is time subtracted from the user's
@@ -384,51 +606,21 @@ public static class EntraDeviceCodeAuth
             result.UserCode ?? string.Empty,
             result.VerificationUrl ?? string.Empty);
 
-        var owner = Volatile.Read(ref s_current);
+        /* Whose acquisition this is, recorded by EntraDeviceCodeProvider one frame above this
+           callback. It is the only provenance this process has, and Claim is where it decides
+           something: "the slot is empty" is not attribution, because it is equally true of an
+           attempt whose own code has just arrived and of an attempt still waiting while some other
+           connection's code arrives first.
 
-        /* Occupied is NOT the same as "this challenge belongs to the occupant", and conflating the
-           two was a real misattribution bug. Four sites in Lite open a server connection without
-           going through Begin (a plan fetch, an MCP read, a Query Store backfill, the
-           excluded-databases picker), so a device-code callback can arrive while an unrelated,
-           Begin-owned sign-in holds the slot. Reusing the occupant then overwrote ITS code with the
-           unrelated server's and re-invoked the presenter - a second window on the same attempt,
-           showing a code for a server the user was not looking at, with no exception anywhere
-           because the unwrapped caller never called Begin.
-
-           TryPublish is the discriminator: the driver invokes its callback once per acquisition, so
-           a challenge arriving at an attempt that already has one cannot be that attempt's. It takes
-           a fresh unowned attempt instead, with its own window and its own bounded lifetime. */
-        var attempt = owner;
-        var unowned = attempt is null || !attempt.TryPublish(challenge);
-
-        if (unowned)
-        {
-            /* A device-code connection opened somewhere that does not wrap it in Begin. The code is
-               still shown, because a code nobody can read is a guaranteed failure and this is the
-               fallback that removes that outcome from every present and future call site at once -
-               Lite resolves a server connection string at a dozen places and only the three a user
-               drives are wrapped.
-
-               What is lost is only the EARLY RETURN, and only where nobody is waiting for one. This
-               attempt's token is awaited by nothing, so its Cancel closes the window and leaves the
-               background open to finish on the driver's deadline. That costs nothing a caller can
-               observe: cancelling a wrapped attempt does not stop the driver's polling either (see
-               EntraDeviceCodeAttempt.Token), it only hands a waiting UI thread back to the user, and
-               there is no waiting UI thread here.
-
-               Its lifetime is bounded so the window cannot outlive the sign-in it describes: nothing
-               else will dispose an attempt nobody owns, and a prompt left on screen after the driver
-               gave up is a code that no longer works. */
-            attempt = new EntraDeviceCodeAttempt();
-            attempt.TryPublish(challenge);
-
-            var orphan = attempt;
-            _ = Task.Delay(UnownedPromptLifetime).ContinueWith(
-                _ => orphan.Dispose(),
-                CancellationToken.None,
-                TaskContinuationOptions.ExecuteSynchronously,
-                TaskScheduler.Default);
-        }
+           Unowned is the normal outcome for the connections Lite opens without wrapping them in
+           Begin - a plan fetch, an MCP read, a Query Store backfill, the excluded-databases picker
+           - and their codes are still shown, named from their own acquisitions. A code nobody can
+           read is a guaranteed failure, and showing it removes that outcome from every present and
+           future call site at once rather than one wrapped site at a time. What an unowned prompt
+           does not have is the early return: cancelling it closes the window without completing a
+           waiting OpenAsync, and there is no waiting OpenAsync behind an unwrapped read. */
+        var acquired = CurrentAcquisitionTarget;
+        var attempt = Claim(challenge, acquired, out var unowned);
 
         /* The user code is short, single-use, and useless without the device code the app never
            holds; the URL is public. Logged because "did the tenant issue a code at all" is the first
@@ -439,9 +631,30 @@ public static class EntraDeviceCodeAuth
                 + $"{challenge.UserCode} at {challenge.VerificationUrl}. The driver stops waiting "
                 + "after three minutes."
                 + (unowned
-                    ? " This connection was not opened through EntraDeviceCodeAuth.Begin, so closing "
-                        + "the prompt hides the code without ending the attempt."
+                    ? " This code did not take a waiting sign-in's slot, so closing the prompt hides "
+                        + "the code without ending the attempt."
                     : string.Empty));
+
+        /* The two ways attribution degrades, logged because neither is visible in the prompt: a
+           prompt that is merely unnamed, or merely slow to cancel, looks like a prompt. */
+        if (acquired is null)
+        {
+            AppLogger.Warn(
+                LogSource,
+                "A device code arrived with no acquisition identity, so it was shown unnamed. Every "
+                    + "acquisition that runs through Lite's own provider records one, so this means "
+                    + "either the driver refused that provider at startup or the execution context "
+                    + "no longer reaches the callback.");
+        }
+        else if (unowned && Volatile.Read(ref s_current) is { Challenge: null } waiting)
+        {
+            AppLogger.Warn(
+                LogSource,
+                $"A device code for {acquired} arrived while a sign-in to {waiting.Target} was "
+                    + "still waiting for its own code, so it was shown as its own prompt. A code "
+                    + "takes a waiting sign-in's slot only when the acquisition that produced it "
+                    + "names that sign-in's own server.");
+        }
 
         try
         {
