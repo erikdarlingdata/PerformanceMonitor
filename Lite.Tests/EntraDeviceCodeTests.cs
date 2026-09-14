@@ -908,9 +908,9 @@ public class EntraDeviceCodeTests
            carries its expected reason as a LITERAL rather than anything read back out of the service.
 
            Both directions, on purpose. A classification hard-wired to report a degradation would
-           satisfy the four degraded rows alone, and one hard-wired to None would satisfy the five that
-           are not; requiring the exact value of each is what makes either inversion red. The row that
-           carries the most weight is the pair that differ only in whether the slot holder already has
+           satisfy the five degraded rows alone, and one hard-wired to None would satisfy the four that
+           are not; requiring the exact value of each is what makes either inversion red. The rows that
+           carry the most weight are the two that differ only in whether the slot holder already has
            its own code: waiting is a degradation and holding is not, which is precisely the condition
            the second warning rests on. */
         var mine = DeviceCodeBuilder("mine.example.invalid", "mydb");
@@ -943,7 +943,7 @@ public class EntraDeviceCodeTests
             };
 
         /* Population floor on the table, and on each value it has to produce. A table that lost its
-           unidentified rows, or its one waiting-versus-holding pair, would still walk and would still
+           unidentified rows, or its waiting-versus-holding contrast, would still walk and would still
            pass every row it kept - which is the shape of a pin that asserts nothing. */
         Assert.Equal(9, routes.Length);
         Assert.Equal(
