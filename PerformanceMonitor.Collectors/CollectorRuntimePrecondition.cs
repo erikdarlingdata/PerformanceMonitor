@@ -278,11 +278,12 @@ public static class CollectorRuntimePrecondition
                reader is the only one who can judge the pair. Saying "never run" here would also be false, and
                falsifiable by the run log the same reader can query. */
             return $"The {collectorName} collector is no longer being invoked against {serverName}: its last " +
-                   $"run of any kind was{DescribeObserved(lastRun)}, while the server itself is still " +
-                   $"collecting normally{DescribeObserved(serverLastCollectedUtc)}. That combination means the " +
-                   $"collector's gate is switched off for this server rather than that it has nothing to " +
-                   $"report, so this read cannot tell you the state it describes — it can only tell you it is " +
-                   $"no longer permitted to look. {gateCandidates} " +
+                   $"run of any kind{DescribeObserved(lastRun)} predates the server's own newest " +
+                   $"collection{DescribeObserved(serverLastCollectedUtc)} by more than " +
+                   $"{GoneDarkHours.ToString("0", CultureInfo.InvariantCulture)} hours. That combination " +
+                   $"means the collector's gate is switched off for this server rather than that it has " +
+                   $"nothing to report, so this read cannot tell you the state it describes — it can only " +
+                   $"tell you it is no longer permitted to look. {gateCandidates} " +
                    ConnectScopedEpilogue;
         }
 
