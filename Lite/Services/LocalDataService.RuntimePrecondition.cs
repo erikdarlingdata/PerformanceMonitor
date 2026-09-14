@@ -57,27 +57,33 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// Whether one collector has EVER run for one server, beside when that server last collected anything at
-    /// all. Both halves in one round trip, because the inference needs both and they must describe the same
-    /// instant: a collector with no rows on a server that is collecting normally is gated off by its
-    /// <c>AppliesTo</c>, while a collector with no rows on a server that has collected nothing is just a
-    /// collection outage. Mirrors Darling's <c>CollectorEverRanSql</c> — the SAME inference, because the gate
-    /// being read is the shared one in <c>PerformanceMonitor.Collectors</c> and a divergence here would mean
-    /// the two SKUs disagreed about whether a server was permitted to answer (#2559).
+    /// When one collector last ran for one server, beside when that server last collected anything at all.
+    /// Both halves in one round trip, because the inference needs both and they must describe the same
+    /// instant: a collector that has gone dark while the server keeps collecting is gated off by its
+    /// <c>AppliesTo</c>, while a collector with no recent rows on a server that has collected nothing is just
+    /// a collection outage. Mirrors Darling's <c>CollectorLastRunSql</c> — the SAME inference, because the
+    /// gate being read is the shared one in <c>PerformanceMonitor.Collectors</c> and a divergence here would
+    /// mean the two SKUs disagreed about whether a server was permitted to answer (#2559).
+    ///
+    /// <para>The collector half reads the latest run's <c>collection_time</c> rather than probing for
+    /// PRESENCE: a <c>collection_log</c> row is not proof of a run, which
+    /// <c>CollectorRuntimePrecondition.GatedOffMessage</c> documents in full.</para>
     /// </summary>
-    public async Task<(bool EverRan, DateTime? ServerLastCollectedUtc)> GetCollectorEverRanAsync(
+    public async Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc)> GetCollectorLastRunAsync(
         int serverId, string collectorName)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         command.CommandText = @"
-SELECT EXISTS (
-           SELECT 1
+SELECT (
+           SELECT collection_time
            FROM collection_log
            WHERE server_id = $1
            AND   collector_name = $2
-       ) AS collector_ever_ran,
+           ORDER BY log_id DESC
+           LIMIT 1
+       ) AS collector_last_run,
        (
            SELECT MAX(collection_time)
            FROM collection_log
@@ -90,13 +96,14 @@ SELECT EXISTS (
         using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync())
         {
-            /* Impossible for this shape (both halves are scalar subqueries), but "we cannot tell" keeps the
-               caller on its existing miss rather than asserting a gate that may not be there. */
-            return (true, null);
+            /* Impossible for this shape (both halves are scalar subqueries), but answering "the server has
+               collected nothing" keeps the caller on its existing miss rather than asserting a gate from a
+               read that told us nothing. */
+            return (null, null);
         }
 
         return (
-            !reader.IsDBNull(0) && reader.GetBoolean(0),
+            reader.IsDBNull(0) ? null : DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
             reader.IsDBNull(1) ? null : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc));
     }
 

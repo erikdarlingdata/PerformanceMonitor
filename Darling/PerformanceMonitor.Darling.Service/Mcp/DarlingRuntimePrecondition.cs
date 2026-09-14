@@ -43,22 +43,28 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 internal static class DarlingRuntimePrecondition
 {
     /// <summary>
-    /// Whether one collector has EVER run for one server, beside when that server last collected anything at
-    /// all. Both halves in one round trip, because the inference needs both and they must describe the same
-    /// instant: a collector with no rows on a server that is collecting normally is gated off, while a
-    /// collector with no rows on a server that has collected nothing is just a collection outage.
+    /// When one collector last ran for one server, beside when that server last collected anything at all.
+    /// Both halves in one round trip, because the inference needs both and they must describe the same
+    /// instant: a collector that has gone dark while the server keeps collecting is gated off, while a
+    /// collector with no recent rows on a server that has collected nothing is just a collection outage.
     ///
-    /// <para><c>EXISTS</c> rather than a count or a MAX on the collector side: the question is presence, and
-    /// on a hypertable holding months of rows for dozens of collectors an existence probe stops at the first
-    /// hit while an aggregate reads the partition. $1 server_id, $2 collector.</para>
+    /// <para>The collector half reads the latest run's <c>collection_time</c> rather than probing for
+    /// PRESENCE, because presence is the wrong question — see
+    /// <see cref="CollectorRuntimePrecondition.GatedOffMessage"/> for why a <c>collection_log</c> row is not
+    /// proof of a run. <c>ORDER BY log_id DESC LIMIT 1</c> is the shape
+    /// <see cref="LatestCollectorOutcomeSql"/> already uses on this same path and for the same reason: the id
+    /// is monotonic per insert, and it lets the row be found without an aggregate over the partition.
+    /// $1 server_id, $2 collector.</para>
     /// </summary>
-    public const string CollectorEverRanSql = @"
-SELECT EXISTS (
-           SELECT 1
+    public const string CollectorLastRunSql = @"
+SELECT (
+           SELECT collection_time
            FROM collection_log
            WHERE server_id = $1
            AND   collector_name = $2
-       ) AS collector_ever_ran,
+           ORDER BY log_id DESC
+           LIMIT 1
+       ) AS collector_last_run,
        (
            SELECT MAX(collection_time)
            FROM collection_log
@@ -129,8 +135,8 @@ ORDER BY database_name";
     }
 
     /// <summary>
-    /// The <c>precondition</c> envelope when the collector serving this read has never run against this
-    /// server while the server is collecting normally — i.e. its <c>AppliesTo</c> gate is off — or
+    /// The <c>precondition</c> envelope when the collector serving this read is not being invoked against
+    /// this server while the server is collecting normally — i.e. its <c>AppliesTo</c> gate is off — or
     /// <c>null</c> otherwise.
     ///
     /// <para>Call this AFTER <see cref="StatusAsync"/>, never instead of it: a collector that ran and
@@ -148,13 +154,13 @@ ORDER BY database_name";
         string gateCandidates,
         CancellationToken cancellationToken = default)
     {
-        bool everRan;
+        DateTime? collectorLastRunUtc;
         DateTime? serverLastCollectedUtc;
 
         try
         {
-            (everRan, serverLastCollectedUtc) =
-                await ReadCollectorEverRanAsync(postgres, serverId, collectorName, cancellationToken);
+            (collectorLastRunUtc, serverLastCollectedUtc) =
+                await ReadCollectorLastRunAsync(postgres, serverId, collectorName, cancellationToken);
         }
         catch (Exception)
         {
@@ -164,7 +170,7 @@ ORDER BY database_name";
         }
 
         var message = CollectorRuntimePrecondition.GatedOffMessage(
-            serverName, collectorName, gateCandidates, everRan, serverLastCollectedUtc);
+            serverName, collectorName, gateCandidates, collectorLastRunUtc, serverLastCollectedUtc);
 
         return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message);
     }
@@ -221,13 +227,14 @@ ORDER BY database_name";
             reader.IsDBNull(2) ? null : DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc));
     }
 
-    private static async Task<(bool EverRan, DateTime? ServerLastCollectedUtc)> ReadCollectorEverRanAsync(
-        NpgsqlDataSource postgres,
-        int serverId,
-        string collectorName,
-        CancellationToken cancellationToken)
+    private static async Task<(DateTime? CollectorLastRunUtc, DateTime? ServerLastCollectedUtc)>
+        ReadCollectorLastRunAsync(
+            NpgsqlDataSource postgres,
+            int serverId,
+            string collectorName,
+            CancellationToken cancellationToken)
     {
-        await using var command = postgres.CreateCommand(CollectorEverRanSql);
+        await using var command = postgres.CreateCommand(CollectorLastRunSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddText(command, collectorName);
@@ -235,13 +242,14 @@ ORDER BY database_name";
 
         if (!await reader.ReadAsync(cancellationToken))
         {
-            /* No row is impossible for this shape (both halves are scalar subqueries), but treating it as
-               "we cannot tell" keeps the caller on its existing miss rather than asserting a gate. */
-            return (true, null);
+            /* No row is impossible for this shape (both halves are scalar subqueries), but answering "the
+               server has collected nothing" keeps the caller on its existing miss rather than asserting a
+               gate from a read that told us nothing. */
+            return (null, null);
         }
 
         return (
-            !reader.IsDBNull(0) && reader.GetBoolean(0),
+            reader.IsDBNull(0) ? null : DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
             reader.IsDBNull(1) ? null : DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc));
     }
 

@@ -90,6 +90,20 @@ public static class CollectorRuntimePrecondition
     public const string ExtensionMissingStatus = "EXTENSION_MISSING";
 
     /// <summary>
+    /// How long a collector has to have gone dark — no run of any kind, measured against the server's OWN
+    /// most recent collection — before <see cref="GatedOffMessage"/> will call its gate off.
+    ///
+    /// <para>This is the same cutoff <c>CollectorHealthClassifier.FailingThresholdHours</c> yields for the
+    /// collector this arm serves, and deliberately so: the <c>STOPPED</c> band asks "has this collector gone
+    /// dark for too long", which is this question answered with a band instead of a sentence. Two surfaces
+    /// answering one question at two cutoffs would disagree about every server sitting between them, and the
+    /// reader has no way to tell which one to believe. Held as a constant here rather than read from the band
+    /// vocabulary because this assembly references nothing; a test pins the two equal, so the second copy
+    /// cannot drift silently.</para>
+    /// </summary>
+    public const double GoneDarkHours = 24.0;
+
+    /// <summary>
     /// The closing sentence every precondition message ends on. One copy, for the same reason
     /// <c>CollectorEngineCapability.PermanentGapEpilogue</c> is one copy: the messages have to agree about
     /// what a precondition IS, and a second wording would eventually disagree about whether it is worth
@@ -194,9 +208,10 @@ public static class CollectorRuntimePrecondition
     }
 
     /// <summary>
-    /// The precondition explanation for a read whose collector has produced <b>no <c>collection_log</c> row
-    /// at all</b> on a server that is demonstrably collecting other things — or null when that is not the
-    /// case, in which case the caller falls through to its own miss vocabulary.
+    /// The precondition explanation for a read whose collector <b>is not being invoked</b> — no run of any
+    /// kind for longer than <see cref="GoneDarkHours"/> — on a server that is demonstrably collecting other
+    /// things, or null when that is not the case, in which case the caller falls through to its own miss
+    /// vocabulary.
     ///
     /// <para><b>Why this arm has to exist, and why <see cref="CollectionOutcomeMessage"/> cannot cover it.</b>
     /// That method reports what the collector's last run RECORDED. A collector whose <c>AppliesTo</c> gate is
@@ -207,11 +222,22 @@ public static class CollectorRuntimePrecondition
     /// permitted to look at. That is precisely the affirmative claim the precondition vocabulary was built to
     /// stop, surviving in the one case that produces no evidence to read.</para>
     ///
-    /// <para><b>The inference.</b> No row EVER for this collector, while the server has collected something
-    /// recently, means the gate is off — there is no third way to get here. Retention cannot fake it: a
-    /// collector whose rows have all aged out has not run inside the retention window either, which is the
-    /// same conclusion. Both halves are required; a server that has collected nothing at all is a collection
-    /// outage and belongs in <c>unavailable</c>, not here.</para>
+    /// <para><b>The inference, and why it is RECENCY rather than existence.</b> A collector with no run
+    /// inside the window where the server itself kept collecting is not being invoked, and a gate is the only
+    /// thing that stops invocation while collection continues. Existence over all of history answers a
+    /// weaker question, because <b>a <c>collection_log</c> row is not proof of a RUN</b>: a store written
+    /// before #2580 holds a zero-duration, zero-row <c>SUCCESS</c> for every cycle of exactly the collectors
+    /// this arm reports on — the pre-dispatch skip recording itself as a success — and those rows stay
+    /// readable for the whole <c>collection_log</c> retention window. An existence probe counts them as runs
+    /// and suppresses the declaration; so does a genuine gate FLIP, whose pre-flip runs are real. Recency
+    /// decays where existence never does, which is the whole of why it is the safe question to ask.</para>
+    ///
+    /// <para><b>Measured against the SERVER's last collection, not the wall clock</b>, because the two halves
+    /// have to describe the same instant. A service that stopped collecting a server three days ago leaves
+    /// every one of its collectors equally stale, and a wall-clock comparison would call every gate off; the
+    /// gap between the two stored timestamps stays small in exactly that case, which is the collection outage
+    /// that belongs in <c>unavailable</c>. Both halves are still required — a server that has collected
+    /// nothing at all answers null here.</para>
     ///
     /// <para><b>What it must not claim.</b> It cannot say WHICH gate is off, because the facts that decide
     /// are not persisted — <c>HAS_DBACCESS('msdb')</c> and the RDS flag live on the cached connection, not on
@@ -222,18 +248,43 @@ public static class CollectorRuntimePrecondition
     /// <param name="serverName">The server as the caller named it.</param>
     /// <param name="collectorName">The collector serving the read that missed.</param>
     /// <param name="gateCandidates">Operator-facing description of what could switch this collector off.</param>
-    /// <param name="collectorEverRan">Whether this collector has any recorded run against this server.</param>
+    /// <param name="collectorLastRunUtc">This collector's most recent run of ANY status against this server,
+    /// or null when it has none at all.</param>
     /// <param name="serverLastCollectedUtc">The server's most recent run by ANY collector, or null if none.</param>
     public static string? GatedOffMessage(
         string serverName,
         string collectorName,
         string gateCandidates,
-        bool collectorEverRan,
+        DateTime? collectorLastRunUtc,
         DateTime? serverLastCollectedUtc)
     {
-        if (collectorEverRan || serverLastCollectedUtc is null)
+        if (serverLastCollectedUtc is null)
         {
             return null;
+        }
+
+        if (collectorLastRunUtc is { } lastRun)
+        {
+            /* A collector still being invoked is at most one cadence behind the sweep that collected the
+               server, so anything inside the cutoff is an ordinary gap and this arm must stand aside. Only a
+               collector the dispatcher has stopped reaching for can fall this far behind a server that is
+               still collecting. */
+            if ((serverLastCollectedUtc.Value - lastRun).TotalHours <= GoneDarkHours)
+            {
+                return null;
+            }
+
+            /* Both instants, because this is a claim about NOW assembled from two stored measurements and the
+               reader is the only one who can judge the pair. Saying "never run" here would also be false, and
+               falsifiable by the run log the same reader can query. */
+            return $"The {collectorName} collector is no longer being invoked against {serverName}: its last " +
+                   $"run of any kind{DescribeObserved(lastRun)} predates the server's own newest " +
+                   $"collection{DescribeObserved(serverLastCollectedUtc)} by more than " +
+                   $"{GoneDarkHours.ToString("0", CultureInfo.InvariantCulture)} hours. That combination " +
+                   $"means the collector's gate is switched off for this server rather than that it has " +
+                   $"nothing to report, so this read cannot tell you the state it describes — it can only " +
+                   $"tell you it is no longer permitted to look. {gateCandidates} " +
+                   ConnectScopedEpilogue;
         }
 
         return $"The {collectorName} collector has never run against {serverName}, while the server itself " +
