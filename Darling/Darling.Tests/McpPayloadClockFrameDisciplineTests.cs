@@ -196,7 +196,7 @@ public sealed class McpPayloadClockFrameDisciplineTests
         ("PlanCorrectionsSql",
             "sys.dm_db_tuning_recommendations reports valid_since, last_refresh and the two action-initiated "
             + "times in UTC: against the collector-written UTC collection_time on the same row, the newest "
-            + "value of each lands within +0.2 minutes of it over 27,719,040 rows on one store and +0.7 over "
+            + "value of each lands within +1.4 minutes of it over 27,719,040 rows on one store and +0.7 over "
             + "637,558 on the other, where a value in a -240 server's local clock could not come nearer than "
             + "240 minutes behind. The two stored-but-unread siblings, execute_action_start_time and "
             + "revert_action_start_time, measure the same. De-skewing these puts every actively-refreshing "
