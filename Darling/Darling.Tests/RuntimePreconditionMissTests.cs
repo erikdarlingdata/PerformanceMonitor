@@ -636,6 +636,59 @@ public sealed class RuntimePreconditionReadWiringTests
         return wired;
     }
 
+    /* The collector-name argument of a GATED-OFF call: the first lowercase quoted literal after the call
+       opens. The gate-candidate sentence that follows it cannot be mistaken for one - it begins with a
+       capital and contains spaces, neither of which this character class admits. */
+    private static readonly Regex GatedOffCall = new(
+        @"GatedOffStatusAsync\([^;]*?""([a-z_0-9]+)""",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// <c>CollectorRuntimePrecondition.GoneDarkHours</c> is a flat constant, and it equals the
+    /// <c>STOPPED</c> cutoff only for collectors whose cadence sits at or below the FAILING floor. A
+    /// collector on a daily cadence has a 48-hour STOPPED cutoff, so wiring one to this arm would have the
+    /// read declare a gate at 24 hours while collection health still called it FAILING for another day —
+    /// two surfaces disagreeing about the same server with nothing to tell a reader which to believe.
+    ///
+    /// <para>This asserts it of whatever is ACTUALLY wired, parsed from both SKUs' shipped sources, rather
+    /// than of the one collector wired today. The gap is unreachable at present; a flat constant is the
+    /// right shape while that holds, and this is what stops the day it stops holding from being silent.
+    /// The sibling pin in <c>CollectorRuntimePreconditionTests</c> asks a different question — whether the
+    /// constant still matches the band vocabulary at all — and neither covers the other.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(DarlingMcp)]
+    [InlineData(LiteMcp)]
+    public void EveryCollectorWiredToTheGatedOffArm_SharesTheStoppedCutoff(string mcpDirectory)
+    {
+        var wired = new SortedSet<string>(StringComparer.Ordinal);
+
+        foreach (var file in RepoFilesIn(mcpDirectory))
+        {
+            var source = File.ReadAllText(file).Replace("\r\n", "\n", StringComparison.Ordinal);
+            foreach (Match call in GatedOffCall.Matches(source))
+            {
+                wired.Add(call.Groups[1].Value);
+            }
+        }
+
+        /* A scan that parsed nothing passes for free, which is the one outcome this must not have. */
+        Assert.True(
+            wired.Count >= 1,
+            $"no GatedOffStatusAsync call found under {mcpDirectory} - the scan is broken, or the arm was removed from this SKU");
+
+        foreach (var collector in wired)
+        {
+            Assert.True(
+                CollectorScheduleDefaults.All.TryGetValue(collector, out var schedule),
+                $"the gated-off arm is wired for '{collector}', which has no CollectorScheduleDefaults entry");
+
+            Assert.Equal(
+                CollectorHealthClassifier.FailingThresholdHours(schedule!.FrequencyMinutes),
+                CollectorRuntimePrecondition.GoneDarkHours);
+        }
+    }
+
     [Theory]
     [InlineData(DarlingMcp)]
     [InlineData(LiteMcp)]
