@@ -2241,6 +2241,22 @@ const ALERT_READ_STATS = [
      giving up while the statement still ran on the store; well below it is a fault the store returned. */
   { key: "alert_read_health.last_failure_elapsed_ms", label: "Ran for", format: "ms", small: true },
   { key: "alert_read_health.last_failure_at", label: "Newest", format: "reltime", small: true },
+  /* The fleet scope: failures that belong to NO server, so no per-server row can hold them and the
+     service count beside a server zero would otherwise span two populations an operator acts on
+     differently - a blind read on another server (read this panel there) and a blind read on a condition
+     belonging to no server (the store's own self-alerts went quiet). The failures on other servers are
+     the service count less the server count less this one, and are deliberately not a column: nothing
+     holds a newest failure for that population, and a count with no stamp is what these stamps fix. */
+  { key: "alert_read_health.fleet_read_failures", label: "Blind reads (no server)", format: "int" },
+  { key: "alert_read_health.fleet_last_failure_read", label: "Which read (no server)", format: "text", small: true },
+  { key: "alert_read_health.fleet_last_failure_elapsed_ms", label: "Ran for (no server)", format: "ms", small: true },
+  { key: "alert_read_health.fleet_last_failure_at", label: "Newest (no server)", format: "reltime", small: true },
+  /* The service count's own currency and identity terms. Scope-free by construction: the newest failure
+     anywhere may be on a server this tab is not showing, which is why the fleet trio above is its own
+     set rather than something to infer from these three. */
+  { key: "alert_read_health.instance_last_failure_read", label: "Which read (service)", format: "text", small: true },
+  { key: "alert_read_health.instance_last_failure_elapsed_ms", label: "Ran for (service)", format: "ms", small: true },
+  { key: "alert_read_health.instance_last_failure_at", label: "Newest (service)", format: "reltime", small: true },
   { key: "alert_read_health.counting_since", label: "Counting since", format: "reltime", small: true },
 ];
 
