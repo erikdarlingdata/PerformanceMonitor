@@ -137,7 +137,9 @@ public sealed class PgServerLogPathPinTests
                 DirectoryFaults(site.Sql).Select(fault => $"{site.Collector} {fault}"));
         }
 
-        Assert.Empty(offenders);
+        Assert.True(
+            offenders.Count == 0,
+            "The log directory is assumed rather than asked for: " + string.Join("; ", offenders));
     }
 
     /// <summary>
@@ -170,7 +172,9 @@ public sealed class PgServerLogPathPinTests
             new[] { "PgDeadlocksCollector.cs", "PgPlanCaptureCollector.cs" },
             files);
 
-        Assert.Empty(faults);
+        Assert.True(
+            faults.Count == 0,
+            "SQL that lists the log directory but does not ask where it is: " + string.Join("; ", faults));
     }
 
     /// <summary>
