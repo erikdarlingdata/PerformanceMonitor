@@ -42,7 +42,10 @@ namespace PerformanceMonitor.Collectors;
 /// <para><b>Pure policy: no clock, no I/O, and no knowledge of either subject.</b> The caller supplies how
 /// many rows its ordering places AHEAD of the wanted population, how big that population is, its own limit
 /// and the surface's maximum - so the arm selection is assertable without a store, and one classifier serves
-/// both tools so they cannot disagree about what a capped page means.</para>
+/// both tools so they cannot disagree about what a capped page means. The cost of that purity is stated on
+/// <see cref="PgCappedReach.RankedTail"/>: knowing nothing about the subject, it cannot tell a read whose
+/// order is a RANKING from one whose order is a grouping, so it claims only that the cut followed the order
+/// and leaves what the order means to the read.</para>
 /// </summary>
 public enum PgCappedReach
 {
@@ -54,11 +57,20 @@ public enum PgCappedReach
 
     /// <summary>
     /// The response starts at the top of the wanted population and is cut at the limit, so the cut follows
-    /// the read's OWN ranking and the caller holds the highest-ranked N of what they asked for.
+    /// the read's OWN order rather than displacing anything: the caller holds the first N of what they asked
+    /// for, in whatever order that read presents.
     ///
-    /// <para>The benign truncation, and the only one that is: "the top 25 by reclaimable bytes" is the
-    /// question the ranking exists to answer, so a page of it is a smaller answer rather than a different
-    /// one. Named all the same, because a reader still needs the denominator to know it is a top-N.</para>
+    /// <para>The mildest truncation, and the only one where the page is a smaller answer rather than a
+    /// different one: "the top 25 by reclaimable bytes" is the question the ranking exists to answer. Named
+    /// all the same, because a reader still needs the denominator to know it is a top-N.</para>
+    ///
+    /// <para><b>What this arm does NOT assert, and the name overstates by one word.</b> It says the cut
+    /// follows the read's order; whether that order is a RANKING — so that the first N are the N worth
+    /// acting on — is a property of the read and not of this classifier, which by construction knows nothing
+    /// about either subject. <c>get_pg_index_bloat</c> under <c>answered_only</c> ranks by reclaimable bytes
+    /// and the word is earned. An ordering that groups rather than ranks would reach this arm with the same
+    /// wording and a weaker guarantee, so the CAUSE text claims only the order and leaves the meaning of
+    /// that order to the read's own note, which states it.</para>
     /// </summary>
     RankedTail,
 
@@ -227,9 +239,10 @@ public static class PgCappedRead
                 callerLimit,
                 ceiling,
                 "RANKED TAIL: this response starts at the top of the population you asked for and stops at "
-                + "your row limit, so it is the highest-ranked rows of it rather than an arbitrary slice. It "
-                + "is still a page and not the population - read the figures above before treating it as "
-                + "one.");
+                + "your row limit, so nothing displaced it - these are the FIRST rows of it in this read's "
+                + "own order rather than an arbitrary slice. Whether that order ranks by something worth "
+                + "acting on is the read's own property and its note says so. Either way this is a page and "
+                + "not the population - read the figures above before treating it as one.");
         }
 
         /* AT LEAST AS MANY AS THE CEILING, so the first wanted row sits at position ahead + 1 > maxLimit and
