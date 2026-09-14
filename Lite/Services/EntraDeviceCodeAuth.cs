@@ -517,9 +517,8 @@ public static class EntraDeviceCodeAuth
         /* Bounded, so the window cannot outlive the sign-in it describes: nothing else will dispose
            an attempt nobody owns, and a prompt left on screen after the driver gave up is a code
            that no longer works. */
-        var expiring = orphan;
         _ = Task.Delay(UnownedPromptLifetime).ContinueWith(
-            _ => expiring.Dispose(),
+            _ => orphan.Dispose(),
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
