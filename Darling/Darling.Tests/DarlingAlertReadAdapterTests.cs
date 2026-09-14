@@ -328,12 +328,22 @@ public sealed class DarlingAlertReadAdapterTests
             Assert.Equal(350.0m, job.PercentOfAverage);
 
             /* #3421: start_time is the monitored server's own clock, so this read carries the server's
-               collected offset beside it and the row states the same instant in UTC. Asserted as the
-               INSTANT, not as a formatted string — a pinned string passes under a sign error as readily
-               as under the right sign. What this proves against a live store is that the correlated
-               offset subquery resolves at all, and the direction and magnitude it feeds. */
+               collected offset beside it and the row states the same instant in UTC. Asserted as
+               INSTANTS, not as formatted strings — a pinned string passes under a sign error as readily
+               as under the right sign. The offset assertion is what proves the projection resolves
+               against a live store at all rather than compiling.
+
+               The round trip is asserted to POSTGRES's resolution, not .NET's: a timestamp column is
+               microsecond-precision and a planted DateTime carries 100 ns ticks, so the value comes back
+               truncated by up to 9 ticks. Comparing the converted value against the locally-computed
+               plant instead of against what the store returned asserts that truncation, which fails on a
+               plant whose sub-microsecond digits happen to be non-zero and passes on one where they are
+               not - measured, at 4 ticks. */
             Assert.Equal(-240, job.UtcOffsetMinutes);
-            Assert.Equal(utcNow.AddHours(-1).AddMinutes(240), job.StartTimeUtc);
+            Assert.True(
+                (utcNow.AddHours(-1) - job.StartTime).Duration() < TimeSpan.FromMicroseconds(1),
+                $"start_time round-tripped as {job.StartTime:O}, further than a microsecond from the planted {utcNow.AddHours(-1):O}");
+            Assert.Equal(job.StartTime.AddMinutes(240), job.StartTimeUtc);
 
             /* #1812: age the SAME snapshot past the freshness bound (default 2-minute cadence → 10
                minutes) — the read becomes no evidence: not fresh, rows skipped, exactly the state that
