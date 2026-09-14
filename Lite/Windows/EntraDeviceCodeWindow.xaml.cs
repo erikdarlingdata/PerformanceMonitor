@@ -69,6 +69,18 @@ public partial class EntraDeviceCodeWindow : Window
     /// Closes the window from the attempt's side. Marshaled, because the attempt ends on whichever
     /// thread completed the connection; flagged, so <see cref="Window_Closing"/> can tell this close
     /// apart from the user giving up and does not cancel an attempt that already succeeded.
+    ///
+    /// <para><b>A second close is a no-op, and that is checked rather than assumed.</b> There is one
+    /// ordering in which this runs after the window is already gone: the attempt ends on a
+    /// background thread and queues the <c>BeginInvoke</c> below, and the user then closes the window
+    /// on the dispatcher before that delegate is pumped — <see cref="Window_Closing"/>'s unsubscribe
+    /// cannot recall an invocation already queued. <c>Window.InternalClose</c> answers
+    /// <c>if (_disposed) return;</c> immediately after its <c>VerifyNotClosing</c>, and
+    /// <c>VerifyNotClosing</c> throws only while a close is IN FLIGHT (<c>_isClosing</c>) or on an
+    /// invalid composition target, which a closed window does not have because its source window is
+    /// null (PresentationFramework 10.0.10, <c>Window.InternalClose</c> / <c>VerifyNotClosing</c>).
+    /// So no guard flag is needed for that ordering, and one would be defensive code for a call the
+    /// framework already discards.</para>
     /// </summary>
     private void OnAttemptFinished()
     {
