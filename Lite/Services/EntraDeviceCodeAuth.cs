@@ -480,6 +480,10 @@ public static class EntraDeviceCodeAuth
     /// getting its thread back. That is the direction this has to fail in: a vague or slow prompt is
     /// recoverable and a confidently mislabelled one is not.</para>
     ///
+    /// <para>Both ways attribution can degrade are logged from here, off the same read the decision
+    /// used: a challenge with no acquisition identity at all, and one whose acquisition names a
+    /// different server than the sign-in currently waiting.</para>
+    ///
     /// <para><b>What the identity does NOT separate, stated because the guarantee is narrower than
     /// it reads.</b> Two acquisitions for the SAME server describe identically, so an unwrapped
     /// read of the server a user is signing in to can still take that sign-in's slot. Both prompts
@@ -508,6 +512,30 @@ public static class EntraDeviceCodeAuth
         }
 
         unowned = true;
+
+        /* The two ways attribution degrades, reported here rather than by the caller because they
+           are facts about the state THIS decision was made on. A caller re-reading the slot
+           afterwards would be describing a later instant, and a diagnostic that names the wrong
+           instant is worse than none. Neither degradation is visible in the prompt: a prompt that is
+           merely unnamed, or merely slow to cancel, looks like a prompt. */
+        if (acquiredTarget is null)
+        {
+            AppLogger.Warn(
+                LogSource,
+                "A device code arrived with no acquisition identity, so it was shown unnamed. Every "
+                    + "acquisition that runs through Lite's own provider records one, so this means "
+                    + "either the driver refused that provider at startup or the execution context "
+                    + "no longer reaches the callback.");
+        }
+        else if (owner is { Challenge: null })
+        {
+            AppLogger.Warn(
+                LogSource,
+                $"A device code for {acquiredTarget} arrived while a sign-in to {owner.Target} was "
+                    + "still waiting for its own code, so it was shown as its own prompt. A code "
+                    + "takes a waiting sign-in's slot only when the acquisition that produced it "
+                    + "names that sign-in's own server.");
+        }
 
         /* Named from the acquisition rather than left anonymous: this is the only name anything has
            for this code, and it is the right one. */
@@ -633,27 +661,6 @@ public static class EntraDeviceCodeAuth
                     ? " This code did not take a waiting sign-in's slot, so closing the prompt hides "
                         + "the code without ending the attempt."
                     : string.Empty));
-
-        /* The two ways attribution degrades, logged because neither is visible in the prompt: a
-           prompt that is merely unnamed, or merely slow to cancel, looks like a prompt. */
-        if (acquired is null)
-        {
-            AppLogger.Warn(
-                LogSource,
-                "A device code arrived with no acquisition identity, so it was shown unnamed. Every "
-                    + "acquisition that runs through Lite's own provider records one, so this means "
-                    + "either the driver refused that provider at startup or the execution context "
-                    + "no longer reaches the callback.");
-        }
-        else if (unowned && Volatile.Read(ref s_current) is { Challenge: null } waiting)
-        {
-            AppLogger.Warn(
-                LogSource,
-                $"A device code for {acquired} arrived while a sign-in to {waiting.Target} was "
-                    + "still waiting for its own code, so it was shown as its own prompt. A code "
-                    + "takes a waiting sign-in's slot only when the acquisition that produced it "
-                    + "names that sign-in's own server.");
-        }
 
         try
         {
