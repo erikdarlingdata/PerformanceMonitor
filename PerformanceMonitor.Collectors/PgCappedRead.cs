@@ -12,6 +12,44 @@ using System.Globalization;
 namespace PerformanceMonitor.Collectors;
 
 /// <summary>
+/// What a capped read's ordering MEANS, which decides whether a truncation can be described as the tail of a
+/// ranking (#3435).
+///
+/// <para><b>Why the classifier has to be told.</b> <see cref="PgCappedReach.RankedTail"/> tells a caller the
+/// rows it lost rank BELOW the rows it got. That holds when the order is a ranking and is false when the
+/// order is a grouping: a cut in a grouping does not leave the top of anything, it leaves some groups and
+/// not others. Decided from counts alone the two are indistinguishable, so the surface declares which it
+/// has and the arm follows from the declaration.</para>
+///
+/// <para><b><see cref="Grouped"/> is first, so it is <c>default</c>.</b> Zero-valued and therefore what a
+/// <c>default</c> verdict carries, which keeps the ranking claim from being the one a value nobody filled in
+/// makes. Same direction as every other comparison here: toward the label that claims less.</para>
+/// </summary>
+public enum PgOrderSemantics
+{
+    /// <summary>
+    /// The order partitions the rows rather than ranking them: rows sort into groups, and within the read's
+    /// order one group is simply before another. <c>get_pg_extensions</c> is this - relevance band, then
+    /// state, then database - so a cut removes whole databases rather than the bottom of a ranking, and an
+    /// install census taken from the surviving rows reports the extension installed everywhere as installed
+    /// nowhere.
+    ///
+    /// <para>A grouped read cannot reach <see cref="PgCappedReach.RankedTail"/>: there is no tail to be at
+    /// the top of, so the classifier answers <see cref="PgCappedReach.Partial"/>, whose claim is only that
+    /// some of the population is missing.</para>
+    /// </summary>
+    Grouped,
+
+    /// <summary>
+    /// The order ranks the wanted population by something worth acting on, so the first N rows are the N
+    /// that matter most and everything cut off ranks below them. <c>get_pg_index_bloat</c> is this -
+    /// reclaimable bytes descending over the answered rows - which is the whole value of
+    /// <see cref="PgCappedReach.RankedTail"/> and the only order it may be claimed from.
+    /// </summary>
+    Ranked,
+}
+
+/// <summary>
 /// Whether a capped read can show the reader the rows they came for, and if not, whether raising the limit
 /// would help (#3424, #3425).
 ///
@@ -40,12 +78,11 @@ namespace PerformanceMonitor.Collectors;
 /// was not publishes a census missing its most important row. Only one of those is recoverable.</para>
 ///
 /// <para><b>Pure policy: no clock, no I/O, and no knowledge of either subject.</b> The caller supplies how
-/// many rows its ordering places AHEAD of the wanted population, how big that population is, its own limit
-/// and the surface's maximum - so the arm selection is assertable without a store, and one classifier serves
-/// both tools so they cannot disagree about what a capped page means. The cost of that purity is stated on
-/// <see cref="PgCappedReach.RankedTail"/>: knowing nothing about the subject, it cannot tell a read whose
-/// order is a RANKING from one whose order is a grouping, so it claims only that the cut followed the order
-/// and leaves what the order means to the read.</para>
+/// many rows its ordering places AHEAD of the wanted population, how big that population is, its own limit,
+/// the surface's maximum, and what its order MEANS - so the arm selection is assertable without a store, and
+/// one classifier serves both tools so they cannot disagree about what a capped page means. The one thing
+/// counts cannot settle is whether an order ranks or groups, and that is a <see cref="PgOrderSemantics"/>
+/// the surface declares rather than a caveat the reader is expected to apply (#3435).</para>
 /// </summary>
 public enum PgCappedReach
 {
@@ -57,30 +94,39 @@ public enum PgCappedReach
 
     /// <summary>
     /// The response starts at the top of the wanted population and is cut at the limit, so the cut follows
-    /// the read's OWN order rather than displacing anything: the caller holds the first N of what they asked
-    /// for, in whatever order that read presents.
+    /// the read's own RANKING: the caller holds the first N of what they asked for and everything missing
+    /// ranks below everything present.
     ///
     /// <para>The mildest truncation, and the only one where the page is a smaller answer rather than a
     /// different one: "the top 25 by reclaimable bytes" is the question the ranking exists to answer. Named
     /// all the same, because a reader still needs the denominator to know it is a top-N.</para>
     ///
-    /// <para><b>What this arm does NOT assert, and the name overstates by one word.</b> It says the cut
-    /// follows the read's order; whether that order is a RANKING — so that the first N are the N worth
-    /// acting on — is a property of the read and not of this classifier, which by construction knows nothing
-    /// about either subject. <c>get_pg_index_bloat</c> under <c>answered_only</c> ranks by reclaimable bytes
-    /// and the word is earned. An ordering that groups rather than ranks would reach this arm with the same
-    /// wording and a weaker guarantee, so the CAUSE text claims only the order and leaves the meaning of
-    /// that order to the read's own note, which states it.</para>
+    /// <para><b>Reachable only from <see cref="PgOrderSemantics.Ranked"/>, and that is the arm's whole
+    /// integrity (#3435).</b> The claim "what you lost ranks below what you got" is false over an order that
+    /// GROUPS - there the rows lost are a different group, not a lower-ranked one - so this arm is not
+    /// selected for a grouped read and is not representable on one: <see cref="PgCappedReachVerdict.Reach"/>
+    /// is derived from the verdict's own figures and its declared order rather than stored beside them, so
+    /// there is no verdict in which this name sits next to
+    /// <see cref="PgOrderSemantics.Grouped"/>. Before #3435 the arm carried a sentence disclaiming the
+    /// ranking instead, which left both meanings under one name and relied on the reader noticing.</para>
     /// </summary>
     RankedTail,
 
     /// <summary>
-    /// Rows the ordering places ahead of the wanted population displaced part of it, and a larger permitted
-    /// limit would reach more - possibly all - of what is missing.
+    /// Part of the wanted population is outside the response: rows the ordering places ahead of it displaced
+    /// some, or the caller's limit cut it, and a larger permitted limit would reach more - possibly all - of
+    /// what is missing.
     ///
     /// <para>Reachable with ZERO rows actually shown: a limit of 25 behind a leading block of 40 shows none
     /// of the wanted population while the maximum of 1,000 would show all of it. That is a different
     /// situation from <see cref="Unreachable"/> with a different remedy, so the two do not share an arm.</para>
+    ///
+    /// <para><b>Where a GROUPED read's capped page lands (#3435), and it is the arm with no ranking claim
+    /// rather than a softened <see cref="RankedTail"/>.</b> "Some of it is missing and a larger limit reaches
+    /// more" is true of a grouped cut; "what is missing ranks lower" is not. Folding the grouped case in here
+    /// removes a false claim rather than hiding one, which is why it is not the <c>undelivered</c> shape of
+    /// #3430: the arm asserts strictly less, and <see cref="PgCappedReachVerdict.Order"/> carries what the
+    /// order actually is for any caller that needs it.</para>
     /// </summary>
     Partial,
 
@@ -100,33 +146,136 @@ public enum PgCappedReach
 /// <summary>
 /// One <see cref="PgCappedReach"/> with every figure it was decided from and the sentence that says so, as
 /// ONE value - so no surface can print the arm without its figures or the figures without the arm.
+///
+/// <para><b>The arm is DERIVED, not stored, and that is what makes a wrong answer inexpressible
+/// (#3435).</b> Every member below that a reader acts on - <see cref="Reach"/>, <see cref="Cause"/>,
+/// <see cref="ReachableRows"/>, <see cref="ReachableAtMaxRows"/> - is computed from the figures and the
+/// declared <see cref="Order"/>. So there is no constructor call, object initializer, <c>with</c>
+/// expression, reflective field write or <c>default</c> that produces a verdict naming
+/// <see cref="PgCappedReach.RankedTail"/> over <see cref="PgOrderSemantics.Grouped"/>, or naming any arm its
+/// own figures contradict: the pairing is not data that could be wrong, it is a reading of data.
+/// <c>default</c> lands on <see cref="PgCappedReach.Unreachable"/> - zeroes mean a surface that returns
+/// nothing, which is the pessimistic answer and not the flattering one.</para>
 /// </summary>
-/// <param name="Reach">The arm.</param>
+/// <param name="Order">What this read's ordering MEANS. The one input counts cannot supply, declared by the
+/// surface, and the gate on <see cref="PgCappedReach.RankedTail"/>.</param>
 /// <param name="RowsAhead">How many rows the read's ordering places AHEAD of the wanted population. Zero
 /// when the response starts at the top of it.</param>
 /// <param name="WantedRows">How big the wanted population is, measured over the SERVER rather than over the
 /// page - a page-derived figure would be the very quantity this class exists to stop being trusted.</param>
-/// <param name="ReachableRows">How many of <paramref name="WantedRows"/> this caller's
-/// <paramref name="Limit"/> can show. Zero is a legitimate answer and is NOT the same as
-/// <paramref name="WantedRows"/> being zero.</param>
-/// <param name="ReachableAtMaxRows">How many of <paramref name="WantedRows"/> the MAXIMUM permitted limit
-/// could show. The figure that separates "raise the limit" from "raising the limit cannot help", which is
-/// #3278's own opening sentence and the reason the last two arms are not one arm.</param>
+/// <param name="ReturnedRows">How many rows the read actually returned. Carried rather than consumed and
+/// discarded, because it is one of the figures the arm is decided from: it is the only thing that tells a
+/// response which stopped short of its limit from one sitting exactly on it.</param>
 /// <param name="Limit">The caller's row limit, as supplied.</param>
 /// <param name="MaxLimit">The surface's maximum permitted row limit.</param>
-/// <param name="Cause">What the arm MEANS and what closes the gap. Carries no figures: a guard that the arms
-/// stay distinguishable has to compare the cause, and comparing a composed message would pass on the figures
-/// differing, which they always do.</param>
+/// <param name="Remedy">What this read offers that does reach the data - the filter, order or aggregate to
+/// use. Appended to <see cref="Cause"/> on the two arms where the caller has to do something, and ignored on
+/// the arms where they do not.</param>
 public readonly record struct PgCappedReachVerdict(
-    PgCappedReach Reach,
+    PgOrderSemantics Order,
     long RowsAhead,
     long WantedRows,
-    long ReachableRows,
-    long ReachableAtMaxRows,
+    int ReturnedRows,
     int Limit,
     int MaxLimit,
-    string Cause)
+    string Remedy)
 {
+    /// <summary>
+    /// The arm, read off the figures and the declared order rather than carried beside them.
+    ///
+    /// <para>The branch order is the classification, and each test is the pessimistic one:</para>
+    /// <list type="number">
+    /// <item><description>SHORT OF THE LIMIT, not merely equal to it. A read that returned exactly its limit
+    /// cannot distinguish "that was all of them" from "there was at least one more", so completeness is
+    /// claimed only when the read stopped early - which is why <see cref="ReturnedRows"/> is a figure this
+    /// verdict keeps. With the population figures agreeing AND the read short of its limit, nothing is behind
+    /// the page.</description></item>
+    /// <item><description>NOTHING AHEAD AND A RANKING means the cut follows that ranking, so the page is the
+    /// top N of the population rather than an arbitrary slice of it. Checked before the two displaced arms
+    /// because <see cref="ReachableRows"/> can equal <see cref="WantedRows"/> here while the read still sits
+    /// on its limit - which is not completeness and is not displacement either. A GROUPED read fails this
+    /// test whatever its figures say and falls through, which is #3435: nothing ahead of a grouping still
+    /// leaves the reader holding some groups and not others.</description></item>
+    /// <item><description>AT LEAST AS MANY AS THE CEILING, so the first wanted row sits at position
+    /// <see cref="RowsAhead"/> + 1 beyond <see cref="MaxLimit"/> and no permitted limit reaches it.
+    /// <c>&gt;=</c> rather than <c>&gt;</c>: a leading block of exactly <see cref="MaxLimit"/> rows fills the
+    /// largest response this surface will produce, leaving nothing for the population behind
+    /// it.</description></item>
+    /// </list>
+    /// </summary>
+    public PgCappedReach Reach =>
+        ReachableRows >= WantedRows && ReturnedRows < Limit ? PgCappedReach.Complete
+        : RowsAhead == 0 && Order == PgOrderSemantics.Ranked ? PgCappedReach.RankedTail
+        : RowsAhead >= MaxLimit ? PgCappedReach.Unreachable
+        : PgCappedReach.Partial;
+
+    /// <summary>
+    /// How many of <see cref="WantedRows"/> this caller's <see cref="Limit"/> can show. Zero is a legitimate
+    /// answer and is NOT the same as <see cref="WantedRows"/> being zero.
+    /// </summary>
+    public long ReachableRows => ReachableAt(Limit);
+
+    /// <summary>
+    /// How many of <see cref="WantedRows"/> the MAXIMUM permitted limit could show. The figure that separates
+    /// "raise the limit" from "raising the limit cannot help", which is #3278's own opening sentence and the
+    /// reason the last two arms are not one arm.
+    /// </summary>
+    public long ReachableAtMaxRows => ReachableAt(MaxLimit);
+
+    /// <summary>
+    /// What the arm MEANS and what closes the gap. Carries no figures: a guard that the arms stay
+    /// distinguishable has to compare the cause, and comparing a composed message would pass on the figures
+    /// differing, which they always do.
+    ///
+    /// <para>ONE sentence per arm, and it says only what that arm asserts on EVERY order it is reachable
+    /// from. <see cref="PgCappedReach.RankedTail"/> can therefore claim the ranking outright, because the
+    /// arm is unreachable without one; <see cref="PgCappedReach.Partial"/> claims only that some of the
+    /// population is missing, because it is reachable from both.</para>
+    /// </summary>
+    public string Cause =>
+        Reach switch
+        {
+            PgCappedReach.Complete =>
+                "COMPLETE: every row of the population you asked for is in this response.",
+
+            PgCappedReach.RankedTail =>
+                "RANKED TAIL: this response starts at the top of the population you asked for and stops at "
+                + "your row limit, so nothing displaced it - these are the FIRST rows of it in this read's "
+                + "own RANKING, and every row you cannot see ranks below every row you can. This arm is "
+                + "reachable only from a read that declares its order a ranking, so that is the type's "
+                + "guarantee rather than this sentence's. It is still a page and not the population - read "
+                + "the figures above before treating it as one.",
+
+            PgCappedReach.Unreachable =>
+                "UNREACHABLE at every permitted row limit: the rows this read's ordering places ahead of the "
+                + "population you asked for already fill the largest response this surface will return, so "
+                + "not one row of that population can appear in it. Raising the limit is not a fix and does "
+                + "not become one as the server grows. " + Remedy,
+
+            _ =>
+                "PARTIAL: part of the population you asked for is outside this response, either displaced by "
+                + "rows this read's ordering places ahead of it or cut off by your row limit. WHICH rows are "
+                + "missing follows this read's own order, so read the order beside these figures before "
+                + "assuming the ones you have are the ones that matter. A larger limit reaches more of it, "
+                + "up to the surface maximum. " + Remedy,
+        };
+
+    /// <summary>
+    /// What this read's order MEANS, in one sentence, true on every arm - including
+    /// <see cref="PgCappedReach.Complete"/>, where nothing was cut and the reader still may want to know how
+    /// the rows are arranged.
+    ///
+    /// <para>Separate from <see cref="Cause"/> so the arms stay comparable on the cause alone, and printed
+    /// with the figures rather than with the arm because it is a property of the READ rather than of this
+    /// particular response.</para>
+    /// </summary>
+    public string OrderNote =>
+        Order == PgOrderSemantics.Ranked
+            ? "This read's order is a RANKING, so a cut follows it and what it withholds ranks below what it "
+              + "returns."
+            : "This read's order is a GROUPING rather than a ranking, so a cut falls BETWEEN groups: what it "
+              + "withholds is other groups and not the lower-ranked remainder of the rows you have.";
+
     /// <summary>
     /// Whether the response can be read as a complete statement about the wanted population. False on every
     /// arm but <see cref="PgCappedReach.Complete"/> - including <see cref="PgCappedReach.RankedTail"/>, where
@@ -152,20 +301,37 @@ public readonly record struct PgCappedReachVerdict(
     public string Message => Census + " " + Cause;
 
     /// <summary>
-    /// The figures, in one shape for every arm. Separate from <see cref="Cause"/> so the arms can be
-    /// asserted distinguishable on the cause alone.
+    /// The figures and what the order means, in one shape for every arm. Separate from <see cref="Cause"/>
+    /// so the arms can be asserted distinguishable on the cause alone.
     /// </summary>
     public string Census =>
         string.Create(
             CultureInfo.InvariantCulture,
             $"Rows the ordering places ahead of what you asked for: {RowsAhead:N0}. Rows in that population: "
             + $"{WantedRows:N0}. Of those, reachable at your limit of {Limit:N0}: {ReachableRows:N0}; "
-            + $"reachable at the maximum limit of {MaxLimit:N0}: {ReachableAtMaxRows:N0}.");
+            + $"reachable at the maximum limit of {MaxLimit:N0}: {ReachableAtMaxRows:N0}. {OrderNote}");
+
+    /// <summary>
+    /// How many of the wanted rows a given limit can show: the budget left after the leading block, capped by
+    /// the population itself and floored at zero.
+    ///
+    /// <para>One expression serving both the caller's limit and the ceiling. Two copies would have to agree,
+    /// and the failure of a disagreement is <see cref="ARaisedLimitWouldHelp"/> answering from two different
+    /// arithmetics - a read that half works, for a reason no reader could see.</para>
+    ///
+    /// <para>Written as a floored minimum rather than a clamp because a clamp THROWS when its bounds cross,
+    /// which a negative <see cref="WantedRows"/> would do - and a property getter that throws is a worse
+    /// answer than zero on a type whose whole job is to describe a result the caller already holds.
+    /// <see cref="PgCappedRead.Classify"/> clamps the figures on the way in, so this is identical to a clamp
+    /// on every verdict it produces.</para>
+    /// </summary>
+    private long ReachableAt(long limit) => Math.Max(0, Math.Min(limit - RowsAhead, WantedRows));
 }
 
 /// <summary>
 /// Classifies whether a capped read reaches the population its reader came for (#3424, #3425). See
-/// <see cref="PgCappedReach"/> for the defect, the measurements, and why it fails toward the worse label.
+/// <see cref="PgCappedReach"/> for the defect, the measurements, and why it fails toward the worse label, and
+/// <see cref="PgOrderSemantics"/> for why the surface has to declare what its ordering means (#3435).
 /// </summary>
 public static class PgCappedRead
 {
@@ -183,6 +349,9 @@ public static class PgCappedRead
     /// <param name="maxLimit">The surface's maximum permitted row limit - pass the shared constant, never a
     /// literal, or this classifier decides the difference between "raise the limit" and "raising the limit
     /// cannot help" against a number that is not the one the surface enforces.</param>
+    /// <param name="order">Whether this read's ordering RANKS the wanted population or GROUPS it. The gate on
+    /// <see cref="PgCappedReach.RankedTail"/>, and the one thing the counts cannot supply: pass what this
+    /// read's own ORDER BY does, not what would read better.</param>
     /// <param name="remedy">What this read offers that does reach the data - the filter, order or aggregate
     /// to use. Appended to the cause on the two arms where the caller has to do something, and ignored on
     /// the arms where they do not.</param>
@@ -192,98 +361,20 @@ public static class PgCappedRead
         int returnedRows,
         int limit,
         int maxLimit,
-        string remedy)
-    {
+        PgOrderSemantics order,
+        string remedy) =>
         /* CLAMPED, not trusted. Every one of these is a count read out of a store or handed in by a caller,
-           and a negative rowsAhead would make the subtraction below hand back MORE reachable rows than the
-           limit allows - the arithmetic failing toward "you can see it all", which is the direction this
-           whole class exists to refuse. A negative wantedRows would do the same via WithheldRows. */
-        var ahead = Math.Max(0, rowsAhead);
-        var wanted = Math.Max(0, wantedRows);
-        var callerLimit = Math.Max(0, limit);
-        var ceiling = Math.Max(0, maxLimit);
-
-        var reachable = Reachable(ahead, wanted, callerLimit);
-        var reachableAtMax = Reachable(ahead, wanted, ceiling);
-
-        /* SHORT OF THE LIMIT, not merely equal to it. A read that returned exactly `limit` rows cannot
-           distinguish "that was all of them" from "there was at least one more", so completeness is claimed
-           only when the read stopped early - the pessimistic comparison, and the reason `returnedRows` is a
-           parameter at all. With the population figures agreeing AND the read short of its limit, nothing is
-           behind the page. */
-        if (reachable >= wanted && returnedRows < callerLimit)
-        {
-            return new PgCappedReachVerdict(
-                PgCappedReach.Complete,
-                ahead,
-                wanted,
-                reachable,
-                reachableAtMax,
-                callerLimit,
-                ceiling,
-                "COMPLETE: every row of the population you asked for is in this response.");
-        }
-
-        /* NOTHING AHEAD means the cut follows this read's own ranking, so the page is the top N of the
-           population rather than an arbitrary slice of it. Checked before the two displaced arms because
-           `reachable` can equal `wanted` here while the read still sits on its limit - which is not
-           completeness and is not displacement either. */
-        if (ahead == 0)
-        {
-            return new PgCappedReachVerdict(
-                PgCappedReach.RankedTail,
-                ahead,
-                wanted,
-                reachable,
-                reachableAtMax,
-                callerLimit,
-                ceiling,
-                "RANKED TAIL: this response starts at the top of the population you asked for and stops at "
-                + "your row limit, so nothing displaced it - these are the FIRST rows of it in this read's "
-                + "own order rather than an arbitrary slice. Whether that order ranks by something worth "
-                + "acting on is the read's own property and its note says so. Either way this is a page and "
-                + "not the population - read the figures above before treating it as one.");
-        }
-
-        /* AT LEAST AS MANY AS THE CEILING, so the first wanted row sits at position ahead + 1 > maxLimit and
-           no permitted limit reaches it. `>=` rather than `>`: a leading block of exactly maxLimit rows fills
-           the largest response this surface will produce, leaving nothing for the population behind it. */
-        if (ahead >= ceiling)
-        {
-            return new PgCappedReachVerdict(
-                PgCappedReach.Unreachable,
-                ahead,
-                wanted,
-                reachable,
-                reachableAtMax,
-                callerLimit,
-                ceiling,
-                "UNREACHABLE at every permitted row limit: the rows this read's ordering places ahead of the "
-                + "population you asked for already fill the largest response this surface will return, so "
-                + "not one row of that population can appear in it. Raising the limit is not a fix and does "
-                + "not become one as the server grows. " + remedy);
-        }
-
-        return new PgCappedReachVerdict(
-            PgCappedReach.Partial,
-            ahead,
-            wanted,
-            reachable,
-            reachableAtMax,
-            callerLimit,
-            ceiling,
-            "PARTIAL: rows this read's ordering places ahead of the population you asked for displaced part "
-            + "of it. A larger limit reaches more of it, up to the surface maximum. " + remedy);
-    }
-
-    /// <summary>
-    /// How many of the wanted rows a given limit can show: the budget left after the leading block, capped by
-    /// the population itself and floored at zero.
-    ///
-    /// <para>One expression serving both the caller's limit and the ceiling. Two copies would have to agree,
-    /// and the failure of a disagreement is <c>ARaisedLimitWouldHelp</c> answering from two different
-    /// arithmetics - a read that half works, for a reason no reader could see.</para>
-    /// </summary>
-    private static long Reachable(long rowsAhead, long wantedRows, long limit) =>
-        Math.Clamp(limit - rowsAhead, 0, wantedRows);
+           and a negative rowsAhead would make the subtraction behind ReachableRows hand back MORE reachable
+           rows than the limit allows - the arithmetic failing toward "you can see it all", which is the
+           direction this whole class exists to refuse. A negative wantedRows would do the same via
+           WithheldRows. Clamped HERE and only here, so the figures a verdict reports are the figures its arm
+           was read from. */
+        new PgCappedReachVerdict(
+            order,
+            Math.Max(0, rowsAhead),
+            Math.Max(0, wantedRows),
+            returnedRows,
+            Math.Max(0, limit),
+            Math.Max(0, maxLimit),
+            remedy);
 }

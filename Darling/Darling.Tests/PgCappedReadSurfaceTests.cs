@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -67,6 +68,111 @@ public sealed class PgCappedReadSurfaceTests
            whole pair of issues is about - a read that has the answer and does not say it. */
         Assert.Contains("reach.Reach.ToString()", body, StringComparison.Ordinal);
         Assert.Contains("reach.Message", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Each surface declares the order semantics its own <c>ORDER BY</c> has: <c>get_pg_index_bloat</c>
+    /// declares <see cref="PgOrderSemantics.Ranked"/>, <c>get_pg_extensions</c> declares
+    /// <see cref="PgOrderSemantics.Grouped"/>, and between them they cover every member of the enum (#3435).
+    ///
+    /// <para><b>The CORRECT value, not merely a value.</b> #3431's lane found its own worst gap by replacing
+    /// the extension surface's <c>rowsAhead</c> argument with a literal zero and watching every test stay
+    /// green: the classifier had good unit tests and the surface had good source pins, and nothing looked at
+    /// the seam between them. <see cref="PgOrderSemantics"/> is a new argument in exactly that seam, and it
+    /// is worse than <c>rowsAhead</c> in one respect - there are only two values, so a surface that passes
+    /// the wrong one passes a plausible one. A pin asserting "an order is declared" would survive the two
+    /// surfaces swapping theirs, which is precisely the defect #3435 exists to make impossible: the
+    /// extensions read would be back to claiming a ranking it does not have.</para>
+    ///
+    /// <para>So the assertion is the exact token, the OTHER token's absence from the same body, and that the
+    /// two surfaces between them name both members - which fails if they ever agree.</para>
+    /// </summary>
+    [Fact]
+    public void EachSurfaceDeclaresTheOrderSemanticsItsOwnOrderByHas()
+    {
+        var declared = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [IndexTool] = nameof(PgOrderSemantics.Ranked),
+            [ExtensionTool] = nameof(PgOrderSemantics.Grouped),
+        };
+
+        var members = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [IndexTool] = "GetPgIndexBloat",
+            [ExtensionTool] = "GetPgExtensions",
+        };
+
+        foreach (var (file, expected) in declared)
+        {
+            var body = StripComments(MemberBody(file, members[file]));
+
+            Assert.Contains(
+                "order: PgOrderSemantics." + expected,
+                body,
+                StringComparison.Ordinal);
+
+            /* THE OTHER MEMBER'S ABSENCE, because a surface passing both would satisfy the line above and
+               still decide against whichever argument won. */
+            foreach (var other in Enum.GetNames<PgOrderSemantics>().Where(
+                name => !string.Equals(name, expected, StringComparison.Ordinal)))
+            {
+                Assert.DoesNotContain("PgOrderSemantics." + other, body, StringComparison.Ordinal);
+            }
+
+            /* THE VERDICT'S ORDER REACHES THE PAYLOAD. Declared and then not published is a read that knows
+               whether its page is a ranking and does not say - the shape both parent issues are about. */
+            Assert.Contains("order_semantics = reach.Order.ToString()", body, StringComparison.Ordinal);
+        }
+
+        /* AND THE TWO DO NOT AGREE. Both surfaces declaring Ranked would pass every per-file assertion
+           above while putting the extensions read back where #3435 found it. */
+        Assert.Equal(
+            Enum.GetNames<PgOrderSemantics>().OrderBy(name => name, StringComparer.Ordinal).ToArray(),
+            declared.Values.Distinct(StringComparer.Ordinal)
+                .OrderBy(name => name, StringComparer.Ordinal).ToArray());
+    }
+
+    /// <summary>
+    /// The two <c>ORDER BY</c> clauses the declarations above are ABOUT still say what they said, so a
+    /// declaration cannot go stale against the SQL it describes.
+    ///
+    /// <para><b>This is the #3423 hazard for the new argument.</b> An <see cref="PgOrderSemantics"/> passed
+    /// at the call site is a claim about a clause in another file, and nothing in C# ties the two together:
+    /// change the index read's trailing keys from reclaimable bytes to something that merely partitions, and
+    /// the surface keeps declaring a ranking with no test noticing. So the clause is pinned where the claim
+    /// is made - reclaimable bytes descending for the read that claims a ranking, and a relevance/state/name
+    /// partition with no magnitude key at all for the read that claims a grouping.</para>
+    /// </summary>
+    [Fact]
+    public void TheDeclaredOrderSemanticsMatchTheOrderByEachReadActuallyHas()
+    {
+        /* RANKED: after the answerless-first key - which answered_only turns constant - the remaining keys
+           are magnitudes descending, so the wanted population really is ranked by something worth acting on
+           in BOTH modes. That is what the Ranked declaration on this surface asserts. */
+        var bloat = DarlingPgIndexBloatReader.PgIndexBloatSql;
+        var bloatOrder = bloat.LastIndexOf("ORDER BY (skipped_reason IS NOT NULL) DESC", StringComparison.Ordinal);
+
+        Assert.True(bloatOrder > 0, "the index bloat read's outer ORDER BY is gone or renamed");
+        Assert.Contains(
+            "latest.estimated_reclaimable_bytes DESC NULLS LAST",
+            bloat[bloatOrder..],
+            StringComparison.Ordinal);
+        Assert.Contains("index_bytes DESC", bloat[bloatOrder..], StringComparison.Ordinal);
+
+        /* GROUPED: relevance band, then state band, then the natural key. Not one magnitude anywhere, so a
+           cut removes whole databases rather than the bottom of a ranking - which is the Grouped
+           declaration on that surface, and the reason RankedTail must be unreachable there. */
+        var extensions = DarlingPgExtensionAvailabilityReader.PgExtensionAvailabilitySql;
+        var closingAlias = extensions.IndexOf(") AS latest", StringComparison.Ordinal);
+        var outerOrder = extensions.IndexOf("ORDER BY is_monitoring_relevant DESC", closingAlias, StringComparison.Ordinal);
+
+        Assert.True(outerOrder > closingAlias, "the extension read's outer ORDER BY is gone or renamed");
+
+        var outer = extensions[outerOrder..];
+
+        Assert.Contains("WHEN 'available' THEN 1", outer, StringComparison.Ordinal);
+        Assert.Contains("database_name, extension_name", outer, StringComparison.Ordinal);
+        Assert.DoesNotContain("DESC NULLS LAST", outer, StringComparison.Ordinal);
     }
 
     /// <summary>

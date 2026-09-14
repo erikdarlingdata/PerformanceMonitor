@@ -241,7 +241,16 @@ public sealed class DarlingMcpPgServerStateTools
 
                Under database_name the product collapses to one database's slice, which is two orders of
                magnitude under the cap, so nothing displaces anything and the page is that database's whole
-               answer. */
+               answer.
+
+               GROUPED, and it is a property of this read's ORDER BY rather than a judgement (#3435). The
+               order is relevance band, then state band, then database and extension name - a partition,
+               not a ranking of the created rows by anything a reader would act on. So a cut here leaves
+               SOME DATABASES AND NOT OTHERS, and RankedTail's claim that the withheld rows rank below the
+               returned ones is false on this surface at every row count. Declaring the grouping is what
+               makes that claim unreachable instead of merely unlikely: the previous argument was that
+               RankedTail needed rowsAhead to be zero here, which is a statement about today's fleet and not
+               about this read's contract. */
             var createdRows = census.Sum(row => row.DatabasesInstalled + row.DatabasesOutdated);
 
             var reach = PgCappedRead.Classify(
@@ -250,6 +259,7 @@ public sealed class DarlingMcpPgServerStateTools
                 returnedRows: rows.Count,
                 limit: limit,
                 maxLimit: McpHelpers.MaxTop,
+                order: PgOrderSemantics.Grouped,
                 remedy: "install_census in this response answers what is created where, aggregated per "
                       + "extension and unaffected by any row limit. For the per-database ROWS, pass "
                       + "database_name: one database is "
@@ -313,6 +323,11 @@ public sealed class DarlingMcpPgServerStateTools
                 reach = new
                 {
                     arm = reach.Reach.ToString(),
+                    /* WHAT THE ORDER MEANS, and on this read it is Grouped (#3435). The field is why the arm
+                       can never be RankedTail here: the rows a cap removes are other databases, so "what
+                       you lost ranks below what you got" would be false, and the type refuses to say it
+                       rather than saying it with a caveat. */
+                    order_semantics = reach.Order.ToString(),
                     is_complete = reach.IsComplete,
                     a_raised_limit_would_help = reach.ARaisedLimitWouldHelp,
                     rows_ahead_of_created = reach.RowsAhead,
