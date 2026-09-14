@@ -892,7 +892,7 @@ public class LiteAlertForwardingTests : IDisposable
     private sealed record SendCall(
         string MetricName, string ServerName, string CurrentValue, string ThresholdValue,
         int ServerId, AlertContext? Context, double? NumericCurrentValue, double? NumericThresholdValue,
-        bool Muted, string? DetailText);
+        bool Muted, string? DetailText, AlertNotificationMode DeliveryMode);
 
     private static (LiteAlertDeliverer Deliverer, List<ToastCall> Toasts, List<SendCall> Sends)
         BuildDeliverer(AlertNotificationMode? serverOverride = null)
@@ -901,9 +901,11 @@ public class LiteAlertForwardingTests : IDisposable
         var sends = new List<SendCall>();
         var deliverer = new LiteAlertDeliverer(
             (title, message, icon, serverName, metricName) => toasts.Add(new ToastCall(title, message, icon, serverName, metricName)),
-            (metricName, serverName, currentValue, thresholdValue, serverId, context, numCur, numThr, muted, detailText) =>
+            (metricName, serverName, currentValue, thresholdValue, serverId, context, numCur, numThr, muted, detailText, deliveryMode) =>
             {
-                sends.Add(new SendCall(metricName, serverName, currentValue, thresholdValue, serverId, context, numCur, numThr, muted, detailText));
+                sends.Add(new SendCall(
+                    metricName, serverName, currentValue, thresholdValue, serverId, context, numCur, numThr,
+                    muted, detailText, deliveryMode));
                 return Task.CompletedTask;
             },
             _ => serverOverride);

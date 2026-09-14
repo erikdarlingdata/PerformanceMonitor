@@ -71,6 +71,12 @@ public class WebhookAlertService
        window is delivered; falls back to the metric-level key when an alert carries no
        fingerprintable incident. */
     private readonly IncidentCooldown _cooldown;
+
+    /* #3430: the per-metric ceiling on REPEAT posts, so one fault on N servers costs a bounded number of
+       cards rather than N per window. One instance per service, which is one per host — the aggregation axis
+       is the metric across the whole fleet, so it cannot live anywhere narrower. */
+    private readonly RepeatDeliveryBudget _repeatBudget = new();
+
     private readonly IAlertSettings _settings;
     private readonly AlertBranding _branding;
     private readonly ILogger<WebhookAlertService> _logger;
@@ -163,6 +169,15 @@ public class WebhookAlertService
     /// PagerDuty summary in place of <paramref name="metricName"/>. Null/empty (every built-in alert)
     /// renders the metric name unchanged. Never reaches the generic channel — see that branch below.
     /// </param>
+    /// <param name="deliveryMode">
+    /// #3430: the effective <see cref="AlertNotificationMode"/> the caller resolved for this alert's server,
+    /// which decides whether the per-metric repeat ceiling applies. <see cref="AlertNotificationMode.Summary"/>
+    /// aggregates; <see cref="AlertNotificationMode.PerEvent"/> does not, because that mode exists so
+    /// downstream automation gets one message per distinct incident and can count recurrences on the #1140
+    /// fingerprint. <c>null</c> — the default, and what the deprecated Dashboard shell and the test call sites
+    /// pass — also does not aggregate: a mode nobody stated is not Summary, and the direction that costs a
+    /// post is preferable to the direction that costs an announcement.
+    /// </param>
     public async Task<bool> TrySendWebhookAlertsAsync(
         string metricName,
         string serverName,
@@ -171,7 +186,8 @@ public class WebhookAlertService
         string serverId = "",
         AlertContext? context = null,
         string? detailText = null,
-        string? displayName = null)
+        string? displayName = null,
+        AlertNotificationMode? deliveryMode = null)
     {
         try
         {
@@ -181,12 +197,34 @@ public class WebhookAlertService
                the alert log on first touch per key (#1145), unless the store is null (no seeding). No
                incidents -> the metric-level fallback key (today's behavior). WHETHER to post only;
                #3313's filter below decides WHICH incidents the post contains. */
+            var window = TimeSpan.FromMinutes(_settings.EmailCooldownMinutes);
             var decision = await _cooldown.EvaluateAsync(
-                serverId, metricName, context?.Incidents,
-                TimeSpan.FromMinutes(_settings.EmailCooldownMinutes));
+                serverId, metricName, context?.Incidents, window);
 
             if (!decision.ShouldSend)
             {
+                return false;
+            }
+
+            /* #3430: the cooldown bounds posts per FINGERPRINT, and AlertFingerprint hashes the server name
+               into every fingerprint, so one fault on N servers is N fingerprints and N posts per window. The
+               budget bounds REPEATS per metric across the whole fleet instead. A first notice is exempt and
+               posts here unchanged; a repeat that finds the metric's window already spent is folded onto the
+               metric's roster and named by the next carrier's card, never dropped. Evaluated on the
+               cooldown's own instant so the two decisions cannot disagree about "now". */
+            var budget = _repeatBudget.Evaluate(
+                metricName, serverName, decision, window,
+                aggregateRepeats: deliveryMode == AlertNotificationMode.Summary,
+                incidents: context?.Incidents);
+
+            if (!budget.ShouldSend)
+            {
+                /* Debug, not Information: a fold happens on every sweep of every co-affected server, which is
+                   the volume this issue is about. The aggregate worth a log line is the carrier's roster size
+                   below, which happens once per window. */
+                _logger.LogDebug(
+                    "Webhook post for {Metric} on {Server} folded into the metric's roster ({Entries} entr(ies) pending)",
+                    metricName, serverName, budget.RosterEntryCount);
                 return false;
             }
 
@@ -198,8 +236,10 @@ public class WebhookAlertService
                ONCE for the whole fan-out, like triageUrl below and for the same reason: four channels
                describing the same firing must not disagree about what it covers. Resolves the prose too,
                against the UNFILTERED context — see IncidentDeliveryFilter for why that basis is the only
-               correct one. #3297's null-when-redundant behaviour is unchanged. */
-            var render = IncidentDeliveryFilter.ForDelivery(context, detailText, decision.DeliverableDedupKeys);
+               correct one. #3297's null-when-redundant behaviour is unchanged. #3430's roster rides through
+               the same call for the same reason, and because that function owns the delivery-scoped copy. */
+            var render = IncidentDeliveryFilter.ForDelivery(
+                context, detailText, decision.DeliverableDedupKeys, budget.Roster);
             var renderContext = render.Context;
             var prose = render.Prose;
 
@@ -248,6 +288,25 @@ public class WebhookAlertService
             if (sent)
             {
                 _cooldown.Stamp(decision);
+
+                /* #3430: clear only the roster entries this card named, so anything folded while the four
+                   posts were in flight is named by the next carrier instead of being committed away by this
+                   one. Logged at Information because it is the once-per-window aggregate — it states how
+                   many servers this single post stood in for. */
+                _repeatBudget.Commit(budget);
+                if (budget.RosterEntryCount > 0)
+                {
+                    _logger.LogInformation(
+                        "Webhook post for {Metric} on {Server} carried {Entries} already-reported incident(s) from other servers",
+                        metricName, serverName, budget.RosterEntryCount);
+                }
+            }
+            else
+            {
+                /* Nothing was delivered, so this post never named the roster and never spent the metric's
+                   window — the same rule the cooldown applies by stamping only on success. Belt and braces
+                   with the reservation's own expiry: whichever of the two runs, the next repeat can post. */
+                _repeatBudget.Release(budget);
             }
 
             return sent;

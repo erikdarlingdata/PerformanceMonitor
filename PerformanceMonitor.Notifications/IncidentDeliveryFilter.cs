@@ -63,9 +63,10 @@ public static class IncidentDeliveryFilter
     /// The delivery-scoped view of an alert.
     /// </summary>
     /// <param name="Context">
-    /// What the channel builders should render: the input instance itself when nothing is filtered (so an
-    /// unfiltered alert is byte-identical to pre-#3313), otherwise a copy carrying the deliverable incidents,
-    /// their detail items, every non-incident item, and the footer.
+    /// What the channel builders should render: the input instance itself when nothing is filtered and no
+    /// #3430 roster is owed (so an unfiltered alert with no roster is byte-identical to pre-#3313), otherwise
+    /// a copy carrying the deliverable incidents, their detail items, every non-incident item, the footer,
+    /// and the roster.
     /// </param>
     /// <param name="Prose">
     /// The alert's flat prose detail to render, resolved through <see cref="AlertDetailText.ProseForDelivery"/>
@@ -104,14 +105,29 @@ public static class IncidentDeliveryFilter
     /// remedy, which is #3296.
     /// </para>
     /// </summary>
+    /// <param name="aggregateRoster">
+    /// #3430's roster item (<see cref="RepeatDeliveryBudget.Decision.Roster"/>) naming the already-reported
+    /// incidents on OTHER servers this post is carrying for, or null when none is owed. Appended here rather
+    /// than by the caller because this is the one function that produces a delivery-scoped COPY of a context:
+    /// a caller appending to its own instance would put the roster into the <c>config_alert_log</c> row and
+    /// every surface that reads it, breaking the split the remarks above draw — the delivery view carries
+    /// what one message says, persistence carries what happened.
+    /// <para>Appended LAST, after the "Other Incidents" footer, so a card reads incidents, then what this
+    /// server is still holding back, then what other servers are. Appended on every return path that
+    /// produces a context, including the unfiltered ones: nothing about "this alert had no stale co-resident
+    /// incident" says the fleet has no folded ones.</para>
+    /// </param>
     public static Render ForDelivery(
-        AlertContext? context, string? detailText, IReadOnlyList<string>? deliverableDedupKeys)
+        AlertContext? context,
+        string? detailText,
+        IReadOnlyList<string>? deliverableDedupKeys,
+        AlertDetailItem? aggregateRoster = null)
     {
         var prose = AlertDetailText.ProseForDelivery(detailText, context);
 
         if (context is null || deliverableDedupKeys is null || context.Incidents is not { Count: > 0 } incidents)
         {
-            return new Render(context, prose, 0);
+            return new Render(WithRoster(context, aggregateRoster), prose, 0);
         }
 
         var deliverable = new HashSet<string>(deliverableDedupKeys, StringComparer.Ordinal);
@@ -137,7 +153,7 @@ public static class IncidentDeliveryFilter
            than delivering an empty card. */
         if (suppressedKeys.Count == 0 || kept.Count == 0)
         {
-            return new Render(context, prose, 0);
+            return new Render(WithRoster(context, aggregateRoster), prose, 0);
         }
 
         var suppressedCount = incidents.Count - kept.Count;
@@ -186,13 +202,52 @@ public static class IncidentDeliveryFilter
             }
         });
 
+        if (aggregateRoster is not null)
+        {
+            rendered.Details.Add(aggregateRoster);
+        }
+
         if (prose is not null &&
             string.Equals(prose, AlertDetailText.Flatten(rendered)?.Trim(), StringComparison.Ordinal))
         {
-            return new Render(context, prose, 0);
+            return new Render(WithRoster(context, aggregateRoster), prose, 0);
         }
 
         return new Render(rendered, prose, suppressedCount);
+    }
+
+    /// <summary>
+    /// Returns <paramref name="context"/> with <paramref name="roster"/> appended, as a COPY — or the input
+    /// instance itself when there is no roster, which keeps the no-roster path byte-identical to pre-#3430.
+    /// <para>A null context with a roster becomes a context carrying only the roster. That is the metric-level
+    /// fan-out — one CPU threshold breached on fifteen servers, or a self-alert, neither of which builds a
+    /// context at all — and it is the case where the roster is the only thing naming the other fourteen. The
+    /// four members are enumerated rather than cloned wholesale because <see cref="AlertContext"/> has no copy
+    /// ctor; the filtered copy below enumerates the same four, so a fifth member arriving would be missing from
+    /// both, which is what <c>Lite.Tests</c>' member-count pin on this type is for.</para>
+    /// </summary>
+    private static AlertContext? WithRoster(AlertContext? context, AlertDetailItem? roster)
+    {
+        if (roster is null)
+        {
+            return context;
+        }
+
+        var copy = new AlertContext
+        {
+            SeverityOverride = context?.SeverityOverride,
+            AttachmentXml = context?.AttachmentXml,
+            AttachmentFileName = context?.AttachmentFileName,
+            Incidents = context?.Incidents
+        };
+
+        if (context is not null)
+        {
+            copy.Details.AddRange(context.Details);
+        }
+
+        copy.Details.Add(roster);
+        return copy;
     }
 
     private static bool NamesAnyOf(AlertDetailItem item, HashSet<string> dedupKeys)

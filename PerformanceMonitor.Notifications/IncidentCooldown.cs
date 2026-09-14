@@ -66,6 +66,7 @@ public sealed class IncidentCooldown
         var keys = BuildKeys(serverId, metricName, incidents);
 
         bool anyFresh = false;
+        bool anyFirstNotice = false;
         bool fingerprinted = false;
         var deliverable = new List<string>(keys.Count);
 
@@ -78,9 +79,17 @@ public sealed class IncidentCooldown
                     _cooldowns.TryAdd(key, lastSent.Value);
             }
 
-            var fresh = !_cooldowns.TryGetValue(key, out var last) || now - last >= window;
+            /* Read once and keep BOTH halves. The absence of an entry after the seed attempt is the only
+               place in the pipeline that can tell "never delivered on this channel" from "delivered, and
+               the window has elapsed" — the map holds an entry only because Stamp wrote one after a
+               successful send or because the seed answered with a real one. The freshness test discards
+               that distinction, and #3430's aggregate ceiling turns on it. */
+            var everSent = _cooldowns.TryGetValue(key, out var last);
+            var fresh = !everSent || now - last >= window;
             if (fresh)
                 anyFresh = true;
+            if (!everSent)
+                anyFirstNotice = true;
 
             if (dedupKey is not null)
             {
@@ -94,7 +103,7 @@ public sealed class IncidentCooldown
            "every one of its fingerprints is in cooldown" are different answers, and the render has to be
            able to tell them apart (an empty list would read as "show nothing"). */
         return new Decision(
-            anyFresh, keys.Select(k => k.Key).ToList(), now, fingerprinted ? deliverable : null);
+            anyFresh, keys.Select(k => k.Key).ToList(), now, fingerprinted ? deliverable : null, anyFirstNotice);
     }
 
     /// <summary>
@@ -155,9 +164,25 @@ public sealed class IncidentCooldown
     /// has to remember to make: the two answers come from one pass over one key set, and a render deciding
     /// freshness for itself could disagree with the decision that let it post.</para>
     /// </param>
+    /// <param name="AnyFirstNotice">
+    /// #3430: whether at least one candidate key had NO prior successful send on this channel — neither an
+    /// entry this process stamped nor one the history-store seed answered with. It is a statement about what
+    /// the seed could find, not a claim that the incident is new to the world: a delivery aged out of
+    /// <c>config_alert_log</c>'s retention reads as a first notice, and a channel constructed with no history
+    /// store (the seed delegate is null) reads EVERY cold key as one.
+    /// <para>Both of those err toward "first notice", which is the direction that costs a post rather than an
+    /// announcement — <see cref="RepeatDeliveryBudget"/> exempts a first notice from its per-metric ceiling
+    /// precisely so a never-announced incident can never be folded into another server's card, which is the
+    /// bug #1154 removed.</para>
+    /// <para>Required rather than defaulted. A default would have to be one of the two answers, and the
+    /// wrong one silently classifies a never-announced incident as a repeat — which is the only input that
+    /// lets the aggregate ceiling drop something. The compiler finding a second producer is cheaper than
+    /// that.</para>
+    /// </param>
     public sealed record Decision(
         bool ShouldSend,
         IReadOnlyList<string> Keys,
         DateTime EvaluatedAtUtc,
-        IReadOnlyList<string>? DeliverableDedupKeys);
+        IReadOnlyList<string>? DeliverableDedupKeys,
+        bool AnyFirstNotice);
 }
