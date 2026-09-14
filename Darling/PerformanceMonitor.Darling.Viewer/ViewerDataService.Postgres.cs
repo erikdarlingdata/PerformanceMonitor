@@ -374,7 +374,8 @@ public sealed partial class ViewerDataService
     /// ACTIONABLE state (available but not installed) sorts above the rest.</summary>
     public Task<List<DarlingPgExtensionAvailabilityReader.PgExtensionRow>> GetPgExtensionAvailabilityAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 200, CancellationToken cancellationToken = default) =>
-        DarlingPgExtensionAvailabilityReader.GetPgExtensionAvailabilityAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+        DarlingPgExtensionAvailabilityReader.GetPgExtensionAvailabilityAsync(
+            _dataSource, serverId, startUtc, endUtc, limit, cancellationToken: cancellationToken);
 
     /// <summary>Activity tab - lock state by mode, type and relation over the window (#2544). Every row
     /// carries the capture denominator, because these are SAMPLES: three ungranted rows means something
@@ -468,7 +469,8 @@ public sealed partial class ViewerDataService
     /// letting a page of answerless rows read as a coverage claim.</summary>
     public Task<List<DarlingPgIndexBloatReader.PgIndexBloatRow>> GetPgIndexBloatAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
-        DarlingPgIndexBloatReader.GetPgIndexBloatAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
+        DarlingPgIndexBloatReader.GetPgIndexBloatAsync(
+            _dataSource, serverId, startUtc, endUtc, limit, cancellationToken: cancellationToken);
 
     /// <summary>Storage tab - what share of this server's btree footprint pg_index_bloat actually has an
     /// answer for (#3278), by count AND by bytes, with the suppressed remainder broken down by reason and

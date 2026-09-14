@@ -135,7 +135,7 @@ public sealed class DarlingPgIndexBloatRotationReadLivePostgresTests
 
             var rows = await DarlingPgIndexBloatReader.GetPgIndexBloatAsync(
                 postgres, ServerId, DarlingMcpTestData.Naive(DateTime.UtcNow.AddHours(-48)),
-                DarlingMcpTestData.Naive(DateTime.UtcNow.AddHours(1)), ReadLimit, ct);
+                DarlingMcpTestData.Naive(DateTime.UtcNow.AddHours(1)), ReadLimit, cancellationToken: ct);
 
             /* Accounting first: three indexes stored across three cycles, three rows read. Seven stored rows
                collapsing to anything but three would mean the distinct key stopped identifying an index. */
