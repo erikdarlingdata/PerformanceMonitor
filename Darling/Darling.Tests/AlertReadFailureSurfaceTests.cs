@@ -330,29 +330,31 @@ public sealed class AlertReadFailureSurfaceTests
     }
 
     /// <summary>
-    /// Under concurrency, every count is backed by the trio that identifies it, and the instance total
-    /// never trails the two parts a reading subtracts from it.
+    /// Under concurrency the instance total never trails the two parts a reading subtracts from it, so the
+    /// figure that names the failures on OTHER servers cannot render negative.
     ///
-    /// <para>Both properties are consequences of the publication order in
-    /// <c>RecordReadFailure</c> and the sampling order in <c>ReadFor</c>, and neither is visible to a
-    /// single-threaded test: the orders only differ while a write is in flight. This is the assertion that
-    /// discriminates them, and it earned its place — it found the write order wrong the first time it ran,
-    /// at about six negative readings per thousand, on a change whose comment confidently asserted that
-    /// sampling the total last was sufficient. It is not: the writer has to increment the total first as
-    /// well, or a reader sees a bucket the total has not counted.</para>
+    /// <para>That population has no count of its own — nothing here holds a newest failure for it, and a
+    /// fourth count with nothing to date it would be the defect rather than the fix — so the total less
+    /// this server's less the fleet's is the only route to it.</para>
     ///
-    /// <para><b>The trio half.</b> A count published before the trio beside it is observable for as long as
-    /// the next instruction takes as a count with nothing to date or name it — the exact reading this whole
-    /// block exists to make impossible, reduced to microseconds rather than removed. Identity is therefore
-    /// published first and the count sampled first, so a nonzero count always has its trio.</para>
+    /// <para>It is a property of the publication order in <c>RecordReadFailure</c> together with the
+    /// sampling order in <c>ReadFor</c>, and it is invisible to a single-threaded test: the two orders only
+    /// differ while a write is in flight. This assertion earned its place — it found the write order wrong
+    /// the first time it ran, at about six negative readings per thousand, on a change whose comment
+    /// confidently asserted that sampling the total last was sufficient on its own. It is not; the writer
+    /// has to increment the total first as well, or a reader samples a bucket the total has not counted.
+    /// Reverting either half reds this test.</para>
     ///
-    /// <para><b>The subtraction half.</b> The failures on OTHER servers have no count of their own —
-    /// nothing here holds a newest failure for them, and a fourth count with nothing to date it would be
-    /// the defect rather than the fix — so the total less this server's less the fleet's is the only route
-    /// to that population, and it must not render as a negative number.</para>
+    /// <para><b>What this does NOT cover</b>, stated because it was attempted here first: the other half of
+    /// the publication order, identity ahead of the count it identifies. That window is one instruction
+    /// wide and reachable only on the FIRST failure a bucket ever records, since the trio is permanently
+    /// populated afterwards — a loop like this one asserting it passed with the writer's order reversed AND
+    /// with the reader's reversed, measured both ways, so it asserted nothing. It is pinned from source by
+    /// <see cref="ThePublicationAndSamplingOrders_ArePinnedFromSource"/> instead, and the two pins are split
+    /// by what each can discriminate rather than sharing a name that overstates both.</para>
     /// </summary>
     [Fact]
-    public async Task UnderConcurrency_EveryCountKeepsItsTrio_AndTheTotalNeverTrailsItsParts()
+    public async Task UnderConcurrency_TheInstanceTotalNeverTrailsItsParts()
     {
         const string Key = "700";
         const int WritesPerWriter = 150_000;
@@ -377,7 +379,6 @@ public sealed class AlertReadFailureSurfaceTests
         /* The reader is THIS thread rather than another queued work item, so it cannot go unscheduled on a
            small runner and report a vacuous pass. */
         var negatives = new List<string>();
-        var undated = new List<string>();
         var observations = 0;
         var observedBothParts = 0;
 
@@ -394,33 +395,6 @@ public sealed class AlertReadFailureSurfaceTests
                 negatives.Add(
                     $"instance {reading.InstanceReadFailures} - server {reading.ServerReadFailures} - "
                     + $"fleet {reading.FleetReadFailures} = {others}");
-            }
-
-            /* The trio half, per scope, on the same snapshot: a count with no stamp, no name or no elapsed
-               beside it. Checked here rather than only after the writers stop, because the whole hazard is
-               an in-flight write — the settled value always agrees. */
-            if (reading.ServerReadFailures > 0
-                && (reading.LastFailureAtUtc is null
-                    || reading.LastFailureRead is null
-                    || reading.LastFailureElapsedMs is null))
-            {
-                undated.Add($"server count {reading.ServerReadFailures} with an incomplete trio");
-            }
-
-            if (reading.FleetReadFailures > 0
-                && (reading.FleetLastFailureAtUtc is null
-                    || reading.FleetLastFailureRead is null
-                    || reading.FleetLastFailureElapsedMs is null))
-            {
-                undated.Add($"fleet count {reading.FleetReadFailures} with an incomplete trio");
-            }
-
-            if (reading.InstanceReadFailures > 0
-                && (reading.InstanceLastFailureAtUtc is null
-                    || reading.InstanceLastFailureRead is null
-                    || reading.InstanceLastFailureElapsedMs is null))
-            {
-                undated.Add($"instance count {reading.InstanceReadFailures} with an incomplete trio");
             }
 
             if (reading.ServerReadFailures > 0 && reading.FleetReadFailures > 0)
@@ -445,11 +419,6 @@ public sealed class AlertReadFailureSurfaceTests
             $"{negatives.Count} negative other-server count(s) over {observations} observation(s): "
             + string.Join(" | ", negatives.Take(5)));
 
-        Assert.True(
-            undated.Count == 0,
-            $"{undated.Count} count(s) observed without the trio that identifies them over "
-            + $"{observations} observation(s): " + string.Join(" | ", undated.Take(5)));
-
         /* Settled: only these two buckets were written, so the total equals their sum exactly and the third
            population is empty. An exact equality here is what proves the total is the sum of the parts and
            not an independently-maintained number that happens to track them. */
@@ -459,6 +428,208 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Equal(
             settled.ServerReadFailures + settled.FleetReadFailures,
             settled.InstanceReadFailures);
+    }
+
+    /// <summary>
+    /// The publication order in <c>RecordReadFailure</c> and the sampling order in <c>ReadFor</c>, pinned
+    /// from source.
+    ///
+    /// <para>Three orderings carry the block's two cross-scope guarantees. Two of them — identity ahead of
+    /// the count it identifies, on each side — are NOT behaviourally reachable: the window is one
+    /// instruction wide and only exists on the first failure a bucket ever records, because the trio is
+    /// permanently populated afterwards. A concurrency loop asserting them was written first and passed
+    /// with the writer's order reversed and again with the reader's reversed, so it asserted nothing; this
+    /// pin exists because that one could not. The third, the total leading its parts, is reachable and is
+    /// pinned behaviourally by <see cref="UnderConcurrency_TheInstanceTotalNeverTrailsItsParts"/> — it is
+    /// covered here as well, cheaply, so a reorder reds on the fast pin too.</para>
+    ///
+    /// <para>The detector is exercised against reordered fixtures below, so its silence on the real file is
+    /// a real absence rather than a matcher that matches whatever it is given.</para>
+    /// </summary>
+    [Fact]
+    public void ThePublicationAndSamplingOrders_ArePinnedFromSource()
+    {
+        var source = ReadSource(Path.Combine(
+            "PerformanceMonitor.Alerting", "AlertReadFailureCounter.cs"));
+
+        var write = MethodBody(source, "public void RecordReadFailure(");
+        var read = MethodBody(source, "public Reading ReadFor(");
+
+        Assert.Empty(OrderViolations(write, read));
+
+        /* Every statement the detector keys on is present, in both bodies, so an "Empty" above cannot be a
+           scan that found nothing to compare. */
+        foreach (var statement in new[]
+        {
+            "Interlocked.Exchange(ref _instanceNewest, newest)",
+            "Interlocked.Exchange(ref bucket.Newest, newest)",
+            "Interlocked.Increment(ref _instanceReadFailures)",
+            "Interlocked.Increment(ref bucket.ReadFailures)",
+        })
+        {
+            Assert.Contains(statement, write, StringComparison.Ordinal);
+        }
+
+        foreach (var statement in new[]
+        {
+            "Interlocked.Read(ref bucket.ReadFailures)",
+            "Interlocked.Read(ref _fleet.ReadFailures)",
+            "Interlocked.Read(ref _instanceReadFailures)",
+            "Volatile.Read(ref bucket.Newest)",
+            "Volatile.Read(ref _fleet.Newest)",
+            "Volatile.Read(ref _instanceNewest)",
+        })
+        {
+            Assert.Contains(statement, read, StringComparison.Ordinal);
+        }
+
+        /* The detector, against each reordering it exists to catch, one at a time — so a rule that stopped
+           working cannot hide behind the others. Each fixture is the real body with exactly two statements
+           swapped, which is what a careless edit produces. */
+        var swaps = new (string What, string A, string B, bool InWriteBody)[]
+        {
+            ("the instance identity behind its count",
+             "Interlocked.Exchange(ref _instanceNewest, newest)",
+             "Interlocked.Increment(ref _instanceReadFailures)", true),
+            ("the bucket identity behind its count",
+             "Interlocked.Exchange(ref bucket.Newest, newest)",
+             "Interlocked.Increment(ref bucket.ReadFailures)", true),
+            ("the total incremented after its part",
+             "Interlocked.Increment(ref _instanceReadFailures)",
+             "Interlocked.Increment(ref bucket.ReadFailures)", true),
+            ("the total sampled before its part",
+             "Interlocked.Read(ref _instanceReadFailures)",
+             "Interlocked.Read(ref bucket.ReadFailures)", false),
+            ("a trio sampled before its count",
+             "Volatile.Read(ref _fleet.Newest)",
+             "Interlocked.Read(ref _fleet.ReadFailures)", false),
+        };
+
+        foreach (var swap in swaps)
+        {
+            var mutatedWrite = swap.InWriteBody ? Swap(write, swap.A, swap.B) : write;
+            var mutatedRead = swap.InWriteBody ? read : Swap(read, swap.A, swap.B);
+
+            Assert.NotEmpty(OrderViolations(mutatedWrite, mutatedRead));
+        }
+    }
+
+    /// <summary>
+    /// Which of the documented orderings the two bodies break, by the position of the statements that
+    /// carry them. Returns an empty list when every one holds.
+    /// </summary>
+    private static List<string> OrderViolations(string write, string read)
+    {
+        var broken = new List<string>();
+
+        void Before(string body, string first, string second, string why)
+        {
+            var a = body.IndexOf(first, StringComparison.Ordinal);
+            var b = body.IndexOf(second, StringComparison.Ordinal);
+
+            /* A missing statement is a violation rather than a pass: a rule whose subject has been renamed
+               away is a rule that stopped being checked, which is the failure mode this whole file exists
+               to avoid one level up. */
+            if (a < 0 || b < 0 || a > b)
+            {
+                broken.Add($"{why} ({first} at {a}, {second} at {b})");
+            }
+        }
+
+        /* Identity before the count it identifies, on each side, so a count is never visible with nothing
+           beside it to date or name it. */
+        Before(
+            write,
+            "Interlocked.Exchange(ref _instanceNewest, newest)",
+            "Interlocked.Increment(ref _instanceReadFailures)",
+            "the instance trio must be published before the instance count");
+        Before(
+            write,
+            "Interlocked.Exchange(ref bucket.Newest, newest)",
+            "Interlocked.Increment(ref bucket.ReadFailures)",
+            "a bucket's trio must be published before that bucket's count");
+
+        /* The total before the part, so the total leads and the other-server subtraction cannot go
+           negative. */
+        Before(
+            write,
+            "Interlocked.Increment(ref _instanceReadFailures)",
+            "Interlocked.Increment(ref bucket.ReadFailures)",
+            "the instance total must be incremented before the bucket it counts for");
+
+        /* And the reader's mirror: every count before its trio, and the total last of the counts. */
+        Before(
+            read,
+            "Interlocked.Read(ref bucket.ReadFailures)",
+            "Volatile.Read(ref bucket.Newest)",
+            "the server count must be sampled before the server trio");
+        Before(
+            read,
+            "Interlocked.Read(ref _fleet.ReadFailures)",
+            "Volatile.Read(ref _fleet.Newest)",
+            "the fleet count must be sampled before the fleet trio");
+        Before(
+            read,
+            "Interlocked.Read(ref _instanceReadFailures)",
+            "Volatile.Read(ref _instanceNewest)",
+            "the instance count must be sampled before the instance trio");
+        Before(
+            read,
+            "Interlocked.Read(ref bucket.ReadFailures)",
+            "Interlocked.Read(ref _instanceReadFailures)",
+            "the instance total must be sampled after the buckets it is subtracted from");
+        Before(
+            read,
+            "Interlocked.Read(ref _fleet.ReadFailures)",
+            "Interlocked.Read(ref _instanceReadFailures)",
+            "the instance total must be sampled after the fleet bucket");
+
+        return broken;
+    }
+
+    /// <summary>The body of a method, from its signature to the brace that closes it.</summary>
+    private static string MethodBody(string source, string signature)
+    {
+        var at = source.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(at > 0, $"#3426 order pin: '{signature}' is no longer in AlertReadFailureCounter.cs");
+
+        var open = source.IndexOf('{', at);
+        Assert.True(open > at, $"#3426 order pin: '{signature}' has no body");
+
+        var depth = 0;
+        for (var i = open; i < source.Length; i++)
+        {
+            if (source[i] == '{')
+            {
+                depth++;
+            }
+            else if (source[i] == '}')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    return source[open..i];
+                }
+            }
+        }
+
+        Assert.Fail($"#3426 order pin: '{signature}' body never closes");
+        return string.Empty;
+    }
+
+    /// <summary>The same text with the first occurrence of two statements exchanged.</summary>
+    private static string Swap(string body, string first, string second)
+    {
+        var a = body.IndexOf(first, StringComparison.Ordinal);
+        var b = body.IndexOf(second, StringComparison.Ordinal);
+
+        Assert.True(a >= 0, $"#3426 order pin: fixture statement not found: {first}");
+        Assert.True(b >= 0, $"#3426 order pin: fixture statement not found: {second}");
+        Assert.NotEqual(a, b);
+
+        var (lo, loText, hi, hiText) = a < b ? (a, first, b, second) : (b, second, a, first);
+
+        return body[..lo] + hiText + body[(lo + loText.Length)..hi] + loText + body[(hi + hiText.Length)..];
     }
 
     [Fact]
