@@ -61,6 +61,16 @@ public class EmailAlertService : IFindingAlertSender
     /// directions are not symmetric: delivering a redundant paragraph is visible and cosmetic, while
     /// withholding one discards an operator's only copy of the remedy, which is the #3296 defect.</para>
     /// </param>
+    /// <param name="deliveryMode">
+    /// #3430: the effective <see cref="AlertNotificationMode"/> for this server, which the caller resolved
+    /// through <see cref="AlertDeliveryModeResolver"/>. Governs the shared send core's per-metric repeat
+    /// ceiling only — it selects nothing about this method's own behaviour, because the #1141 split has
+    /// already happened upstream by the time a message reaches here.
+    /// <para>Defaults to null, meaning "the caller stated no mode", which declines aggregation. The analysis
+    /// finding path (<see cref="FindingAlert"/>) and the dialog test-send take that default deliberately:
+    /// findings carry their own <c>analysis_notify_cooldown_minutes</c> throttle and were not part of what
+    /// #3430 measured.</para>
+    /// </param>
     public async Task TrySendAlertEmailAsync(
         string metricName,
         string serverName,
@@ -72,13 +82,14 @@ public class EmailAlertService : IFindingAlertSender
         double? numericThresholdValue = null,
         bool muted = false,
         string? detailText = null,
-        bool deliverProse = true)
+        bool deliverProse = true,
+        AlertNotificationMode? deliveryMode = null)
     {
         try
         {
             var result = await _core.TrySendAsync(
                 metricName, serverName, currentValue, thresholdValue, serverId.ToString(), context, attemptChannels: !muted,
-                detailText: deliverProse ? detailText : null);
+                detailText: deliverProse ? detailText : null, deliveryMode: deliveryMode);
 
             /* trayChannelPresent: true — LiteAlertDeliverer.DeliverAsync shows a styled balloon for every
                non-muted alert on the same call that reaches here, so a stored "tray" really does mean a

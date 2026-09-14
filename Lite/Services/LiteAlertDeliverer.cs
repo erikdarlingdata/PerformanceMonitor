@@ -49,7 +49,7 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
     internal delegate Task SendAlert(
         string metricName, string serverName, string currentValue, string thresholdValue,
         int serverId, AlertContext? context, double? numericCurrentValue, double? numericThresholdValue,
-        bool muted, string? detailText);
+        bool muted, string? detailText, AlertNotificationMode deliveryMode);
 
     private readonly ShowToast _showToast;
     private readonly SendAlert _sendAlert;
@@ -91,11 +91,11 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
         };
 
         _sendAlert = (metricName, serverName, currentValue, thresholdValue, serverId, context,
-                numericCurrentValue, numericThresholdValue, muted, detailText) =>
+                numericCurrentValue, numericThresholdValue, muted, detailText, deliveryMode) =>
             emailAlertService.TrySendAlertEmailAsync(
                 metricName, serverName, currentValue, thresholdValue, serverId, context,
                 numericCurrentValue: numericCurrentValue, numericThresholdValue: numericThresholdValue,
-                muted: muted, detailText: detailText);
+                muted: muted, detailText: detailText, deliveryMode: deliveryMode);
 
         /* #1236: the per-server delivery-mode override for serverId, or null to inherit the global
            App.AlertDeliveryMode. serverId is the deterministic hash of the storage name (the same
@@ -147,6 +147,15 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
                     outcome.MetricName);
             }
 
+            /* #1236: a per-server override (Manage Servers -> Edit) wins over the global delivery mode;
+               null inherits App.AlertDeliveryMode. Resolved HERE, for every metric, because #3430's
+               per-metric repeat ceiling in the shared send core turns on it — and the fan-out that ceiling
+               bounds is at its worst on the metrics that never had an incident to split (one CPU threshold
+               breached on fifteen servers is fifteen metric-level cooldown keys). The #1141 split below
+               still only applies to the three metrics that carry incidents. */
+            var deliveryMode = AlertDeliveryModeResolver.Resolve(
+                _resolveServerDeliveryOverride(serverId), App.AlertDeliveryMode);
+
             /* Only blocking/deadlocks ever routed through SendDetectedAlertAsync's #1141 split in
                the old loop; every other metric was a direct single send with its numerics. */
             /* #1839's "Blocking Wait Time" joins them: it carries the same blocked-process incident
@@ -156,14 +165,14 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
                 await SendDetectedAlertAsync(
                     outcome.MetricName, outcome.ServerName, outcome.CurrentValue, outcome.ThresholdValue,
                     serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue,
-                    outcome.Muted, outcome.DetailText);
+                    outcome.Muted, outcome.DetailText, deliveryMode);
             }
             else
             {
                 await _sendAlert(
                     outcome.MetricName, outcome.ServerName, outcome.CurrentValue, outcome.ThresholdValue,
                     serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue,
-                    outcome.Muted, outcome.DetailText);
+                    outcome.Muted, outcome.DetailText, deliveryMode);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -192,11 +201,8 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
     private async Task SendDetectedAlertAsync(
         string metricName, string serverName, string summaryCurrentValue, string thresholdValue,
         int serverId, AlertContext? context, double? numericCurrentValue, double? numericThresholdValue,
-        bool isMuted, string? summaryDetailText)
+        bool isMuted, string? summaryDetailText, AlertNotificationMode deliveryMode)
     {
-        /* #1236: a per-server override (Manage Servers -> Edit) wins over the global delivery mode;
-           null inherits App.AlertDeliveryMode. */
-        var deliveryMode = AlertDeliveryModeResolver.Resolve(_resolveServerDeliveryOverride(serverId), App.AlertDeliveryMode);
         if (deliveryMode == AlertNotificationMode.PerEvent && context?.Incidents is { Count: > 0 })
         {
             foreach (var msg in PerEventNotification.Split(context, App.AlertPerEventMaxPerCycle))
@@ -206,13 +212,14 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
                    silently recorded 0 for it. The threshold is the outcome's, unchanged. */
                 await _sendAlert(
                     metricName, serverName, msg.CurrentValue, thresholdValue, serverId,
-                    msg.Context, msg.NumericValue, numericThresholdValue, isMuted, AlertContextBuilders.ContextToDetailText(msg.Context));
+                    msg.Context, msg.NumericValue, numericThresholdValue, isMuted,
+                    AlertContextBuilders.ContextToDetailText(msg.Context), deliveryMode);
             }
             return;
         }
 
         await _sendAlert(
             metricName, serverName, summaryCurrentValue, thresholdValue, serverId,
-            context, numericCurrentValue, numericThresholdValue, isMuted, summaryDetailText);
+            context, numericCurrentValue, numericThresholdValue, isMuted, summaryDetailText, deliveryMode);
     }
 }

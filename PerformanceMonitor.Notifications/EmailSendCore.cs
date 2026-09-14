@@ -39,6 +39,11 @@ public sealed class EmailSendCore
        fingerprintable incident. Seeds the email last-sent time from the alert log (#981). */
     private readonly IncidentCooldown _cooldown;
 
+    /* #3430: the per-metric ceiling on REPEAT sends, the email twin of the webhook fan-out's. Its own
+       instance, so an email that was folded is not governed by the webhook's send history — the same reason
+       the two channels hold separate IncidentCooldown key spaces. */
+    private readonly RepeatDeliveryBudget _repeatBudget = new();
+
     /* Failure tracking for louder logging + the health getter (MIN-4: counters stay
        co-located with GetEmailHealth on the shared core). */
     private int _consecutiveFailures;
@@ -83,6 +88,14 @@ public sealed class EmailSendCore
     /// <paramref name="metricName"/> — built-in alerts render exactly as before. The cooldown key,
     /// severity, and dedup all stay on <paramref name="metricName"/>.
     /// </param>
+    /// <param name="deliveryMode">
+    /// #3430: the effective <see cref="AlertNotificationMode"/> for this alert's server, resolved by the
+    /// caller (both SKUs' deliverers already do, for the #1141 split) and passed straight through to the
+    /// webhook fan-out as well, so one alert's two channels agree about whether it may be aggregated.
+    /// <see cref="AlertNotificationMode.Summary"/> permits the per-metric repeat ceiling;
+    /// <see cref="AlertNotificationMode.PerEvent"/> and <c>null</c> do not — see
+    /// <see cref="RepeatDeliveryBudget.Evaluate"/> for why an unstated mode declines rather than defaults.
+    /// </param>
     public async Task<EmailFanoutResult> TrySendAsync(
         string metricName,
         string serverName,
@@ -92,7 +105,8 @@ public sealed class EmailSendCore
         AlertContext? context,
         bool attemptChannels,
         string? detailText = null,
-        string? displayName = null)
+        string? displayName = null,
+        AlertNotificationMode? deliveryMode = null)
     {
         bool emailAttempted = false;
         bool emailSent = false;
@@ -117,11 +131,25 @@ public sealed class EmailSendCore
                stamp every candidate key only after a successful send. Seeds from the alert log on
                first touch per key (#981). No incidents -> the metric-level fallback key (today's behavior).
                WHETHER to send only; #3313's filter below decides WHICH incidents the email contains. */
+            var window = TimeSpan.FromMinutes(_settings.EmailCooldownMinutes);
             var decision = await _cooldown.EvaluateAsync(
-                serverId, metricName, context?.Incidents,
-                TimeSpan.FromMinutes(_settings.EmailCooldownMinutes));
+                serverId, metricName, context?.Incidents, window);
 
-            if (decision.ShouldSend)
+            /* #3430: the per-metric repeat ceiling, on the email channel's own budget and the cooldown's own
+               instant. Consulted only once the cooldown has already said this alert sends — an alert inside
+               its own fingerprint's window was never a candidate, so folding it would put an entry on the
+               roster for something that is not owed a delivery at all. A first notice is exempt; a repeat
+               that finds the metric's window already spent is folded and named by the next email that does
+               go out. A folded send reports emailAttempted: false, the same shape a cooldown-throttled one
+               already reports, so AlertDelivery.FromFanout derives the row's disposition unchanged. */
+            var budget = decision.ShouldSend
+                ? _repeatBudget.Evaluate(
+                    metricName, serverName, decision, window,
+                    aggregateRepeats: deliveryMode == AlertNotificationMode.Summary,
+                    incidents: context?.Incidents)
+                : null;
+
+            if (budget is not null && budget.ShouldSend)
             {
                 emailAttempted = true;
 
@@ -129,7 +157,8 @@ public sealed class EmailSendCore
                    cooldown, not the webhook's: the two channels hold separate key spaces (see the keyPrefix
                    on each IncidentCooldown), so an email that failed to send last cycle left its key
                    unstamped and its incident is still owed a delivery even where the webhook's is not. */
-                var render = IncidentDeliveryFilter.ForDelivery(context, detailText, decision.DeliverableDedupKeys);
+                var render = IncidentDeliveryFilter.ForDelivery(
+                    context, detailText, decision.DeliverableDedupKeys, budget.Roster);
 
                 var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
                 var subject = $"[SQL Monitor Alert] {titleName} on {serverName}";
@@ -143,6 +172,15 @@ public sealed class EmailSendCore
                     emailSent = true;
                     _cooldown.Stamp(decision);
 
+                    /* #3430: clear only the roster entries this email named, so anything folded while the
+                       SMTP send was in flight is named by the next one. */
+                    _repeatBudget.Commit(budget);
+                    if (budget.RosterEntryCount > 0)
+                    {
+                        _logger.LogInformation(
+                            $"Alert email for {metricName} on {serverName} carried {budget.RosterEntryCount} already-reported incident(s) from other servers");
+                    }
+
                     if (_consecutiveFailures > 0)
                     {
                         _logger.LogInformation($"Alert email delivery recovered after {_consecutiveFailures} failure(s)");
@@ -154,6 +192,10 @@ public sealed class EmailSendCore
                 }
                 catch (Exception ex)
                 {
+                    /* The send threw, so this email named nothing and must not have spent the metric's
+                       window — the same rule the cooldown applies by stamping only on success. */
+                    _repeatBudget.Release(budget);
+
                     sendError = ex.Message;
                     _consecutiveFailures++;
                     _lastFailureError = ex.Message;
@@ -168,16 +210,27 @@ public sealed class EmailSendCore
                     }
                 }
             }
+            else if (budget is not null)
+            {
+                /* Debug, not Information: a fold happens on every sweep of every co-affected server, which
+                   is the volume this issue is about. The aggregate worth a log line is the carrier's roster
+                   size above, which happens once per window. */
+                _logger.LogDebug(
+                    $"Alert email for {metricName} on {serverName} folded into the metric's roster ({budget.RosterEntryCount} entr(ies) pending)");
+            }
         }
 
         /* Webhook notifications (Teams / Slack) — independent of email, and handed the UNFILTERED context:
            it owns its own cooldown key space and applies its own #3313 filter from its own decision. Passing
-           email's filtered copy would make one channel's send history govern the other's card. */
+           email's filtered copy would make one channel's send history govern the other's card. The delivery
+           mode goes through unchanged (#3430): one alert's two channels must agree about whether it may be
+           aggregated, and this is the only place that holds the answer for both. */
         bool webhookSent = false;
         if (attemptChannels)
         {
             webhookSent = await _webhookAlertService.TrySendWebhookAlertsAsync(
-                metricName, serverName, currentValue, thresholdValue, serverId, context, detailText, displayName);
+                metricName, serverName, currentValue, thresholdValue, serverId, context, detailText, displayName,
+                deliveryMode);
         }
 
         return new EmailFanoutResult(emailAttempted, emailSent, sendError, webhookSent, anyChannelConfigured);
