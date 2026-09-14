@@ -744,6 +744,38 @@ public class EntraDeviceCodeTests
                 .AuthenticationDisplay);
     }
 
+    [Fact]
+    public void TheBulkAddRefusalNamesTheModeItIsRefusing()
+    {
+        /* BulkServerOnboardingTests asserts the refusal TEXT behaviourally, but it needs a loadable
+           WPF Window to call the belt and so cannot run on a non-Windows host at all. This pins the
+           half that can: the belt composes its message from AuthenticationDisplayFor, so the
+           substrings that theory expects are derived here from the same helper rather than typed in
+           two places and hoped to agree. */
+        Assert.Contains(
+            "Device Code",
+            ServerConnection.AuthenticationDisplayFor(AuthenticationTypes.EntraDeviceCode),
+            StringComparison.OrdinalIgnoreCase);
+
+        Assert.Contains(
+            "Entra MFA",
+            ServerConnection.AuthenticationDisplayFor(AuthenticationTypes.EntraMFA),
+            StringComparison.OrdinalIgnoreCase);
+
+        /* And the belt really does compose from that helper rather than from a literal of its own,
+           which is what makes the two assertions above about the shipped message. */
+        var belt = CSharpSourceWalker.StripCommentsAndStrings(
+            ParitySource.ReadFile("Lite/Windows/AddMultipleServersDialog.xaml.cs"));
+
+        var at = belt.IndexOf("BuildServerConnection(BulkServerParseLine", StringComparison.Ordinal);
+        Assert.True(at >= 0, "the belt's choke point must exist");
+
+        Assert.Contains(
+            "ServerConnection." + "AuthenticationDisplayFor(",
+            belt[at..Math.Min(belt.Length, at + 600)],
+            StringComparison.Ordinal);
+    }
+
     // ---- Lite/Darling parity --------------------------------------------------------------
 
     [Fact]
