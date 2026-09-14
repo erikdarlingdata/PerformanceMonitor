@@ -156,12 +156,18 @@ public static class EntraDeviceCodeAuth
        ConnectionId) before invoking it (Extensions.Azure 7.0.2, :689). So there is no key to route
        on even in principle, and a per-connection map would be a map with no lookup.
 
-       One at a time is what the UI produces anyway: the Add/Edit dialog is modal and disables Test
-       and Save while a test runs, and ServerManager's connectivity check refuses to open an
-       interactive-mode connection while that dialog is open. A second concurrent Begin therefore
-       does not happen today; if it ever does, the newer attempt owns the slot, the older one gets no
-       window and expires on the driver's own three-minute deadline, and the displacement is logged
-       rather than silent. */
+       The slot is CLAIMED, not overwritten, and that is a correctness requirement rather than
+       tidiness. Three sites call Begin - the Add/Edit dialog's connection test, ServerManager's
+       connectivity check, and RemoteCollectorService's collector connections - and the third runs on
+       a timer, independent of dialog state. RemoteCollectorService's own interactive-auth semaphore
+       serializes collectors against each other and nothing else, so a collection cycle and a user
+       pressing Test genuinely can overlap.
+
+       Overwriting the slot in that overlap is the worst available outcome: the EARLIER attempt's
+       code is published onto the LATER attempt's window, so the user reads a code for one server and
+       types it into a browser, completing a sign-in for a different one, while the connection they
+       were watching fails three minutes later for no visible reason. Refusing the second claim
+       replaces that with an immediate, named failure. */
     private static EntraDeviceCodeAttempt? s_current;
 
     /// <summary>
@@ -211,20 +217,33 @@ public static class EntraDeviceCodeAuth
     /// act on, so the gate cannot disagree with the connection string, and it would follow a
     /// credential profile into this mode for free if one were ever offered there.</para>
     ///
-    /// <para><b>ONE attempt may be in flight at a time, and this is the method's precondition rather
-    /// than an implementation detail.</b> A second overlapping <c>Begin</c> takes the slot the
-    /// driver's callback publishes into, so the earlier caller's code is then displayed on the later
-    /// caller's window — whose Cancel cancels the later caller's token, not the sign-in the displayed
-    /// code belongs to. There is no fix available here, only the constraint: MSAL hands the callback
-    /// a <c>DeviceCodeResult</c> and SqlClient's wrapper drops the
+    /// <para><b>ONE attempt may be in flight at a time, and this method ENFORCES that rather than
+    /// documenting it.</b> A second overlapping call throws
+    /// <see cref="InvalidOperationException"/> with <see cref="ConcurrentSignInMessage"/>.</para>
+    ///
+    /// <para>The constraint is unfixable, so it has to be enforced. MSAL hands the callback a
+    /// <c>DeviceCodeResult</c> and SqlClient's wrapper drops the
     /// <c>SqlAuthenticationParameters</c>, including its <c>ConnectionId</c>, before invoking it — so
-    /// nothing reaches this type that could tell two attempts apart. The displacement is logged,
-    /// which is a diagnosis and not a mitigation. Today's call sites cannot overlap (the Add/Edit
-    /// dialog is modal and disables its own buttons while a test runs, and the connectivity sweep
-    /// refuses interactive modes while that dialog is open); a NEW concurrent call site has to
-    /// serialize itself, the way <c>RemoteCollectorService</c> does behind its interactive-auth
-    /// semaphore.</para>
+    /// nothing reaches this type that could tell two attempts apart, and there is no key a
+    /// per-connection map could use. What a second claim would otherwise do is the worst outcome
+    /// available: publish the EARLIER attempt's code onto the LATER attempt's window, so the user
+    /// reads a code labelled as one server's and completes a sign-in for another's, while the
+    /// connection they were watching fails three minutes later for no visible reason.</para>
+    ///
+    /// <para><b>And the overlap is reachable, which is why enforcing it is not belt-and-braces.</b>
+    /// Three sites call this — the Add/Edit dialog's connection test,
+    /// <c>ServerManager.CheckConnectionAsync</c>, and
+    /// <c>RemoteCollectorService.CreateConnectionAsync</c> — and the third runs on a collection
+    /// timer, independent of dialog state. The collector's own interactive-auth semaphore serializes
+    /// collectors against each other and holds nothing the UI paths take, so a collection cycle
+    /// prompting for a code while the user presses Test is an ordinary Tuesday, not a thought
+    /// experiment. Dialog modality does not cover it; an earlier draft of this comment claimed it
+    /// did.</para>
     /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// A device-code sign-in is already in flight. Callers do not catch this specially: the dialog
+    /// shows the message, and a collector logs it and tries again next cycle.
+    /// </exception>
     public static EntraDeviceCodeAttempt? Begin(SqlConnectionStringBuilder? builder)
     {
         if (builder?.Authentication != SqlAuthenticationMethod.ActiveDirectoryDeviceCodeFlow)
@@ -233,19 +252,37 @@ public static class EntraDeviceCodeAuth
         }
 
         var attempt = new EntraDeviceCodeAttempt();
-        var displaced = Interlocked.Exchange(ref s_current, attempt);
 
-        if (displaced is not null)
+        /* CompareExchange, so the claim is atomic and the loser knows it lost. Exchange would hand
+           the slot over and leave the previous holder's callback publishing onto this attempt. */
+        var holder = Interlocked.CompareExchange(ref s_current, attempt, null);
+
+        if (holder is not null)
         {
+            attempt.Dispose();
+
             AppLogger.Warn(
                 LogSource,
-                "A second device-code sign-in started while one was still in flight. The earlier "
-                    + "attempt will not be shown a code and will expire on the driver's deadline; "
-                    + "the driver's callback carries nothing to tell the two apart.");
+                "A device-code sign-in was requested while one was already in flight, and was "
+                    + "refused. Two at once cannot be told apart: the driver's callback carries no "
+                    + "connection id, so the first sign-in's code would be shown on the second "
+                    + "one's window.");
+
+            throw new InvalidOperationException(ConcurrentSignInMessage);
         }
 
         return attempt;
     }
+
+    /// <summary>
+    /// What the user is told when a second device-code sign-in is requested while one is in flight.
+    /// Names the action, because the remedy is entirely in their hands: finish the sign-in on screen,
+    /// or close its window.
+    /// </summary>
+    public const string ConcurrentSignInMessage =
+        "A device code sign-in is already in progress. Finish it in your browser, or close the code "
+            + "window to cancel it, and then try again. Only one device code sign-in can run at a "
+            + "time because the SQL driver gives no way to tell two of them apart.";
 
     /// <summary>
     /// Whether an attempt currently owns the slot the driver's callback publishes into.

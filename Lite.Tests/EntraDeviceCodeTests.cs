@@ -360,13 +360,22 @@ public class EntraDeviceCodeTests
     }
 
     [Fact]
-    public void Attempt_DisposingADisplacedAttemptDoesNotEvictTheNewerOne()
+    public void Begin_RefusesASecondConcurrentSignIn_RatherThanDisplacingTheFirst()
     {
-        /* The conditional half of the release, and the reason it is a CompareExchange rather than an
-           assignment. Two attempts can overlap only in a shape the UI does not produce today, but the
-           failure if it ever does is the quiet kind: the older attempt finishes, clears the slot, and
-           the newer one's code is then published onto nothing - a sign-in with no window at all,
-           replacing one with a window showing the wrong code. */
+        /* The finding #3408's review caught, and the reason this is a refusal rather than a warning.
+           Three sites call Begin and the collector's runs on a timer, so a collection cycle and a
+           user pressing Test genuinely overlap - the collector's own semaphore serializes collectors
+           against each other and holds nothing the UI paths take.
+
+           Overwriting the slot in that overlap publishes the EARLIER attempt's code onto the LATER
+           attempt's window: the user reads a code, types it into a browser, completes a sign-in for
+           a server they did not choose, and watches the one they did choose fail three minutes later
+           with nothing on screen to explain it. There is no correlation available to fix it with -
+           the driver's callback carries no connection id - so the only honest behaviour is to refuse.
+
+           Asserted in BOTH directions, because a Begin that threw unconditionally would satisfy the
+           throw alone: the first claim must succeed, the second must throw, and after the first is
+           disposed a third must succeed again. */
         var builder = new SqlConnectionStringBuilder();
         ServerConnection.ApplyAuthentication(
             builder, AuthenticationTypes.EntraDeviceCode, null, null, null, null);
@@ -374,26 +383,73 @@ public class EntraDeviceCodeTests
         EntraDeviceCodeAuth.ResetForTests();
         try
         {
-            var older = EntraDeviceCodeAuth.Begin(builder);
-            var newer = EntraDeviceCodeAuth.Begin(builder);
+            var first = EntraDeviceCodeAuth.Begin(builder);
+            Assert.NotNull(first);
+            Assert.True(EntraDeviceCodeAuth.SignInInFlight);
 
-            Assert.NotNull(older);
-            Assert.NotNull(newer);
-            Assert.NotSame(older, newer);
+            var refused = Assert.Throws<InvalidOperationException>(() => EntraDeviceCodeAuth.Begin(builder));
 
-            older!.Dispose();
+            /* The message names the remedy, because the remedy is entirely the user's: finish the
+               sign-in on screen or close its window. */
+            Assert.Equal(EntraDeviceCodeAuth.ConcurrentSignInMessage, refused.Message);
+            Assert.Contains("already in progress", refused.Message, StringComparison.OrdinalIgnoreCase);
 
+            /* The refusal must not have taken the slot, or the first attempt's own code would land
+               on an object nobody is watching. */
             Assert.True(
                 EntraDeviceCodeAuth.SignInInFlight,
-                "the displaced attempt must not take the newer attempt's slot with it");
+                "a refused claim must leave the in-flight attempt holding the slot");
 
-            newer!.Dispose();
+            first!.Dispose();
             Assert.False(EntraDeviceCodeAuth.SignInInFlight);
+
+            /* And the slot is reusable afterwards - a refusal that wedged the mode for the rest of
+               the run would be worse than the race it replaced. */
+            using var third = EntraDeviceCodeAuth.Begin(builder);
+            Assert.NotNull(third);
         }
         finally
         {
             EntraDeviceCodeAuth.ResetForTests();
         }
+    }
+
+    [Fact]
+    public void TheDialogDoesNotClaimBackgroundCollectionSkipsInteractiveModes()
+    {
+        /* The second finding from the same review, and it was a user-facing falsehood: the panel said
+           "background collection skips these servers", which is true of the CONNECTIVITY SWEEP and
+           false of collection. RemoteCollectorService skips an interactive-mode server only once
+           UserCancelledMfa is set, so the first cycle after a start does prompt - which is exactly
+           how Entra MFA has always worked and is what makes either mode usable for collection.
+
+           Pinned on the dialog AND the README together, because the two disagreed and the README was
+           the correct one. Anchored on the panel so a sentence elsewhere in the file cannot stand in
+           for it. */
+        var xaml = ParitySource.ReadFile("Lite/Windows/AddServerDialog.xaml");
+
+        var panel = xaml.IndexOf("x:Name=\"EntraDeviceCodePanel\"", StringComparison.Ordinal);
+        Assert.True(panel >= 0, "the device-code notes panel must exist");
+
+        var end = xaml.IndexOf("</StackPanel>", panel, StringComparison.Ordinal);
+        Assert.True(end > panel, "the panel must be closed");
+
+        var text = xaml[panel..end];
+
+        /* The claim that was wrong, in the shape it was written. */
+        Assert.DoesNotContain("background collection skips", text, StringComparison.OrdinalIgnoreCase);
+
+        /* And the accurate replacement, which has to say that collection is NOT skipped. Positive
+           control: without this, deleting the whole paragraph passes the assertion above. */
+        Assert.Contains("data collection does not", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("per run of the app", text, StringComparison.OrdinalIgnoreCase);
+
+        var readme = ParitySource.ReadFile("README.md");
+        Assert.Contains("data collection does not skip them", readme, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            "Background connectivity sweeps skip these servers rather than raising a code at nobody, collection prompts once",
+            readme,
+            StringComparison.Ordinal);
     }
 
     // ---- The challenge must not carry the secret half ------------------------------------

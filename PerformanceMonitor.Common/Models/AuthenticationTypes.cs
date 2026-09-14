@@ -153,8 +153,17 @@ public static class AuthenticationTypes
     /// <para><see cref="EntraDeviceCode"/> is present for a reason worth separating from
     /// <see cref="EntraMFA"/>'s. Entra MFA is suppressed because an account picker in front of
     /// someone who is not looking at the app is rude. Device code is suppressed because it would not
-    /// work: the code it issues lives about three minutes, so one raised on a collection cycle
-    /// expires unseen and turns a reachable server into a recurring authentication failure.</para>
+    /// work: the code it issues lives about three minutes, so one raised on a sweep expires unseen
+    /// and turns a reachable server into a recurring authentication failure.</para>
+    ///
+    /// <para><b>This governs the connectivity sweep and the bulk-add belt, NOT data collection.</b>
+    /// Lite's collector prompts for an interactive mode and serializes the prompt rather than
+    /// skipping the server, which is how <see cref="EntraMFA"/> has always worked and is what makes
+    /// either mode usable for collection at all — it asks once per run of the app and the driver's
+    /// token cache serves the rest. What this list buys there is the SERIALIZATION and the
+    /// honour-a-decline behaviour, not suppression. Reading it as "interactive modes are never
+    /// prompted in the background" is wrong, and the connection dialog said so until #3196's review
+    /// caught it.</para>
     /// </summary>
     /// <param name="authenticationType">One of the constants on this class, or any other value.</param>
     /// <returns>True only for modes that can raise a sign-in UI.</returns>
