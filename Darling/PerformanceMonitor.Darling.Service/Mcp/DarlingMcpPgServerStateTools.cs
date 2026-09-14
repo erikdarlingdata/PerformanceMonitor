@@ -119,9 +119,12 @@ public sealed class DarlingMcpPgServerStateTools
             + "extension), so the row count is databases x extension names - 102 extension names per database "
             + "on the measured fleet, which puts a ten-database host past the 1000-row maximum and a "
             + "sixteen-database one at 1,632. ONE database's slice is 102 rows, so this is what makes such a "
-            + "host completable: sixteen calls that each finish instead of one that cannot. You do not need it "
-            + "for an install census - install_census in the response is aggregated per extension and no row "
-            + "limit touches it.")] string? database_name = null,
+            + "host completable: sixteen calls that each finish instead of one that cannot. OMIT it for an "
+            + "install census: install_census is aggregated per extension and no row limit touches it, so "
+            + "one unfiltered call answers what is installed where. It follows this filter when you supply "
+            + "one, so a filtered response describes that database and nothing else - census, install_census "
+            + "and reach all share the rows' scope, and the echoed database_name names it.")]
+            string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
@@ -321,11 +324,14 @@ public sealed class DarlingMcpPgServerStateTools
                     max_limit = McpHelpers.MaxTop,
                 },
 
-                /* THE INSTALL CENSUS: one row per extension somebody created anywhere on this server, with
-                   the database count it is created in and the denominator beside it. Aggregated, so it
-                   CANNOT be truncated away while its siblings survive - which is what happens to plpgsql in
-                   the row list above on any host of ten databases or more. This is the answer to "is X
-                   installed everywhere", and it is complete whatever the row limit did. */
+                /* THE INSTALL CENSUS: one row per extension somebody created anywhere in this response's
+                   SCOPE, with the database count it is created in and the denominator beside it. Aggregated,
+                   so it CANNOT be truncated away while its siblings survive - which is what happens to
+                   plpgsql in the row list above on any host of ten databases or more. This is the answer to
+                   "is X installed everywhere", and it is complete whatever the row limit did.
+
+                   Scope, not server, because database_name narrows this too: one response describes one
+                   population, and databases_total says which. Unfiltered, the scope IS the server. */
                 install_census = census
                     .Where(row => row.ExtensionName is not null)
                     .Select(row => new
