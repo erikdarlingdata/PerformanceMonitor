@@ -359,9 +359,21 @@ public sealed class DarlingCappedReadLivePostgresTests
             var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
             var newest = now.AddHours(-2);
 
+            /* MIXED: outdated in one database, installed in the other. */
             await SeedExtensionAsync(connection, ct, newest, "appdb", "hypopg", "outdated", relevant: true);
-            await SeedExtensionAsync(connection, ct, newest, "appdb", "bloom", "absent", relevant: false);
             await SeedExtensionAsync(connection, ct, newest, "other", "hypopg", "installed", relevant: true);
+
+            /* OUTDATED EVERYWHERE AND INSTALLED NOWHERE, which is the case that discriminates. A census
+               whose created test read `state = 'installed'` alone keeps `hypopg` on the strength of its
+               other database and drops THIS extension entirely - so without this pair the claim "outdated
+               counts as created" is asserted by a fixture that does not depend on it. Measured: dropping
+               'outdated' from the census HAVING left every assertion in this class passing until this row
+               existed. */
+            await SeedExtensionAsync(connection, ct, newest, "appdb", "pg_cron", "outdated", relevant: true);
+            await SeedExtensionAsync(connection, ct, newest, "other", "pg_cron", "outdated", relevant: true);
+
+            /* CREATED NOWHERE: absent in one database, available in the other. */
+            await SeedExtensionAsync(connection, ct, newest, "appdb", "bloom", "absent", relevant: false);
             await SeedExtensionAsync(connection, ct, newest, "other", "bloom", "available", relevant: false);
 
             await using var postgres = NpgsqlDataSource.Create(connectionString!);
@@ -370,20 +382,29 @@ public sealed class DarlingCappedReadLivePostgresTests
                 postgres, ServerId,
                 DarlingMcpTestData.Naive(now.AddHours(-48)), DarlingMcpTestData.Naive(now.AddHours(1)), ct);
 
-            var row = Assert.Single(census);
+            var byName = census.ToDictionary(row => row.ExtensionName!, StringComparer.Ordinal);
 
-            Assert.Equal("hypopg", row.ExtensionName);
-            Assert.Equal(1, row.DatabasesInstalled);
-            Assert.Equal(1, row.DatabasesOutdated);
-            Assert.Equal(2, row.DatabasesReporting);
-            Assert.Equal(2, row.DatabasesTotal);
-            Assert.Equal(4, row.RowsAvailable);
+            Assert.Equal(
+                new[] { "hypopg", "pg_cron" },
+                byName.Keys.OrderBy(name => name, StringComparer.Ordinal).ToArray());
+
+            Assert.Equal(1, byName["hypopg"].DatabasesInstalled);
+            Assert.Equal(1, byName["hypopg"].DatabasesOutdated);
+            Assert.Equal(2, byName["hypopg"].DatabasesReporting);
+            Assert.Equal(2, byName["hypopg"].DatabasesTotal);
+            Assert.Equal(6, byName["hypopg"].RowsAvailable);
+
+            /* ZERO installed and TWO outdated: created in both databases, current in neither. Reported
+               apart rather than summed, because "created" and "up to date" are different questions and a
+               single figure answers whichever one the reader assumed. */
+            Assert.Equal(0, byName["pg_cron"].DatabasesInstalled);
+            Assert.Equal(2, byName["pg_cron"].DatabasesOutdated);
 
             /* `bloom` is absent in one database and available in the other, so it is created NOWHERE and
                the HAVING excludes it. A census that listed it would put a row reading "installed in 0 of 2"
-               beside the one that matters, on every uninstalled extension the build offers — 100 of them on
+               beside the ones that matter, on every uninstalled extension the build offers - 100 of them on
                the measured fleet. */
-            Assert.DoesNotContain("bloom", census.Select(r => r.ExtensionName));
+            Assert.DoesNotContain("bloom", census.Select(row => row.ExtensionName));
 
             bodySucceeded = true;
         }
