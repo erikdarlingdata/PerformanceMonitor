@@ -131,9 +131,11 @@ internal static class OversizedPlanBacklogSweep
     /// <para><b>What it costs at the top of the range.</b> One server's pass is serial under
     /// <see cref="PerPlanBudget"/>, so the worst case for one monitored server is ten times fifteen seconds,
     /// 150 seconds; the fleet pass is serial too, so 42 servers all timing out at the cap is 105 minutes.
-    /// That pass skips its own next slots rather than stacking — <c>DarlingWorker</c> tracks it and launches
-    /// nothing on top of it — which is the right shape for a fleet whose fetches are all failing. The
-    /// measured pass is nowhere near it: 126 plans in 6,155 ms, ~49 ms each.</para>
+    /// Two passes never overlap whatever the interval — <c>DarlingWorker</c> tracks the pass and its gate
+    /// will not launch on top of an incomplete one — so a pass that outruns <see cref="SweepInterval"/> runs
+    /// back-to-back with its successor at the SAME one-plan-at-a-time load rather than at two passes' worth
+    /// of concurrent fetches. That is the bound which matters, and it is the per-fetch isolation above that
+    /// provides it. The measured pass is nowhere near any of this: 126 plans in 6,155 ms, ~49 ms each.</para>
     /// </summary>
     internal const int MaxPlansPerServerPerTick = 10;
 
