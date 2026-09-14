@@ -265,6 +265,71 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     private const int TsqlServerLocalCount = 28;
     private const int TsqlUtcCount = 12;
 
+    /// <summary>
+    /// The classifier's verdict per column, in the census's own (table, column) ordinal order — the whole
+    /// T-SQL-readable arm, forty entries, as a SEQUENCE.
+    ///
+    /// <para><b>Why a sequence and not the two counts beside it.</b> Two per-category totals are blind to a
+    /// PERMUTATION: one column moving ServerLocal-to-Utc while another moves the other way leaves both
+    /// totals untouched, and a marker edit that flips two columns at once is the ordinary shape of a mistake
+    /// here, not an exotic one. #3419 is that mistake's other half — six columns changed frame on the
+    /// strength of a measurement, and the counts were the only thing that noticed. The counts are kept
+    /// because they name a bare drift more legibly than a forty-line diff does, but this is the
+    /// ratchet.</para>
+    ///
+    /// <para>Derived from the classifier rather than from <see cref="RelationMarkers"/> and
+    /// <see cref="ExpressionMarkers"/>, deliberately: those are the INPUT, and asserting a register against
+    /// the declarations it was computed from is a tautology. What this holds is that the vocabulary still
+    /// resolves to the same answers it resolved to when each answer was justified.</para>
+    /// </summary>
+    private static readonly string[] TsqlClassifiedFrames =
+    [
+        "ag_database_replica_states.last_commit_time=ServerLocal",
+        "ag_database_replica_states.last_hardened_time=ServerLocal",
+        "ag_database_replica_states.last_received_time=ServerLocal",
+        "ag_database_replica_states.last_redone_time=ServerLocal",
+        "agent_status.next_scheduled_run=ServerLocal",
+        "blocked_process_reports.event_time=Utc",
+        "cpu_utilization_stats.sample_time=ServerLocal",
+        "deadlocks.deadlock_time=Utc",
+        "default_trace_events.end_time=ServerLocal",
+        "default_trace_events.event_time=ServerLocal",
+        "dmv_blocking_snapshots.blocked_last_tran_started=ServerLocal",
+        "dmv_blocking_snapshots.blocking_last_tran_started=ServerLocal",
+        "index_object_stats.last_user_lookup=ServerLocal",
+        "index_object_stats.last_user_scan=ServerLocal",
+        "index_object_stats.last_user_seek=ServerLocal",
+        "index_object_stats.last_user_update=ServerLocal",
+        "index_object_stats.sqlserver_start_time=ServerLocal",
+        "job_history.run_datetime=ServerLocal",
+        "long_query_completions.event_time=Utc",
+        "memory_pressure_events.sample_time=Utc",
+        "plan_cache_stats.oldest_plan_create_time=ServerLocal",
+        /* #3419: all six, measured against collection_time on two stores. The two *_start_time siblings are
+           stored and never read, so nothing consumes them today — they are here because the relation marker
+           decides them, and a marker that decided only four of six would be the split this file exists to
+           make impossible. */
+        "plan_correction.execute_action_initiated_time=Utc",
+        "plan_correction.execute_action_start_time=Utc",
+        "plan_correction.last_refresh=Utc",
+        "plan_correction.revert_action_initiated_time=Utc",
+        "plan_correction.revert_action_start_time=Utc",
+        "plan_correction.valid_since=Utc",
+        "procedure_stats.cached_time=ServerLocal",
+        "procedure_stats.last_execution_time=ServerLocal",
+        "pvs_stats.aborted_version_cleaner_end_time=ServerLocal",
+        "pvs_stats.aborted_version_cleaner_start_time=ServerLocal",
+        "pvs_stats.offrow_version_cleaner_end_time=ServerLocal",
+        "pvs_stats.offrow_version_cleaner_start_time=ServerLocal",
+        "query_snapshots.tran_start_time=ServerLocal",
+        "query_stats.creation_time=ServerLocal",
+        "query_stats.last_execution_time=ServerLocal",
+        "query_store_stats.interval_start_time_utc=Utc",
+        "running_jobs.start_time=ServerLocal",
+        "server_properties.sqlserver_start_time=ServerLocal",
+        "system_health_events.event_time=Utc",
+    ];
+
     /// <summary>The assignment's balanced right-hand side. Balanced rather than to-end-of-line because four
     /// of the columns are assigned a multi-line <c>DATEADD</c> or a correlated subquery, and a line-scoped
     /// read of those sees the function name and none of its clock base.</summary>
@@ -563,6 +628,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     public void EveryTimestampColumnsFrame_IsReadFromItsOwnCollectorsQueryText_OrDeclaredWithEvidence()
     {
         var unreadable = new List<string>();
+        var classified = new List<string>();
         var serverLocal = 0;
         var utc = 0;
 
@@ -577,9 +643,11 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             {
                 case ClockFrame.ServerLocal:
                     serverLocal++;
+                    classified.Add(table + "." + column + "=ServerLocal");
                     break;
                 case ClockFrame.Utc:
                     utc++;
+                    classified.Add(table + "." + column + "=Utc");
                     break;
                 default:
                     unreadable.Add(table + "." + column);
@@ -589,6 +657,12 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
         Assert.Equal(TsqlServerLocalCount, serverLocal);
         Assert.Equal(TsqlUtcCount, utc);
+
+        /* The per-column verdicts in order, which the two totals above cannot see a permutation in.
+           The census walk is already ordered by (table, column), so this compares the sequence as
+           produced rather than a re-sorted copy — a re-sort would hide a reordering of the census
+           itself. */
+        Assert.Equal(TsqlClassifiedFrames, classified.ToArray());
 
         Assert.Equal(
             NonTsqlProvenance.Select(d => d.Table + "." + d.Column).OrderBy(x => x, StringComparer.Ordinal).ToArray(),
