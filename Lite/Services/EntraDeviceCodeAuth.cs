@@ -547,7 +547,8 @@ public static class EntraDeviceCodeAuth
     /// </param>
     /// <param name="degradation">
     /// Which way attribution degraded, or <see cref="EntraDeviceCodeDegradation.None"/>. The same
-    /// classification that selects the warning below, so the two cannot disagree.
+    /// classification <see cref="DescribeDegradation"/> is handed to pick the warning, so the
+    /// value a caller reads and the message an operator reads cannot disagree.
     /// </param>
     internal static EntraDeviceCodeAttempt Claim(
         EntraDeviceCodeChallenge challenge,
@@ -588,31 +589,15 @@ public static class EntraDeviceCodeAuth
                     : EntraDeviceCodeDegradation.None;
 
         /* The operator's half, selected BY the classification above rather than by asking the state
-           again. The prose is deliberately not asserted on anywhere - a message pinned word for word
-           rots into a test that fails on an improvement - but the condition each line rests on is
-           now the condition a caller can read, so an inverted one is a red test and not a silently
-           missing warning.
-
-           The second warning suppresses a null on the owner it names. SignInStillAwaitingItsOwnCode is
-           reachable only through a pattern that matched a slot holder, which the compiler cannot see
-           through an enum. */
-        if (degradation is EntraDeviceCodeDegradation.NoAcquisitionIdentity)
+           again, and built in a function a test can call rather than inline at the branch. Which
+           message each degradation gets is asserted; no word of it is. An inline message can be
+           swapped with its sibling, and an operator sent to the wrong remedy, with nothing to go
+           red - the classification is what the tests read, and it is computed before either
+           message exists. Nothing operator-facing is spelled in THIS method, which is pinned too,
+           because a copy written here would be a message no test can reach. */
+        if (DescribeDegradation(degradation, acquiredTarget, owner?.Target) is { } warning)
         {
-            AppLogger.Warn(
-                LogSource,
-                "A device code arrived with no acquisition identity, so it was shown unnamed. Every "
-                    + "acquisition that runs through Lite's own provider records one, so this means "
-                    + "either the driver refused that provider at startup or the execution context "
-                    + "no longer reaches the callback.");
-        }
-        else if (degradation is EntraDeviceCodeDegradation.SignInStillAwaitingItsOwnCode)
-        {
-            AppLogger.Warn(
-                LogSource,
-                $"A device code for {acquiredTarget} arrived while a sign-in to {owner!.Target} was "
-                    + "still waiting for its own code, so it was shown as its own prompt. A code "
-                    + "takes a waiting sign-in's slot only when the acquisition that produced it "
-                    + "names that sign-in's own server.");
+            AppLogger.Warn(LogSource, warning);
         }
 
         /* Named from the acquisition rather than left anonymous: this is the only name anything has
@@ -631,6 +616,54 @@ public static class EntraDeviceCodeAuth
 
         return orphan;
     }
+
+    /// <summary>
+    /// What an operator is told about one degraded attribution, or <c>null</c> for
+    /// <see cref="EntraDeviceCodeDegradation.None"/>, which has nothing to report.
+    ///
+    /// <para><b>A function rather than two messages inline, so the ASSOCIATION is assertable.</b>
+    /// <see cref="AppLogger"/> is static with no sink to capture, so nothing can assert on the
+    /// warning that actually reaches a log. What a test CAN do is call this and check that each
+    /// degradation reaches the message about that degradation - which is the property that was
+    /// missing (#3433): the classification is computed before either message exists, so two
+    /// messages written inline at the branch could be swapped, inverted or deleted with the whole
+    /// suite still green. Both messages end in a different remedy, so the wrong one sends an
+    /// operator to the wrong place.</para>
+    ///
+    /// <para><b>No word of either message is pinned</b>, because a message asserted word for word
+    /// fails on an improvement to its wording - the sibling refusal log in <see cref="Begin"/> is
+    /// unpinned for the same reason. What is pinned is what each message NAMES: the missing-identity
+    /// one names no server, because there is no identity to name and a name invented here is the
+    /// mislabelling this whole file exists to prevent, and the waiting-sign-in one names both, which
+    /// is what makes it actionable - which code arrived, and which sign-in it did not serve.</para>
+    /// </summary>
+    /// <param name="degradation">Which way attribution degraded, as <see cref="Claim"/> classified it.</param>
+    /// <param name="acquiredTarget">
+    /// What the acquisition that produced the challenge is signing in to, or <c>null</c> when no
+    /// identity reached the callback.
+    /// </param>
+    /// <param name="waitingTarget">
+    /// What the sign-in holding the rendezvous slot is signing in to, or <c>null</c> when no
+    /// sign-in holds it.
+    /// </param>
+    internal static string? DescribeDegradation(
+        EntraDeviceCodeDegradation degradation,
+        string? acquiredTarget,
+        string? waitingTarget) =>
+        degradation switch
+        {
+            EntraDeviceCodeDegradation.NoAcquisitionIdentity =>
+                "A device code arrived with no acquisition identity, so it was shown unnamed. Every "
+                    + "acquisition that runs through Lite's own provider records one, so this means "
+                    + "either the driver refused that provider at startup or the execution context "
+                    + "no longer reaches the callback.",
+            EntraDeviceCodeDegradation.SignInStillAwaitingItsOwnCode =>
+                $"A device code for {acquiredTarget} arrived while a sign-in to {waitingTarget} was "
+                    + "still waiting for its own code, so it was shown as its own prompt. A code "
+                    + "takes a waiting sign-in's slot only when the acquisition that produced it "
+                    + "names that sign-in's own server.",
+            _ => null,
+        };
 
     /// <summary>Gives up the slot, but only if <paramref name="attempt"/> still holds it.</summary>
     internal static void Release(EntraDeviceCodeAttempt attempt) =>

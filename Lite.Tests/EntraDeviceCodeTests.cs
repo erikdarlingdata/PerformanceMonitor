@@ -1020,6 +1020,132 @@ public class EntraDeviceCodeTests
     }
 
     [Fact]
+    public void EachDegradationReachesTheMessageAboutThatDegradation()
+    {
+        /* #3433. The classification above is well pinned; which MESSAGE each classification reaches
+           was not, and the file claimed it was. Claim computes the degradation BEFORE either message
+           exists, so with the two messages written inline at the branch that selects them, swapping
+           the AppLogger.Warn bodies, inverting either branch condition, or deleting either warning
+           outright all left the suite green - measured, all four. Both messages end in a different
+           remedy, so an operator reading the wrong one is sent to the wrong place.
+
+           DescribeDegradation is the seam that makes this assertable. AppLogger is static with no
+           sink, so nothing can read the warning that reaches a log; a pure function of the
+           classification and the two names can be called directly.
+
+           NO WORD of either message is asserted, which is the trade the file argues for and gets
+           right - a message pinned word for word fails on an improvement to its wording, the same
+           reason the refusal log in Begin is unpinned. What is asserted is which concept each
+           message carries and which server it NAMES. */
+        const string acquired = "alpha.example.invalid (adb)";
+        const string waiting = "bravo.example.invalid (bdb)";
+
+        /* Row per degraded value: the word that names the condition, and which of the two servers
+           the message must name. The words are the enum members' own - NoAcquisition*Identity*,
+           SignInStillA*waiting*ItsOwnCode - so a rewording that dropped one would be describing a
+           different degradation, and every other word stays free. */
+        var expectations =
+            new (EntraDeviceCodeDegradation Degradation, string Concept, bool NamesAcquired,
+                bool NamesWaiting)[]
+            {
+                (EntraDeviceCodeDegradation.NoAcquisitionIdentity, "identity", false, false),
+                (EntraDeviceCodeDegradation.SignInStillAwaitingItsOwnCode, "waiting", true, true),
+            };
+
+        /* Floors on the table and on the enum. A table crippled to zero rows asserts nothing and
+           would otherwise pass; and counting the rows against the enum's own length is what makes a
+           third degradation added with no message fail HERE rather than ship with no warning - the
+           two rows below plus None, asserted separately, account for every value. */
+        Assert.Equal(2, expectations.Length);
+        Assert.Equal(3, Enum.GetValues<EntraDeviceCodeDegradation>().Length);
+        Assert.Equal(2, expectations.Select(e => e.Concept).Distinct().Count());
+        Assert.DoesNotContain(
+            EntraDeviceCodeDegradation.None, expectations.Select(e => e.Degradation));
+
+        /* The instrument's own precondition: neither sentinel may carry either concept word. A
+           sentinel spelling one of them would satisfy its row's concept check by being interpolated
+           rather than by anything the message says, and the check would pass while asserting
+           nothing. Sentinels rather than plausible names for the same reason - "names this server"
+           has to be decided by the interpolation, not by a word someone might also write. */
+        foreach (var expectation in expectations)
+        {
+            Assert.DoesNotContain(expectation.Concept, acquired, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(expectation.Concept, waiting, StringComparison.OrdinalIgnoreCase);
+        }
+
+        Assert.NotEqual(acquired, waiting);
+
+        var walked = 0;
+        var messages = new List<string>();
+
+        foreach (var expectation in expectations)
+        {
+            var message = EntraDeviceCodeAuth.DescribeDegradation(
+                expectation.Degradation, acquired, waiting);
+
+            Assert.False(
+                string.IsNullOrWhiteSpace(message),
+                $"{expectation.Degradation} must tell an operator something");
+
+            /* The concept the degradation is about, and NOT the other one's. Cross-absence is what
+               makes the pair discriminate: one message carrying both words would satisfy both rows,
+               which is the swap this test exists to catch wearing a disguise. */
+            Assert.Contains(expectation.Concept, message!, StringComparison.OrdinalIgnoreCase);
+
+            foreach (var other in expectations.Where(e => e.Degradation != expectation.Degradation))
+            {
+                Assert.DoesNotContain(
+                    other.Concept, message!, StringComparison.OrdinalIgnoreCase);
+            }
+
+            /* And which server it names, which is the wording-free half of the discrimination. A
+               code with no acquisition identity has no name to state and must invent none - a name
+               conjured there is the mislabelling the whole file exists to prevent. The one that did
+               not take a waiting sign-in's slot must name both, or the reader cannot tell which code
+               arrived or which sign-in it failed to serve. */
+            foreach (var (name, named) in new[]
+                {
+                    (acquired, expectation.NamesAcquired),
+                    (waiting, expectation.NamesWaiting),
+                })
+            {
+                if (named)
+                {
+                    Assert.Contains(name, message!, StringComparison.Ordinal);
+                }
+                else
+                {
+                    Assert.DoesNotContain(name, message!, StringComparison.Ordinal);
+                }
+            }
+
+            walked++;
+            messages.Add(message!);
+        }
+
+        /* The walk happened, against a literal, and produced two DIFFERENT messages - a function
+           returning one message for both degradations satisfies every per-row check that does not
+           compare the rows to each other. */
+        Assert.Equal(2, walked);
+        Assert.Equal(2, messages.Distinct().Count());
+
+        /* None has nothing to report, and reporting something would put a warning in the log on the
+           ordinary case - a background read with no sign-in waiting. Asserted with both names in
+           hand, so a message assembled from them unconditionally fails here. */
+        Assert.Null(
+            EntraDeviceCodeAuth.DescribeDegradation(
+                EntraDeviceCodeDegradation.None, acquired, waiting));
+
+        /* Pure: same inputs, same answers, with no rendezvous slot set up and no ResetForTests
+           around any of it. That is what lets the rows above be read in any order and still mean
+           what they say, and it is why this can be asserted at all. */
+        Assert.Equal(
+            messages,
+            expectations.Select(e =>
+                EntraDeviceCodeAuth.DescribeDegradation(e.Degradation, acquired, waiting)));
+    }
+
+    [Fact]
     public async Task TheAcquisitionIdentityReachesWhatTheAcquisitionAwaits()
     {
         /* The mechanism the attribution rests on, exercised rather than assumed. The provider
@@ -1211,34 +1337,59 @@ public class EntraDeviceCodeTests
     [Fact]
     public void TheWarningsAreSelectedByTheClassificationRatherThanBySecondGuesses()
     {
-        /* What makes the behavioural pin on the reason cover the warnings too, rather than merely
-           sitting beside them. Two properties, and neither is about the prose:
+        /* What makes the behavioural pins cover the warning an operator actually sees, rather than
+           merely sitting beside it. Three properties, and none of them is about the prose:
 
-           Both warnings still exist. The reason being a return value is what a test can assert on;
-           the warning is what an operator sees, and deleting one while keeping the other would leave
-           a green suite and a silent degradation - which is the state this change was made to end,
-           reached from the other side.
+           The warning Claim writes is the message DescribeDegradation chose. Any message spelled
+           HERE instead would be a message no test can call - the state #3433 found - so Claim
+           carries no operator-facing text at all, which is asserted by there being no string
+           literal anywhere in it.
 
-           And each warning is chosen BY the classification, not by asking the state again. A second
-           copy of either condition, written to select a log line, is a condition no pin covers: it
-           could be inverted on its own and the returned reason would go on agreeing with the tests.
-           So the conditions must appear once, ahead of the classification, and not after it.
+           One warning call rather than one per degradation. With a message inline at each branch
+           there were two, and deleting either left a green suite and a silent degradation; with the
+           choice in a function, how many messages exist is that function's business and the pin on
+           it is behavioural, while this side has a single call that cannot be bypassed.
 
-           The prose itself is deliberately unpinned. A message asserted word for word fails on an
-           improvement to its wording, which is a test that costs more than it catches - the sibling
-           refusal log in Begin is unpinned for the same reason. */
-        var code = CSharpSourceWalker.StripCommentsAndStrings(
-            ParitySource.ReadFile("Lite/Services/EntraDeviceCodeAuth.cs"));
+           And the classification is what selects, not a second reading of the state. A second copy
+           of either condition, written to pick a log line, is a condition no pin covers: it could
+           be inverted on its own while the returned reason went on agreeing with the tests. So the
+           conditions appear once, above the selection, and DescribeDegradation is handed the ANSWER
+           rather than the state it was computed from - asserted on both sides, because a copy moved
+           into the function would be out of this method's reach and just as uncovered.
+
+           The prose itself stays unpinned, here and behaviourally. A message asserted word for word
+           fails on an improvement to its wording - the sibling refusal log in Begin is unpinned for
+           the same reason. */
+        var raw = ParitySource.ReadFile("Lite/Services/EntraDeviceCodeAuth.cs");
+        var code = CSharpSourceWalker.StripCommentsAndStrings(raw);
+
+        /* Stripping blanks in place and preserves newlines, so an offset in the stripped text is the
+           same offset in the raw text. That is what lets a span located below in the stripped code
+           be handed to a literal scan over the raw - asserted, not assumed, because the two scans
+           silently describing different spans would make the literal count vacuous. */
+        Assert.Equal(raw.Length, code.Length);
 
         var claim = code.IndexOf("EntraDeviceCodeAttempt Claim(", StringComparison.Ordinal);
         Assert.True(claim >= 0, "the attribution decision must live in Claim");
 
-        var claimBody = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', claim));
+        var claimOpen = code.IndexOf('{', claim);
+        var claimBody = CSharpSourceWalker.BraceBalanced(code, claimOpen);
 
-        /* Two warnings, because there are two ways attribution degrades. Counted rather than merely
-           found: one of the two going missing is exactly the loss this pin exists to catch. */
-        Assert.Equal(
-            2, Regex.Matches(claimBody, @"AppLogger\s*\.\s*Warn\s*\(").Count);
+        /* ONE warning, handed a value. Counted rather than merely found: the call going missing
+           altogether is the loss this half of the pin exists to catch. */
+        Assert.Equal(1, Regex.Matches(claimBody, @"AppLogger\s*\.\s*Warn\s*\(").Count);
+
+        var claimLiterals =
+            CSharpSourceWalker.StringLiteralBodies(raw)
+                .Where(l => l.Start >= claimOpen && l.Start < claimOpen + claimBody.Length)
+                .Select(l => l.Text.Trim())
+                .ToList();
+
+        Assert.True(
+            claimLiterals.Count == 0,
+            "Claim must carry no operator-facing text: a message written here is a message no test "
+                + "can call, and swapping two of them was green. Put it in DescribeDegradation. "
+                + $"Found {claimLiterals.Count}: {string.Join(" | ", claimLiterals)}");
 
         /* ONE copy of each condition on the degraded path. This is the load-bearing assertion: a
            second copy, written to pick a log line, is a condition nothing covers - it could be
@@ -1260,29 +1411,48 @@ public class EntraDeviceCodeTests
 
         var noIdentity = Regex.Match(degradedPath, @"acquiredTarget is (not )?null").Index;
         var stillWaiting = Regex.Match(degradedPath, @"Challenge:\s*(not )?null").Index;
-        var firstWarn = degradedPath.IndexOf("AppLogger", StringComparison.Ordinal);
+        var selection = degradedPath.IndexOf("DescribeDegradation" + "(", StringComparison.Ordinal);
+        var warn = degradedPath.IndexOf("AppLogger", StringComparison.Ordinal);
 
-        Assert.True(firstWarn >= 0, "both degradations must still reach the log");
+        Assert.True(selection >= 0, "the message must be the one DescribeDegradation chose");
+        Assert.True(warn >= 0, "a degradation must still reach the log");
         Assert.True(
-            noIdentity >= 0 && noIdentity < firstWarn,
-            "the missing-identity condition must be asked above the warnings, not by one of them");
+            noIdentity >= 0 && noIdentity < selection,
+            "the missing-identity condition must be asked above the selection, not by it");
         Assert.True(
-            stillWaiting >= 0 && stillWaiting < firstWarn,
-            "the waiting-sign-in condition must be asked above the warnings, not by one of them");
+            stillWaiting >= 0 && stillWaiting < selection,
+            "the waiting-sign-in condition must be asked above the selection, not by it");
+        Assert.True(selection < warn, "the message must be chosen before it is logged");
 
-        /* And what is left below the conditions is the classification being read back. The positive
-           half of the same property: a body that stopped branching altogether would satisfy a bare
-           "only one copy of each condition" and select no warning at all. */
-        var belowTheConditions = degradedPath[Math.Max(noIdentity, stillWaiting)..];
+        /* And what crosses into the function is the classification, not the state it was computed
+           from. The positive half of the same property: a body that stopped branching altogether
+           would satisfy a bare "only one copy of each condition" and select no warning at all. */
+        Assert.Contains(
+            "DescribeDegradation" + "(degradation",
+            degradedPath,
+            StringComparison.Ordinal);
 
-        Assert.Contains(
-            "degradation is " + "EntraDeviceCodeDegradation.NoAcquisitionIdentity",
-            belowTheConditions,
-            StringComparison.Ordinal);
-        Assert.Contains(
-            "degradation is " + "EntraDeviceCodeDegradation.SignInStillAwaitingItsOwnCode",
-            belowTheConditions,
-            StringComparison.Ordinal);
+        /* No copy of either condition on the far side either. DescribeDegradation may read the
+           classification and interpolate the two names; asking the state again there would be the
+           second uncovered copy this pin is about, moved somewhere the assertions above cannot see
+           it. */
+        var describe = code.IndexOf("string? DescribeDegradation(", StringComparison.Ordinal);
+        Assert.True(describe >= 0, "the message choice must live in DescribeDegradation");
+
+        var armsOpen = code.IndexOf('{', code.IndexOf("degradation switch", describe, StringComparison.Ordinal));
+        Assert.True(armsOpen > describe, "DescribeDegradation must select on the classification");
+
+        var arms = CSharpSourceWalker.BraceBalanced(code, armsOpen);
+
+        Assert.Equal(0, Regex.Matches(arms, @"acquiredTarget is (not )?null").Count);
+        Assert.Equal(0, Regex.Matches(arms, @"Challenge:\s*(not )?null").Count);
+
+        /* And the messages are where they were moved to, so this pin cannot be satisfied by a
+           function that spells nothing anywhere. Their CONTENT is the behavioural pin's business. */
+        Assert.True(
+            CSharpSourceWalker.StringLiteralBodies(raw)
+                .Count(l => l.Start >= armsOpen && l.Start < armsOpen + arms.Length) >= 2,
+            "both degradations' messages must live in DescribeDegradation");
     }
 
     [Theory]
