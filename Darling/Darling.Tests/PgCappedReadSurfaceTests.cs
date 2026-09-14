@@ -239,11 +239,27 @@ public sealed class PgCappedReadSurfaceTests
         {
             "census = new", "reach = new", "install_census = census",
             "databases_total = ", "extension_name_count = ", "rows_available = ",
-            "databases_complete_in_page = ", "database_name,",
+            "databases_complete_in_page = ",
         })
         {
             Assert.Contains(field, body, StringComparison.Ordinal);
         }
+
+        /* THE ECHO IS THE NORMALISED VALUE, not the caller's raw string. A whitespace-only database_name
+           reaches this from the web surface, the query treats it as no filter, and echoing the raw string
+           beside server-wide rows labels the response with a scope it does not have - the "one response,
+           one scope" guarantee contradicted by its own label. Pinned as the assignment rather than as the
+           field's presence, because `database_name,` is what the defect looked like. */
+        Assert.Contains("database_name = scope,", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("\r\n                database_name,", body, StringComparison.Ordinal);
+
+        /* ONE normalisation, reached through the reader's own helper rather than restated here. Three places
+           have to agree - both reads and the echo - and the finding was the third one disagreeing. */
+        Assert.Contains(
+            "DarlingPgExtensionAvailabilityReader.NormalizeDatabaseFilter(database_name)",
+            body,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("IsNullOrWhiteSpace(database_name)", body, StringComparison.Ordinal);
     }
 
     /// <summary>

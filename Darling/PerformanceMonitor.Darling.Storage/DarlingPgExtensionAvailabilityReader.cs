@@ -43,6 +43,26 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class DarlingPgExtensionAvailabilityReader
 {
+    /// <summary>
+    /// The database filter, normalised: blank becomes null, and a padded name loses its padding. The SINGLE
+    /// definition of what "no filter" means here (#3425).
+    ///
+    /// <para><b>Why it is exposed rather than applied privately at each bind.</b> Three places have to agree
+    /// about this rule — the row read, the install census, and whatever a surface ECHOES back to say which
+    /// scope the response describes. It was applied twice privately and echoed un-normalised once, so a
+    /// whitespace-only <c>database_name</c> from the web surface produced server-wide rows under a payload
+    /// field claiming one database: the response contradicting its own label, which is the "one response,
+    /// one scope" guarantee the census and reach blocks are built on. Two copies of a rule is how the third
+    /// place gets it wrong.</para>
+    ///
+    /// <para>Blank means EVERY database rather than a database named with spaces. The web surface hands over
+    /// a query-string value, so <c>?database_name=</c> is reachable, and selecting the databases whose name
+    /// is the empty string returns none of them — an empty list that reads as a server with no
+    /// inventory.</para>
+    /// </summary>
+    public static string? NormalizeDatabaseFilter(string? databaseName) =>
+        string.IsNullOrWhiteSpace(databaseName) ? null : databaseName.Trim();
+
     /// <param name="State"><c>installed</c>, <c>outdated</c>, <c>available</c>, or <c>absent</c>.</param>
     /// <param name="InstalledVersion">The version created in the CONNECTED DATABASE — not the cluster.
     /// Null does not mean "nowhere on this cluster", only "not in the database we are connected to".</param>
@@ -257,10 +277,10 @@ public static class DarlingPgExtensionAvailabilityReader
            nothing would report zero installations on a server that has them. */
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
-        /* Blank counts as absent, the same normalisation the row read applies - the two have to agree about
-           what "no filter" means or one narrows while the other does not. */
+        /* THROUGH THE SAME HELPER the row read uses, not a second copy of the rule: the census and the rows
+           have to agree about what "no filter" means or one narrows while the other does not. */
         command.Parameters.AddWithValue(
-            string.IsNullOrWhiteSpace(databaseName) ? (object)DBNull.Value : databaseName.Trim());
+            (object?)NormalizeDatabaseFilter(databaseName) ?? DBNull.Value);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -304,15 +324,12 @@ public static class DarlingPgExtensionAvailabilityReader
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(limit);
         /* $5, appended rather than inserted — renumbering four working parameter indexes inside a string is
-           a silent re-aim the compiler cannot see.
-
-           DBNull for the every-database case, and BLANK counts as absent: the web surface hands over a
-           query-string value, so an empty `database_name=` would otherwise select the databases named
-           with the empty string - none of them - and return an empty list that reads as a server with no
-           extensions. Trimmed for the same reason. Same shape as DarlingPgDeadlockReader's optional
-           hash, whose `$n::text IS NULL` form this SQL copies because that one is live-exercised. */
+           a silent re-aim the compiler cannot see. DBNull for the every-database case, through
+           NormalizeDatabaseFilter so this bind cannot disagree with the census's or with what a surface
+           echoes. Same `$n::text IS NULL` shape as DarlingPgDeadlockReader's optional hash, which this SQL
+           copies because that one is live-exercised. */
         command.Parameters.AddWithValue(
-            string.IsNullOrWhiteSpace(databaseName) ? (object)DBNull.Value : databaseName.Trim());
+            (object?)NormalizeDatabaseFilter(databaseName) ?? DBNull.Value);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

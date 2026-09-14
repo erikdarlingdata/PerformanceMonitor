@@ -668,6 +668,38 @@ public sealed class DarlingCappedReadLivePostgresTests
             Assert.Equal(1, filteredInstalled["plpgsql"].GetProperty("databases_installed").GetInt64());
             Assert.Equal(1, filteredInstalled["plpgsql"].GetProperty("databases_total").GetInt64());
 
+            /* A WHITESPACE-ONLY FILTER MEANS EVERY DATABASE, and the payload has to SAY every database.
+               The query already normalised blank to no-filter; the echo did not, so the response came back
+               labelled with a scope it did not have - the "one response, one scope" guarantee contradicted
+               by its own label, on a value `?database_name=` reaches from the web surface. One normalisation
+               now feeds the reads, the echo and the empty-path message, and this is the arm that fails if a
+               second copy of the rule reappears anywhere. */
+            using var blankFilterPayload = JsonDocument.Parse(
+                await DarlingMcpPgServerStateTools.GetPgExtensions(postgres, ServerName, 168, 50, "   "));
+
+            Assert.Equal(
+                JsonValueKind.Null,
+                blankFilterPayload.RootElement.GetProperty("database_name").ValueKind);
+            Assert.Equal(
+                3,
+                blankFilterPayload.RootElement.GetProperty("census")
+                    .GetProperty("databases_total").GetInt64());
+            Assert.Equal(
+                18, blankFilterPayload.RootElement.GetProperty("extension_count").GetInt32());
+
+            /* AND A PADDED NAME IS THE NAME, trimmed on both the query and the echo rather than on one. */
+            using var paddedFilterPayload = JsonDocument.Parse(
+                await DarlingMcpPgServerStateTools.GetPgExtensions(
+                    postgres, ServerName, 168, 50, "  hangfire  "));
+
+            Assert.Equal(
+                "hangfire", paddedFilterPayload.RootElement.GetProperty("database_name").GetString());
+            Assert.Equal(6, paddedFilterPayload.RootElement.GetProperty("extension_count").GetInt32());
+            Assert.Equal(
+                1,
+                paddedFilterPayload.RootElement.GetProperty("census")
+                    .GetProperty("databases_total").GetInt64());
+
             bodySucceeded = true;
         }
         finally

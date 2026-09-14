@@ -136,8 +136,16 @@ public sealed class DarlingMcpPgServerStateTools
         {
             var windowStart = windowEnd.AddHours(-hours_back);
 
+            /* NORMALISED ONCE, and everything downstream uses THIS value - the reads, the echo, and the
+               empty-path message. The reader's own bind applies the same helper, so the query and the label
+               cannot disagree: a whitespace-only database_name from the web surface produces server-wide
+               rows, and echoing the caller's raw string beside them claimed a scope the response did not
+               have. That is the "one response, one scope" guarantee the census and reach blocks rest on,
+               contradicted by its own label. */
+            var scope = DarlingPgExtensionAvailabilityReader.NormalizeDatabaseFilter(database_name);
+
             var rows = await DarlingPgExtensionAvailabilityReader.GetPgExtensionAvailabilityAsync(
-                postgres, resolved.ServerId, windowStart, windowEnd, limit, database_name);
+                postgres, resolved.ServerId, windowStart, windowEnd, limit, scope);
 
             if (rows.Count == 0)
             {
@@ -148,9 +156,9 @@ public sealed class DarlingMcpPgServerStateTools
                         $"No extension inventory for {resolved.ServerName} in the last {hours_back} "
                         + "hour(s). This collector runs DAILY, so a short window can be empty on a healthy "
                         + "server — widen it before concluding anything."
-                        + (string.IsNullOrWhiteSpace(database_name)
+                        + (scope is null
                             ? string.Empty
-                            : $" You filtered to database_name '{database_name}': check the spelling and "
+                            : $" You filtered to database_name '{scope}': check the spelling and "
                               + "that the collector enumerates it, because a name that matches nothing is "
                               + "indistinguishable here from a server with no inventory. Re-run without the "
                               + "filter to see which databases are reported."));
@@ -179,7 +187,7 @@ public sealed class DarlingMcpPgServerStateTools
                put 1,632 against a complete 102-row answer and the reach classifier correctly answered
                Unreachable, telling a filtered caller they could not see what they were holding. */
             var census = await DarlingPgExtensionAvailabilityReader.GetInstallCensusAsync(
-                postgres, resolved.ServerId, windowStart, windowEnd, database_name);
+                postgres, resolved.ServerId, windowStart, windowEnd, scope);
 
             /* FROM THE CENSUS, not from the rows. Every row carries the same two scalars — they hang off a
                one-row relation the per-extension groups join to — so the first row is the whole answer, and
@@ -264,9 +272,11 @@ public sealed class DarlingMcpPgServerStateTools
                 hours_back,
                 extension_count = rows.Count,
                 truncated,
-                /* ECHOED, so a saved payload says which population it describes: one database's complete
-                   102 rows and a 102-row slice of a sixteen-database product look identical otherwise. */
-                database_name,
+                /* ECHOED NORMALISED, so a saved payload says which population it actually describes: one
+                   database's complete 102 rows and a 102-row slice of a sixteen-database product look
+                   identical otherwise, and a blank filter that the query ignored must not come back looking
+                   like a filter that applied. */
+                database_name = scope,
                 installed = truncated
                     ? (int?)null
                     : rows.Count(r => string.Equals(r.State, "installed", StringComparison.OrdinalIgnoreCase)),
