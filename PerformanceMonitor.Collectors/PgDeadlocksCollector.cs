@@ -68,6 +68,15 @@ public sealed class PgDeadlocksCollector : PostgresCollectorDefinitionBase<PgDea
     /* pg_ls_logdir() for the CURRENT file rather than a configured name — log_filename is a strftime
        pattern, so the real name is only knowable by asking.
 
+       The DIRECTORY is asked for on the same grounds. pg_ls_logdir() returns bare names relative to
+       log_directory, and pg_read_file resolves a relative path against the data directory, so
+       current_setting('log_directory') is right in both regimes: a relative setting concatenates to a path
+       under the data directory, and an absolute one — which some installers pick, to keep logs on their own
+       volume — resolves as itself and is readable, because pg_read_file admits an absolute path under
+       log_directory even when log_directory sits outside the data directory. Hardcoding 'log/' is correct
+       only where log_directory holds its default, and elsewhere raises 58P01 for the file this same query
+       just listed (#3410). StoreLogSweep.ReadFileSql builds the store's own log path the same way.
+
        The extraction mirrors PgPlanCaptureCollector's: regexp_matches over the tail rather than a
        line-by-line walk, because the block is recognisable as a unit. Two things in this pattern are load
        bearing and were measured rather than assumed:
@@ -97,7 +106,7 @@ WITH newest AS (
 ),
 tail AS (
     SELECT pg_catalog.pg_read_file(
-               'log/' || n.name,
+               pg_catalog.current_setting('log_directory') || '/' || n.name,
                greatest(n.size - " + TailBytesLiteral + @", 0),
                " + TailBytesLiteral + @") AS body
     FROM newest AS n
