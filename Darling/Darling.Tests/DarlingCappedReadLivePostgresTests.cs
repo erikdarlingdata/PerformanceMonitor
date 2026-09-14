@@ -10,10 +10,12 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -454,6 +456,267 @@ public sealed class DarlingCappedReadLivePostgresTests
             Assert.Equal(0, row.DatabasesTotal);
             Assert.Equal(0, row.ExtensionNameCount);
             Assert.Equal(0, row.RowsAvailable);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(connection, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// The two MCP payloads, end to end: each one's <c>reach</c> block carries the arm AND the figures it
+    /// was decided from, over the same fixtures as above.
+    ///
+    /// <para><b>Why this exists and a source pin did not do.</b> Mutation testing found that replacing the
+    /// extension read's <c>rowsAhead</c> argument with a literal zero left every other assertion in this
+    /// suite green — the source pins see that the classifier is CALLED and that its verdict reaches the
+    /// payload, and <c>PgCappedReadTests</c> sees that the classifier is right about inputs it is handed
+    /// directly. Neither can see the surface handing it the wrong inputs, which turns
+    /// <see cref="PerformanceMonitor.Collectors.PgCappedReach.Unreachable"/> into
+    /// <see cref="PerformanceMonitor.Collectors.PgCappedReach.RankedTail"/> and prints "you have the
+    /// top-ranked rows" over a page that holds none of them. The figures are asserted numerically for the
+    /// same reason: an arm alone is one of four values and two wrong arguments can still produce the right
+    /// one.</para>
+    /// </summary>
+    [Fact]
+    public async Task BothPayloadsCarryTheirReachFiguresAndNotJustTheArm()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #3424/#3425 payload test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var newest = now.AddHours(-2);
+
+            /* Twelve answerless index rows and four answered ones — the same shape as the reader arm, so
+               the figures below are checkable against a fixture a reader can count. */
+            for (var i = 0; i < 12; i++)
+            {
+                await SeedIndexAsync(
+                    connection, ct, newest, "wide", "wide_ix_" + i.ToString("00", CultureInfo.InvariantCulture),
+                    (100 + i) * Mib, estTupleBytes: 48L, reclaimable: null, skippedReason: WidthsReason);
+            }
+
+            foreach (var (name, reclaimable) in new[]
+            {
+                ("orders_a_ix", 90L), ("orders_b_ix", 20L), ("orders_c_ix", 50L), ("orders_d_ix", 30L),
+            })
+            {
+                await SeedIndexAsync(
+                    connection, ct, newest, "orders", name, 500 * Mib,
+                    estTupleBytes: 48L, reclaimable: reclaimable * Mib, skippedReason: null);
+            }
+
+            await LogRunAsync(connection, ct, newest, "SUCCESS");
+
+            /* Three databases x six extension names = 18 pairs, two of them created in every database. */
+            foreach (var database in new[] { "appdb", "hangfire", "postgres" })
+            {
+                await SeedExtensionAsync(
+                    connection, ct, newest, database, "pg_stat_statements", "installed", relevant: true);
+                await SeedExtensionAsync(
+                    connection, ct, newest, database, "pgstattuple", "available", relevant: true);
+
+                foreach (var name in new[] { "amcheck", "bloom", "citext" })
+                {
+                    await SeedExtensionAsync(
+                        connection, ct, newest, database, name, "available", relevant: false);
+                }
+
+                await SeedExtensionAsync(
+                    connection, ct, newest, database, "plpgsql", "installed", relevant: false);
+            }
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+            // ── get_pg_index_bloat, unfiltered: 12 answerless ahead of 4 answers ──────────────────────
+            using var unfiltered = JsonDocument.Parse(
+                await DarlingMcpPgIndexTools.GetPgIndexBloat(postgres, ServerName, 168, ReadLimit));
+
+            var unfilteredReach = unfiltered.RootElement.GetProperty("reach");
+
+            Assert.Equal("Partial", unfilteredReach.GetProperty("arm").GetString());
+            Assert.False(unfilteredReach.GetProperty("is_complete").GetBoolean());
+            Assert.True(unfilteredReach.GetProperty("a_raised_limit_would_help").GetBoolean());
+            Assert.Equal(12, unfilteredReach.GetProperty("answerless_rows_ahead").GetInt64());
+            Assert.Equal(4, unfilteredReach.GetProperty("answered_rows_on_server").GetInt64());
+            Assert.Equal(0, unfilteredReach.GetProperty("answered_rows_reachable_here").GetInt64());
+            Assert.Equal(4, unfilteredReach.GetProperty("answered_rows_withheld").GetInt64());
+            Assert.False(unfiltered.RootElement.GetProperty("answered_only").GetBoolean());
+
+            // ── and filtered: nothing ahead, everything reachable ─────────────────────────────────────
+            using var filtered = JsonDocument.Parse(
+                await DarlingMcpPgIndexTools.GetPgIndexBloat(
+                    postgres, ServerName, 168, ReadLimit, answered_only: true));
+
+            var filteredReach = filtered.RootElement.GetProperty("reach");
+
+            Assert.Equal("Complete", filteredReach.GetProperty("arm").GetString());
+            Assert.Equal(0, filteredReach.GetProperty("answerless_rows_ahead").GetInt64());
+            Assert.Equal(4, filteredReach.GetProperty("answered_rows_reachable_here").GetInt64());
+            Assert.Equal(0, filteredReach.GetProperty("answered_rows_withheld").GetInt64());
+            Assert.True(filtered.RootElement.GetProperty("answered_only").GetBoolean());
+
+            /* A LIMIT SMALLER THAN THE ANSWERED POPULATION is a RankedTail and not a Complete: the top two
+               of four by reclaimable bytes is the ranking working, and it is still a page. */
+            using var narrow = JsonDocument.Parse(
+                await DarlingMcpPgIndexTools.GetPgIndexBloat(
+                    postgres, ServerName, 168, 2, answered_only: true));
+
+            Assert.Equal("RankedTail", narrow.RootElement.GetProperty("reach").GetProperty("arm").GetString());
+            Assert.Equal(
+                2, narrow.RootElement.GetProperty("reach").GetProperty("answered_rows_withheld").GetInt64());
+
+            // ── get_pg_extensions: 16 non-created rows ahead of 6 created ones ────────────────────────
+            using var extensions = JsonDocument.Parse(
+                await DarlingMcpPgServerStateTools.GetPgExtensions(postgres, ServerName, 168, ReadLimit));
+
+            var root = extensions.RootElement;
+            var extensionReach = root.GetProperty("reach");
+
+            /* THE ARITHMETIC, not just the arm. 18 pairs of which 6 are created, so 12 rows are ahead of
+               them — and a surface that handed the classifier a zero here would answer RankedTail and
+               print "you have the top-ranked rows" over a page holding none of them. */
+            Assert.Equal(12, extensionReach.GetProperty("rows_ahead_of_created").GetInt64());
+            Assert.Equal(6, extensionReach.GetProperty("created_rows_on_server").GetInt64());
+            Assert.Equal("Partial", extensionReach.GetProperty("arm").GetString());
+            Assert.Equal(0, extensionReach.GetProperty("created_rows_reachable_here").GetInt64());
+            Assert.Equal(6, extensionReach.GetProperty("created_rows_withheld").GetInt64());
+
+            var census = root.GetProperty("census");
+
+            Assert.Equal(3, census.GetProperty("databases_total").GetInt64());
+            Assert.Equal(6, census.GetProperty("extension_name_count").GetInt64());
+            Assert.Equal(18, census.GetProperty("rows_available").GetInt64());
+            Assert.Equal(18, census.GetProperty("rows_expected_if_uniform").GetInt64());
+            Assert.Equal(3, census.GetProperty("databases_in_page").GetInt32());
+
+            /* NOT ONE database is complete in a ten-row page of an eighteen-row product, and the payload
+               says so rather than leaving a reader to divide the row count by anything. */
+            Assert.Equal(0, census.GetProperty("databases_complete_in_page").GetInt32());
+
+            /* THE STATE TOTALS ARE WITHHELD on a truncated page, and the install census is not. */
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("installed").ValueKind);
+
+            var installed = root.GetProperty("install_census").EnumerateArray()
+                .ToDictionary(row => row.GetProperty("extension_name").GetString()!, StringComparer.Ordinal);
+
+            Assert.Equal(
+                new[] { "pg_stat_statements", "plpgsql" },
+                installed.Keys.OrderBy(name => name, StringComparer.Ordinal).ToArray());
+            Assert.Equal(3, installed["plpgsql"].GetProperty("databases_installed").GetInt64());
+            Assert.Equal(3, installed["plpgsql"].GetProperty("databases_total").GetInt64());
+
+            /* AND plpgsql IS ABSENT FROM THE ROWS in the same payload, which is the whole of #3425 stated
+               as one comparison rather than two tests. */
+            Assert.DoesNotContain(
+                "plpgsql",
+                root.GetProperty("extensions").EnumerateArray()
+                    .Select(row => row.GetProperty("extension_name").GetString()));
+
+            // ── the database filter completes one database, in the payload too ────────────────────────
+            using var oneDatabase = JsonDocument.Parse(
+                await DarlingMcpPgServerStateTools.GetPgExtensions(
+                    postgres, ServerName, 168, 50, "hangfire"));
+
+            Assert.Equal("hangfire", oneDatabase.RootElement.GetProperty("database_name").GetString());
+            Assert.Equal(6, oneDatabase.RootElement.GetProperty("extension_count").GetInt32());
+            Assert.Contains(
+                "plpgsql",
+                oneDatabase.RootElement.GetProperty("extensions").EnumerateArray()
+                    .Select(row => row.GetProperty("extension_name").GetString()));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(connection, bodySucceeded);
+        }
+    }
+
+    /// <summary>
+    /// <c>answered_only</c> over a server whose every index is unmodellable answers <c>no_answers</c>, and
+    /// the refusal carries the suppression breakdown.
+    ///
+    /// <para>The fleet's commonest state — a monitoring login that cannot read <c>pg_stats</c> — and the one
+    /// where an <c>empty</c> status would read as "nothing to reclaim" over a server holding hundreds of
+    /// gigabytes of unmeasurable index.</para>
+    /// </summary>
+    [Fact]
+    public async Task AnsweredOnlyOverAServerWithNoAnswersRefusesRatherThanReadingEmpty()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #3424 no_answers test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var newest = now.AddHours(-2);
+
+            for (var i = 0; i < 3; i++)
+            {
+                await SeedIndexAsync(
+                    connection, ct, newest, "wide", "wide_ix_" + i.ToString(CultureInfo.InvariantCulture),
+                    200 * Mib, estTupleBytes: 48L, reclaimable: null, skippedReason: WidthsReason);
+            }
+
+            await LogRunAsync(connection, ct, newest, "SUCCESS");
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+            using var refused = JsonDocument.Parse(
+                await DarlingMcpPgIndexTools.GetPgIndexBloat(
+                    postgres, ServerName, 168, ReadLimit, answered_only: true));
+
+            Assert.Equal("no_answers", refused.RootElement.GetProperty("status").GetString());
+
+            var message = refused.RootElement.GetProperty("message").GetString()!;
+
+            Assert.Contains("NOT ONE of them", message, StringComparison.Ordinal);
+            Assert.Contains("not a clean bill of health", message, StringComparison.Ordinal);
+
+            /* THE BREAKDOWN TRAVELS WITH THE REFUSAL. A refusal naming no cause sends the reader back for
+               a second call to learn what they cannot see, which is the round trip #3278's census exists
+               to remove. */
+            var hints = refused.RootElement.GetProperty("hints");
+
+            Assert.Equal(3, hints.GetProperty("candidate_index_count").GetInt64());
+            Assert.Equal(0, hints.GetProperty("trusted_index_count").GetInt64());
+            Assert.Equal("NothingTrusted", hints.GetProperty("arm").GetString());
+            Assert.Equal(
+                "ColumnWidthsNotVisible",
+                Assert.Single(hints.GetProperty("suppressed_by_reason").EnumerateArray())
+                    .GetProperty("reason").GetString());
+
+            /* THE CONTROL: without the filter the same server answers with ROWS, so `no_answers` is the
+               filter's own refusal and not this server being empty. */
+            using var unfiltered = JsonDocument.Parse(
+                await DarlingMcpPgIndexTools.GetPgIndexBloat(postgres, ServerName, 168, ReadLimit));
+
+            Assert.Equal(3, unfiltered.RootElement.GetProperty("index_count").GetInt32());
 
             bodySucceeded = true;
         }
