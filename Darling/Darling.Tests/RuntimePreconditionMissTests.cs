@@ -777,10 +777,14 @@ public sealed class RuntimePreconditionMissLivePostgresTests
     private const string DeniedServerName = "darling-precondition-denied";
     private const string HealthyServerName = "darling-precondition-healthy";
     private const string QueryStoreServerName = "darling-precondition-qs";
+    private const string GatedServerName = "darling-precondition-gated";
+    private const string IdleServerName = "darling-precondition-idle";
 
     private static readonly int DeniedServerId = ServerIdHelper.GetDeterministicHashCode(DeniedServerName);
     private static readonly int HealthyServerId = ServerIdHelper.GetDeterministicHashCode(HealthyServerName);
     private static readonly int QueryStoreServerId = ServerIdHelper.GetDeterministicHashCode(QueryStoreServerName);
+    private static readonly int GatedServerId = ServerIdHelper.GetDeterministicHashCode(GatedServerName);
+    private static readonly int IdleServerId = ServerIdHelper.GetDeterministicHashCode(IdleServerName);
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -900,6 +904,74 @@ public sealed class RuntimePreconditionMissLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// The store half of #3423, driven through the real <c>collection_log</c> query rather than the decision
+    /// function alone — the populations differ only in WHEN <c>running_jobs</c> last appeared, which is a fact
+    /// the SQL has to fetch before anything can reason about it.
+    ///
+    /// <para><b>The gated server is seeded as the fleet actually holds it:</b> <c>running_jobs</c> rows that
+    /// are gate SKIPS recorded as zero-duration, zero-row <c>SUCCESS</c>, sitting inside
+    /// <c>collection_log</c> retention, beside a sibling Agent collector that is running right now. A
+    /// presence probe answers "it has run" from those rows and the read goes back to asserting the Agent is
+    /// idle on a server it was never permitted to look at.</para>
+    ///
+    /// <para><b>Both directions, and they must differ.</b> The idle server is the same read over the same
+    /// empty snapshot table, distinguished only by <c>running_jobs</c> having run in the sweep that collected
+    /// the server. A read answering <c>precondition</c> to both would be exactly as wrong as one answering
+    /// <c>empty</c> to both, and only a paired assertion can fail on either.</para>
+    /// </summary>
+    [Fact]
+    public async Task AGateSkipRecordedAsASuccess_DoesNotMakeTheReadCallTheAgentIdle()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live precondition test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterAsync(connection, ct, GatedServerId, GatedServerName);
+            await RegisterAsync(connection, ct, IdleServerId, IdleServerName);
+
+            var now = DateTime.UtcNow;
+            var thisSweep = now.AddMinutes(-2);
+
+            await LogAtAsync(connection, ct, GatedServerId, GatedServerName, "running_jobs", "SUCCESS", null, now.AddDays(-20));
+            await LogAtAsync(connection, ct, GatedServerId, GatedServerName, "job_history", "SUCCESS", null, thisSweep);
+
+            await LogAtAsync(connection, ct, IdleServerId, IdleServerName, "running_jobs", "SUCCESS", null, thisSweep);
+            await LogAtAsync(connection, ct, IdleServerId, IdleServerName, "job_history", "SUCCESS", null, thisSweep);
+
+            var gated = await DarlingMcpJobTools.GetRunningJobs(postgres, GatedServerName);
+            var idle = await DarlingMcpJobTools.GetRunningJobs(postgres, IdleServerName);
+
+            Assert.Equal("precondition", DarlingMcpTestData.StatusOf(gated));
+            Assert.Contains("AWS RDS", gated, StringComparison.Ordinal);
+
+            Assert.Equal("empty", DarlingMcpTestData.StatusOf(idle));
+            Assert.NotEqual(DarlingMcpTestData.StatusOf(idle), DarlingMcpTestData.StatusOf(gated));
+
+            /* The property a gate decided at connect time could not give: the moment the collector is
+               dispatched again, this read stops declaring the gate, with nothing restarted on either side. */
+            await LogAtAsync(connection, ct, GatedServerId, GatedServerName, "running_jobs", "SUCCESS", null, now);
+            Assert.Equal("empty", DarlingMcpTestData.StatusOf(
+                await DarlingMcpJobTools.GetRunningJobs(postgres, GatedServerName)));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task RegisterAsync(NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName)
     {
         using var command = new NpgsqlCommand(@"
@@ -916,11 +988,21 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_engine_edition = 3,
     private static Task LogAsync(
         NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName,
         string collectorName, string status, string? errorMessage) =>
+        LogAtAsync(connection, ct, serverId, serverName, collectorName, status, errorMessage, DateTime.UtcNow);
+
+    /// <summary>
+    /// One <c>collection_log</c> row at a CHOSEN instant. The gated-off inference is a comparison between two
+    /// stored timestamps, so a seeder that always writes "now" can only ever produce one of the populations
+    /// it has to tell apart.
+    /// </summary>
+    private static Task LogAtAsync(
+        NpgsqlConnection connection, CancellationToken ct, int serverId, string serverName,
+        string collectorName, string status, string? errorMessage, DateTime collectionTimeUtc) =>
         DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
 VALUES ($1,$2,$3,$4,$5,0,$6,$7,0,0,0)",
             CollectionIdGenerator.Next(), serverId, serverName, collectorName,
-            DarlingMcpTestData.Naive(DateTime.UtcNow), status, errorMessage);
+            DarlingMcpTestData.Naive(collectionTimeUtc), status, errorMessage);
 
     private static Task QueryStoreHealthAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime captureTime, string databaseName, string actualState) =>
@@ -932,7 +1014,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        var ids = $"{DeniedServerId}, {HealthyServerId}, {QueryStoreServerId}";
+        var ids = $"{DeniedServerId}, {HealthyServerId}, {QueryStoreServerId}, {GatedServerId}, {IdleServerId}";
         foreach (var table in new[] { "collection_log", "query_store_health", "servers" })
         {
             using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id IN ({ids});", connection);
