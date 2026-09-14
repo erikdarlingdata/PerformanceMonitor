@@ -163,13 +163,21 @@ public sealed class DarlingMcpPgIndexTools
                MaxTop is passed as the symbol rather than 1000: this classifier decides the difference
                between "raise the limit" and "raising the limit cannot help", and deciding it against a
                literal that has drifted from what ValidateTop enforces would answer confidently for a
-               surface that does not exist. */
+               surface that does not exist.
+
+               RANKED, on both paths (#3435). The outer ORDER BY's remaining keys are estimated reclaimable
+               bytes descending then index bytes descending, so over the ANSWERED population - the one this
+               classifier is asked about - the order is a ranking whether or not answered_only removed the
+               answerless block in front of it. That declaration is what lets this surface reach RankedTail
+               at all, and the arm's claim that the withheld rows rank lower is exactly this ORDER BY's
+               property rather than a sentence bolted onto the arm. */
             var reach = PgCappedRead.Classify(
                 rowsAhead: answered_only ? 0 : coverage.Suppressed.Sum(bucket => bucket.IndexCount),
                 wantedRows: coverage.Trusted.IndexCount,
                 returnedRows: rows.Count,
                 limit: limit,
                 maxLimit: McpHelpers.MaxTop,
+                order: PgOrderSemantics.Ranked,
                 remedy: "Pass answered_only: true to request the answered indexes directly, ranked by "
                       + "reclaimable bytes descending. That leaves the default answerless-first order "
                       + "untouched for readers who have not asked, and the coverage census below still "
@@ -255,6 +263,11 @@ public sealed class DarlingMcpPgIndexTools
                 reach = new
                 {
                     arm = reach.Reach.ToString(),
+                    /* WHAT THE ORDER MEANS, beside the arm rather than implied by it (#3435). RankedTail is
+                       reachable only from a ranking, so this field is what a reader checks to know the arm
+                       could have been that - and on a grouped read it is what says the missing rows are
+                       other groups rather than a lower-ranked remainder. */
+                    order_semantics = reach.Order.ToString(),
                     is_complete = reach.IsComplete,
                     a_raised_limit_would_help = reach.ARaisedLimitWouldHelp,
                     answerless_rows_ahead = reach.RowsAhead,

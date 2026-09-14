@@ -551,6 +551,10 @@ public sealed class DarlingCappedReadLivePostgresTests
             var unfilteredReach = unfiltered.RootElement.GetProperty("reach");
 
             Assert.Equal("Partial", unfilteredReach.GetProperty("arm").GetString());
+            /* RANKED, published, on the surface whose ORDER BY ranks by reclaimable bytes (#3435). Asserted
+               on the payload rather than only in the source, because the argument and the field are two
+               places the wrong answer could come from. */
+            Assert.Equal("Ranked", unfilteredReach.GetProperty("order_semantics").GetString());
             Assert.False(unfilteredReach.GetProperty("is_complete").GetBoolean());
             Assert.True(unfilteredReach.GetProperty("a_raised_limit_would_help").GetBoolean());
             Assert.Equal(12, unfilteredReach.GetProperty("answerless_rows_ahead").GetInt64());
@@ -580,6 +584,9 @@ public sealed class DarlingCappedReadLivePostgresTests
 
             Assert.Equal("RankedTail", narrow.RootElement.GetProperty("reach").GetProperty("arm").GetString());
             Assert.Equal(
+                "Ranked",
+                narrow.RootElement.GetProperty("reach").GetProperty("order_semantics").GetString());
+            Assert.Equal(
                 2, narrow.RootElement.GetProperty("reach").GetProperty("answered_rows_withheld").GetInt64());
 
             // ── get_pg_extensions: 16 non-created rows ahead of 6 created ones ────────────────────────
@@ -595,6 +602,7 @@ public sealed class DarlingCappedReadLivePostgresTests
             Assert.Equal(12, extensionReach.GetProperty("rows_ahead_of_created").GetInt64());
             Assert.Equal(6, extensionReach.GetProperty("created_rows_on_server").GetInt64());
             Assert.Equal("Partial", extensionReach.GetProperty("arm").GetString());
+            Assert.Equal("Grouped", extensionReach.GetProperty("order_semantics").GetString());
             Assert.Equal(0, extensionReach.GetProperty("created_rows_reachable_here").GetInt64());
             Assert.Equal(6, extensionReach.GetProperty("created_rows_withheld").GetInt64());
 
@@ -657,6 +665,7 @@ public sealed class DarlingCappedReadLivePostgresTests
             var oneDatabaseReach = oneDatabase.RootElement.GetProperty("reach");
 
             Assert.Equal("Complete", oneDatabaseReach.GetProperty("arm").GetString());
+            Assert.Equal("Grouped", oneDatabaseReach.GetProperty("order_semantics").GetString());
             Assert.True(oneDatabaseReach.GetProperty("is_complete").GetBoolean());
             Assert.Equal(2, oneDatabaseReach.GetProperty("created_rows_on_server").GetInt64());
             Assert.Equal(0, oneDatabaseReach.GetProperty("created_rows_withheld").GetInt64());
@@ -699,6 +708,82 @@ public sealed class DarlingCappedReadLivePostgresTests
                 1,
                 paddedFilterPayload.RootElement.GetProperty("census")
                     .GetProperty("databases_total").GetInt64());
+
+            /* ═══ #3435: THE EXTENSIONS READ WITH NOTHING AHEAD OF THE POPULATION IT IS ASKED ABOUT ═══
+
+               A newer cycle in which all six extension names are INSTALLED in all three databases, so
+               rows_available and created_rows are both 18 and rows_ahead_of_created is 0 - the one input on
+               which the two order semantics part company. Read at a limit of ten, this response holds ten
+               rows of an eighteen-row product: some databases complete, others cut.
+
+               A RankedTail here would print "these are the FIRST rows of it in this read's own ranking"
+               over a page whose missing rows are a different DATABASE, not a lower-ranked anything. This
+               read declares its order Grouped, so the arm is unreachable and the answer is Partial.
+
+               The shape is SEEDED rather than argued about. "Not one the fleet produces" is a claim about a
+               census, of the kind #3423 retired when the rows feeding an EXISTS proxy stopped being
+               written, so the contract is what gets tested here. */
+            var later = now.AddHours(-1);
+
+            foreach (var database in new[] { "appdb", "hangfire", "postgres" })
+            {
+                await SeedExtensionAsync(
+                    connection, ct, later, database, "pg_stat_statements", "installed", relevant: true);
+                await SeedExtensionAsync(
+                    connection, ct, later, database, "pgstattuple", "installed", relevant: true);
+
+                foreach (var name in new[] { "amcheck", "bloom", "citext", "plpgsql" })
+                {
+                    await SeedExtensionAsync(
+                        connection, ct, later, database, name, "installed", relevant: false);
+                }
+            }
+
+            using var allCreated = JsonDocument.Parse(
+                await DarlingMcpPgServerStateTools.GetPgExtensions(postgres, ServerName, 168, ReadLimit));
+
+            var allCreatedReach = allCreated.RootElement.GetProperty("reach");
+
+            Assert.Equal(0, allCreatedReach.GetProperty("rows_ahead_of_created").GetInt64());
+            Assert.Equal(18, allCreatedReach.GetProperty("created_rows_on_server").GetInt64());
+            Assert.Equal(ReadLimit, allCreated.RootElement.GetProperty("extension_count").GetInt32());
+            Assert.True(allCreated.RootElement.GetProperty("truncated").GetBoolean());
+
+            Assert.Equal("Grouped", allCreatedReach.GetProperty("order_semantics").GetString());
+            Assert.Equal("Partial", allCreatedReach.GetProperty("arm").GetString());
+            Assert.Equal(ReadLimit, allCreatedReach.GetProperty("created_rows_reachable_here").GetInt64());
+            Assert.Equal(18 - ReadLimit, allCreatedReach.GetProperty("created_rows_withheld").GetInt64());
+
+            /* AND THE PAGE IS THE GROUPED CUT IN ITS PURE FORM, which is what makes "the rows you lost rank
+               below the rows you got" false here rather than merely vague. Measured on this fixture: the
+               ten rows are all three databases' two monitoring-relevant extensions, then ONE database's
+               four remaining ones. So the page holds one COMPLETE database and two truncated to a third of
+               themselves, and what it withheld is two other databases' rows - not a lower-ranked tail of
+               anything, since every row here is in the same state and no key in this ORDER BY is a
+               magnitude. */
+            var databasesInPage = allCreated.RootElement.GetProperty("extensions").EnumerateArray()
+                .Select(row => row.GetProperty("database_name").GetString()!)
+                .Distinct(StringComparer.Ordinal)
+                .Count();
+
+            Assert.Equal(3, databasesInPage);
+            Assert.Equal(
+                1, allCreated.RootElement.GetProperty("census")
+                    .GetProperty("databases_complete_in_page").GetInt32());
+
+            /* THE CONTROL, and it is what makes the arm above a measurement of the fix rather than of the
+               fixture: the identical figures declared as a RANKING are still a RankedTail. So the arm
+               changed because the declaration changed, not because the numbers did. */
+            var asRanking = PgCappedRead.Classify(
+                rowsAhead: allCreatedReach.GetProperty("rows_ahead_of_created").GetInt64(),
+                wantedRows: allCreatedReach.GetProperty("created_rows_on_server").GetInt64(),
+                returnedRows: allCreated.RootElement.GetProperty("extension_count").GetInt32(),
+                limit: allCreatedReach.GetProperty("limit").GetInt32(),
+                maxLimit: allCreatedReach.GetProperty("max_limit").GetInt32(),
+                order: PgOrderSemantics.Ranked,
+                remedy: "control");
+
+            Assert.Equal(PgCappedReach.RankedTail, asRanking.Reach);
 
             bodySucceeded = true;
         }
