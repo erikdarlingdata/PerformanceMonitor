@@ -422,7 +422,9 @@ public sealed class PgIndexBloatGridReachTests
     [Fact]
     public void TheWebDashboardAsksForTheAnsweredPopulationInItsOwnPanel()
     {
-        var tabs = RepoFile.ReadRepoFile(WebTabs);
+        /* LF-normalised, because the descriptor boundary below is a multi-line anchor and an anchor
+           carrying the wrong newline matches nothing and reads as clean. */
+        var tabs = RepoFile.ReadRepoFileLf(WebTabs);
 
         var ranking = tabs.IndexOf("\"Index Bloat (answered ranking)\"", StringComparison.Ordinal);
 
@@ -437,14 +439,27 @@ public sealed class PgIndexBloatGridReachTests
         Assert.Contains("\"note\"", panel, StringComparison.Ordinal);
 
         /* AND THE DEFAULT PANEL IS UNTOUCHED. Reach, not order: the panel that leads with the gaps must not
-           have acquired the filter, or this change hid what #3278 exists to show. */
+           have acquired the filter, or this change hid what #3278 exists to show.
+
+           Scoped to that panel's OWN descriptor - its title through the close of its table() call - and not
+           to the text between the two titles, which contains the design comment explaining the filter and
+           would satisfy this assertion by accident. */
         var estimated = tabs.IndexOf("\"Index Bloat (estimated)\"", StringComparison.Ordinal);
 
         Assert.True(estimated > 0, "the default index bloat panel is gone or renamed");
         Assert.True(estimated < ranking, "the answered ranking is rendered ahead of the default order");
 
-        Assert.DoesNotContain(
-            "answered_only", tabs[estimated..ranking], StringComparison.Ordinal);
+        var closed = tabs.IndexOf("\n      ),", estimated, StringComparison.Ordinal);
+
+        Assert.True(
+            closed > estimated && closed < ranking,
+            "the default panel's descriptor no longer closes before the answered-ranking panel begins - "
+            + "remap this pin rather than widening it");
+
+        var defaultPanel = tabs[estimated..closed];
+
+        Assert.Contains("\"get_pg_index_bloat\"", defaultPanel, StringComparison.Ordinal);
+        Assert.DoesNotContain("answered_only", defaultPanel, StringComparison.Ordinal);
 
         /* The extension inventory prints the read's own caveat too - the same shape of capped census, and
            before this it rendered with no caveat at all. */
