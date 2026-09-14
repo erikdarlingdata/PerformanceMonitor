@@ -407,6 +407,46 @@ public class AlertBodyClockFrameDisciplineTests
         Assert.EndsWith(AlertTimestamp.UnknownOffsetMarker, sentinel, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The conversion is exact over the whole input domain and returns null at the edges rather than
+    /// throwing, because the sentinel a null instant column arrives as sits AT the edge — and because a
+    /// helper that threw would take the render path down with it on a row nobody could read anyway.
+    /// </summary>
+    [Fact]
+    public void TheConversion_IsExactAtEveryOffset_AndReturnsNullRatherThanOverflowing()
+    {
+        Assert.Equal(AnchorUtc, AlertTimestamp.ToUtc(AnchorOnServerClock, FleetOffsetMinutes));
+        Assert.Equal(AnchorOnServerClock, AlertTimestamp.ToUtc(AnchorOnServerClock, 0));
+        Assert.Equal(AnchorUtc.AddMinutes(-810), AlertTimestamp.ToUtc(AnchorUtc, 810));
+        Assert.Null(AlertTimestamp.ToUtc(AnchorUtc, null));
+
+        /* Off both edges, by one minute and by the largest offset an int can hold. Null, never a throw:
+           the sentinel a null instant column arrives as IS DateTime.MinValue. */
+        Assert.Null(AlertTimestamp.ToUtc(DateTime.MinValue, 1));
+        Assert.Null(AlertTimestamp.ToUtc(DateTime.MaxValue, -1));
+        Assert.Null(AlertTimestamp.ToUtc(DateTime.MinValue, int.MaxValue));
+        Assert.Null(AlertTimestamp.ToUtc(DateTime.MaxValue, int.MinValue));
+
+        /* The same extremes in the direction that stays representable are CONVERTED, not refused — the
+           bound rejects only what it must, and the shift is still exact 2.1e9 minutes out. Measured by
+           differencing in minutes rather than by restating the tick arithmetic, which would assert the
+           implementation against itself. */
+        foreach (var (from, offset) in new[]
+        {
+            (DateTime.MinValue, int.MinValue),
+            (DateTime.MaxValue, int.MaxValue),
+        })
+        {
+            var shifted = AlertTimestamp.ToUtc(from, offset);
+            Assert.NotNull(shifted);
+            Assert.Equal(-(long)offset, (long)(shifted!.Value - from).TotalMinutes);
+        }
+
+        /* A zero offset at either edge is the identity, so the bound is not rejecting the edges outright. */
+        Assert.Equal(DateTime.MinValue, AlertTimestamp.ToUtc(DateTime.MinValue, 0));
+        Assert.Equal(DateTime.MaxValue, AlertTimestamp.ToUtc(DateTime.MaxValue, 0));
+    }
+
     [Fact]
     public void TheFailedJobBody_StatesTheWindowItReports_InTheSameFrame()
     {

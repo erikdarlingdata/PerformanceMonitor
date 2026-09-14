@@ -73,6 +73,11 @@ public static class AlertTimestamp
     /// <see cref="DateTime.MinValue"/> arrives here from a row whose instant column was null.
     /// <para>Returning null in both cases rather than throwing or clamping keeps one outcome for
     /// "cannot be stated in UTC", which <see cref="ForServerInstant"/> then renders honestly.</para>
+    /// <para>The bound is CHECKED rather than an overflow caught, and the check cannot itself overflow:
+    /// an <see cref="int"/> offset is at most ~2.1e9 minutes, so the shift is at most ~1.3e18 ticks, and
+    /// against a tick count of at most ~3.2e18 the sum stays well inside <see cref="long"/>. An
+    /// <c>AddMinutes</c> in a <c>try</c> would read as if any offset might throw, when the only reachable
+    /// case is a sentinel instant sitting at the very edge of the range.</para>
     /// </summary>
     public static DateTime? ToUtc(DateTime serverLocal, int? utcOffsetMinutes)
     {
@@ -81,14 +86,13 @@ public static class AlertTimestamp
             return null;
         }
 
-        try
-        {
-            return serverLocal.AddMinutes(-offset);
-        }
-        catch (ArgumentOutOfRangeException)
+        long ticks = serverLocal.Ticks - ((long)offset * TimeSpan.TicksPerMinute);
+        if (ticks < DateTime.MinValue.Ticks || ticks > DateTime.MaxValue.Ticks)
         {
             return null;
         }
+
+        return new DateTime(ticks, serverLocal.Kind);
     }
 
     /// <summary>Renders a naive-UTC instant with the UTC marker.</summary>
