@@ -261,8 +261,15 @@ public class IncidentCooldownTests
 
     /// <summary>
     /// A key this process has already stamped is a repeat on the next evaluation, with no history read
-    /// involved — the in-memory map and the seed are two routes to the same fact, and only one of them is
-    /// exercised after the first touch.
+    /// involved. The in-memory map and the history seed are two routes to the same fact and only one of them
+    /// is exercised after the first touch, so a bit derived from the seed's answer alone would read "first
+    /// notice" forever on a deployment whose alerts all pre-date its last restart.
+    /// <para>The stale-SEED route — a repeat that is ALSO <c>ShouldSend</c>, which is the pairing the
+    /// aggregate acts on — is pinned in
+    /// <see cref="Decision_SeparatesANeverDeliveredFingerprintFromAStaleOne"/>. Splitting them keeps both
+    /// deterministic: reaching that pairing through the map would need the evaluation to sit between one and
+    /// two windows after the stamp, and a test that sleeps into a window is a test that fails on a busy
+    /// build agent.</para>
     /// </summary>
     [Fact]
     public async Task Decision_ReportsARepeat_OnceTheKeyHasBeenStamped()
@@ -273,10 +280,12 @@ public class IncidentCooldownTests
         Assert.True(first.AnyFirstNotice);
         cd.Stamp(first);
 
-        /* Past its own window, so it sends again — and it is no longer a first notice. */
-        var later = await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("A"), TimeSpan.Zero);
-        Assert.True(later.ShouldSend);
-        Assert.False(later.AnyFirstNotice);
+        var again = await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("A"), Window);
+        Assert.False(again.AnyFirstNotice);
+
+        /* And the map route does not bleed across keys: a sibling fingerprint on the same server and metric
+           has its own key and is still a first notice. */
+        Assert.True((await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("B"), Window)).AnyFirstNotice);
     }
 
     /// <summary>
