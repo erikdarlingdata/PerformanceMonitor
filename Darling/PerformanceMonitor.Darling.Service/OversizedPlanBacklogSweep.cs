@@ -111,7 +111,7 @@ internal static class OversizedPlanBacklogSweep
     /// <para><b>Spent, not reset, when it runs out.</b> <see cref="NextSweepDelay"/> HOLDS the count at this
     /// maximum rather than clearing it, so a host whose SQL Server targets never connect at all pays the
     /// burst once per process and then writes exactly one run-record per interval forever. Clearing it there
-    /// would turn a permanently unreachable fleet into a fresh burst every hour, which is the row-growth
+    /// would turn a permanently unreachable fleet into a fresh burst every interval, which is the row-growth
     /// objection to a plain short retry interval.</para>
     /// </summary>
     internal const int MaxConnectWaitAttempts = 5;

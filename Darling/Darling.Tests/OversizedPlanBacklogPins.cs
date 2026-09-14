@@ -531,7 +531,7 @@ public sealed class OversizedPlanBacklogPins
 
         /* Spent, not reset: the counter stays at the maximum, so the burst cannot recur without a tick that
            actually reached a server in between. Clearing it here is how a short retry interval becomes a
-           fresh burst every hour on a permanently unreachable fleet. */
+           fresh burst every interval on a permanently unreachable fleet. */
         Assert.Equal(OversizedPlanBacklogSweep.MaxConnectWaitAttempts, waits);
     }
 
