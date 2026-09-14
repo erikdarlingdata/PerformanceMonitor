@@ -593,7 +593,7 @@ public static class EntraDeviceCodeAuth
            now the condition a caller can read, so an inverted one is a red test and not a silently
            missing warning.
 
-           The second line suppresses a null on the owner it names. SignInStillAwaitingItsOwnCode is
+           The second warning suppresses a null on the owner it names. SignInStillAwaitingItsOwnCode is
            reachable only through a pattern that matched a slot holder, which the compiler cannot see
            through an enum. */
         if (degradation is EntraDeviceCodeDegradation.NoAcquisitionIdentity)
