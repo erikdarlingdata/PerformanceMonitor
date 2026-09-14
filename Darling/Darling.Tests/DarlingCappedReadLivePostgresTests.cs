@@ -142,14 +142,14 @@ public sealed class DarlingCappedReadLivePostgresTests
                 postgres, ServerId, start, end, ReadLimit, cancellationToken: ct);
 
             Assert.Equal(ReadLimit, unfiltered.Count);
-            Assert.Empty(unfiltered.Where(r => r.SkippedReason is null));
+            Assert.DoesNotContain(unfiltered, r => r.SkippedReason is null);
 
             // ── THE FIX: the same limit, and every answer is present ──────────────────────────────────
             var answered = await DarlingPgIndexBloatReader.GetPgIndexBloatAsync(
                 postgres, ServerId, start, end, ReadLimit, answeredOnly: true, cancellationToken: ct);
 
             Assert.Equal(4, answered.Count);
-            Assert.Empty(answered.Where(r => r.SkippedReason is not null));
+            Assert.DoesNotContain(answered, r => r.SkippedReason is not null);
 
             /* THE INDEX WHOSE NEWEST ROW IS A LABEL is among them, which is the gate's placement being
                correct rather than merely present. */
