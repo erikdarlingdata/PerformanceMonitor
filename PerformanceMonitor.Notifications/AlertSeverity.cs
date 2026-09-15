@@ -81,6 +81,15 @@ internal static class AlertSeverity
             "Store Disk Pressure" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Store Runtime Upgrade" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Compression Job Stuck" => ("#DC2626", "CRITICAL", "\U0001F534"),
+            /* #3443: the collector-cost DIGEST is the one metric in this map that is INFO-blue on
+               purpose. It fires with no severity override precisely so this arm decides, because the
+               product's only outbound channel is the alerting one and INFO is the only tier the rendering
+               layer has for "read this, do not act on it" — AlertSeverityLevel itself has two members.
+               DECLARED rather than left to the unmapped fall-through below, which renders identically:
+               the #1136 and #2090 work was a sweep to eliminate metrics reaching that fall-through by
+               accident, so a digest relying on it would be corrected into a WARNING by the next sweep and
+               the demotion would silently undo itself. */
+            "Collector Cost Digest" => ("#2eaef1", "INFO", "\U0001F535"),
             "Version Store (PVS)" => ("#D97706", "WARNING", "\U0001F7E0"),
             "AG Failover" => ("#D97706", "WARNING", "\U0001F7E0"),
             "AG Replica Disconnected" => ("#DC2626", "CRITICAL", "\U0001F534"),
