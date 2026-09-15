@@ -718,6 +718,35 @@ public class WebhookAlertService
     }
 
     /// <summary>
+    /// Slack's documented ceiling on the <c>fields</c> array of one <c>section</c> block. A section over it
+    /// is rejected as invalid_blocks, which fails the WHOLE message rather than degrading it — so a body
+    /// that grows past it loses the alert entirely, silently from the reader's side.
+    /// </summary>
+    private const int SlackSectionFieldLimit = 10;
+
+    /// <summary>
+    /// Appends <paramref name="fields"/> as however many <c>section</c> blocks it takes to keep each one
+    /// inside <see cref="SlackSectionFieldLimit"/>. Consecutive sections carry no divider between them, so
+    /// a split reads as one continued block.
+    ///
+    /// <para>The field count per item is not bounded by anything upstream: an incident item already emits
+    /// its forensic detail, its dedup metadata, occurrence counts and an incident start, and #3442's
+    /// per-party deadlock facts add up to five more. Splitting here rather than capping per producer means
+    /// no producer has to know what every other producer contributed to the same item.</para>
+    ///
+    /// <para>An empty list appends nothing: a section with neither <c>text</c> nor a non-empty
+    /// <c>fields</c> is itself invalid.</para>
+    /// </summary>
+    private static void AddSlackFieldSections(List<object> blocks, List<object> fields)
+    {
+        for (var i = 0; i < fields.Count; i += SlackSectionFieldLimit)
+        {
+            var take = Math.Min(SlackSectionFieldLimit, fields.Count - i);
+            blocks.Add(new { type = "section", fields = fields.GetRange(i, take) });
+        }
+    }
+
+    /// <summary>
     /// Builds a Slack incoming webhook payload with a colored attachment sidebar.
     /// Uses Slack Block Kit for rich formatting.
     /// <para>#2710: a non-null <paramref name="triageUrl"/> adds an actions block with a LINK button (a url
@@ -783,7 +812,7 @@ public class WebhookAlertService
             fields.Add(new { type = "mrkdwn", text = $"*Time (Local):*\n{localNow:yyyy-MM-dd HH:mm:ss}" });
         }
 
-        blocks.Add(new { type = "section", fields });
+        AddSlackFieldSections(blocks, fields);
 
         /* #3297: the prose detail, before the per-incident dividers. */
         if (prose is not null)
@@ -820,7 +849,7 @@ public class WebhookAlertService
                     detailFields.Add(new { type = "mrkdwn", text = $"*{label}:*\n{value}" });
                 }
 
-                blocks.Add(new { type = "section", fields = detailFields });
+                AddSlackFieldSections(blocks, detailFields);
             }
         }
 

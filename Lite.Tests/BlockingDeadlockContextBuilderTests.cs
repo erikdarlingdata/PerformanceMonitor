@@ -256,12 +256,17 @@ public class BlockingDeadlockContextBuilderTests
         var item = Assert.Single(context!.Details);
         Assert.Equal("Deadlock", item.Heading);
         var expected = AlertFingerprint.ForObjects(Server, AlertFingerprint.Deadlock, new[] { "StackOverflow.dbo.Users" });
+        /* #3442: each party's own statement follows the roster, in the graph's process order. This
+           fixture's processes carry no isolationlevel or lockMode attribute, so those segments are absent
+           rather than rendered blank — the rest of the shape is what a two-party graph produces. */
         Assert.Equal(
             new List<(string, string)>
             {
                 ("Database", "StackOverflow"),
                 ("Victim SQL", "UPDATE Users SET Reputation = 1"),
                 ("Processes", "SPID 55 (victim) vs SPID 60"),
+                ("Process A", "SPID 55 (victim), sql: UPDATE Users SET Reputation = 1"),
+                ("Process B", "SPID 60, sql: UPDATE Badges SET Name = 'x'"),
                 ("Dedup Key", expected!.DedupKey),
                 ("Involved Objects", "StackOverflow.dbo.Users")
             },
