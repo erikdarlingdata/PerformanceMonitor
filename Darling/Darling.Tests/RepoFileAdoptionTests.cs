@@ -116,6 +116,7 @@ public sealed class RepoFileAdoptionTests
         "FleetCardCollectionStaleNamesItsPopulationTests.cs",
         "FleetPageAttentionFilterTests.cs",
         "LockedModeRestoreCoverageTests.cs",
+        "NightlyVersionInjectionTests.cs",
         "PgCpuCapacityHeadroomTests.cs",
         "PgIndexBloatGridReachTests.cs",
         "PgLoggingCollectorOffTests.cs",
