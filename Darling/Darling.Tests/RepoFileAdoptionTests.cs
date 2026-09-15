@@ -117,6 +117,7 @@ public sealed class RepoFileAdoptionTests
         "FleetPageAttentionFilterTests.cs",
         "LockedModeRestoreCoverageTests.cs",
         "PgCpuCapacityHeadroomTests.cs",
+        "PgIndexBloatGridReachTests.cs",
         "ServerPageTabsTests.cs",
         "StartupFailureTriageTests.cs",
         "StoreCopyPhaseTests.cs",

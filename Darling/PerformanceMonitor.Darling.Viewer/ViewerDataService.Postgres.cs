@@ -466,11 +466,17 @@ public sealed partial class ViewerDataService
     /// to a large one at 70%. Indexes too large to measure sort to the TOP: unknown is not zero, and they
     /// are the likeliest big win. This returns the ROWS only; what the row count MEANS about the server is
     /// <see cref="GetPgIndexBloatCoverageAsync"/>, and a caller that prints one without the other is back to
-    /// letting a page of answerless rows read as a coverage claim.</summary>
+    /// letting a page of answerless rows read as a coverage claim.
+    /// <para><paramref name="answeredOnly"/> drops the indexes with no answer so the answered population is
+    /// REQUESTED rather than paged past (#3431). Defaults to false, which leaves #3278's answerless-first
+    /// order exactly as it is: the panel asks for BOTH pages and composes them
+    /// (<see cref="PgIndexBloatGridBudget.Compose"/>), because a grid that asks only for the default one
+    /// shows no answer at all whenever the answerless population outnumbers its row cap (#3434).</para></summary>
     public Task<List<DarlingPgIndexBloatReader.PgIndexBloatRow>> GetPgIndexBloatAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
+        int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, bool answeredOnly = false,
+        CancellationToken cancellationToken = default) =>
         DarlingPgIndexBloatReader.GetPgIndexBloatAsync(
-            _dataSource, serverId, startUtc, endUtc, limit, cancellationToken: cancellationToken);
+            _dataSource, serverId, startUtc, endUtc, limit, answeredOnly, cancellationToken);
 
     /// <summary>Storage tab - what share of this server's btree footprint pg_index_bloat actually has an
     /// answer for (#3278), by count AND by bytes, with the suppressed remainder broken down by reason and

@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, readTool, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, fmtMs, windowFromHours } from "../util.js";
+import { el, readTool, mount, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, getPath, fmtMs, windowFromHours } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
 import { renderLineChart, SERIES_COLORS } from "../charts.js";
 
@@ -140,7 +140,16 @@ function fanout(read, params, specs) {
         /* #2802: a fanout spec carries no `params` of its own (the window lives on the shared fetch above), so
            hand vizLine the fetch's `hours` as `windowHours` — otherwise a fanout line panel (Current Waits,
            Blocking/Deadlock Severity, ...) would fall back to its sparse data extent. Inert for the table specs. */
-        mount(body, VIZ[spec.viz](res.data, { ...spec, windowHours: params && params.hours }));
+        /* A SERVER-SUPPLIED caveat above the rows, the same hook renderPanel carries (#3278) and for the
+           same reason: a capped page whose ordering displaces the rows a reader came for looks like a
+           working read, and only the server holds the population figures that say otherwise. Opt-in per
+           SPEC rather than per fetch, because a fanout's specs slice one response into panels that are not
+           all pages of a population - the aggregate one beside a capped row list is exactly the pairing
+           where only one of them needs saying so. */
+        const note = spec.noteKey ? getPath(res.data, spec.noteKey) : null;
+        const rendered = VIZ[spec.viz](res.data, { ...spec, windowHours: params && params.hours });
+
+        mount(body, typeof note === "string" && note.trim() ? [noticeStrip(note), rendered] : rendered);
       } catch (e) {
         mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
       }
@@ -1486,15 +1495,35 @@ export const POSTGRES_TABS = [
          because it is the answer to most of the empty panels elsewhere on the page — a state of
          'available' means the files are there and one CREATE EXTENSION fills a grid that currently reads
          as a permanent absence. */
-      table(
-        "Extensions",
-        "get_pg_extensions",
-        { server, hours: ctx.hours, limit: 50 },
-        "extensions",
-        PG_EXTENSION_COLUMNS,
-        ctx.label + ", per DATABASE not per cluster; 'available' means CREATE EXTENSION would work",
-        "No extension inventory in this window. This collector runs DAILY, so a short window can be empty on a healthy server."
-      ),
+      /* `noteKey` for the same reason the index bloat panel has one (#3434). Rows here are the PRODUCT of
+         databases and extension names - 102 names per database on the measured fleet - so 50 rows is one
+         database's slice of a multi-database host, and the ordering puts the non-relevant INSTALLED rows
+         behind every non-relevant AVAILABLE one, so what the cap removes first is precisely what an
+         install census needs. The read computes all of that (#3425): its note carries the truncation
+         caveat, the reach verdict saying whether a larger limit would help, and the pointer to
+         install_census and database_name. Without the note this page rendered a capped census with no
+         caveat at all, which is a weaker version of the same defect - a page that looks complete. */
+      ...fanout("get_pg_extensions", { server, hours: ctx.hours, limit: 50 }, [
+        {
+          title: "Extensions",
+          subtitle: ctx.label + ", per DATABASE not per cluster; 'available' means CREATE EXTENSION would work",
+          viz: "table",
+          rowsKey: "extensions",
+          columns: PG_EXTENSION_COLUMNS,
+          emptyText:
+            "No extension inventory in this window. This collector runs DAILY, so a short window can be empty on a healthy server.",
+          noteKey: "note",
+        },
+        {
+          title: "Extension Install Census",
+          subtitle: "one row per extension created anywhere on this server; NO row limit touches this",
+          viz: "table",
+          rowsKey: "install_census",
+          columns: PG_EXTENSION_CENSUS_COLUMNS,
+          emptyText:
+            "Nothing is created on this server beyond what PostgreSQL installs itself, or the inventory has not been collected yet. This census counts only extensions somebody created: the available-but-absent ones are the actionable rows and they sort FIRST in the grid above.",
+        },
+      ]),
     ],
   },
 
@@ -2050,6 +2079,32 @@ export const POSTGRES_TABS = [
         PG_INDEX_BLOAT_COLUMNS,
         ctx.label + ", ESTIMATED from catalog statistics with no page reads; a row with a reason instead of a number has NO answer, not a healthy one",
         "Nothing recorded for this server. That is not the same as no bloat: this collector runs DAILY, so a short window or a fresh install is legitimately empty here. Read the coverage sentence for which it is.",
+        2,
+        "note"
+      ),
+      /* THE ANSWERS, REACHED (#3434). The panel above keeps #3278's answerless-first order, and on a census
+         whose answerless population outnumbers 25 that page is 100% of them - structurally rather than by
+         chance - so every answered index sits behind a block no row cap on this page pages past. Measured
+         on the fleet: 1,779 answerless rows ahead of 726 answers covering 213.8 GB on the largest census,
+         and 268 ahead of 79 covering 191.0 GB on the next. answered_only (#3431) asks the read for that
+         population directly, ranked by reclaimable bytes with nothing ahead of it.
+
+         A SECOND PANEL rather than a filter on the first: the order above is deliberate and stays. And not
+         a client-side merge of the two reads either - the caveat over each grid is composed by the SERVER
+         from population figures the browser does not have, so merging two reads into one grid would mean
+         merging two censuses into one sentence, and a note describing a population its grid is not showing
+         is the very defect this closes.
+
+         Not fanout(): that is several panels over ONE fetch, and these two differ in a PARAMETER, so there
+         is no shared response to slice. */
+      table(
+        "Index Bloat (answered ranking)",
+        "get_pg_index_bloat",
+        { server, hours: ctx.hours, limit: 25, answered_only: true },
+        "indexes",
+        PG_INDEX_BLOAT_COLUMNS,
+        ctx.label + ", only the indexes that HAVE an answer, biggest reclaimable bytes first",
+        "No row came back for this server. The read answers no_answers with the census when nothing here has an answer, so reaching this sentence instead means the collector recorded nothing in the window - it runs DAILY.",
         2,
         "note"
       ),
@@ -3286,6 +3341,24 @@ const PG_BUFFER_USAGE_COLUMNS = [
 
 /* State first: it is the only column anyone scans for, and "available" is the one that means a one-line fix
    is waiting. */
+/* The install census (#3425), which is why this panel exists beside the row list rather than instead of it:
+   the rows are the PRODUCT of databases and extension names, so a multi-database host outgrows any row cap
+   and the ordering takes the CREATED rows first - precisely the population a census needs. This is one row
+   per extension, aggregated server-side, so no limit can reach it.
+
+   databases_installed and databases_outdated are reported apart and never summed into one column: both mean
+   the extension exists in that database and only one of them means it is current. databases_reporting is
+   below databases_total only when collection was uneven, which is a fact about the monitoring rather than
+   about the server, so it is shown rather than assumed away. */
+const PG_EXTENSION_CENSUS_COLUMNS = [
+  { key: "extension_name", label: "Extension" },
+  { key: "databases_created", label: "Created In", format: "int", align: "right" },
+  { key: "databases_installed", label: "At Default", format: "int", align: "right" },
+  { key: "databases_outdated", label: "Outdated", format: "int", align: "right" },
+  { key: "databases_reporting", label: "Reported", format: "int", align: "right" },
+  { key: "databases_total", label: "Databases", format: "int", align: "right" },
+];
+
 const PG_EXTENSION_COLUMNS = [
   { key: "state", label: "State" },
   { key: "extension_name", label: "Extension" },
