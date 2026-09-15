@@ -235,19 +235,19 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <para><b>The #3316 calibration this replaces claimed a band the fleet has since disproved.</b> Its
     /// 41-hour sample put real regressions at 21.8-22.6 s/day and truthful-unactionable ones at
     /// 0.16-3.6 s/day, and set 5 s in the gap claiming "more than 4x headroom on both sides". On
-    /// 2026-09-15 a production server paged hourly on a 5.5x <c>database_size_stats</c> regression worth
-    /// 8.7 seconds of collection time all day — truthful, unactionable, and 1.7x the floor — while the
-    /// same day's genuine exhibits added 224 and 377 s/day. The unactionable mass reaches at least
-    /// 8.7 s/day, so the empty band is (8.7, 21.8) and 5 s sits below it, not inside it.</para>
+    /// 2026-09-15 a production server paged hourly on a 5.5x <c>database_size_stats</c> regression whose
+    /// whole-day total was 8.7 seconds and whose ADDED cost — this floor's own unit — was 7.1 s/day,
+    /// 1.42x the floor: truthful, unactionable, and comfortably selected — while the same day's genuine
+    /// exhibits added 224 and 377 s/day. The unactionable mass reaches at least 7.1 s/day of added cost,
+    /// so the empty band is (7.1, 21.8) and 5 s sits below it, not inside it.</para>
     ///
     /// <para><b>15 s/day is derived from the fleet distribution of per-collector daily cost, not from that
     /// one card (#3462).</b> Measured over 7 days on two stores — 42 and 43 servers of one production
     /// store class — the MEDIAN (server, collector) pair costs 13.7 and 13.1 s/day to exist at all, and
     /// the cheapest 17 of 39 collectors each cost under 4 s/day. A regression whose entire added footprint
     /// is less than the median collector's whole daily bill is lost in the fleet's own operating mass; at
-    /// 15 s the floor sits just above both medians, and — independently — at the geometric midpoint
-    /// (13.8) of the measured empty band, with 1.7x headroom over the noisiest truthful-unactionable
-    /// firing and 1.45x under the smallest real catch. The headroom is honestly thinner than #3316
+    /// 15 s the floor sits just above both medians and inside the measured empty band — 2.1x above its
+    /// noise edge and 1.45x under the smallest real catch. The headroom is honestly thinner than #3316
     /// claimed for 5 s, because the band itself is thinner than #3316 believed: both of its edges are now
     /// measured rather than extrapolated.</para>
     ///

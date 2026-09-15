@@ -93,14 +93,15 @@ public sealed class CollectorCostMaterialityFloorTests
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /// <summary>The floor's own calibration, pinned without a store so it cannot drift silently even where
-    /// the live half is skipped. Both edges are MEASURED: the lower is the noisiest truthful-unactionable
-    /// firing's whole-day cost (2026-09-15, 8.7 s), the upper is the smallest real catch #3316 recorded
-    /// (21.8 s/day). A floor outside that band either re-admits a firing an operator answered with
-    /// "it's a few hundred ms. what's the point?" or starts eating real catches.</summary>
+    /// the live half is skipped. Both edges are MEASURED, in the floor's own unit: the lower is the
+    /// noisiest truthful-unactionable firing's ADDED cost (2026-09-15: 7,088 ms/day — the card's whole-day
+    /// total was 8.7 s, but the floor gates the delta), the upper is the smallest real catch #3316
+    /// recorded (21.8 s/day). A floor outside that band either re-admits a firing an operator answered
+    /// with "it's a few hundred ms. what's the point?" or starts eating real catches.</summary>
     [Fact]
     public void TheShippedFloor_SitsInsideTheMeasuredEmptyBand_AndTheWorstCatchClearsItByOrdersOfMagnitude()
     {
-        Assert.True(DarlingSelfAlertEvaluator.CostRegressionAddedMsFloor > 8_700,
+        Assert.True(DarlingSelfAlertEvaluator.CostRegressionAddedMsFloor > 7_088,
             "the floor re-admits the 2026-09-15 noise exhibit");
         Assert.True(DarlingSelfAlertEvaluator.CostRegressionAddedMsFloor < 21_800,
             "the floor eats #3316's smallest measured real catch");

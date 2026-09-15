@@ -60,7 +60,7 @@ public sealed class CollectorCostRegressionMaterialityTests
     private const string VolumeMaterial = "volume_material_3316";
 
     /* The floor under test, between the two fixtures with 25% and 8x margin. Passed explicitly rather than
-       read from the evaluator's private constant: this pins the QUERY's property, which is what the SQL can
+       read from the evaluator's internal constant: this pins the QUERY's property, which is what the SQL can
        get wrong, and stays meaningful if the production value is retuned. */
     private const long AddedMsFloor = 5_000;
 
