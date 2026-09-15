@@ -884,7 +884,7 @@ public sealed class AlertReadFailureSurfaceTests
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
         (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 13, 5),
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 5, 9),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 7, 9),
     };
 
     /// <summary>
@@ -934,9 +934,13 @@ public sealed class AlertReadFailureSurfaceTests
     /// parameter required errored at exactly 13 sites in <c>AlertEngine.cs</c>, 5 in
     /// <c>DarlingSelfAlertEvaluator.cs</c>, 9 in <c>DarlingWorker.cs</c> and 0 in Lite, which is a census
     /// that cannot miss a site or invent one. <c>DarlingWorker.cs</c> carries a tenth since #3354's
-    /// mute-rule reload.</para>
+    /// mute-rule reload, and <c>DarlingSelfAlertEvaluator.cs</c> a sixth and a seventh since #3443: the
+    /// collector-cost census read, whose swallowed failure decides that a tick routes nothing rather than
+    /// guessing a channel, and the collector-cost digest read, whose swallowed failure costs a day's
+    /// report. Both are the evidence an alerting decision is judged on — not context, not a write, not a
+    /// delivery — so both are counted rather than exempt, each under its own name with its own clock.</para>
     /// </summary>
-    private const int CountedSites = 28;
+    private const int CountedSites = 30;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the

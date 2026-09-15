@@ -281,8 +281,8 @@ public partial class MainWindow : Window
                Logged AND counted on #3013's surface, the same two artefacts Darling's
                LoadMuteRulesAsync leaves, because a cache that is correct and STALE is indistinguishable
                from one that is correct and current without them. This is the ONE member of
-               AlertReadFailureCounter.FleetScopedReads that both SKUs can actually record — the other
-               two are Darling store self-alerts — and that constant is concatenated into both SKUs'
+               AlertReadFailureCounter.FleetScopedReads that both SKUs can actually record — the others
+               are Darling store self-alerts — and that constant is concatenated into both SKUs'
                get_collection_health description, so a Lite process that named this read and could never
                increment it would describe a failure mode it cannot surface.
 

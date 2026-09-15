@@ -1173,9 +1173,15 @@ internal sealed class DarlingSelfAlertEvaluator
         foreach (var regression in regressions)
         {
             var regressed = regressedServers[regression.CollectorName].Count;
-            var collected = collectedServers.TryGetValue(regression.CollectorName, out var c) ? c : 0;
 
-            if (regressed >= CostRegressionFleetWideMinServers && regressed * 2 > collected)
+            /* A collector absent from the census has no denominator, and "unknown" must not read as a
+               fleet of ZERO: zero satisfies the majority comparison for any numerator at all, so folding
+               the miss into a default of 0 pages exactly the pair with the least evidence behind it. The
+               TryGetValue is therefore part of the condition — no denominator, no majority claim, and the
+               pair goes to the digest in full (the fail-toward-the-report direction the remarks argue). */
+            if (collectedServers.TryGetValue(regression.CollectorName, out var collected)
+                && regressed >= CostRegressionFleetWideMinServers
+                && regressed * 2 > collected)
             {
                 paging.Add(regression);
             }

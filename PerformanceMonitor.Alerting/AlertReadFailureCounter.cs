@@ -690,15 +690,25 @@ public sealed class AlertReadFailureCounter
     /// condition all read what the last successful load put there. A nonzero instance total naming this
     /// read is the artefact, which is why it is counted rather than exempt.</para>
     ///
-    /// <para>It is also the only member of this set that BOTH SKUs can produce, and that is load-bearing
-    /// for a constant both descriptions concatenate. The other two are Darling store self-alerts that have
-    /// no Lite equivalent at all, so naming them there describes a shared inventory rather than promising a
-    /// Lite reading. The mute-rule reload is different: Lite performs that read, Lite swallows its failure,
-    /// and Lite's call site therefore records it here too. A read this constant names on a SKU that cannot
-    /// increment it would be this class's own defect — a confident zero — reproduced in its documentation.</para>
+    /// <para>#3443 grew the collector-cost condition from one read to three, and they are named apart
+    /// rather than folded into one entry because they blind DIFFERENT things: the regression read is the
+    /// predicate's own evidence, the census read is the fan-out denominator that decides which channel a
+    /// finding reaches, and the digest read is the daily report's movers. A failure of any one of them
+    /// skips the rest of that tick, so an operator chasing a nonzero count needs to know which stage went
+    /// quiet — a blind denominator and a blind report are not the same outage.</para>
+    ///
+    /// <para>It is also the case that only ONE member of this set — the mute-rule reload — can be produced
+    /// by BOTH SKUs, and that is load-bearing for a constant both descriptions concatenate. The others are
+    /// Darling store self-alerts that have no Lite equivalent at all, so naming them there describes a
+    /// shared inventory rather than promising a Lite reading. The mute-rule reload is different: Lite
+    /// performs that read, Lite swallows its failure, and Lite's call site therefore records it here too.
+    /// A read this constant names on a SKU that cannot increment it would be this class's own defect — a
+    /// confident zero — reproduced in its documentation.</para>
     /// </summary>
     public const string FleetScopedReads =
-        "the collector-cost regression self-alert, the mute-rule reload, and the store background-job "
+        "the collector-cost regression self-alert and its two #3443 companions (the collector-cost census "
+        + "read that decides paging-versus-digest routing, and the collector-cost digest read behind the "
+        + "daily report), the mute-rule reload, and the store background-job "
         + "health reads behind compression-job health, store-job cadence and retention holds";
 
     /// <summary>
