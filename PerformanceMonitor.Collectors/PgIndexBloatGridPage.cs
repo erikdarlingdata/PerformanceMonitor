@@ -88,6 +88,15 @@ public readonly record struct PgIndexBloatGridPage<TRow>(
     ///
     /// <para>It says the counts are the GRID's and points at the census for the server's, because the two
     /// reads behind this are both capped — so nothing here can honestly be read as a population.</para>
+    ///
+    /// <para><b>The cut is explained by what the answered ranking ACTUALLY took, never by the reserve
+    /// share.</b> <see cref="PgIndexBloatGridBudget.AnsweredReserveFor"/> is a ceiling on that take rather
+    /// than the take itself: where the answered population is smaller than the share, the block withheld
+    /// from the lead is the population and not the share. Printing the share there states a number the
+    /// reader's own arithmetic contradicts — at a 200-row grid with 1 answered index it would claim 50 rows
+    /// were reserved beside a cut at 199 — which is this class's own defect one level in. Every figure here
+    /// is a count of <see cref="Rows"/>, so <c>GridLimit - AnsweredShown == AnswerlessShown</c> holds
+    /// wherever this branch prints.</para>
     /// </summary>
     public string Composition =>
         string.Create(
@@ -100,11 +109,11 @@ public readonly record struct PgIndexBloatGridPage<TRow>(
             ? string.Create(
                 CultureInfo.InvariantCulture,
                 $"  The answerless block is CUT at {AnswerlessShown:N0} of the "
-                + $"{AnswerlessShown + AnswerlessNotShown:N0} this read returned, because "
-                + $"{PgIndexBloatGridBudget.AnsweredReserveFor(GridLimit):N0} of the {GridLimit:N0} row(s) "
-                + $"are reserved for the answered ranking. Without that reservation the answerless rows "
-                + $"fill the grid at their own population size - they sort first by design - and no "
-                + $"answer appears at any row cap.")
+                + $"{AnswerlessShown + AnswerlessNotShown:N0} this read returned, because the answered "
+                + $"ranking behind it took {AnsweredShown:N0} of the {GridLimit:N0} row(s). A SHARE of "
+                + $"every grid is reserved for that ranking, or the answerless rows fill the grid at "
+                + $"their own population size - they sort first by design - and no answer appears at any "
+                + $"row cap.")
             : string.Empty)
         + (AnsweredNotShown > 0
             ? string.Create(

@@ -358,15 +358,21 @@ public sealed class PgIndexBloatGridReachTests
             Assert.Contains(
                 N(answeredInGrid) + " answered index(es) behind them", prose, StringComparison.Ordinal);
 
-            /* CLOSED: no other number may appear. Each permitted figure is either a count of the grid or a
-               count of a READ that the sentence labels as one. */
+            /* CLOSED: no other number may appear. Each permitted figure is either a count of the grid, a
+               count of a READ that the sentence labels as one, or the cap the grid was given.
+
+               THE RESERVE SHARE IS NOT IN HERE, and its absence is the point. Permitting it
+               unconditionally let the sentence state the theoretical quarter beside a cut that did not
+               match it - at a 200-row grid with one answered index, "50 of the 200 row(s) are reserved"
+               beside a cut at 199 - because an allowed numeral is never checked for CONSISTENCY with the
+               others. A figure that is not a count of the grid has no business in a sentence about the
+               grid, so the set says so rather than the assertions working around it. */
             var permitted = new HashSet<string>(StringComparer.Ordinal)
             {
                 N(answerlessInGrid),
                 N(answeredInGrid),
                 N(answerlessInGrid + page.AnswerlessNotShown),
                 N(page.AnsweredNotShown),
-                N(PgIndexBloatGridBudget.AnsweredReserveFor(cap)),
                 N(cap),
             };
 
@@ -383,6 +389,23 @@ public sealed class PgIndexBloatGridReachTests
             if (page.AnswerlessNotShown > 0 || page.AnsweredNotShown > 0)
             {
                 Assert.Contains("this read returned", prose, StringComparison.Ordinal);
+            }
+
+            /* THE CUT SENTENCE'S OWN ARITHMETIC RECONCILES. A closed numeral set says every figure is
+               permitted; it cannot say the permitted figures add up, and a sentence whose numbers do not
+               add up is this defect one level in - the reader does the arithmetic the prose invites and
+               gets a contradiction. So where the lead was cut, the two figures that explain the cut are
+               asserted to satisfy the identity the sentence states, and the sentence is asserted to
+               state THOSE figures. */
+            if (page.TheLeadWasTruncatedForTheAnswers)
+            {
+                Assert.Equal(cap, page.AnswerlessShown + page.AnsweredShown);
+                Assert.Contains(
+                    "took " + N(answeredInGrid) + " of the " + N(cap) + " row(s)",
+                    prose,
+                    StringComparison.Ordinal);
+                Assert.Contains(
+                    "CUT at " + N(answerlessInGrid) + " of the ", prose, StringComparison.Ordinal);
             }
         }
     }
