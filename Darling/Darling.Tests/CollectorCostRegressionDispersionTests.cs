@@ -215,8 +215,10 @@ public sealed class CollectorCostRegressionDispersionTests
         Assert.Contains("sc.latest_ms_per_run > sc.baseline_p95_ms_per_run * $3", sql, StringComparison.Ordinal);
 
         /* The window the evaluator passes as $1, read from the source rather than restated, because a
-           restated constant is the thing that goes stale. */
-        var evaluator = RepoFile.ReadRepoFileLf(
+           restated constant is the thing that goes stale. The RAW reader, not the LF one: the anchor below
+           sits on one line, so normalising newlines would change nothing about what it can match, and
+           RepoFileAdoptionTests keys membership of the LF set on a pin's anchors CROSSING a line break. */
+        var evaluator = RepoFile.ReadRepoFile(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs");
         var declaration = Regex.Match(
             evaluator, @"CostRegressionBaselineWindow\s*=\s*TimeSpan\.FromDays\((?<days>\d+)\)");
