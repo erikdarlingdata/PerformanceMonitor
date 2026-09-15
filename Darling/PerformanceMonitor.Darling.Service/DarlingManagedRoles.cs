@@ -29,12 +29,17 @@ namespace PerformanceMonitor.Darling.Service;
 /// <item><b><c>admin</c></b> — SELECT on both schemas + INSERT/UPDATE/DELETE on <c>config</c> only.
 /// The Viewer's default identity: it owns the alert-dismiss, mute-rule, and analysis-mute writes but
 /// can never DROP, alter schema, touch <c>collect</c> data, or create objects.</item>
-/// <item><b><c>viewer</c></b> — SELECT on both schemas, and (the single write exception, #1563)
-/// INSERT/UPDATE/DELETE on ONLY <c>config.custom_views</c> (the web dashboard's user-authored view
-/// definitions — non-secret JSON; editing is any AUTHENTICATED seat, the web surface's normal networked
-/// mode gated server-side by the host's token+CIDR auth — NOT loopback-only). No other writes anywhere. A
-/// locked-down deployment points the Viewer at this ("look but don't touch" — plus its own saved custom
-/// views).</item>
+/// <item><b><c>viewer</c></b> — SELECT on both schemas, plus a NARROW, enumerated set of writes: the web
+/// dashboard's write surfaces run as this role, so it holds INSERT/UPDATE/DELETE on
+/// <c>config.custom_views</c> (#1563, the user-authored view definitions), <c>config.custom_alert_rules</c>
+/// (#3285, the user-authored alert rules), <c>config.database_state_expected</c> (#1986, the Viewer's
+/// per-database override editor) and <c>config.config_mute_rules</c> (#3450, the dedicated mute-rule
+/// endpoints — plus the two <c>config_service</c> beacon columns its bump trigger writes as the caller).
+/// All non-secret tables; over the web, editing is gated server-side by the host's auth + the seat model
+/// (an OIDC viewer seat is refused every write) — these grants are only the floor beneath that gate. A
+/// locked-down deployment points the Viewer at this role, and its WPF surfaces still read as "look but
+/// don't touch": the read-only probe discriminates on a privilege this role never gets
+/// (<c>ViewerDataService.ReadOnlyProbeSql</c>).</item>
 /// <item><b><c>mcp</c></b> — the (optionally network-exposed) MCP host's store identity
 /// (darling-network-endpoints, D3-role): the SAME read surface as <c>viewer</c> (SELECT on
 /// <c>collect</c> + <c>config</c>-minus-the-secret-columns) PLUS a NARROW, enumerated set of writes —
@@ -244,7 +249,7 @@ public static class DarlingManagedRoles
         await command.ExecuteNonQueryAsync(cancellationToken);
 
         logger.LogInformation(
-            "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + write config.custom_views; mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_notification.email_cooldown_minutes, config_service reload beacon) + onboard servers (config_monitored_servers)) — the Viewer and MCP host no longer connect as the superuser");
+            "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + the narrow web-surface writes (custom_views, custom_alert_rules, database_state_expected, config_mute_rules + the reload beacon); mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_notification.email_cooldown_minutes, config_service reload beacon) + onboard servers (config_monitored_servers)) — the Viewer and MCP host no longer connect as the superuser");
 
         /* CLAMPED, not raw: the batch above wrote the clamped form, so returning the raw read would hand the
            caller a baseline that differs from what the roles actually carry (a stored 0 provisions '15s').
@@ -724,6 +729,22 @@ GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
 GRANT INSERT, UPDATE, DELETE ON {config}.config_mute_rules TO {mcp};
 GRANT UPDATE ON {config}.config_alert_settings TO {mcp};
 GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {mcp};
+-- #3450: the web dashboard's dedicated mute-rule endpoints (POST/PATCH/PUT/DELETE under /api/mute-rules) run
+--    as the least-privilege viewer role -- the web host's ONLY store identity -- so viewer gets the SAME
+--    single-table config_mute_rules write mcp holds above, the shape of the custom_views/custom_alert_rules
+--    pairs in section 7. The SEAT model, not this grant, decides who may call the endpoints (an OIDC viewer
+--    seat is refused every unsafe method by the host's write gate); this is only the narrow floor beneath that
+--    gate. The section-8 beacon caveat applies verbatim: config_mute_rules carries trg_bump_mute_rules ->
+--    config_bump_version (SECURITY INVOKER), which UPDATEs config_service.config_version AS viewer, so viewer
+--    needs the same two-column config_service grant mcp has -- and no more (paused / capture_plans / mcp_port
+--    stay out of reach; the column grant serves the trigger, never a service flag). One consequence is owned
+--    where it bites: the WPF Viewer's read-only probe used to ask has_table_privilege on exactly this table's
+--    INSERT, which this grant would have flipped to ''writable'' for a connectAs = ''viewer'' seat whose
+--    alert-dismiss writes still 42501 -- the probe now discriminates on config_alert_log UPDATE
+--    (ViewerDataService.ReadOnlyProbeSql), a write only admin/owner hold, so the locked-down Viewer's
+--    read-only UX is unchanged by this grant.
+GRANT INSERT, UPDATE, DELETE ON {config}.config_mute_rules TO {viewer};
+GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {viewer};
 -- #3314: the DELIVERY cooldown -- the sole throttle on a Slack/Teams/PagerDuty/webhook post -- is the one
 -- alert-engine knob stored on config_notification rather than config_alert_settings, so update_alert_settings
 -- spans two tables and needs a write here. This DOES widen mcp into a table holding bearer secrets (the SMTP

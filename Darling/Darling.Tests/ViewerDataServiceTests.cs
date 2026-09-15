@@ -395,11 +395,15 @@ public sealed class StatusToBrushConverterTests
 public sealed class ViewerReadOnlyTests
 {
     [Fact]
-    public void ReadOnlyProbeSql_TestsConfigInsertPrivilege()
+    public void ReadOnlyProbeSql_TestsTheAlertDismissWrite()
     {
-        /* has_table_privilege on config_mute_rules INSERT: true => writable (admin/owner), false =>
-           read-only viewer. The bare name resolves to config.config_mute_rules via search_path. */
-        Assert.Equal("SELECT has_table_privilege('config_mute_rules', 'INSERT')", ViewerDataService.ReadOnlyProbeSql);
+        /* has_table_privilege on config_alert_log UPDATE (the alert-dismiss write): true => writable
+           (admin/owner), false => read-only viewer. The bare name resolves to config.config_alert_log via
+           search_path. It probed config_mute_rules INSERT until #3450 granted the viewer ROLE exactly that
+           privilege for the web dashboard's mute-rule endpoints — which would have offered a connectAs =
+           "viewer" seat the dismiss buttons its writes still 42501 on — so the probe moved to a write the
+           viewer role never holds, one the gated surfaces actually perform. */
+        Assert.Equal("SELECT has_table_privilege('config_alert_log', 'UPDATE')", ViewerDataService.ReadOnlyProbeSql);
     }
 
     [Fact]

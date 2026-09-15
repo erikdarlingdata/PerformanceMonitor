@@ -88,8 +88,12 @@ public sealed class DarlingWebEndpointsTests
            /api/catalog, the eight custom-alert-rule tools (#3285 — create/update/delete write, get/list/validate
            read against the compose catalog, test_custom_alert_rule (#3299) evaluate-now, and
            list_custom_alert_templates (#3285 Component 7) starter templates, none a
-           /api/read/{tool} mirror), the five alert-tuning WRITE tools, and the two server-onboarding WRITE tools
-           (add_servers / remove_server) — all with no /api/read/{tool} 1:1 mirror, like mute_analysis_finding. */
+           /api/read/{tool} mirror), the five alert-tuning WRITE tools — of which the four mute-rule verbs are
+           served by their OWN dedicated /api/mute-rules endpoints since #3450, the Custom Views disposition,
+           so they STAY excluded from the generic mirror for the same reason those do, while
+           update_alert_settings remains a write with no web surface at all — and the two server-onboarding
+           WRITE tools (add_servers / remove_server). All with no /api/read/{tool} 1:1 mirror, like
+           mute_analysis_finding. */
         Assert.Equal(
             new[]
             {
@@ -223,6 +227,32 @@ public sealed class DarlingWebEndpointsTests
     [InlineData(-5, 1)]
     public void ClampRows_BoundsCallerSuppliedRowCounts(int requested, int expected) =>
         Assert.Equal(expected, DarlingWebEndpoints.ClampRows(requested));
+
+    /* ── the mute-rule envelope → HTTP status mapping (#3450): the dedicated /api/mute-rules write routes pass
+       the MCP verb's own {status, ...} envelope through verbatim and add ONLY the HTTP status, so a web client
+       and an MCP client read one truth. This table is that addition, whole. ── */
+
+    [Theory]
+    [InlineData("{\"status\":\"created\",\"mute_rule\":{}}", 201, 201)]      // create's success rides the route's own code
+    [InlineData("{\"status\":\"updated\",\"mute_rule\":{}}", 200, 200)]
+    [InlineData("{\"status\":\"unchanged\",\"mute_rule\":{}}", 200, 200)]    // retry-safe "already so" shares the success code; the envelope carries the distinction
+    [InlineData("{\"status\":\"deleted\",\"rule_id\":\"x\"}", 200, 200)]
+    [InlineData("{\"status\":\"invalid\",\"message\":\"bad field\"}", 201, 400)]   // a refusal outranks whatever success the route hoped for
+    [InlineData("{\"status\":\"not_found\",\"message\":\"no rule\"}", 200, 404)]
+    public void MuteRuleEnvelopeStatus_MapsTheVerbEnvelopeOntoHttp(string envelope, int successStatus, int expected) =>
+        Assert.Equal(expected, DarlingWebEndpoints.MuteRuleEnvelopeStatus(envelope, successStatus));
+
+    [Fact]
+    public void MuteRuleEnvelopeStatus_TheCoresCaughtException_IsAServerError() =>
+        /* The cores swallow their own exceptions into "Error during ..." — the same shape the read surface
+           maps to 500, classified by the same ClassifyToolResponse. */
+        Assert.Equal(500, DarlingWebEndpoints.MuteRuleEnvelopeStatus("Error during update_mute_rule: connection reset", 200));
+
+    [Fact]
+    public void MuteRuleEnvelopeStatus_ABareString_IsAClientError() =>
+        /* Not a shape the cores produce; mapped like the read surface's client-correctable arm rather than
+           claiming success over a body that is not an envelope. */
+        Assert.Equal(400, DarlingWebEndpoints.MuteRuleEnvelopeStatus("rule_id is required.", 200));
 
     /* ── custom-alert-rule wire-shape builders (#3285): the ONE shape shared by the /api/alerts responses AND
        the MCP alert tools (get/create/update/list), so the two surfaces cannot drift. ── */

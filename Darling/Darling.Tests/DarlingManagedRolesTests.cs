@@ -80,9 +80,19 @@ public sealed class DarlingManagedRolesTests
     {
         var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
 
-        /* #1563: the ONE viewer write — an EXPLICIT single-table grant on config.custom_views (the web
-           dashboard's user-authored view store; editing is loopback-gated server-side). */
+        /* #1563: the first viewer write — an EXPLICIT single-table grant on config.custom_views (the web
+           dashboard's user-authored view store; editing is loopback-gated server-side). The viewer write set
+           has since grown by the same single-table shape (custom_alert_rules #3285, database_state_expected
+           #1986, config_mute_rules #3450 below) and by nothing wider. */
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.custom_views TO viewer;", sql, StringComparison.Ordinal);
+
+        /* #3450: the web mute-rule endpoints run as viewer, so it holds the SAME single-table mute write the
+           mcp role has — plus the COLUMN-level config_service beacon grant the SECURITY-INVOKER bump trigger
+           needs (trg_bump_mute_rules UPDATEs config_service.config_version AS the writing role), and never a
+           table-wide config_service UPDATE that would reach paused / capture_plans / mcp_port. */
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO viewer;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT UPDATE (config_version, updated_at) ON config.config_service TO viewer;", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("GRANT UPDATE ON config.config_service TO viewer", sql, StringComparison.Ordinal);
 
         /* It must NOT widen the schema-wide config write to viewer (that grant stays admin-only, pinned here). */
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;", sql, StringComparison.Ordinal);

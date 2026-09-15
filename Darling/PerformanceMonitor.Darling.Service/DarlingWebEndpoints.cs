@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Text.Json;
@@ -59,8 +60,10 @@ public static class DarlingWebEndpoints
     /// is the compute-heavy plan-analysis phase-2 work; the Custom Views tools (#1599) are served by their OWN
     /// richer web endpoints (<c>/api/views</c> CRUD + <c>/api/compose/run</c> + the <c>/api/catalog</c> compose
     /// vocabulary that <c>describe_custom_view_catalog</c> mirrors), not a <c>/api/read/{tool}</c> query-string mirror;
-    /// and the alert-tuning tools (<c>update_alert_settings</c> / <c>create_mute_rule</c> / <c>update_mute_rule</c> /
-    /// <c>delete_mute_rule</c> / <c>set_mute_rule_enabled</c>) WRITE the alert config, and the server-onboarding tools
+    /// the four mute-rule write verbs (<c>create_mute_rule</c> / <c>update_mute_rule</c> / <c>delete_mute_rule</c> /
+    /// <c>set_mute_rule_enabled</c>) are the Custom Views disposition since #3450 — served by their OWN dedicated
+    /// endpoints (<c>/api/mute-rules</c>, see <see cref="MapMuteRules"/>), never a query-string mirror of a write;
+    /// <c>update_alert_settings</c> WRITEs the alert config with no web surface at all, and the server-onboarding tools
     /// (<c>add_servers</c> / <c>remove_server</c>) WRITE the
     /// monitored-server registry, so — like <c>mute_analysis_finding</c> — they have no read endpoint. The
     /// custom-alert-rule tools (#3285) are the same disposition as the Custom Views tools: <c>create</c> /
@@ -281,6 +284,7 @@ public static class DarlingWebEndpoints
 
         MapCustomViews(app, postgres);
         MapCustomAlerts(app, postgres);
+        MapMuteRules(app, postgres);
 
         /* The per-alert triage page's assembly endpoint (#2710): everything it serves is already reachable
            through the /api/read mirror above — it adds assembly (alert match + anchored sections), not reach. */
@@ -684,6 +688,196 @@ public static class DarlingWebEndpoints
 
             return ToHttpResult(await Mcp.DarlingMcpCustomAlertTools.TestCustomAlertRule(postgres, ruleId, definitionJson));
         });
+    }
+
+    /* ─────────────────────── #3450 mute rules: the dedicated write endpoints ─────────────────────── */
+
+    /// <summary>
+    /// The mute-rule WRITE surface (#3450): create / update / set-enabled / delete, the web twins of the four
+    /// MCP alert-tuning verbs. <see cref="ExcludedToolNames"/> was never a trust boundary — only the list of
+    /// tools with no <i>generic</i> <c>/api/read</c> mirror — so, exactly as the Custom Views tools got
+    /// <c>/api/views</c>, the mute verbs get dedicated routes here; the read half already ships as
+    /// <c>/api/read/get_mute_rules</c>.
+    ///
+    /// <para><b>Who may call these.</b> Nothing here names a seat, and that is the design: every unsafe method
+    /// is born gated by the host's group-level write gate (<see cref="Hosting.DarlingWebSeat.IsRequestAllowed"/>
+    /// refuses a read-only seat everything non-GET except <c>POST /api/compose/run</c>), so an OIDC viewer seat
+    /// gets 403 on all four routes while the admin and shared-token seats — and the tokenless loopback operator —
+    /// pass, the same enforcement <c>/api/views</c> and <c>/api/alerts</c> ride. <c>application/json</c> is
+    /// required on every route (the CSRF defense — see <see cref="IsJsonContentType"/> for why a non-simple
+    /// Content-Type closes the simple-request forgery hole), the DELETE included, matching the views surface.</para>
+    ///
+    /// <para><b>Zero drift with MCP, by construction.</b> Each route is a thin HTTP mapping over the SAME core
+    /// the matching MCP verb runs — <see cref="Mcp.DarlingMcpAlertTools.CreateMuteRuleCore"/> /
+    /// <see cref="Mcp.DarlingMcpAlertTools.UpdateMuteRuleCore"/> /
+    /// <see cref="Mcp.DarlingMcpAlertTools.SetMuteRuleEnabledCore"/> /
+    /// <see cref="Mcp.DarlingMcpAlertTools.DeleteMuteRuleCore"/> — over the host's least-privilege VIEWER pool
+    /// (whose narrow floor — <c>config_mute_rules</c> plus the two <c>config_service</c> beacon columns the
+    /// SECURITY-INVOKER bump trigger writes as the caller — is provisioned beside the mcp role's in
+    /// <c>DarlingManagedRoles</c>). The response BODY is the verb's own <c>{status, ...}</c> envelope, verbatim;
+    /// only the HTTP status is added (<see cref="MuteRuleEnvelopeStatus"/>), so a web client and an MCP client
+    /// read one truth. That buys the cores' invariants unduplicated: PARTIAL update with explicit-null clears
+    /// through the store's own full-row <c>UpdateAsync</c>, an <c>unchanged</c> answer for a write that would
+    /// change nothing, a re-read after every write so the reported rule is the STORED one, and
+    /// <c>created_at_utc</c> never moving through any path — the #3306 clock the whole verb family exists to
+    /// preserve. One cosmetic consequence is accepted with it: a refusal's prose speaks the MCP verbs' names
+    /// ("use set_mute_rule_enabled"), which is the shared parser's vocabulary and maps 1:1 onto these routes.</para>
+    ///
+    /// <para><b>The operational caveat these endpoints inherit.</b> Alert rows spell <c>server_name</c> two ways
+    /// — the monitor's own self-alert family uses the display-short name, engine alerts use the registry name —
+    /// so a rule created or edited from ANY surface can go inert by matching the wrong spelling while looking
+    /// scoped. Copy the spelling off the alert rows being muted (<c>/api/read/get_alert_history</c>) rather than
+    /// retyping it; the update core's own description carries the same warning on the MCP side.</para>
+    ///
+    /// <para><b>Route shapes.</b> Create is a POST returning 201 with the stored rule — no <c>Location</c>
+    /// header, deliberately: there is no per-rule GET (the read is the list, <c>/api/read/get_mute_rules</c>),
+    /// and a Location that 404s is worse than none. Update is a PATCH — not the views surface's PUT — because
+    /// the body is a partial document (send only the fields to change; an explicit null clears one) and calling
+    /// that a full replace would misstate the one semantic the verb exists for. Set-enabled is a PUT of the tiny
+    /// <c>{"enabled": bool}</c> sub-resource, the reversible flag flip that never touches another field. The id
+    /// is the rule's GUID string from <c>get_mute_rules</c> / create's response.</para>
+    /// </summary>
+    private static void MapMuteRules(WebApplication app, NpgsqlDataSource postgres)
+    {
+        var store = new PgMuteRuleStore(postgres);
+
+        /* Create — 201 with the STORED rule (re-read after the insert); 400 on a bad body/field/expiry. The
+           body is one JSON object of the get_mute_rules field shape; {} is legal and creates a rule that mutes
+           EVERY alert (the same whole-fleet silence an argument-less create_mute_rule builds — scope fields
+           narrow, they are not required). application/json required. */
+        app.MapPost("/api/mute-rules", async (HttpContext context) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            return MuteRuleToolResult(
+                await Mcp.DarlingMcpAlertTools.CreateMuteRuleCore(store, await ReadBodyAsync(context)),
+                StatusCodes.Status201Created);
+        });
+
+        /* Update — PARTIAL, the merged update_mute_rule semantics verbatim: the body carries ONLY the fields to
+           change, an explicit JSON null clears one, a field not sent does not move, 'enabled' is refused toward
+           the flag route, and created_at_utc is structurally out of reach. 200 updated/unchanged, 404 unknown
+           id, 400 bad field/value with nothing written. The raw body text IS the core's changes_json — no
+           web-side re-parse to drift. application/json required. */
+        app.MapPatch("/api/mute-rules/{id}", async (HttpContext context, string id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            return MuteRuleToolResult(
+                await Mcp.DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, await ReadBodyAsync(context)));
+        });
+
+        /* Set-enabled — the reversible flag flip that keeps the rule's id, scope, reason and creation date (the
+           reason it exists; delete-and-recreate resets the #3306 clock and delivers the suppressed alerts in
+           between). 200 updated/unchanged, 404 unknown id. The body is exactly {"enabled": true|false}: strict,
+           because the ONE field this route may move is the one field the update route refuses — a stray sibling
+           key here is a caller who wanted PATCH. application/json required. */
+        app.MapPut("/api/mute-rules/{id}/enabled", async (HttpContext context, string id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            JsonNode? root;
+            try
+            {
+                root = await JsonNode.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
+            }
+            catch (JsonException)
+            {
+                return ErrorResult("Request body is not valid JSON.", StatusCodes.Status400BadRequest);
+            }
+
+            if (root is not JsonObject body || body["enabled"] is not JsonValue enabledValue
+                || !enabledValue.TryGetValue<bool>(out var enabled) || body.Count != 1)
+            {
+                return ErrorResult(
+                    "Request body must be exactly {\"enabled\": true|false}; any other field belongs to PATCH /api/mute-rules/{id}.",
+                    StatusCodes.Status400BadRequest);
+            }
+
+            return MuteRuleToolResult(
+                await Mcp.DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, id, enabled));
+        });
+
+        /* Delete — 200 with the verb's {status:"deleted", rule_id} envelope rather than the views surface's
+           204, deliberately: the envelope is the ONE shape both surfaces answer with, and it names the id the
+           caller should stop citing. 404 unknown id. Permanent — prefer the enabled route for anything
+           reversible. application/json required (the same CSRF discipline as the bodyless views DELETE). */
+        app.MapDelete("/api/mute-rules/{id}", async (HttpContext context, string id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            return MuteRuleToolResult(
+                await Mcp.DarlingMcpAlertTools.DeleteMuteRuleCore(store, id));
+        });
+    }
+
+    /// <summary>Reads the raw request body text — what the mute-rule cores parse themselves, so the web layer
+    /// adds no parse of its own to drift from theirs.</summary>
+    private static async Task<string> ReadBodyAsync(HttpContext context)
+    {
+        using var reader = new StreamReader(context.Request.Body);
+        return await reader.ReadToEndAsync(context.RequestAborted);
+    }
+
+    /// <summary>
+    /// Maps a mute-rule verb's returned string onto the HTTP status the web surface answers with, leaving the
+    /// body untouched: <c>invalid</c> → 400, <c>not_found</c> → 404, any other envelope (created / updated /
+    /// unchanged / deleted) → <paramref name="successStatus"/>; the cores' caught-exception
+    /// <c>"Error during ..."</c> string → 500 (classified by <see cref="ClassifyToolResponse"/>, like the read
+    /// surface); any other bare string is a shape the cores do not produce and maps to the client-correctable
+    /// 400 for the reason the read surface's mapping does. <c>unchanged</c> deliberately shares the success
+    /// code: it is the retry-safe "already so" answer, and the envelope's own <c>status</c> field carries the
+    /// distinction a caller might act on. Pure, so the whole table pins without a server.
+    /// </summary>
+    internal static int MuteRuleEnvelopeStatus(string result, int successStatus = StatusCodes.Status200OK)
+    {
+        switch (ClassifyToolResponse(result))
+        {
+            case ToolResponseKind.ServerError:
+                return StatusCodes.Status500InternalServerError;
+            case ToolResponseKind.ClientError:
+                return StatusCodes.Status400BadRequest;
+        }
+
+        try
+        {
+            var status = JsonNode.Parse(result) is JsonObject envelope ? TryGetString(envelope, "status") : null;
+            return status switch
+            {
+                "invalid" => StatusCodes.Status400BadRequest,
+                "not_found" => StatusCodes.Status404NotFound,
+                _ => successStatus,
+            };
+        }
+        catch (JsonException)
+        {
+            /* A '{'-leading string that does not parse is not a shape the cores produce — refuse to claim
+               success over a body nobody can read. */
+            return StatusCodes.Status500InternalServerError;
+        }
+    }
+
+    /// <summary>The envelope pass-through the mute-rule routes share: the verb's own body, verbatim, under the
+    /// status <see cref="MuteRuleEnvelopeStatus"/> assigns — except a bare (non-JSON) string, which is wrapped
+    /// as <c>{"error": ...}</c> exactly as <see cref="ToHttpResult"/> wraps the read surface's.</summary>
+    private static IResult MuteRuleToolResult(string result, int successStatus = StatusCodes.Status200OK)
+    {
+        var httpStatus = MuteRuleEnvelopeStatus(result, successStatus);
+        return ClassifyToolResponse(result) == ToolResponseKind.JsonPassthrough
+            ? Results.Text(result, "application/json", statusCode: httpStatus)
+            : ErrorResult(result, httpStatus);
     }
 
     /// <summary>The discriminated outcome of <see cref="RunComposedPanelAsync"/>: the <c>{sql, rows,

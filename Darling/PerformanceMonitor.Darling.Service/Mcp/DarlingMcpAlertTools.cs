@@ -601,33 +601,118 @@ public sealed class DarlingMcpAlertTools
         }
     }
 
+    /// <summary>
+    /// The web dashboard's create half (#3450) over the <see cref="IMuteRuleStore"/> seam — create_mute_rule's
+    /// semantics with the fields arriving as ONE JSON object (the web request body) instead of MCP's discrete
+    /// parameters. The body is parsed by <see cref="BuildMuteRuleUpdate"/> — the SAME whitelist-and-first-error
+    /// authority the update verb runs — so the two surfaces cannot disagree about a field name, a bad expiry, or
+    /// which keys are refused (<c>id</c> / <c>created_at_utc</c> / <c>enabled</c> / <c>summary</c> get the same
+    /// pointed messages here; a new rule is born enabled, and the flag verb owns the flag afterwards). Two
+    /// consequences of that sharing are deliberate rather than incidental: a BLANK string is refused (the MCP
+    /// create folds whitespace to null because omission is available there; on a JSON body <c>""</c> is far more
+    /// likely a mistake than a value), and an explicit JSON null is accepted as the no-op it is (every field
+    /// starts null). An EMPTY object is legal, exactly as a create_mute_rule call with no arguments is — a rule
+    /// with no constraining fields mutes EVERY alert, and that warning belongs on the surface's description, not
+    /// in a refusal its MCP twin does not make.
+    ///
+    /// <para>The new rule is born ENABLED with a fresh GUID id and <c>created_at_utc</c> = now — the same
+    /// <see cref="MuteRule"/> initializer defaults the Viewer's dialog and the MCP tool rely on. The reported
+    /// rule is <b>re-read from the store after the insert</b>, the discipline every mute verb follows: the
+    /// <c>created_at_utc</c> on the wire — the #3306 clock — is the value the store HOLDS, not a restatement of
+    /// the value this method computed, which is the only form in which the two can disagree and be seen to.</para>
+    /// </summary>
+    internal static async Task<string> CreateMuteRuleCore(IMuteRuleStore store, string fieldsJson)
+    {
+        try
+        {
+            JsonNode? root;
+            try
+            {
+                root = JsonNode.Parse(fieldsJson);
+            }
+            catch (JsonException ex)
+            {
+                return Outcome("invalid", $"the request body is not valid JSON: {ex.Message}");
+            }
+
+            if (root is not JsonObject body)
+            {
+                return Outcome("invalid",
+                    "the request body must be a JSON object of mute-rule fields (see get_mute_rules for the shape). An empty object creates a rule that mutes EVERY alert.");
+            }
+
+            var (changes, error) = BuildMuteRuleUpdate(body);
+            if (error != null)
+            {
+                return Outcome("invalid", error);
+            }
+
+            /* A new MuteRule defaults Id to a fresh GUID and Enabled to true — the SAME id-generation and
+               born-enabled default the Viewer's create dialog and the MCP create tool use. The parsed appliers
+               write the caller's fields over the blank rule; a null-clear applier is a no-op on a field that
+               starts null, which is what lets create and update share one parser without sharing a merge base. */
+            var rule = new MuteRule { CreatedAtUtc = DateTime.UtcNow };
+            foreach (var change in changes)
+            {
+                change.Apply(rule);
+            }
+
+            await store.InsertAsync(rule);
+
+            var stored = await FindRuleAsync(store, rule.Id);
+            if (stored is null)
+            {
+                /* The insert landed and the rule is gone: a concurrent delete (or the expiry purge, on a rule
+                   created already-expired) took the row between the write and the read back. Both facts are
+                   named because 'not_found' alone would read as a call that wrote nothing. */
+                return Outcome("not_found",
+                    $"Mute rule '{rule.Id}' was created but is no longer in the store — it was deleted concurrently.");
+            }
+
+            return JsonSerializer.Serialize(
+                new { status = "created", mute_rule = BuildMuteRulePayload(stored) },
+                McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("create_mute_rule", ex);
+        }
+    }
+
     [McpServerTool(Name = "delete_mute_rule"), Description(
         "Deletes an alert mute rule by its id (from get_mute_rules or create_mute_rule). Returns " +
         "{status:\"deleted\", rule_id} on success, or {status:\"not_found\"} when no rule has that id. Permanent. " +
         "The running service stops honoring the rule on its next collection sweep, when the delete's " +
         "config_version bump makes it reload its mute cache.")]
-    public static async Task<string> DeleteMuteRule(
+    public static Task<string> DeleteMuteRule(
         NpgsqlDataSource postgres,
-        [Description("The id of the mute rule to delete (from get_mute_rules or create_mute_rule).")] string rule_id)
+        [Description("The id of the mute rule to delete (from get_mute_rules or create_mute_rule).")] string rule_id) =>
+        DeleteMuteRuleCore(new PgMuteRuleStore(postgres), rule_id);
+
+    /// <summary>
+    /// delete_mute_rule's body over the <see cref="IMuteRuleStore"/> seam <see cref="PgMuteRuleStore"/>
+    /// implements — hoisted verbatim (#3450) so the web dashboard's DELETE endpoint runs the SAME decisions on
+    /// its own pool, exactly as the enable and update verbs already share theirs. The existence check runs
+    /// through the SAME store read get_mute_rules uses, so 'deleted' vs 'not_found' is honest
+    /// (<see cref="IMuteRuleStore.DeleteAsync"/> is a bare DELETE that reports no row count).
+    /// </summary>
+    internal static async Task<string> DeleteMuteRuleCore(IMuteRuleStore store, string ruleId)
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(rule_id))
+            if (string.IsNullOrWhiteSpace(ruleId))
             {
                 return Outcome("invalid", "rule_id is required.");
             }
 
-            /* Existence check through the SAME store get_mute_rules reads, so 'deleted' vs 'not_found' is honest
-               (PgMuteRuleStore.DeleteAsync is a bare DELETE that reports no row count). */
-            var store = new PgMuteRuleStore(postgres);
             var rules = await store.LoadAllAsync();
-            if (!rules.Any(r => string.Equals(r.Id, rule_id, StringComparison.Ordinal)))
+            if (!rules.Any(r => string.Equals(r.Id, ruleId, StringComparison.Ordinal)))
             {
-                return Outcome("not_found", $"No mute rule with id '{rule_id}'.");
+                return Outcome("not_found", $"No mute rule with id '{ruleId}'.");
             }
 
-            await store.DeleteAsync(rule_id);
-            return JsonSerializer.Serialize(new { status = "deleted", rule_id }, McpHelpers.JsonOptions);
+            await store.DeleteAsync(ruleId);
+            return JsonSerializer.Serialize(new { status = "deleted", rule_id = ruleId }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {

@@ -522,6 +522,16 @@ public sealed class DarlingWebOidcTests
     [InlineData(false, "DELETE", "/api/alerts/3", false)]       // no delete
     [InlineData(false, "POST", "/api/alerts/validate", false)]  // validate is a POST, born gated (NOT compose/run-exempt)
     [InlineData(false, "POST", "/api/alerts/test", false)]      // evaluate-now is a POST, born gated too
+    // The mute-rule write endpoints (#3450) shadow /api/alerts: dedicated writes, born gated on the method —
+    // including PATCH, which no earlier surface used and which must NOT ride the compose-run POST exemption.
+    [InlineData(true, "POST", "/api/mute-rules", true)]                // edit seat: create
+    [InlineData(true, "PATCH", "/api/mute-rules/abc-123", true)]       // edit seat: partial update
+    [InlineData(true, "PUT", "/api/mute-rules/abc-123/enabled", true)] // edit seat: enable/disable
+    [InlineData(true, "DELETE", "/api/mute-rules/abc-123", true)]      // edit seat: delete
+    [InlineData(false, "POST", "/api/mute-rules", false)]              // viewer: no create
+    [InlineData(false, "PATCH", "/api/mute-rules/abc-123", false)]     // no edit
+    [InlineData(false, "PUT", "/api/mute-rules/abc-123/enabled", false)] // no flag flip
+    [InlineData(false, "DELETE", "/api/mute-rules/abc-123", false)]    // no delete
     public void IsRequestAllowed_Matrix(bool canEdit, string method, string path, bool expected)
         => Assert.Equal(expected, DarlingWebSeat.IsRequestAllowed(new DarlingWebSeat("who", canEdit), method, path));
 

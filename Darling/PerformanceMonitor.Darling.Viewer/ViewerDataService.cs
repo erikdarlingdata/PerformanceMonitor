@@ -398,14 +398,22 @@ public sealed partial class ViewerDataService : IAsyncDisposable
         "SELECT server_id, server_name, display_name, is_enabled, sql_major_version, COALESCE(monthly_cost_usd, 0), engine_kind, COALESCE(sql_engine_edition, 0), postgres_major_version FROM servers ORDER BY display_name";
 
     /// <summary>
-    /// The authoritative read-only probe (V8 security hardening): does the connected role hold INSERT
-    /// on a <c>config</c> table? True → the admin role (or an owner) — the mute / alert-dismiss /
-    /// analysis-mute writes are available. False → the read-only viewer role — those surfaces degrade.
-    /// This is the source of truth over <c>connectAs</c> (which only picks a credential and doesn't
-    /// apply in BYO mode), because it reflects the connection's ACTUAL privileges. The bare table name
-    /// resolves through search_path to <c>config.config_mute_rules</c>.
+    /// The authoritative read-only probe (V8 security hardening): does the connected role hold UPDATE on
+    /// <c>config_alert_log</c> — the alert-dismiss write itself? True → the admin role (or an owner) — the
+    /// mute / alert-dismiss / analysis-mute writes are available. False → the read-only viewer role — those
+    /// surfaces degrade. This is the source of truth over <c>connectAs</c> (which only picks a credential and
+    /// doesn't apply in BYO mode), because it reflects the connection's ACTUAL privileges. The bare table name
+    /// resolves through search_path to <c>config.config_alert_log</c>.
+    ///
+    /// <para>It probed <c>config_mute_rules</c> INSERT until #3450 granted the viewer ROLE exactly that
+    /// privilege (the web dashboard's dedicated mute-rule endpoints run as viewer), which would have flipped
+    /// every <c>connectAs = "viewer"</c> Viewer to "writable" while its alert-dismiss writes still 42501'd —
+    /// buttons offered, writes refused. <c>config_alert_log</c> UPDATE is one of the writes this probe actually
+    /// gates and stays with admin/owner (never in the viewer role's enumerated web-surface set), so the probe
+    /// keeps discriminating the two roles it exists to tell apart — and the locked-down Viewer's read-only UX,
+    /// mute-rule buttons included, is unchanged by the web grant.</para>
     /// </summary>
-    public const string ReadOnlyProbeSql = "SELECT has_table_privilege('config_mute_rules', 'INSERT')";
+    public const string ReadOnlyProbeSql = "SELECT has_table_privilege('config_alert_log', 'UPDATE')";
 
     private readonly NpgsqlDataSource _dataSource;
 
