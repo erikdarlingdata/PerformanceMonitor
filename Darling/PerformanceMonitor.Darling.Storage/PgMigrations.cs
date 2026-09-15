@@ -194,6 +194,7 @@ public static class PgMigrations
             V121Sql + "\n" + OversizedPlanBacklog.CreateTableSql + "\n" + V54Sql + "\n"
             + PgSchemaGenerator.GenerateQueryStatsPayloadColumnPreAdds() + "\n"
             + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
+        new Migration(122, "pg-deadlock-blocking-count-knobs", V122Sql),
     };
 
     /// <summary>
@@ -488,6 +489,53 @@ ALTER TABLE query_stats
 ALTER TABLE procedure_stats
     ADD COLUMN IF NOT EXISTS query_plan_xml_bytes bigint;
 DROP VIEW IF EXISTS v_query_stats;";
+
+    /// <summary>
+    /// V122 — the PostgreSQL Deadlocks and Blocking alerts' count thresholds on the singleton
+    /// <c>config_alert_settings</c> row (#3444), which were <c>private const int … = 1</c> in
+    /// <c>DarlingWorker</c> with no settings, config or JSON path, while their SQL Server twins
+    /// (<c>blocking_count_threshold</c>, <c>deadlock_count_threshold</c>) have been settable since V1.
+    ///
+    /// <para><b>Their OWN columns rather than the twins'.</b> The two engines' figures are calibrated
+    /// against different evidence and, decisively, against different surfaces: the reason to move the SQL
+    /// Server deadlock figure is agreement with <c>deadlock_warn_per_hour</c> (V120), and a PostgreSQL
+    /// server has no deadlock band to agree with — <c>v_deadlocks</c> is the extended-event capture and is
+    /// structurally zero for a PostgreSQL server (#3017), and the reading is nulled again by
+    /// <c>ServerMetricSources.DmvSourced</c> before it reaches the band. On the blocking side the
+    /// denominators differ outright: the SQL Server count is engine-recorded blocked-process reports, the
+    /// PostgreSQL one is distinct root blockers in a periodic SAMPLE of <c>pg_stat_activity</c>. Reusing
+    /// the columns would also make the upgrade behaviour a function of store state — a store whose
+    /// operator had already raised the SQL Server threshold would have its PostgreSQL alerting silently
+    /// quieted by this rung, which is the one outcome #3444 names as worse than the gap.</para>
+    ///
+    /// <para><b>The column defaults ARE the constants they replace</b> (1 and 1, from
+    /// <c>PostgresAlertEvaluator.DeadlockCountThresholdDefault</c> and
+    /// <c>BlockingCountThresholdDefault</c> — restated as literals here only because a rung is a SQL
+    /// string, and pinned equal to those constants by <c>PgAlertCountKnobRungTests</c>). A store that
+    /// upgrades and is never touched fires exactly where it did, on every store, whatever its SQL Server
+    /// thresholds say.</para>
+    ///
+    /// <para><b><c>integer</c>, matching the twins</b> rather than the <c>double precision</c> the V119
+    /// and V120 rungs used: these are counts of discrete events with no meaningful fractional part, and
+    /// <c>blocking_count_threshold</c>/<c>deadlock_count_threshold</c> are <c>integer</c> on this same
+    /// table.</para>
+    ///
+    /// <para><b>No ACL or provisioning change</b>: <c>config_alert_settings</c> carries table-level grants
+    /// with no column carve (V33/V35/V55/V57/V119/V120 all say so), and V17's statement-level
+    /// <c>trg_bump_alert_settings</c> already bumps <c>config_service.config_version</c> on any write
+    /// here, so the running service picks a change up on its next sweep with no restart.</para>
+    ///
+    /// <para><b>No CHECK enforcing the floor</b>, deliberately, matching V119/V120. The floor is
+    /// <c>PostgresAlertEvaluator.CountThresholdFloor</c>, enforced as the <c>update_alert_settings</c>
+    /// write bound and as a read-side clamp on <c>DarlingAlertSettings</c> — the same raw-in/clamped-out
+    /// split every knob on this table uses, so <c>get_alert_settings</c> reports back what the operator
+    /// stored rather than a value a constraint rewrote.</para>
+    /// </summary>
+    private const string V122Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS pg_deadlock_count_threshold integer NOT NULL DEFAULT 1;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS pg_blocking_count_threshold integer NOT NULL DEFAULT 1;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

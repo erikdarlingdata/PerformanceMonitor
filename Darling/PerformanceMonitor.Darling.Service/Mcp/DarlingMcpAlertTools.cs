@@ -17,6 +17,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -128,7 +129,7 @@ public sealed class DarlingMcpAlertTools
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, and the scheduled-analysis cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes bounds the resulting Slack/Teams/PagerDuty/webhook/email post twice over: once per alert FINGERPRINT, and once per METRIC across the whole fleet for a RE-notification. The second bound is why one fault on forty servers does not cost forty posts an hour; the servers it holds back are named on the post that does go out, under an 'Other Servers Affected' section. A first notice is never held back by either bound, and PerEvent delivery mode opts out of the per-metric one. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store', so an alert naming that is tuned here and nowhere else, including Retention Held's warn/critical ratios. The health_bands group is NOT an alert: its two tiers decide what band a server's card, the worst-first ranking and get_fleet_overview's counts read, in deadlocks per HOUR normalised over whatever window was asked for — so the same pair means the same condition on a 1-hour read and a 24-hour one. Tuning deadlocks.count_threshold does not move the band and tuning health_bands does not move the alert. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, and the scheduled-analysis cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes bounds the resulting Slack/Teams/PagerDuty/webhook/email post twice over: once per alert FINGERPRINT, and once per METRIC across the whole fleet for a RE-notification. The second bound is why one fault on forty servers does not cost forty posts an hour; the servers it holds back are named on the post that does go out, under an 'Other Servers Affected' section. A first notice is never held back by either bound, and PerEvent delivery mode opts out of the per-metric one. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store', so an alert naming that is tuned here and nowhere else, including Retention Held's warn/critical ratios. The health_bands group is NOT an alert: its two tiers decide what band a server's card, the worst-first ranking and get_fleet_overview's counts read, in deadlocks per HOUR normalised over whatever window was asked for — so the same pair means the same condition on a 1-hour read and a 24-hour one. Tuning deadlocks.count_threshold does not move the band and tuning health_bands does not move the alert. Separately, deadlocks.pg_count_threshold and blocking.pg_count_threshold are the PostgreSQL versions of those two alerts' count gates, reported inside those same groups, and they are deliberately NOT the same numbers as the count_threshold beside them: a PostgreSQL server has no deadlock or blocking health band to calibrate against, and its blocking count is a periodic SAMPLE of pg_stat_activity rather than engine-recorded reports. The enabled switch in each group governs BOTH engines; the two thresholds do not move each other. On a store with no PostgreSQL targets both PostgreSQL keys are inert. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]
     public static async Task<string> GetAlertSettings(
         NpgsqlDataSource postgres)
     {
@@ -195,9 +196,23 @@ public sealed class DarlingMcpAlertTools
             enabled = s.BlockingEnabled,
             count_threshold = s.BlockingCountThreshold,
             /* #1839: the second gate — total blocked wait in the latest snapshot (0 = off). */
-            wait_threshold_seconds = s.BlockingWaitSecondsThreshold
+            wait_threshold_seconds = s.BlockingWaitSecondsThreshold,
+            /* #3444 (V122): the PostgreSQL threshold, reported INSIDE this group rather than under a
+               postgres_alerts section of its own. The two engines' figures belong side by side because
+               that is the only placement where an operator reading "blocking" sees that there are two of
+               them — the same argument FleetDeadlockRateThresholdSql makes about not putting a knob in a
+               second table somebody has to know to look in. `enabled` above governs BOTH engines. */
+            pg_count_threshold = s.PgBlockingCountThreshold
         },
-        deadlocks = new { enabled = s.DeadlockEnabled, count_threshold = s.DeadlockCountThreshold },
+        deadlocks = new
+        {
+            enabled = s.DeadlockEnabled,
+            count_threshold = s.DeadlockCountThreshold,
+            /* #3444 (V122): the PostgreSQL threshold — see the blocking group above for why it sits here
+               rather than in a section of its own, and the V122 rung for why it is not this group's
+               count_threshold. `enabled` governs both engines. */
+            pg_count_threshold = s.PgDeadlockCountThreshold
+        },
         /* #3368 (V120): the per-server HEALTH BAND tiers, reported as their own group rather than folded
            into the alert group above — the distinction is the point. `deadlocks` governs whether an alert is
            DELIVERED; these two decide what colour a server's card, the worst-first "needs attention"
@@ -395,7 +410,9 @@ public sealed class DarlingMcpAlertTools
         "decide what colour a card reads and how get_fleet_overview counts bands. Both accept 1.0 upward: one " +
         "per hour is the tightest setting that is still a rate, so no value here can restore the 'any deadlock " +
         "is Critical' reading these tiers replaced. Setting critical BELOW warn is accepted and means every " +
-        "banded rate is Critical. For silencing ONE recurring signature for a " +
+        "banded rate is Critical. " +
+        "Two keys govern the PostgreSQL versions of the two count alerts and are NOT the same numbers as their SQL Server neighbours: deadlocks.pg_count_threshold and blocking.pg_count_threshold, both accepting 1 upward. They sit inside those groups rather than a section of their own so both engines' figures are visible together, but tuning deadlocks.count_threshold does NOT move the PostgreSQL gate and tuning deadlocks.pg_count_threshold does NOT move the SQL Server one. The enabled switch in each group DOES govern both engines. They are separate because the reason to move the SQL Server deadlock figure is agreement with health_bands.deadlock_warn_per_hour, and a PostgreSQL server has no deadlock band at all - its deadlocks are served by get_pg_deadlocks and are structurally absent from the fleet deadlock total - while on the blocking side the SQL Server count is engine-recorded blocked-process reports and the PostgreSQL one is distinct root blockers in a periodic SAMPLE of pg_stat_activity. Both PostgreSQL keys are ignored on a store with no PostgreSQL targets. " +
+        "For silencing ONE recurring signature for a " +
         "long stretch, use create_mute_rule instead of a long delivery cooldown: a mute is scoped, expires, is " +
         "listed by get_mute_rules, and still logs the alert, where the cooldown is global to every fingerprint " +
         "on every server and no tool reports what it suppressed. SMTP/webhook delivery credentials are managed " +
@@ -822,6 +839,12 @@ public sealed class DarlingMcpAlertTools
                                did not choose to send. The bound is the engine's Math.Max(0, ...), so 0
                                keeps disabling the second gate rather than becoming invalid. */
                             case "wait_threshold_seconds": AddInt("blocking_wait_seconds_threshold", n, "blocking.wait_threshold_seconds", 0, int.MaxValue); break;
+                            /* #3444 (V122): the PostgreSQL count gate. The floor is the SAME named
+                               constant DarlingAlertSettings clamps to, not a retyped 1, so this writer
+                               cannot ACCEPT a value the read-side clamp then rewrites. The twin above
+                               takes the identical bound and has no read-side clamp; that gap is named on
+                               DarlingAlertSettings rather than reproduced here. */
+                            case "pg_count_threshold": AddInt("pg_blocking_count_threshold", n, "blocking.pg_count_threshold", PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue); break;
                             default: error = $"Unknown field 'blocking.{k}'."; break;
                         }
                     });
@@ -834,6 +857,9 @@ public sealed class DarlingMcpAlertTools
                         {
                             case "enabled": AddBool("deadlock_enabled", n, "deadlocks.enabled"); break;
                             case "count_threshold": AddInt("deadlock_count_threshold", n, "deadlocks.count_threshold", 1, int.MaxValue); break;
+                            /* #3444 (V122): the PostgreSQL count gate — same bound sourcing as its
+                               blocking sibling. */
+                            case "pg_count_threshold": AddInt("pg_deadlock_count_threshold", n, "deadlocks.pg_count_threshold", PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue); break;
                             default: error = $"Unknown field 'deadlocks.{k}'."; break;
                         }
                     });

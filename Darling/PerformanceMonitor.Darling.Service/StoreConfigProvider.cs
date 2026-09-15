@@ -988,10 +988,12 @@ INSERT INTO config_alert_settings (
     store_job_cadence_warn_percent,
     file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes,
     retention_hold_warn_ratio, retention_hold_critical_ratio,
-    deadlock_warn_per_hour, deadlock_critical_per_hour)
+    deadlock_warn_per_hour, deadlock_critical_per_hour,
+    pg_deadlock_count_threshold, pg_blocking_count_threshold)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
-        $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63)
+        $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63,
+        $64, $65)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -1073,6 +1075,11 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
            setting (every banded rate is Critical), not a state to normalize on the way in. */
         command.Parameters.AddWithValue(a.DeadlockWarnPerHour);
         command.Parameters.AddWithValue(a.DeadlockCriticalPerHour);
+        /* #3444, bound in the same order the V122 columns were appended. Seeded RAW like every sibling:
+           the floor lives on DarlingAlertSettings, so what the store holds is what get_alert_settings
+           reports back. */
+        command.Parameters.AddWithValue(a.PgDeadlockCountThreshold);
+        command.Parameters.AddWithValue(a.PgBlockingCountThreshold);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -1344,7 +1351,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        store_job_cadence_warn_percent,
        file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes,
        retention_hold_warn_ratio, retention_hold_critical_ratio,
-       deadlock_warn_per_hour, deadlock_critical_per_hour
+       deadlock_warn_per_hour, deadlock_critical_per_hour,
+       pg_deadlock_count_threshold, pg_blocking_count_threshold
 FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -1454,6 +1462,14 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
                would silently reset the tier to the shipped default on every worker start. */
             DeadlockWarnPerHour = reader.GetDouble(60),
             DeadlockCriticalPerHour = reader.GetDouble(61),
+
+            /* #3444 PostgreSQL count knobs appended (V122) at ordinals 62-63, integer like their SQL
+               Server twins rather than the double the two pairs above use. Same reachability rule as
+               every appended knob: ApplyToConfig replaces config.Alerts wholesale, so a column selected
+               but not read here -- or read but not selected -- would silently reset the threshold to the
+               shipped default on every worker start. */
+            PgDeadlockCountThreshold = reader.GetInt32(62),
+            PgBlockingCountThreshold = reader.GetInt32(63),
         };
         var analysis = new AnalysisConfig
         {

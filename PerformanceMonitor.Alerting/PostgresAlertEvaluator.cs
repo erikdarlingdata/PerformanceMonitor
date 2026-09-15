@@ -128,6 +128,55 @@ public static class PostgresAlertEvaluator
     /// </summary>
     public const double PoisonWaitCriticalAvgWaiters = 10.0;
 
+    /// <summary>
+    /// #3444 (V122): the shipped default for <c>deadlocks.pg_count_threshold</c> — how many distinct
+    /// deadlocks inside the rolling window fire the PostgreSQL Deadlocks alert.
+    ///
+    /// <para><b>1 is the value the alert shipped with as a compile-time constant</b>, restated here as a
+    /// default rather than changed, so a store that upgrades and is never touched fires exactly where it
+    /// did. The knob exists because the number's right value is per-workload; the number itself is not a
+    /// product opinion this change is revising.</para>
+    ///
+    /// <para><b>Its own knob rather than SQL Server's <c>deadlocks.count_threshold</c>.</b> The two
+    /// engines' counts are tuned against different evidence and, decisively, against different
+    /// SURFACES: the reason to move the SQL Server figure is agreement with
+    /// <c>health_bands.deadlock_warn_per_hour</c>, and a PostgreSQL server has no deadlock band to agree
+    /// with — <c>DarlingFleetReader.FleetDeadlockSql</c> reads <c>v_deadlocks</c>, which is
+    /// structurally zero for a PostgreSQL server, and <c>ServerMetricSources.DmvSourced</c> nulls the
+    /// reading before it reaches the band. Reusing the key would import a number whose whole
+    /// justification is agreement with a surface the importing engine does not have. The <c>enabled</c>
+    /// switch IS shared, matching <see cref="PoisonWaitMetric"/>'s own split: whether the condition is
+    /// worth alerting on at all is one preference, and the volume at which it is worth a page is
+    /// not.</para>
+    /// </summary>
+    public const int DeadlockCountThresholdDefault = 1;
+
+    /// <summary>
+    /// #3444 (V122): the shipped default for <c>blocking.pg_count_threshold</c> — how many distinct ROOT
+    /// blockers inside the rolling window fire the PostgreSQL Blocking alert. 1, for the same
+    /// reproduce-today's-behaviour reason as <see cref="DeadlockCountThresholdDefault"/>.
+    ///
+    /// <para><b>The denominators differ, which is the second reason this is not SQL Server's
+    /// <c>blocking.count_threshold</c>.</b> That figure counts engine-recorded blocked-process reports and
+    /// DMV snapshot rows. This one counts distinct root blockers found in a PERIODIC SAMPLE of
+    /// <c>pg_stat_activity</c> — PostgreSQL records nothing unless asked, so the same numeral is a bar
+    /// against two different measurement processes.</para>
+    /// </summary>
+    public const int BlockingCountThresholdDefault = 1;
+
+    /// <summary>
+    /// The FLOOR both #3444 count knobs clamp to on read, and the lower write bound
+    /// <c>update_alert_settings</c> enforces — one value so a bound the write path ACCEPTS cannot be a
+    /// value the read path then rewrites.
+    ///
+    /// <para><b>It is what keeps the knob a threshold.</b> At 0 the gate's <c>count &gt;= threshold</c>
+    /// test is true for a count of zero, so a store row hand-edited to 0 would fire "Deadlocks Detected"
+    /// on a server with no deadlocks. 1 is the tightest setting that still describes an occurrence. The
+    /// SQL Server twins take the same write bound and have no read-side floor; that asymmetry is named
+    /// rather than copied — see <c>DarlingAlertSettings</c>.</para>
+    /// </summary>
+    public const int CountThresholdFloor = 1;
+
     /// <summary>Metric names, kept as constants because mute rules and history filtering match on them.</summary>
     public const string WraparoundMetric = "PostgreSQL Wraparound Risk";
     public const string XminHorizonMetric = "PostgreSQL Vacuum Horizon Blocked";

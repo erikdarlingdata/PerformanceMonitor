@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -69,7 +70,9 @@ public sealed partial class ViewerDataService
         /* #3297: V119's Retention Held tiers, APPENDED for the reason one line up. */
         "retention_hold_warn_ratio, retention_hold_critical_ratio, " +
         /* #3368: V120's deadlock health-band tiers, APPENDED for the same reason. */
-        "deadlock_warn_per_hour, deadlock_critical_per_hour";
+        "deadlock_warn_per_hour, deadlock_critical_per_hour, " +
+        /* #3444: V122's PostgreSQL Deadlocks/Blocking count thresholds, APPENDED for the same reason. */
+        "pg_deadlock_count_threshold, pg_blocking_count_threshold";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -86,6 +89,7 @@ INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_a
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62,
+        $63, $64,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -150,6 +154,8 @@ ON CONFLICT (id) DO UPDATE SET
     retention_hold_critical_ratio = EXCLUDED.retention_hold_critical_ratio,
     deadlock_warn_per_hour = EXCLUDED.deadlock_warn_per_hour,
     deadlock_critical_per_hour = EXCLUDED.deadlock_critical_per_hour,
+    pg_deadlock_count_threshold = EXCLUDED.pg_deadlock_count_threshold,
+    pg_blocking_count_threshold = EXCLUDED.pg_blocking_count_threshold,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -243,6 +249,8 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.RetentionHoldCriticalRatio }); // $60 (#3297, V119)
         command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.DeadlockWarnPerHour });        // $61 (#3368, V120)
         command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.DeadlockCriticalPerHour });    // $62 (#3368, V120)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.PgDeadlockCountThreshold });      // $63 (#3444, V122)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = r.PgBlockingCountThreshold });      // $64 (#3444, V122)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -318,6 +326,9 @@ ON CONFLICT (id) DO UPDATE SET
         /* #3368 deadlock health-band tiers appended (V120) at ordinals 60-61. */
         DeadlockWarnPerHour = reader.GetDouble(60),
         DeadlockCriticalPerHour = reader.GetDouble(61),
+        /* #3444 PostgreSQL Deadlocks/Blocking count thresholds appended (V122) at ordinals 62-63. */
+        PgDeadlockCountThreshold = reader.GetInt32(62),
+        PgBlockingCountThreshold = reader.GetInt32(63),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -394,6 +405,13 @@ public sealed class AlertSettingsRow
        constants for the reason the pair above is. */
     public double DeadlockWarnPerHour { get; set; } = ServerHealthThresholds.DeadlockWarnPerHourDefault;
     public double DeadlockCriticalPerHour { get; set; } = ServerHealthThresholds.DeadlockCriticalPerHourDefault;
+
+    /* #3444 (V122): the PostgreSQL Deadlocks/Blocking alert count thresholds. Derived from the shared
+       constants for the reason the pairs above are. Distinct from BlockingCountThreshold and
+       DeadlockCountThreshold, which are the SQL Server figures — see the V122 rung for why the two
+       engines do not share one calibration. */
+    public int PgDeadlockCountThreshold { get; set; } = PostgresAlertEvaluator.DeadlockCountThresholdDefault;
+    public int PgBlockingCountThreshold { get; set; } = PostgresAlertEvaluator.BlockingCountThresholdDefault;
 
     /* #2391: defaults mirror the V79 column defaults, so a viewer prefilling against a store that has
        not seeded the row shows what the store would have given it. Ships OFF, per #2349. */
@@ -550,6 +568,8 @@ public sealed class AlertSettingsRow
             && Math.Abs(RetentionHoldWarnRatio - other.RetentionHoldWarnRatio) < 0.0001
             && Math.Abs(RetentionHoldCriticalRatio - other.RetentionHoldCriticalRatio) < 0.0001
             && Math.Abs(DeadlockWarnPerHour - other.DeadlockWarnPerHour) < 0.0001
-            && Math.Abs(DeadlockCriticalPerHour - other.DeadlockCriticalPerHour) < 0.0001;
+            && Math.Abs(DeadlockCriticalPerHour - other.DeadlockCriticalPerHour) < 0.0001
+            && PgDeadlockCountThreshold == other.PgDeadlockCountThreshold
+            && PgBlockingCountThreshold == other.PgBlockingCountThreshold;
     }
 }
