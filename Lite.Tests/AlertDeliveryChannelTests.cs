@@ -29,6 +29,13 @@ namespace Lite.Tests;
 /// three copies into one shared derivation therefore has to leave Lite's output byte-identical, and
 /// <see cref="LiteDispositions_AreUnchangedFromTheHandWrittenDerivation"/> is what says so — over the whole
 /// input domain, against the derivation it replaced, rather than at a handful of sampled points.</para>
+///
+/// <para><b>One class of Lite row does now change value</b> (#3427): a webhook post that came back
+/// unsuccessful stored <c>tray</c>, so an install whose Slack posts were all failing recorded a delivery
+/// for every one of them. It stores <see cref="AlertDelivery.ChannelFailed"/> instead.
+/// <see cref="TheOnlyLiteRowsThatChangeValue_AreFailedWebhookPosts"/> enumerates the complete disagreement
+/// set, so the parity claim above still holds everywhere else and a second change cannot ride along with
+/// this one.</para>
 /// </summary>
 public sealed class AlertDeliveryChannelTests
 {
@@ -78,10 +85,36 @@ public sealed class AlertDeliveryChannelTests
     /// predicate.</para>
     /// </summary>
     private static bool Unreachable(EmailFanoutResult result, bool muted)
-        => (result.EmailSent && !result.EmailAttempted)
-        || (result.SendError is not null && !result.EmailAttempted)
-        || (muted && (result.EmailAttempted || result.EmailSent || result.WebhookSent
-                      || result.SendError is not null));
+        => (result.SendError is not null) != (result.EmailOutcome == AlertChannelOutcome.Failed)
+        || (result.WebhookSendError is not null) != (result.WebhookOutcome == AlertChannelOutcome.Failed)
+        || (muted && (result.EmailOutcome != AlertChannelOutcome.NotAttempted
+                      || result.WebhookOutcome != AlertChannelOutcome.NotAttempted))
+        || (!result.AnyChannelConfigured && (result.EmailOutcome != AlertChannelOutcome.NotAttempted
+                                             || result.WebhookOutcome != AlertChannelOutcome.NotAttempted))
+        || (result.AnyChannelConfigured && !muted
+            && result.EmailOutcome == AlertChannelOutcome.NotAttempted
+            && result.WebhookOutcome == AlertChannelOutcome.NotAttempted);
+
+    /// <summary>
+    /// Whether email was involved at all — <see cref="AlertDelivery.FromFanout"/>'s own predicate,
+    /// restated here because the one class of Lite row whose stored value DOES move is characterised by
+    /// it: a webhook post that was attempted and failed, on an alert where email contributed nothing.
+    /// </summary>
+    private static bool EmailInvolved(EmailFanoutResult result)
+        => result.EmailAttempted || result.EmailSent || result.SendError is not null;
+
+    /// <summary>
+    /// <b>The one Lite disposition #3427 deliberately changes.</b> A webhook post that came back
+    /// unsuccessful used to be stored as <c>tray</c> on this SKU, because the tray arm answered first and a
+    /// toast really had been shown — so a Lite install whose Slack posts were all failing recorded a
+    /// successful delivery for every one of them. A failure is now named above the tray arm.
+    ///
+    /// <para>A throttled or folded send is NOT in here, and still stores <c>tray</c>: the toast is a real,
+    /// completed delivery, so "nothing reached anyone" would be false. A failure is different in kind —
+    /// nothing else on this SKU records it per alert.</para>
+    /// </summary>
+    private static bool WebhookFailureNowNamed(EmailFanoutResult result)
+        => result.WebhookOutcome == AlertChannelOutcome.Failed && !EmailInvolved(result);
 
     /// <summary>
     /// Over every send outcome the core can actually produce, Lite's shared derivation agrees with the
@@ -96,7 +129,7 @@ public sealed class AlertDeliveryChannelTests
 
         foreach (var (result, muted) in EveryFanoutCase())
         {
-            if (Unreachable(result, muted))
+            if (Unreachable(result, muted) || WebhookFailureNowNamed(result))
             {
                 continue;
             }
@@ -109,18 +142,120 @@ public sealed class AlertDeliveryChannelTests
             Assert.Equal(expected.NotificationType, actual.Channel);
         }
 
-        /* 64 representable (2^4 result bools x send_error present-or-not x muted), of which 22 are
-           reachable. The figure is derived from Unreachable() rather than asserted independently — see
-           TheReachableCount_FollowsFromThePredicate, which is what stops it drifting into a magic number. */
-        Assert.Equal(ReachableCaseCount(), compared);
+        /* 400 representable (5 outcomes per channel x each channel's error present-or-not x
+           AnyChannelConfigured x muted), of which 27 are reachable and 3 of those are the deliberate
+           change. The figures are derived from the two predicates rather than asserted independently — see
+           TheReachableCount_FollowsFromThePredicates, which is what stops them drifting into magic
+           numbers. */
+        Assert.Equal(UnchangedCaseCount(), compared);
     }
 
     /// <summary>
-    /// Every disagreement with the old derivation is one of the unreachable shapes. Without this, widening
-    /// the exclusion above would make the parity claim pass by comparing less.
+    /// <b>The change to Lite's stored values is exactly three shapes, and this says which.</b> All three
+    /// are a failed webhook post with email uninvolved, all three used to store <c>tray</c>, and all three
+    /// now store <see cref="AlertDelivery.ChannelFailed"/>. Stated as the complete disagreement set rather
+    /// than as "the failed case also changed", because a second unintended change would otherwise sit
+    /// beside it unnoticed — the same reason the Darling suite counts its SKU divergence instead of
+    /// checking the one cell it knows about.
     /// </summary>
     [Fact]
-    public void EveryDisagreement_IsAnUnreachableCombination()
+    public void TheOnlyLiteRowsThatChangeValue_AreFailedWebhookPosts()
+    {
+        var changed = new List<(string Was, string Now)>();
+
+        foreach (var (result, muted) in EveryFanoutCase())
+        {
+            if (Unreachable(result, muted))
+            {
+                continue;
+            }
+
+            var expected = HandWrittenDerivation(result, muted);
+            var actual = AlertDelivery.FromFanout(result, muted, trayChannelPresent: true);
+
+            if (expected.Sent == actual.Sent && expected.NotificationType == actual.Channel)
+            {
+                continue;
+            }
+
+            changed.Add((expected.NotificationType, actual.Channel));
+
+            /* Each one is the characterised shape, so the exclusion above is not a licence to change
+               anything else. */
+            Assert.True(WebhookFailureNowNamed(result));
+
+            /* alert_sent does not move — nothing delivered before and nothing delivers now. Only the
+               reason does. */
+            Assert.Equal(expected.Sent, actual.Sent);
+        }
+
+        Assert.Equal(3, changed.Count);
+        Assert.All(changed, c => Assert.Equal(AlertDelivery.ChannelTray, c.Was));
+        Assert.All(changed, c => Assert.Equal(AlertDelivery.ChannelFailed, c.Now));
+    }
+
+    /// <summary>
+    /// <b>The both-SKUs answer, measured rather than asserted in prose.</b> Over the whole reachable
+    /// domain, Lite can store <see cref="AlertDelivery.ChannelFailed"/> — so the new vocabulary is not
+    /// Darling-only — and it cannot store <see cref="AlertDelivery.ChannelThrottled"/> or
+    /// <see cref="AlertDelivery.ChannelFolded"/>, because the tray arm answers first for a suppression and
+    /// a toast really was shown. Neither SKU can store
+    /// <see cref="AlertDelivery.ChannelUndelivered"/> any more.
+    ///
+    /// <para>Written as two exact sets, not as membership checks, so a value that quietly becomes
+    /// unreachable on one SKU — a permanently-empty column an operator would read as "this never happens"
+    /// — fails here. <c>unconfigured</c>'s absence from the Lite set is pre-existing and for the same
+    /// reason as the suppressions': #3169 put the tray arm above the configuration arms so a Lite row's
+    /// value does not depend on whether SMTP happens to be set up.</para>
+    /// </summary>
+    [Fact]
+    public void TheStoredVocabulary_DiffersBetweenTheSkus_ExactlyHere()
+    {
+        var lite = new SortedSet<string>(StringComparer.Ordinal);
+        var headless = new SortedSet<string>(StringComparer.Ordinal);
+
+        foreach (var (result, muted) in EveryFanoutCase())
+        {
+            if (Unreachable(result, muted))
+            {
+                continue;
+            }
+
+            lite.Add(AlertDelivery.FromFanout(result, muted, trayChannelPresent: true).Channel);
+            headless.Add(AlertDelivery.FromFanout(result, muted, trayChannelPresent: false).Channel);
+        }
+
+        Assert.Equal(
+            new[]
+            {
+                AlertDelivery.ChannelEmail, AlertDelivery.ChannelEmailAndWebhook,
+                AlertDelivery.ChannelFailed, AlertDelivery.ChannelMuted, AlertDelivery.ChannelTray,
+                AlertDelivery.ChannelWebhook,
+            }.OrderBy(c => c, StringComparer.Ordinal).ToArray(),
+            lite.ToArray());
+
+        Assert.Equal(
+            new[]
+            {
+                AlertDelivery.ChannelEmail, AlertDelivery.ChannelEmailAndWebhook,
+                AlertDelivery.ChannelFailed, AlertDelivery.ChannelFolded, AlertDelivery.ChannelMuted,
+                AlertDelivery.ChannelNoneConfigured, AlertDelivery.ChannelThrottled,
+                AlertDelivery.ChannelWebhook,
+            }.OrderBy(c => c, StringComparer.Ordinal).ToArray(),
+            headless.ToArray());
+
+        /* And the legacy value is gone from both, which is what makes a stored `undelivered` row
+           unambiguously pre-#3427 history rather than something a current build might still be writing. */
+        Assert.DoesNotContain(AlertDelivery.ChannelUndelivered, lite);
+        Assert.DoesNotContain(AlertDelivery.ChannelUndelivered, headless);
+    }
+
+    /// <summary>
+    /// Every disagreement with the old derivation is either an unreachable shape or the one deliberate
+    /// change. Without this, widening either exclusion would make the parity claim pass by comparing less.
+    /// </summary>
+    [Fact]
+    public void EveryDisagreement_IsUnreachableOrTheDeliberateChange()
     {
         var disagreements = new List<(EmailFanoutResult Result, bool Muted)>();
 
@@ -136,7 +271,8 @@ public sealed class AlertDeliveryChannelTests
         }
 
         Assert.NotEmpty(disagreements);
-        Assert.All(disagreements, c => Assert.True(Unreachable(c.Result, c.Muted)));
+        Assert.All(disagreements, c =>
+            Assert.True(Unreachable(c.Result, c.Muted) || WebhookFailureNowNamed(c.Result)));
     }
 
     /// <summary>
@@ -147,7 +283,9 @@ public sealed class AlertDeliveryChannelTests
     public void LiteWritesTray_BecauseItHasOne()
     {
         var delivery = AlertDelivery.FromFanout(
-            new EmailFanoutResult(false, false, null, false, AnyChannelConfigured: false),
+            new EmailFanoutResult(
+                AlertChannelOutcome.NotAttempted, null, AlertChannelOutcome.NotAttempted, null,
+                AnyChannelConfigured: false),
             muted: false, trayChannelPresent: true);
 
         Assert.Equal(AlertDelivery.ChannelTray, delivery.Channel);
@@ -197,6 +335,10 @@ public sealed class AlertDeliveryChannelTests
             (false, AlertDelivery.ChannelNotApplicable, null),
             (false, AlertDelivery.ChannelNoneConfigured, null),
             (false, AlertDelivery.ChannelUndelivered, null),
+            (false, AlertDelivery.ChannelThrottled, null),
+            (false, AlertDelivery.ChannelFolded, null),
+            (false, AlertDelivery.ChannelFailed, "Slack: 500 Internal Server Error"),
+            (false, AlertDelivery.ChannelFailed, null),
             (false, AlertDelivery.ChannelMuted, null),
             (false, AlertDelivery.ChannelEmail, "relay refused"),
             (false, AlertDelivery.ChannelEmail, null),
@@ -275,15 +417,15 @@ public sealed class AlertDeliveryChannelTests
 
     private static IEnumerable<(EmailFanoutResult Result, bool Muted)> EveryFanoutCase()
     {
-        foreach (var emailAttempted in new[] { false, true })
-        foreach (var emailSent in new[] { false, true })
-        foreach (var webhookSent in new[] { false, true })
+        foreach (var email in Enum.GetValues<AlertChannelOutcome>())
+        foreach (var webhook in Enum.GetValues<AlertChannelOutcome>())
         foreach (var anyConfigured in new[] { false, true })
         foreach (var sendError in new string?[] { null, "relay refused" })
+        foreach (var webhookError in new string?[] { null, "Slack: 500 Internal Server Error" })
         foreach (var muted in new[] { false, true })
         {
             yield return (
-                new EmailFanoutResult(emailAttempted, emailSent, sendError, webhookSent, anyConfigured),
+                new EmailFanoutResult(email, sendError, webhook, webhookError, anyConfigured),
                 muted);
         }
     }
@@ -291,16 +433,28 @@ public sealed class AlertDeliveryChannelTests
     private static int ReachableCaseCount()
         => EveryFanoutCase().Count(c => !Unreachable(c.Result, c.Muted));
 
+    private static int UnchangedCaseCount()
+        => EveryFanoutCase().Count(c => !Unreachable(c.Result, c.Muted) && !WebhookFailureNowNamed(c.Result));
+
     /// <summary>
-    /// The reachable count is 22 of 64. Pinned separately from the parity comparison so a widened
-    /// <see cref="Unreachable"/> cannot make that comparison pass by excluding more: the parity test asserts
-    /// it compared <see cref="ReachableCaseCount"/> cases, and this asserts what that number is.
+    /// 27 reachable of 400 representable, of which 24 keep their old value and 3 are the deliberate change.
+    /// Pinned separately from the parity comparison so a widened <see cref="Unreachable"/> or
+    /// <see cref="WebhookFailureNowNamed"/> cannot make that comparison pass by excluding more: the parity
+    /// test asserts it compared <see cref="UnchangedCaseCount"/> cases, and this asserts what that number
+    /// is and that the two predicates partition the reachable set as claimed.
     /// </summary>
     [Fact]
-    public void TheReachableCount_FollowsFromThePredicate()
+    public void TheReachableCount_FollowsFromThePredicates()
     {
-        Assert.Equal(64, EveryFanoutCase().Count());
-        Assert.Equal(22, ReachableCaseCount());
+        Assert.Equal(400, EveryFanoutCase().Count());
+        Assert.Equal(27, ReachableCaseCount());
+        Assert.Equal(24, UnchangedCaseCount());
+
+        /* The two exclusions do not overlap, so "27 = 24 + 3" is a partition rather than an arithmetic
+           coincidence — an unreachable shape counted as a deliberate change would otherwise hide one. */
+        Assert.Equal(
+            3,
+            EveryFanoutCase().Count(c => !Unreachable(c.Result, c.Muted) && WebhookFailureNowNamed(c.Result)));
     }
 
     private static string RepoPath(string relative) => Path.Combine(RepoRoot(), relative);

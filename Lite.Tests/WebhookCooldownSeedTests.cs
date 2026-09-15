@@ -36,11 +36,17 @@ public class WebhookCooldownSeedTests
         var history = new FakeHistoryStore { LastWebhookSent = DateTime.UtcNow };
         var svc = MakeService(history, EnabledTeamsSettings());
 
-        var sent = await svc.TrySendWebhookAlertsAsync("Deadlocks Detected", "Srv", "4", "1", "1");
+        var result = await svc.TrySendWebhookAlertsAsync("Deadlocks Detected", "Srv", "4", "1", "1");
 
-        Assert.False(sent);                                        // suppressed
+        Assert.False(result.Sent);                                 // suppressed
         Assert.Equal(1, history.GetLastWebhookSentCallCount);      // the seed was consulted
         Assert.Equal(0, svc.GetTeamsHealth().ConsecutiveFailures); // and NO post was attempted
+
+        /* #3427: the suppression names its mechanism. This fixture and
+           SeedFromHistory_OlderThanCooldown_DoesNotSuppress differ only in how old the seeded send is, and
+           they come back Throttled and Failed — the discrimination the alert log could not make. */
+        Assert.Equal(AlertChannelOutcome.Throttled, result.Outcome);
+        Assert.Null(result.SendError);
     }
 
     [Fact]
@@ -52,11 +58,17 @@ public class WebhookCooldownSeedTests
         var history = new FakeHistoryStore { LastWebhookSent = DateTime.UtcNow.AddMinutes(-17) };
         var svc = MakeService(history, EnabledTeamsSettings());
 
-        var sent = await svc.TrySendWebhookAlertsAsync("Deadlocks Detected", "Srv", "4", "1", "1");
+        var result = await svc.TrySendWebhookAlertsAsync("Deadlocks Detected", "Srv", "4", "1", "1");
 
-        Assert.False(sent);                                        // dead URL -> post failed
+        Assert.False(result.Sent);                                 // dead URL -> post failed
         Assert.Equal(1, history.GetLastWebhookSentCallCount);      // seed consulted
         Assert.Equal(1, svc.GetTeamsHealth().ConsecutiveFailures); // but it WAS attempted (not suppressed)
+
+        /* #3427: Failed, not Throttled — and the two fixtures differ only in the seeded send's age, so the
+           answer can only have come from the mechanism. Both used to be one bool's false. */
+        Assert.Equal(AlertChannelOutcome.Failed, result.Outcome);
+        Assert.NotNull(result.SendError);
+        Assert.StartsWith("Teams: ", result.SendError);
     }
 
     [Fact]
@@ -66,10 +78,11 @@ public class WebhookCooldownSeedTests
         // fresh service attempts the post.
         var svc = MakeService(history: null, EnabledTeamsSettings());
 
-        var sent = await svc.TrySendWebhookAlertsAsync("Deadlocks Detected", "Srv", "4", "1", "1");
+        var result = await svc.TrySendWebhookAlertsAsync("Deadlocks Detected", "Srv", "4", "1", "1");
 
-        Assert.False(sent);
+        Assert.False(result.Sent);
         Assert.Equal(1, svc.GetTeamsHealth().ConsecutiveFailures);
+        Assert.Equal(AlertChannelOutcome.Failed, result.Outcome);
     }
 
     private sealed class FakeWebhookSettings : IAlertSettings
@@ -140,11 +153,12 @@ public class WebhookCooldownSeedTests
         var history = new FakeHistoryStore { LastWebhookSent = DateTime.UtcNow, SeededDedupKey = "X" };
         var svc = MakeService(history, EnabledTeamsSettings());
 
-        var sent = await svc.TrySendWebhookAlertsAsync(
+        var result = await svc.TrySendWebhookAlertsAsync(
             "Deadlocks Detected", "Srv", "4", "1", "1", ContextWith("Y"));
 
-        Assert.False(sent);                                        // dead URL -> attempted, failed
+        Assert.False(result.Sent);                                 // dead URL -> attempted, failed
         Assert.Equal(1, svc.GetTeamsHealth().ConsecutiveFailures); // ATTEMPTED, not suppressed
+        Assert.Equal(AlertChannelOutcome.Failed, result.Outcome);
     }
 
     [Fact]
@@ -154,10 +168,11 @@ public class WebhookCooldownSeedTests
         var history = new FakeHistoryStore { LastWebhookSent = DateTime.UtcNow, SeededDedupKey = "X" };
         var svc = MakeService(history, EnabledTeamsSettings());
 
-        var sent = await svc.TrySendWebhookAlertsAsync(
+        var result = await svc.TrySendWebhookAlertsAsync(
             "Deadlocks Detected", "Srv", "4", "1", "1", ContextWith("X"));
 
-        Assert.False(sent);                                        // suppressed
+        Assert.False(result.Sent);                                 // suppressed
         Assert.Equal(0, svc.GetTeamsHealth().ConsecutiveFailures); // NOT attempted
+        Assert.Equal(AlertChannelOutcome.Throttled, result.Outcome);
     }
 }

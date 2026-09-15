@@ -52,10 +52,34 @@ public sealed record AlertDelivery
     /// <see cref="FromFanout"/>'s <c>trayChannelPresent</c>.</summary>
     public const string ChannelTray = "tray";
 
-    /// <summary>At least one channel was configured and consulted, and none of them delivered — a
-    /// cooldown-throttled send, or a webhook post that came back unsuccessful. Replaces the reading that
-    /// used to fall into <see cref="ChannelTray"/> on a SKU with no tray.</summary>
+    /// <summary><b>Legacy only — no producer writes this value.</b> At least one channel was configured and
+    /// consulted, none of them delivered, and the row does not say which mechanism stopped it: a
+    /// cooldown-throttled send, a per-metric fold, or a webhook post that came back unsuccessful, all three
+    /// with a null <c>send_error</c>. A stored row carrying it means any of those and cannot be decomposed,
+    /// so it is read as an outcome and never as a reason. <see cref="ChannelThrottled"/>,
+    /// <see cref="ChannelFolded"/> and <see cref="ChannelFailed"/> name the three separately.</summary>
     public const string ChannelUndelivered = "undelivered";
+
+    /// <summary>A channel was configured and consulted, and the delivery cooldown
+    /// (<c>delivery.cooldown_minutes</c>, #3314) was still inside this alert's window, so nothing was
+    /// attempted. The throttle doing its job: no fault, and nothing is owed a delivery. This is the value
+    /// that makes a cooldown's effect measurable from the alert log instead of inferred from the shape of a
+    /// run of non-deliveries.</summary>
+    public const string ChannelThrottled = "throttled";
+
+    /// <summary>#3430: a channel was configured, this alert was outside its own fingerprint's window and so
+    /// WAS owed a delivery, and the metric's per-fleet repeat budget folded it onto another
+    /// <c>(server, fingerprint)</c>'s roster. The alert is reported — named under
+    /// <see cref="RepeatDeliveryBudget.RosterHeading"/> on the delivery that does go out — which is what
+    /// separates it from <see cref="ChannelThrottled"/>, where nothing was owed and nothing is named
+    /// anywhere.</summary>
+    public const string ChannelFolded = "folded";
+
+    /// <summary>A channel was attempted and came back unsuccessful. <see cref="SendError"/> carries the
+    /// first failing channel's text on this disposition, including for a webhook — see
+    /// <see cref="WebhookFanoutResult"/>, which reports a per-channel outcome and an error rather than one
+    /// bool for four channels.</summary>
+    public const string ChannelFailed = "failed";
 
     public const string ChannelEmail = "email";
     public const string ChannelWebhook = "webhook";
@@ -70,6 +94,7 @@ public sealed record AlertDelivery
     public static IReadOnlyList<string> StateCarryingChannels { get; } = new[]
     {
         ChannelNotApplicable, ChannelNoneConfigured, ChannelMuted, ChannelUndelivered, ChannelTray,
+        ChannelThrottled, ChannelFolded, ChannelFailed,
     };
 
     /// <summary>
@@ -98,9 +123,16 @@ public sealed record AlertDelivery
     /// not have to.</summary>
     public string Channel { get; }
 
-    /// <summary>The email send error, when the SMTP attempt threw. Null on every other disposition —
-    /// including a configured webhook whose post failed, which <c>EmailFanoutResult</c> does not report
-    /// (see <see cref="FromFanout"/>).</summary>
+    /// <summary>Why the attempt failed, from whichever channel reported it: the SMTP exception on
+    /// <see cref="ChannelEmail"/>, or the first failing webhook channel's error on
+    /// <see cref="ChannelFailed"/>. Null on every disposition that attempted nothing, and null on a
+    /// delivered row — a webhook failure alongside a successful email is not surfaced here, because the
+    /// email cooldown seed filters on this column and a delivered send must keep seeding it. Persisted as
+    /// <c>send_error</c>.
+    ///
+    /// <para><b>Not a discriminator.</b> Null does not mean "nothing went wrong": it is null on a
+    /// throttled row, on a folded row, and on every row written before those dispositions existed.
+    /// <see cref="Channel"/> is what says which mechanism applied.</para></summary>
     public string? SendError { get; }
 
     /// <summary>
@@ -160,12 +192,27 @@ public sealed record AlertDelivery
     /// channel. The invariant is what lets a reader decode the one legacy signature this change leaves
     /// behind — see <c>AlertDeliveryStatus.Describe</c>.</para>
     ///
-    /// <para><b>A configured webhook that failed reads as <see cref="ChannelUndelivered"/>, not
-    /// <see cref="ChannelEmail"/>-style failure.</b> <c>EmailFanoutResult.SendError</c> tracks the EMAIL
-    /// channel only — <c>WebhookAlertService.TrySendWebhookAlertsAsync</c> collapses every per-channel
-    /// outcome into one bool — so a webhook post that came back unsuccessful is reported here as
-    /// "configured, nothing delivered" with a null error. That is honest but coarse, and it is a live
-    /// delivery gap on any store that configures a webhook.</para>
+    /// <para><b>The three conditions that are not one.</b> A cooldown-throttled send, a #3430 fold and an
+    /// attempted-and-failed post are separate dispositions — <see cref="ChannelThrottled"/>,
+    /// <see cref="ChannelFolded"/>, <see cref="ChannelFailed"/> — because each wants a different operator
+    /// response and all three arrive as "nothing delivered" with a null <c>send_error</c>. Splitting the
+    /// non-delivered rows on <c>send_error</c> counts every one of them as a working throttle, which is the
+    /// reassuring reading rather than the true one. <see cref="EmailFanoutResult"/> carries an
+    /// <see cref="AlertChannelOutcome"/> per channel so the row can say which.</para>
+    ///
+    /// <para><b>Arm order among them: failed, then folded, then throttled</b>, and a failure is placed
+    /// above <paramref name="trayChannelPresent"/> as well. A failed post is the one condition an operator
+    /// cannot observe any other way, so nothing masks it — not a tray toast they already watched appear. A
+    /// fold beats a throttle because the two channels hold separate key spaces and separate budgets, so one
+    /// alert can be folded on one and throttled on the other; the fold is the stronger statement, since a
+    /// folded alert was owed a delivery and is named on another one.</para>
+    ///
+    /// <para><b><see cref="ChannelUndelivered"/> is unreachable from here for a new row.</b> It is the
+    /// fall-through for a shape the send core cannot emit — every channel reporting
+    /// <see cref="AlertChannelOutcome.NotAttempted"/> while
+    /// <see cref="EmailFanoutResult.AnyChannelConfigured"/> says one is set up — because a configured
+    /// channel is always consulted unless the alert is muted, and muted is decided above. Rows retained
+    /// from before the split still carry it and still mean all three at once.</para>
     /// </remarks>
     public static AlertDelivery FromFanout(EmailFanoutResult result, bool muted, bool trayChannelPresent)
     {
@@ -195,12 +242,64 @@ public sealed record AlertDelivery
             : result.WebhookSent ? ChannelWebhook
             : emailInvolved ? ChannelEmail
             : muted ? ChannelMuted
+            : Reported(result, AlertChannelOutcome.Failed) ? ChannelFailed
             : trayChannelPresent ? ChannelTray
             : !result.AnyChannelConfigured ? ChannelNoneConfigured
+            : Reported(result, AlertChannelOutcome.Folded) ? ChannelFolded
+            : Reported(result, AlertChannelOutcome.Throttled) ? ChannelThrottled
             : ChannelUndelivered;
 
-        return new AlertDelivery(sent, channel, result.SendError);
+        /* The webhook's error reaches the row only on ChannelFailed. It must not ride along on a DELIVERED
+           row: the email cooldown seed (IAlertHistoryStore.GetLastEmailSentUtcAsync) filters on
+           send_error IS NULL, so a sent email carrying a sibling channel's failure would stop seeding its
+           own cooldown and re-send after a restart. An email attempt's own error is unconditional, because
+           it is what makes the ChannelEmail arm above a failure rather than an absence. */
+        var sendError = result.SendError
+            ?? (channel == ChannelFailed ? result.WebhookSendError : null);
+
+        return new AlertDelivery(sent, channel, sendError);
     }
+
+    /// <summary>
+    /// Whether EITHER channel reports <paramref name="outcome"/>. The arms above are per-outcome rather
+    /// than per-channel because the column holds one value for a fan-out of up to four channels across two
+    /// key spaces, so "did anything fail / fold / get throttled" is the question a single value can answer.
+    /// </summary>
+    private static bool Reported(EmailFanoutResult result, AlertChannelOutcome outcome) =>
+        result.EmailOutcome == outcome || result.WebhookOutcome == outcome;
+}
+
+/// <summary>
+/// What happened to ONE delivery channel for one alert. The per-channel half of
+/// <see cref="AlertDelivery"/>: <see cref="EmailFanoutResult"/> carries one of these for email and one for
+/// the webhook fan-out, and <see cref="AlertDelivery.FromFanout"/> reduces the pair to the single
+/// <c>notification_type</c> the alert log stores.
+///
+/// <para>A channel reports <see cref="Throttled"/> or <see cref="Folded"/> only when it is configured and
+/// was actually consulted, so an unconfigured channel can never claim a suppression it had no opportunity
+/// to apply — which is what lets <see cref="AlertDelivery.FromFanout"/> read either channel's value
+/// without also asking whether that channel exists.</para>
+/// </summary>
+public enum AlertChannelOutcome
+{
+    /// <summary>Nothing was consulted on this channel: it is not configured on this store, or a mute rule
+    /// suppressed the alert before any channel was consulted. The default, so a channel a caller forgot to
+    /// answer for claims nothing.</summary>
+    NotAttempted = 0,
+
+    /// <summary>Configured, consulted, and the delivery cooldown was still inside this alert's window, so
+    /// nothing was attempted (#3314). Nothing is owed a delivery.</summary>
+    Throttled = 1,
+
+    /// <summary>Configured, outside this alert's own fingerprint window and so owed a delivery, and folded
+    /// onto the metric's per-fleet roster to be named by another delivery (#3430).</summary>
+    Folded = 2,
+
+    /// <summary>Attempted, and came back unsuccessful.</summary>
+    Failed = 3,
+
+    /// <summary>Attempted, and delivered.</summary>
+    Delivered = 4,
 }
 
 /// <summary>
@@ -245,6 +344,12 @@ public static class AlertDeliveryStatus
     /// nothing in the row separates them — the whole reason this change exists. It renders
     /// <see cref="Logged"/>, which is #2781's word for it and claims nothing in either direction. New rows
     /// say which of those they are.</para>
+    ///
+    /// <para>A stored <see cref="AlertDelivery.ChannelUndelivered"/> is the same kind of row and gets the
+    /// same treatment. It covers a throttled send, a #3430 fold and a failed post, and nothing in it
+    /// separates them, so it renders <see cref="NotSent"/> — an outcome, with no mechanism attached.
+    /// Rendering it as <see cref="Throttled"/> would be the likelier of the three asserted as the
+    /// certain one, and a webhook outage inside that history would read as a tuned cooldown.</para>
     /// </remarks>
     public static string Describe(bool sent, string? channel, string? sendError, bool producerHadTrayChannel)
     {
@@ -280,6 +385,25 @@ public static class AlertDeliveryStatus
             return NoChannelConfigured;
         }
 
+        /* Reached only by a `failed` row with no error text. One with an error already answered Failed on
+           the send_error arm above, and the two must agree: the web dashboard's lookup is a table keyed on
+           notification_type alone and answers Failed either way, so without this arm an errorless `failed`
+           row would read "Failed" on one surface and "Not sent" on the other. */
+        if (channel == AlertDelivery.ChannelFailed)
+        {
+            return Failed;
+        }
+
+        if (channel == AlertDelivery.ChannelThrottled)
+        {
+            return Throttled;
+        }
+
+        if (channel == AlertDelivery.ChannelFolded)
+        {
+            return ReportedElsewhere;
+        }
+
         /* Lite's tray toast is a real delivery to a real channel. On a store whose producer had no tray
            the same stored value carries no information at all, so it gets #2781's neutral "Logged" — the
            label the web surface already chose for this exact row, rather than a second word for it. */
@@ -297,6 +421,16 @@ public static class AlertDeliveryStatus
     public const string Failed = "Failed";
     public const string Muted = "Muted";
     public const string Shown = "Shown";
+
+    /// <summary>The delivery cooldown was still inside this alert's window, so no channel was attempted.
+    /// A working throttle, and a different operator response from <see cref="Failed"/> — which is why the
+    /// two are separate labels rather than one <see cref="NotSent"/>.</summary>
+    public const string Throttled = "Throttled";
+
+    /// <summary>#3430: this alert's delivery was folded onto another server's, which names it under
+    /// <see cref="AlertDelivery.ChannelFolded"/>'s roster heading. It reached the channel — on someone
+    /// else's card — so the label says reported rather than suppressed.</summary>
+    public const string ReportedElsewhere = "Reported elsewhere";
 
     /// <summary>#2781/#2814's label for a stored <c>tray</c> row on a surface with no tray: a history row
     /// was written and no channel was involved, with no claim either way. Reached only by rows written
