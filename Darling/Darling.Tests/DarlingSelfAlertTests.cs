@@ -4103,6 +4103,38 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         Assert.Single(h.Deliverer.Outcomes);
     }
 
+    /// <summary>#3464 (measured): with alerts_enabled read back false on both SQL Server stores, a
+    /// Collector Cost Regression reached the live paging channel 60 minutes into the fleet-wide mute,
+    /// while the engine sweep's server_alert_passes counters sat frozen — the master switch honored by
+    /// the sweep and bypassed by this sibling, whose only AlertsEnabled consult guarded the digest branch
+    /// that runs AFTER the paging apply. The gate is the sibling shape: master-off means no evaluation,
+    /// no history rows, state frozen where it stands.</summary>
+    [Fact]
+    public async Task CollectorCostRegression_AlertsDisabled_DoesNotFire_DoesNotRecord_AndResumesCleanly()
+    {
+        var h = new Harness();
+        h.Settings.AlertsEnabled = false;
+        var e = h.Build();
+
+        /* Master off: the regression that fires on entry when the switch is on delivers nothing and writes
+           nothing — including no resolution row for a pair that clears mid-mute (frozen means frozen; the
+           sweep's own counters proved the engine records nothing under master-off, and the sibling applies
+           all early-return the same way). */
+        await e.ApplyCostRegressionsAsync(new[] { Regression() }, Ct);
+        await e.ApplyCostRegressionsAsync(
+            System.Array.Empty<PerformanceMonitor.Darling.Service.Mcp.DarlingCollectorCostReader.CostRegression>(), Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        /* Master back on: nothing half-advanced under the mute, so the identical regression fires as a
+           clean first entry — no cooldown consumed, no phantom "Cleared" row owed. */
+        h.Settings.AlertsEnabled = true;
+        await e.ApplyCostRegressionsAsync(new[] { Regression() }, Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Collector Cost Regression", fired.MetricName);
+        Assert.Empty(h.History.Records);
+    }
+
     [Fact]
     public async Task CollectorCostRegression_DistinctCollectors_FireIndependently()
     {

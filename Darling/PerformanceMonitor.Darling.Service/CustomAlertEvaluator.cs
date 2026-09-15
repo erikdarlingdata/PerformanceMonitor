@@ -48,6 +48,12 @@ public sealed class CustomAlertEvaluator
     private readonly NpgsqlDataSource _viewer;
     private readonly IAlertDeliverer _deliverer;
     private readonly Func<AlertMuteContext, bool>? _isAlertMuted;
+
+    /// <summary>#3464: the master alerts switch, read live per sweep (the worker passes a closure over the
+    /// same <c>config.Alerts.Enabled</c> every other family consults). REQUIRED, not optional-defaulting-on:
+    /// an unwired master gate is exactly the bypass shape that issue measured twice, so a construction that
+    /// cannot say where its master switch lives must not compile.</summary>
+    private readonly Func<bool> _alertsEnabled;
     private readonly PgAlertHistoryStore _historyStore;
     private readonly int _defaultIntervalSeconds;
     private readonly ILogger _logger;
@@ -120,6 +126,7 @@ public sealed class CustomAlertEvaluator
         NpgsqlDataSource viewerDataSource,
         IAlertDeliverer deliverer,
         Func<AlertMuteContext, bool>? isAlertMuted,
+        Func<bool> alertsEnabled,
         PgAlertHistoryStore historyStore,
         int defaultIntervalSeconds,
         TimeSpan cacheTtl,
@@ -130,6 +137,7 @@ public sealed class CustomAlertEvaluator
         _viewer = viewerDataSource ?? throw new ArgumentNullException(nameof(viewerDataSource));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
         _isAlertMuted = isAlertMuted;
+        _alertsEnabled = alertsEnabled ?? throw new ArgumentNullException(nameof(alertsEnabled));
         _historyStore = historyStore ?? throw new ArgumentNullException(nameof(historyStore));
         _defaultIntervalSeconds = Math.Max(CustomAlertRuleDefinition.MinEvaluationIntervalSeconds, defaultIntervalSeconds);
         _cacheTtl = cacheTtl;
@@ -216,9 +224,26 @@ public sealed class CustomAlertEvaluator
         return builder.ToString();
     }
 
-    /// <summary>Evaluates every enabled rule applicable to one server. Failure-isolated per rule.</summary>
+    /// <summary>Evaluates every enabled rule applicable to one server. Failure-isolated per rule.
+    /// Gated on the master alerts switch, like the engine sweep it is the user-authored twin of (#3464).</summary>
     public async Task EvaluateServerAsync(int serverId, string storageName, string displayName, CancellationToken cancellationToken)
     {
+        /* #3464: the master-switch gate this sweep never had. A user-authored rule fires into the SAME
+           channels the engine's fourteen built-ins do, and those built-ins stop evaluating the moment
+           alerts_enabled goes false (AlertEngine.EvaluateServerAsync's early return) — so a rule the
+           operator wrote was one of the paths that could still page through a fleet-wide mute. Master-off
+           here means what it means for the engine: no rule load, no metric reads, no history rows, and the
+           per-rule hysteresis/streak state frozen where it stands, resuming from the same persisted samples
+           when the switch comes back. The per-rule Enabled flag stays the narrower knob (only enabled rules
+           are swept at all), which makes this the established master-AND-family composition rather than a
+           new semantics. ReconcileStateAsync is deliberately NOT gated: it is state hygiene for disabled
+           and out-of-scope rules, its writes are history rows and never a channel, and leaving a mute
+           unable to orphan state is part of what makes flipping the switch back on safe. */
+        if (!_alertsEnabled())
+        {
+            return;
+        }
+
         IReadOnlyList<ParsedRule> rules;
         try
         {

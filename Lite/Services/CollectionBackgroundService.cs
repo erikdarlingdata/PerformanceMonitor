@@ -425,10 +425,25 @@ public class CollectionBackgroundService : BackgroundService
     }
 
     /// <summary>
+    /// Whether a finished analysis pass may route its findings to the notification channels: the master
+    /// alerts switch AND the analysis family toggle — the same AND'd idiom Lite's connection edge already
+    /// uses (<c>App.AlertsEnabled &amp;&amp; App.NotifyConnectionChanges</c>, MainWindow.xaml.cs) and the
+    /// Darling twin of DarlingWorker.ShouldNotifyAnalysisFindings. #3464: the family toggle alone decided
+    /// this on both SKUs, so an operator who flipped the master switch off still got analysis mail — the
+    /// measured Darling incident delivered 38 minutes into a fleet-wide mute, and Lite's copy of the gate
+    /// had the identical shape. The D0 split is unchanged: analysis still runs and persists regardless,
+    /// so the Recommendations tab keeps filling while the channels stay silent. Static and pure over the
+    /// live App statics so the truth table is testable without a background service.
+    /// </summary>
+    internal static bool ShouldNotifyAnalysisFindings() =>
+        App.AlertsEnabled && App.AnalysisNotificationsEnabled;
+
+    /// <summary>
     /// Runs the triage engine for each enabled server on the independent
     /// AnalysisIntervalMinutes cadence and persists findings to DuckDB. Production is
     /// gated by App.AnalysisEnabled (default ON, D0); findings are only routed to the
-    /// notification channels when App.AnalysisNotificationsEnabled is also on.
+    /// notification channels when the master alerts switch AND
+    /// App.AnalysisNotificationsEnabled are both on (#3464).
     /// </summary>
     private async Task RunAnalysisIfDueAsync(CancellationToken stoppingToken)
     {
@@ -440,9 +455,10 @@ public class CollectionBackgroundService : BackgroundService
             return;
         }
 
-        /* D0: deliver findings only when notifications are also enabled. Analysis
-           runs+persists regardless; this inner gate controls delivery alone. */
-        var notify = App.AnalysisNotificationsEnabled;
+        /* D0: deliver findings only when the master switch AND the notification toggle are both on
+           (#3464 — the toggle alone let analysis mail through a fleet-wide mute). Analysis runs+persists
+           regardless; this inner gate controls delivery alone. */
+        var notify = ShouldNotifyAnalysisFindings();
 
         if (DateTime.UtcNow - _lastAnalysisTime < TimeSpan.FromMinutes(App.AnalysisIntervalMinutes))
         {

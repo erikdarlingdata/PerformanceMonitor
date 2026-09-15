@@ -139,7 +139,7 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), $4, 
             // defaultIntervalSeconds 0 so the second sweep is immediately due (no 60s cadence wait); cacheTtl 0 so
             // each sweep re-reads the rule.
             var evaluator = new CustomAlertEvaluator(
-                rules, state, dataSource, deliverer, isAlertMuted: null,
+                rules, state, dataSource, deliverer, isAlertMuted: null, alertsEnabled: static () => true,
                 new PgAlertHistoryStore(dataSource), defaultIntervalSeconds: 0,
                 cacheTtl: TimeSpan.Zero, NullLogger.Instance);
 

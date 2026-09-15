@@ -993,10 +993,25 @@ internal sealed class DarlingSelfAlertEvaluator
     /// slower rather than the target, and the fired alert says so — see
     /// <see cref="CostIsNotAllTargetSide"/>, which exists because this doc and that text have to agree.</para>
     /// Called once per cycle from the worker's hourly store-metrics tick, AFTER the flush that writes the
-    /// latest hour. Testable directly with a recording deliverer + a controllable clock.
+    /// latest hour. Gated on the master alerts switch before the first store read (#3464). Testable
+    /// directly with a recording deliverer + a controllable clock.
     /// </summary>
     public async Task EvaluateCollectorCostAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
+        /* #3464: the master-switch gate, up front and before the first store read — the shape
+           EvaluateStoreAlertsAsync established ("mirrors the engine's early return"). This method had NO
+           consult ahead of the paging apply: the only AlertsEnabled on this path guarded the digest branch
+           below, which runs AFTER ApplyCostRegressionsAsync, so the one self-alert family that pages
+           fleet-wide was also the one that delivered 60 minutes into a fleet-wide mute while the engine
+           sweep's server_alert_passes counters sat frozen. Master-off here means what it means for the
+           engine: nothing is read, nothing is evaluated, nothing is recorded, and the fire/resolve state
+           freezes where it stands — the regressions are a property of stored rows, so re-enabling resumes
+           from the same answer the store would have given all along. */
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
         List<Mcp.DarlingCollectorCostReader.CostRegression> regressions;
         var readClock = Stopwatch.StartNew();
         try
@@ -1042,10 +1057,10 @@ internal sealed class DarlingSelfAlertEvaluator
         await ApplyCostRegressionsAsync(routing.Paging, cancellationToken);
 
         /* The digest's own interval, checked here so 23 of every 24 hourly ticks do no extra store work.
-           AlertsEnabled is checked inside the apply, like every sibling. */
-        if (!_settings.AlertsEnabled
-            || (_lastCostDigest.TryGetValue(CollectorCostDigestKey, out var lastDigest)
-                && _utcNow() - lastDigest < CollectorCostDigestInterval))
+           The master switch already returned above, before the first store read (#3464); AlertsEnabled is
+           ALSO checked inside the apply, like every sibling, so a direct caller cannot skip it. */
+        if (_lastCostDigest.TryGetValue(CollectorCostDigestKey, out var lastDigest)
+            && _utcNow() - lastDigest < CollectorCostDigestInterval)
         {
             return;
         }
@@ -1070,10 +1085,24 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /// <summary>The apply half of <see cref="EvaluateCollectorCostAsync"/>, split out so the fire-once /
     /// re-fire / resolve lifecycle is unit-testable with a recording deliverer and a controllable clock,
-    /// with the regression set fabricated rather than read from a store.</summary>
+    /// with the regression set fabricated rather than read from a store. Gated on the master alerts
+    /// switch, like every sibling apply (#3464 — this was the one that was not).</summary>
     internal async Task ApplyCostRegressionsAsync(
         IReadOnlyList<Mcp.DarlingCollectorCostReader.CostRegression> regressions, CancellationToken cancellationToken)
     {
+        /* #3464: the consult this apply never had, and the measured half of that issue: with
+           alerts_enabled read back false on both SQL Server stores, a Collector Cost Regression reached
+           the live paging channel an hour into the mute, because every sibling apply gates here and this
+           one delivered through FireAsync with no master consult anywhere between the hourly tick and the
+           channel. The gate is the sibling shape — no evaluation, no history rows, cooldown and
+           active-edge state frozen — rather than the connection edge's track-always split, because unlike
+           a connection edge there is no cross-sweep state machine here to corrupt: the fire/resolve edge
+           is rebuilt from stored rows the moment the switch comes back on. */
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
         var now = _utcNow();
         var current = new HashSet<string>(StringComparer.Ordinal);
 
