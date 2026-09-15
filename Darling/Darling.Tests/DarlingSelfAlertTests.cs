@@ -3925,9 +3925,11 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
     private static PerformanceMonitor.Darling.Service.Mcp.DarlingCollectorCostReader.CostRegression Regression(
         long latestMs = 8000, double baselineMs = 2000.0, int serverId = 7, string collector = "query_store",
         DateTime? latestMetricTime = null, long latestRuns = 100,
-        double latestMsPerRun = 80.0, double baselineMsPerRun = 20.0) =>
+        double latestMsPerRun = 80.0, double baselineMsPerRun = 20.0,
+        double baselineP95MsPerRun = 20.0) =>
         new(serverId, "prod-multi-19", collector, latestMs, baselineMs,
-            latestMetricTime ?? DefaultRegressionMetricTime, latestRuns, latestMsPerRun, baselineMsPerRun);
+            latestMetricTime ?? DefaultRegressionMetricTime, latestRuns, latestMsPerRun, baselineMsPerRun,
+            baselineP95MsPerRun);
 
     [Fact]
     public async Task CollectorCostRegression_FiresOnEntry_SuppressedWithinCooldown_ResolvesWhenGone()
@@ -3992,5 +3994,54 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         await e.ApplyCostRegressionsAsync(
             new[] { Regression(latestMetricTime: DefaultRegressionMetricTime.AddHours(1)) }, Ct);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    /// <summary>#3440: the fired alert must report the bound that actually SELECTED it. The query gates on the
+    /// factor applied to the mean AND to the p95 of the collector's own daily per-run cost, so the binding
+    /// bound is the factor on the higher of the two. Reporting the mean-derived figure would hand a reader a
+    /// threshold the row did not have to clear — with a p95 baseline of 50 ms/run the real bound is 100, and
+    /// the mean-derived one is 40, so a reader checking the arithmetic would compute a 4x that is not the test
+    /// the alert applied.</summary>
+    [Fact]
+    public async Task CollectorCostRegression_ReportsTheBoundThatSelectedIt_NotTheMeanRatio()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCostRegressionsAsync(
+            new[] { Regression(latestMsPerRun: 120.0, baselineMsPerRun: 20.0, baselineP95MsPerRun: 50.0) }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(100.0, fired.NumericThresholdValue);
+        Assert.Contains("100.0 ms/run", fired.ThresholdValue, StringComparison.Ordinal);
+
+        /* Both baselines stay legible on the alert, because the reader's next question is which one bound. */
+        Assert.Contains("20.0 ms/run mean", fired.ThresholdValue, StringComparison.Ordinal);
+        Assert.Contains("50.0 ms/run daily p95", fired.ThresholdValue, StringComparison.Ordinal);
+        Assert.Contains("p95 of its OWN daily per-run cost", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>#3440: the reported bound is derived through <see cref="System.Math.Max"/>, so no construction
+    /// of the record can produce a bound BELOW the pre-#3440 mean-ratio one. That is what makes the added
+    /// conjunct narrowing-only rather than a retune: a p95 baseline that is absent, zero, or incoherently
+    /// under the mean degrades to exactly the old bound instead of to a looser one, and there is no settable
+    /// member holding a bound for a <c>with</c> expression to overwrite.</summary>
+    [Fact]
+    public void CollectorCostRegressionThreshold_NeverFallsBelowTheMeanBound()
+    {
+        const double factor = 2.0;
+        const double mean = 20.0;
+
+        foreach (var p95 in new[] { 0.0, 0.1, 19.999, mean, 20.001, 50.0, 1_000_000.0 })
+        {
+            var r = Regression(baselineMsPerRun: mean, baselineP95MsPerRun: p95);
+            Assert.True(r.ThresholdMsPerRun(factor) >= mean * factor,
+                $"p95 {p95} produced a bound below the mean bound");
+            Assert.Equal(System.Math.Max(mean, p95) * factor, r.ThresholdMsPerRun(factor), 6);
+        }
+
+        /* And the degenerate case is exactly the old bound, not merely "not below" it. */
+        Assert.Equal(mean * factor,
+            Regression(baselineMsPerRun: mean, baselineP95MsPerRun: 0.0).ThresholdMsPerRun(factor), 6);
     }
 }

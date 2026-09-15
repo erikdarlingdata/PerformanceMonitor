@@ -185,7 +185,16 @@ internal sealed class DarlingSelfAlertEvaluator
        measured case doubled 3.0 -> 6.1 ms per run over 50 runs, which costs 0.16 s a day. So a third gate
        asks what the regression COSTS — the per-run rise times the volume it is paid on — and requires
        CostRegressionAddedMsFloor of it. That is unit-consistent with the ratio, and unlike a minimum
-       per-run baseline it still reports a 3 ms collector that runs often enough for the rise to matter. */
+       per-run baseline it still reports a 3 ms collector that runs often enough for the rise to matter.
+       #3440: the ratio is measured against the baseline's UPPER EDGE as well as its mean. A heavy
+       collector's own spread exceeds CostRegressionFactor on natural variation — per-run p95/avg measured
+       at 2.03x to 5.04x across index_object_stats, procedure_stats and query_store on one fleet — so
+       against a mean baseline a normal upper-mode day cleared the factor by construction, and the
+       CostRegressionAddedMsFloor cannot screen those because the expense that makes a collector bimodal
+       makes its upper mode's excess large. The reader now also returns the p95 of the PRIOR days' per-run
+       cost and requires the factor on that too. The two are an AND, so this alert can only fire on a
+       subset of what it fired on before, and CostRegression.ThresholdMsPerRun is the bound the fired alert
+       reports so the threshold a reader falsifies against is the one that selected the row. */
     private readonly ConcurrentDictionary<string, string> _activeCostRegression = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastCostRegressionAlert = new();
 
@@ -921,22 +930,27 @@ internal sealed class DarlingSelfAlertEvaluator
                 var ratio = regression.BaselineMsPerRun > 0
                     ? regression.LatestMsPerRun / regression.BaselineMsPerRun
                     : 0;
+                var threshold = regression.ThresholdMsPerRun(CostRegressionFactor);
                 await FireAsync(
                     key, regression.ServerName, "Collector Cost Regression",
                     currentValue: $"{regression.LatestMsPerRun:N1} ms/run",
-                    thresholdValue: $"{regression.BaselineMsPerRun:N1} ms/run baseline x {CostRegressionFactor:N1}",
+                    thresholdValue: $"{threshold:N1} ms/run (the greater of its {regression.BaselineMsPerRun:N1} ms/run mean " +
+                        $"and its {regression.BaselineP95MsPerRun:N1} ms/run daily p95, x {CostRegressionFactor:N1})",
                     detail: $"The '{regression.CollectorName}' collector's OWN query time on {regression.ServerName} rose to " +
                         $"{regression.LatestMsPerRun:N1} ms per run, {ratio:N1}x its {CostRegressionBaselineWindow.TotalDays:N0}-day " +
                         $"baseline of {regression.BaselineMsPerRun:N1} ms per run ({regression.LatestRuns:N0} runs totalling " +
                         $"{regression.LatestMs:N0} ms so far today, adding {regression.AddedMsPerDay / 1000.0:N1} s of collection " +
-                        $"time a day at that volume). This is the MONITORING TOOL's own cost, not the " +
+                        $"time a day at that volume). It also cleared {threshold:N1} ms per run, which is the factor on the " +
+                        $"p95 of its OWN daily per-run cost over that window ({regression.BaselineP95MsPerRun:N1} ms) rather " +
+                        $"than on the mean (#3440) - so this is not the collector's own upper mode on a normal slow day. " +
+                        $"This is the MONITORING TOOL's own cost, not the " +
                         $"server's workload - each individual run is costing more than it used to. Measured PER RUN (#2846) so " +
                         $"a cadence change cannot read as a cost change. get_collector_cost with " +
                         $"collector_name={regression.CollectorName} shows the trend. {CostIsNotAllTargetSide}",
                     severity: AlertSeverityLevel.Warning,
                     shortMessage: $"{regression.CollectorName} collection cost on {regression.ServerName} is {ratio:N1}x its per-run baseline",
                     numericCurrentValue: regression.LatestMsPerRun,
-                    numericThresholdValue: regression.BaselineMsPerRun * CostRegressionFactor,
+                    numericThresholdValue: threshold,
                     cancellationToken);
             }
         }

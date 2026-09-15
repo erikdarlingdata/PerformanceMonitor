@@ -134,7 +134,8 @@ ORDER BY day";
     /// run-weighted cost per run of the prior days in the window, returned only when the baseline is
     /// meaningful (total >= floor, and at least 3 prior days so a new collector cannot trip it) and the
     /// latest exceeds it by the factor.
-    /// $1 = baseline window start (naive UTC), $2 = baseline floor ms, $3 = factor.
+    /// $1 = baseline window start (naive UTC), $2 = baseline floor ms, $3 = factor (applied to the mean AND
+    /// to the p95 per-run baseline), $4 = minimum added ms per day.
     ///
     /// <para><b>Why PER RUN and not the day's total (#2846).</b> Total daily cost is
     /// <c>runs x cost-per-run</c>, so comparing totals cannot tell "each run got more expensive" from "the
@@ -154,6 +155,33 @@ ORDER BY day";
     /// legitimately runs once per server per day, so a min-runs guard would blind the alert to every
     /// daily-cadence collector.</para>
     ///
+    /// <para><b>The bound is the factor on the baseline's own UPPER EDGE, not on its mean (#3440).</b>
+    /// <c>baseline_p95_ms_per_run</c> is the 95th percentile of the PRIOR days' per-run cost, and the latest
+    /// day has to clear the factor on it as well as on the run-weighted mean. The mean conjunct stays, so
+    /// the pair is an AND and this predicate can only ever select a SUBSET of what the mean alone selected:
+    /// nothing that was silent can start firing. It is there because a heavy collector's own spread already
+    /// exceeds the factor — measured on one production fleet, <c>p95/avg</c> per run ran 2.03x
+    /// (<c>index_object_stats</c>), 2.95x, 4.74x (<c>procedure_stats</c>) and 5.04x (<c>query_store</c>) —
+    /// so against a mean baseline a perfectly normal upper-mode day cleared a 2.0x ratio by construction,
+    /// and the alert could not tell "this collector got slower" from "this collector had a normal slow day".
+    /// The materiality floor cannot screen those: the expense that makes a collector bimodal also makes its
+    /// upper mode's excess large. The measured firing was 17,548 ms/run against a 6,477 ms mean on a
+    /// once-daily collector whose own worst run that week was 17,935 ms.</para>
+    ///
+    /// <para><b>The percentile is taken at the grain of the quantity under test, over DAYS.</b>
+    /// <c>latest_ms_per_run</c> is one day's mean per-run cost, so the distribution it has to be unusual
+    /// against is the distribution of DAILY per-run means, which is what <c>ranked.ms_per_run</c> is. A
+    /// per-run percentile over individual runs is a different population and is far wider on a
+    /// many-runs-per-day collector, where a daily mean is a much more precise figure — taking the bound from
+    /// that would loosen this test exactly where it is most able to discriminate.</para>
+    ///
+    /// <para><b>DISC rather than CONT</b>, the same choice and the same reason as the per-run p95
+    /// <c>get_collection_health</c> serves (#2460): the baseline window holds at most 13 prior days, and an
+    /// interpolation between a bimodal series' two modes is a figure no day ever cost. At 14 days it
+    /// resolves to the most expensive prior day, which is the intended reading — clear twice your own worst
+    /// day — and it degrades correctly rather than by definition if that window ever lengthens, because
+    /// over enough days DISC starts discarding genuine one-offs.</para>
+    ///
     /// <para><c>latest_metric_time</c> (#2707) is the newest raw hourly row folded into <c>latest_ms</c> —
     /// the freshness anchor the self-alert needs to tell "this regression got worse" from "the hourly flush
     /// hasn't landed a new row since I last looked", the same distinction #2704 draws with wait_stats'
@@ -172,6 +200,7 @@ WITH daily AS
 ranked AS
 (
     SELECT server_id, collector_name, day, sql_ms, runs, latest_metric_time_in_day,
+           sql_ms::double precision / nullif(runs, 0) AS ms_per_run,
            max(day) OVER (PARTITION BY server_id, collector_name) AS latest_day
     FROM daily
 ),
@@ -184,6 +213,8 @@ agg AS
            sum(sql_ms)                     FILTER (WHERE day < latest_day) AS baseline_total_ms,
            sum(runs)                       FILTER (WHERE day < latest_day) AS baseline_total_runs,
            count(*)                        FILTER (WHERE day < latest_day) AS baseline_days,
+           percentile_disc(0.95) WITHIN GROUP (ORDER BY ms_per_run)
+               FILTER (WHERE day < latest_day)                      AS baseline_p95_ms_per_run,
            max(latest_metric_time_in_day)  FILTER (WHERE day = latest_day) AS latest_metric_time
     FROM ranked
     GROUP BY server_id, collector_name
@@ -191,7 +222,7 @@ agg AS
 scored AS
 (
     SELECT a.server_id, a.collector_name, a.latest_ms, a.latest_runs, a.baseline_ms,
-           a.baseline_days, a.latest_metric_time,
+           a.baseline_days, a.latest_metric_time, a.baseline_p95_ms_per_run,
            a.latest_ms::double precision
                / nullif(a.latest_runs, 0)          AS latest_ms_per_run,
            a.baseline_total_ms::double precision
@@ -200,14 +231,16 @@ scored AS
 )
 SELECT sc.server_id, COALESCE(s.display_name, s.server_name) AS server_name, sc.collector_name,
        sc.latest_ms, sc.baseline_ms, sc.latest_metric_time,
-       sc.latest_runs, sc.latest_ms_per_run, sc.baseline_ms_per_run
+       sc.latest_runs, sc.latest_ms_per_run, sc.baseline_ms_per_run, sc.baseline_p95_ms_per_run
 FROM scored AS sc
 JOIN collect.servers AS s ON s.server_id = sc.server_id
 WHERE sc.baseline_days >= 3
 AND   sc.baseline_ms >= $2
 AND   sc.latest_ms_per_run IS NOT NULL
 AND   sc.baseline_ms_per_run IS NOT NULL
+AND   sc.baseline_p95_ms_per_run IS NOT NULL
 AND   sc.latest_ms_per_run > sc.baseline_ms_per_run * $3
+AND   sc.latest_ms_per_run > sc.baseline_p95_ms_per_run * $3
 AND   (sc.latest_ms_per_run - sc.baseline_ms_per_run) * sc.latest_runs >= $4
 ORDER BY (sc.latest_ms_per_run - sc.baseline_ms_per_run) DESC";
 
@@ -225,8 +258,20 @@ ORDER BY (sc.latest_ms_per_run - sc.baseline_ms_per_run) DESC";
         DateTime LatestMetricTime,
         long LatestRuns,
         double LatestMsPerRun,
-        double BaselineMsPerRun)
+        double BaselineMsPerRun,
+        double BaselineP95MsPerRun)
     {
+        /// <summary>#3440: the per-run figure the latest day has to clear — the factor applied to the
+        /// HIGHER of the two baselines, which is the dispersion-aware bound the query gates on. Derived
+        /// from the members rather than carried, for the same reason
+        /// <see cref="AddedMsPerDay"/> is: this is the number the alert reports as its threshold, and a
+        /// carried copy could disagree with the predicate that actually selected the row. The
+        /// <see cref="Math.Max"/> is also why an incoherent construction cannot loosen the bound — a
+        /// <see cref="BaselineP95MsPerRun"/> below <see cref="BaselineMsPerRun"/> selects the mean and
+        /// yields the pre-#3440 bound, never a lower one.</summary>
+        public double ThresholdMsPerRun(double factor) =>
+            Math.Max(BaselineMsPerRun, BaselineP95MsPerRun) * factor;
+
         /// <summary>#3316: the per-run rise multiplied by the volume it is paid on, in ms per day -
         /// what this regression actually COSTS. Derived from the members rather than carried, so it
         /// cannot disagree with the parts that explain it, and the query gates on the same
@@ -259,7 +304,8 @@ ORDER BY (sc.latest_ms_per_run - sc.baseline_ms_per_run) DESC";
                 reader.GetDateTime(5),
                 reader.GetInt64(6),
                 reader.GetDouble(7),
-                reader.GetDouble(8)));
+                reader.GetDouble(8),
+                reader.GetDouble(9)));
         }
 
         return rows;
