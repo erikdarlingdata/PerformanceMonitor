@@ -27,7 +27,7 @@ public sealed class McpAlertTools
     internal static string CpuModeFor(CpuAlertMode mode) =>
         mode == CpuAlertMode.SqlOnly ? CpuModeSql : CpuModeTotal;
 
-    [McpServerTool(Name = "get_alert_history"), Description("Gets recent alert history from the alert log. Shows what alerts fired, when, and whether email was sent successfully.")]
+    [McpServerTool(Name = "get_alert_history"), Description("Gets recent alert history from the alert log. Shows what alerts fired, when, and whether email was sent successfully. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'tray' is this instance's own balloon notification, which every non-muted alert gets, so it is what most rows read here and it does NOT report the email or webhook outcome; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'muted' means a mute rule suppressed it; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null whenever a cooldown or the per-metric repeat budget suppressed a send, and on every row written before those dispositions existed. 'throttled' and 'folded' are recorded by the headless service; on this instance the tray channel answers first, so a cooldown-suppressed or folded send is stored as 'tray'. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which.")]
     public static async Task<string> GetAlertHistory(
         LocalDataService dataService,
         [Description("Hours of history. Default 24.")] int hours_back = 24,

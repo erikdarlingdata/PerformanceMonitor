@@ -409,6 +409,9 @@ export const ALERT_STATE_LABELS = {
   muted: "Muted",
   undelivered: "Not sent",
   tray: "Logged",
+  throttled: "Throttled",
+  folded: "Reported elsewhere",
+  failed: "Failed",
 };
 
 /**
@@ -418,6 +421,10 @@ export const ALERT_STATE_LABELS = {
  * Carries the one legacy signature that decodes: alert_sent true alongside "tray" is unreachable for a row
  * written after #3169 - a row that delivered names its channel - so it can only be the resolution builder's
  * old hardcoded true, which meant "no send channel applies" and never meant a delivery.
+ *
+ * "throttled", "folded" and "failed" are the three conditions a stored "undelivered" cannot tell apart
+ * (#3427). A retained "undelivered" row is all three at once and keeps its outcome-only "Not sent" label -
+ * relabelling it "Throttled" would assert the likeliest of the three as the certain one.
  */
 export function alertDeliveryState(a) {
   if (a.alert_sent && a.notification_type === "tray") return ALERT_STATE_LABELS.none;

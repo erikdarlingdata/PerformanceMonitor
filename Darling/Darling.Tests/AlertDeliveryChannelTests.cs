@@ -96,10 +96,11 @@ public sealed class AlertDeliveryChannelTests
     /// <summary>
     /// <b>Sent implies a named delivering channel</b>, over the WHOLE input domain rather than the
     /// combinations the send core happens to produce. Enumerating every route to a violation is the point:
-    /// <c>EmailFanoutResult</c> carries four independent bools, and an <c>EmailSent</c> without an
-    /// <c>EmailAttempted</c> — which the send core never emits but the type freely represents — would
-    /// otherwise report a delivery on a channel that never named itself, putting a <c>true</c> back
-    /// alongside <c>tray</c> and re-breaking the legacy decode in
+    /// <c>EmailFanoutResult</c> carries two independent <see cref="AlertChannelOutcome"/> values and two
+    /// independent error strings, and a <see cref="AlertChannelOutcome.Delivered"/> alongside a muted
+    /// alert — which the send core never emits but the type freely represents — would otherwise report a
+    /// delivery on a channel that never named itself, putting a <c>true</c> back alongside <c>tray</c> and
+    /// re-breaking the legacy decode in
     /// <see cref="TheLegacyResolutionSignature_DecodesToNoChannel"/>.
     /// </summary>
     [Fact]
@@ -124,10 +125,10 @@ public sealed class AlertDeliveryChannelTests
             }
         }
 
-        /* The count IS the claim that the enumeration is the whole domain: 2^4 result bools x send_error
-           present-or-not x muted x trayChannelPresent. A shrunken loop would otherwise pass by covering
-           less. */
-        Assert.Equal(128, checked_);
+        /* The count IS the claim that the enumeration is the whole domain: 5 outcomes per channel x each
+           channel's error present-or-not x AnyChannelConfigured x muted x trayChannelPresent. A shrunken
+           loop would otherwise pass by covering less. */
+        Assert.Equal(800, checked_);
     }
 
     /// <summary>
@@ -140,11 +141,9 @@ public sealed class AlertDeliveryChannelTests
     [Fact]
     public void NoSentRow_LandsOnANonDeliveringChannel()
     {
-        string[] nonDelivering =
-        {
-            AlertDelivery.ChannelTray, AlertDelivery.ChannelNotApplicable,
-            AlertDelivery.ChannelNoneConfigured, AlertDelivery.ChannelMuted, AlertDelivery.ChannelUndelivered,
-        };
+        /* Read off the declared partition rather than listed again, so a channel added to the taxonomy
+           without being classified cannot slip past this by being absent from a hand-kept array. */
+        var nonDelivering = AlertDelivery.StateCarryingChannels;
 
         foreach (var (result, muted, tray) in EveryFanoutCase())
         {
@@ -170,34 +169,97 @@ public sealed class AlertDeliveryChannelTests
     }
 
     /// <summary>
-    /// <b>No state-carrying channel can carry a <c>send_error</c>.</b> Over the whole input domain, a
-    /// non-null error implies <see cref="AlertDelivery.DeliveringChannels"/> — because the error can only
-    /// come from the SMTP attempt, so its presence is itself email involvement.
+    /// <b>A <c>send_error</c> implies a channel that was ATTEMPTED.</b> Over the whole input domain, a
+    /// non-null error lands only on <see cref="AlertDelivery.DeliveringChannels"/> or on
+    /// <see cref="AlertDelivery.ChannelFailed"/> — the dispositions where something was actually tried.
+    /// Never on throttled, folded, muted, unconfigured, tray or none, all of which attempted nothing and
+    /// so have nothing to report.
     ///
     /// <para>This is what licenses two surfaces to check in different orders. The web dashboard tests
     /// <c>send_error</c> before its state lookup; <see cref="AlertDeliveryStatus.Describe"/> tests the state
-    /// channels first. Equivalent, but only because the two cases can never co-occur — which the review of
-    /// this change correctly noted was true of the reachable subset rather than of the type. It is now true
-    /// of the type.</para>
+    /// channels first. Equivalent, and <see cref="Failed_RendersTheSameWithOrWithoutAnError"/> is what
+    /// keeps them equivalent now that one state-carrying channel may carry an error: both orders answer
+    /// <see cref="AlertDeliveryStatus.Failed"/> for it.</para>
     ///
     /// <para>Residual, stated rather than papered over: a row PERSISTED by an earlier version could still
-    /// hold a state channel beside an error, and the two surfaces would label it differently. No producer
-    /// can write one, and none of the 32,546 rows on the three live stores carries a non-null
+    /// hold some other state channel beside an error, and the two surfaces would label it differently. No
+    /// producer can write one, and none of the 32,546 rows on the three live stores carries a non-null
     /// <c>send_error</c> at all.</para>
     /// </summary>
     [Fact]
-    public void NoStateCarryingChannel_CanCarryASendError()
+    public void ASendErrorImpliesAnAttemptedChannel()
     {
+        var attempted = AlertDelivery.DeliveringChannels
+            .Append(AlertDelivery.ChannelFailed)
+            .ToArray();
+
         foreach (var (result, muted, tray) in EveryFanoutCase())
         {
             var delivery = AlertDelivery.FromFanout(result, muted, tray);
 
             if (delivery.SendError is not null)
             {
-                Assert.Contains(delivery.Channel, AlertDelivery.DeliveringChannels);
-                Assert.DoesNotContain(delivery.Channel, AlertDelivery.StateCarryingChannels);
+                Assert.Contains(delivery.Channel, attempted);
             }
         }
+    }
+
+    /// <summary>
+    /// The one state-carrying channel that may carry an error renders the same label with or without one,
+    /// on both orders of check. Without this, an errorless <see cref="AlertDelivery.ChannelFailed"/> row
+    /// would read "Failed" on the web dashboard (a table keyed on <c>notification_type</c> alone) and
+    /// "Not sent" in the WPF grids, which is the cross-surface disagreement
+    /// <see cref="ASendErrorImpliesAnAttemptedChannel"/> used to rule out by making the case impossible.
+    /// </summary>
+    [Fact]
+    public void Failed_RendersTheSameWithOrWithoutAnError()
+    {
+        foreach (var tray in new[] { false, true })
+        {
+            Assert.Equal(
+                AlertDeliveryStatus.Failed,
+                AlertDeliveryStatus.Describe(false, AlertDelivery.ChannelFailed, null, tray));
+            Assert.Equal(
+                AlertDeliveryStatus.Failed,
+                AlertDeliveryStatus.Describe(false, AlertDelivery.ChannelFailed, "Slack: 500", tray));
+        }
+    }
+
+    /// <summary>
+    /// <b>A delivered row never carries a sibling channel's error.</b> The email cooldown seed
+    /// (<see cref="IAlertHistoryStore.GetLastEmailSentUtcAsync"/>) filters on <c>send_error IS NULL</c>, so
+    /// attaching a failed webhook's error to a successful email would take that send out of its own seed
+    /// and re-deliver it after a restart — a delivery regression bought with a diagnostic.
+    /// </summary>
+    [Fact]
+    public void ADeliveredRow_NeverCarriesTheWebhookError()
+    {
+        var probed = 0;
+
+        foreach (var (result, muted, tray) in EveryFanoutCase())
+        {
+            if (result.WebhookSendError is null)
+            {
+                continue;
+            }
+
+            var delivery = AlertDelivery.FromFanout(result, muted, tray);
+            if (!delivery.Sent)
+            {
+                continue;
+            }
+
+            probed++;
+            Assert.NotEqual(result.WebhookSendError, delivery.SendError);
+
+            /* The only error a sent row may carry is the email channel's own, which is what makes the
+               email arm a failure rather than an absence. */
+            Assert.True(delivery.SendError is null || delivery.SendError == result.SendError);
+        }
+
+        /* The domain HAS sent rows carrying a webhook error, so the loop above asserted something. Without
+           this, narrowing the cross-product to cases with no webhook error would pass by testing nothing. */
+        Assert.True(probed > 0, "no delivered row in the domain carried a webhook error");
     }
 
     /* ─────────────── the three states that used to be one `false` ─────────────── */
@@ -219,18 +281,123 @@ public sealed class AlertDeliveryChannelTests
     }
 
     /// <summary>
-    /// Configured, consulted, nothing delivered — a throttled send or a webhook post that came back
-    /// unsuccessful. Distinct from <see cref="AlertDelivery.ChannelNoneConfigured"/>, which is the whole
-    /// point: the two want different operator responses and used to arrive identically.
+    /// <b>#3427, the whole of it.</b> A throttled send, a folded send and a failed post are three
+    /// conditions that want three different operator responses, and every one of them arrives as
+    /// "configured, consulted, nothing delivered" with a null <c>send_error</c>. Each gets its own stored
+    /// value, and the three come back DIFFERENT — from each other, from a delivered row, and from the
+    /// unconfigured and muted rows they sit next to.
+    ///
+    /// <para>Asserting that each value is merely PRODUCIBLE would pass on a taxonomy that mapped all three
+    /// to one string, so the claim here is pairwise distinctness over a fixture where each mechanism is
+    /// active in turn — and the rendered labels are checked too, because two stored values that render
+    /// alike are two values an operator cannot tell apart.</para>
     /// </summary>
     [Fact]
-    public void WithAChannelConfiguredAndNothingDelivered_TheDispositionIsUndelivered()
+    public void TheThreeSuppressionMechanisms_AreMutuallyDistinguishable()
+    {
+        /* One fixture per mechanism, each differing from the others ONLY in which outcome the webhook
+           channel reports. Nothing else varies, so a difference in the answer can only come from the
+           mechanism. */
+        var throttled = AlertDelivery.FromFanout(
+            Fanout(webhook: AlertChannelOutcome.Throttled, anyChannelConfigured: true),
+            muted: false, trayChannelPresent: false);
+
+        var folded = AlertDelivery.FromFanout(
+            Fanout(webhook: AlertChannelOutcome.Folded, anyChannelConfigured: true),
+            muted: false, trayChannelPresent: false);
+
+        var failed = AlertDelivery.FromFanout(
+            Fanout(webhook: AlertChannelOutcome.Failed, webhookSendError: "Slack: 500 Internal Server Error",
+                   anyChannelConfigured: true),
+            muted: false, trayChannelPresent: false);
+
+        Assert.Equal(AlertDelivery.ChannelThrottled, throttled.Channel);
+        Assert.Equal(AlertDelivery.ChannelFolded, folded.Channel);
+        Assert.Equal(AlertDelivery.ChannelFailed, failed.Channel);
+
+        /* None of the three delivered, so alert_sent cannot separate them — which is why the channel has
+           to. */
+        Assert.False(throttled.Sent);
+        Assert.False(folded.Sent);
+        Assert.False(failed.Sent);
+
+        /* Pairwise distinct as STORED values, and pairwise distinct as RENDERED ones. */
+        var channels = new[] { throttled.Channel, folded.Channel, failed.Channel };
+        Assert.Equal(3, channels.Distinct(StringComparer.Ordinal).Count());
+
+        var labels = new[] { Describe(throttled), Describe(folded), Describe(failed) };
+        Assert.Equal(3, labels.Distinct(StringComparer.Ordinal).Count());
+
+        /* And distinct from the dispositions they are routinely mistaken for. */
+        Assert.DoesNotContain(AlertDelivery.ChannelUndelivered, channels);
+        Assert.DoesNotContain(AlertDelivery.ChannelNoneConfigured, channels);
+        Assert.DoesNotContain(AlertDelivery.ChannelMuted, channels);
+
+        /* send_error is NOT the discriminator: it is null on two of the three. Splitting the
+           not-delivered rows on it credits the throttle for a failure, which is the error #3427 records
+           having been made in production. */
+        Assert.Null(throttled.SendError);
+        Assert.Null(folded.SendError);
+        Assert.Equal("Slack: 500 Internal Server Error", failed.SendError);
+    }
+
+    /// <summary>
+    /// A failed post carries its reason, which is the half of #3427 the taxonomy alone does not fix: a
+    /// <c>failed</c> row with no error names no endpoint to go and look at. The channel's name is kept with
+    /// the message because four channels report into one string.
+    /// </summary>
+    [Fact]
+    public void AFailedWebhookPost_CarriesTheFailingChannelsError()
     {
         var delivery = AlertDelivery.FromFanout(
-            Fanout(anyChannelConfigured: true), muted: false, trayChannelPresent: false);
+            Fanout(webhook: AlertChannelOutcome.Failed, webhookSendError: "Teams: 404 Not Found",
+                   anyChannelConfigured: true),
+            muted: false, trayChannelPresent: false);
 
-        Assert.False(delivery.Sent);
-        Assert.Equal(AlertDelivery.ChannelUndelivered, delivery.Channel);
+        Assert.Equal(AlertDelivery.ChannelFailed, delivery.Channel);
+        Assert.Equal("Teams: 404 Not Found", delivery.SendError);
+        Assert.Equal(AlertDeliveryStatus.Failed, Describe(delivery));
+    }
+
+    /// <summary>
+    /// <b><see cref="AlertDelivery.ChannelUndelivered"/> is unreachable for a new row.</b> It is retained
+    /// for the ~8 weeks of history that holds it, where it means throttled OR folded OR failed with nothing
+    /// to say which. Over the whole representable domain the only shapes that still reach it are the ones
+    /// the send core cannot emit — every channel reporting
+    /// <see cref="AlertChannelOutcome.NotAttempted"/> while a channel is configured and the alert is not
+    /// muted, which cannot happen because a configured channel is always consulted.
+    ///
+    /// <para>Stated as an enumeration of the surviving routes rather than as "it does not occur in these
+    /// cases", because that is the form a reader can falsify: if a fourth suppression mechanism is added
+    /// and not given a value, it lands here and this names it.</para>
+    /// </summary>
+    [Fact]
+    public void Undelivered_IsReachedOnlyByShapesTheSendCoreCannotEmit()
+    {
+        var reached = 0;
+
+        foreach (var (result, muted, tray) in EveryFanoutCase())
+        {
+            if (AlertDelivery.FromFanout(result, muted, tray).Channel != AlertDelivery.ChannelUndelivered)
+            {
+                continue;
+            }
+
+            reached++;
+
+            Assert.Equal(AlertChannelOutcome.NotAttempted, result.EmailOutcome);
+            Assert.Equal(AlertChannelOutcome.NotAttempted, result.WebhookOutcome);
+            Assert.True(result.AnyChannelConfigured);
+            Assert.False(muted);
+            Assert.False(tray);
+
+            /* And a null email error, since a non-null one would have made this the email channel. */
+            Assert.Null(result.SendError);
+        }
+
+        /* The arm IS live in the type. Zero here would mean the assertions above ran on nothing, and would
+           read exactly like a proof of unreachability. */
+        Assert.True(reached > 0, "the undelivered fall-through was never taken");
     }
 
     /// <summary>An attempt that threw keeps its error, and reads as a failure rather than as an absence.</summary>
@@ -238,7 +405,7 @@ public sealed class AlertDeliveryChannelTests
     public void AnAttemptThatFailed_KeepsItsErrorAndReadsAsFailed()
     {
         var delivery = AlertDelivery.FromFanout(
-            Fanout(emailAttempted: true, sendError: "relay refused", anyChannelConfigured: true),
+            Fanout(email: AlertChannelOutcome.Failed, sendError: "relay refused", anyChannelConfigured: true),
             muted: false, trayChannelPresent: false);
 
         Assert.False(delivery.Sent);
@@ -321,6 +488,10 @@ public sealed class AlertDeliveryChannelTests
     [InlineData(false, AlertDelivery.ChannelNotApplicable, null, AlertDeliveryStatus.NoChannel)]
     [InlineData(false, AlertDelivery.ChannelNoneConfigured, null, AlertDeliveryStatus.NoChannelConfigured)]
     [InlineData(false, AlertDelivery.ChannelUndelivered, null, AlertDeliveryStatus.NotSent)]
+    [InlineData(false, AlertDelivery.ChannelThrottled, null, AlertDeliveryStatus.Throttled)]
+    [InlineData(false, AlertDelivery.ChannelFolded, null, AlertDeliveryStatus.ReportedElsewhere)]
+    [InlineData(false, AlertDelivery.ChannelFailed, null, AlertDeliveryStatus.Failed)]
+    [InlineData(false, AlertDelivery.ChannelFailed, "Slack: 500", AlertDeliveryStatus.Failed)]
     [InlineData(false, AlertDelivery.ChannelMuted, null, AlertDeliveryStatus.Muted)]
     [InlineData(false, AlertDelivery.ChannelEmail, "relay refused", AlertDeliveryStatus.Failed)]
     [InlineData(false, AlertDelivery.ChannelEmail, null, AlertDeliveryStatus.NotSent)]
@@ -404,6 +575,9 @@ public sealed class AlertDeliveryChannelTests
             (false, AlertDelivery.ChannelNotApplicable, null),
             (false, AlertDelivery.ChannelNoneConfigured, null),
             (false, AlertDelivery.ChannelUndelivered, null),
+            (false, AlertDelivery.ChannelThrottled, null),
+            (false, AlertDelivery.ChannelFolded, null),
+            (false, AlertDelivery.ChannelFailed, "Slack: 500 Internal Server Error"),
             (false, AlertDelivery.ChannelMuted, null),
             (false, AlertDelivery.ChannelEmail, "relay refused"),
             (true, AlertDelivery.ChannelEmailAndWebhook, null),
@@ -528,31 +702,41 @@ public sealed class AlertDeliveryChannelTests
         => AlertDeliveryStatus.Describe(delivery.Sent, delivery.Channel, delivery.SendError, producerHadTrayChannel: false);
 
     private static EmailFanoutResult Fanout(
-        bool emailAttempted = false, bool emailSent = false, string? sendError = null,
-        bool webhookSent = false, bool anyChannelConfigured = false)
-        => new(emailAttempted, emailSent, sendError, webhookSent, anyChannelConfigured);
+        AlertChannelOutcome email = AlertChannelOutcome.NotAttempted, string? sendError = null,
+        AlertChannelOutcome webhook = AlertChannelOutcome.NotAttempted, string? webhookSendError = null,
+        bool anyChannelConfigured = false)
+        => new(email, sendError, webhook, webhookSendError, anyChannelConfigured);
 
     /// <summary>
-    /// Every representable <c>EmailFanoutResult</c> shape crossed with both callers' answers — 128 cases.
-    /// <c>SendError</c> is in the cross-product because an arm DOES branch on it: it counts as email
-    /// involvement, which is what makes
-    /// <see cref="NoStateCarryingChannel_CanCarryASendError"/> hold over the whole domain.
+    /// Every representable <c>EmailFanoutResult</c> shape crossed with both callers' answers — 800 cases:
+    /// five <see cref="AlertChannelOutcome"/> values per channel, each channel's error present or not,
+    /// <c>AnyChannelConfigured</c>, <c>muted</c> and <c>trayChannelPresent</c>.
+    /// Both errors are in the cross-product because arms DO branch on them: the email one counts as email
+    /// involvement (which is what makes <see cref="ASendErrorImpliesAnAttemptedChannel"/> hold over the
+    /// whole domain), and the webhook one is what a <see cref="AlertDelivery.ChannelFailed"/> row carries.
     /// </summary>
     private static IEnumerable<(EmailFanoutResult Result, bool Muted, bool Tray)> EveryFanoutCase()
     {
-        foreach (var emailAttempted in new[] { false, true })
-        foreach (var emailSent in new[] { false, true })
-        foreach (var webhookSent in new[] { false, true })
+        foreach (var email in EveryOutcome)
+        foreach (var webhook in EveryOutcome)
         foreach (var anyConfigured in new[] { false, true })
         foreach (var sendError in new string?[] { null, "relay refused" })
+        foreach (var webhookError in new string?[] { null, "Slack: 500 Internal Server Error" })
         foreach (var muted in new[] { false, true })
         foreach (var tray in new[] { false, true })
         {
             yield return (
-                new EmailFanoutResult(emailAttempted, emailSent, sendError, webhookSent, anyConfigured),
+                new EmailFanoutResult(email, sendError, webhook, webhookError, anyConfigured),
                 muted, tray);
         }
     }
+
+    /// <summary>
+    /// Read off the enum rather than listed, so a sixth outcome joins every enumeration below on the same
+    /// commit that declares it instead of leaving each of them quietly covering less.
+    /// </summary>
+    private static readonly AlertChannelOutcome[] EveryOutcome =
+        Enum.GetValues<AlertChannelOutcome>();
 
     private static IEnumerable<string> SourceFilesUnder(string relativeDirectory)
         => Directory.EnumerateFiles(Path.Combine(RepoRoot(), relativeDirectory), "*.cs", SearchOption.AllDirectories)

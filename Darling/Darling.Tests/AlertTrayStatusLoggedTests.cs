@@ -56,6 +56,9 @@ public class AlertTrayStatusLoggedTests
         [AlertDelivery.ChannelMuted] = AlertDeliveryStatus.Muted,
         [AlertDelivery.ChannelUndelivered] = AlertDeliveryStatus.NotSent,
         [AlertDelivery.ChannelTray] = AlertDeliveryStatus.Logged,
+        [AlertDelivery.ChannelThrottled] = AlertDeliveryStatus.Throttled,
+        [AlertDelivery.ChannelFolded] = AlertDeliveryStatus.ReportedElsewhere,
+        [AlertDelivery.ChannelFailed] = AlertDeliveryStatus.Failed,
     };
 
     /// <summary>

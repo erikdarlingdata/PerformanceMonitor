@@ -57,8 +57,10 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
             CurrentValueText: "92.5%", ThresholdValueText: "80%",
             NumericCurrentValue: null, NumericThresholdValue: null,
             Delivery: AlertDelivery.FromFanout(
-                new EmailFanoutResult(EmailAttempted: true, EmailSent: true, SendError: null,
-                                      WebhookSent: false, AnyChannelConfigured: true),
+                new EmailFanoutResult(
+                    EmailOutcome: AlertChannelOutcome.Delivered, SendError: null,
+                    WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null,
+                    AnyChannelConfigured: true),
                 muted: false, trayChannelPresent: true),
             Muted: false, DetailText: "detail text", ContextJson: "{\"k\":1}"));
 
@@ -93,8 +95,10 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
             CurrentValueText: "87% (Total CPU)", ThresholdValueText: "80%",
             NumericCurrentValue: null, NumericThresholdValue: null,
             Delivery: AlertDelivery.FromFanout(
-                new EmailFanoutResult(EmailAttempted: true, EmailSent: true, SendError: null,
-                                      WebhookSent: false, AnyChannelConfigured: true),
+                new EmailFanoutResult(
+                    EmailOutcome: AlertChannelOutcome.Delivered, SendError: null,
+                    WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null,
+                    AnyChannelConfigured: true),
                 muted: false, trayChannelPresent: true),
             Muted: false, DetailText: null, ContextJson: null));
 
@@ -115,8 +119,10 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
             CurrentValueText: "not-a-number", ThresholdValueText: "also-bad",
             NumericCurrentValue: 1.8, NumericThresholdValue: 1.5,
             Delivery: AlertDelivery.FromFanout(
-                new EmailFanoutResult(EmailAttempted: false, EmailSent: false, SendError: null,
-                                      WebhookSent: false, AnyChannelConfigured: false),
+                new EmailFanoutResult(
+                    EmailOutcome: AlertChannelOutcome.NotAttempted, SendError: null,
+                    WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null,
+                    AnyChannelConfigured: false),
                 muted: false, trayChannelPresent: true),
             Muted: false, DetailText: null, ContextJson: null));
 
