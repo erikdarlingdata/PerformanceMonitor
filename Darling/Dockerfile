@@ -23,10 +23,21 @@
 # container had an independent opinion about which SDK to use. Pinning removes that second opinion: bump
 # this line and global.json together, deliberately, instead of being bumped by an upstream tag move.
 FROM mcr.microsoft.com/dotnet/sdk:10.0.302 AS build
+
+# The msbuild version property for the publish below, threaded in by nightly.yml (#3455) so the
+# service compiled into a :nightly image stamps the same 3.7.0-nightly.<date>.<run> string its image
+# tag carries. The informational version is what --version prints and what get_collection_health's
+# service block serves, so a container answering with the clean release string while running a
+# nightly is the defect that issue documents on the zip, one artifact over. Empty by default ON
+# PURPOSE: the shell expansion below then adds no flag at all, the publish inherits the version
+# Directory.Build.props declares, and every other consumer of this Dockerfile — build.yml's release
+# image, a hand-run docker build — produces byte-for-byte the command it produced before the ARG
+# existed.
+ARG VERSION=
 WORKDIR /src
 COPY . .
 RUN dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj \
-    -c Release -o /app/publish
+    -c Release -o /app/publish ${VERSION:+-p:Version=$VERSION}
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
 # Microsoft.Data.SqlClient probes the Kerberos GSSAPI library at connect time on Linux — even for SQL
