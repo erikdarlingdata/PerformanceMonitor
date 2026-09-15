@@ -115,11 +115,21 @@ public sealed class PgPlanCaptureCollector : PostgresCollectorDefinitionBase<PgP
 
        Plans are extracted with regexp_matches rather than parsed line by line because auto_explain writes
        the JSON tab-indented under its LOG line, so the block is recognisable as a unit. The tabs are
-       stripped to make it valid JSON. */
+       stripped to make it valid JSON.
+
+       The listing is GATED on logging_collector, with a marker row instead of log rows when it is off
+       (#3410) — PgDeadlocksCollector's query carries the full argument, since the two read the same file.
+       The short form: off means the server logs to stderr, the log directory may legitimately not exist,
+       and 58P01 every cycle on a deliberate configuration is the wrong report. The gate is a pseudoconstant
+       predicate the planner enforces as a one-time filter, so pg_ls_logdir() never runs when it is false;
+       ReadAsync turns the marker into PgLoggingCollectorOffException, and the runner records the named
+       non-fatal skip — not-collected with the reason, never a silent zero that reads as a target with
+       nothing slow on it. */
     private const string QueryText = @"
 WITH newest AS (
     SELECT name, size
     FROM pg_catalog.pg_ls_logdir()
+    WHERE pg_catalog.current_setting('logging_collector') = 'on'
     ORDER BY modification DESC
     LIMIT 1
 ),
@@ -139,6 +149,9 @@ FROM tail,
          tail.body,
          '\[\d+\] (-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
          'g') AS m
+UNION ALL
+SELECT NULL::bigint, NULL::double precision, '" + PgLoggingCollectorOffException.Marker + @"'
+WHERE pg_catalog.current_setting('logging_collector') <> 'on'
 LIMIT 2000";
 
     public override string Name => "pg_plan_capture";
@@ -184,6 +197,18 @@ LIMIT 2000";
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* The marker row the query returns instead of listing the log directory when
+               logging_collector is off (#3410). A real row always carries a query id — the regexp capture
+               is literal digits cast to bigint — so a NULL first column plus the marker text is the gate's
+               row and nothing else's. Thrown so the runner records the named skip; skipped, a server that
+               logs to stderr reads as a target with no slow statements. */
+            if (reader.IsDBNull(0)
+                && !reader.IsDBNull(2)
+                && string.Equals(reader.GetString(2), PgLoggingCollectorOffException.Marker, StringComparison.Ordinal))
+            {
+                throw new PgLoggingCollectorOffException();
+            }
+
             /* Extraction, redaction and hashing live in PgPlanLogParser, shared with the RDS log-API
                transport (#2538). Two implementations of the redaction would eventually disagree, and the
                cost of THAT divergence is customer data rather than a wrong number. */

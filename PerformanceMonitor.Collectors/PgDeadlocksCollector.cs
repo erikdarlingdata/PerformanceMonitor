@@ -96,11 +96,24 @@ public sealed class PgDeadlocksCollector : PostgresCollectorDefinitionBase<PgDea
 
        The 'n' flag makes ^ match at line starts. Parsing of the block itself is C#, in
        PgDeadlockLogParser, so the RDS transport — which receives log TEXT and runs no SQL — shares it, and
-       both routes get the same zone refusal from the same code. */
+       both routes get the same zone refusal from the same code.
+
+       The listing is GATED on logging_collector, and the gate carries a marker row out the other side
+       (#3410). With the setting off the server writes to stderr and there may be no log directory at all,
+       so pg_ls_logdir() raises 58P01 for a directory that legitimately does not exist — an error every
+       cycle forever, on a server configured to log somewhere else on purpose. The predicate is
+       pseudoconstant (no column references, current_setting is stable), so the planner enforces it as a
+       one-time filter ABOVE the function scan and pg_ls_logdir() is never called when it is false; a
+       leftover directory full of files from before the setting was switched off is deliberately not read
+       either, because everything in it is stale. The marker row is what stops off from reading as a quiet
+       server: ReadAsync recognises it and throws PgLoggingCollectorOffException, which the runner records
+       as a named non-fatal skip — the same not-collected-with-reason answer the store's own log read gives
+       for an empty directory, rather than a failure or a silent zero. */
     private const string QueryText = @"
 WITH newest AS (
     SELECT name, size
     FROM pg_catalog.pg_ls_logdir()
+    WHERE pg_catalog.current_setting('logging_collector') = 'on'
     ORDER BY modification DESC
     LIMIT 1
 ),
@@ -121,6 +134,9 @@ FROM tail,
          tail.body,
          '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+) ([^ \n]+) \[(\d+)\][^\n]*ERROR:  deadlock detected\s*\n[^\n]*DETAIL:  ((?:[^\n]*\n)(?:\t[^\n]*\n)*)',
          'gn') AS m
+UNION ALL
+SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL, NULL, NULL
+WHERE pg_catalog.current_setting('logging_collector') <> 'on'
 LIMIT 500";
 
     public override string Name => "pg_deadlocks";
@@ -165,6 +181,18 @@ LIMIT 500";
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            var firstColumn = reader.IsDBNull(0) ? string.Empty : reader.GetString(0);
+
+            /* The marker row the query returns instead of listing the log directory when
+               logging_collector is off (#3410). Thrown rather than skipped for the reason the zone refusal
+               below is: skipped, a server that logs to stderr reads as a server with no deadlocks, and the
+               runner never learns the one fact that explains every empty cycle. It cannot collide with a
+               real row — the first column is a regexp capture of a literal-digit timestamp. */
+            if (string.Equals(firstColumn, PgLoggingCollectorOffException.Marker, System.StringComparison.Ordinal))
+            {
+                throw new PgLoggingCollectorOffException();
+            }
+
             /* Ordinals track the query's four columns: stamp, zone, victim pid, DETAIL. The zone is
                ordinal 1 and reaching the parser is what makes the stamp's meaning checked rather than
                assumed; a non-zero-offset one throws out of here, and the worker records the refusal
@@ -173,7 +201,7 @@ LIMIT 500";
                for: a partial history from a target declared unreadable is worse for the reader than a
                refusal that says one thing. */
             var parsed = PgDeadlockLogParser.FromBlock(
-                reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
+                firstColumn,
                 reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
                 reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
                 reader.IsDBNull(3) ? null : reader.GetString(3));
