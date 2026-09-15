@@ -225,16 +225,18 @@ public sealed record AlertDelivery
            are unreachable in practice (attemptChannels: !muted gates every attempt), and both are
            representable in the type, which is the difference that matters.
 
-           Below the delivering arms the order preserves the derivation this replaces: muted beats tray
-           (Lite shows no toast for a muted alert), and tray beats the configuration arms so a Lite row's
-           stored value is unchanged whether or not SMTP happens to be set up. */
-        /* SendError counts as email involvement. It is only ever set by the SMTP attempt — the webhook
-           fan-out reports one bool for four channels and no error, which IAlertHistoryStore documents — so
-           its presence IS the email channel having been used. Reading it here is what makes "a non-null
-           send_error implies a delivering channel" hold over the whole input domain rather than over the
-           shapes the send core emits, and that is what lets the web dashboard test send_error BEFORE the
-           state lookup while AlertDeliveryStatus.Describe tests the state channels first: the orders differ
-           and are equivalent, because no state-carrying channel can carry an error. */
+           Below the delivering arms the order preserves the derivation this replaces, with one insertion:
+           muted still beats everything below it (Lite shows no toast for a muted alert), failed now sits
+           between muted and tray - the remarks above argue why nothing masks a failed post, a tray toast
+           included - and tray still beats the configuration arms so a Lite row's stored value is unchanged
+           whether or not SMTP happens to be set up. */
+        /* SendError counts as email involvement. It is only ever set by the SMTP attempt — a webhook
+           channel's failure travels separately in WebhookSendError and joins the row only on the
+           ChannelFailed arm below — so its presence IS the email channel having been used. Reading it here
+           is what makes "a send_error implies an attempted channel" (ASendErrorImpliesAnAttemptedChannel)
+           hold over the whole input domain rather than over the shapes the send core emits: every
+           error-carrying row names a channel that was attempted, either a channel-naming arm carrying the
+           email attempt's own error or ChannelFailed carrying the webhook's. */
         var emailInvolved = result.EmailAttempted || result.EmailSent || result.SendError is not null;
 
         var channel =
