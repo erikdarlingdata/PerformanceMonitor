@@ -98,6 +98,81 @@ public class PostgresFaultOutcomeTests
     }
 
     /// <summary>
+    /// #3410, the half #3414 left open. The classifier has always told 42501 and 58P01 apart —
+    /// Permissions versus Unclassified — and nothing the operator reads showed the difference: both
+    /// rendered as a failed collector, so the natural first move was the grant chase, right for one and a
+    /// dead end for the other. A 58P01 on a log reader now records the same non-fatal skip the 42501 does,
+    /// with the OTHER half of the advice: the path the server itself named, where it resolves, and an
+    /// explicit refusal to send anyone after a grant.
+    /// </summary>
+    [Theory]
+    [InlineData("pg_deadlocks")]
+    [InlineData("pg_plan_capture")]
+    public void ALogReaderMissingFileNamesThePathAndRefusesTheGrantChase(string collectorName)
+    {
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("58P01", "could not open file \"/pglogs/postgresql-Mon.log\" for reading: No such file or directory"),
+            collectorName, "appdb");
+
+        /* The same non-fatal bucket the 42501 uses — a persistent, operator-actionable state must not log
+           ERROR every cycle forever — so the MESSAGE is where the two diverge, which is the point. */
+        Assert.Equal("PERMISSIONS", status);
+
+        /* What was looked for: the server's own message text survives verbatim, path and all. */
+        Assert.Contains("/pglogs/postgresql-Mon.log", explanation, StringComparison.Ordinal);
+        Assert.Contains("58P01", explanation, StringComparison.Ordinal);
+
+        /* Where the path came from and where it resolves — the two facts an operator needs to check it. */
+        Assert.Contains("log_directory", explanation, StringComparison.Ordinal);
+        Assert.Contains("MONITORED server's filesystem", explanation, StringComparison.Ordinal);
+
+        /* And it must NOT restate 42501's advice, which is this fault's dead end. */
+        Assert.Contains("not a missing grant", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_read_server_files", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("GRANT EXECUTE", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The discrimination itself, asserted as a pair: the reporter's complaint was that the two SQLSTATEs
+    /// read the SAME, so one fact holds both renderings side by side and requires each to carry its own
+    /// advice and not the other's. Either sentence drifting toward the other reds here rather than in the
+    /// field.
+    /// </summary>
+    [Fact]
+    public void TheTwoLogReadFaults_RenderDifferentAdvice()
+    {
+        var denial = DarlingWorker.PostgresFaultOutcome(
+            Pg("42501", "permission denied for function pg_read_file"), "pg_deadlocks", "appdb").Explanation;
+        var missing = DarlingWorker.PostgresFaultOutcome(
+            Pg("58P01", "could not open file \"/pglogs/x.log\" for reading: No such file or directory"),
+            "pg_deadlocks", "appdb").Explanation;
+
+        /* The denial sends the operator to the grant pair; the missing file must not. */
+        Assert.Contains("pg_read_server_files", denial, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_read_server_files", missing, StringComparison.Ordinal);
+
+        /* The missing file names what was looked for; the denial has no path to name. */
+        Assert.Contains("/pglogs/x.log", missing, StringComparison.Ordinal);
+        Assert.DoesNotContain("/pglogs/x.log", denial, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The arm must not widen: a 58P01 from any collector that is not one of the two log readers is a
+    /// genuinely unexpected fault — there is no listing-then-reading shape to explain it — and stays on
+    /// the loud default, exactly as the classifier's Unclassified answer intends.
+    /// </summary>
+    [Fact]
+    public void AMissingFileOnAnyOtherCollectorStaysLoud()
+    {
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("58P01", "could not open file \"pg_wal/0000000100000000000000A1\": No such file or directory"),
+            PlainCollector);
+
+        Assert.Equal("ERROR", status);
+        Assert.Contains("could not open file", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// An unknown connected database degrades to a phrase rather than inventing a name — the same rule
     /// the ObjectMissing arm's WhereToCreateIt follows.
     /// </summary>

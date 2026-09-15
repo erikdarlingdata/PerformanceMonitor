@@ -6703,6 +6703,8 @@ LIMIT 1";
     /// <summary>
     /// The self-hosted log readers (#3239). Their dispatch entries send Aurora and RDS to the log-API
     /// ingestors, so a target-side PostgresException under either name comes from the pg_read_file route.
+    /// Consulted by two arms: the 42501 grant-pair sentence (#3239) and the 58P01 missing-file sentence
+    /// (#3410), which is why it names the ROUTE rather than either fault.
     /// </summary>
     private static bool ReadsServerLogWithPgReadFile(string collectorName)
         => collectorName is "pg_deadlocks" or "pg_plan_capture";
@@ -6770,7 +6772,9 @@ LIMIT 1";
     /// distinguishes them, the same division the Azure service-objective hint already uses. A missing
     /// object on a collector that DECLARES the extension it reads is not one of those: since #3240 it gets
     /// its own <c>EXTENSION_MISSING</c> status, so the health surfaces can band it apart from a grant
-    /// problem instead of hinting at <c>pg_monitor</c>. Returning "ERROR" means "let the general handler
+    /// problem instead of hinting at <c>pg_monitor</c>. A missing FILE on one of the two log readers is
+    /// not one of those either — there the absent thing IS nameable, because the path came from the
+    /// server's own answers, so its arm names it (#3410). Returning "ERROR" means "let the general handler
     /// have it", which keeps the genuinely unexpected loud.</para>
     /// </summary>
     internal static (string Status, string Explanation) PostgresFaultOutcome(
@@ -6800,6 +6804,29 @@ LIMIT 1";
             CollectorTargetFault.Permissions => ("PERMISSIONS",
                 $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the monitoring login lacks a grant this "
                 + "source needs. pg_monitor covers every collector here; check that it is granted."),
+
+            /* #3410, the half #3414 left open: 58P01 and 42501 were told apart in the classifier —
+               Permissions versus Unclassified — and nowhere the operator looks. Both rendered as a failed
+               collector, so the natural first move was the grant chase, which is right for 42501 and a
+               dead end here: no GRANT changes a missing file. Scoped to the two log readers because for
+               them a missing file is a nameable state of the source — the path was built from the server's
+               own answers moments earlier — while a 58P01 anywhere else is genuinely unexpected and must
+               stay loud, which the default arm below still is. Keyed on Unclassified deliberately: the
+               classifier LEAVES 58P01 there so every other collector keeps the loud default, and this arm
+               is the exception being made, not a reclassification. */
+            CollectorTargetFault.Unclassified when ReadsServerLogWithPgReadFile(collectorName) && ex.SqlState == "58P01" =>
+                ("PERMISSIONS",
+                    $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the server named the exact file it could "
+                    + "not OPEN, and that path is the fact to act on: 58P01 is a missing FILE, not a missing "
+                    + "grant, and no GRANT changes it — a denial is 42501 and gets different advice. The "
+                    + "path is built from the server's own answers, current_setting('log_directory') joined "
+                    + "to a name pg_ls_logdir() returned in the same statement, and it resolves on the "
+                    + "MONITORED server's filesystem, not the monitoring host's. A one-off is a file removed "
+                    + "between the listing and the read and heals on the next cycle; one that repeats every "
+                    + "cycle means the directory log_directory names no longer holds what the listing said, "
+                    + "which is worth a look at that server's setting and what actually sits behind it. A "
+                    + "server whose logging_collector is off does not land here — that is detected first "
+                    + "and recorded as its own named state."),
 
             /* #3240: a missing source object on a collector that DECLARES its extension dependency
                (ICollectorSchemaInfo.RequiredPgExtensions, #3191) is not ambiguous — the absent thing is
