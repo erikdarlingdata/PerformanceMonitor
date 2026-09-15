@@ -606,6 +606,56 @@ public sealed class RepeatDeliveryBudgetTests
     }
 
     /// <summary>
+    /// #3456, the banked shape: two same-metric self-alerts on different UNPARSEABLE server keys, delivered
+    /// milliseconds apart through the real deliverer against a history store that models
+    /// <c>config_alert_log</c>'s integer <c>server_id</c> column — the write side collapses both keys into
+    /// the 0 bucket, exactly as the real stores do. Measured live twice (two organic pairs 3.7 ms apart on
+    /// one day): the first delivered and wrote its row, the second seeded against that just-written row and
+    /// rendered <c>throttled</c> despite its own last delivery being two hours old. Both must post — the
+    /// seed's answer for a key with no per-key rows is no answer, which reads as a first notice.
+    /// <para>Neither card carries a roster, and that is asserted rather than left silent: with no per-key
+    /// seed both siblings are first notices, and a first notice is exempt from folding by #1154's rule — so
+    /// #3436's carrier+roster acceptance for the self-alert family needs seed identity that survives the
+    /// integer column, which is the named follow-up to #3456, not this change. This pin says nothing is
+    /// DROPPED; it deliberately does not say the burst folds.</para>
+    /// </summary>
+    [Fact]
+    public async Task OnTheWire_TwoSelfAlertSiblingsMillisecondsApart_TheSecondIsNotThrottledOffTheFirstsSend()
+    {
+        using var endpoint = new CapturingWebhookEndpoint();
+        var history = new CollapsingColumnHistoryStore();
+        var deliverer = BuildDeliverer(endpoint, history);
+
+        /* The self-alert shape: a composite key the integer column cannot hold, no incidents (so the
+           metric-level cooldown key), the same metric on two servers — DarlingSelfAlertEvaluator's
+           cost:{serverId}:{collector} keys, with invented ids. */
+        await deliverer.DeliverAsync(
+            SelfAlertOutcome("cost:101:wait_stats", "SRV-B"), TestContext.Current.CancellationToken);
+        await deliverer.DeliverAsync(
+            SelfAlertOutcome("cost:102:wait_stats", "SRV-C"), TestContext.Current.CancellationToken);
+
+        /* Both posted. On the pre-#3456 seed the second call reads the first's just-written collapsed row
+           and comes back Throttled, so this asserts the mechanism and not a fixture accident. */
+        Assert.Equal(2, endpoint.Bodies.Count);
+        Assert.Contains("SRV-B", endpoint.Bodies[0], StringComparison.Ordinal);
+        Assert.Contains("SRV-C", endpoint.Bodies[1], StringComparison.Ordinal);
+
+        /* Both history rows say webhook-delivered — neither says throttled — and both landed in the
+           collapsed bucket, which is what makes the seed's refusal to read it the load-bearing half. */
+        Assert.Equal(2, history.Records.Count);
+        Assert.All(history.Records, record =>
+        {
+            Assert.True(record.AlertSent);
+            Assert.Equal("webhook", record.NotificationType);
+        });
+        Assert.All(history.CollapsedServerIds, sid => Assert.Equal(0, sid));
+
+        /* The deferred half, stated as an assertion: first notices do not fold, so no roster engages. */
+        Assert.All(endpoint.Bodies, body =>
+            Assert.DoesNotContain(RepeatDeliveryBudget.RosterHeading, body, StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// Email is bounded too, on its own budget, and this is a separate pin rather than an extra assertion
     /// because a fix applied to the webhook fan-out alone passes every webhook assertion above. The two
     /// channels hold separate cooldown key spaces by design (#1154's <c>keyPrefix</c>), so they hold separate
@@ -763,6 +813,14 @@ public sealed class RepeatDeliveryBudgetTests
     private static string? Fact(RepeatDeliveryBudget.Decision decision, string label) =>
         decision.Roster?.Fields.Where(f => f.Label == label).Select(f => f.Value).FirstOrDefault();
 
+    /* The self-alert shape FireAsync produces: the composite key as ServerKey, a null context (no
+       incidents, so the metric-level cooldown key), prose detail only. */
+    private static AlertOutcome SelfAlertOutcome(string serverKey, string serverName) =>
+        new(
+            serverKey, serverName, "Collector Cost Regression", "120.0 ms/run", "60.0 ms/run",
+            Context: null, DetailText: "The collector's own query time rose on " + serverName + ".",
+            NumericCurrentValue: 120, NumericThresholdValue: 60, Muted: false, Severity: null);
+
     private static AlertOutcome Outcome(string serverName)
     {
         var context = new AlertContext();
@@ -844,5 +902,66 @@ public sealed class RepeatDeliveryBudgetTests
 
         private Task<DateTime?> Seed(string? dedupKey) =>
             Task.FromResult<DateTime?>(dedupKey is not null && _seeded.Contains(dedupKey) ? _sentUtc : null);
+    }
+
+    /// <summary>
+    /// Models what the REAL stores persist and answer — rows keyed by the integer <c>server_id</c> column,
+    /// mapped through the same <see cref="AlertHistoryServerIdentity"/> both stores use — rather than a
+    /// fake keyed on the string the caller passed. The distinction is the whole of #3456: a string-keyed
+    /// fake would keep every key's history separate and the banked shape could never reproduce against it.
+    /// Routing through the shared mapping means a regression of <c>SeedScope</c> back to the parse-to-0
+    /// fallback makes this store answer the second sibling's seed with the first's just-written row, and
+    /// the wire pin above goes red. The dedupKey filter is not modelled: the self-alert family carries no
+    /// incidents, so its cooldown key is metric-level and the seed is asked with a null dedupKey.
+    /// </summary>
+    private sealed class CollapsingColumnHistoryStore : IAlertHistoryStore
+    {
+        private readonly List<(int ServerId, string Metric, string Type, DateTime AtUtc)> _rows = new();
+
+        public List<AlertHistoryRecord> Records { get; } = new();
+
+        public IReadOnlyList<int> CollapsedServerIds =>
+            _rows.ConvertAll(row => row.ServerId);
+
+        public Task RecordAlertAsync(AlertHistoryRecord record)
+        {
+            Records.Add(record);
+            _rows.Add((
+                AlertHistoryServerIdentity.StorageId(record.ServerId),
+                record.MetricName, record.NotificationType, DateTime.UtcNow));
+            return Task.CompletedTask;
+        }
+
+        public Task<DateTime?> GetLastEmailSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
+            Max(serverId, metricName, type => type is "email" or "email+webhook");
+
+        public Task<DateTime?> GetLastWebhookSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
+            Max(serverId, metricName, type => type is "webhook" or "email+webhook");
+
+        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
+            Max(serverId, metricName, _ => true);
+
+        private Task<DateTime?> Max(string serverId, string metricName, Func<string, bool> typeFilter)
+        {
+            var sid = AlertHistoryServerIdentity.SeedScope(serverId);
+            if (sid is null)
+            {
+                return Task.FromResult<DateTime?>(null);
+            }
+
+            DateTime? max = null;
+            foreach (var row in _rows)
+            {
+                if (row.ServerId == sid.Value
+                    && string.Equals(row.Metric, metricName, StringComparison.Ordinal)
+                    && typeFilter(row.Type)
+                    && (max is null || row.AtUtc > max.Value))
+                {
+                    max = row.AtUtc;
+                }
+            }
+
+            return Task.FromResult(max);
+        }
     }
 }

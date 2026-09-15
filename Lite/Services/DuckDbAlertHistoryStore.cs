@@ -63,7 +63,11 @@ public sealed class DuckDbAlertHistoryStore : IAlertHistoryStore
             record.NumericCurrentValue, record.CurrentValueText);
         var thresholdValue = AlertValueParser.ResolveStoredValue(
             record.NumericThresholdValue, record.ThresholdValueText);
-        var serverId = int.TryParse(record.ServerId, out var sid) ? sid : 0;
+
+        /* Unparseable keys collapse to the server_id 0 bucket — write-only, never read back by the seed
+           methods below (#3456). Shared with Darling's PgAlertHistoryStore via AlertHistoryServerIdentity
+           so the write half and the read half cannot drift apart. */
+        var serverId = AlertHistoryServerIdentity.StorageId(record.ServerId);
 
         try
         {
@@ -130,7 +134,12 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)";
     /// </summary>
     public async Task<DateTime?> GetLastEmailSentUtcAsync(string serverId, string metricName, string? dedupKey = null)
     {
-        var sid = int.TryParse(serverId, out var s) ? s : 0;
+        /* #3456: an unparseable key's rows all sit in the collapsed server_id 0 bucket, where the old
+           parse-to-0 fallback read back the fleet-wide last send of the metric — another key's history.
+           Declining (null = no seed = first notice) fails toward posting; the invariant lives on
+           AlertHistoryServerIdentity.SeedScope, shared with Darling's PgAlertHistoryStore. */
+        var sid = AlertHistoryServerIdentity.SeedScope(serverId);
+        if (sid is null) return null;
         try
         {
             /* Use injected initializer, fall back to creating one from App.DatabasePath */
@@ -164,7 +173,7 @@ AND   metric_name = $2
 AND   notification_type IN ('email', 'email+webhook')
 AND   send_error IS NULL"
             + (dedupKey is null ? "" : "\nAND   context_json LIKE $3 ESCAPE '\\'");
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
             if (dedupKey is not null)
                 command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertContextSerializer.BuildDedupKeyLikePattern(dedupKey) });
@@ -194,7 +203,10 @@ AND   send_error IS NULL"
     /// </summary>
     public async Task<DateTime?> GetLastWebhookSentUtcAsync(string serverId, string metricName, string? dedupKey = null)
     {
-        var sid = int.TryParse(serverId, out var s) ? s : 0;
+        /* #3456: decline unparseable keys rather than read the collapsed bucket — see
+           GetLastEmailSentUtcAsync's remark and AlertHistoryServerIdentity.SeedScope. */
+        var sid = AlertHistoryServerIdentity.SeedScope(serverId);
+        if (sid is null) return null;
         try
         {
             /* Use injected initializer, fall back to creating one from App.DatabasePath */
@@ -228,7 +240,7 @@ WHERE server_id = $1
 AND   metric_name = $2
 AND   notification_type IN ('webhook', 'email+webhook')"
             + (dedupKey is null ? "" : "\nAND   context_json LIKE $3 ESCAPE '\\'");
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
             if (dedupKey is not null)
                 command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertContextSerializer.BuildDedupKeyLikePattern(dedupKey) });
@@ -263,7 +275,10 @@ AND   notification_type IN ('webhook', 'email+webhook')"
     /// </summary>
     public async Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null)
     {
-        var sid = int.TryParse(serverId, out var s) ? s : 0;
+        /* #3456: decline unparseable keys rather than read the collapsed bucket — see
+           GetLastEmailSentUtcAsync's remark and AlertHistoryServerIdentity.SeedScope. */
+        var sid = AlertHistoryServerIdentity.SeedScope(serverId);
+        if (sid is null) return null;
         try
         {
             var duckDb = _duckDb;
@@ -291,7 +306,7 @@ FROM config_alert_log
 WHERE server_id = $1
 AND   metric_name = $2"
             + (dedupKey is null ? "" : "\nAND   context_json LIKE $3 ESCAPE '\\'");
-            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
             command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
             if (dedupKey is not null)
                 command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = AlertContextSerializer.BuildDedupKeyLikePattern(dedupKey) });

@@ -59,7 +59,11 @@ public class CollectorCostDigestTests
         new(serverId, "pm-server-" + serverId.ToString(CultureInfo.InvariantCulture), collector,
             LatestMs: (long)(latestMsPerRun * latestRuns), BaselineMs: baselineMsPerRun * latestRuns,
             LatestMetricTime: new DateTime(2026, 7, 1, 11, 0, 0, DateTimeKind.Unspecified),
-            LatestRuns: latestRuns, LatestMsPerRun: latestMsPerRun, BaselineMsPerRun: baselineMsPerRun);
+            LatestRuns: latestRuns, LatestMsPerRun: latestMsPerRun, BaselineMsPerRun: baselineMsPerRun,
+            /* The one-line change the remark above reserved for #3441's merge: p95 pinned to the mean
+               makes ThresholdMsPerRun resolve to the pre-#3441 bound exactly, so every fixture keeps
+               asking the ROUTING question it was written to ask rather than gaining a dispersion one. */
+            BaselineP95MsPerRun: baselineMsPerRun);
 
     private static DarlingCollectorCostReader.CollectorCostSummaryRow Census(
         string collector, int serverCount, long totalSqlMs = 1_000_000, long runCount = 1000,

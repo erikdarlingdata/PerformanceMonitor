@@ -55,7 +55,11 @@ public sealed class PgAlertHistoryStore : IAlertHistoryStore
             record.NumericCurrentValue, record.CurrentValueText);
         var thresholdValue = AlertValueParser.ResolveStoredValue(
             record.NumericThresholdValue, record.ThresholdValueText);
-        var serverId = int.TryParse(record.ServerId, out var sid) ? sid : 0;
+
+        /* Unparseable keys (the self-alert family) collapse to the server_id 0 bucket — a write-only
+           bucket the cooldown seed below refuses to read (#3456). One shared mapping with that read, so
+           the two halves cannot drift back into answering the identity question differently. */
+        var serverId = AlertHistoryServerIdentity.StorageId(record.ServerId);
 
         try
         {
@@ -147,7 +151,18 @@ AND   notification_type IN ('webhook', 'email+webhook')", "WebhookAlert");
     private async Task<DateTime?> ReadMaxAlertTimeAsync(
         string serverId, string metricName, string? dedupKey, string extraFilter, string logScope)
     {
-        var sid = int.TryParse(serverId, out var s) ? s : 0;
+        /* #3456: a key that is not an integer has no per-key rows to read — the write side collapses
+           every such key into the server_id 0 bucket, so the old parse-to-0 fallback answered this key's
+           question with MAX(alert_time) over EVERY collapsed key's rows: the fleet-wide last send of the
+           metric, which is how one server's delivery came to throttle its siblings' first notices. No
+           answer (null = no seed = first notice) is the correct one, and it fails toward posting. The
+           invariant and the literal-0 exclusion live on AlertHistoryServerIdentity.SeedScope. */
+        var sid = AlertHistoryServerIdentity.SeedScope(serverId);
+        if (sid is null)
+        {
+            return null;
+        }
+
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync();
@@ -163,7 +178,7 @@ AND   metric_name = $2" + extraFilter
                    rather than hand-concatenated here — see its doc comment for why. NULL context_json
                    rows fail the match either way. */
                 + (dedupKey is null ? "" : "\nAND   context_json LIKE $3 ESCAPE '\\'"), connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
-            command.Parameters.AddWithValue(sid);
+            command.Parameters.AddWithValue(sid.Value);
             command.Parameters.AddWithValue(metricName);
             if (dedupKey is not null)
             {
