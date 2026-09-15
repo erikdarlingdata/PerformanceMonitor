@@ -702,7 +702,7 @@ GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
 
 -- 8. Alert tuning (the MCP alert-tuning write tools): the mcp role's alert-config writes, mirroring section 7's
 --    custom_views grant model (EXPLICIT single-table statements, NO ALTER DEFAULT PRIVILEGES). update_alert_settings
---    / create_mute_rule / delete_mute_rule let a token-holder tune the SAME alert engine the Viewer's Settings
+--    / create_mute_rule / delete_mute_rule / set_mute_rule_enabled let a token-holder tune the SAME alert engine the Viewer's Settings
 --    window drives: INSERT/UPDATE/DELETE on config_mute_rules (the mute rules the delivery paths honor) and UPDATE
 --    on the SINGLETON config_alert_settings row (id=1 -- UPDATE only, never INSERT/DELETE: the row is a fixed
 --    singleton the service seeds). Still NARROW -- never the config_command service-credential pivot, a
@@ -717,7 +717,7 @@ GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
 --    provisioning runs AFTER migration; a recreated table re-grants on the next start (self-heal).
 --    EVERY mcp-writable beacon-triggered table rests on that one grant, not the alert-settings path alone:
 --    config_mute_rules carries trg_bump_mute_rules (V117 / #3315) and config_monitored_servers carries
---    trg_bump_monitored_servers (section 9), so create_mute_rule / delete_mute_rule and add_servers /
+--    trg_bump_monitored_servers (section 9), so create_mute_rule / delete_mute_rule / set_mute_rule_enabled and add_servers /
 --    remove_server bump the beacon as mcp too. Narrowing the grant to update_alert_settings 42501s all of
 --    them -- one column UPDATE serves every trigger. Re-derive the set from which mcp-writable tables carry a
 --    bump trigger rather than from a count recorded here, which a later rung ages out without changing it.

@@ -18,6 +18,7 @@ using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using Xunit;
@@ -1096,6 +1097,76 @@ public sealed class DarlingSelfAlertTests
 
         Assert.Empty(h.Deliverer.Outcomes);
     }
+
+    /// <summary>
+    /// #3432: a rule taken out of force through <c>set_mute_rule_enabled</c> and put back is stale to THIS
+    /// condition on the age it actually has. The claim is driven through the real evaluator rather than
+    /// asserted about a timestamp, because what a reset costs is measured in what this alert does and does
+    /// not say.
+    ///
+    /// <para>Each transition is visible in the outcome. While disabled the rule is not a blind spot and
+    /// nothing fires — the arm the sibling test above pins. Re-enabled, it fires, and the rendered age is
+    /// the authored one. A verb that stamped <c>created_at_utc</c> on either transition would leave the rule
+    /// a moment old, inside <see cref="DarlingSelfAlertEvaluator.StaleMuteAge"/>, so the final
+    /// <c>Assert.Single</c> would find NOTHING: the reset shows up as a missing alert rather than as a
+    /// different number, which is exactly how the delete-and-re-create workaround disarms this alert
+    /// today.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_ARuleDisabledAndReEnabledThroughTheMcpVerb_IsStaleOnItsRealAge()
+    {
+        const string ruleId = "rule-held";
+        const double authoredDaysAgo = 30d;
+        var authored = MuteClock.AddDays(-authoredDaysAgo);
+
+        var store = new FakeMuteRuleStore().Seed(
+            Mute(authoredDaysAgo, id: ruleId));
+        Assert.Equal(authored, store.Row(ruleId)!.CreatedAtUtc);
+
+        Assert.Equal("updated", StatusOf(
+            await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, ruleId, enabled: false)));
+
+        var whileDisabled = new Harness();
+        await whileDisabled.Build().ApplyStaleMuteRulesAsync(await store.LoadAllAsync(), Ct);
+        Assert.Empty(whileDisabled.Deliverer.Outcomes);
+
+        Assert.Equal("updated", StatusOf(
+            await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, ruleId, enabled: true)));
+
+        var h = new Harness();
+        await h.Build().ApplyStaleMuteRulesAsync(await store.LoadAllAsync(), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteMetric, fired.MetricName);
+        Assert.Equal(1d, fired.NumericCurrentValue);
+        Assert.Contains($"oldest {authoredDaysAgo:F0} days", fired.DetailText, StringComparison.Ordinal);
+        Assert.Equal(authored, store.Row(ruleId)!.CreatedAtUtc);
+    }
+
+    /// <summary>
+    /// The counterfactual the test above rests on, stated as its own assertion: a rule authored NOW is not
+    /// stale, so "the alert still fires" is a claim about the preserved date and not about the rule merely
+    /// being enabled and unbounded. Without this, a reset that somehow still fired would be indistinguishable
+    /// from a preserved date.
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_ARuleAuthoredAtTheHarnessInstant_IsNotStale_WhichIsWhatAResetWouldCost()
+    {
+        const string ruleId = "rule-fresh";
+        var store = new FakeMuteRuleStore().Seed(Mute(ageDays: 0, id: ruleId));
+
+        Assert.Equal("updated", StatusOf(
+            await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, ruleId, enabled: false)));
+        Assert.Equal("updated", StatusOf(
+            await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, ruleId, enabled: true)));
+
+        var h = new Harness();
+        await h.Build().ApplyStaleMuteRulesAsync(await store.LoadAllAsync(), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    private static string StatusOf(string json) => DarlingMcpTestData.StatusOf(json);
 
     [Fact]
     public async Task StaleMute_ARuleMatchingEveryAlert_ReadsCritical_AndSaysTheStoreLooksHealthyForNoReason()
