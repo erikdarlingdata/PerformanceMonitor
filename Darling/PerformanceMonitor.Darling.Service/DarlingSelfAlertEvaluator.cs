@@ -940,9 +940,10 @@ internal sealed class DarlingSelfAlertEvaluator
                         $"{regression.LatestMsPerRun:N1} ms per run, {ratio:N1}x its {CostRegressionBaselineWindow.TotalDays:N0}-day " +
                         $"baseline of {regression.BaselineMsPerRun:N1} ms per run ({regression.LatestRuns:N0} runs totalling " +
                         $"{regression.LatestMs:N0} ms so far today, adding {regression.AddedMsPerDay / 1000.0:N1} s of collection " +
-                        $"time a day at that volume). It also cleared {threshold:N1} ms per run, which is the factor on the " +
-                        $"p95 of its OWN daily per-run cost over that window ({regression.BaselineP95MsPerRun:N1} ms) rather " +
-                        $"than on the mean (#3440) - so this is not the collector's own upper mode on a normal slow day. " +
+                        $"time a day at that volume). It also cleared {threshold:N1} ms per run, the factor on the HIGHER of " +
+                        $"that mean and the p95 of its OWN daily per-run cost over the window " +
+                        $"({regression.BaselineP95MsPerRun:N1} ms) - so this is not the collector's own upper mode on a " +
+                        $"normal slow day (#3440). " +
                         $"This is the MONITORING TOOL's own cost, not the " +
                         $"server's workload - each individual run is costing more than it used to. Measured PER RUN (#2846) so " +
                         $"a cadence change cannot read as a cost change. get_collector_cost with " +

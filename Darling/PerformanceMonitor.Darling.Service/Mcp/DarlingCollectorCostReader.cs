@@ -133,7 +133,7 @@ ORDER BY day";
     /// (#2674) — the self-alert's detection query. Per (server, collector): latest day's cost PER RUN vs the
     /// run-weighted cost per run of the prior days in the window, returned only when the baseline is
     /// meaningful (total >= floor, and at least 3 prior days so a new collector cannot trip it) and the
-    /// latest exceeds it by the factor.
+    /// latest exceeds the factor on BOTH that mean and the prior days' own per-run p95.
     /// $1 = baseline window start (naive UTC), $2 = baseline floor ms, $3 = factor (applied to the mean AND
     /// to the p95 per-run baseline), $4 = minimum added ms per day.
     ///
