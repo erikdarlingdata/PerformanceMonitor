@@ -129,7 +129,10 @@ public sealed class DarlingSecuritySplitLiveTests
                 await ExecAsync(admin, "DELETE FROM config_mute_rules WHERE id = 'sec-split-admin'", ct);
             }
 
-            /* viewer reads collect but is DENIED the same config write — 42501. */
+            /* viewer reads collect but is DENIED a config write it was never granted — 42501. The probe
+               target moved off config_mute_rules when #3450 granted viewer exactly that write (the web
+               dashboard's mute-rule endpoints); config_command is the service-credential pivot no
+               least-privilege role may ever write, so it stays the denial control. */
             await using (var viewer = new NpgsqlConnection(viewerString))
             {
                 await viewer.OpenAsync(ct);
@@ -137,7 +140,7 @@ public sealed class DarlingSecuritySplitLiveTests
 
                 var denied = await Assert.ThrowsAsync<PostgresException>(async () =>
                     await ExecAsync(viewer,
-                        "INSERT INTO config_mute_rules (id, enabled, created_at_utc) VALUES ('sec-split-viewer', true, now())", ct));
+                        "INSERT INTO config_command (command_type) VALUES ('sec-split-viewer-noop')", ct));
                 Assert.Equal("42501", denied.SqlState); // insufficient_privilege
             }
 
@@ -226,7 +229,7 @@ public sealed class DarlingSecuritySplitLiveTests
     }
 
     [Fact]
-    public async Task ViewerRole_CanCrudCustomViews_ButStillDeniedOtherConfigWrites()
+    public async Task ViewerRole_CanCrudCustomViewsAndMuteRules_ButStillDeniedOtherConfigWrites()
     {
         var connectionString = RequireLivePostgres();
         var ct = TestContext.Current.CancellationToken;
@@ -254,12 +257,33 @@ public sealed class DarlingSecuritySplitLiveTests
             await ExecAsync(viewer,
                 $"DELETE FROM config.custom_views WHERE name = '{viewName}'", ct);
 
-            /* But viewer is STILL denied a write to any OTHER config table — 42501 insufficient_privilege — so
-               the custom_views grant did not accidentally widen into a schema-wide config write. */
+            /* #3450: the web mute-rule endpoints' floor — full CRUD on config_mute_rules as the viewer role,
+               proven by a real round-trip (own-scoped id). The INSERT fires trg_bump_mute_rules ->
+               config_bump_version AS viewer (SECURITY INVOKER), so this also proves the COLUMN-level
+               config_service beacon grant covers the viewer's mute writes — without it every statement here
+               would 42501 at the trigger, in production only, because the superuser-run suites never hit the
+               grant. Seed the beacon singleton first (owner; no-op when present). */
+            await ExecAsync(owner, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT (id) DO NOTHING", ct);
+            await ExecAsync(viewer,
+                "INSERT INTO config_mute_rules (id, enabled, created_at_utc) VALUES ('cv-sec-viewer-mute', true, now())", ct);
+            await ExecAsync(viewer,
+                "UPDATE config_mute_rules SET reason = 'edited as viewer' WHERE id = 'cv-sec-viewer-mute'", ct);
+            await ExecAsync(viewer,
+                "DELETE FROM config_mute_rules WHERE id = 'cv-sec-viewer-mute'", ct);
+
+            /* But viewer is STILL denied a write to a config table it was NOT granted — 42501
+               insufficient_privilege on the config_command service-credential pivot — so the single-table
+               grants did not accidentally widen into a schema-wide config write. And the config_service grant
+               is strictly COLUMN-level: the beacon columns move (proven through the trigger above), a real
+               service flag does not. */
             var denied = await Assert.ThrowsAsync<PostgresException>(async () =>
                 await ExecAsync(viewer,
-                    "INSERT INTO config_mute_rules (id, enabled, created_at_utc) VALUES ('cv-sec-viewer', true, now())", ct));
+                    "INSERT INTO config_command (command_type) VALUES ('cv-sec-viewer-noop')", ct));
             Assert.Equal("42501", denied.SqlState);
+
+            var beaconOnly = await Assert.ThrowsAsync<PostgresException>(async () =>
+                await ExecAsync(viewer, "UPDATE config.config_service SET paused = NOT paused WHERE id = 1", ct));
+            Assert.Equal("42501", beaconOnly.SqlState);
 
             bodySucceeded = true;
         }
@@ -269,6 +293,7 @@ public sealed class DarlingSecuritySplitLiveTests
             await LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, async (cleanup, cleanupCt) =>
             {
                 await ExecAsync(cleanup, $"DELETE FROM config.custom_views WHERE name = '{viewName}'", cleanupCt);
+                await ExecAsync(cleanup, "DELETE FROM config.config_mute_rules WHERE id = 'cv-sec-viewer-mute'", cleanupCt);
                 await DropTestRolesAsync(cleanup, cleanupCt);
             });
         }
@@ -541,9 +566,14 @@ GRANT SELECT ON ALL TABLES IN SCHEMA collect TO {AdminRole}, {ViewerRole};
 GRANT SELECT ON ALL TABLES IN SCHEMA config  TO {AdminRole}, {ViewerRole};
 GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO {AdminRole};
 {DarlingManagedRoles.BuildViewerColumnAclSql("config", ViewerRole)}
--- The single viewer write (#1563): mirrors DarlingManagedRoles section 7. config.custom_views exists because
--- MigrateAsync (V31) ran before this helper.
+-- The viewer writes: the #1563 custom_views grant (mirrors DarlingManagedRoles section 7) and the #3450
+-- mute-rule grant pair (mirrors section 8's viewer half — the web dashboard's dedicated mute-rule endpoints
+-- run as viewer, and config_mute_rules carries the SECURITY-INVOKER trg_bump_mute_rules, so the COLUMN-level
+-- config_service beacon grant is load-bearing for every viewer mute write). Both targets exist because
+-- MigrateAsync ran before this helper (V31 / V117).
 GRANT INSERT, UPDATE, DELETE ON config.custom_views TO {ViewerRole};
+GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO {ViewerRole};
+GRANT UPDATE (config_version, updated_at) ON config.config_service TO {ViewerRole};
 ALTER DEFAULT PRIVILEGES FOR ROLE {OwnerRoleOf(owner)} IN SCHEMA collect GRANT SELECT ON TABLES TO {AdminRole}, {ViewerRole};
 
 -- The mcp-role analog (darling-network-endpoints, D3-role): viewer's read surface + the same secret-column

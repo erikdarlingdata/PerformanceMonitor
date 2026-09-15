@@ -917,6 +917,11 @@ internal sealed class FakeMuteRuleStore : IMuteRuleStore
     /// twin for the edit verb's write-to-read-back window.</summary>
     internal Action? AfterUpdate { get; set; }
 
+    /// <summary>Runs immediately after an <see cref="InsertAsync"/> write lands, handed the row AS STORED — the
+    /// create verb's write-to-read-back window (#3450). Takes the rule because, unlike the flag/edit verbs, the
+    /// caller does not know the generated id before the write.</summary>
+    internal Action<MuteRule>? AfterInsert { get; set; }
+
     internal FakeMuteRuleStore Seed(MuteRule rule)
     {
         _rows.Add(rule.Clone());
@@ -945,6 +950,7 @@ internal sealed class FakeMuteRuleStore : IMuteRuleStore
         }
 
         _rows.Add(rule.Clone());
+        AfterInsert?.Invoke(rule.Clone());
         return Task.CompletedTask;
     }
 
@@ -1534,6 +1540,251 @@ public sealed class UpdateMuteRuleTests
         var result = await DarlingMcpAlertTools.UpdateMuteRule(dead, RuleId, "{\"reason\":\"x\"}");
 
         Assert.StartsWith("Error during update_mute_rule", result, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// The web dashboard's mute-rule CREATE half (#3450): <c>CreateMuteRuleCore</c>, the JSON-body twin of the MCP
+/// <c>create_mute_rule</c> tool, over the same <see cref="IMuteRuleStore"/> seam — what
+/// <c>POST /api/mute-rules</c> calls with the raw request body. The load-bearing claims: the body is parsed by
+/// the SAME whitelist authority the update verb runs (so a stray key, a blank, a bad expiry, and the four
+/// non-editable keys are refused with the update path's own messages, and NOTHING is stored on a refusal); the
+/// new rule is born enabled with a fresh clock; and the reported rule is the store's read-back, not the local
+/// copy — proven on the arm where the two answers differ.
+/// </summary>
+public sealed class CreateMuteRuleCoreTests
+{
+    private static JsonNode Payload(string json) =>
+        JsonNode.Parse(json)!["mute_rule"] ?? throw new InvalidOperationException($"no mute_rule in {json}");
+
+    [Fact]
+    public async Task AFullBody_CreatesAnEnabledRule_AndReportsTheStoredRow()
+    {
+        var store = new FakeMuteRuleStore();
+
+        var result = await DarlingMcpAlertTools.CreateMuteRuleCore(store, /*lang=json*/ """
+            {
+              "server_name": "pm-server-1",
+              "metric_name": "High CPU",
+              "database_pattern": "sales",
+              "query_text_pattern": "UPDATE big",
+              "wait_type_pattern": "LCK",
+              "job_name_pattern": "nightly",
+              "reason": "  known load window  ",
+              "expires_at_utc": "2026-12-01T00:00:00Z"
+            }
+            """);
+
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(result));
+
+        var payload = Payload(result);
+        var stored = store.Row((string)payload["id"]!)!;
+
+        /* Born enabled with the caller's fields — whitespace trimmed exactly as the parser promises. */
+        Assert.True(stored.Enabled);
+        Assert.Equal("pm-server-1", stored.ServerName);
+        Assert.Equal("known load window", stored.Reason);
+        Assert.Equal("nightly", stored.JobNamePattern);
+        Assert.Equal(new DateTime(2026, 12, 1, 0, 0, 0, DateTimeKind.Utc), stored.ExpiresAtUtc);
+
+        /* The #3306 clock starts NOW — the store's value, which is also what the payload reports. */
+        Assert.True((DateTime.UtcNow - stored.CreatedAtUtc).Duration() < TimeSpan.FromMinutes(1));
+        Assert.True((bool)payload["enabled"]!);
+        Assert.Equal(1, store.Count);
+    }
+
+    [Fact]
+    public async Task AnEmptyObject_IsLegal_AndCreatesTheWholeFleetRule()
+    {
+        /* The MCP twin accepts an argument-less create (a rule with no constraining fields mutes EVERY
+           alert); the web body's {} is the same request and gets the same answer — the warning lives on the
+           surface's description, not in a refusal one twin makes and the other does not. */
+        var store = new FakeMuteRuleStore();
+
+        var result = await DarlingMcpAlertTools.CreateMuteRuleCore(store, "{}");
+
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(result));
+        var stored = store.Row((string)Payload(result)["id"]!)!;
+        Assert.True(stored.Enabled);
+        Assert.Null(stored.ServerName);
+        Assert.Null(stored.MetricName);
+        Assert.Null(stored.ExpiresAtUtc);
+    }
+
+    [Theory]
+    [InlineData("{\"reason\":\"\"}")]                       // blank refused (null is the one spelling of clear/omit)
+    [InlineData("{\"reasn\":\"typo\"}")]                    // unknown key refused by the shared whitelist
+    [InlineData("{\"enabled\":false}")]                     // the flag belongs to set_mute_rule_enabled / PUT .../enabled
+    [InlineData("{\"id\":\"mine\"}")]                       // identity is generated, never supplied
+    [InlineData("{\"created_at_utc\":\"2020-01-01T00:00:00Z\"}")] // the #3306 clock is never caller-set
+    [InlineData("{\"expires_at_utc\":\"not-a-date\"}")]     // the same expiry parse the update path runs
+    [InlineData("{\"expires_at\":\"2026-01-01T00:00:00Z\",\"expires_at_utc\":\"2026-01-01T00:00:00Z\"}")] // alias duplicate
+    [InlineData("not json")]
+    [InlineData("[1,2]")]                                   // a body that is not an object
+    public async Task ARefusedBody_ReturnsInvalid_AndStoresNothing(string body)
+    {
+        var store = new FakeMuteRuleStore();
+
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.CreateMuteRuleCore(store, body)));
+        Assert.Equal(0, store.Count);
+    }
+
+    [Fact]
+    public async Task TheExpiresAtAlias_IsAccepted_AndReportsUnderTheCanonicalName()
+    {
+        /* create_mute_rule's parameter spelling, honored here through the SAME parser normalization. */
+        var store = new FakeMuteRuleStore();
+
+        var result = await DarlingMcpAlertTools.CreateMuteRuleCore(store, "{\"expires_at\":\"2026-06-01T00:00:00Z\"}");
+
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(result));
+        Assert.Equal(new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc),
+            store.Row((string)Payload(result)["id"]!)!.ExpiresAtUtc);
+    }
+
+    [Fact]
+    public async Task ACreateWhoseRowVanishesBeforeTheReadBack_ReportsTheAbsence_NamingBothFacts()
+    {
+        /* The discriminating arm for "the reported rule is the store's read-back": a core that reported its
+           local copy would answer 'created' here and hand the caller a rule that no longer exists. */
+        var store = new FakeMuteRuleStore();
+        store.AfterInsert = inserted => store.Remove(inserted.Id);
+
+        var result = await DarlingMcpAlertTools.CreateMuteRuleCore(store, "{\"reason\":\"raced\"}");
+
+        Assert.Equal("not_found", DarlingMcpTestData.StatusOf(result));
+        Assert.Contains("was created", result, StringComparison.Ordinal);
+        Assert.Contains("deleted concurrently", result, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// delete_mute_rule's hoisted core (#3450), over the seam — what <c>DELETE /api/mute-rules/{id}</c> and the MCP
+/// tool both run. The decisions are small and all here: an honest 'deleted' vs 'not_found' off the same store
+/// read get_mute_rules uses, and a blank id refused before the store is touched.
+/// </summary>
+public sealed class DeleteMuteRuleCoreTests
+{
+    private const string RuleId = "rule-to-delete";
+
+    private static FakeMuteRuleStore StoreWithRule() =>
+        new FakeMuteRuleStore().Seed(new MuteRule { Id = RuleId, Reason = "doomed" });
+
+    [Fact]
+    public async Task DeletesAnExistingRule_AndNamesTheIdTheCallerShouldStopCiting()
+    {
+        var store = StoreWithRule();
+
+        var result = await DarlingMcpAlertTools.DeleteMuteRuleCore(store, RuleId);
+
+        Assert.Equal("deleted", DarlingMcpTestData.StatusOf(result));
+        Assert.Equal(RuleId, (string)JsonNode.Parse(result)!["rule_id"]!);
+        Assert.Equal(0, store.Count);
+    }
+
+    [Fact]
+    public async Task AnUnknownId_ReturnsNotFound_AndDeletesNothing()
+    {
+        var store = StoreWithRule();
+
+        Assert.Equal("not_found", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.DeleteMuteRuleCore(store, "no-such")));
+        Assert.Equal(1, store.Count);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task ABlankId_ReturnsInvalid_WithoutReading(string ruleId)
+    {
+        var store = StoreWithRule();
+
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.DeleteMuteRuleCore(store, ruleId)));
+        Assert.Equal(0, store.LoadAllCalls);
+        Assert.Equal(1, store.Count);
+    }
+}
+
+/// <summary>
+/// The whole web write surface (#3450) driven end-to-end through the EXACT core seam the
+/// <c>/api/mute-rules</c> routes call, with the raw JSON bodies the routes pass — create, then a partial edit,
+/// then an explicit-null clear, then the flag both ways — asserting the one invariant the issue pins across
+/// every path: <c>created_at_utc</c> never moves. This is the #3306 clock; a surface that reset it would hand a
+/// weekly edit the same staleness invisibility a delete-and-recreate buys.
+/// </summary>
+public sealed class WebMuteRuleEndpointFlowTests
+{
+    [Fact]
+    public async Task CreateEditClearAndFlip_NeverMoveTheCreationDate()
+    {
+        var store = new FakeMuteRuleStore();
+
+        /* POST /api/mute-rules */
+        var created = await DarlingMcpAlertTools.CreateMuteRuleCore(store,
+            "{\"metric_name\":\"High CPU\",\"reason\":\"initial\",\"expires_at_utc\":\"2026-12-01T00:00:00Z\"}");
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(created));
+        var id = (string)JsonNode.Parse(created)!["mute_rule"]!["id"]!;
+        var born = store.Row(id)!.CreatedAtUtc;
+
+        /* PATCH /api/mute-rules/{id} — a partial edit: only the sent field moves. */
+        var edited = await DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, "{\"reason\":\"root cause found\"}");
+        Assert.Equal("updated", DarlingMcpTestData.StatusOf(edited));
+        Assert.Equal("root cause found", store.Row(id)!.Reason);
+        Assert.Equal("High CPU", store.Row(id)!.MetricName);   // a field not sent does not change
+        Assert.Equal(born, store.Row(id)!.CreatedAtUtc);
+
+        /* PATCH again — the explicit-null clear: the rule becomes permanent, the clock still stands. */
+        var cleared = await DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, "{\"expires_at_utc\":null}");
+        Assert.Equal("updated", DarlingMcpTestData.StatusOf(cleared));
+        Assert.Null(store.Row(id)!.ExpiresAtUtc);
+        Assert.Equal(born, store.Row(id)!.CreatedAtUtc);
+
+        /* PUT /api/mute-rules/{id}/enabled — both directions. */
+        Assert.Equal("updated", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, id, false)));
+        Assert.Equal("updated", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, id, true)));
+        Assert.Equal(born, store.Row(id)!.CreatedAtUtc);
+
+        /* DELETE /api/mute-rules/{id} closes the loop. */
+        Assert.Equal("deleted", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.DeleteMuteRuleCore(store, id)));
+        Assert.Equal(0, store.Count);
+    }
+
+    /// <summary>
+    /// #3450's carried caveat, surface-tested as the issue asked: alert rows spell server_name two ways
+    /// (the self-alert family uses the display-short name, engine alerts the registry name), and a mute
+    /// rule matches the row's exact spelling — so the web write surface must store WHATEVER spelling it
+    /// was given, verbatim. A normalization here — case folding, registry resolution, trimming a domain —
+    /// would silently move a rule from one family's spelling to the other and turn a working mute inert,
+    /// which is precisely the operational trap the caveat documents. Both spellings round-trip through
+    /// create and through an update that swaps between them; equality is Ordinal because that is the
+    /// matcher's own comparison.
+    /// </summary>
+    [Fact]
+    public async Task TheTwoServerNameSpellings_StoreVerbatim_NeitherNormalized()
+    {
+        var store = new FakeMuteRuleStore();
+        const string shortSpelling = "pm-server-7";
+        const string fullSpelling = "pm-server-7.fleet.example.test";
+
+        var fromShort = await DarlingMcpAlertTools.CreateMuteRuleCore(store,
+            "{\"server_name\":\"" + shortSpelling + "\",\"metric_name\":\"Collector Cost Regression\",\"reason\":\"short spelling\"}");
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(fromShort));
+        var shortId = (string)JsonNode.Parse(fromShort)!["mute_rule"]!["id"]!;
+        Assert.Equal(shortSpelling, store.Row(shortId)!.ServerName);
+
+        var fromFull = await DarlingMcpAlertTools.CreateMuteRuleCore(store,
+            "{\"server_name\":\"" + fullSpelling + "\",\"metric_name\":\"Blocking Detected\",\"reason\":\"full spelling\"}");
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(fromFull));
+        var fullId = (string)JsonNode.Parse(fromFull)!["mute_rule"]!["id"]!;
+        Assert.Equal(fullSpelling, store.Row(fullId)!.ServerName);
+
+        /* The update endpoint is where the caveat bites hardest — an operator repointing a rule between
+           the two families must get the exact bytes they sent, both directions. */
+        Assert.Equal("updated", DarlingMcpTestData.StatusOf(
+            await DarlingMcpAlertTools.UpdateMuteRuleCore(store, shortId, "{\"server_name\":\"" + fullSpelling + "\"}")));
+        Assert.Equal(fullSpelling, store.Row(shortId)!.ServerName);
+        Assert.Equal("updated", DarlingMcpTestData.StatusOf(
+            await DarlingMcpAlertTools.UpdateMuteRuleCore(store, shortId, "{\"server_name\":\"" + shortSpelling + "\"}")));
+        Assert.Equal(shortSpelling, store.Row(shortId)!.ServerName);
     }
 }
 
