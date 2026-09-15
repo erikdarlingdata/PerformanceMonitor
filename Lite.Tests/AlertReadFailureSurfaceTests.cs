@@ -244,24 +244,33 @@ public sealed class AlertReadFailureSurfaceTests
             }
         }
 
-        Assert.Equal(4, nullKeyReads.Count);
+        Assert.Equal(6, nullKeyReads.Count);
 
         var inventory = AlertReadFailureCounter.FleetScopedReads;
 
         /* Each recorded site is represented. Keyed on the distinguishing word rather than the whole read
            name, because the constant is prose for an operator and the read name is a label for a log. */
-        Assert.Contains(nullKeyReads, r => r.Contains("collector-cost", StringComparison.Ordinal));
+        Assert.Contains(nullKeyReads, r => r.Contains("collector-cost regression", StringComparison.Ordinal));
+        /* #3443: the regression read grew two fleet-scoped companions in the same evaluator pass — the
+           census read that supplies the paging-versus-digest routing denominator, and the digest's movers
+           read. Asserted as three DISTINCT reads rather than one "collector-cost" match, because they blind
+           different stages of the same condition and a shared name would make last_failure_read ambiguous
+           exactly when one of the three is the one that went quiet. */
+        Assert.Contains(nullKeyReads, r => r.Contains("collector-cost census", StringComparison.Ordinal));
+        Assert.Contains(nullKeyReads, r => r.Contains("collector-cost digest", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("background-job health", StringComparison.Ordinal));
         /* #3354: config_mute_rules belongs to the store, not to any monitored server, so its failed read
            lands in the instance total and in no server's count — exactly the case a per-server-only
            surface would have given no home. Recorded TWICE across the tree, once per SKU, and that is the
            point rather than a duplicate: both SKUs perform this read, the counters are per-process, and a
-           SKU that named it without recording it would promise a reading it cannot produce. The other two
+           SKU that named it without recording it would promise a reading it cannot produce. The other four
            entries are Darling store self-alerts with no Lite equivalent. */
         Assert.Equal(
             2,
             nullKeyReads.Count(r => r.Contains("mute-rule reload", StringComparison.Ordinal)));
         Assert.Contains("collector-cost regression", inventory, StringComparison.Ordinal);
+        Assert.Contains("collector-cost census", inventory, StringComparison.Ordinal);
+        Assert.Contains("collector-cost digest", inventory, StringComparison.Ordinal);
         Assert.Contains("background-job health", inventory, StringComparison.Ordinal);
         Assert.Contains("mute-rule reload", inventory, StringComparison.Ordinal);
 

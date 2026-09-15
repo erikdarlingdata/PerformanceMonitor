@@ -327,4 +327,158 @@ ORDER BY (sc.latest_ms_per_run - sc.baseline_ms_per_run) DESC";
 
         return rows;
     }
+
+    /// <summary>
+    /// Every (server, collector) pair whose per-run cost MOVED against its own baseline, in either
+    /// direction, ranked by the collection time the move adds or removes per day (#3443). The digest read:
+    /// the inclusive twin of <see cref="RegressionSql"/>, which is the paging read.
+    ///
+    /// <para><b>Why a second read rather than a looser factor on the first.</b> They answer different
+    /// questions and must not share a predicate. The regression read has to decide, and every gate it
+    /// carries — the #3316 added-cost floor, the #3440 dispersion bound — exists to make that decision
+    /// defensible. This read decides nothing: it ranks, and the reader judges. So it carries NO factor, NO
+    /// materiality floor and NO dispersion bound, and a pair appears in it whether its cost rose or fell.
+    /// A collector that got CHEAPER is a movement worth a line and is structurally invisible to the
+    /// regression read, which fires only on rises — the shipped plan-render cadence gate (#2915) took
+    /// <c>procedure_stats</c> from 1,150 to 456 ms per run on one fleet and nothing in this series reported
+    /// it.</para>
+    ///
+    /// <para><b>The only bound is presentation, not eligibility.</b> <c>$2</c> caps the rows RETURNED, and
+    /// <c>eligible_pairs</c> carries how many the ranking chose from, so a digest can state its own
+    /// denominator rather than implying it showed everything. Ranking by
+    /// <c>abs((latest_ms_per_run - baseline_ms_per_run) * latest_runs)</c> — the same expression
+    /// <see cref="CostMover.AddedMsPerDay"/> derives, so the order and the printed figure cannot disagree —
+    /// means a stable heavy collector sorts LOW (its delta is near zero) while a cheap collector that moved
+    /// on high volume sorts high. That is what makes a threshold unnecessary: the quantity that would have
+    /// been thresholded is the sort key.</para>
+    ///
+    /// <para><b>The dispersion figures are carried, not gated on.</b> <c>baseline_p95_ms_per_run</c> and
+    /// <c>baseline_worst_day_ms_per_run</c> are over the prior days' per-run means — the same population and
+    /// the same <c>percentile_disc</c> choice #3440 gates the paging read on (#2460's reasoning: at most 13
+    /// prior days, and an interpolation between a bimodal series' two modes is a figure no day ever cost).
+    /// A reader who can see that a collector's own worst prior day was 17,935 ms/run does not need the
+    /// product to decide for them whether today's 17,548 is alarming, which is the whole argument for
+    /// putting this in a report.</para>
+    ///
+    /// <para><c>baseline_days &gt;= 3</c> is retained from the regression read and is the one eligibility
+    /// rule here: below three prior days there is no baseline to have moved against, so the ratio would be
+    /// an artifact rather than an inclusive reading. $1 = baseline window start (naive UTC), $2 = row cap.</para>
+    /// </summary>
+    public const string MoverSql = @"
+WITH daily AS
+(
+    SELECT cc.server_id, cc.collector_name, date_trunc('day', cc.metric_time) AS day,
+           sum(cc.total_sql_ms) AS sql_ms, sum(cc.run_count) AS runs,
+           max(cc.max_sql_ms) AS worst_ms
+    FROM collect.collector_cost AS cc
+    WHERE cc.metric_time >= $1
+    GROUP BY cc.server_id, cc.collector_name, date_trunc('day', cc.metric_time)
+    HAVING sum(cc.run_count) > 0
+),
+ranked AS
+(
+    SELECT server_id, collector_name, day, sql_ms, runs, worst_ms,
+           sql_ms::double precision / runs AS day_ms_per_run,
+           max(day) OVER (PARTITION BY server_id, collector_name) AS latest_day
+    FROM daily
+),
+agg AS
+(
+    SELECT server_id, collector_name,
+           max(runs)     FILTER (WHERE day = latest_day) AS latest_runs,
+           max(worst_ms) FILTER (WHERE day = latest_day) AS latest_worst_ms,
+           max(day_ms_per_run) FILTER (WHERE day = latest_day) AS latest_ms_per_run,
+           sum(sql_ms)   FILTER (WHERE day < latest_day) AS baseline_total_ms,
+           sum(runs)     FILTER (WHERE day < latest_day) AS baseline_total_runs,
+           count(*)      FILTER (WHERE day < latest_day) AS baseline_days,
+           max(day_ms_per_run) FILTER (WHERE day < latest_day) AS baseline_worst_day_ms_per_run,
+           percentile_disc(0.95) WITHIN GROUP (ORDER BY day_ms_per_run)
+               FILTER (WHERE day < latest_day) AS baseline_p95_ms_per_run
+    FROM ranked
+    GROUP BY server_id, collector_name
+),
+eligible AS
+(
+    SELECT a.server_id, a.collector_name, a.latest_runs, a.latest_worst_ms, a.latest_ms_per_run,
+           a.baseline_days, a.baseline_worst_day_ms_per_run, a.baseline_p95_ms_per_run,
+           a.baseline_total_ms::double precision
+               / nullif(a.baseline_total_runs, 0) AS baseline_ms_per_run
+    FROM agg AS a
+    WHERE a.baseline_days >= 3
+    AND   a.latest_ms_per_run IS NOT NULL
+    AND   a.baseline_total_runs > 0
+)
+SELECT e.server_id, COALESCE(s.display_name, s.server_name) AS server_name, e.collector_name,
+       e.latest_runs, e.latest_worst_ms, e.latest_ms_per_run, e.baseline_ms_per_run,
+       e.baseline_p95_ms_per_run, e.baseline_worst_day_ms_per_run, e.baseline_days,
+       count(*) OVER () AS eligible_pairs
+FROM eligible AS e
+JOIN collect.servers AS s ON s.server_id = e.server_id
+ORDER BY abs((e.latest_ms_per_run - e.baseline_ms_per_run) * e.latest_runs) DESC,
+         e.server_id, e.collector_name
+LIMIT $2";
+
+    /// <summary>One line of the collector-cost digest (#3443): a (server, collector) pair whose per-run cost
+    /// moved against its own baseline, with everything a reader needs to judge the move without the product
+    /// having judged it for them.
+    ///
+    /// <para>Positional and REQUIRED, like <see cref="CostRegression"/>, so the compiler finds every
+    /// construction site if this shape changes. <see cref="EligiblePairs"/> is the same figure on every row
+    /// of one read — the ranking's denominator, carried per row because that is what
+    /// <c>count(*) OVER ()</c> returns and because a digest that states "20 of 177" must read the 177 from
+    /// the same answer the 20 came out of rather than from a second query that could disagree.</para></summary>
+    public sealed record CostMover(
+        int ServerId,
+        string ServerName,
+        string CollectorName,
+        long LatestRuns,
+        long LatestWorstMs,
+        double LatestMsPerRun,
+        double BaselineMsPerRun,
+        double BaselineP95MsPerRun,
+        double BaselineWorstDayMsPerRun,
+        int BaselineDays,
+        long EligiblePairs)
+    {
+        /// <summary>The per-run move multiplied by the volume it is paid on, in ms per day — what this
+        /// movement is WORTH. Signed: negative is a collector that got cheaper. Derived rather than carried
+        /// for <see cref="CostRegression.AddedMsPerDay"/>'s reason, and <see cref="MoverSql"/> ranks on the
+        /// absolute value of this same expression, so the printed figure and the row's position cannot
+        /// disagree.</summary>
+        public double AddedMsPerDay => (LatestMsPerRun - BaselineMsPerRun) * LatestRuns;
+
+        /// <summary>Latest per-run cost as a multiple of the run-weighted baseline. 0 when the baseline is
+        /// zero, matching how the regression alert computes the ratio it reports.</summary>
+        public double Ratio => BaselineMsPerRun > 0 ? LatestMsPerRun / BaselineMsPerRun : 0;
+    }
+
+    public static async Task<List<CostMover>> GetCostMoversAsync(
+        NpgsqlDataSource postgres, DateTime baselineSinceUtc, int maxRows,
+        CancellationToken cancellationToken = default)
+    {
+        var rows = new List<CostMover>();
+        await using var command = postgres.CreateCommand(MoverSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.AddWithValue(baselineSinceUtc);
+        command.Parameters.AddWithValue(maxRows);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new CostMover(
+                reader.GetInt32(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetInt64(3),
+                reader.GetInt64(4),
+                reader.GetDouble(5),
+                reader.GetDouble(6),
+                reader.IsDBNull(7) ? 0 : reader.GetDouble(7),
+                reader.IsDBNull(8) ? 0 : reader.GetDouble(8),
+                (int)reader.GetInt64(9),
+                reader.GetInt64(10)));
+        }
+
+        return rows;
+    }
 }

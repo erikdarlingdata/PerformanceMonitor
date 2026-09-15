@@ -233,6 +233,97 @@ internal sealed class DarlingSelfAlertEvaluator
     private const long CostRegressionAddedMsFloor = 5000;
     private static readonly TimeSpan CostRegressionBaselineWindow = TimeSpan.FromDays(14);
 
+    /// <summary>
+    /// #3443: the fan-out that separates the one cost shape worth interrupting somebody for from the ones
+    /// worth reading in the morning. A collector reaches the paging channel only when the regression is a
+    /// property of the COLLECTOR rather than of a server: it was selected on at least this many servers AND
+    /// on more than half the servers that collector actually ran on in the window
+    /// (<see cref="CollectorCostDenominatorWindow"/>). Everything else is reported by
+    /// <see cref="CollectorCostDigestMetric"/> instead, with the comparison context an alert card cannot
+    /// carry.
+    ///
+    /// <para><b>The majority half is a comparison, not a threshold.</b> The collector's code and the
+    /// monitoring store are shared across the fleet, so a deployment or store-side cause raises the cost
+    /// everywhere the collector runs; one server's slow day raises it on one server. "More than half"
+    /// is the weakest statement that says the rise is the common case rather than the exception, and there
+    /// is no number in it to tune — 22 of 43 servers and 2 of 3 are the same rule.</para>
+    ///
+    /// <para><b>The floor of 2 exists because a majority of one is one.</b> A collector that ran on a single
+    /// server would otherwise satisfy the majority rule on that server alone, which is exactly the shape
+    /// being demoted.</para>
+    ///
+    /// <para><b>Measured, and the measurement is uncomfortable enough to state.</b> Over 8 days on a
+    /// 43-server production store this condition produced 937 firings across 143 (collector, day)
+    /// combinations; the widest fan-out any collector reached was 10 servers of 43, so NONE of the 937
+    /// would have paged under this rule and all 937 would have been digest lines. That is the intended
+    /// outcome rather than a coincidence — the shape this page is for is a build or a store change reaching
+    /// the whole fleet (#2133/#2150), which is rare by construction — but it does mean the paging half has
+    /// no live firing to validate against, and its fixtures are the only demonstration that it still
+    /// fires.</para>
+    /// </summary>
+    private const int CostRegressionFleetWideMinServers = 2;
+
+    /// <summary>
+    /// The window the fan-out DENOMINATOR is measured over — how many servers each collector ran on. A
+    /// trailing 24 hours rather than the current UTC day, because a day-aligned denominator is a partial
+    /// count for the whole first hour after midnight and the majority rule would read a smaller fleet than
+    /// the collector has. Named in the fired alert text, because a ratio whose denominator the reader cannot
+    /// see is not falsifiable.
+    ///
+    /// <para>It is a DIFFERENT window from the regression read's own <c>latest_day</c> numerator, and that
+    /// asymmetry is deliberate: the numerator has to stay the predicate's own grain (this evaluator does not
+    /// own that predicate), and the denominator has to be a full count. For a collector that runs many times
+    /// an hour the two populations are the same 43 servers either way; for a once-daily collector the
+    /// denominator is the servers it ran on in the last day, which is the same set.</para>
+    /// </summary>
+    private static readonly TimeSpan CollectorCostDenominatorWindow = TimeSpan.FromHours(24);
+
+    /// <summary>
+    /// The metric name the collector-cost DIGEST fires under (#3443). A WEBHOOK AUTOMATION KEY like its
+    /// siblings — the alert-history grids, the severity map and any downstream consumer key on it — so it is
+    /// a const and must stay stable across releases.
+    /// </summary>
+    internal const string CollectorCostDigestMetric = "Collector Cost Digest";
+
+    /// <summary>Fleet-level key, non-numeric so it never collides with a real server_id (the
+    /// <see cref="DiskKey"/> shape).</summary>
+    private const string CollectorCostDigestKey = "costdigest";
+
+    /// <summary>
+    /// How often the digest is sent. Daily, and for <see cref="StaleMuteRefire"/>'s reason rather than a new
+    /// one: the shared alert cooldown is clamped to at most two hours, and the fact this reports is a day's
+    /// per-run cost against a multi-day baseline, which does not change twelve times a day.
+    ///
+    /// <para><b>Not the same argument as #3306's, though, and the difference is the point of #3443.</b>
+    /// <see cref="StaleMuteRefire"/> makes a standing fact livable by re-stating it less often on the same
+    /// channel; a stale mute has one actionable step and an alert card holds it. This interval is doing
+    /// something else: it is the period over which findings are COLLECTED INTO ONE DOCUMENT, because the
+    /// action a cost movement invites is "look at a distribution and decide", which does not fit on a card
+    /// and cannot be taken from a phone at 3am. A longer interval alone would have produced the same
+    /// unactionable card less often.</para>
+    ///
+    /// <para><b>In-memory, like every sibling's interval, and a restart costs one extra digest.</b> That is
+    /// the failure class <see cref="StaleMuteRefire"/> and #3430's <c>RepeatDeliveryBudget</c> both already
+    /// accept, and it is what keeps this change free of a migration rung. An extra copy of a report is the
+    /// cheapest possible failure; nothing is lost either way, because the digest is recomputed from the
+    /// store every time rather than accumulated in process.</para>
+    /// </summary>
+    internal static readonly TimeSpan CollectorCostDigestInterval = TimeSpan.FromDays(1);
+
+    /// <summary>How many movers the digest spells out, on <see cref="MaxListedStaleMuteRules"/>' reasoning —
+    /// one bounded message, not a wall of text. Measured: 177 pairs on one 43-server store and 103 on
+    /// another were eligible on the same day, so the cap is doing real work and the digest states the
+    /// population it selected from rather than implying it showed everything.</summary>
+    private const int MaxListedCostMovers = 20;
+
+    /// <summary>How many collectors the digest's heaviest-first census spells out.</summary>
+    private const int MaxListedCostHeaviest = 10;
+
+    /// <summary>When the digest was last sent — the <see cref="_lastStaleMuteAlert"/> idiom, one fixed key.
+    /// A digest has no active flag and no resolution edge: it is a report of a measurement, not a condition
+    /// that can be entered and left, so there is nothing to clear.</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _lastCostDigest = new();
+
     /// <summary>The fixed key for the fleet-level Store Disk Pressure edge (not a real server).</summary>
     private const string DiskKey = "store";
 
@@ -898,7 +989,57 @@ internal sealed class DarlingSelfAlertEvaluator
             return;
         }
 
-        await ApplyCostRegressionsAsync(regressions, cancellationToken);
+        /* #3443: the fan-out denominator — how many servers each collector actually ran on. This is
+           get_collector_cost's OWN ranked read (GetTopAsync), not a private query, so the digest's census
+           and the routing denominator are the same numbers the MCP surface serves and cannot disagree with
+           it. One aggregate over 24 hours of an hourly table. */
+        List<Mcp.DarlingCollectorCostReader.CollectorCostSummaryRow> census;
+        var censusClock = Stopwatch.StartNew();
+        try
+        {
+            census = await Mcp.DarlingCollectorCostReader.GetTopAsync(
+                postgres, _utcNow() - CollectorCostDenominatorWindow, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Without the denominator there is no routing decision to make, so this tick does NOTHING
+               rather than guessing. Falling back to "route everything to the page" would reinstate the
+               delivery this change exists to end; falling back to "route nothing" would fire a spurious
+               resolution for every pair that was paging. Skipping keeps _activeCostRegression and every
+               interval untouched, and the regressions are a property of stored rows rather than of this
+               moment — the next tick reads the same answer. */
+            _logger?.LogDebug(ex, "collector-cost census read failed after {ElapsedMs} ms", censusClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "collector-cost census self-alert", censusClock.ElapsedMilliseconds);
+            return;
+        }
+
+        var routing = RouteCostRegressions(regressions, census);
+        await ApplyCostRegressionsAsync(routing.Paging, cancellationToken);
+
+        /* The digest's own interval, checked here so 23 of every 24 hourly ticks do no extra store work.
+           AlertsEnabled is checked inside the apply, like every sibling. */
+        if (!_settings.AlertsEnabled
+            || (_lastCostDigest.TryGetValue(CollectorCostDigestKey, out var lastDigest)
+                && _utcNow() - lastDigest < CollectorCostDigestInterval))
+        {
+            return;
+        }
+
+        List<Mcp.DarlingCollectorCostReader.CostMover> movers;
+        var moverClock = Stopwatch.StartNew();
+        try
+        {
+            movers = await Mcp.DarlingCollectorCostReader.GetCostMoversAsync(
+                postgres, _utcNow() - CostRegressionBaselineWindow, MaxListedCostMovers, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "collector-cost digest read failed after {ElapsedMs} ms", moverClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "collector-cost digest self-alert", moverClock.ElapsedMilliseconds);
+            return;
+        }
+
+        await ApplyCollectorCostDigestAsync(movers, census, cancellationToken);
     }
 
     /// <summary>The apply half of <see cref="EvaluateCollectorCostAsync"/>, split out so the fire-once /
@@ -967,9 +1108,283 @@ internal sealed class DarlingSelfAlertEvaluator
                 var collector = parts.Length == 3 ? parts[2] : key;
                 await RecordResolutionAsync(new AlertResolution(
                     key, serverName, "Collector Cost Regression",
-                    "Cost Regression Cleared", $"{serverName}: {collector} collection cost is back within its baseline"), cancellationToken);
+                    "Cost Regression Cleared",
+                    $"{serverName}: {collector} collection cost is no longer rising on a majority of the servers it runs on"),
+                    cancellationToken);
             }
         }
+    }
+
+    /// <summary>
+    /// #3443: which of the regressions the predicate selected reach the PAGING channel, and which are
+    /// reported by <see cref="CollectorCostDigestMetric"/> instead. PURE — no clock, no I/O — so the routing
+    /// is pinnable without a host, and it decides nothing about detection: every row in
+    /// <paramref name="regressions"/> appears in one of the two lists.
+    ///
+    /// <para><b>Why the channel and not the threshold.</b> This condition has needed two successive gates to
+    /// stop it reporting things nobody can act on — #3316's materiality floor and #3440's dispersion bound —
+    /// and both are correct fixes to real defects. Neither changes what the surviving message asks a reader
+    /// to do. Take the firing that produced #3440 at its best, with #3440 shipped and the ratio genuinely
+    /// meaningful: a once-daily collector cost 11.1 extra seconds today, on the monitoring tool's own
+    /// overhead, against a 60,000 ms sweep budget. Nothing is degraded, no data is lost, no monitored server
+    /// is affected, and nothing needs doing before morning. That is a report. The one cost shape that is
+    /// both real and urgent is a different quantity — the same collector rising across the fleet at once,
+    /// which is a deployment or a store-side change rather than one server's slow day — and that is what
+    /// <see cref="CostRegressionFleetWideMinServers"/> and the majority rule select.</para>
+    ///
+    /// <para><b>The demotion fails toward the REPORT, deliberately, which is the opposite of this
+    /// product's usual direction.</b> Delivery decisions elsewhere (#3430's budget) resolve every
+    /// uncertainty to "post", because the cost of failing that way is one extra message and the cost of
+    /// failing the other way is an unannounced incident. Here an unannounced finding is impossible: a
+    /// collector missing from <paramref name="census"/> — so its denominator is unknown — still appears in
+    /// the digest, in full, with more context than the alert card carried. So the safe direction is the
+    /// quiet one, and it is safe only BECAUSE the report exists. If the digest were ever removed this rule
+    /// would have to invert.</para>
+    ///
+    /// <para><b>Nothing is aggregated away on the paging side.</b> A fleet-wide regression still fires
+    /// per (server, collector), carrying every figure the predicate computed for that pair, because #1154's
+    /// rule is that a never-announced incident must not be swallowed by a key shared with another server and
+    /// #3430's budget already folds the RE-tellings into one carrier plus a roster. A page that named the
+    /// collector once and summarised the servers would have had to decide which pair's numbers to show.</para>
+    /// </summary>
+    /// <param name="regressions">Everything the regression predicate selected this tick.</param>
+    /// <param name="census">
+    /// The fan-out denominator: <c>get_collector_cost</c>'s own ranked read over
+    /// <see cref="CollectorCostDenominatorWindow"/>, whose <c>ServerCount</c> is how many servers each
+    /// collector ran on. A collector absent from it has no denominator and is report-only.
+    /// </param>
+    internal static CostRegressionRouting RouteCostRegressions(
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CostRegression> regressions,
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CollectorCostSummaryRow> census)
+    {
+        var paging = new List<Mcp.DarlingCollectorCostReader.CostRegression>();
+        var reportOnly = new List<Mcp.DarlingCollectorCostReader.CostRegression>();
+
+        /* Distinct SERVERS per collector, not row count: the predicate returns one row per
+           (server, collector), but counting rows would let a duplicated row inflate a fan-out. */
+        var regressedServers = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
+        foreach (var regression in regressions)
+        {
+            if (!regressedServers.TryGetValue(regression.CollectorName, out var servers))
+            {
+                servers = new HashSet<int>();
+                regressedServers[regression.CollectorName] = servers;
+            }
+
+            servers.Add(regression.ServerId);
+        }
+
+        var collectedServers = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var row in census)
+        {
+            /* Highest wins on a duplicated collector name, so a duplicate cannot shrink a denominator and
+               make the majority rule easier to satisfy. */
+            if (!collectedServers.TryGetValue(row.CollectorName, out var existing) || row.ServerCount > existing)
+            {
+                collectedServers[row.CollectorName] = row.ServerCount;
+            }
+        }
+
+        foreach (var regression in regressions)
+        {
+            var regressed = regressedServers[regression.CollectorName].Count;
+
+            /* A collector absent from the census has no denominator, and "unknown" must not read as a
+               fleet of ZERO: zero satisfies the majority comparison for any numerator at all, so folding
+               the miss into a default of 0 pages exactly the pair with the least evidence behind it. The
+               TryGetValue is therefore part of the condition — no denominator, no majority claim, and the
+               pair goes to the digest in full (the fail-toward-the-report direction the remarks argue). */
+            if (collectedServers.TryGetValue(regression.CollectorName, out var collected)
+                && regressed >= CostRegressionFleetWideMinServers
+                && regressed * 2 > collected)
+            {
+                paging.Add(regression);
+            }
+            else
+            {
+                reportOnly.Add(regression);
+            }
+        }
+
+        return new CostRegressionRouting(paging, reportOnly);
+    }
+
+    /// <summary>
+    /// Where each selected regression goes (#3443). One value carrying the whole answer so a caller cannot
+    /// read one list and silently drop the other, and so the invariant that matters — every input row is in
+    /// exactly one of the two — is assertable on a single return.
+    /// </summary>
+    internal readonly record struct CostRegressionRouting(
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CostRegression> Paging,
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CostRegression> ReportOnly);
+
+    /// <summary>
+    /// FLEET-level (#3443): the collector-cost DIGEST — one message, once per
+    /// <see cref="CollectorCostDigestInterval"/>, carrying every (server, collector) pair whose per-run cost
+    /// moved against its own baseline in either direction, ranked by the collection time the move adds or
+    /// removes per day, plus the heaviest collectors over the same window.
+    ///
+    /// <para><b>It is a report, and the product says so in the only tier it has for saying it.</b> Fired
+    /// with no severity, which routes <see cref="AlertSeverity.ForMetric"/> to the per-metric map, where
+    /// this metric has an explicit INFO arm: badge INFO, blue, in email and in all four webhook shapes. That
+    /// arm is DECLARED rather than a fall-through on purpose — an unmapped metric renders INFO-blue too, and
+    /// the #1136/#2090 work was a sweep to eliminate exactly that accident, so a digest relying on the
+    /// accident would be "fixed" into a WARNING by the next such sweep.</para>
+    ///
+    /// <para><b>No resolution edge, unlike every sibling.</b> Retention Held, Store Disk Pressure, Stale
+    /// Mute Rules and the rest are CONDITIONS: they are entered and left, so a recovery row closes the audit
+    /// loop. A digest is a measurement of a period. There is no state to leave and nothing to announce the
+    /// clearing of, so it has no active flag and writes no "Cleared" row — which is also why the 302
+    /// <c>Cost Regression Cleared</c> rows the demoted half produced over 8 days on one store simply stop
+    /// existing rather than moving somewhere.</para>
+    ///
+    /// <para><b>Empty sends nothing.</b> A digest whose two sections are both empty is a message that says a
+    /// read returned no rows, which is the channel noise this issue is about. The store had no eligible
+    /// pairs and no collector cost at all in the window, and that is <c>get_collection_health</c>'s
+    /// question, not this one's.</para>
+    ///
+    /// <para>Muted through the shared seam like its siblings — <see cref="StaleMuteMetric"/> is the one
+    /// condition that decides its own mute, and for a reason (it reports mutes) that does not apply
+    /// here. Internal so it pins directly with a recording deliverer and a controllable clock.</para>
+    /// </summary>
+    internal async Task ApplyCollectorCostDigestAsync(
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CostMover> movers,
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CollectorCostSummaryRow> census,
+        CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (_lastCostDigest.TryGetValue(CollectorCostDigestKey, out var lastSent)
+            && now - lastSent < CollectorCostDigestInterval)
+        {
+            return;
+        }
+
+        if (movers.Count == 0 && census.Count == 0)
+        {
+            return;
+        }
+
+        _lastCostDigest[CollectorCostDigestKey] = now;
+        var (shortMessage, detail) = RenderCollectorCostDigest(movers, census);
+
+        await FireAsync(
+            CollectorCostDigestKey, StoreServerLabel, CollectorCostDigestMetric,
+            currentValue: movers.Count.ToString(CultureInfo.InvariantCulture),
+            /* There is no threshold. Saying so in the string is the point of the string: this surface
+               exists because the same figures under a threshold could not be judged from a card. The
+               numeric below is the 0 the NOT NULL column demands. */
+            thresholdValue: "no threshold (report)",
+            detail: detail,
+            /* No override: the per-metric map's declared INFO arm decides. See the remarks. */
+            severity: null,
+            shortMessage: shortMessage,
+            /* A genuine whole number — the count of movers listed (AlertMetricClassifier renders it as a
+               count, the Stale Mute Rules shape). */
+            numericCurrentValue: movers.Count,
+            numericThresholdValue: 0,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Renders the digest (#3443). PURE and static, so the DOCUMENT a human reads is assertable — a pin over
+    /// this output can check that the figures on one line reconcile with each other, which a pin over the
+    /// producer's fields one at a time cannot see.
+    ///
+    /// <para><b>Every figure a reader needs to judge the move is on the line, and the product judges
+    /// none of them.</b> Latest cost per run, the run-weighted baseline, the ratio between them, the p95 and
+    /// the worst single day of the baseline's own per-run costs, how many runs the latest figure averages,
+    /// the worst single run in it, and the signed seconds per day the move is worth. The dispersion pair is
+    /// what makes the ratio judgeable: a collector whose own worst prior day was 17,935 ms/run is not
+    /// remarkable at 17,548 today, and nothing but those two numbers side by side says so.</para>
+    ///
+    /// <para><b>The heaviest-first census is load-bearing, not decoration.</b> A ranking by MOVEMENT cannot
+    /// surface a collector that is expensive without being newly expensive, and that is how the most
+    /// expensive collector this product has ever had was actually found (#2862: <c>procedure_stats</c> at
+    /// 98.1M ms/day over 17,869 runs, 5,490 ms/run, which was noticed by reading a cost ranking rather than
+    /// by any alert). A digest that could not surface it would have lost the better of this metric's two
+    /// real catches.</para>
+    ///
+    /// <para><b>Summary statistics over the window rather than a per-day series.</b> Twenty movers times a
+    /// week of daily figures is a wall of numbers in a channel message; the p95, the worst day and the
+    /// baseline day count are that week, compressed, and the closing line names
+    /// <c>get_collector_cost</c> as where the series itself lives.</para>
+    /// </summary>
+    private static (string ShortMessage, string Detail) RenderCollectorCostDigest(
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CostMover> movers,
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CollectorCostSummaryRow> census)
+    {
+        /* Read off the rows rather than recomputed: every row of one read carries the same denominator, and
+           a digest that states "N of M" has to take the M from the answer the N came out of. */
+        var eligible = movers.Count == 0 ? 0 : movers[0].EligiblePairs;
+        var shortMessage = string.Create(CultureInfo.InvariantCulture,
+            $"Collector cost digest: {movers.Count} of {eligible} (server, collector) pairs moved most against their own baseline");
+
+        var sb = new StringBuilder();
+        sb.Append(shortMessage).Append('.');
+        sb.Append(
+            " This is a REPORT, not an incident: it is the monitoring tool's own query time on the monitored"
+            + " servers, nothing here is degraded, no data is lost and nothing needs doing before morning."
+            + " Ranked by the collection time each move adds or removes per day, so a stable heavy collector"
+            + " sorts low and a cheap one that moved on high volume sorts high - which is why this surface"
+            + " needs no materiality floor and no dispersion bound. A NEGATIVE figure is a collector that"
+            + " got CHEAPER, which the paging condition cannot report at all.");
+
+        if (movers.Count > 0)
+        {
+            sb.Append("\nMoved most (per-run cost against its own ")
+              .Append(movers[0].BaselineDays.ToString(CultureInfo.InvariantCulture))
+              .Append("-day baseline where stated):");
+        }
+
+        foreach (var mover in movers)
+        {
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n- {mover.CollectorName} on {mover.ServerName}: {mover.LatestMsPerRun:N1} ms/run vs a"
+                + $" {mover.BaselineMsPerRun:N1} ms/run baseline ({mover.Ratio:N2}x) over {mover.BaselineDays:N0} prior days"
+                + $" whose own p95 was {mover.BaselineP95MsPerRun:N1} ms/run and worst day {mover.BaselineWorstDayMsPerRun:N1} ms/run;"
+                + $" {mover.LatestRuns:N0} runs, worst single run {mover.LatestWorstMs:N0} ms"
+                + $" -> {mover.AddedMsPerDay / 1000.0:+0.0;-0.0;0.0} s/day"));
+        }
+
+        if (census.Count > 0)
+        {
+            sb.Append("\nHeaviest collectors over the same window, every server together - a collector can be"
+                + " expensive without having moved, and a movement ranking cannot see that (#2862):");
+        }
+
+        var listed = 0;
+        foreach (var row in census)
+        {
+            if (listed >= MaxListedCostHeaviest)
+            {
+                break;
+            }
+
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n= {row.CollectorName}: {row.TotalSqlMs:N0} ms over {row.RunCount:N0} runs on {row.ServerCount:N0} servers"
+                + $" ({row.AvgSqlMs:N0} ms/run, worst single run {row.MaxSqlMs:N0} ms)"));
+            listed++;
+        }
+
+        var remaining = census.Count - listed;
+        if (remaining > 0)
+        {
+            sb.Append("\n+ ").Append(remaining.ToString(CultureInfo.InvariantCulture))
+              .Append(" more collectors (see get_collector_cost).");
+        }
+
+        sb.Append(
+            "\nThe figures are summary statistics over the window, not a per-day series - get_collector_cost"
+            + " with a collector_name is where the series lives, and get_collection_health is where a"
+            + " collector's runs, failures and abandonment rate live. ");
+        sb.Append(CostIsNotAllTargetSide);
+
+        return (shortMessage, sb.ToString());
     }
 
     /// <summary>

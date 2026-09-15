@@ -56,6 +56,21 @@ public class AlertSeverityTests
         Assert.Equal("#D97706", hex);
     }
 
+    /// <summary>#3443's one deliberate INFO arm. The collector-cost digest renders identically to the
+    /// unmapped fall-through on purpose - it is a report to read, not a condition to act on - but its arm
+    /// is DECLARED in the map so the next #1136/#2090-style sweep does not read the INFO rendering as an
+    /// accident and promote it to WARNING. This pin is what fails if that promotion happens. The digest
+    /// stays out of <see cref="EveryFiredMetricName_HasASeverityArm_NotTheInfoFallThrough"/>'s inventory
+    /// for the same reason: that list asserts fired metrics DIFFER from the fall-through, and this one
+    /// matches it by design.</summary>
+    [Fact]
+    public void CollectorCostDigest_IsInfoBlueOnPurpose()
+    {
+        var (hex, badge, _) = AlertSeverity.ForMetric("Collector Cost Digest");
+        Assert.Equal("INFO", badge);
+        Assert.Equal("#2eaef1", hex);
+    }
+
     [Fact]
     public void EmailBody_CriticalOverride_RendersCriticalNotInfo()
     {

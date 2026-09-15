@@ -139,9 +139,13 @@ namespace PerformanceMonitor.Common
                a whole number like its siblings, not a state, so it renders here rather than joining
                IsStateOnly (its "Custom Alert Rules Recovered" resolution is state-only via IsResolution).
                "Stale Mute Rules" (#3306) is the same shape: the count of mute rules still suppressing alerts
-               with no expiry, past every expiry the product offers. */
+               with no expiry, past every expiry the product offers. "Collector Cost Digest" (#3443) counts
+               the (server, collector) pairs the digest listed; its threshold column is the 0 sentinel the
+               NOT NULL column demands, because a report has no threshold, and the alert's own threshold
+               STRING says so. */
             "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job"
-                or "Custom Alert Rules Unhealthy" or "Stale Mute Rules" => $"{value:F0}",
+                or "Custom Alert Rules Unhealthy" or "Stale Mute Rules"
+                or "Collector Cost Digest" => $"{value:F0}",
 
             /* #1846: a state-only metric never had a number — its display value is a role, a connection
                state, a version or the literal "resolved", and the stored double is the 0 sentinel the

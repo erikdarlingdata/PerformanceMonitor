@@ -290,7 +290,7 @@ public sealed class MuteRuleReloadRetentionTests
     /// <para>Both, not just the log, and asserted rather than assumed for a reason that is specific to this
     /// read. <c>AlertReadFailureCounter.FleetScopedReads</c> is concatenated into both SKUs'
     /// <c>get_collection_health</c> description byte-for-byte, and this is the only member of that set a
-    /// Lite process can produce — the other two are Darling store self-alerts. So a Lite arm that logged
+    /// Lite process can produce — the others are Darling store self-alerts. So a Lite arm that logged
     /// and did not count would leave that description promising a reading Lite cannot produce, which is a
     /// confident zero on the surface built to end confident zeroes. The first draft of this pin asserted
     /// only the log line, so the asymmetry was PINNED rather than caught.</para>
