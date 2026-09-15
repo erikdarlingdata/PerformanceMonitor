@@ -4150,7 +4150,15 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
     /// bound is the factor on the higher of the two. Reporting the mean-derived figure would hand a reader a
     /// threshold the row did not have to clear — with a p95 baseline of 50 ms/run the real bound is 100, and
     /// the mean-derived one is 40, so a reader checking the arithmetic would compute a 4x that is not the test
-    /// the alert applied.</summary>
+    /// the alert applied.
+    ///
+    /// <para>#3462 extends the same rule across units: since the predicate is now a conjunction of a per-run
+    /// bound and an added-cost-per-day floor, the threshold text must state BOTH, or the reader falsifying
+    /// the arithmetic reconstructs a looser predicate than the one that fired. The floor is pinned as the
+    /// literal "15 s/day" deliberately (the metric-name pin's reasoning): a retune of the constant must land
+    /// here and re-justify the calibration, not ride through on string interpolation. The fixture's 200 runs
+    /// put its added cost at 20,000 ms/day — a row the shipped query could actually return, since the floor
+    /// would have excluded the old 100-run shape at 10,000.</para></summary>
     [Fact]
     public async Task CollectorCostRegression_ReportsTheBoundThatSelectedIt_NotTheMeanRatio()
     {
@@ -4158,7 +4166,8 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         var e = h.Build();
 
         await e.ApplyCostRegressionsAsync(
-            new[] { Regression(latestMsPerRun: 120.0, baselineMsPerRun: 20.0, baselineP95MsPerRun: 50.0) }, Ct);
+            new[] { Regression(latestMsPerRun: 120.0, baselineMsPerRun: 20.0, baselineP95MsPerRun: 50.0,
+                latestRuns: 200) }, Ct);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal(100.0, fired.NumericThresholdValue);
@@ -4168,6 +4177,11 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         Assert.Contains("20.0 ms/run mean", fired.ThresholdValue, StringComparison.Ordinal);
         Assert.Contains("50.0 ms/run daily p95", fired.ThresholdValue, StringComparison.Ordinal);
         Assert.Contains("p95 of its OWN daily per-run cost", fired.DetailText, StringComparison.Ordinal);
+
+        /* #3462: the floor is the other conjunct that selected the row, stated in its own unit beside the
+           ratio bound, on the threshold and in the detail's explanation of the added-cost figure. */
+        Assert.Contains("worth at least 15 s/day of added collection time", fired.ThresholdValue, StringComparison.Ordinal);
+        Assert.Contains("reported only when that added cost reaches 15 s/day", fired.DetailText, StringComparison.Ordinal);
     }
 
     /// <summary>#3440: the reported bound is derived through <see cref="System.Math.Max"/>, so no construction

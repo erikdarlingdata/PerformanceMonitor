@@ -186,6 +186,10 @@ internal sealed class DarlingSelfAlertEvaluator
        asks what the regression COSTS — the per-run rise times the volume it is paid on — and requires
        CostRegressionAddedMsFloor of it. That is unit-consistent with the ratio, and unlike a minimum
        per-run baseline it still reports a 3 ms collector that runs often enough for the rise to matter.
+       #3462: that floor is recalibrated from the fleet's own per-collector daily-cost distribution (see
+       its declaration) after an 8.7 s/day card broke #3316's empty-band assumption, and the digest's
+       movers read now shares it — evaluated in the reads themselves, so both delivery surfaces inherit
+       one definition of material.
        #3440: the ratio is measured against the baseline's UPPER EDGE as well as its mean. A heavy
        collector's own spread exceeds CostRegressionFactor on natural variation — per-run p95/avg measured
        at 2.03x to 5.04x across index_object_stats, procedure_stats and query_store on one fleet — so
@@ -224,13 +228,34 @@ internal sealed class DarlingSelfAlertEvaluator
     private const double CostRegressionFactor = 2.0;
     private const long CostRegressionBaselineFloorMs = 1000;
 
-    /// <summary>#3316: the minimum ADDED cost per day, in ms, before a per-run regression is worth an
-    /// alert and its paired resolution. Derived from a measured 41-hour fleet sample rather than chosen:
-    /// the firings that identified a real regression added 21.8-22.6 s/day, while the ones that were
-    /// truthful and unactionable added 0.16-3.6 s/day. 5 s sits in the empty band between them with more
-    /// than 4x headroom on both sides. It is also 5x <see cref="CostRegressionBaselineFloorMs"/>, which
-    /// is the eligibility floor for the collector rather than for the regression.</summary>
-    private const long CostRegressionAddedMsFloor = 5000;
+    /// <summary>#3316/#3462: the minimum ADDED cost per day, in ms, before a per-run regression is worth
+    /// reporting on EITHER delivery surface — the page and the digest movers list both gate on it, taken
+    /// from this one constant so the two cannot disagree about what material means.
+    ///
+    /// <para><b>The #3316 calibration this replaces claimed a band the fleet has since disproved.</b> Its
+    /// 41-hour sample put real regressions at 21.8-22.6 s/day and truthful-unactionable ones at
+    /// 0.16-3.6 s/day, and set 5 s in the gap claiming "more than 4x headroom on both sides". On
+    /// 2026-09-15 a production server paged hourly on a 5.5x <c>database_size_stats</c> regression whose
+    /// whole-day total was 8.7 seconds and whose ADDED cost — this floor's own unit — was 7.1 s/day,
+    /// 1.42x the floor: truthful, unactionable, and comfortably selected — while the same day's genuine
+    /// exhibits added 224 and 377 s/day. The unactionable mass reaches at least 7.1 s/day of added cost,
+    /// so the empty band is (7.1, 21.8) and 5 s sits below it, not inside it.</para>
+    ///
+    /// <para><b>15 s/day is derived from the fleet distribution of per-collector daily cost, not from that
+    /// one card (#3462).</b> Measured over 7 days on two stores — 42 and 43 servers of one production
+    /// store class — the MEDIAN (server, collector) pair costs 13.7 and 13.1 s/day to exist at all, and
+    /// the cheapest 17 of 39 collectors each cost under 4 s/day. A regression whose entire added footprint
+    /// is less than the median collector's whole daily bill is lost in the fleet's own operating mass; at
+    /// 15 s the floor sits just above both medians and inside the measured empty band — 2.1x above its
+    /// noise edge and 1.45x under the smallest real catch. The headroom is honestly thinner than #3316
+    /// claimed for 5 s, because the band itself is thinner than #3316 believed: both of its edges are now
+    /// measured rather than extrapolated.</para>
+    ///
+    /// <para>Internal so <c>CollectorCostMaterialityFloorTests</c> can run the SHIPPED value against the
+    /// shipped query: the 2026-09-15 exhibits and #3316's smallest catch bracket this constant, so a retune
+    /// outside the measured band turns a fixture red rather than silently re-admitting the noise or
+    /// dropping the catches.</para></summary>
+    internal const long CostRegressionAddedMsFloor = 15000;
     private static readonly TimeSpan CostRegressionBaselineWindow = TimeSpan.FromDays(14);
 
     /// <summary>
@@ -1030,7 +1055,8 @@ internal sealed class DarlingSelfAlertEvaluator
         try
         {
             movers = await Mcp.DarlingCollectorCostReader.GetCostMoversAsync(
-                postgres, _utcNow() - CostRegressionBaselineWindow, MaxListedCostMovers, cancellationToken);
+                postgres, _utcNow() - CostRegressionBaselineWindow, CostRegressionAddedMsFloor,
+                MaxListedCostMovers, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1075,13 +1101,20 @@ internal sealed class DarlingSelfAlertEvaluator
                 await FireAsync(
                     key, regression.ServerName, "Collector Cost Regression",
                     currentValue: $"{regression.LatestMsPerRun:N1} ms/run",
+                    /* #3441's rule extended by #3462: the reported threshold is the one that actually selected
+                       the row, and since #3462 that is a conjunction in two units — the per-run bound AND the
+                       added-cost-per-day floor — so both are stated, or a reader falsifying the arithmetic
+                       would reconstruct a looser predicate than the one that fired. */
                     thresholdValue: $"{threshold:N1} ms/run (the greater of its {regression.BaselineMsPerRun:N1} ms/run mean " +
-                        $"and its {regression.BaselineP95MsPerRun:N1} ms/run daily p95, x {CostRegressionFactor:N1})",
+                        $"and its {regression.BaselineP95MsPerRun:N1} ms/run daily p95, x {CostRegressionFactor:N1}), " +
+                        $"worth at least {CostRegressionAddedMsFloor / 1000.0:N0} s/day of added collection time",
                     detail: $"The '{regression.CollectorName}' collector's OWN query time on {regression.ServerName} rose to " +
                         $"{regression.LatestMsPerRun:N1} ms per run, {ratio:N1}x its {CostRegressionBaselineWindow.TotalDays:N0}-day " +
                         $"baseline of {regression.BaselineMsPerRun:N1} ms per run ({regression.LatestRuns:N0} runs totalling " +
                         $"{regression.LatestMs:N0} ms so far today, adding {regression.AddedMsPerDay / 1000.0:N1} s of collection " +
-                        $"time a day at that volume). It also cleared {threshold:N1} ms per run, the factor on the HIGHER of " +
+                        $"time a day at that volume - a regression is reported only when that added cost reaches " +
+                        $"{CostRegressionAddedMsFloor / 1000.0:N0} s/day, the materiality floor both delivery surfaces share, so this " +
+                        $"is not a few hundred milliseconds of nothing (#3462)). It also cleared {threshold:N1} ms per run, the factor on the HIGHER of " +
                         $"that mean and the p95 of its OWN daily per-run cost over the window " +
                         $"({regression.BaselineP95MsPerRun:N1} ms) - so this is not the collector's own upper mode on a " +
                         $"normal slow day (#3440). " +
@@ -1126,7 +1159,10 @@ internal sealed class DarlingSelfAlertEvaluator
     /// and both are correct fixes to real defects. Neither changes what the surviving message asks a reader
     /// to do. Take the firing that produced #3440 at its best, with #3440 shipped and the ratio genuinely
     /// meaningful: a once-daily collector cost 11.1 extra seconds today, on the monitoring tool's own
-    /// overhead, against a 60,000 ms sweep budget. Nothing is degraded, no data is lost, no monitored server
+    /// overhead, against a 60,000 ms sweep budget. (#3462's recalibrated floor now screens that particular
+    /// magnitude before routing ever sees it; the argument stands at any magnitude the floor admits —
+    /// 21.8 s/day, the smallest real catch #3316 measured, clears it and still needs nothing before
+    /// morning.) Nothing is degraded, no data is lost, no monitored server
     /// is affected, and nothing needs doing before morning. That is a report. The one cost shape that is
     /// both real and urgent is a different quantity — the same collector rising across the fleet at once,
     /// which is a deployment or a store-side change rather than one server's slow day — and that is what
@@ -1137,7 +1173,10 @@ internal sealed class DarlingSelfAlertEvaluator
     /// uncertainty to "post", because the cost of failing that way is one extra message and the cost of
     /// failing the other way is an unannounced incident. Here an unannounced finding is impossible: a
     /// collector missing from <paramref name="census"/> — so its denominator is unknown — still appears in
-    /// the digest, in full, with more context than the alert card carried. So the safe direction is the
+    /// the digest, in full, with more context than the alert card carried. #3462's floor on the digest does
+    /// not narrow that guarantee: the movers read gates on the SAME constant this predicate does, and the
+    /// regression's added cost IS the mover's magnitude, so every row this routing ever receives is material
+    /// by construction and stays digest-visible. So the safe direction is the
     /// quiet one, and it is safe only BECAUSE the report exists. If the digest were ever removed this rule
     /// would have to invert.</para>
     ///
@@ -1221,8 +1260,10 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>
     /// FLEET-level (#3443): the collector-cost DIGEST — one message, once per
     /// <see cref="CollectorCostDigestInterval"/>, carrying every (server, collector) pair whose per-run cost
-    /// moved against its own baseline in either direction, ranked by the collection time the move adds or
-    /// removes per day, plus the heaviest collectors over the same window.
+    /// moved MATERIALLY against its own baseline in either direction (#3462 — the movers read shares
+    /// <see cref="CostRegressionAddedMsFloor"/> with the paging predicate, on the move's magnitude), ranked
+    /// by the collection time the move adds or removes per day, plus the heaviest collectors over the same
+    /// window, which carry no floor at all — expensive-without-moving is that section's whole catch (#2862).
     ///
     /// <para><b>It is a report, and the product says so in the only tier it has for saying it.</b> Fired
     /// with no severity, which routes <see cref="AlertSeverity.ForMetric"/> to the per-metric map, where
@@ -1296,7 +1337,7 @@ internal sealed class DarlingSelfAlertEvaluator
     /// producer's fields one at a time cannot see.
     ///
     /// <para><b>Every figure a reader needs to judge the move is on the line, and the product judges
-    /// none of them.</b> Latest cost per run, the run-weighted baseline, the ratio between them, the p95 and
+    /// one thing only: that the move was worth listing at all (#3462).</b> Latest cost per run, the run-weighted baseline, the ratio between them, the p95 and
     /// the worst single day of the baseline's own per-run costs, how many runs the latest figure averages,
     /// the worst single run in it, and the signed seconds per day the move is worth. The dispersion pair is
     /// what makes the ratio judgeable: a collector whose own worst prior day was 17,935 ms/run is not
@@ -1322,17 +1363,20 @@ internal sealed class DarlingSelfAlertEvaluator
            a digest that states "N of M" has to take the M from the answer the N came out of. */
         var eligible = movers.Count == 0 ? 0 : movers[0].EligiblePairs;
         var shortMessage = string.Create(CultureInfo.InvariantCulture,
-            $"Collector cost digest: {movers.Count} of {eligible} (server, collector) pairs moved most against their own baseline");
+            $"Collector cost digest: {movers.Count} of {eligible} (server, collector) pairs moved materially against their own baseline");
 
         var sb = new StringBuilder();
         sb.Append(shortMessage).Append('.');
-        sb.Append(
-            " This is a REPORT, not an incident: it is the monitoring tool's own query time on the monitored"
-            + " servers, nothing here is degraded, no data is lost and nothing needs doing before morning."
-            + " Ranked by the collection time each move adds or removes per day, so a stable heavy collector"
-            + " sorts low and a cheap one that moved on high volume sorts high - which is why this surface"
-            + " needs no materiality floor and no dispersion bound. A NEGATIVE figure is a collector that"
-            + " got CHEAPER, which the paging condition cannot report at all.");
+        sb.Append(string.Create(CultureInfo.InvariantCulture,
+            $" This is a REPORT, not an incident: it is the monitoring tool's own query time on the monitored"
+            + $" servers, nothing here is degraded, no data is lost and nothing needs doing before morning."
+            + $" Ranked by the collection time each move adds or removes per day, so a stable heavy collector"
+            + $" sorts low and a cheap one that moved on high volume sorts high. Only moves worth at least"
+            + $" {CostRegressionAddedMsFloor / 1000.0:N0} s/day in either direction are listed - the same materiality floor the paging"
+            + $" condition applies, inherited from the metric so a few hundred milliseconds of movement is not"
+            + $" restated here as news (#3462) - but there is no ratio factor and no dispersion bound: the"
+            + $" baseline's own p95 and worst day are on every line for the reader to judge. A NEGATIVE figure"
+            + $" is a collector that got CHEAPER, which the paging condition cannot report at all."));
 
         if (movers.Count > 0)
         {
