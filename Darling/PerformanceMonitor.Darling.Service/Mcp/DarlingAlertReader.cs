@@ -169,7 +169,12 @@ LIMIT $3";
         double RetentionHoldCriticalRatio,
         /* #3368 (V120): the deadlock health band's tiers, in deadlocks per hour. APPENDED, same reason. */
         double DeadlockWarnPerHour,
-        double DeadlockCriticalPerHour);
+        double DeadlockCriticalPerHour,
+        /* #3444 (V122): the PostgreSQL Deadlocks/Blocking count thresholds. APPENDED, same reason. These
+           are NOT BlockingCountThreshold/DeadlockCountThreshold above — those are the SQL Server figures,
+           and the two engines carry separate calibrations on purpose (see the V122 rung). */
+        int PgDeadlockCountThreshold,
+        int PgBlockingCountThreshold);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -198,7 +203,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        store_job_cadence_warn_percent,
        file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes,
        retention_hold_warn_ratio, retention_hold_critical_ratio,
-       deadlock_warn_per_hour, deadlock_critical_per_hour
+       deadlock_warn_per_hour, deadlock_critical_per_hour,
+       pg_deadlock_count_threshold, pg_blocking_count_threshold
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -245,7 +251,9 @@ WHERE id = 1";
             /* #3297: V119 Retention Held tiers at 58–59. */
             reader.GetDouble(58), reader.GetDouble(59),
             /* #3368: V120 deadlock-rate band tiers at 60–61. */
-            reader.GetDouble(60), reader.GetDouble(61));
+            reader.GetDouble(60), reader.GetDouble(61),
+            /* #3444: V122 PostgreSQL Deadlocks/Blocking count thresholds at 62–63. */
+            reader.GetInt32(62), reader.GetInt32(63));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */

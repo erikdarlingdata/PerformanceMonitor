@@ -18,6 +18,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -496,6 +497,88 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     }
 
     /// <summary>
+    /// #3444: the PostgreSQL count gates are writable under <c>blocking.pg_count_threshold</c> /
+    /// <c>deadlocks.pg_count_threshold</c>, and the accepted range is the engine's clamp EXACTLY — the same
+    /// parity every write bound in this file holds, for the same reason: a wider bound lets the tool ACCEPT
+    /// a value <c>DarlingAlertSettings</c> then silently rewrites on read, which presents as the setting not
+    /// sticking with nothing saying no.
+    ///
+    /// <para>Zero is OUT of range, unlike most of the numerics in this file, and that is the decision rather
+    /// than an oversight: at 0 the gate's <c>count &gt;= threshold</c> test is true for a count of zero, so
+    /// an accepted 0 would fire "Deadlocks Detected" on a server with no deadlocks. There is no
+    /// disable-by-zero reading to preserve — the <c>enabled</c> switch each group already carries is the off
+    /// lever, and it covers both engines.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(-1, false)]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    [InlineData(500, true)]
+    public void PgCountThresholdWriteBounds_MatchTheEngineClamps(int value, bool accepted)
+    {
+        foreach (var (group, column) in new[]
+        {
+            ("blocking", "pg_blocking_count_threshold"),
+            ("deadlocks", "pg_deadlock_count_threshold"),
+        })
+        {
+            var parsed = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(
+                $"{{\"{group}\":{{\"pg_count_threshold\":{value}}}}}")!);
+
+            Assert.Equal(accepted, parsed.Error is null);
+            Assert.Equal(accepted ? 1 : 0, parsed.Targets.Count);
+            if (accepted)
+            {
+                Assert.Equal(
+                    (DarlingMcpAlertTools.AlertSettingsTable, column),
+                    Assert.Single(parsed.Targets));
+            }
+        }
+
+        /* The engine's floor, so the theory's numbers are not a second opinion about the range — and the
+           writer names the SAME constant, pinned as the whole accepting case so a retyped bound or a
+           re-targeted column cannot hide inside a looser substring. */
+        Assert.Equal(1, PostgresAlertEvaluator.CountThresholdFloor);
+        var tools = ReadRepoFile(System.IO.Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs"));
+        Assert.Contains(
+            "case \"pg_count_threshold\": AddInt(\"pg_blocking_count_threshold\", n, \"blocking.pg_count_threshold\", PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue); break;",
+            tools, StringComparison.Ordinal);
+        Assert.Contains(
+            "case \"pg_count_threshold\": AddInt(\"pg_deadlock_count_threshold\", n, \"deadlocks.pg_count_threshold\", PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue); break;",
+            tools, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3444: get_alert_settings reports the PostgreSQL gates INSIDE the <c>blocking</c> and <c>deadlocks</c>
+    /// groups — the key-placement decision the V122 rung argues: the two engines' figures belong side by
+    /// side, because that is the only placement where an operator reading "blocking" sees that there are two
+    /// of them. Serialized through the tool's own options and re-parsed, so what is asserted is the wire
+    /// shape a client receives, not a C# identifier.
+    /// </summary>
+    [Fact]
+    public void PgCountThresholds_AreReportedInsideTheBlockingAndDeadlocksGroups()
+    {
+        var payload = SerializedSettingsPayload(SampleSettingsRow());
+
+        Assert.Equal(4, payload["deadlocks"]!["pg_count_threshold"]!.GetValue<int>());
+        Assert.Equal(6, payload["blocking"]!["pg_count_threshold"]!.GetValue<int>());
+
+        /* Distinct from the SQL Server numbers beside them — the sample row keeps all four different, so a
+           payload that emitted the wrong engine's figure under either key cannot pass. */
+        Assert.NotEqual(
+            payload["deadlocks"]!["count_threshold"]!.GetValue<int>(),
+            payload["deadlocks"]!["pg_count_threshold"]!.GetValue<int>());
+        Assert.NotEqual(
+            payload["blocking"]!["count_threshold"]!.GetValue<int>(),
+            payload["blocking"]!["pg_count_threshold"]!.GetValue<int>());
+
+        /* And NOT in a postgres section of their own — a knob in a second group somebody has to know to
+           look in is the placement the rung's argument rejects. */
+        Assert.DoesNotContain("postgres_alerts", payload.Select(kv => kv.Key));
+    }
+
+    /// <summary>
     /// The write bounds for everything #2417 made writable, against <c>DarlingAlertSettings</c>' clamps —
     /// the same parity <see cref="FileGrowthWriteBounds_MatchTheEngineClamps"/> holds for the file-growth
     /// knobs, and for the same reason: a bound that differs lets the tool ACCEPT a value the engine then
@@ -652,7 +735,11 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         RetentionHoldWarnRatio: 3.0, RetentionHoldCriticalRatio: 7.5,
         /* #3368: inside [1.0, 1000.0], and deliberately NOT the shipped 5.0 / 20.0 — a sample equal to the
            default would let a surface that dropped the column and fell back to the default still match. */
-        DeadlockWarnPerHour: 7.0, DeadlockCriticalPerHour: 31.0);
+        DeadlockWarnPerHour: 7.0, DeadlockCriticalPerHour: 31.0,
+        /* #3444: inside the write bound (>= 1), deliberately NOT the shipped 1s, and deliberately NOT the
+           SQL Server numbers above (3 and 5) — equal pairs would let a payload that emitted the wrong
+           engine's figure under either key round-trip unnoticed. */
+        PgDeadlockCountThreshold: 4, PgBlockingCountThreshold: 6);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()
@@ -732,6 +819,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [InlineData("{\"cooldown_minutes\":0}")]                  // below min (1-120)
     [InlineData("{\"analysis\":{\"notify_severity\":9.9}}")]  // above max (0.0-2.0)
     [InlineData("{\"long_running_job\":{\"multiplier\":1}}")] // below min (2-20)
+    [InlineData("{\"blocking\":{\"pg_count_threshold\":0}}")]  // below the shared floor (#3444)
+    [InlineData("{\"deadlocks\":{\"pg_count_threshold\":0}}")] // below the shared floor (#3444)
     [InlineData("{\"cpu\":{\"threshold_percent\":\"90\"}}")]  // wrong type (string, not int)
     [InlineData("{\"alerts_enabled\":\"yes\"}")]              // wrong type (string, not bool)
     [InlineData("{\"excluded_databases\":\"tempdb\"}")]       // wrong type (string, not array)

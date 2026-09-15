@@ -122,6 +122,26 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
         TimescaleSupport.RetentionHoldRatioFloor,
         TimescaleSupport.RetentionHoldRatioCeiling);
 
+    /// <summary>#3444 (V122): the PostgreSQL Deadlocks alert's rolling-window count threshold.
+    ///
+    /// <para><b>Floored, where its SQL Server twin is not.</b> <see cref="DeadlockCountThreshold"/> passes
+    /// <c>_config.Alerts</c> through raw, so a store row hand-edited to 0 makes the gate's
+    /// <c>count &gt;= threshold</c> test true for a count of zero and fires on a server with no deadlocks.
+    /// That is a pre-existing gap on the twin rather than a shape to copy: the floor here matches
+    /// <see cref="BlockingWaitSecondsThreshold"/> two screens up, which floors for the identical reason.
+    /// The floor is also the <c>update_alert_settings</c> lower write bound, so no value the write path
+    /// accepts is a value this clamp then rewrites — the "setting did not stick" failure the write-bound
+    /// parity pins exist for.</para></summary>
+    public int PgDeadlockCountThreshold => Math.Max(
+        PostgresAlertEvaluator.CountThresholdFloor,
+        _config.Alerts.PgDeadlockCountThreshold);
+
+    /// <summary>#3444 (V122): the PostgreSQL Blocking alert's rolling-window distinct-root-blocker count
+    /// threshold, floored on read for the same reason as its deadlock sibling above.</summary>
+    public int PgBlockingCountThreshold => Math.Max(
+        PostgresAlertEvaluator.CountThresholdFloor,
+        _config.Alerts.PgBlockingCountThreshold);
+
     /// <summary>#3368 (V120): the deadlock health band's tiers as ONE value, because they are only ever read
     /// together and a caller handed two doubles can drop one.
     ///

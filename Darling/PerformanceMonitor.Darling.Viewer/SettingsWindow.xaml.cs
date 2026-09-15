@@ -17,6 +17,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Navigation;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -722,8 +723,14 @@ public partial class SettingsWindow : Window
         AlertBlockingCheckBox.IsChecked = r.BlockingEnabled;
         AlertBlockingThresholdBox.Text = r.BlockingCountThreshold.ToString(CultureInfo.InvariantCulture);
         AlertBlockingWaitSecondsBox.Text = r.BlockingWaitSecondsThreshold.ToString(CultureInfo.InvariantCulture);
+        /* #3444 (V122): the PostgreSQL count gates, prefilled beside their SQL Server twins. Separate
+           boxes because they are separate columns — see the V122 rung for why one number cannot serve
+           both engines. Both follow AlertBlockingCheckBox/AlertDeadlockCheckBox, which govern the
+           condition on either engine. */
+        AlertPgBlockingThresholdBox.Text = r.PgBlockingCountThreshold.ToString(CultureInfo.InvariantCulture);
         AlertDeadlockCheckBox.IsChecked = r.DeadlockEnabled;
         AlertDeadlockThresholdBox.Text = r.DeadlockCountThreshold.ToString(CultureInfo.InvariantCulture);
+        AlertPgDeadlockThresholdBox.Text = r.PgDeadlockCountThreshold.ToString(CultureInfo.InvariantCulture);
         AlertPoisonWaitCheckBox.IsChecked = r.PoisonWaitEnabled;
         AlertPoisonWaitThresholdBox.Text = r.PoisonWaitThresholdMs.ToString(CultureInfo.InvariantCulture);
         AlertLongRunningQueryCheckBox.IsChecked = r.LongRunningQueryEnabled;
@@ -839,6 +846,16 @@ public partial class SettingsWindow : Window
             row.BlockingWaitSecondsThreshold = blockingWait;
         if (int.TryParse(AlertDeadlockThresholdBox.Text, out var deadlock) && deadlock > 0)
             row.DeadlockCountThreshold = deadlock;
+        /* #3444 (V122): the floor is the same named constant update_alert_settings enforces and
+           DarlingAlertSettings clamps to, so the three writers into this column cannot disagree about
+           what is acceptable. Out-of-range input leaves the row's prefilled value, matching every
+           sibling above. */
+        if (int.TryParse(AlertPgDeadlockThresholdBox.Text, out var pgDeadlock)
+            && pgDeadlock >= PostgresAlertEvaluator.CountThresholdFloor)
+            row.PgDeadlockCountThreshold = pgDeadlock;
+        if (int.TryParse(AlertPgBlockingThresholdBox.Text, out var pgBlocking)
+            && pgBlocking >= PostgresAlertEvaluator.CountThresholdFloor)
+            row.PgBlockingCountThreshold = pgBlocking;
         if (int.TryParse(AlertPoisonWaitThresholdBox.Text, out var poisonWait) && poisonWait > 0)
             row.PoisonWaitThresholdMs = poisonWait;
         if (int.TryParse(AlertLongRunningQueryThresholdBox.Text, out var lrq) && lrq > 0)
@@ -958,6 +975,12 @@ public partial class SettingsWindow : Window
         AlertBlockingThresholdBox.Text = "1";
         AlertBlockingWaitSecondsBox.Text = "0";
         AlertDeadlockThresholdBox.Text = "1";
+        /* #3444 (V122): from the shared constants rather than a literal "1", so a moved default cannot
+           leave this button writing a threshold nobody chose. */
+        AlertPgDeadlockThresholdBox.Text =
+            PostgresAlertEvaluator.DeadlockCountThresholdDefault.ToString(CultureInfo.InvariantCulture);
+        AlertPgBlockingThresholdBox.Text =
+            PostgresAlertEvaluator.BlockingCountThresholdDefault.ToString(CultureInfo.InvariantCulture);
         AlertPoisonWaitThresholdBox.Text = "500";
         AlertLongRunningQueryThresholdBox.Text = "30";
         /* V20: the long-running-query read shape resets to Lite's App defaults (5 rows, every filter on). */
@@ -1041,6 +1064,15 @@ public partial class SettingsWindow : Window
         }
         if (AlertDeadlockCheckBox.IsChecked == true)
             parts.Add($"deadlocks >= {AlertDeadlockThresholdBox.Text}");
+        /* #3444: only summarize the PostgreSQL gates when they differ from their SQL Server twin — on the
+           common single-engine install the two agree and a second identical clause would read as a
+           duplicate rather than as information. */
+        if (AlertDeadlockCheckBox.IsChecked == true
+            && !string.Equals(AlertPgDeadlockThresholdBox.Text, AlertDeadlockThresholdBox.Text, StringComparison.Ordinal))
+            parts.Add($"pg deadlocks >= {AlertPgDeadlockThresholdBox.Text}");
+        if (AlertBlockingCheckBox.IsChecked == true
+            && !string.Equals(AlertPgBlockingThresholdBox.Text, AlertBlockingThresholdBox.Text, StringComparison.Ordinal))
+            parts.Add($"pg blocking >= {AlertPgBlockingThresholdBox.Text}");
         if (AlertPoisonWaitCheckBox.IsChecked == true)
             parts.Add($"poison waits >= {AlertPoisonWaitThresholdBox.Text}ms avg");
         if (AlertLongRunningQueryCheckBox.IsChecked == true)
@@ -1081,6 +1113,8 @@ public partial class SettingsWindow : Window
         AlertBlockingWaitSecondsBox.IsEnabled = enabled;
         AlertDeadlockCheckBox.IsEnabled = enabled;
         AlertDeadlockThresholdBox.IsEnabled = enabled;
+        AlertPgDeadlockThresholdBox.IsEnabled = enabled;
+        AlertPgBlockingThresholdBox.IsEnabled = enabled;
         AlertPoisonWaitCheckBox.IsEnabled = enabled;
         AlertPoisonWaitThresholdBox.IsEnabled = enabled;
         AlertLongRunningQueryCheckBox.IsEnabled = enabled;

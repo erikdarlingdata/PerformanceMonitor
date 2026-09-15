@@ -3663,8 +3663,8 @@ public sealed class DarlingWorker : BackgroundService
            three predictors above or any sibling — the same isolation AlertEngine gives its own
            CheckDeadlocksAsync/CheckBlockingAsync/CheckLongRunningQueriesAsync/CheckPoisonWaitsAsync/
            CheckCpuAsync. */
-        await EvaluatePgDeadlocksAsync(runtime, snapshot, cancellationToken);
-        await EvaluatePgBlockingAsync(runtime, snapshot, cancellationToken);
+        await EvaluatePgDeadlocksAsync(runtime, snapshot, config, cancellationToken);
+        await EvaluatePgBlockingAsync(runtime, snapshot, config, cancellationToken);
         await EvaluatePgLongRunningQueryAsync(runtime, snapshot, config, cancellationToken);
         await EvaluatePgPoisonWaitAsync(runtime, snapshot, config, cancellationToken);
         await EvaluatePgCpuAsync(runtime, snapshot, config, cancellationToken);
@@ -3989,11 +3989,25 @@ public sealed class DarlingWorker : BackgroundService
     /// than Postgres-prefixed ones — deliberately, for parity: a mute rule, a history filter, or a dashboard
     /// built against "Deadlocks Detected" should not have to know or care which engine a server runs, and
     /// server_id never collides across engines so there is no ambiguity in doing so.</para>
+    /// <para>#3444 (V122): the count threshold is <see cref="DarlingAlertSettings.PgDeadlockCountThreshold"/>
+    /// — the clamped settings read, deliberately NOT SQL Server's
+    /// <see cref="DarlingAlertSettings.DeadlockCountThreshold"/>, whose calibration does not travel across
+    /// engines (the V122 rung says why). <see cref="DarlingAlertSettings.DeadlockEnabled"/> gates the check,
+    /// the same treatment <see cref="EvaluatePgLongRunningQueryAsync"/> gives its own shared switch: whether
+    /// the condition is worth alerting on at all is one preference covering both engines, and the volume at
+    /// which it is worth a page is per-engine.</para>
     /// </summary>
     private async Task EvaluatePgDeadlocksAsync(
-        ServerRuntime runtime, AlertServerSnapshot snapshot, CancellationToken cancellationToken)
+        ServerRuntime runtime, AlertServerSnapshot snapshot, DarlingConfig config, CancellationToken cancellationToken)
     {
         if (_postgres is null || _alertDeliverer is null)
+        {
+            return;
+        }
+
+        var alertSettings = new DarlingAlertSettings(config);
+
+        if (!alertSettings.DeadlockEnabled)
         {
             return;
         }
@@ -4035,8 +4049,12 @@ public sealed class DarlingWorker : BackgroundService
             var watermark = _lastAlertedPgDeadlockCount.TryGetValue(key, out var wm) ? wm : 0;
             var cooldownElapsed = !_lastPgDeadlockAlert.TryGetValue(key, out var last) || now - last >= cooldown;
 
+            /* #3444: read ONCE, then handed to the gate and the delivered message alike, so the two cannot
+               quote different numbers when a store reload swaps config.Alerts mid-evaluation. */
+            var threshold = alertSettings.PgDeadlockCountThreshold;
+
             var decision = RollingCountAlertGate.Evaluate(
-                count, PgDeadlockCountThreshold, watermark, cooldownElapsed, suppressed: false);
+                count, threshold, watermark, cooldownElapsed, suppressed: false);
             _lastAlertedPgDeadlockCount[key] = decision.Watermark;
             if (decision.Watermark != watermark)
             {
@@ -4067,14 +4085,14 @@ public sealed class DarlingWorker : BackgroundService
                         snapshot.ServerName,
                         metricName,
                         count.ToString(CultureInfo.InvariantCulture),
-                        PgDeadlockCountThreshold.ToString(CultureInfo.InvariantCulture),
+                        threshold.ToString(CultureInfo.InvariantCulture),
                         Context: new AlertContext
                         {
                             Incidents = rows.Select(BuildPgDeadlockIncident).ToList(),
                         },
                         DetailText: null,
                         NumericCurrentValue: count,
-                        NumericThresholdValue: PgDeadlockCountThreshold,
+                        NumericThresholdValue: threshold,
                         Muted: muted,
                         Severity: null,
                         ShortMessage: $"{count} deadlock(s) in the last hour"),
@@ -4107,12 +4125,21 @@ public sealed class DarlingWorker : BackgroundService
     /// <see cref="DarlingPgBlockingReader.GetPgBlockingChainsAsync"/> could. <see cref="WorstPgBlockingChainPerRoot"/>
     /// below still runs — see its own doc comment for why a second, C#-side dedup remains worth keeping even
     /// though the query no longer needs it to arrive at "one row per root". Same <see cref="RollingCountAlertGate"/>
-    /// reuse and parity-named metrics as <see cref="EvaluatePgDeadlocksAsync"/> — see its doc comment for why.
+    /// reuse and parity-named metrics as <see cref="EvaluatePgDeadlocksAsync"/> — see its doc comment for why —
+    /// and the same #3444 settings treatment: <see cref="DarlingAlertSettings.PgBlockingCountThreshold"/> is the
+    /// count gate, under <see cref="DarlingAlertSettings.BlockingEnabled"/>.
     /// </summary>
     private async Task EvaluatePgBlockingAsync(
-        ServerRuntime runtime, AlertServerSnapshot snapshot, CancellationToken cancellationToken)
+        ServerRuntime runtime, AlertServerSnapshot snapshot, DarlingConfig config, CancellationToken cancellationToken)
     {
         if (_postgres is null || _alertDeliverer is null)
+        {
+            return;
+        }
+
+        var alertSettings = new DarlingAlertSettings(config);
+
+        if (!alertSettings.BlockingEnabled)
         {
             return;
         }
@@ -4155,8 +4182,11 @@ public sealed class DarlingWorker : BackgroundService
             var watermark = _lastAlertedPgBlockingCount.TryGetValue(key, out var wm) ? wm : 0;
             var cooldownElapsed = !_lastPgBlockingAlert.TryGetValue(key, out var last) || now - last >= cooldown;
 
+            /* #3444: read ONCE, for the reason EvaluatePgDeadlocksAsync gives at the same spot. */
+            var threshold = alertSettings.PgBlockingCountThreshold;
+
             var decision = RollingCountAlertGate.Evaluate(
-                count, PgBlockingCountThreshold, watermark, cooldownElapsed, suppressed: false);
+                count, threshold, watermark, cooldownElapsed, suppressed: false);
             _lastAlertedPgBlockingCount[key] = decision.Watermark;
             if (decision.Watermark != watermark)
             {
@@ -4183,14 +4213,14 @@ public sealed class DarlingWorker : BackgroundService
                         snapshot.ServerName,
                         metricName,
                         count.ToString(CultureInfo.InvariantCulture),
-                        PgBlockingCountThreshold.ToString(CultureInfo.InvariantCulture),
+                        threshold.ToString(CultureInfo.InvariantCulture),
                         Context: new AlertContext
                         {
                             Incidents = worstPerRoot.Select(BuildPgBlockingIncident).ToList(),
                         },
                         DetailText: null,
                         NumericCurrentValue: count,
-                        NumericThresholdValue: PgBlockingCountThreshold,
+                        NumericThresholdValue: threshold,
                         Muted: muted,
                         Severity: null,
                         ShortMessage: $"{count} blocking session(s)"),
@@ -4362,8 +4392,11 @@ public sealed class DarlingWorker : BackgroundService
     /// "poison wait alerts on/off" preference, both engines. <c>PoisonWaitThresholdMs</c> is deliberately
     /// NOT reused: it is an avg-ms-per-wait bar, and the issue's research shows the Postgres poison events
     /// average 1-2 ms per wait at six-figure volumes — a shape that bar can never see. The Postgres
-    /// threshold is a constant on <see cref="PostgresAlertEvaluator"/> for this first cut, the same
-    /// reasoning as <see cref="PgDeadlockCountThreshold"/>.</para>
+    /// threshold is a constant on <see cref="PostgresAlertEvaluator"/> for this first cut: add
+    /// configuration when someone actually wants a different number, not speculatively. The
+    /// <see cref="EvaluatePgDeadlocksAsync"/>/<see cref="EvaluatePgBlockingAsync"/> count gates started
+    /// under that same rule and graduated to settings when #3444 named the operator who wanted one; this
+    /// threshold graduates the same way on the same evidence, not before.</para>
     ///
     /// <para><b>Cooldown + active flag + the #2704 unrefreshed-source-row guard, per SUBJECT.</b> This is
     /// an accumulation check like its SQL Server twin, so it inherits that method's exact state kit (see
@@ -4578,17 +4611,6 @@ public sealed class DarlingWorker : BackgroundService
                 serverName, metricName, ex.Message);
         }
     }
-
-    /// <summary>Rolling-window count threshold for the Postgres Deadlocks alert (#2711) — 1, matching SQL
-    /// Server's own observed default via <see cref="IAlertEngineSettings.DeadlockCountThreshold"/>. A
-    /// constant rather than a setting for this first cut, the same reasoning
-    /// <see cref="PostgresAlertEvaluator"/>'s own doc comment gives for its three thresholds: add
-    /// configuration when someone actually wants a different number, not speculatively.</summary>
-    private const int PgDeadlockCountThreshold = 1;
-
-    /// <summary>Rolling-window count threshold for the Postgres Blocking alert (#2711) — same reasoning
-    /// as <see cref="PgDeadlockCountThreshold"/>.</summary>
-    private const int PgBlockingCountThreshold = 1;
 
     /// <summary>
     /// Pure mapping, pulled out of <see cref="EvaluatePgDeadlocksAsync"/> so it is testable without a

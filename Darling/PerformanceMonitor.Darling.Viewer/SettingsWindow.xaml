@@ -335,9 +335,23 @@
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <TextBlock Text="PostgreSQL blocking roots &#x2265;" VerticalAlignment="Center" Margin="24,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertPgBlockingThresholdBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="(sampled root blockers; the checkbox above covers both engines)" VerticalAlignment="Center" Margin="4,0,0,0"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertDeadlockCheckBox" Content="Deadlocks &#x2265;" VerticalAlignment="Center"
                               Foreground="{DynamicResource ForegroundBrush}"/>
                     <TextBox x:Name="AlertDeadlockThresholdBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <TextBlock Text="PostgreSQL deadlocks &#x2265;" VerticalAlignment="Center" Margin="24,0,0,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="AlertPgDeadlockThresholdBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="(the checkbox above covers both engines)" VerticalAlignment="Center" Margin="4,0,0,0"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
                     <CheckBox x:Name="AlertPoisonWaitCheckBox" Content="Poison waits (THREADPOOL, etc.) avg wait &#x2265;" VerticalAlignment="Center"

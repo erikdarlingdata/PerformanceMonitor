@@ -153,14 +153,21 @@ public sealed class McpAlertSettingsKeyTests
     /// rather than a loosened assertion. Each entry is paid for by a test asserting the omission is still
     /// real, so an exemption cannot outlive its reason.
     ///
-    /// <para>EMPTY, and the emptiness is asserted in
-    /// <see cref="GetAlertSettings_ReportsEveryGroupDarlingDoes_SpelledDarlingsWay"/> rather than merely
-    /// being true today. Its one entry was <c>ag.disconnect_refire_minutes</c>, Darling's #1696 /
-    /// store-V37 knob, which Lite had no equivalent for at all — no static, no settings.json key, and no
-    /// edge state that could re-announce a still-disconnected replica. #2426 built the re-fire, so the
-    /// exemption came out with it and all four AG members compare. The seam stays for the next such
-    /// case: adding an entry means writing the test that pays for it.</para></summary>
-    private static readonly string[] LiteOmittedMembers = Array.Empty<string>();
+    /// <para>#3444 (V122) put the seam back to work after #2426 emptied it: Darling's <c>blocking</c> and
+    /// <c>deadlocks</c> groups each gained a <c>pg_count_threshold</c> — the PostgreSQL version of that
+    /// group's count gate, deliberately a separate figure from the SQL Server one beside it — and Lite has
+    /// no PostgreSQL seam for either to govern. Nothing in this SKU ever sets
+    /// <c>CollectorTargetEngine.PostgreSql</c>, its DuckDB schema generator emits SQL Server definitions
+    /// only, and its servers table has no engine_kind column to read (<c>McpEngineCapability</c> states
+    /// and relies on the same fact), so emitting the pair would advertise knobs this product cannot act
+    /// on — the placeholder failure this array's own history rejected for
+    /// <c>ag.disconnect_refire_minutes</c>, the #1696 / store-V37 entry that came out when #2426 built
+    /// Lite's re-fire and the exemption lost its reason. Paid for by
+    /// <see cref="GetAlertSettings_OmitsPgCountThresholds_BecauseLiteHasNoPostgresSeam"/>, which also
+    /// holds the exact-set pin that stood in the parity test as an <c>Assert.Empty</c> while the array
+    /// was empty.</para></summary>
+    private static readonly string[] LiteOmittedMembers =
+        { "blocking.pg_count_threshold", "deadlocks.pg_count_threshold" };
 
     /// <summary>
     /// Darling's <c>BuildAlertSettingsPayload</c> shape read out of Darling's SOURCE — each top-level key in
@@ -293,11 +300,6 @@ public sealed class McpAlertSettingsKeyTests
             problems.Count == 0,
             "Lite's get_alert_settings has drifted from Darling's shape: " + string.Join("; ", problems));
 
-        /* #2426: nothing is exempted today, and that is asserted rather than merely true — an entry added
-           to LiteOmittedMembers without the test that justifies it would silently narrow this comparison,
-           which is the drift this whole class exists to stop. */
-        Assert.Empty(LiteOmittedMembers);
-
         /* smtp is Lite's ONE addition — Lite delivers its own email where Darling manages delivery
            credentials outside the settings row. Pinned as an exact set so a second Lite-only group cannot be
            added without this test being the place someone justifies it. */
@@ -394,6 +396,60 @@ public sealed class McpAlertSettingsKeyTests
             .ToArray();
 
         Assert.Empty(bandCallers);
+    }
+
+    /// <summary>
+    /// #3444 (V122): the two PostgreSQL count gates, and the test that pays for both
+    /// <see cref="LiteOmittedMembers"/> entries. Darling reports <c>pg_count_threshold</c> inside
+    /// <c>blocking</c> and <c>deadlocks</c> — a separate figure from the SQL Server gate beside it, because
+    /// the two engines' counts are calibrated against different evidence — and Lite must not, because Lite
+    /// has no PostgreSQL seam for either figure to govern. The same three halves as the health-bands
+    /// omission above: Darling must still emit both (or the exemption is dead weight hiding a Darling
+    /// regression), Lite must still not (or the exemption is masking keys that have since arrived and
+    /// could now be compared), and the seam's absence is checkable rather than assertable, which is why it
+    /// is checked.
+    ///
+    /// <para>The scan looks for the machinery the keys would tune — the evaluator whose gates they are and
+    /// the two settings names that carry them — NOT for <c>CollectorTargetEngine.PostgreSql</c>, the
+    /// seam's own name: the one Lite file that mentions it, <c>McpEngineCapability</c>, does so in prose
+    /// ARGUING the absence this test checks, so that term would fail on the sentence stating the fact. If
+    /// Lite ever grows a PostgreSQL seam and these gates with it, this scan is where that shows up, the
+    /// entries come out of <see cref="LiteOmittedMembers"/>, and the members compare — #2426's ag history,
+    /// repeated.</para>
+    /// </summary>
+    [Fact]
+    public void GetAlertSettings_OmitsPgCountThresholds_BecauseLiteHasNoPostgresSeam()
+    {
+        var darling = DarlingPayloadShape();
+        Assert.Contains("pg_count_threshold", darling.Single(g => g.Key == "blocking").Value);
+        Assert.Contains("pg_count_threshold", darling.Single(g => g.Key == "deadlocks").Value);
+
+        var root = Settings();
+        Assert.DoesNotContain("pg_count_threshold", KeysOf(root.GetProperty("blocking")));
+        Assert.DoesNotContain("pg_count_threshold", KeysOf(root.GetProperty("deadlocks")));
+
+        var liteRoot = Path.GetDirectoryName(FindRepoFile(Path.Combine("Lite", "PerformanceMonitorLite.csproj")))!;
+        var pgGateCallers = Directory
+            .EnumerateFiles(liteRoot, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                     && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => File.ReadAllText(f) is var text
+                     && (text.Contains("PostgresAlertEvaluator", StringComparison.Ordinal)
+                      || text.Contains("PgBlockingCountThreshold", StringComparison.Ordinal)
+                      || text.Contains("PgDeadlockCountThreshold", StringComparison.Ordinal)
+                      || text.Contains("pg_count_threshold", StringComparison.Ordinal)))
+            .Select(f => Path.GetFileName(f))
+            .ToArray();
+
+        Assert.Empty(pgGateCallers);
+
+        /* Pinned as an exact set, so a third member-level exemption cannot be added without this test
+           being the place someone justifies it — the same guard the smtp assertion applies to groups, and
+           the non-empty successor to the Assert.Empty that stood in the parity test while the array was
+           empty. */
+        Assert.Equal(
+            new[] { "blocking.pg_count_threshold", "deadlocks.pg_count_threshold" },
+            LiteOmittedMembers);
     }
 
     /// <summary>

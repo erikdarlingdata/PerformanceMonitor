@@ -13,6 +13,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -661,6 +662,32 @@ public sealed class AlertsConfig
     /// what setting it there asks for.</summary>
     [JsonPropertyName("retentionHoldCriticalRatio")]
     public double RetentionHoldCriticalRatio { get; set; } = TimescaleSupport.RetentionHoldCriticalRatioDefault;
+
+    /// <summary>#3444 (V122): how many distinct deadlocks inside the rolling window fire the PostgreSQL
+    /// Deadlocks alert. Was a compile-time constant in <c>DarlingWorker</c> with no settings path at all,
+    /// while SQL Server's <see cref="DeadlockCountThreshold"/> has been settable since V1.
+    ///
+    /// <para>The seed is <see cref="PostgresAlertEvaluator.DeadlockCountThresholdDefault"/>, named rather
+    /// than restated, so this and the V122 column default cannot disagree — the #3060 discipline the
+    /// retention and deadlock-band knobs above already follow. <c>DarlingAlertSettings</c> clamps it on
+    /// read.</para>
+    ///
+    /// <para><b>Separate from <see cref="DeadlockCountThreshold"/> deliberately</b> — see the V122 rung and
+    /// the default constant for why the SQL Server figure's justification does not travel to an engine with
+    /// no deadlock band. The <c>enabled</c> switch IS shared: <see cref="DeadlockEnabled"/> governs both
+    /// engines.</para></summary>
+    [JsonPropertyName("pgDeadlockCountThreshold")]
+    public int PgDeadlockCountThreshold { get; set; } = PostgresAlertEvaluator.DeadlockCountThresholdDefault;
+
+    /// <summary>#3444 (V122): how many distinct ROOT BLOCKERS inside the rolling window fire the PostgreSQL
+    /// Blocking alert, seeded from <see cref="PostgresAlertEvaluator.BlockingCountThresholdDefault"/> for
+    /// the reason its deadlock sibling above is.
+    ///
+    /// <para>Separate from <see cref="BlockingCountThreshold"/> because the two count different things: that
+    /// one counts engine-recorded blocked-process reports, this one counts roots found in a periodic SAMPLE
+    /// of <c>pg_stat_activity</c>. <see cref="BlockingEnabled"/> is shared.</para></summary>
+    [JsonPropertyName("pgBlockingCountThreshold")]
+    public int PgBlockingCountThreshold { get; set; } = PostgresAlertEvaluator.BlockingCountThresholdDefault;
 
     /// <summary>#3368 (V120): the deadlock health band's WARNING tier, in deadlocks per hour normalised over
     /// the window a card counted them in. The band was <c>count &gt; 0</c>, so one resolved deadlock made a
