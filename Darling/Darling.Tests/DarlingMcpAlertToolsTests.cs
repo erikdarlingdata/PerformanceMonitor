@@ -1747,6 +1747,45 @@ public sealed class WebMuteRuleEndpointFlowTests
         Assert.Equal("deleted", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.DeleteMuteRuleCore(store, id)));
         Assert.Equal(0, store.Count);
     }
+
+    /// <summary>
+    /// #3450's carried caveat, surface-tested as the issue asked: alert rows spell server_name two ways
+    /// (the self-alert family uses the display-short name, engine alerts the registry name), and a mute
+    /// rule matches the row's exact spelling — so the web write surface must store WHATEVER spelling it
+    /// was given, verbatim. A normalization here — case folding, registry resolution, trimming a domain —
+    /// would silently move a rule from one family's spelling to the other and turn a working mute inert,
+    /// which is precisely the operational trap the caveat documents. Both spellings round-trip through
+    /// create and through an update that swaps between them; equality is Ordinal because that is the
+    /// matcher's own comparison.
+    /// </summary>
+    [Fact]
+    public async Task TheTwoServerNameSpellings_StoreVerbatim_NeitherNormalized()
+    {
+        var store = new FakeMuteRuleStore();
+        const string shortSpelling = "pm-server-7";
+        const string fullSpelling = "pm-server-7.fleet.example.test";
+
+        var fromShort = await DarlingMcpAlertTools.CreateMuteRuleCore(store,
+            "{\"server_name\":\"" + shortSpelling + "\",\"metric_name\":\"Collector Cost Regression\",\"reason\":\"short spelling\"}");
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(fromShort));
+        var shortId = (string)JsonNode.Parse(fromShort)!["mute_rule"]!["id"]!;
+        Assert.Equal(shortSpelling, store.Row(shortId)!.ServerName);
+
+        var fromFull = await DarlingMcpAlertTools.CreateMuteRuleCore(store,
+            "{\"server_name\":\"" + fullSpelling + "\",\"metric_name\":\"Blocking Detected\",\"reason\":\"full spelling\"}");
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(fromFull));
+        var fullId = (string)JsonNode.Parse(fromFull)!["mute_rule"]!["id"]!;
+        Assert.Equal(fullSpelling, store.Row(fullId)!.ServerName);
+
+        /* The update endpoint is where the caveat bites hardest — an operator repointing a rule between
+           the two families must get the exact bytes they sent, both directions. */
+        Assert.Equal("updated", DarlingMcpTestData.StatusOf(
+            await DarlingMcpAlertTools.UpdateMuteRuleCore(store, shortId, "{\"server_name\":\"" + fullSpelling + "\"}")));
+        Assert.Equal(fullSpelling, store.Row(shortId)!.ServerName);
+        Assert.Equal("updated", DarlingMcpTestData.StatusOf(
+            await DarlingMcpAlertTools.UpdateMuteRuleCore(store, shortId, "{\"server_name\":\"" + shortSpelling + "\"}")));
+        Assert.Equal(shortSpelling, store.Row(shortId)!.ServerName);
+    }
 }
 
 /// <summary>
