@@ -381,6 +381,14 @@ LIMIT $4";
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync();
 
+        /* #3467: SAME_STATEMENT_PILEUP rows never DEFINE the latest batch (they are written per
+           collection sweep, not per analysis pass — letting one claim the MAX would replace the last
+           complete pass with a single row and read as a healthier server mid-incident, #2448's
+           misreading through the write cadence) and are OVERLAID while newer than the last scheduled
+           batch, aging out of "latest" when the next pass completes. The epoch COALESCE keeps a pileup
+           visible when analysis is disabled and no scheduled batch exists. Identical shape to Darling's
+           PgFindingStore.GetLatestFindingsSql; the pair is pinned against each other by
+           SameStatementPileupSourceCensusTests.BothFindingStores_CarveThePileupRowsOutOfTheLatestBatch_Identically. */
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 SELECT finding_id, analysis_time, server_id, server_name, database_name,
@@ -390,8 +398,18 @@ SELECT finding_id, analysis_time, server_id, server_name, database_name,
        remediation_action_json, drill_down_json
 FROM analysis_findings
 WHERE server_id = $1
-AND   analysis_time = (
-    SELECT MAX(analysis_time) FROM analysis_findings WHERE server_id = $1
+AND   (
+    analysis_time = (
+        SELECT MAX(analysis_time) FROM analysis_findings
+        WHERE server_id = $1 AND root_fact_key <> 'SAME_STATEMENT_PILEUP'
+    )
+    OR (
+        root_fact_key = 'SAME_STATEMENT_PILEUP'
+        AND analysis_time > COALESCE((
+            SELECT MAX(analysis_time) FROM analysis_findings
+            WHERE server_id = $1 AND root_fact_key <> 'SAME_STATEMENT_PILEUP'
+        ), TIMESTAMP '1970-01-01')
+    )
 )
 ORDER BY severity DESC";
 

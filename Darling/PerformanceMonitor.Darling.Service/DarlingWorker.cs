@@ -699,6 +699,21 @@ public sealed class DarlingWorker : BackgroundService
            the Runtime-null connect gate. */
         public DateTime NextSelfAlertSweep { get; set; } = DateTime.MinValue;
 
+        /* #3467: the same-statement-pileup sweep's cadence stamp. Its own stamp rather than a rider on
+           NextAlertSweep because the two answer to different masters — the alert sweep is engine
+           evaluation (master-off stops it entirely) while the pileup sweep is analysis PRODUCTION
+           (D0: it runs and persists under master-off; only delivery goes quiet) — and coupling their
+           due-times would let a change to one family's cadence silently move the other's. */
+        public DateTime NextPileupSweep { get; set; } = DateTime.MinValue;
+
+        /* #3467: the newest query_snapshots collection_time the pileup sweep has already evaluated for
+           this server, so a 30-second sweep cadence over a ~60-second collector produces one evaluation
+           per snapshot instant rather than re-detecting (and re-persisting) the same pileup. In-memory
+           on purpose: after a restart the worst case is one repeated evaluation of the newest snapshot,
+           whose finding folds onto the same incident id and whose notification the cooldown (seeded
+           from the alert log on first lookup) suppresses. */
+        public DateTime LastPileupSnapshotEvaluated { get; set; } = DateTime.MinValue;
+
         /* MinValue = the first loop pass evaluates the custom-alert rules immediately. Separate from
            NextAlertSweep and above the connect gate for the same reason as the self-alert sweep: a custom
            rule reads the collected store, which exists whether or not the server is currently connected. */
@@ -2285,6 +2300,24 @@ public sealed class DarlingWorker : BackgroundService
             {
                 server.NextAlertSweep = DateTime.UtcNow.Add(s_alertSweepInterval);
                 await EvaluateAlertsAsync(engine, server, config, stoppingToken);
+            }
+
+            /* #3467: the same-statement-pileup finding, evaluated at collection cadence rather than the
+               analysis interval — the entire point of the finding is that the 20:10:31Z snapshot held
+               notify-grade evidence 21 minutes before the scheduled pass described it and ~28 before the
+               query_store-fed finding could exist. Alert-sweep cadence (30 s) over a one-minute snapshot
+               collector means a pileup is evaluated within one collection cycle of being visible.
+               Analysis-side gates, not alert-side: production rides config.Analysis.Enabled (D0 — the
+               pass runs and persists whatever the master switch says; delivery alone is gated inside,
+               via ShouldNotifyAnalysisFindings). SQL Server targets only — the shape is a
+               sys.dm_exec_requests statement pileup, and a PostgreSQL target never writes
+               query_snapshots rows. */
+            if (config.Analysis.Enabled
+                && server.Runtime?.Target.Engine != CollectorTargetEngine.PostgreSql
+                && DateTime.UtcNow >= server.NextPileupSweep)
+            {
+                server.NextPileupSweep = DateTime.UtcNow.Add(s_alertSweepInterval);
+                await EvaluateSameStatementPileupAsync(server, config, notificationService, stoppingToken);
             }
 
             /* AN3: the scheduled analysis pipeline, per-server. The cadence, the enabled gate, and the notify
@@ -5249,6 +5282,142 @@ LIMIT 1";
     /// </summary>
     internal static bool ShouldNotifyAnalysisFindings(DarlingConfig config) =>
         config.Alerts.Enabled && config.Analysis.NotificationsEnabled;
+
+    /// <summary>
+    /// #3467: one same-statement-pileup evaluation for one server — the collection-cadence analysis
+    /// finding. Reads the newest active-query snapshot window (query_snapshots alone — the #2296
+    /// deployments have no Query Store to read, so nothing here may key on one), hands it to the
+    /// shared detector, and routes any detection through the SAME finding machinery the scheduled
+    /// pass uses: mute-filter → materialize → drill-down → persist → notify-if-delivering. Riding
+    /// PgFindingStore means the finding inherits everything the scheduled findings already have —
+    /// the mute registry, the (story_path_hash, incident_id) occurrence folding that makes episode
+    /// two of the same statement a recurrence on episode one's trail, the notification service's
+    /// severity gate (notify_severity), its incident-keyed cooldown, and the #2054
+    /// worsening-re-notify — and adds no delivery SEMANTICS of its own. It is a new delivery call
+    /// site, which is a different thing and is accounted for as one: the single NotifyAsync below sits
+    /// under ShouldNotifyAnalysisFindings(config), carries its own #3465 census entry (Inline), and is
+    /// pinned in both directions by AlertMasterSwitchSurfaceTests.
+    ///
+    /// <para><b>Achieved latency for the measured incident</b>: the pileup snapshot landed 20:10:31Z;
+    /// this evaluation runs within the 30-second sweep stamp of the collector write, so the finding —
+    /// severity 2.0 against the 1.5 gate — exists and notifies by ~20:11Z, while the episode (which
+    /// self-cleared around 20:11) is still alive. The scheduled anomalies arrived 20:31:48Z capped at
+    /// 1.0; the query_store-fed PLAN_REGRESSION could not exist before ~20:38Z.</para>
+    ///
+    /// <para>Failure containment: a store fault costs one log line and this cycle's evaluation — never
+    /// the sweep body's remaining passes. InsertFindingsAsync throws by design on a rolled-back batch
+    /// (#2448); that throw is contained here because a missed pileup persist is re-derived by the next
+    /// sweep for as long as the pileup lasts, which is precisely what a live-signature finding can
+    /// afford that a scheduled pass cannot.</para>
+    /// </summary>
+    private async Task EvaluateSameStatementPileupAsync(
+        ServerLoopState server,
+        DarlingConfig config,
+        AnalysisNotificationService notificationService,
+        CancellationToken stoppingToken)
+    {
+        var runtime = server.Runtime;
+        if (runtime is null)
+        {
+            return;
+        }
+
+        try
+        {
+            /* Window floor: lookback + staleness margin behind "now", so the newest instant's full
+               baseline window is covered even when the newest snapshot itself is a few minutes old.
+               The detector applies the real staleness rule against the newest instant it finds. */
+            var reader = new PgPileupSnapshotReader(_postgres!, _logger);
+            var floor = DateTime.UtcNow.AddMinutes(
+                -(SameStatementPileupDetector.BaselineLookbackMinutes + SameStatementPileupDetector.StaleSnapshotCutoffMinutes));
+            var rows = await reader.ReadWindowAsync(runtime.ServerId, floor, stoppingToken);
+            if (rows.Count == 0)
+            {
+                return;
+            }
+
+            /* One evaluation per snapshot instant: the 30-second sweep outpaces the one-minute
+               collector, and re-running the detector over an already-evaluated instant would persist
+               duplicate occurrence rows for the same evidence. Stamped before the detector runs — a
+               clean instant is just as evaluated as a firing one. */
+            var latest = DateTime.MinValue;
+            foreach (var row in rows)
+            {
+                if (row.CollectionTime > latest)
+                {
+                    latest = row.CollectionTime;
+                }
+            }
+
+            if (latest <= server.LastPileupSnapshotEvaluated)
+            {
+                return;
+            }
+
+            server.LastPileupSnapshotEvaluated = latest;
+
+            var detections = SameStatementPileupDetector.Evaluate(runtime.StorageName, rows, DateTime.UtcNow);
+            if (detections.Count == 0)
+            {
+                return;
+            }
+
+            /* The scheduled pass's two-phase persist, transplanted: mute-filter materializes the
+               surviving findings (the STORAGE identity, same as every collected row), the drill-down
+               evidence is attached between the phases, and the insert commits the set or nothing. */
+            var context = new AnalysisContext
+            {
+                ServerId = runtime.ServerId,
+                ServerName = runtime.StorageName,
+                TimeRangeStart = latest.AddMinutes(-SameStatementPileupDetector.BaselineLookbackMinutes),
+                TimeRangeEnd = latest,
+                CancellationToken = stoppingToken,
+                ShutdownToken = stoppingToken,
+            };
+
+            var findingStore = new PgFindingStore(_postgres!, _logger);
+            var findings = await findingStore.FilterMutedFindingsAsync(
+                detections.Select(d => d.Story).ToList(), context);
+            if (findings.Count == 0)
+            {
+                return;
+            }
+
+            var drillDownByHash = detections.ToDictionary(d => d.Story.StoryPathHash, d => d.DrillDown);
+            foreach (var finding in findings)
+            {
+                if (drillDownByHash.TryGetValue(finding.StoryPathHash, out var drillDown))
+                {
+                    finding.DrillDown = drillDown;
+                }
+            }
+
+            await findingStore.InsertFindingsAsync(findings, context);
+
+            _logger.LogWarning(
+                "[{Server}] Same-statement pileup detected: {Count} finding(s) at snapshot {Snapshot:u}, peak severity {Severity:F2}",
+                server.Config.DisplayName, findings.Count, latest, findings.Max(f => f.Severity));
+
+            /* Delivery, gated exactly like the scheduled pass's findings: master AND family, one
+               predicate (#3464). Below the gate, the notification service applies notify_severity,
+               the incident-keyed cooldown, and worsening re-notify — this path adds no delivery
+               semantics of its own. */
+            if (ShouldNotifyAnalysisFindings(config))
+            {
+                await notificationService.NotifyAsync(findings);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            /* Shutdown — quiet and expected. */
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "[{Server}] Same-statement pileup evaluation failed — skipped this cycle; the next sweep re-evaluates a fresher window: {Message}",
+                server.Config.DisplayName, ex.Message);
+        }
+    }
 
     /// <summary>
     /// Runs the AN3 analysis pipeline for one connected server and routes the findings to the
