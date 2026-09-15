@@ -207,4 +207,35 @@ public class DeadlockGraphProcessParserTests
 
         Assert.Empty(DeadlockGraphProcessParser.Parse<DeadlockProcessInfo>(input));
     }
+
+    /* ---------------- TryParseGraph: the same walk, one graph, malformed reported rather than substituted
+       (#3442). Parse's fallback row is what a grid needs and what a text renderer cannot use, so the two
+       outcomes have to stay distinguishable at the seam. ---------------- */
+
+    [Fact]
+    public void TryParseGraph_GoodXml_ReturnsTheSameProcessesParseDoes()
+    {
+        var row = new DeadlockGraphInput(TwoProcessDeadlockXml, DeadlockTime, VictimSqlText: null, VictimQueryPlanXml: null);
+
+        Assert.True(DeadlockGraphProcessParser.TryParseGraph<DeadlockProcessInfo>(row, out var processes));
+        Assert.Equal(
+            DeadlockGraphProcessParser.Parse<DeadlockProcessInfo>(new[] { row }).Select(d => d.ProcessId).ToList(),
+            processes.Select(d => d.ProcessId).ToList());
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("<deadlock")]
+    public void TryParseGraph_AbsentOrMalformed_IsFalseWithNoProcesses(string? xml)
+    {
+        var row = new DeadlockGraphInput(xml, DeadlockTime, VictimSqlText: "UPDATE t SET c = 9", VictimQueryPlanXml: null);
+
+        Assert.False(DeadlockGraphProcessParser.TryParseGraph<DeadlockProcessInfo>(row, out var processes));
+
+        /* Empty rather than null, and NOT the victim-only fallback row: a caller rendering text would
+           otherwise publish the fallback's default spid as a session id. */
+        Assert.NotNull(processes);
+        Assert.Empty(processes);
+    }
 }

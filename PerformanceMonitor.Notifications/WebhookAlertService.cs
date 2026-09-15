@@ -178,7 +178,7 @@ public class WebhookAlertService
     /// pass — also does not aggregate: a mode nobody stated is not Summary, and the direction that costs a
     /// post is preferable to the direction that costs an announcement.
     /// </param>
-    public async Task<bool> TrySendWebhookAlertsAsync(
+    public async Task<WebhookFanoutResult> TrySendWebhookAlertsAsync(
         string metricName,
         string serverName,
         string currentValue,
@@ -189,6 +189,15 @@ public class WebhookAlertService
         string? displayName = null,
         AlertNotificationMode? deliveryMode = null)
     {
+        /* Answered before the cooldown and the budget, not after. A channel that does not exist cannot be
+           throttled or folded, and reporting a suppression for one would put a mechanism on the alert-log
+           row for a store that has no webhook at all — #3427's defect in the opposite direction. It also
+           spares an SMTP-only store the cooldown's seed query on every alert. */
+        if (!AnyWebhookConfigured)
+        {
+            return WebhookFanoutResult.NotAttempted;
+        }
+
         try
         {
             /* #1154: per-fingerprint cooldown. Post if any incident in this alert is outside its
@@ -203,7 +212,7 @@ public class WebhookAlertService
 
             if (!decision.ShouldSend)
             {
-                return false;
+                return WebhookFanoutResult.Throttled;
             }
 
             /* #3430: the cooldown bounds posts per FINGERPRINT, and AlertFingerprint hashes the server name
@@ -225,10 +234,32 @@ public class WebhookAlertService
                 _logger.LogDebug(
                     "Webhook post for {Metric} on {Server} folded into the metric's roster ({Entries} entr(ies) pending)",
                     metricName, serverName, budget.RosterEntryCount);
-                return false;
+                return WebhookFanoutResult.Folded;
             }
 
             bool sent = false;
+
+            /* Whether any channel was reached at all, and the first one that came back unsuccessful. The
+               four gates below are the same expressions AnyWebhookConfigured is built from, so the early
+               return above already guarantees at least one attempt — this is measured rather than inferred
+               from that equality, because a fifth channel added to one list and not the other would
+               otherwise make "attempted and failed" the answer for a channel that was never reached. */
+            bool attempted = false;
+            string? firstError = null;
+
+            /* The channel NAME is kept with its error. Four channels report into one string, so "500 Internal
+               Server Error" without it names no endpoint an operator could go and fix. */
+            void Record(string channel, string? error)
+            {
+                if (error is null)
+                {
+                    sent = true;
+                }
+                else
+                {
+                    firstError ??= $"{channel}: {error}";
+                }
+            }
 
             /* #3313: the decision above says the alert posts; this says WHICH of its incidents the card
                contains. Rendering all of them re-delivered fingerprints that were still inside their own
@@ -264,12 +295,14 @@ public class WebhookAlertService
 
             if (TeamsConfigured)
             {
-                sent |= await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName);
+                attempted = true;
+                Record("Teams", await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName));
             }
 
             if (SlackConfigured)
             {
-                sent |= await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName);
+                attempted = true;
+                Record("Slack", await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName));
             }
 
             if (GenericConfigured)
@@ -277,12 +310,14 @@ public class WebhookAlertService
                 /* Generic webhook: the payload's "metric" field is a machine key an automation correlates on,
                    so it stays the immutable metric name — the display name is a human-title concern only, and
                    this channel has no title. The prose detail DOES go, because it is alert content. */
-                sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc);
+                attempted = true;
+                Record("Generic", await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc));
             }
 
             if (PagerDutyConfigured)
             {
-                sent |= await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName);
+                attempted = true;
+                Record("PagerDuty", await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName));
             }
 
             if (sent)
@@ -309,12 +344,18 @@ public class WebhookAlertService
                 _repeatBudget.Release(budget);
             }
 
-            return sent;
+            return sent ? WebhookFanoutResult.Delivered
+                : attempted ? WebhookFanoutResult.Failed(firstError)
+                : WebhookFanoutResult.NotAttempted;
         }
         catch (Exception ex)
         {
+            /* Reached by the cooldown's seed query, the roster build or the triage-link derivation — before
+               any post. It is still a failure of this alert's delivery and not a suppression, and it is the
+               one route to a `failed` row that no per-channel health counter records, so the message is the
+               only place the reason survives. */
             _logger.LogError($"TrySendWebhookAlertsAsync outer error: {ex.Message}");
-            return false;
+            return WebhookFanoutResult.Failed($"webhook fan-out: {ex.Message}");
         }
     }
 
@@ -407,7 +448,10 @@ public class WebhookAlertService
 
     #region Teams
 
-    private async Task<bool> TrySendTeamsAlertAsync(
+    /// <summary>Posts to Teams. Returns null when the post succeeded, or the error text when it did not —
+    /// a bool loses the reason, and the reason is what the alert log's <c>send_error</c> carries on a
+    /// <see cref="AlertDelivery.ChannelFailed"/> row.</summary>
+    private async Task<string?> TrySendTeamsAlertAsync(
         string metricName,
         string serverName,
         string currentValue,
@@ -434,7 +478,7 @@ public class WebhookAlertService
                 else if (_consecutiveTeamsFailures % 50 == 0)
                     _logger.LogError($"TEAMS WEBHOOK STILL FAILING: {_consecutiveTeamsFailures} failures. Last: {error}");
 
-                return false;
+                return error;
             }
 
             if (_consecutiveTeamsFailures > 0)
@@ -443,14 +487,14 @@ public class WebhookAlertService
             _consecutiveTeamsFailures = 0;
             _lastTeamsError = null;
             _logger.LogInformation($"Teams webhook sent for {metricName} on {serverName}");
-            return true;
+            return null;
         }
         catch (Exception ex)
         {
             _consecutiveTeamsFailures++;
             _lastTeamsError = ex.Message;
             _logger.LogError($"Teams webhook error: {ex.Message}");
-            return false;
+            return ex.Message;
         }
     }
 
@@ -670,7 +714,9 @@ public class WebhookAlertService
 
     #region Slack
 
-    private async Task<bool> TrySendSlackAlertAsync(
+    /// <summary>Posts to Slack. Null when the post succeeded, the error text when it did not — see
+    /// <see cref="TrySendTeamsAlertAsync"/>.</summary>
+    private async Task<string?> TrySendSlackAlertAsync(
         string metricName,
         string serverName,
         string currentValue,
@@ -697,7 +743,7 @@ public class WebhookAlertService
                 else if (_consecutiveSlackFailures % 50 == 0)
                     _logger.LogError($"SLACK WEBHOOK STILL FAILING: {_consecutiveSlackFailures} failures. Last: {error}");
 
-                return false;
+                return error;
             }
 
             if (_consecutiveSlackFailures > 0)
@@ -706,14 +752,43 @@ public class WebhookAlertService
             _consecutiveSlackFailures = 0;
             _lastSlackError = null;
             _logger.LogInformation($"Slack webhook sent for {metricName} on {serverName}");
-            return true;
+            return null;
         }
         catch (Exception ex)
         {
             _consecutiveSlackFailures++;
             _lastSlackError = ex.Message;
             _logger.LogError($"Slack webhook error: {ex.Message}");
-            return false;
+            return ex.Message;
+        }
+    }
+
+    /// <summary>
+    /// Slack's documented ceiling on the <c>fields</c> array of one <c>section</c> block. A section over it
+    /// is rejected as invalid_blocks, which fails the WHOLE message rather than degrading it — so a body
+    /// that grows past it loses the alert entirely, silently from the reader's side.
+    /// </summary>
+    private const int SlackSectionFieldLimit = 10;
+
+    /// <summary>
+    /// Appends <paramref name="fields"/> as however many <c>section</c> blocks it takes to keep each one
+    /// inside <see cref="SlackSectionFieldLimit"/>. Consecutive sections carry no divider between them, so
+    /// a split reads as one continued block.
+    ///
+    /// <para>The field count per item is not bounded by anything upstream: an incident item already emits
+    /// its forensic detail, its dedup metadata, occurrence counts and an incident start, and #3442's
+    /// per-party deadlock facts add up to five more. Splitting here rather than capping per producer means
+    /// no producer has to know what every other producer contributed to the same item.</para>
+    ///
+    /// <para>An empty list appends nothing: a section with neither <c>text</c> nor a non-empty
+    /// <c>fields</c> is itself invalid.</para>
+    /// </summary>
+    private static void AddSlackFieldSections(List<object> blocks, List<object> fields)
+    {
+        for (var i = 0; i < fields.Count; i += SlackSectionFieldLimit)
+        {
+            var take = Math.Min(SlackSectionFieldLimit, fields.Count - i);
+            blocks.Add(new { type = "section", fields = fields.GetRange(i, take) });
         }
     }
 
@@ -783,7 +858,7 @@ public class WebhookAlertService
             fields.Add(new { type = "mrkdwn", text = $"*Time (Local):*\n{localNow:yyyy-MM-dd HH:mm:ss}" });
         }
 
-        blocks.Add(new { type = "section", fields });
+        AddSlackFieldSections(blocks, fields);
 
         /* #3297: the prose detail, before the per-incident dividers. */
         if (prose is not null)
@@ -820,7 +895,7 @@ public class WebhookAlertService
                     detailFields.Add(new { type = "mrkdwn", text = $"*{label}:*\n{value}" });
                 }
 
-                blocks.Add(new { type = "section", fields = detailFields });
+                AddSlackFieldSections(blocks, detailFields);
             }
         }
 
@@ -873,7 +948,11 @@ public class WebhookAlertService
 
     #region Generic
 
-    private async Task<bool> TrySendGenericAlertAsync(
+    /// <summary>Posts to the generic channel. Null when the post succeeded, the error text when it did not
+    /// — see <see cref="TrySendTeamsAlertAsync"/>. A malformed headers JSON or body template reports here
+    /// too: an operator config error still delivers nothing, and naming it is the difference between a
+    /// fixable row and a bare "failed".</summary>
+    private async Task<string?> TrySendGenericAlertAsync(
         string metricName,
         string serverName,
         string currentValue,
@@ -892,7 +971,7 @@ public class WebhookAlertService
             if (!TryParseHeaders(_settings.GenericWebhookHeadersJson, out var headers, out var headerError))
             {
                 RecordGenericFailure(headerError!);
-                return false;
+                return headerError;
             }
 
             var payload = BuildGenericPayload(
@@ -903,7 +982,7 @@ public class WebhookAlertService
             if (!IsWellFormedJson(payload, out var bodyError))
             {
                 RecordGenericFailure(bodyError!);
-                return false;
+                return bodyError;
             }
 
             var error = await PostWebhookAsync(
@@ -912,7 +991,7 @@ public class WebhookAlertService
             if (error != null)
             {
                 RecordGenericFailure(error);
-                return false;
+                return error;
             }
 
             if (_consecutiveGenericFailures > 0)
@@ -921,14 +1000,14 @@ public class WebhookAlertService
             _consecutiveGenericFailures = 0;
             _lastGenericError = null;
             _logger.LogInformation($"Generic webhook sent for {metricName} on {serverName}");
-            return true;
+            return null;
         }
         catch (Exception ex)
         {
             _consecutiveGenericFailures++;
             _lastGenericError = ex.Message;
             _logger.LogError($"Generic webhook error: {ex.Message}");
-            return false;
+            return ex.Message;
         }
     }
 
@@ -1370,7 +1449,9 @@ public class WebhookAlertService
 
     #region PagerDuty
 
-    private async Task<bool> TrySendPagerDutyAlertAsync(
+    /// <summary>Posts to PagerDuty Events v2. Null when the post succeeded, the error text when it did not
+    /// — see <see cref="TrySendTeamsAlertAsync"/>.</summary>
+    private async Task<string?> TrySendPagerDutyAlertAsync(
         string metricName,
         string serverName,
         string currentValue,
@@ -1407,7 +1488,7 @@ public class WebhookAlertService
                 else if (_consecutivePagerDutyFailures % 50 == 0)
                     _logger.LogError($"PAGERDUTY WEBHOOK STILL FAILING: {_consecutivePagerDutyFailures} failures. Last: {error}");
 
-                return false;
+                return error;
             }
 
             if (_consecutivePagerDutyFailures > 0)
@@ -1416,14 +1497,14 @@ public class WebhookAlertService
             _consecutivePagerDutyFailures = 0;
             _lastPagerDutyError = null;
             _logger.LogInformation($"PagerDuty webhook sent for {metricName} on {serverName}");
-            return true;
+            return null;
         }
         catch (Exception ex)
         {
             _consecutivePagerDutyFailures++;
             _lastPagerDutyError = ex.Message;
             _logger.LogError($"PagerDuty webhook error: {ex.Message}");
-            return false;
+            return ex.Message;
         }
     }
 
@@ -1758,4 +1839,44 @@ public class WebhookAlertService
     }
 
     #endregion
+}
+
+/// <summary>
+/// What <see cref="WebhookAlertService.TrySendWebhookAlertsAsync"/> did, in the
+/// <see cref="AlertChannelOutcome"/> vocabulary, with the first failing channel's error text.
+///
+/// <para><b>Why not a bool.</b> One bool for four channels made a failed post indistinguishable from a
+/// working cooldown in the alert log: both arrived as false with no error, and
+/// <see cref="AlertDelivery.FromFanout"/> had nothing to label them apart with. The error is the FIRST
+/// failure only, prefixed with its channel name — four channels and one string, so the alternative is a
+/// concatenation nobody reads, and one named endpoint is more actionable than four unnamed ones. Each
+/// channel's full failure history stays on its own consecutive-failure counter and health getter.</para>
+/// </summary>
+/// <param name="Outcome">What happened, over the whole fan-out.</param>
+/// <param name="SendError">
+/// The first failing channel's error, prefixed with that channel's name. Non-null only on
+/// <see cref="AlertChannelOutcome.Failed"/>; a throttled or folded fan-out attempted nothing and so has
+/// nothing to report.
+/// </param>
+public readonly record struct WebhookFanoutResult(AlertChannelOutcome Outcome, string? SendError)
+{
+    /// <summary>Whether a channel delivered. At least one did; the rest may have failed, and each of those
+    /// is on its own health counter.</summary>
+    public bool Sent => Outcome == AlertChannelOutcome.Delivered;
+
+    /// <summary>No webhook channel was consulted: none is configured, or the caller suppressed the whole
+    /// fan-out.</summary>
+    public static WebhookFanoutResult NotAttempted { get; } = new(AlertChannelOutcome.NotAttempted, null);
+
+    /// <summary>A cooldown window was still open, so nothing was attempted.</summary>
+    public static WebhookFanoutResult Throttled { get; } = new(AlertChannelOutcome.Throttled, null);
+
+    /// <summary>The metric's per-fleet repeat budget folded this delivery onto another server's.</summary>
+    public static WebhookFanoutResult Folded { get; } = new(AlertChannelOutcome.Folded, null);
+
+    /// <summary>Delivered on at least one channel.</summary>
+    public static WebhookFanoutResult Delivered { get; } = new(AlertChannelOutcome.Delivered, null);
+
+    /// <summary>Attempted, and nothing delivered.</summary>
+    public static WebhookFanoutResult Failed(string? error) => new(AlertChannelOutcome.Failed, error);
 }

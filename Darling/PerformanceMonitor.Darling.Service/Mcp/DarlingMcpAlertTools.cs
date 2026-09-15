@@ -27,8 +27,8 @@ using PerformanceMonitor.Notifications;
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
-/// The alerts MCP tools — get_alert_history, get_alert_settings, get_mute_rules plus the three alert-TUNING
-/// write tools update_alert_settings / create_mute_rule / delete_mute_rule — served over Darling's Postgres
+/// The alerts MCP tools — get_alert_history, get_alert_settings, get_mute_rules plus the alert-TUNING
+/// write tools update_alert_settings / create_mute_rule / delete_mute_rule / set_mute_rule_enabled — served over Darling's Postgres
 /// store. The reads are the same names Lite (and the Dashboard) expose; the writes are Darling-only (the central
 /// alert store the fleet shares, which Lite's single-instance DuckDB has no twin for). This is the FLEET
 /// edition's biggest MCP win: an agent triaging N servers can now see what fired, whether delivery failed, the
@@ -55,9 +55,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// any write, and only the provided columns are written by a targeted parameterized UPDATE. The write self-bumps
 /// <c>config_service.config_version</c> via the existing config-table trigger, so the running service hot-reloads
 /// within one sweep (the tool never writes <c>config_version</c> itself). SMTP/webhook credential columns are out
-/// of scope — the mcp role cannot read or write them. create_mute_rule / delete_mute_rule reuse the SAME
-/// <see cref="PgMuteRuleStore"/> get_mute_rules reads through, generating the rule id the same way the Viewer's
-/// mute-create path does (a fresh GUID on a new <see cref="MuteRule"/>).</para>
+/// of scope — the mcp role cannot read or write them. create_mute_rule / delete_mute_rule /
+/// set_mute_rule_enabled reuse the SAME <see cref="PgMuteRuleStore"/> get_mute_rules reads through, generating
+/// the rule id the same way the Viewer's mute-create path does (a fresh GUID on a new
+/// <see cref="MuteRule"/>). set_mute_rule_enabled is the headless twin of the Viewer's mute-rule checkbox: it
+/// writes <c>enabled</c> and nothing else, so a rule can leave force and return without losing the id, the
+/// reason or the creation date the Stale Mute Rules self-alert (#3306) ages it from.</para>
 ///
 /// <para><b>Security.</b> These write tools connect (like every MCP tool) as the least-privilege <c>mcp</c> role,
 /// granted (see <see cref="DarlingManagedRoles"/>) INSERT/UPDATE/DELETE on <c>config.config_mute_rules</c>, UPDATE
@@ -68,7 +71,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpAlertTools
 {
-    [McpServerTool(Name = "get_alert_history"), Description("Gets recent alert history from the alert log: what alerts fired, when, for which server, the current vs threshold value, whether email/webhook delivery succeeded, and whether the alert was muted. Omit server_name to see the whole fleet (each row names its server); pass one to scope to a single server.")]
+    [McpServerTool(Name = "get_alert_history"), Description("Gets recent alert history from the alert log: what alerts fired, when, for which server, the current vs threshold value, whether email/webhook delivery succeeded, and whether the alert was muted. Omit server_name to see the whole fleet (each row names its server); pass one to scope to a single server. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'throttled' means the delivery cooldown was still inside this alert's window so nothing was attempted (the throttle working, not a fault); 'folded' means a repeat was rolled onto another server's post for the same metric and is named there under 'Other Servers Affected', so it WAS reported; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'unconfigured' means no email or webhook channel is set up; 'muted' means a mute rule suppressed it; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null on 'throttled' and 'folded' rows and on every row written before those values existed, so a null error is not evidence of a working cooldown. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which — count those rows separately rather than attributing them.")]
     public static async Task<string> GetAlertHistory(
         NpgsqlDataSource postgres,
         [Description("Server name or display name. Omit to return alerts across all servers (the fleet default).")] string? server_name = null,
@@ -627,6 +630,103 @@ public sealed class DarlingMcpAlertTools
             return McpHelpers.FormatError("delete_mute_rule", ex);
         }
     }
+
+    [McpServerTool(Name = "set_mute_rule_enabled"), Description(
+        "Enables or disables an existing alert mute rule by its id (from get_mute_rules or create_mute_rule) " +
+        "WITHOUT deleting it. A disabled rule suppresses nothing while keeping its id, its scope, its reason " +
+        "and its creation date, so silencing a signal for a window and restoring it afterwards is one " +
+        "reversible change to one rule. USE THIS rather than delete_mute_rule followed by create_mute_rule " +
+        "for a temporary or reversible change, for two reasons. A re-created rule is a NEW rule: it carries a " +
+        "new id (anything citing the old one now points at nothing) and a new creation date, and the Stale " +
+        "Mute Rules self-alert ages a rule from its creation date — so a rule re-created every few days never " +
+        "becomes stale and is never reported, while a disabled-and-re-enabled one is reported on the age it " +
+        "actually has. And between the delete taking effect and the create taking effect, every alert the " +
+        "rule was suppressing is delivered. NEITHER direction changes created_at_utc. Returns " +
+        "{status:\"updated\", mute_rule:{...}} with the rule AS STORED, {status:\"unchanged\", mute_rule:{...}} " +
+        "when the rule already holds that value (so a retry is safe and costs no write), or " +
+        "{status:\"not_found\"} when no rule has that id. The running service applies the change on its next " +
+        "collection sweep, when the write's config_version bump makes it reload its mute cache — so a " +
+        "matching alert already mid-flight can still be delivered once after a disable, and one can still be " +
+        "suppressed once after an enable.")]
+    public static Task<string> SetMuteRuleEnabled(
+        NpgsqlDataSource postgres,
+        [Description("The id of the mute rule to enable or disable (from get_mute_rules or create_mute_rule).")] string rule_id,
+        [Description("true to put the rule back in force, false to stop it suppressing while keeping the rule.")] bool enabled) =>
+        SetMuteRuleEnabledCore(new PgMuteRuleStore(postgres), rule_id, enabled);
+
+    /// <summary>
+    /// set_mute_rule_enabled's body over the <see cref="IMuteRuleStore"/> seam
+    /// <see cref="PgMuteRuleStore"/> implements, so the tool's decisions are reachable without a store.
+    ///
+    /// <para><b>The flag is the only field written.</b> It goes through
+    /// <see cref="IMuteRuleStore.SetEnabledAsync"/> — a narrow UPDATE of <c>enabled</c> alone.
+    /// <c>created_at_utc</c> is when the rule was AUTHORED, and the Stale Mute Rules self-alert (#3306) ages
+    /// a rule from it, so a rule taken out of force and put back is reported on the age it actually has. A
+    /// path that rebuilt the row on the way through would hand a disable/re-enable cycle the same week of
+    /// invisibility a delete-and-re-create buys — more cheaply, keeping the id, and with nothing changing
+    /// for a reader to notice.</para>
+    ///
+    /// <para><b>The reported rule is re-read from the store AFTER the write</b>, not the one this method
+    /// already held. <c>created_at_utc</c> on the wire is therefore the stored value rather than a
+    /// restatement of a value read before the write, which is the only form in which the caller's copy can
+    /// disagree with the store's and be seen to.</para>
+    ///
+    /// <para><b>Setting the flag to the value it already holds writes nothing</b> and reports
+    /// <c>unchanged</c>: the call is safe to retry, and a caller can tell a change it made from a state it
+    /// found. The existence read that decides <c>not_found</c> is what carries the current flag, so this
+    /// costs no extra round trip.</para>
+    /// </summary>
+    internal static async Task<string> SetMuteRuleEnabledCore(IMuteRuleStore store, string ruleId, bool enabled)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(ruleId))
+            {
+                return Outcome("invalid", "rule_id is required.");
+            }
+
+            /* Existence check through the SAME store get_mute_rules reads, so 'updated' vs 'not_found' is
+               honest (SetEnabledAsync is a bare UPDATE that reports no row count). */
+            var existing = await FindRuleAsync(store, ruleId);
+            if (existing is null)
+            {
+                return Outcome("not_found", $"No mute rule with id '{ruleId}'.");
+            }
+
+            if (existing.Enabled == enabled)
+            {
+                return JsonSerializer.Serialize(
+                    new { status = "unchanged", mute_rule = BuildMuteRulePayload(existing) },
+                    McpHelpers.JsonOptions);
+            }
+
+            await store.SetEnabledAsync(ruleId, enabled);
+
+            var stored = await FindRuleAsync(store, ruleId);
+            if (stored is null)
+            {
+                /* The flag landed and the rule is gone, so the state to report is the absence: a concurrent
+                   delete_mute_rule (or an expiry purge) took the row between the write and the read back.
+                   Both facts are named because 'not_found' alone would read as a call that wrote nothing. */
+                return Outcome("not_found",
+                    $"Mute rule '{ruleId}' was set enabled={(enabled ? "true" : "false")} but is no longer in the store — it was deleted concurrently.");
+            }
+
+            return JsonSerializer.Serialize(
+                new { status = "updated", mute_rule = BuildMuteRulePayload(stored) },
+                McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("set_mute_rule_enabled", ex);
+        }
+    }
+
+    /// <summary>One rule by id, or null — an ordinal id match over the store's full read, which is the only
+    /// read <see cref="IMuteRuleStore"/> offers.</summary>
+    private static async Task<MuteRule?> FindRuleAsync(IMuteRuleStore store, string ruleId) =>
+        (await store.LoadAllAsync())
+            .FirstOrDefault(r => r is not null && string.Equals(r.Id, ruleId, StringComparison.Ordinal));
 
     /// <summary>The singleton config rows update_alert_settings writes, in the order it writes them — see
     /// the statement-order note at the write itself. Also the read side's table set: the settings row is

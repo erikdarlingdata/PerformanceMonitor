@@ -39,6 +39,11 @@ public interface IAlertHistoryStore
     /// ('email','email+webhook') AND send_error IS NULL. Dash: NotificationType
     /// == "email" AND SendError empty.
     /// <para>
+    /// The send_error clause is why <see cref="AlertDelivery.FromFanout"/> keeps a failed webhook's error
+    /// off a row that delivered: an error borrowed from a sibling channel would take a successful email out
+    /// of this seed and re-send it after a restart.
+    /// </para>
+    /// <para>
     /// When <paramref name="dedupKey"/> is non-null (#1154 per-fingerprint cooldown), the result is
     /// additionally restricted to rows whose persisted <c>ContextJson</c> carries that #1140 dedup
     /// fingerprint, so the seed reconstructs the per-incident last-sent time. Null = the metric-level
@@ -52,7 +57,9 @@ public interface IAlertHistoryStore
     /// cooldown across restart so a Teams/Slack alert delivered shortly before a restart
     /// is not re-posted afterward (#1145, mirroring the email seed #981). The
     /// notification_type already implies the webhook delivered (it's only written on a
-    /// successful post), and send_error tracks the EMAIL channel, so it is NOT filtered on.
+    /// successful post), so send_error is NOT filtered on. It can hold a webhook channel's error
+    /// (<see cref="AlertDelivery.ChannelFailed"/>), but only on a row that delivered nothing, and those
+    /// rows carry neither of the notification_type values below.
     /// Lite: notification_type IN ('webhook','email+webhook'). Dash: NotificationType == "webhook".
     /// <para>
     /// When <paramref name="dedupKey"/> is non-null (#1154 per-fingerprint cooldown), the result is

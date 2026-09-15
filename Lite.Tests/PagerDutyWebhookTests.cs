@@ -340,10 +340,16 @@ public class PagerDutyWebhookTests
             settings, Branding, new AppLoggerAdapter<WebhookAlertService>(), historyStore: null);
 
         /* The send will fail (no real endpoint), but we verify it was attempted via the failure counter. */
-        var sent = await service.TrySendWebhookAlertsAsync("High CPU", "SRV1", "95%", "90%", "server-1");
+        var result = await service.TrySendWebhookAlertsAsync("High CPU", "SRV1", "95%", "90%", "server-1");
 
-        Assert.False(sent); /* Failed send */
+        Assert.False(result.Sent); /* Failed send */
         Assert.Equal(1, service.GetPagerDutyHealth().ConsecutiveFailures);
+
+        /* #3427: an attempted-and-failed fan-out is Failed, not one of the suppressions, and it names the
+           channel in its error so the alert log's send_error points at an endpoint. */
+        Assert.Equal(AlertChannelOutcome.Failed, result.Outcome);
+        Assert.NotNull(result.SendError);
+        Assert.StartsWith("PagerDuty: ", result.SendError);
     }
 
     [Fact]
@@ -359,10 +365,16 @@ public class PagerDutyWebhookTests
         var service = new WebhookAlertService(
             settings, Branding, new AppLoggerAdapter<WebhookAlertService>(), historyStore: null);
 
-        var sent = await service.TrySendWebhookAlertsAsync("High CPU", "SRV1", "95%", "90%", "server-1");
+        var result = await service.TrySendWebhookAlertsAsync("High CPU", "SRV1", "95%", "90%", "server-1");
 
-        Assert.False(sent);
+        Assert.False(result.Sent);
         Assert.Equal(0, service.GetPagerDutyHealth().ConsecutiveFailures); /* Not attempted */
+
+        /* #3427: no webhook channel is configured, so the fan-out reports NotAttempted rather than a
+           suppression — a channel that does not exist cannot be throttled or folded, and reporting one
+           would put a mechanism on the alert-log row for a store that has no webhook. */
+        Assert.Equal(AlertChannelOutcome.NotAttempted, result.Outcome);
+        Assert.Null(result.SendError);
     }
 
     private sealed class FakePagerDutySettings : IAlertSettings

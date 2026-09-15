@@ -220,13 +220,15 @@ public sealed class CrossAppMcpToolInventoryPinTests
         /* Darling MCP alert-tuning write tools — the write half of the alerts slice (the READ half,
            get_alert_history / get_alert_settings / get_mute_rules, IS shared with Lite). These write the
            central Postgres alert store: update_alert_settings partial-updates config.config_alert_settings,
-           create_mute_rule / delete_mute_rule CRUD config.config_mute_rules. Darling-ONLY by architecture,
+           create_mute_rule / delete_mute_rule / set_mute_rule_enabled CRUD config.config_mute_rules.
+           Darling-ONLY by architecture,
            not "not ported yet": Lite is a single-instance WPF app over local DuckDB with no central,
            service-honored alert store the same way, so there is no Lite twin to port (same reasoning as the
            Custom Views tools above). */
         "update_alert_settings",
         "create_mute_rule",
         "delete_mute_rule",
+        "set_mute_rule_enabled",
 
         /* Darling MCP server-onboarding write tools — add/remove the monitored servers in the CENTRAL store the
            whole fleet shares (config.config_monitored_servers). add_servers bulk-onboards (validate + in-process

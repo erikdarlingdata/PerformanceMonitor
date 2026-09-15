@@ -666,11 +666,13 @@ public sealed class RepeatDeliveryBudgetTests
         Assert.Contains(Fingerprint(repeats[1]), folded.DetailText!, StringComparison.Ordinal);
         Assert.Contains(Fingerprint(repeats[1]), folded.ContextJson!, StringComparison.Ordinal);
 
-        /* The folded row reports the same disposition a cooldown-throttled one always has: a channel was
-           configured, nothing delivered, and no send error. No new notification_type, so no store column
-           and no reader anywhere has to learn a third meaning. */
+        /* The folded row names its own disposition (#3427). It used to share `undelivered` with a
+           cooldown-throttled send and a failed post, with nothing in the row to say which; a fold is the
+           one of the three that was owed a delivery and is named on another card's roster, and the stored
+           value now says so. alert_sent stays false and send_error stays null — nothing went out from this
+           row and nothing faulted — so only the reason gains a name. */
         Assert.False(folded.AlertSent);
-        Assert.Equal(AlertDelivery.ChannelUndelivered, folded.NotificationType);
+        Assert.Equal(AlertDelivery.ChannelFolded, folded.NotificationType);
         Assert.Null(folded.SendError);
     }
 

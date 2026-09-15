@@ -18,6 +18,7 @@ using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using Xunit;
@@ -1096,6 +1097,76 @@ public sealed class DarlingSelfAlertTests
 
         Assert.Empty(h.Deliverer.Outcomes);
     }
+
+    /// <summary>
+    /// #3432: a rule taken out of force through <c>set_mute_rule_enabled</c> and put back is stale to THIS
+    /// condition on the age it actually has. The claim is driven through the real evaluator rather than
+    /// asserted about a timestamp, because what a reset costs is measured in what this alert does and does
+    /// not say.
+    ///
+    /// <para>Each transition is visible in the outcome. While disabled the rule is not a blind spot and
+    /// nothing fires — the arm the sibling test above pins. Re-enabled, it fires, and the rendered age is
+    /// the authored one. A verb that stamped <c>created_at_utc</c> on either transition would leave the rule
+    /// a moment old, inside <see cref="DarlingSelfAlertEvaluator.StaleMuteAge"/>, so the final
+    /// <c>Assert.Single</c> would find NOTHING: the reset shows up as a missing alert rather than as a
+    /// different number, which is exactly how the delete-and-re-create workaround disarms this alert
+    /// today.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_ARuleDisabledAndReEnabledThroughTheMcpVerb_IsStaleOnItsRealAge()
+    {
+        const string ruleId = "rule-held";
+        const double authoredDaysAgo = 30d;
+        var authored = MuteClock.AddDays(-authoredDaysAgo);
+
+        var store = new FakeMuteRuleStore().Seed(
+            Mute(authoredDaysAgo, id: ruleId));
+        Assert.Equal(authored, store.Row(ruleId)!.CreatedAtUtc);
+
+        Assert.Equal("updated", StatusOf(
+            await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, ruleId, enabled: false)));
+
+        var whileDisabled = new Harness();
+        await whileDisabled.Build().ApplyStaleMuteRulesAsync(await store.LoadAllAsync(), Ct);
+        Assert.Empty(whileDisabled.Deliverer.Outcomes);
+
+        Assert.Equal("updated", StatusOf(
+            await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, ruleId, enabled: true)));
+
+        var h = new Harness();
+        await h.Build().ApplyStaleMuteRulesAsync(await store.LoadAllAsync(), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteMetric, fired.MetricName);
+        Assert.Equal(1d, fired.NumericCurrentValue);
+        Assert.Contains($"oldest {authoredDaysAgo:F0} days", fired.DetailText, StringComparison.Ordinal);
+        Assert.Equal(authored, store.Row(ruleId)!.CreatedAtUtc);
+    }
+
+    /// <summary>
+    /// The counterfactual the test above rests on, stated as its own assertion: a rule authored NOW is not
+    /// stale, so "the alert still fires" is a claim about the preserved date and not about the rule merely
+    /// being enabled and unbounded. Without this, a reset that somehow still fired would be indistinguishable
+    /// from a preserved date.
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_ARuleAuthoredAtTheHarnessInstant_IsNotStale_WhichIsWhatAResetWouldCost()
+    {
+        const string ruleId = "rule-fresh";
+        var store = new FakeMuteRuleStore().Seed(Mute(ageDays: 0, id: ruleId));
+
+        Assert.Equal("updated", StatusOf(
+            await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, ruleId, enabled: false)));
+        Assert.Equal("updated", StatusOf(
+            await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, ruleId, enabled: true)));
+
+        var h = new Harness();
+        await h.Build().ApplyStaleMuteRulesAsync(await store.LoadAllAsync(), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    private static string StatusOf(string json) => DarlingMcpTestData.StatusOf(json);
 
     [Fact]
     public async Task StaleMute_ARuleMatchingEveryAlert_ReadsCritical_AndSaysTheStoreLooksHealthyForNoReason()
@@ -3925,9 +3996,11 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
     private static PerformanceMonitor.Darling.Service.Mcp.DarlingCollectorCostReader.CostRegression Regression(
         long latestMs = 8000, double baselineMs = 2000.0, int serverId = 7, string collector = "query_store",
         DateTime? latestMetricTime = null, long latestRuns = 100,
-        double latestMsPerRun = 80.0, double baselineMsPerRun = 20.0) =>
+        double latestMsPerRun = 80.0, double baselineMsPerRun = 20.0,
+        double baselineP95MsPerRun = 20.0) =>
         new(serverId, "prod-multi-19", collector, latestMs, baselineMs,
-            latestMetricTime ?? DefaultRegressionMetricTime, latestRuns, latestMsPerRun, baselineMsPerRun);
+            latestMetricTime ?? DefaultRegressionMetricTime, latestRuns, latestMsPerRun, baselineMsPerRun,
+            baselineP95MsPerRun);
 
     [Fact]
     public async Task CollectorCostRegression_FiresOnEntry_SuppressedWithinCooldown_ResolvesWhenGone()
@@ -3992,5 +4065,63 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         await e.ApplyCostRegressionsAsync(
             new[] { Regression(latestMetricTime: DefaultRegressionMetricTime.AddHours(1)) }, Ct);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    /// <summary>#3440: the fired alert must report the bound that actually SELECTED it. The query gates on the
+    /// factor applied to the mean AND to the p95 of the collector's own daily per-run cost, so the binding
+    /// bound is the factor on the higher of the two. Reporting the mean-derived figure would hand a reader a
+    /// threshold the row did not have to clear — with a p95 baseline of 50 ms/run the real bound is 100, and
+    /// the mean-derived one is 40, so a reader checking the arithmetic would compute a 4x that is not the test
+    /// the alert applied.</summary>
+    [Fact]
+    public async Task CollectorCostRegression_ReportsTheBoundThatSelectedIt_NotTheMeanRatio()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCostRegressionsAsync(
+            new[] { Regression(latestMsPerRun: 120.0, baselineMsPerRun: 20.0, baselineP95MsPerRun: 50.0) }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(100.0, fired.NumericThresholdValue);
+        Assert.Contains("100.0 ms/run", fired.ThresholdValue, StringComparison.Ordinal);
+
+        /* Both baselines stay legible on the alert, because the reader's next question is which one bound. */
+        Assert.Contains("20.0 ms/run mean", fired.ThresholdValue, StringComparison.Ordinal);
+        Assert.Contains("50.0 ms/run daily p95", fired.ThresholdValue, StringComparison.Ordinal);
+        Assert.Contains("p95 of its OWN daily per-run cost", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>#3440: the reported bound is derived through <see cref="System.Math.Max"/>, so no construction
+    /// of the record can produce a bound BELOW the pre-#3440 mean-ratio one. That is what makes the added
+    /// conjunct narrowing-only rather than a retune: a p95 baseline that is absent, zero, or incoherently
+    /// under the mean degrades to exactly the old bound instead of to a looser one, and there is no settable
+    /// member holding a bound for a <c>with</c> expression to overwrite.</summary>
+    [Fact]
+    public void CollectorCostRegressionThreshold_NeverFallsBelowTheMeanBound()
+    {
+        const double factor = 2.0;
+        const double mean = 20.0;
+        var p95s = new[] { 0.0, 0.1, 19.999, mean, 20.001, 50.0, 1_000_000.0 };
+
+        /* The loop bound is asserted rather than assumed: a grid mutated to zero rows would leave every
+           assertion below unreached and this test would pass having checked nothing. */
+        Assert.Equal(7, p95s.Length);
+        var checked_ = 0;
+
+        foreach (var p95 in p95s)
+        {
+            var r = Regression(baselineMsPerRun: mean, baselineP95MsPerRun: p95);
+            Assert.True(r.ThresholdMsPerRun(factor) >= mean * factor,
+                $"p95 {p95} produced a bound below the mean bound");
+            Assert.Equal(System.Math.Max(mean, p95) * factor, r.ThresholdMsPerRun(factor), 6);
+            checked_++;
+        }
+
+        Assert.Equal(p95s.Length, checked_);
+
+        /* And the degenerate case is exactly the old bound, not merely "not below" it. */
+        Assert.Equal(mean * factor,
+            Regression(baselineMsPerRun: mean, baselineP95MsPerRun: 0.0).ThresholdMsPerRun(factor), 6);
     }
 }

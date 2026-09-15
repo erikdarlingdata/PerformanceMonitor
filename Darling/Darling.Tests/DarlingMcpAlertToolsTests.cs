@@ -22,6 +22,7 @@ using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 using Reader = PerformanceMonitor.Darling.Service.Mcp.DarlingAlertReader;
@@ -31,8 +32,9 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins the alerts MCP slice — the three READS (get_alert_history, get_alert_settings, get_mute_rules) plus the
-/// three Darling-only WRITES (update_alert_settings, create_mute_rule, delete_mute_rule) over the Postgres store.
-/// Ungated: the tool surface is EXACTLY the six names (all static, on a [McpServerToolType] class, returning
+/// four Darling-only WRITES (update_alert_settings, create_mute_rule, delete_mute_rule,
+/// set_mute_rule_enabled) over the Postgres store.
+/// Ungated: the tool surface is EXACTLY the seven names (all static, on a [McpServerToolType] class, returning
 /// Task&lt;string&gt;); each read param contract matches Lite's (plus the fleet-only optional server_name on
 /// get_alert_history); the write tools require exactly their target (settings_json / rule_id); the read SQL is
 /// Postgres-dialect + positional-param + excludes dismissed rows; the advertised tools/list schema is Gemini-clean
@@ -53,6 +55,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         "get_alert_history",
         "get_alert_settings",
         "get_mute_rules",
+        "set_mute_rule_enabled",
         "update_alert_settings",
     };
 
@@ -62,7 +65,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         .ToArray();
 
     [Fact]
-    public void ToolSurface_ExactlyTheSixAlertTools()
+    public void ToolSurface_ExactlyTheSevenAlertTools()
     {
         var toolMethods = ToolMethods();
         var names = toolMethods
@@ -91,6 +94,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [InlineData("update_alert_settings", "settings_json")]
     [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at")]
     [InlineData("delete_mute_rule", "rule_id")]
+    [InlineData("set_mute_rule_enabled", "rule_id,enabled")]
     public void ParamContract_MatchesContract(string toolName, string expectedCsv)
     {
         Assert.Equal(expectedCsv.Split(','), McpParams(toolName).Select(p => p.Name).ToArray());
@@ -115,6 +119,9 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [Theory]
     [InlineData("update_alert_settings", "settings_json")]
     [InlineData("delete_mute_rule", "rule_id")]
+    /* Both, not just the target: a set-flag verb whose value defaulted would let a caller that meant to
+       disable a rule enable it by omission, on a surface where the omission is the common typing mistake. */
+    [InlineData("set_mute_rule_enabled", "rule_id,enabled")]
     public void ParamContract_WriteTools_RequireTheirTarget(string toolName, string requiredCsv)
     {
         var required = McpParams(toolName).Where(p => !p.Optional).Select(p => p.Name)
@@ -778,10 +785,10 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void AdvertisedSchema_IsGeminiClean_ForAllSixTools()
+    public void AdvertisedSchema_IsGeminiClean_ForAllSevenTools()
     {
         var tools = BuildToolSchemas();
-        Assert.Equal(6, tools.Count);
+        Assert.Equal(7, tools.Count);
         var violations = tools.Values.SelectMany(t => DarlingMcpSchemaAssert.Violations(t.Name, t.InputSchema)).ToList();
         Assert.True(violations.Count == 0, "Gemini-incompatible schema keywords leaked:\n" + string.Join("\n", violations));
     }
@@ -793,6 +800,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [InlineData("update_alert_settings", "settings_json")]
     [InlineData("create_mute_rule", "")]
     [InlineData("delete_mute_rule", "rule_id")]
+    [InlineData("set_mute_rule_enabled", "enabled,rule_id")]
     public void AdvertisedSchema_RequiredParams_MatchTheContract(string toolName, string expectedCsv)
     {
         var expected = expectedCsv.Length == 0 ? Array.Empty<string>() : expectedCsv.Split(',');
@@ -851,11 +859,374 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
 }
 
 /// <summary>
+/// An in-memory <see cref="IMuteRuleStore"/> with <see cref="PgMuteRuleStore"/>'s row semantics, so a
+/// decision the shipped statements could not produce does not pass here.
+///
+/// <para>Rows are cloned on the way in and on the way out. A caller holding a rule from
+/// <see cref="LoadAllAsync"/> therefore cannot reach the stored row by reference, and an in-memory flag flip
+/// that never reached a store reads as what it is rather than as a successful write.</para>
+///
+/// <para><see cref="SetEnabledAsync"/> writes <c>Enabled</c> alone; <see cref="UpdateAsync"/> writes every
+/// field EXCEPT <c>CreatedAtUtc</c>. Those are the two shipped UPDATE statements' SET lists, held to the
+/// shipped SQL by <see cref="SetMuteRuleEnabledTests.TheShippedMuteRuleUpdates_NeverSetTheCreationDate"/>.
+/// Reads come back newest-first, matching the ORDER BY.</para>
+/// </summary>
+internal sealed class FakeMuteRuleStore : IMuteRuleStore
+{
+    private readonly List<MuteRule> _rows = new();
+
+    internal int LoadAllCalls { get; private set; }
+    internal int SetEnabledCalls { get; private set; }
+    internal int UpdateCalls { get; private set; }
+
+    /// <summary>Runs immediately after a <see cref="SetEnabledAsync"/> write lands, so a test can drive what
+    /// another writer does to the row in the window before the read back.</summary>
+    internal Action? AfterSetEnabled { get; set; }
+
+    internal FakeMuteRuleStore Seed(MuteRule rule)
+    {
+        _rows.Add(rule.Clone());
+        return this;
+    }
+
+    /// <summary>The stored row by id, cloned — the assertion surface for what a write left behind.</summary>
+    internal MuteRule? Row(string id) => _rows.Find(r => r.Id == id)?.Clone();
+
+    internal int Count => _rows.Count;
+
+    internal void Remove(string id) => _rows.RemoveAll(r => r.Id == id);
+
+    public Task<IReadOnlyList<MuteRule>> LoadAllAsync()
+    {
+        LoadAllCalls++;
+        return Task.FromResult<IReadOnlyList<MuteRule>>(
+            _rows.OrderByDescending(r => r.CreatedAtUtc).Select(r => r.Clone()).ToList());
+    }
+
+    public Task InsertAsync(MuteRule rule)
+    {
+        if (_rows.Exists(r => r.Id == rule.Id))
+        {
+            throw new InvalidOperationException($"duplicate mute rule id '{rule.Id}'");
+        }
+
+        _rows.Add(rule.Clone());
+        return Task.CompletedTask;
+    }
+
+    public Task UpdateAsync(MuteRule rule)
+    {
+        UpdateCalls++;
+        var index = _rows.FindIndex(r => r.Id == rule.Id);
+        if (index < 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        var replacement = rule.Clone();
+        replacement.CreatedAtUtc = _rows[index].CreatedAtUtc;
+        _rows[index] = replacement;
+        return Task.CompletedTask;
+    }
+
+    public Task SetEnabledAsync(string ruleId, bool enabled)
+    {
+        SetEnabledCalls++;
+        var row = _rows.Find(r => r.Id == ruleId);
+        if (row is not null)
+        {
+            row.Enabled = enabled;
+        }
+
+        AfterSetEnabled?.Invoke();
+        return Task.CompletedTask;
+    }
+
+    public Task DeleteAsync(string ruleId)
+    {
+        Remove(ruleId);
+        return Task.CompletedTask;
+    }
+
+    public Task DeleteExpiredAsync(IReadOnlyList<string> expiredIds)
+    {
+        foreach (var id in expiredIds)
+        {
+            Remove(id);
+        }
+
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>
+/// set_mute_rule_enabled (#3432): the headless verb for taking a mute rule out of force and putting it back,
+/// over the <see cref="IMuteRuleStore"/> seam the tool's store implements.
+///
+/// <para>The load-bearing claim is that neither direction moves <c>created_at_utc</c>. The Stale Mute Rules
+/// self-alert (#3306) ages a rule from it, so a verb that stamped it would give a disable/re-enable cycle
+/// the same week of invisibility a delete-and-re-create buys — the defect this tool exists to end, at lower
+/// cost and keeping the id, so with nothing changing for a reader to notice.</para>
+///
+/// <para>Every creation-date assertion here is driven from a rule authored
+/// <see cref="PlantedAgeDays"/> days before the test runs, so a reset to "now" is a visibly different value
+/// and not a difference the assertions could miss. The same claim is put to #3306's real evaluator in
+/// <c>DarlingSelfAlertTests.StaleMute_ARuleDisabledAndReEnabledThroughTheMcpVerb_IsStaleOnItsRealAge</c>,
+/// where a reset costs the alert entirely.</para>
+/// </summary>
+public sealed class SetMuteRuleEnabledTests
+{
+    private const string RuleId = "rule-under-test";
+
+    /// <summary>Far past #3306's seven-day bound, so the planted value cannot be confused with a fresh one.</summary>
+    private const int PlantedAgeDays = 90;
+
+    /// <summary>The authored instant, truncated to the microsecond the <c>timestamp</c> column keeps.</summary>
+    private static readonly DateTime Planted = TruncateToMicroseconds(DateTime.UtcNow.AddDays(-PlantedAgeDays));
+
+    private static DateTime TruncateToMicroseconds(DateTime value) =>
+        new(value.Ticks - (value.Ticks % 10), DateTimeKind.Utc);
+
+    private static FakeMuteRuleStore StoreWith(bool enabled, DateTime? expiresAtUtc = null) =>
+        new FakeMuteRuleStore().Seed(new MuteRule
+        {
+            Id = RuleId,
+            Enabled = enabled,
+            CreatedAtUtc = Planted,
+            ExpiresAtUtc = expiresAtUtc,
+            Reason = "fixture reason",
+            MetricName = "High CPU",
+        });
+
+    private static JsonNode Payload(string json) =>
+        JsonNode.Parse(json)!["mute_rule"] ?? throw new InvalidOperationException($"no mute_rule in {json}");
+
+    private static DateTime ReportedCreatedAt(string json) =>
+        DateTime.Parse(
+            (string)Payload(json)["created_at_utc"]!,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.RoundtripKind);
+
+    /* ---------------- the instrument ---------------- */
+
+    [Fact]
+    public async Task TheFixtureStore_DoesNotHandOutTheStoredRow()
+    {
+        /* A subject that flipped a loaded rule in memory and never called the store would pass every
+           assertion below if this leaked a reference. */
+        var store = StoreWith(enabled: true);
+
+        var loaded = (await store.LoadAllAsync()).Single();
+        loaded.Enabled = false;
+        loaded.CreatedAtUtc = DateTime.UtcNow;
+
+        Assert.True(store.Row(RuleId)!.Enabled);
+        Assert.Equal(Planted, store.Row(RuleId)!.CreatedAtUtc);
+    }
+
+    [Fact]
+    public async Task TheFixtureStore_WritesEnabledAlone_AndUpdateSpares_TheCreationDate()
+    {
+        var store = StoreWith(enabled: true);
+
+        await store.SetEnabledAsync(RuleId, false);
+        Assert.False(store.Row(RuleId)!.Enabled);
+        Assert.Equal(Planted, store.Row(RuleId)!.CreatedAtUtc);
+
+        var rebuilt = store.Row(RuleId)!;
+        rebuilt.CreatedAtUtc = DateTime.UtcNow;
+        rebuilt.Reason = "rewritten";
+        await store.UpdateAsync(rebuilt);
+
+        Assert.Equal("rewritten", store.Row(RuleId)!.Reason);
+        Assert.Equal(Planted, store.Row(RuleId)!.CreatedAtUtc);
+    }
+
+    /// <summary>
+    /// The fixture's fidelity is a claim about the shipped SQL, so it is held to it: neither
+    /// <c>config_mute_rules</c> UPDATE in <see cref="PgMuteRuleStore"/> names <c>created_at_utc</c> in its
+    /// SET list. Reading the statements out of the source rather than restating them, because the value of
+    /// this pin is that it fails when the shipped SQL changes.
+    /// </summary>
+    [Fact]
+    public void TheShippedMuteRuleUpdates_NeverSetTheCreationDate()
+    {
+        var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "PgMuteRuleStore.cs");
+
+        Assert.Contains(
+            "UPDATE config_mute_rules SET enabled = $2 WHERE id = $1",
+            source,
+            StringComparison.Ordinal);
+
+        var setLists = System.Text.RegularExpressions.Regex.Matches(
+            source,
+            @"UPDATE config_mute_rules SET(?<body>.*?)WHERE",
+            System.Text.RegularExpressions.RegexOptions.Singleline);
+
+        /* Non-vacuous floor: a regex that matched nothing would assert nothing. Both UPDATEs are here —
+           the full-row one UpdateAsync issues and the narrow flag one SetEnabledAsync issues. */
+        Assert.Equal(2, setLists.Count);
+
+        foreach (System.Text.RegularExpressions.Match match in setLists)
+        {
+            Assert.DoesNotContain("created_at_utc", match.Groups["body"].Value, StringComparison.Ordinal);
+        }
+
+        /* The column IS in the file — in the SELECT and the INSERT — so the assertion above is about where
+           it appears, not about the name being absent. */
+        Assert.Contains("created_at_utc", source, StringComparison.Ordinal);
+    }
+
+    /* ---------------- the verb ---------------- */
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task BlankId_ReturnsInvalid_WithoutReadingOrWriting(string ruleId)
+    {
+        var store = StoreWith(enabled: true);
+
+        Assert.Equal("invalid",
+            DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, ruleId, false)));
+        Assert.Equal(0, store.LoadAllCalls);
+        Assert.Equal(0, store.SetEnabledCalls);
+    }
+
+    [Fact]
+    public async Task AnUnknownId_ReturnsNotFound_AndWritesNothing()
+    {
+        var store = StoreWith(enabled: true);
+
+        Assert.Equal("not_found",
+            DarlingMcpTestData.StatusOf(
+                await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, "no-such-rule", false)));
+        Assert.Equal(0, store.SetEnabledCalls);
+        Assert.True(store.Row(RuleId)!.Enabled);
+    }
+
+    /// <summary>Acceptance 1: the rule stops suppressing and is still there.</summary>
+    [Fact]
+    public async Task Disabling_LeavesTheRuleInTheStore_AndReportsTheStoredRow()
+    {
+        var store = StoreWith(enabled: true);
+
+        var json = await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, RuleId, enabled: false);
+
+        Assert.Equal("updated", DarlingMcpTestData.StatusOf(json));
+        Assert.Equal(1, store.Count);
+        Assert.False(store.Row(RuleId)!.Enabled);
+        Assert.False((bool)Payload(json)["enabled"]!);
+        Assert.Equal(RuleId, (string)Payload(json)["id"]!);
+        /* The scope and the reason survive too — a disabled rule an operator re-enables must still be the
+           rule they wrote, which is the whole difference from a re-create. */
+        Assert.Equal("High CPU", (string)Payload(json)["metric_name"]!);
+        Assert.Equal("fixture reason", (string)Payload(json)["reason"]!);
+        Assert.Equal(1, store.SetEnabledCalls);
+        Assert.Equal(0, store.UpdateCalls);
+    }
+
+    /// <summary>
+    /// Acceptance 2: the planted creation date survives the disable, in the store AND on the wire. The
+    /// second assertion in each pair is what makes a reset visible — a stamped value would be minutes old,
+    /// not <see cref="PlantedAgeDays"/> days.
+    /// </summary>
+    [Fact]
+    public async Task Disabling_PreservesThePlantedCreationDate_InTheStoreAndOnTheWire()
+    {
+        var store = StoreWith(enabled: true);
+
+        var json = await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, RuleId, enabled: false);
+
+        Assert.Equal(Planted, store.Row(RuleId)!.CreatedAtUtc);
+        Assert.True(DateTime.UtcNow - store.Row(RuleId)!.CreatedAtUtc >= TimeSpan.FromDays(PlantedAgeDays - 1));
+
+        Assert.Equal(Planted, ReportedCreatedAt(json));
+        Assert.True(DateTime.UtcNow - ReportedCreatedAt(json) >= TimeSpan.FromDays(PlantedAgeDays - 1));
+    }
+
+    /// <summary>
+    /// The direction that matters most: re-enabling is the one a delete-and-re-create emulation would have
+    /// used to buy another <c>StaleMuteAge</c> of invisibility, and it is the cheaper of the two to reach
+    /// (the id does not change, so nothing downstream breaks to signal it).
+    /// </summary>
+    [Fact]
+    public async Task ReEnabling_PreservesThePlantedCreationDate_Too()
+    {
+        var store = StoreWith(enabled: true);
+
+        Assert.Equal("updated",
+            DarlingMcpTestData.StatusOf(
+                await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, RuleId, enabled: false)));
+
+        var json = await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, RuleId, enabled: true);
+
+        Assert.Equal("updated", DarlingMcpTestData.StatusOf(json));
+        Assert.True(store.Row(RuleId)!.Enabled);
+        Assert.True((bool)Payload(json)["enabled"]!);
+        Assert.Equal(Planted, store.Row(RuleId)!.CreatedAtUtc);
+        Assert.Equal(Planted, ReportedCreatedAt(json));
+        Assert.True(DateTime.UtcNow - ReportedCreatedAt(json) >= TimeSpan.FromDays(PlantedAgeDays - 1));
+        Assert.Equal(2, store.SetEnabledCalls);
+        Assert.Equal(0, store.UpdateCalls);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SettingTheValueTheRuleAlreadyHolds_WritesNothing_AndReportsUnchanged(bool enabled)
+    {
+        var store = StoreWith(enabled);
+
+        var json = await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, RuleId, enabled);
+
+        Assert.Equal("unchanged", DarlingMcpTestData.StatusOf(json));
+        Assert.Equal(0, store.SetEnabledCalls);
+        Assert.Equal(enabled, (bool)Payload(json)["enabled"]!);
+        Assert.Equal(Planted, ReportedCreatedAt(json));
+    }
+
+    /// <summary>
+    /// The reported rule is read back AFTER the write, so a rule deleted in that window has no stored state
+    /// to report. Both facts are named: the flag landed and the rule is gone.
+    /// </summary>
+    [Fact]
+    public async Task ARuleDeletedBetweenTheWriteAndTheReadBack_ReportsNotFound_NamingTheWriteThatLanded()
+    {
+        var store = StoreWith(enabled: true);
+        store.AfterSetEnabled = () => store.Remove(RuleId);
+
+        var json = await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, RuleId, enabled: false);
+
+        Assert.Equal("not_found", DarlingMcpTestData.StatusOf(json));
+        Assert.Equal(1, store.SetEnabledCalls);
+        Assert.Contains("enabled=false", json, StringComparison.Ordinal);
+        Assert.Contains("deleted concurrently", json, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A store fault is reported, not swallowed into a success. <see cref="IMuteRuleStore"/> requires every
+    /// member to throw on failure precisely so this surface can tell the two apart.
+    /// </summary>
+    [Fact]
+    public async Task AStoreFault_IsReportedAsAnError()
+    {
+        await using var dead = NpgsqlDataSource.Create(
+            "Host=127.0.0.1;Port=1;Username=none;Password=none;Database=none;Timeout=1");
+
+        var result = await DarlingMcpAlertTools.SetMuteRuleEnabled(dead, RuleId, false);
+
+        Assert.StartsWith("Error during set_mute_rule_enabled", result, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
 /// Gated (DARLING_TEST_PG) live round-trips for the alert tools. The READ test plants an alert-log row, seeds the
 /// single alert-settings row, and plants a mute rule, then asserts each read surfaces its data. The WRITE test
 /// proves update_alert_settings flips a threshold AND self-bumps config_version (the reload beacon), and that
-/// create_mute_rule → get_mute_rules → delete_mute_rule round-trips. Both connect as the DARLING_TEST_PG owner
-/// (a THROWAWAY dev Postgres) and are own-scoped / restore what they touch, so a shared store is left as it was.
+/// create_mute_rule → get_mute_rules → delete_mute_rule round-trips. A third drives set_mute_rule_enabled both
+/// directions and asserts the row's created_at_utc survives every transition (#3432). All three connect as the
+/// DARLING_TEST_PG owner (a THROWAWAY dev Postgres) and are own-scoped / restore what they touch, so a shared
+/// store is left as it was.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class DarlingMcpAlertToolsLivePostgresTests
@@ -1057,9 +1428,103 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
         }
     }
 
-    private static async Task<object?> ScalarAsync(NpgsqlConnection connection, CancellationToken ct, string sql)
+    /// <summary>How far back the round-trip below authors its rule. Days rather than minutes so a reset to
+    /// "now" is a visibly different value rather than a rounding difference.</summary>
+    private const int PlantedAgeDays = 90;
+
+    /// <summary>
+    /// #3432 against the real store: <c>set_mute_rule_enabled</c> moves the flag and nothing else, in both
+    /// directions, on the SHIPPED SQL rather than on a fixture of it.
+    ///
+    /// <para>This is the arm no in-memory pin reaches. Those hold the tool's decisions against an
+    /// <c>IMuteRuleStore</c> fixture and hold <see cref="PgMuteRuleStore"/>'s statements as TEXT; only a real
+    /// round trip fails when the statement itself starts writing <c>created_at_utc</c>, which is the column
+    /// the Stale Mute Rules self-alert (#3306) ages a rule from.</para>
+    ///
+    /// <para>Own-scoped by a GUID reason tag, so a shared store is left as it was.</para>
+    /// </summary>
+    [Fact]
+    public async Task SetMuteRuleEnabled_MovesOnlyTheFlag_BothDirections_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live mute-enable round-trip.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var muteTag = "mcp_mute_enable_e2e_" + Guid.NewGuid().ToString("N");
+        var ruleId = muteTag;
+        /* Truncated to the microsecond the `timestamp` column keeps, so the read back compares equal for the
+           reason it is being asserted rather than surviving a tolerance. */
+        var authored = DateTime.UtcNow.AddDays(-PlantedAgeDays);
+        var planted = DarlingMcpTestData.Naive(new DateTime(authored.Ticks - (authored.Ticks % 10), DateTimeKind.Utc));
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO config_mute_rules (id, enabled, created_at_utc, expires_at_utc, reason, server_name, metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+                ruleId, true, planted, null, muteTag, "e2e-mute-enable-server", "High CPU", null, null, null, null);
+
+            /* Off, back on, and off again: the second disable proves the round trip is repeatable rather than
+               a first transition that happens to work. */
+            foreach (var target in new[] { false, true, false })
+            {
+                var json = await DarlingMcpAlertTools.SetMuteRuleEnabled(postgres, ruleId, target);
+                Assert.Equal("updated", DarlingMcpTestData.StatusOf(json));
+
+                using (var doc = JsonDocument.Parse(json))
+                {
+                    var rule = doc.RootElement.GetProperty("mute_rule");
+                    Assert.Equal(target, rule.GetProperty("enabled").GetBoolean());
+                    Assert.Equal(planted.Ticks, rule.GetProperty("created_at_utc").GetDateTime().Ticks);
+                    /* The scope and the reason are the rule's identity to an operator, and a re-create would
+                       have had to restate them. */
+                    Assert.Equal("High CPU", rule.GetProperty("metric_name").GetString());
+                    Assert.Equal(muteTag, rule.GetProperty("reason").GetString());
+                }
+
+                /* And the ROW, read outside the tool: what the wire reported is what is stored. */
+                Assert.Equal(target, Convert.ToBoolean(await ScalarAsync(connection, ct, "SELECT enabled FROM config_mute_rules WHERE id = $1", ruleId)));
+                Assert.Equal(planted.Ticks, ((DateTime)(await ScalarAsync(connection, ct, "SELECT created_at_utc FROM config_mute_rules WHERE id = $1", ruleId))!).Ticks);
+
+                /* Repeating the same value writes nothing and says so. */
+                Assert.Equal("unchanged", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.SetMuteRuleEnabled(postgres, ruleId, target)));
+                Assert.Equal(planted.Ticks, ((DateTime)(await ScalarAsync(connection, ct, "SELECT created_at_utc FROM config_mute_rules WHERE id = $1", ruleId))!).Ticks);
+            }
+
+            /* One row throughout — the id never changed, so nothing citing it broke. */
+            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection, ct, "SELECT COUNT(*) FROM config_mute_rules WHERE id = $1", ruleId)));
+
+            Assert.Equal("not_found", DarlingMcpTestData.StatusOf(
+                await DarlingMcpAlertTools.SetMuteRuleEnabled(postgres, ruleId + "-absent", true)));
+
+            /* delete_mute_rule still works on a rule this tool has been toggling. */
+            Assert.Equal("deleted", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.DeleteMuteRule(postgres, ruleId)));
+            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(connection, ct, "SELECT COUNT(*) FROM config_mute_rules WHERE id = $1", ruleId)));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM config_mute_rules WHERE reason = $1", muteTag));
+        }
+    }
+
+    private static async Task<object?> ScalarAsync(
+        NpgsqlConnection connection, CancellationToken ct, string sql, params object?[] args)
     {
         using var command = new NpgsqlCommand(sql, connection);
+        foreach (var arg in args)
+        {
+            command.Parameters.Add(new NpgsqlParameter { Value = arg ?? (object)DBNull.Value });
+        }
+
         return await command.ExecuteScalarAsync(ct);
     }
 
