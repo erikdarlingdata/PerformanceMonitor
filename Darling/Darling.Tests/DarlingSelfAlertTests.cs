@@ -4031,14 +4031,23 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
     {
         const double factor = 2.0;
         const double mean = 20.0;
+        var p95s = new[] { 0.0, 0.1, 19.999, mean, 20.001, 50.0, 1_000_000.0 };
 
-        foreach (var p95 in new[] { 0.0, 0.1, 19.999, mean, 20.001, 50.0, 1_000_000.0 })
+        /* The loop bound is asserted rather than assumed: a grid mutated to zero rows would leave every
+           assertion below unreached and this test would pass having checked nothing. */
+        Assert.Equal(7, p95s.Length);
+        var checked_ = 0;
+
+        foreach (var p95 in p95s)
         {
             var r = Regression(baselineMsPerRun: mean, baselineP95MsPerRun: p95);
             Assert.True(r.ThresholdMsPerRun(factor) >= mean * factor,
                 $"p95 {p95} produced a bound below the mean bound");
             Assert.Equal(System.Math.Max(mean, p95) * factor, r.ThresholdMsPerRun(factor), 6);
+            checked_++;
         }
+
+        Assert.Equal(p95s.Length, checked_);
 
         /* And the degenerate case is exactly the old bound, not merely "not below" it. */
         Assert.Equal(mean * factor,
