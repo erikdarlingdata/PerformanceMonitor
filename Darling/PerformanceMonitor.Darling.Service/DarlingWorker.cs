@@ -7303,6 +7303,32 @@ LIMIT 1";
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
+        catch (PgLoggingCollectorOffException ex)
+        {
+            /* #3410's third state: logging_collector is off, so the target writes its log to stderr and
+               there is no file for the pg_read_file route to read. Not 42501's missing grant and not
+               58P01's missing file — neither a grant nor a path change can produce a file the server is
+               not writing — so it takes the timezone arm's disposition for the timezone arm's reasons:
+               PERMISSIONS, because it is a setting on the monitored server that an operator can change and
+               CollectorRuntimePrecondition's arm already frames it as satisfiable and re-derived every
+               cycle; not ERROR, because nothing is broken on the monitoring side and a deliberate logging
+               destination does not change because we shouted about it once a cycle; not a SUCCESS row with
+               zero rows, which would read as a server with no deadlocks and nothing slow. The message is
+               the exception's own — it names the setting and the restart — which is the same
+               not-collected-with-the-reason answer the store's own log read gives when its directory
+               listing comes back empty.
+
+               Unlike the timezone arm this one CAN name its slot: only the pg_read_file route returns the
+               marker row — the RDS transport runs no SQL and its platform keeps the logging collector on —
+               so the elapsed time is a target query and belongs in sqlMs. */
+            _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: logging_collector is off, so the target writes no server log files",
+                server.Config.DisplayName, collectorName);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
+        }
         catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
         {
             /* The 1-second LOCK_TIMEOUT guard doing its job (#1805): the snapshot sweep stepped aside
