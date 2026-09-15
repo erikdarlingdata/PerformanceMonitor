@@ -980,12 +980,28 @@ public partial class ViewerServerTab
 
            BOTH at PgGridRowLimit rather than the second at its reserve, because the reserve is a FLOOR
            under the answers and not a ceiling - a server whose answerless population is small still shows
-           the same long ranking it always did, and that only works if the second read fetched it. */
-        var leadingPage = await _dataService.GetPgIndexBloatAsync(
+           the same long ranking it always did, and that only works if the second read fetched it.
+
+           CONCURRENT, under a DECLARED fan-out width, because the scope is what prices the reads rather
+           than what permits them: ViewerCommandDeadlines hands each command a deadline computed from the
+           width the context declares, so two reads issued together without a scope are priced as if each
+           were alone and share a deadline neither can meet under the other's contention. LoadPgStorageAsync
+           releases its own width before calling this, so the enclosing count here is one and Of(2) is the
+           real concurrency. */
+        using var readFanOut = ViewerReadFanOut.Of(2);
+
+        var leadingPageTask = _dataService.GetPgIndexBloatAsync(
             _server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
-        var answeredPage = await _dataService.GetPgIndexBloatAsync(
+        var answeredPageTask = _dataService.GetPgIndexBloatAsync(
             _server.ServerId, startUtc, endUtc, PgGridRowLimit, answeredOnly: true);
+
+        await Task.WhenAll(leadingPageTask, answeredPageTask);
+
+        /* Released at the JOIN, not at the closing brace: the coverage census below does not contend with
+           two reads that have already finished, and leaving the width declared would price it as if it
+           did. Same reason the caller releases before reaching this method. */
+        readFanOut.Release();
 
         /* The composition, its figures and the sentence stating them, as ONE value - so this panel counts
            nothing itself. Whatever the grid shows changes what the row count MEANS, and that count feeds
@@ -993,8 +1009,8 @@ public partial class ViewerServerTab
            than from the composed page is how a note comes to describe a population the grid is not
            showing, which is the defect this panel is being fixed for arriving one layer in. */
         var page = PgIndexBloatGridBudget.Compose(
-            leadingPage,
-            answeredPage,
+            leadingPageTask.Result,
+            answeredPageTask.Result,
             r => r.SkippedReason is not null,
             r => r.EstimatedReclaimableBytes ?? 0L,
             PgGridRowLimit);

@@ -409,10 +409,27 @@ public sealed class PgIndexBloatGridReachTests
         /* The census's "rows returned" figure is the composed count, which is what is on screen. */
         Assert.Contains("_server.ServerId, endUtc, rows.Count", body, StringComparison.Ordinal);
 
-        /* Each read is named exactly twice - where it is assigned, and where it is handed to Compose. A
-           third mention is a figure being derived from one read instead of from the grid. */
-        Assert.Equal(2, Occurrences(body, "leadingPage"));
-        Assert.Equal(2, Occurrences(body, "answeredPage"));
+        /* Each read is named exactly three times - assigned, joined, and handed to Compose. A fourth
+           mention is a figure being derived from one read instead of from the grid. */
+        Assert.Equal(3, Occurrences(body, "leadingPageTask"));
+        Assert.Equal(3, Occurrences(body, "answeredPageTask"));
+
+        /* CONCURRENT UNDER A DECLARED WIDTH, and the declaration is the load-bearing half. The two reads
+           are independent, so issuing them in sequence costs this panel two full round trips where it
+           used to pay one - but issuing them together WITHOUT a scope is worse than either, because
+           ViewerCommandDeadlines prices each command off the width the context declares and would hand
+           two contending reads a deadline computed for one. Released at the join so the census read below
+           is not priced against reads that have finished. */
+        Assert.Contains("ViewerReadFanOut.Of(2)", body, StringComparison.Ordinal);
+        Assert.Contains("Task.WhenAll(leadingPageTask, answeredPageTask)", body, StringComparison.Ordinal);
+        Assert.Contains("readFanOut.Release()", body, StringComparison.Ordinal);
+
+        var join = body.IndexOf("Task.WhenAll", StringComparison.Ordinal);
+        var release = body.IndexOf("readFanOut.Release()", StringComparison.Ordinal);
+        var census = body.IndexOf("GetPgIndexBloatCoverageAsync", StringComparison.Ordinal);
+
+        Assert.True(join < release, "the width is released before the reads it describes are joined");
+        Assert.True(release < census, "the census read is still priced against two finished reads");
     }
 
     /// <summary>
