@@ -168,6 +168,12 @@ ORDER BY day";
     /// upper mode's excess large. The measured firing was 17,548 ms/run against a 6,477 ms mean on a
     /// once-daily collector whose own worst run that week was 17,935 ms.</para>
     ///
+    /// <para>The spread is structural rather than incidental on the daily-cadence collectors, which is why
+    /// no choice of factor fixes this. A once-daily collector contributes ONE run per day, so a 14-day
+    /// baseline is the mean of about fourteen single observations and the quantity tested against it is one
+    /// more single observation from the same distribution — there is no within-day averaging to damp either
+    /// side. Widening the window adds observations to the mean without narrowing the thing being tested.</para>
+    ///
     /// <para><b>The mean conjunct is retained even though it is entailed at this window size.</b> DISC's
     /// 1-based rank is <c>ceil(0.95 * N)</c>, which equals N for every N up to 19, so on a baseline of at
     /// most 13 days the p95 IS the maximum of the daily per-run costs; and <c>baseline_ms_per_run</c> is the
