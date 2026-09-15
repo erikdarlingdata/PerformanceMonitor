@@ -81,8 +81,8 @@ public sealed class AlertDeliveryChannelTests
     /// onto <c>tray</c> or <c>muted</c>, or an error onto a state-carrying channel, which
     /// <c>Darling.Tests.AlertDeliveryChannelTests</c>'s domain-wide pins forbid. None is reachable, so
     /// excluding them from the parity comparison costs nothing real, and
-    /// <see cref="EveryDisagreement_IsAnUnreachableCombination"/> holds the exclusion to exactly this
-    /// predicate.</para>
+    /// <see cref="EveryDisagreement_IsUnreachableOrTheDeliberateChange"/> holds the exclusion to exactly
+    /// this predicate plus the one deliberate change, <see cref="WebhookFailureNowNamed"/>.</para>
     /// </summary>
     private static bool Unreachable(EmailFanoutResult result, bool muted)
         => (result.SendError is not null) != (result.EmailOutcome == AlertChannelOutcome.Failed)
@@ -117,10 +117,12 @@ public sealed class AlertDeliveryChannelTests
         => result.WebhookOutcome == AlertChannelOutcome.Failed && !EmailInvolved(result);
 
     /// <summary>
-    /// Over every send outcome the core can actually produce, Lite's shared derivation agrees with the
-    /// hand-written one it replaced — so no Lite row's <c>alert_sent</c> or <c>notification_type</c> changes
-    /// value. <see cref="EveryDisagreement_IsAnUnreachableCombination"/> pins that the exclusion is exactly
-    /// <see cref="Unreachable"/> and nothing more, so this cannot be weakened by widening it.
+    /// Over every send outcome the core can actually produce, outside the one deliberate change, Lite's
+    /// shared derivation agrees with the hand-written one it replaced — so no other Lite row's
+    /// <c>alert_sent</c> or <c>notification_type</c> changes value.
+    /// <see cref="EveryDisagreement_IsUnreachableOrTheDeliberateChange"/> pins that the exclusion is
+    /// exactly <see cref="Unreachable"/> plus <see cref="WebhookFailureNowNamed"/> and nothing more, so
+    /// this cannot be weakened by widening either.
     /// </summary>
     [Fact]
     public void LiteDispositions_AreUnchangedFromTheHandWrittenDerivation()
