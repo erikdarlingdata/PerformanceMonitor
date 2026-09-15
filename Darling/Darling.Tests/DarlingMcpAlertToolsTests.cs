@@ -1134,8 +1134,10 @@ public sealed class SetMuteRuleEnabledTests
 /// Gated (DARLING_TEST_PG) live round-trips for the alert tools. The READ test plants an alert-log row, seeds the
 /// single alert-settings row, and plants a mute rule, then asserts each read surfaces its data. The WRITE test
 /// proves update_alert_settings flips a threshold AND self-bumps config_version (the reload beacon), and that
-/// create_mute_rule → get_mute_rules → delete_mute_rule round-trips. Both connect as the DARLING_TEST_PG owner
-/// (a THROWAWAY dev Postgres) and are own-scoped / restore what they touch, so a shared store is left as it was.
+/// create_mute_rule → get_mute_rules → delete_mute_rule round-trips. A third drives set_mute_rule_enabled both
+/// directions and asserts the row's created_at_utc survives every transition (#3432). All three connect as the
+/// DARLING_TEST_PG owner (a THROWAWAY dev Postgres) and are own-scoped / restore what they touch, so a shared
+/// store is left as it was.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class DarlingMcpAlertToolsLivePostgresTests
@@ -1337,9 +1339,103 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
         }
     }
 
-    private static async Task<object?> ScalarAsync(NpgsqlConnection connection, CancellationToken ct, string sql)
+    /// <summary>How far back the round-trip below authors its rule. Days rather than minutes so a reset to
+    /// "now" is a visibly different value rather than a rounding difference.</summary>
+    private const int PlantedAgeDays = 90;
+
+    /// <summary>
+    /// #3432 against the real store: <c>set_mute_rule_enabled</c> moves the flag and nothing else, in both
+    /// directions, on the SHIPPED SQL rather than on a fixture of it.
+    ///
+    /// <para>This is the arm no in-memory pin reaches. Those hold the tool's decisions against an
+    /// <c>IMuteRuleStore</c> fixture and hold <see cref="PgMuteRuleStore"/>'s statements as TEXT; only a real
+    /// round trip fails when the statement itself starts writing <c>created_at_utc</c>, which is the column
+    /// the Stale Mute Rules self-alert (#3306) ages a rule from.</para>
+    ///
+    /// <para>Own-scoped by a GUID reason tag, so a shared store is left as it was.</para>
+    /// </summary>
+    [Fact]
+    public async Task SetMuteRuleEnabled_MovesOnlyTheFlag_BothDirections_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live mute-enable round-trip.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var muteTag = "mcp_mute_enable_e2e_" + Guid.NewGuid().ToString("N");
+        var ruleId = muteTag;
+        /* Truncated to the microsecond the `timestamp` column keeps, so the read back compares equal for the
+           reason it is being asserted rather than surviving a tolerance. */
+        var authored = DateTime.UtcNow.AddDays(-PlantedAgeDays);
+        var planted = DarlingMcpTestData.Naive(new DateTime(authored.Ticks - (authored.Ticks % 10), DateTimeKind.Utc));
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO config_mute_rules (id, enabled, created_at_utc, expires_at_utc, reason, server_name, metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+                ruleId, true, planted, null, muteTag, "e2e-mute-enable-server", "High CPU", null, null, null, null);
+
+            /* Off, back on, and off again: the second disable proves the round trip is repeatable rather than
+               a first transition that happens to work. */
+            foreach (var target in new[] { false, true, false })
+            {
+                var json = await DarlingMcpAlertTools.SetMuteRuleEnabled(postgres, ruleId, target);
+                Assert.Equal("updated", DarlingMcpTestData.StatusOf(json));
+
+                using (var doc = JsonDocument.Parse(json))
+                {
+                    var rule = doc.RootElement.GetProperty("mute_rule");
+                    Assert.Equal(target, rule.GetProperty("enabled").GetBoolean());
+                    Assert.Equal(planted.Ticks, rule.GetProperty("created_at_utc").GetDateTime().Ticks);
+                    /* The scope and the reason are the rule's identity to an operator, and a re-create would
+                       have had to restate them. */
+                    Assert.Equal("High CPU", rule.GetProperty("metric_name").GetString());
+                    Assert.Equal(muteTag, rule.GetProperty("reason").GetString());
+                }
+
+                /* And the ROW, read outside the tool: what the wire reported is what is stored. */
+                Assert.Equal(target, Convert.ToBoolean(await ScalarAsync(connection, ct, "SELECT enabled FROM config_mute_rules WHERE id = $1", ruleId)));
+                Assert.Equal(planted.Ticks, ((DateTime)(await ScalarAsync(connection, ct, "SELECT created_at_utc FROM config_mute_rules WHERE id = $1", ruleId))!).Ticks);
+
+                /* Repeating the same value writes nothing and says so. */
+                Assert.Equal("unchanged", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.SetMuteRuleEnabled(postgres, ruleId, target)));
+                Assert.Equal(planted.Ticks, ((DateTime)(await ScalarAsync(connection, ct, "SELECT created_at_utc FROM config_mute_rules WHERE id = $1", ruleId))!).Ticks);
+            }
+
+            /* One row throughout — the id never changed, so nothing citing it broke. */
+            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection, ct, "SELECT COUNT(*) FROM config_mute_rules WHERE id = $1", ruleId)));
+
+            Assert.Equal("not_found", DarlingMcpTestData.StatusOf(
+                await DarlingMcpAlertTools.SetMuteRuleEnabled(postgres, ruleId + "-absent", true)));
+
+            /* delete_mute_rule still works on a rule this tool has been toggling. */
+            Assert.Equal("deleted", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.DeleteMuteRule(postgres, ruleId)));
+            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(connection, ct, "SELECT COUNT(*) FROM config_mute_rules WHERE id = $1", ruleId)));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM config_mute_rules WHERE reason = $1", muteTag));
+        }
+    }
+
+    private static async Task<object?> ScalarAsync(
+        NpgsqlConnection connection, CancellationToken ct, string sql, params object?[] args)
     {
         using var command = new NpgsqlCommand(sql, connection);
+        foreach (var arg in args)
+        {
+            command.Parameters.Add(new NpgsqlParameter { Value = arg ?? (object)DBNull.Value });
+        }
+
         return await command.ExecuteScalarAsync(ct);
     }
 
