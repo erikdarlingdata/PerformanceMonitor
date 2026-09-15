@@ -329,28 +329,43 @@ ORDER BY (sc.latest_ms_per_run - sc.baseline_ms_per_run) DESC";
     }
 
     /// <summary>
-    /// Every (server, collector) pair whose per-run cost MOVED against its own baseline, in either
-    /// direction, ranked by the collection time the move adds or removes per day (#3443). The digest read:
-    /// the inclusive twin of <see cref="RegressionSql"/>, which is the paging read.
+    /// Every (server, collector) pair whose per-run cost moved MATERIALLY against its own baseline, in
+    /// either direction, ranked by the collection time the move adds or removes per day (#3443, floored by
+    /// #3462). The digest read: the inclusive twin of <see cref="RegressionSql"/>, which is the paging read
+    /// — inclusive in DIRECTION and in carrying no ratio or dispersion gate, not in magnitude.
     ///
     /// <para><b>Why a second read rather than a looser factor on the first.</b> They answer different
     /// questions and must not share a predicate. The regression read has to decide, and every gate it
     /// carries — the #3316 added-cost floor, the #3440 dispersion bound — exists to make that decision
-    /// defensible. This read decides nothing: it ranks, and the reader judges. So it carries NO factor, NO
-    /// materiality floor and NO dispersion bound, and a pair appears in it whether its cost rose or fell.
-    /// A collector that got CHEAPER is a movement worth a line and is structurally invisible to the
-    /// regression read, which fires only on rises — the shipped plan-render cadence gate (#2915) took
-    /// <c>procedure_stats</c> from 1,150 to 456 ms per run on one fleet and nothing in this series reported
-    /// it.</para>
+    /// defensible. This read ranks instead of deciding, so it carries NO factor and NO dispersion bound,
+    /// and a pair appears in it whether its cost rose or fell. A collector that got CHEAPER is a movement
+    /// worth a line and is structurally invisible to the regression read, which fires only on rises — the
+    /// shipped plan-render cadence gate (#2915) took <c>procedure_stats</c> from 1,150 to 456 ms per run on
+    /// one fleet and nothing in this series reported it.</para>
     ///
-    /// <para><b>The only bound is presentation, not eligibility.</b> <c>$2</c> caps the rows RETURNED, and
-    /// <c>eligible_pairs</c> carries how many the ranking chose from, so a digest can state its own
-    /// denominator rather than implying it showed everything. Ranking by
-    /// <c>abs((latest_ms_per_run - baseline_ms_per_run) * latest_runs)</c> — the same expression
-    /// <see cref="CostMover.AddedMsPerDay"/> derives, so the order and the printed figure cannot disagree —
-    /// means a stable heavy collector sorts LOW (its delta is near zero) while a cheap collector that moved
-    /// on high volume sorts high. That is what makes a threshold unnecessary: the quantity that would have
-    /// been thresholded is the sort key.</para>
+    /// <para><b>It DOES share the paging read's materiality floor (#3462), applied to the magnitude of the
+    /// move in either direction.</b> This read shipped with no floor at all, on the argument that the
+    /// ranking made one unnecessary — but the row cap is a presentation bound, not an eligibility one, so
+    /// on a fleet with fewer material movers than the cap the remainder of the list filled with rows worth
+    /// a few hundred milliseconds a day. The firing that produced #3462 showed why that is not harmless: a
+    /// 5.5x regression worth 8.7 s/day next to a genuine 377 s/day one is the same noise in a quieter
+    /// channel, and the operator's reaction to it — "it's a few hundred ms. what's the point?" — applies
+    /// to a digest line as much as to a page. So <c>$2</c> is the SAME floor the regression read gates on,
+    /// taken on <c>abs(...)</c> because a collector that got cheaper by an immaterial amount is equally not
+    /// worth a line, and evaluated here in the read rather than at rendering so anything downstream of the
+    /// metric inherits it. The ratio factor and the dispersion bound stay OUT: those exist to make a
+    /// decision defensible, and this read still makes none — the baseline's own p95 and worst day are
+    /// carried on every line for the reader to judge the ratio with.</para>
+    ///
+    /// <para><b>The row cap remains presentation, and the denominator states what survived the floor.</b>
+    /// <c>$3</c> caps the rows RETURNED, and <c>eligible_pairs</c> carries how many MATERIAL movers the
+    /// ranking chose from, so a digest can state its own denominator rather than implying it showed
+    /// everything. Ranking by <c>abs((latest_ms_per_run - baseline_ms_per_run) * latest_runs)</c> — the
+    /// same expression <see cref="CostMover.AddedMsPerDay"/> derives and the same one the floor gates on,
+    /// so the order, the gate and the printed figure cannot disagree — means a stable heavy collector
+    /// sorts LOW (its delta is near zero) while a cheap collector that moved on high volume sorts high.
+    /// That is what makes a RATIO threshold unnecessary here; it is not what bounds the immaterial tail,
+    /// which is the floor's job.</para>
     ///
     /// <para><b>The dispersion figures are carried, not gated on.</b> <c>baseline_p95_ms_per_run</c> and
     /// <c>baseline_worst_day_ms_per_run</c> are over the prior days' per-run means — the same population and
@@ -360,9 +375,10 @@ ORDER BY (sc.latest_ms_per_run - sc.baseline_ms_per_run) DESC";
     /// product to decide for them whether today's 17,548 is alarming, which is the whole argument for
     /// putting this in a report.</para>
     ///
-    /// <para><c>baseline_days &gt;= 3</c> is retained from the regression read and is the one eligibility
-    /// rule here: below three prior days there is no baseline to have moved against, so the ratio would be
-    /// an artifact rather than an inclusive reading. $1 = baseline window start (naive UTC), $2 = row cap.</para>
+    /// <para><c>baseline_days &gt;= 3</c> is retained from the regression read: below three prior days
+    /// there is no baseline to have moved against, so the ratio would be an artifact rather than an
+    /// inclusive reading. $1 = baseline window start (naive UTC), $2 = minimum absolute added ms per day
+    /// (#3462, the paging read's own floor), $3 = row cap.</para>
     /// </summary>
     public const string MoverSql = @"
 WITH daily AS
@@ -414,9 +430,10 @@ SELECT e.server_id, COALESCE(s.display_name, s.server_name) AS server_name, e.co
        count(*) OVER () AS eligible_pairs
 FROM eligible AS e
 JOIN collect.servers AS s ON s.server_id = e.server_id
+WHERE abs((e.latest_ms_per_run - e.baseline_ms_per_run) * e.latest_runs) >= $2
 ORDER BY abs((e.latest_ms_per_run - e.baseline_ms_per_run) * e.latest_runs) DESC,
          e.server_id, e.collector_name
-LIMIT $2";
+LIMIT $3";
 
     /// <summary>One line of the collector-cost digest (#3443): a (server, collector) pair whose per-run cost
     /// moved against its own baseline, with everything a reader needs to judge the move without the product
@@ -442,9 +459,9 @@ LIMIT $2";
     {
         /// <summary>The per-run move multiplied by the volume it is paid on, in ms per day — what this
         /// movement is WORTH. Signed: negative is a collector that got cheaper. Derived rather than carried
-        /// for <see cref="CostRegression.AddedMsPerDay"/>'s reason, and <see cref="MoverSql"/> ranks on the
-        /// absolute value of this same expression, so the printed figure and the row's position cannot
-        /// disagree.</summary>
+        /// for <see cref="CostRegression.AddedMsPerDay"/>'s reason, and <see cref="MoverSql"/> both ranks on
+        /// and floors at (#3462) the absolute value of this same expression, so the printed figure, the
+        /// row's position and its eligibility cannot disagree.</summary>
         public double AddedMsPerDay => (LatestMsPerRun - BaselineMsPerRun) * LatestRuns;
 
         /// <summary>Latest per-run cost as a multiple of the run-weighted baseline. 0 when the baseline is
@@ -453,13 +470,14 @@ LIMIT $2";
     }
 
     public static async Task<List<CostMover>> GetCostMoversAsync(
-        NpgsqlDataSource postgres, DateTime baselineSinceUtc, int maxRows,
+        NpgsqlDataSource postgres, DateTime baselineSinceUtc, long addedMsFloor, int maxRows,
         CancellationToken cancellationToken = default)
     {
         var rows = new List<CostMover>();
         await using var command = postgres.CreateCommand(MoverSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(baselineSinceUtc);
+        command.Parameters.AddWithValue(addedMsFloor);
         command.Parameters.AddWithValue(maxRows);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

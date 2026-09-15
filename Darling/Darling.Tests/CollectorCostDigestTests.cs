@@ -304,10 +304,14 @@ public class CollectorCostDigestTests
             logger: null, utcNow: () => Now);
     }
 
+    /* Two runs rather than the measured firing's one (#3462): at one run the move is worth 11.1 s/day,
+       under the 15 s/day floor the shipped read now gates on, and a lifecycle fixture should be a row the
+       read could actually return. At two it is worth 22.1 s/day and everything else stays the measured
+       #3440 figures. */
     private static readonly DarlingCollectorCostReader.CostMover[] OneMover =
     {
         Mover("query_store", "pm-server-1", latestMsPerRun: 17_548.0, baselineMsPerRun: 6_477.0,
-            latestRuns: 1, p95: 17_935.0, worstDay: 17_935.0, worstRunMs: 17_548, eligiblePairs: 177),
+            latestRuns: 2, p95: 17_935.0, worstDay: 17_935.0, worstRunMs: 17_548, eligiblePairs: 177),
     };
 
     private static readonly DarlingCollectorCostReader.CollectorCostSummaryRow[] OneCensusRow =
@@ -468,15 +472,19 @@ public class CollectorCostDigestTests
     {
         /* Pre-ranked by |s/day|, the order MoverSql's ORDER BY delivers: the renderer trusts its reader
            and does not sort, so identity (4) below is an assertion about the fixture's realism, not about
-           a sort the renderer performs. */
+           a sort the renderer performs. Realism also means every row clears #3462's 15 s/day floor — the
+           shipped read no longer returns a row worth less — so the small-figures line is a cheap collector
+           whose rise is material on VOLUME (the #3316 shape a per-run minimum would have wrongly excluded:
+           3.0 -> 20.0 ms/run across 1,154 runs, the shared cadence's runs-per-day, is 19.6 s/day), and the
+           1-run day became a 2-run day (11.1 s/day at one run sits under the floor). */
         var movers = new[]
         {
             Mover("procedure_stats", "pm-server-2", 456.2, 1_150.6, latestRuns: 44_002,
                 p95: 1_175.9, worstDay: 1_175.9, worstRunMs: 81_854, eligiblePairs: 177),
-            Mover("query_store", "pm-server-1", 17_548.0, 6_477.0, latestRuns: 1,
+            Mover("query_store", "pm-server-1", 17_548.0, 6_477.0, latestRuns: 2,
                 p95: 17_935.0, worstDay: 17_935.0, worstRunMs: 17_548, eligiblePairs: 177),
-            Mover("latch_stats", "pm-server-3", 6.1, 3.0, latestRuns: 50,
-                p95: 3.2, worstDay: 3.4, worstRunMs: 9, eligiblePairs: 177),
+            Mover("latch_stats", "pm-server-3", 20.0, 3.0, latestRuns: 1_154,
+                p95: 3.2, worstDay: 3.4, worstRunMs: 46, eligiblePairs: 177),
         };
 
         var detail = await RenderAsync(movers, OneCensusRow);
@@ -673,21 +681,33 @@ public class CollectorCostDigestTests
     /* ---------------- the shipped query's own shape ---------------- */
 
     /// <summary>
-    /// The digest read is INCLUSIVE by construction, and the construction is what this asserts: it takes two
-    /// parameters — the window and the row cap — and no third or fourth, where the paging read takes a
-    /// materiality floor and a factor as well. A looser factor on the paging predicate would have been the
-    /// tempting shortcut and is the wrong shape: that predicate has to DECIDE, and every gate it carries
-    /// exists to make the decision defensible, while this read decides nothing and ranks instead.
+    /// The digest read's shape after #3462: a window, the materiality floor, and a row cap — and NOTHING
+    /// else, where the paging read also takes a ratio factor. #3448 shipped this read with two parameters
+    /// and load-bearing prose that the ranking made a floor unnecessary; #3462 narrowed that deliberately,
+    /// because the row cap is a presentation bound and on a quiet fleet the list filled its remainder with
+    /// rows worth a few hundred milliseconds a day — the same noise the paging floor exists to stop, in a
+    /// quieter channel. What this read still does NOT carry is the part that decides: no ratio factor and
+    /// no dispersion bound, because it ranks and the reader judges — and the floor it gained is the SAME
+    /// expression the ranking sorts on and <c>CostMover.AddedMsPerDay</c> derives, taken on abs() so a
+    /// material improvement still gets its line, which is why gaining it does not change what kind of read
+    /// this is.
     /// </summary>
     [Fact]
-    public void TheDigestRead_TakesAWindowAndARowCapAndNoThresholds()
+    public void TheDigestRead_TakesTheSharedMaterialityFloor_ButNoFactorAndNoDispersionBound()
     {
         var sql = DarlingCollectorCostReader.MoverSql;
 
         Assert.Contains("$1", sql, StringComparison.Ordinal);
         Assert.Contains("$2", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("$3", sql, StringComparison.Ordinal);
+        Assert.Contains("$3", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("$4", sql, StringComparison.Ordinal);
+
+        /* The floor gates the same expression the ranking sorts on, on the move's MAGNITUDE — asserted as
+           the exact conjunct so a rewrite that floored only rises (dropping the got-cheaper half) or gated
+           a different quantity than it prints goes red here. */
+        Assert.Contains(
+            "WHERE abs((e.latest_ms_per_run - e.baseline_ms_per_run) * e.latest_runs) >= $2",
+            sql, StringComparison.Ordinal);
 
         /* The ranking is the absolute added cost per day — the same expression CostMover.AddedMsPerDay
            derives, so the printed figure and the row's position cannot disagree. */

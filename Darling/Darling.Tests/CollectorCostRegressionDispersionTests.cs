@@ -34,9 +34,12 @@ namespace Darling.Tests;
 ///
 /// <para><b>#3316's materiality floor cannot screen these, which is why the fix is a second bound and not a
 /// retune of the first.</b> The expense that makes a collector bimodal also makes its upper mode's excess
-/// large: the measured <c>query_store</c> spread adds 16,534 ms on one p95 run, 3.3x the 5,000 ms floor. This
-/// fixture therefore runs at the PRODUCTION floor rather than at zero, so an exclusion here is attributable
-/// to dispersion and to nothing else.</para>
+/// large: the measured <c>query_store</c> spread adds 16,534 ms on one p95 run, 3.3x the 5,000 ms floor
+/// #3316 shipped (and still past the 15,000 ms one #3462 recalibrated it to). This fixture runs at that
+/// ORIGINAL floor, deliberately and explicitly rather than at the production constant: the floor only needs
+/// to be nonzero and cleared by every fixture for an exclusion here to be attributable to dispersion and to
+/// nothing else, and the fixtures' 10,500 ms added cost sits UNDER the #3462 production value — passing
+/// that would turn this into a materiality test and prove nothing about the p95 bound.</para>
 ///
 /// <para><b>Why this has to be a live-Postgres test.</b> Same reason as
 /// <see cref="CollectorCostRegressionPerRunTests"/> and <see cref="CollectorCostRegressionMaterialityTests"/>:
@@ -87,9 +90,11 @@ public sealed class CollectorCostRegressionDispersionTests
        percentile_cont gives 18,850 (bound 37,700). The latest day of 40,000 falls between them. */
     private const string InterpolationWouldReport = "interpolation_would_report_3440";
 
-    /* The production factor and materiality floor, passed explicitly rather than read from the evaluator's
-       private constants: this pins the QUERY's property, which is what the SQL can get wrong, and stays
-       meaningful if either production value is retuned. */
+    /* The production factor, and the floor as #3316 shipped it, passed explicitly rather than read from the
+       evaluator's constants: this pins the QUERY's property, which is what the SQL can get wrong, and stays
+       meaningful when the production floor is retuned — which #3462 did, to 15,000 ms, ABOVE these fixtures'
+       10,500 ms added cost. The class remarks say why that makes the explicit value load-bearing here;
+       CollectorCostMaterialityFloorTests is where the shipped floor value is exercised. */
     private const double Factor = 2.0;
     private const long AddedMsFloor = 5_000;
 
@@ -155,9 +160,10 @@ public sealed class CollectorCostRegressionDispersionTests
             Assert.Equal(7_000.0, tight.BaselineP95MsPerRun, 3);
             Assert.Equal(14_000.0, tight.ThresholdMsPerRun(Factor), 3);
 
-            /* This row is also the proof that #3316's floor did not do the excluding above: the two
+            /* This row is also the proof that the materiality floor did not do the excluding above: the two
                collectors' latest day, run count and mean are identical, so BimodalNormal's added cost is
-               this same figure, and it is twice the 5,000 ms floor the query was given. */
+               this same figure, and it is twice the 5,000 ms floor the query was given (the query was NOT
+               given #3462's production floor, which sits above this figure — see the constant's remarks). */
             Assert.Equal(10_500.0, tight.AddedMsPerDay, 3);
 
             /* Both directions. The SAME bimodal baseline, a latest day past the bound: still reported, so
