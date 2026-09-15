@@ -172,6 +172,11 @@ public static class AlertContextBuilders
                 item.Fields.Add(("Victim SQL", TruncateText(p.Row.VictimSqlText)));
             if (!string.IsNullOrEmpty(p.Row.ProcessSummary))
                 item.Fields.Add(("Processes", p.Row.ProcessSummary));
+            /* #3442: the same per-party facts the fingerprinted item carries. Both render paths take
+               them from the one parse in ParseDeadlocks, because the two lists disagreeing on what a
+               deadlock's parties were is the #2108 defect in a narrower place. */
+            foreach (var party in p.Parties)
+                item.Fields.Add(party);
 
             context.Details.Add(item);
         }
@@ -451,26 +456,30 @@ public static class AlertContextBuilders
                         e.BlockedProcessReportXml, AlertIncidentAttachment.BlockedProcessReportFileName)
                     : null)));
 
-    /* The graph parse, shared by the render path and #2216's observation path. Both the fingerprint's object
-       set and the #2109 Database fact come off the same pass, so parsing once per deadlock is the point. */
-    private static List<(DeadlockAlertRow Row, IReadOnlyList<string> Objects, IReadOnlyList<string> Databases)>
+    /* The graph parse, shared by the render path and #2216's observation path. The fingerprint's object
+       set, the #2109 Database fact and #3442's per-party facts all come off the same pass, so parsing once
+       per deadlock is the point. */
+    private static List<(DeadlockAlertRow Row, IReadOnlyList<string> Objects, IReadOnlyList<string> Databases,
+        IReadOnlyList<(string Label, string Value)> Parties)>
         ParseDeadlocks(IReadOnlyList<DeadlockAlertRow> filtered) =>
         filtered
             .Select(d => (Row: d,
                 Objects: DeadlockObjectExtractor.FromGraphXml(d.DeadlockGraphXml),
-                Databases: DeadlockObjectExtractor.DatabasesFromGraphXml(d.DeadlockGraphXml)))
+                Databases: DeadlockObjectExtractor.DatabasesFromGraphXml(d.DeadlockGraphXml),
+                Parties: d.PartyFacts))
             .ToList();
 
     /* #1140: fingerprint each deadlock by its sorted involved-object set, across ALL deadlocks in the window,
        grouped so recurrences over the same objects collapse to one incident with a count. */
     private static List<DeadlockIncidentGrouper.DeadlockGroup> GroupParsedDeadlocks(
         string serverName,
-        List<(DeadlockAlertRow Row, IReadOnlyList<string> Objects, IReadOnlyList<string> Databases)> parsed) =>
+        List<(DeadlockAlertRow Row, IReadOnlyList<string> Objects, IReadOnlyList<string> Databases,
+            IReadOnlyList<(string Label, string Value)> Parties)> parsed) =>
         DeadlockIncidentGrouper.Group(
             serverName,
             parsed.Select(p => new DeadlockIncidentGrouper.DeadlockEvent(
                 p.Objects,
-                DeadlockDetailFields(p.Databases, p.Row.VictimSqlText, p.Row.ProcessSummary),
+                DeadlockDetailFields(p.Databases, p.Row.VictimSqlText, p.Row.ProcessSummary, p.Parties),
                 /* #3330: the deadlock's own graph travels with it, so each incident attaches the graph for
                    the deadlock its card actually describes. */
                 p.Row.HasDeadlockXml
@@ -501,15 +510,23 @@ public static class AlertContextBuilders
     }
 
     /* #1141/#2109: forensic detail carried on a deadlock incident — the representative event's
-       databases, victim SQL, and process summary. Since #2108 these render on the incident's own
-       summary item too, not just per-event cards. */
+       databases, victim SQL, process summary, and #3442's per-party facts. Since #2108 these render on
+       the incident's own summary item too, not just per-event cards.
+
+       The parties are appended AFTER the three existing facts rather than interleaved with them. Every
+       consumer that re-reads this body by label takes the FIRST line matching a prefix it knows —
+       AlertMuteContext.PopulateFromDetailText's Database / Victim SQL pre-fill most directly — so a new
+       fact ahead of one of those would change which value a consumer resolves without changing any
+       consumer. Behind them, it cannot. */
     private static List<AlertIncidentField>? DeadlockDetailFields(
-        IReadOnlyList<string> databases, string? victimSql, string? processes)
+        IReadOnlyList<string> databases, string? victimSql, string? processes,
+        IReadOnlyList<(string Label, string Value)> parties)
     {
         var f = new List<AlertIncidentField>();
         if (databases.Count > 0) f.Add(new AlertIncidentField("Database", string.Join(", ", databases)));
         if (!string.IsNullOrWhiteSpace(victimSql)) f.Add(new AlertIncidentField("Victim SQL", TruncateText(victimSql)));
         if (!string.IsNullOrWhiteSpace(processes)) f.Add(new AlertIncidentField("Processes", processes!));
+        foreach (var (label, value) in parties) f.Add(new AlertIncidentField(label, value));
         return f.Count > 0 ? f : null;
     }
 

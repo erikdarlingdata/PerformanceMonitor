@@ -736,6 +736,7 @@
       "performancemonitor.alerting": {
         "type": "Project",
         "dependencies": {
+          "PerformanceMonitor.Common": "[3.7.0, )",
           "PerformanceMonitor.Notifications": "[3.7.0, )"
         }
       },

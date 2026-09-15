@@ -14,5 +14,10 @@
 
   <ItemGroup>
     <ProjectReference Include="..\PerformanceMonitor.Notifications\PerformanceMonitor.Notifications.csproj" />
+    <!-- The shared deadlock-graph walk (DeadlockGraphProcessParser / DeadlockProcessInfo) the alert body's
+         per-process facts come from, already the one walk behind both apps' deadlock grids. Common has no
+         project references of its own, so this adds a leaf and no cycle, and every app that consumes this
+         project already references Common directly. -->
+    <ProjectReference Include="..\PerformanceMonitor.Common\PerformanceMonitor.Common.csproj" />
   </ItemGroup>
 </Project>

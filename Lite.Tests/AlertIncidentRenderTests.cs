@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Notifications;
 using Xunit;
@@ -289,5 +290,88 @@ public class AlertIncidentRenderTests
         var (html, plain) = EmailTemplateBuilder.BuildAlertEmail("Deadlocks Detected", "S1", "2", "n/a", 15, Branding, ctx, Prose);
         Assert.Contains(System.Net.WebUtility.HtmlEncode(Prose), html, StringComparison.Ordinal);
         Assert.Contains(Prose, plain, StringComparison.Ordinal);
+    }
+    /* ---------------- Slack's per-section field ceiling (#3442) ----------------
+       Slack rejects a section block whose `fields` array holds more than 10 items, and it rejects the
+       whole message rather than the block — so a body that grows past the ceiling is not a degraded
+       alert, it is no alert. Nothing upstream bounds the field count of one item: the forensic detail,
+       the dedup metadata, the occurrence counts, the incident start and #3442's per-party deadlock facts
+       all land on the same item from different producers. The split lives in the Slack builder for that
+       reason, so no producer has to know what the others contributed. */
+
+    private const int SlackFieldsPerSection = 10;
+
+    private static List<System.Text.Json.JsonElement> SlackSections(string payload)
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse(payload);
+        return doc.RootElement.GetProperty("attachments")[0].GetProperty("blocks").EnumerateArray()
+            .Where(b => b.TryGetProperty("fields", out _))
+            .Select(b => b.Clone())
+            .ToList();
+    }
+
+    private static AlertContext ItemWithFields(int count)
+    {
+        var item = new AlertDetailItem { Heading = "Deadlock" };
+        for (var n = 0; n < count; n++)
+        {
+            item.Fields.Add(($"Fact {(char)('A' + n)}", $"value {n}"));
+        }
+
+        var ctx = new AlertContext();
+        ctx.Details.Add(item);
+        return ctx;
+    }
+
+    [Fact]
+    public void SlackFieldSections_StayInsideTheCeiling_AndLoseNoField()
+    {
+        /* 13 fields plus the heading entry is 14, which one section cannot carry. */
+        var ctx = ItemWithFields(13);
+        var sections = SlackSections(
+            WebhookAlertService.BuildSlackPayload("Deadlocks Detected", "S1", "1", "n/a", Branding, context: ctx));
+
+        var detailSections = sections.Skip(1).ToList();   // sections[0] is the lead server/value block
+        Assert.True(detailSections.Count > 1, "13 fields still rendered as a single section");
+
+        var entries = new List<string>();
+        foreach (var section in detailSections)
+        {
+            var fields = section.GetProperty("fields").EnumerateArray().ToList();
+            Assert.InRange(fields.Count, 1, SlackFieldsPerSection);
+            entries.AddRange(fields.Select(f => f.GetProperty("text").GetString()!));
+        }
+
+        /* Split, not sampled: the heading entry and all 13 facts arrive, in order. */
+        Assert.Equal(14, entries.Count);
+        Assert.Equal("*Deadlock*", entries[0]);
+        Assert.Equal(
+            Enumerable.Range(0, 13).Select(n => $"*Fact {(char)('A' + n)}:*\n{"value " + n}").ToList(),
+            entries.Skip(1).ToList());
+    }
+
+    [Fact]
+    public void SlackFieldSections_DoNotSplitWhatFits()
+    {
+        /* The discriminator for the pin above: at nine fields plus the heading the item is one section, so
+           a "split" assertion cannot be satisfied by a builder that splits unconditionally. */
+        var ctx = ItemWithFields(9);
+        var sections = SlackSections(
+            WebhookAlertService.BuildSlackPayload("Deadlocks Detected", "S1", "1", "n/a", Branding, context: ctx));
+
+        var detail = Assert.Single(sections.Skip(1));
+        Assert.Equal(SlackFieldsPerSection, detail.GetProperty("fields").GetArrayLength());
+    }
+
+    [Fact]
+    public void SlackLeadSection_IsAlsoSubjectToTheCeiling()
+    {
+        /* The lead block builds its own field list and would cross the ceiling by the same route; it goes
+           through the same splitter rather than a second rule. */
+        foreach (var section in SlackSections(
+            WebhookAlertService.BuildSlackPayload("High CPU", "S1", "97%", "90%", Branding)))
+        {
+            Assert.InRange(section.GetProperty("fields").GetArrayLength(), 1, SlackFieldsPerSection);
+        }
     }
 }
