@@ -80,7 +80,9 @@ LIMIT 5000";
     /// The evaluation window's rows, newest first, or an empty list on a read fault — the pileup
     /// sweep is a per-collection best-effort evaluation, and a failed read must cost one log line and
     /// this cycle's evaluation, never the sweep (the fact-collector degrade discipline). The next
-    /// sweep re-reads a fresher window anyway.
+    /// sweep re-reads a fresher window anyway. Shutdown residue is not a fault: it propagates past
+    /// the filter (<see cref="AnalysisShutdown.IsExpectedAbandon"/>, #2299 — the same idiom every
+    /// reader in this directory uses) instead of costing a log line for work we ourselves called off.
     /// </summary>
     public async Task<List<SameStatementPileupDetector.SnapshotRow>> ReadWindowAsync(
         int serverId, DateTime windowFloorUtc, CancellationToken cancellationToken)
@@ -114,7 +116,7 @@ LIMIT 5000";
                     PhysicalReads: reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11))));
             }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
         {
             _logger?.LogWarning(
                 "[PgPileupSnapshotReader] pileup window read failed for server {ServerId} — this sweep's evaluation is skipped, the next sweep re-reads: {Message}",

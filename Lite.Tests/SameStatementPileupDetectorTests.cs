@@ -667,6 +667,57 @@ public class SameStatementPileupDetectorTests
     }
 
     /// <summary>
+    /// The ACCEPTED onset blind spot, pinned as behavior so a change to it is a decision and not an
+    /// accident (the detector's class remarks carry the full "what this cannot see" statement). If
+    /// the collector's FIRST sample of an episode catches the pack between the sub-second ceiling
+    /// and the elapsed floor — here ~5 s in — that instant correctly produces nothing (the floor
+    /// gate), and its rows then poison the statement's own baseline: the next instant, every session
+    /// past the floor and the mechanism on display, STILL produces nothing, because the ceiling gate
+    /// reads the onset rows as multi-second priors. Roughly a 9-in-60 sampling-phase exposure at the
+    /// one-minute cadence on the measured 90-second shape, and it fails QUIET — a missed page, never
+    /// a false one. Accepted until the recurrence watch produces a measured miss; the counterfactual
+    /// half below is what either repair (onset-exclusion, qualifying-subset pricing) would have to
+    /// preserve.
+    /// </summary>
+    [Fact]
+    public void AnOnsetSampledEpisode_PoisonsItsOwnBaseline_AndStaysQuiet_TheAcceptedBlindSpot()
+    {
+        var onsetAt = PileupAt;               /* first sample lands ~5 s into the episode */
+        var deepAt = PileupAt.AddSeconds(60); /* the next collection: same sessions, past the floor */
+
+        List<SameStatementPileupDetector.SnapshotRow> onsetInstant =
+        [
+            Row(onsetAt, 649, 5_200, wait: "PAGEIOLATCH_SH", status: "suspended"),
+            Row(onsetAt, 311, 5_000, wait: "PAGEIOLATCH_SH", status: "suspended"),
+            Row(onsetAt, 847, 4_800, wait: null, status: "running"),
+            /* The genuine history is there — the statement really is normally sub-second. */
+            Row(onsetAt.AddMinutes(-3), 300, 54),
+        ];
+
+        /* Instant one: no finding — the floor gate, correctly (nothing is past 10 s yet). */
+        Assert.Empty(SameStatementPileupDetector.Evaluate(IncidentServer, onsetInstant, onsetAt.AddSeconds(5)));
+
+        /* Instant two: every session past the floor, the IO wait present, the 54 ms prior still in
+           the window — and STILL no finding, because the baseline gate now reads instant one's
+           5-second rows and the sub-second ceiling fails. The accepted behavior, stated. */
+        var window = new List<SameStatementPileupDetector.SnapshotRow>(onsetInstant)
+        {
+            Row(deepAt, 649, 65_200, wait: "PAGEIOLATCH_SH", status: "suspended"),
+            Row(deepAt, 311, 65_000, wait: "PAGEIOLATCH_SH", status: "suspended"),
+            Row(deepAt, 847, 64_800, wait: null, status: "running"),
+        };
+
+        Assert.Empty(SameStatementPileupDetector.Evaluate(IncidentServer, window, deepAt.AddSeconds(5)));
+
+        /* The counterfactual that isolates the cause: the identical second instant with the onset
+           sample absent — the collector's phase landing 10 s later — fires. The miss is priced
+           entirely by where the first sample landed, which is the phase arithmetic the doc states. */
+        var withoutOnset = window.Where(r => r.CollectionTime != onsetAt).ToList();
+
+        Assert.Single(SameStatementPileupDetector.Evaluate(IncidentServer, withoutOnset, deepAt.AddSeconds(5)));
+    }
+
+    /// <summary>
     /// Every session must be past the floor, not just the leader: one deep copy alongside two fast
     /// ones is the long-running-single-session shape wearing a crowd, and the pack's MINIMUM is what
     /// the severity prices, so the gate has to agree with the arithmetic.

@@ -134,7 +134,11 @@ LIMIT $4";
         self-limiting: a pileup row is visible from its firing until the next scheduled pass
         completes (≤ the analysis interval), then ages out of "latest" while remaining in the
         windowed reads and its incident's occurrence trail. The epoch COALESCE keeps pileup rows
-        visible on a deployment where analysis is disabled and no scheduled batch ever exists.
+        visible where no scheduled batch exists to anchor on — which is never a disabled-analysis
+        deployment (the pileup sweep rides the same analysis-enabled gate, so a store with analysis
+        off gains no pileup rows either), but IS a young install whose pileup fired before the
+        scheduled pass's 24-hour data-span gate let a first batch exist, and an install where
+        analysis was toggled off after pileup rows landed but before any scheduled batch did.
         Lite's FindingStore carries the identical shape; the two are pinned against each other by
         SameStatementPileupSourceCensusTests.BothFindingStores_CarveThePileupRowsOutOfTheLatestBatch_Identically.
     */

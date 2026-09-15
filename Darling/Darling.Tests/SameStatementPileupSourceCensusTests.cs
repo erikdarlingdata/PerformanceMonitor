@@ -58,14 +58,17 @@ public sealed class SameStatementPileupSourceCensusTests
     /// <summary>
     /// The only tables the trigger path may read: the active-query snapshot table, under each SKU's
     /// name for it (Darling reads the table, Lite reads its view). The waiting-task collector is the
-    /// other collector the issue names as permitted input; it is not read on the trigger path today
-    /// (the snapshot row carries wait_type and status, which is the IO-class evidence the predicate
-    /// needs) and is listed so adding that read stays a one-line, deliberate census change rather
-    /// than a silent new dependency.
+    /// other input the issue permits, and it is deliberately NOT pre-cleared here: the trigger does
+    /// not read it today (the snapshot row carries wait_type and status, which is the IO-class
+    /// evidence the predicate needs), and a standing permission nobody consumes would make this
+    /// census silent on the one addition it is most likely to meet — the read could arrive without
+    /// touching a single census line. Adding it means widening this set in the same change: the
+    /// census fails, names the file, and the new dependency lands as a decision on the record rather
+    /// than a pre-approved default.
     /// </summary>
     private static readonly string[] s_permittedTables =
     {
-        "query_snapshots", "v_query_snapshots", "waiting_tasks", "v_waiting_tasks",
+        "query_snapshots", "v_query_snapshots",
     };
 
     /// <summary>
@@ -145,8 +148,9 @@ public sealed class SameStatementPileupSourceCensusTests
                     s_permittedTables.Contains(table, StringComparer.OrdinalIgnoreCase),
                     $"#3467: {file} reads '{table}', which is not one of the pileup finding's permitted inputs ["
                     + string.Join(", ", s_permittedTables)
-                    + "]. The trigger must stay computable from the active-query snapshot and waiting-task "
-                    + "collectors alone (#2296).");
+                    + "]. The trigger must stay computable from the active-query snapshot collector alone "
+                    + "(#2296). The issue also permits the waiting-task collector: adding that read is done by "
+                    + "widening this set in the same change, so the dependency arrives deliberately.");
             }
         }
 
@@ -220,6 +224,53 @@ public sealed class SameStatementPileupSourceCensusTests
 
         /* And the key they carve on is the detector's constant, not a drifting copy. */
         Assert.Equal("SAME_STATEMENT_PILEUP", SameStatementPileupDetector.RootFactKey);
+    }
+
+    /// <summary>
+    /// #3467's follow-up review: the per-instant dedup stamp — the one piece of cross-sweep state —
+    /// advances only after the instant's outcome is durable, in BOTH call sites. Not a Query Store
+    /// question, but the same two files and the same from-source discipline: stamped before
+    /// InsertFindingsAsync, a transient store fault marks a firing instant "done" and loses its
+    /// finding for good if the episode clears before the next collector write. The safe ordering is
+    /// re-derivable by construction — occurrence folding absorbs a re-persist, the incident-keyed
+    /// cooldown absorbs a re-notify — so nothing downstream needs the early stamp, and this pin keeps
+    /// a refactor from quietly restoring it.
+    /// </summary>
+    [Fact]
+    public void TheDedupStamp_AdvancesOnlyAfterTheInstantsOutcomeIsDurable()
+    {
+        foreach (var (file, stamp) in new (string File, string Stamp)[]
+        {
+            ("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs",
+                "server.LastPileupSnapshotEvaluated = latest"),
+            ("Lite/Services/CollectionBackgroundService.cs",
+                "_lastPileupSnapshotEvaluated[serverId] = latest"),
+        })
+        {
+            var lines = CSharpSourceWalker.StripCommentsAndStrings(Read(file)).Replace("\r\n", "\n").Split('\n');
+
+            var evaluateAt = Array.FindIndex(lines,
+                l => l.Contains("SameStatementPileupDetector.Evaluate(", StringComparison.Ordinal));
+            Assert.True(evaluateAt >= 0, $"#3467: {file} evaluates the detector");
+
+            var insertAt = Array.FindIndex(lines, evaluateAt,
+                l => l.Contains("InsertFindingsAsync(", StringComparison.Ordinal));
+            Assert.True(insertAt > evaluateAt, $"#3467: {file} persists the pileup findings after evaluating");
+
+            var stampLines = Enumerable.Range(0, lines.Length)
+                .Where(i => lines[i].Contains(stamp, StringComparison.Ordinal))
+                .ToList();
+
+            Assert.True(stampLines.Count > 0, $"#3467: {file} still stamps the evaluated instant");
+            Assert.True(stampLines.Min() > evaluateAt,
+                $"#3467: {file} advances the pileup dedup stamp BEFORE the detector's verdict exists — the "
+                + "stamp must record an outcome (clean, muted, or persisted), not an attempt.");
+            Assert.True(stampLines.Max() > insertAt,
+                $"#3467: {file} no longer stamps after a successful InsertFindingsAsync — a transient persist "
+                + "fault would permanently lose the instant's finding if the episode clears before the next "
+                + "collector write. Folding absorbs the re-persist and the cooldown the re-notify, so the "
+                + "stamp belongs after the persist.");
+        }
     }
 
     /* ---------------- helpers ---------------- */

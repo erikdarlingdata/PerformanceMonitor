@@ -386,7 +386,11 @@ LIMIT $4";
            complete pass with a single row and read as a healthier server mid-incident, #2448's
            misreading through the write cadence) and are OVERLAID while newer than the last scheduled
            batch, aging out of "latest" when the next pass completes. The epoch COALESCE keeps a pileup
-           visible when analysis is disabled and no scheduled batch exists. Identical shape to Darling's
+           visible where no scheduled batch exists to anchor on — never a disabled-analysis
+           deployment (the pileup sweep rides the same analysis-enabled gate, so analysis off means
+           no pileup rows either), but a young install whose pileup fired before the scheduled pass's
+           data-span gate let a first batch exist, or analysis toggled off after pileup rows landed
+           and before any scheduled batch did. Identical shape to Darling's
            PgFindingStore.GetLatestFindingsSql; the pair is pinned against each other by
            SameStatementPileupSourceCensusTests.BothFindingStores_CarveThePileupRowsOutOfTheLatestBatch_Identically. */
         using var cmd = connection.CreateCommand();

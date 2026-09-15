@@ -53,6 +53,28 @@ namespace PerformanceMonitor.Analysis;
 /// fourth was the measured incident. Each constant's derivation is stated on the constant, in the unit
 /// the gate compares (#3463's lesson), and the calibration is pinned by
 /// <c>SameStatementPileupDetectorTests</c>.</para>
+///
+/// <para><b>What this cannot see: an episode whose own onset poisons its baseline.</b> The baseline
+/// gate reads the statement's prior in-flight observations, and the collector can make the episode
+/// itself one of them. If the FIRST sample of an episode lands while the sessions are between the
+/// sub-second ceiling and the elapsed floor — 1–10 s in — that instant correctly produces nothing
+/// (the floor gate), and its rows then sit in the 45-minute lookback as multi-second priors: every
+/// later instant of the same episode fails the sub-second ceiling against them, and the episode
+/// never fires at all. The failure direction is quiet — a missed page, never a false one — and the
+/// exposure is sampling phase: at the one-minute collection cadence the first sample lands in that
+/// band when the collector's phase offset from episode start does, a 9-second span of a 60-second
+/// cycle — roughly 9-in-60 on the measured 90-second shape (under ~1 s the onset rows are themselves
+/// sub-second and reinforce the baseline; past 10 s the first sample fires directly). Accepted, for
+/// now, deliberately: both repairs are gate changes — excluding an episode's own onset rows from its
+/// baseline, or pricing the pack on the qualifying subset past the floor — and each carries edges of
+/// its own (an onset exclusion has to decide how much of the recent window IS the episode, which is
+/// this same phase problem moved one gate over; the qualifying subset needs the fleet calibration
+/// re-derived under the new predicate), so neither ships ahead of a measured miss to calibrate
+/// against. The recurrence watch is the instrument that would produce one: episodes fold onto a
+/// statement-scoped incident id, so a statement whose trail holds fired episodes alongside
+/// snapshot-visible pileups that produced no finding is the reopen shape, and the miss's own rows
+/// price which repair to take. <c>SameStatementPileupDetectorTests</c> pins the poisoned sequence as
+/// the accepted behavior, counterfactual included.</para>
 /// </summary>
 public static class SameStatementPileupDetector
 {
@@ -259,7 +281,15 @@ public static class SameStatementPileupDetector
             /* EVERY session past the floor — the pack's minimum is the conservative magnitude: each
                concurrent caller has burned at least this long on a statement that should be done in
                milliseconds. A single long-running session with fast siblings is long_running_query's
-               job, and the min-elapsed condition is what keeps it there. */
+               job, and the min-elapsed condition is what keeps it there. The trade is fresh arrivals:
+               a caller that just joined the convoy resets the pack's minimum to its own near-zero
+               elapsed and suppresses detection at exactly the moment the pileup is growing. The
+               alternative is to require MinConcurrentSessions past the floor and price severity on
+               that QUALIFYING subset, letting newcomers ride uncounted — the right shape for that
+               edge, and not shipped tonight because the fleet calibration (four qualifying groups in
+               four server-days) was measured under this predicate and would need re-deriving under
+               that one. The class remarks' onset blind-spot paragraph names the reopen shape, and it
+               covers this edge too: both surface as a measured miss on the recurrence watch. */
             var minElapsedMs = pack.Min(r => r.ElapsedMs);
             if (minElapsedMs < MinElapsedMs)
             {

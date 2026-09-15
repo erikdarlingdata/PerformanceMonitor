@@ -504,8 +504,14 @@ public class CollectionBackgroundService : BackgroundService
                     continue;
                 }
 
-                /* One evaluation per snapshot instant (see the field) — stamped before the detector
-                   runs, because a clean instant is just as evaluated as a firing one. */
+                /* One evaluation per snapshot instant (see the field). The stamp advances only once
+                   the instant's outcome is settled — evaluated clean, fully muted, or persisted —
+                   never before the persist: stamped early, a transient InsertFindingsAsync fault
+                   would mark a firing instant "done" and lose its finding for good if the episode
+                   cleared before the next cycle. Left behind on a fault, the next cycle re-derives
+                   instead, and the downstream machinery absorbs the replay — a duplicate persist
+                   folds onto the same incident trail, a duplicate notify dies in the incident-keyed
+                   cooldown (the Darling twin states the full argument). */
                 var latest = DateTime.MinValue;
                 foreach (var row in rows)
                 {
@@ -520,11 +526,10 @@ public class CollectionBackgroundService : BackgroundService
                     continue;
                 }
 
-                _lastPileupSnapshotEvaluated[serverId] = latest;
-
                 var detections = SameStatementPileupDetector.Evaluate(serverName, rows, DateTime.UtcNow);
                 if (detections.Count == 0)
                 {
+                    _lastPileupSnapshotEvaluated[serverId] = latest;
                     continue;
                 }
 
@@ -545,6 +550,7 @@ public class CollectionBackgroundService : BackgroundService
                     detections.Select(d => d.Story).ToList(), context);
                 if (findings.Count == 0)
                 {
+                    _lastPileupSnapshotEvaluated[serverId] = latest;
                     continue;
                 }
 
@@ -558,6 +564,7 @@ public class CollectionBackgroundService : BackgroundService
                 }
 
                 await findingStore.InsertFindingsAsync(findings, context);
+                _lastPileupSnapshotEvaluated[serverId] = latest;
 
                 _logger?.LogWarning(
                     "Same-statement pileup detected on {Server}: {Count} finding(s) at snapshot {Snapshot:u}, peak severity {Severity:F2}",

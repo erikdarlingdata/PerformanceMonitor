@@ -5273,7 +5273,7 @@ LIMIT 1";
     /// had quietly REPLACED the master consult rather than adding to it. The split itself is unchanged
     /// and deliberate (Lite's D0): the pass runs and persists findings whatever this returns — the
     /// master switch's own contract (Darling/README.md, the alerts section) promises exactly that,
-    /// "turns off all alert evaluation and scheduled-analysis finding notifications (the analysis itself
+    /// "turns off all alert evaluation and analysis finding notifications (the analysis itself
     /// still runs and persists findings)" — so the Recommendations tab keeps filling while the channels
     /// stay silent, and the toggle remains the narrower knob for fleets that want alerting without
     /// analysis mail. One predicate, called by BOTH analysis entry points (the scheduled tick and
@@ -5306,9 +5306,11 @@ LIMIT 1";
     ///
     /// <para>Failure containment: a store fault costs one log line and this cycle's evaluation — never
     /// the sweep body's remaining passes. InsertFindingsAsync throws by design on a rolled-back batch
-    /// (#2448); that throw is contained here because a missed pileup persist is re-derived by the next
-    /// sweep for as long as the pileup lasts, which is precisely what a live-signature finding can
-    /// afford that a scheduled pass cannot.</para>
+    /// (#2448); that throw is contained here because the per-instant dedup stamp advances only after a
+    /// successful persist, so the next sweep re-derives the SAME instant rather than waiting for a
+    /// fresh one — occurrence folding absorbs the re-persist, the incident-keyed cooldown absorbs the
+    /// re-notify — which is precisely what a live-signature finding can afford that a scheduled pass
+    /// cannot.</para>
     /// </summary>
     private async Task EvaluateSameStatementPileupAsync(
         ServerLoopState server,
@@ -5338,8 +5340,15 @@ LIMIT 1";
 
             /* One evaluation per snapshot instant: the 30-second sweep outpaces the one-minute
                collector, and re-running the detector over an already-evaluated instant would persist
-               duplicate occurrence rows for the same evidence. Stamped before the detector runs — a
-               clean instant is just as evaluated as a firing one. */
+               duplicate occurrence rows for the same evidence. The stamp advances only once the
+               instant's OUTCOME is settled — evaluated clean, fully muted, or persisted — never
+               before the persist: stamped ahead of InsertFindingsAsync, a transient store fault would
+               mark a firing instant "done" and lose its finding for good if the episode cleared
+               before the next collector write. Left behind on a fault, the next sweep re-derives the
+               same instant instead (the 30-second sweep usually gets its retry in before the
+               one-minute collector replaces the instant), and the machinery downstream absorbs the
+               replay: a duplicate persist folds onto the same (story_path_hash, incident_id) trail,
+               a duplicate notify dies in the incident-keyed cooldown. */
             var latest = DateTime.MinValue;
             foreach (var row in rows)
             {
@@ -5354,11 +5363,10 @@ LIMIT 1";
                 return;
             }
 
-            server.LastPileupSnapshotEvaluated = latest;
-
             var detections = SameStatementPileupDetector.Evaluate(runtime.StorageName, rows, DateTime.UtcNow);
             if (detections.Count == 0)
             {
+                server.LastPileupSnapshotEvaluated = latest;
                 return;
             }
 
@@ -5380,6 +5388,7 @@ LIMIT 1";
                 detections.Select(d => d.Story).ToList(), context);
             if (findings.Count == 0)
             {
+                server.LastPileupSnapshotEvaluated = latest;
                 return;
             }
 
@@ -5393,6 +5402,7 @@ LIMIT 1";
             }
 
             await findingStore.InsertFindingsAsync(findings, context);
+            server.LastPileupSnapshotEvaluated = latest;
 
             _logger.LogWarning(
                 "[{Server}] Same-statement pileup detected: {Count} finding(s) at snapshot {Snapshot:u}, peak severity {Severity:F2}",
