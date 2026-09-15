@@ -59,8 +59,8 @@ public static class DarlingWebEndpoints
     /// is the compute-heavy plan-analysis phase-2 work; the Custom Views tools (#1599) are served by their OWN
     /// richer web endpoints (<c>/api/views</c> CRUD + <c>/api/compose/run</c> + the <c>/api/catalog</c> compose
     /// vocabulary that <c>describe_custom_view_catalog</c> mirrors), not a <c>/api/read/{tool}</c> query-string mirror;
-    /// and the alert-tuning tools (<c>update_alert_settings</c> / <c>create_mute_rule</c> / <c>delete_mute_rule</c> /
-    /// <c>set_mute_rule_enabled</c>) WRITE the alert config, and the server-onboarding tools
+    /// and the alert-tuning tools (<c>update_alert_settings</c> / <c>create_mute_rule</c> / <c>update_mute_rule</c> /
+    /// <c>delete_mute_rule</c> / <c>set_mute_rule_enabled</c>) WRITE the alert config, and the server-onboarding tools
     /// (<c>add_servers</c> / <c>remove_server</c>) WRITE the
     /// monitored-server registry, so — like <c>mute_analysis_finding</c> — they have no read endpoint. The
     /// custom-alert-rule tools (#3285) are the same disposition as the Custom Views tools: <c>create</c> /
@@ -85,6 +85,7 @@ public static class DarlingWebEndpoints
         "run_custom_view_panel",
         "update_alert_settings",
         "create_mute_rule",
+        "update_mute_rule",
         "delete_mute_rule",
         "set_mute_rule_enabled",
         "add_servers",

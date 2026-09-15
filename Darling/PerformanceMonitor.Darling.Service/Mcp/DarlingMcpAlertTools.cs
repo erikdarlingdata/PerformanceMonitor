@@ -27,7 +27,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
 /// The alerts MCP tools — get_alert_history, get_alert_settings, get_mute_rules plus the alert-TUNING
-/// write tools update_alert_settings / create_mute_rule / delete_mute_rule / set_mute_rule_enabled — served over Darling's Postgres
+/// write tools update_alert_settings / create_mute_rule / update_mute_rule / delete_mute_rule / set_mute_rule_enabled — served over Darling's Postgres
 /// store. The reads are the same names Lite (and the Dashboard) expose; the writes are Darling-only (the central
 /// alert store the fleet shares, which Lite's single-instance DuckDB has no twin for). This is the FLEET
 /// edition's biggest MCP win: an agent triaging N servers can now see what fired, whether delivery failed, the
@@ -54,12 +54,16 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// any write, and only the provided columns are written by a targeted parameterized UPDATE. The write self-bumps
 /// <c>config_service.config_version</c> via the existing config-table trigger, so the running service hot-reloads
 /// within one sweep (the tool never writes <c>config_version</c> itself). SMTP/webhook credential columns are out
-/// of scope — the mcp role cannot read or write them. create_mute_rule / delete_mute_rule /
+/// of scope — the mcp role cannot read or write them. create_mute_rule / update_mute_rule / delete_mute_rule /
 /// set_mute_rule_enabled reuse the SAME <see cref="PgMuteRuleStore"/> get_mute_rules reads through, generating
 /// the rule id the same way the Viewer's mute-create path does (a fresh GUID on a new
 /// <see cref="MuteRule"/>). set_mute_rule_enabled is the headless twin of the Viewer's mute-rule checkbox: it
 /// writes <c>enabled</c> and nothing else, so a rule can leave force and return without losing the id, the
-/// reason or the creation date the Stale Mute Rules self-alert (#3306) ages it from.</para>
+/// reason or the creation date the Stale Mute Rules self-alert (#3306) ages it from. update_mute_rule is the
+/// headless twin of the Viewer's Edit dialog on the same terms: a PARTIAL edit merged onto the stored rule and
+/// written through the store's own <see cref="IMuteRuleStore.UpdateAsync"/>, whose SET list does not name
+/// <c>created_at_utc</c> — so no edit, however sweeping, can reset the clock #3306 ages the rule from, which
+/// delete-and-re-create does on every field the enable flag cannot express.</para>
 ///
 /// <para><b>Security.</b> These write tools connect (like every MCP tool) as the least-privilege <c>mcp</c> role,
 /// granted (see <see cref="DarlingManagedRoles"/>) INSERT/UPDATE/DELETE on <c>config.config_mute_rules</c>, UPDATE
@@ -704,6 +708,287 @@ public sealed class DarlingMcpAlertTools
             return McpHelpers.FormatError("set_mute_rule_enabled", ex);
         }
     }
+
+    [McpServerTool(Name = "update_mute_rule"), Description(
+        "Edits an existing alert mute rule IN PLACE by its id (from get_mute_rules or create_mute_rule) — the " +
+        "changes the enabled flag cannot express: narrowing or correcting a pattern, rewording a reason, adding " +
+        "an expires_at_utc to a rule that should stop being permanent, or clearing one so it stays. A PARTIAL " +
+        "update: pass ONLY the fields to change as JSON in the SAME shape get_mute_rules returns (e.g. " +
+        "{\"reason\":\"root cause found\",\"expires_at_utc\":\"2026-08-01T00:00:00Z\"}); a field you do NOT " +
+        "send is left exactly as stored, and an EXPLICIT JSON null clears a field — the same clearing the " +
+        "Viewer's edit dialog performs by blanking it — so {\"expires_at_utc\":null} makes a rule permanent and " +
+        "{\"job_name_pattern\":null} stops constraining that dimension. Editable fields: server_name, " +
+        "metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, reason, " +
+        "expires_at_utc (create_mute_rule's expires_at spelling is accepted as a write-only alias; send only " +
+        "one). enabled is NOT editable here — use set_mute_rule_enabled, the dedicated reversible verb. USE THIS " +
+        "rather than delete_mute_rule followed by create_mute_rule: a re-created rule is a NEW rule with a new " +
+        "id and a new creation date, and the Stale Mute Rules self-alert ages a rule from its creation date — so " +
+        "a rule re-created on every edit never becomes stale and is never reported, while an edited one is " +
+        "reported on the age it actually has. Editing NEVER moves created_at_utc, whatever fields change; that " +
+        "preservation is the reason this verb exists. Two cautions: clearing scope fields WIDENS the rule — one " +
+        "with no constraining fields left mutes EVERY alert (a whole-fleet silence) — and an edited server_name " +
+        "must match the alert rows' spelling EXACTLY as get_alert_history reports it (the monitor's own " +
+        "self-alert family and the engine alerts can spell the same server differently — display-short vs " +
+        "registry name — so copy the spelling off the alert rows being muted rather than retyping it), or the " +
+        "rule stays in force while matching nothing. Returns {status:\"updated\", updated_fields:[...], " +
+        "mute_rule:{...}} with the rule AS STORED (re-read after the write), {status:\"unchanged\", " +
+        "mute_rule:{...}} when every provided field already holds that value (so a retry is safe and costs no " +
+        "write), {status:\"not_found\"} when no rule has that id, or {status:\"invalid\", ...} on a bad field " +
+        "or value with NOTHING written. The running service applies the edit on its next collection sweep, when " +
+        "the write's config_version bump makes it reload its mute cache.")]
+    public static Task<string> UpdateMuteRule(
+        NpgsqlDataSource postgres,
+        [Description("The id of the mute rule to edit (from get_mute_rules or create_mute_rule).")] string rule_id,
+        [Description("A JSON object with ONLY the mute-rule fields to change, in the shape get_mute_rules returns (e.g. {\"reason\":\"root cause found\"}). An explicit null clears a field; a field not sent does not change.")] string changes_json) =>
+        UpdateMuteRuleCore(new PgMuteRuleStore(postgres), rule_id, changes_json);
+
+    /// <summary>
+    /// update_mute_rule's body over the <see cref="IMuteRuleStore"/> seam <see cref="PgMuteRuleStore"/>
+    /// implements, so the tool's decisions are reachable without a store.
+    ///
+    /// <para><b>The partial update is a merge onto the STORED rule, written through the store's own
+    /// <see cref="IMuteRuleStore.UpdateAsync"/>.</b> That statement is a full-row write of every editable
+    /// column — the same shape the Viewer's Edit dialog saves through — so a field the caller did not send is
+    /// restated at the value just read, and an explicit null is a VALUE (every editable column is nullable;
+    /// the dialog clears one by blanking it). Following the store's own semantics is what makes clearing
+    /// expressible at all: without it, removing an expires_at — making a rule permanent again — would need the
+    /// delete-and-re-create this verb exists to end.</para>
+    ///
+    /// <para><b><c>created_at_utc</c> is structurally out of reach.</b> UpdateAsync's SET list does not name
+    /// it (pinned by <c>TheShippedMuteRuleUpdates_NeverSetTheCreationDate</c>), so no edit resets the clock
+    /// the Stale Mute Rules self-alert (#3306) ages a rule from. That preservation is the verb's reason to
+    /// exist: every field edit used to require delete/recreate, and a rule re-created on every edit never
+    /// becomes stale and is never reported.</para>
+    ///
+    /// <para><b><c>enabled</c> is carried, never edited.</b> The merged row restates the flag it read —
+    /// UpdateAsync writes the whole editable row, so a concurrent set_mute_rule_enabled landing between this
+    /// read and this write is overwritten, the same window the Viewer's Edit dialog has always had. Refusing
+    /// the field here keeps flag changes on the narrow verb, whose UPDATE touches <c>enabled</c> alone.</para>
+    ///
+    /// <para><b>An edit that changes nothing writes nothing</b> and reports <c>unchanged</c> — a retry is
+    /// safe, and a caller can tell a change it made from a state it found. The comparison is ORDINAL: a
+    /// case-only edit IS an edit (the stored text changes, even though matching is case-insensitive), so the
+    /// caller's spelling is honored rather than second-guessed. And <b>the reported rule is re-read from the
+    /// store AFTER the write</b>; a rule deleted in that window reports the absence, naming the write that
+    /// landed, rather than folding the race into a failure.</para>
+    /// </summary>
+    internal static async Task<string> UpdateMuteRuleCore(IMuteRuleStore store, string ruleId, string changesJson)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(ruleId))
+            {
+                return Outcome("invalid", "rule_id is required.");
+            }
+
+            /* Validation runs BEFORE persistence, mirroring update_alert_settings: a bad field or value
+               returns 'invalid' without the store ever being read or written. */
+            JsonNode? root;
+            try
+            {
+                root = JsonNode.Parse(changesJson);
+            }
+            catch (JsonException ex)
+            {
+                return Outcome("invalid", $"changes_json is not valid JSON: {ex.Message}");
+            }
+
+            if (root is not JsonObject body)
+            {
+                return Outcome("invalid", "changes_json must be a JSON object of the mute-rule fields to change (see get_mute_rules for the shape).");
+            }
+
+            var (changes, error) = BuildMuteRuleUpdate(body);
+            if (error != null)
+            {
+                return Outcome("invalid", error);
+            }
+
+            if (changes.Count == 0)
+            {
+                return Outcome("invalid", "No editable mute-rule fields were provided. Send only the fields to change (e.g. {\"reason\":\"...\"}); pass null to clear one.");
+            }
+
+            /* Existence check through the SAME store get_mute_rules reads, so 'updated' vs 'not_found' is
+               honest (UpdateAsync is a bare UPDATE that reports no row count) — and the row it returns is
+               the merge base the partial semantics need. */
+            var existing = await FindRuleAsync(store, ruleId);
+            if (existing is null)
+            {
+                return Outcome("not_found", $"No mute rule with id '{ruleId}'.");
+            }
+
+            var merged = existing.Clone();
+            foreach (var change in changes)
+            {
+                change.Apply(merged);
+            }
+
+            if (SameEditableFields(existing, merged))
+            {
+                return JsonSerializer.Serialize(
+                    new { status = "unchanged", mute_rule = BuildMuteRulePayload(existing) },
+                    McpHelpers.JsonOptions);
+            }
+
+            await store.UpdateAsync(merged);
+
+            var stored = await FindRuleAsync(store, ruleId);
+            if (stored is null)
+            {
+                /* The edit landed and the rule is gone, so the state to report is the absence: a concurrent
+                   delete_mute_rule (or an expiry purge) took the row between the write and the read back.
+                   Both facts are named because 'not_found' alone would read as a call that wrote nothing. */
+                return Outcome("not_found",
+                    $"Mute rule '{ruleId}' was updated but is no longer in the store — it was deleted concurrently.");
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                status = "updated",
+                /* The canonical wire names the call took charge of (the expires_at alias reports as
+                   expires_at_utc) — what was SENT, not what differed: the write restates the whole editable
+                   row either way, and 'unchanged' above is the no-difference answer. */
+                updated_fields = changes.Select(c => c.Field).ToArray(),
+                mute_rule = BuildMuteRulePayload(stored)
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("update_mute_rule", ex);
+        }
+    }
+
+    /// <summary>One validated field of a partial mute-rule update: the CANONICAL wire name it lands under
+    /// (the expires_at alias normalizes to expires_at_utc, which is also what makes sending both spellings
+    /// detectable as a duplicate) and the applier that writes it onto the merged rule.</summary>
+    private sealed record MuteRuleFieldChange(string Field, Action<MuteRule> Apply);
+
+    /// <summary>
+    /// Parses a PARTIAL mute-rule update — the per-rule JSON shape get_mute_rules RETURNS, carrying only the
+    /// fields to change — into appliers over a <see cref="MuteRule"/> clone. Returns a non-null error — and
+    /// the caller writes nothing — on the FIRST bad field, mirroring <see cref="BuildAlertSettingsUpdate"/>'s
+    /// whitelist-and-first-error discipline.
+    ///
+    /// <para>An explicit JSON null is the ONE spelling of "clear". A blank string is refused rather than
+    /// treated as a second one: create_mute_rule folds whitespace to null because omission is available
+    /// there, but on a partial update "" is far more likely a caller who meant to clear (or meant nothing)
+    /// than a value, and two spellings of clear would make one of them always accidental.</para>
+    ///
+    /// <para>The four read-payload keys that are NOT editable each get a pointed refusal rather than the
+    /// generic unknown-field text, because feeding a get_mute_rules row back with edits is the natural
+    /// mistake: <c>id</c> is the rule's identity, <c>created_at_utc</c> is the #3306 clock this verb exists
+    /// to preserve, <c>enabled</c> belongs to set_mute_rule_enabled, and <c>summary</c> is derived, not
+    /// stored.</para>
+    /// </summary>
+    private static (List<MuteRuleFieldChange> Changes, string? Error) BuildMuteRuleUpdate(JsonObject body)
+    {
+        var changes = new List<MuteRuleFieldChange>();
+        string? error = null;
+
+        void AddText(string field, JsonNode? node, Action<MuteRule, string?> set)
+        {
+            if (error != null) return;
+            if (node is null)
+            {
+                changes.Add(new MuteRuleFieldChange(field, r => set(r, null)));
+            }
+            else if (node is JsonValue v && v.TryGetValue<string>(out var s))
+            {
+                var trimmed = s.Trim();
+                if (trimmed.Length == 0)
+                    error = $"'{field}' is blank. Pass null to clear the field, or a non-blank value to set it.";
+                else
+                    changes.Add(new MuteRuleFieldChange(field, r => set(r, trimmed)));
+            }
+            else
+            {
+                error = $"'{field}' must be a string, or null to clear it.";
+            }
+        }
+
+        /* `spelling` is the key the caller sent (for the error text); the recorded Field is always the
+           canonical expires_at_utc, so both spellings in one body surface as a duplicate below. */
+        void AddExpiry(string spelling, JsonNode? node)
+        {
+            if (error != null) return;
+            if (node is null)
+            {
+                changes.Add(new MuteRuleFieldChange("expires_at_utc", r => r.ExpiresAtUtc = null));
+            }
+            else if (node is JsonValue v && v.TryGetValue<string>(out var s)
+                && DateTime.TryParse(s, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var parsed))
+            {
+                var utc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+                changes.Add(new MuteRuleFieldChange("expires_at_utc", r => r.ExpiresAtUtc = utc));
+            }
+            else
+            {
+                error = $"'{spelling}' must be an ISO-8601 UTC timestamp (e.g. 2026-08-01T00:00:00Z), or null for a permanent rule.";
+            }
+        }
+
+        foreach (var prop in body)
+        {
+            if (error != null) break;
+            switch (prop.Key)
+            {
+                case "server_name": AddText("server_name", prop.Value, (r, v) => r.ServerName = v); break;
+                case "metric_name": AddText("metric_name", prop.Value, (r, v) => r.MetricName = v); break;
+                case "database_pattern": AddText("database_pattern", prop.Value, (r, v) => r.DatabasePattern = v); break;
+                case "query_text_pattern": AddText("query_text_pattern", prop.Value, (r, v) => r.QueryTextPattern = v); break;
+                case "wait_type_pattern": AddText("wait_type_pattern", prop.Value, (r, v) => r.WaitTypePattern = v); break;
+                case "job_name_pattern": AddText("job_name_pattern", prop.Value, (r, v) => r.JobNamePattern = v); break;
+                case "reason": AddText("reason", prop.Value, (r, v) => r.Reason = v); break;
+                case "expires_at_utc": AddExpiry("expires_at_utc", prop.Value); break;
+                /* create_mute_rule's parameter spelling, accepted as a write-only alias so a caller moving
+                   from create to update does not trip on the payload suffix — the same courtesy the
+                   settings tool extends to email_cooldown_minutes, and like there the canonical name is the
+                   only one the read emits. */
+                case "expires_at": AddExpiry("expires_at", prop.Value); break;
+                case "enabled":
+                    error = "'enabled' is not editable here — use set_mute_rule_enabled, which writes the flag alone.";
+                    break;
+                case "id":
+                    error = "'id' is the rule's identity and cannot be edited. Pass the rule to edit as rule_id; send only the fields to change.";
+                    break;
+                case "created_at_utc":
+                    error = "'created_at_utc' never moves — it is the creation date the Stale Mute Rules self-alert ages a rule from, and preserving it is the reason this verb exists.";
+                    break;
+                case "summary":
+                    error = "'summary' is derived from the scope fields and is not stored — edit the fields it summarizes instead.";
+                    break;
+                default:
+                    error = $"Unknown field '{prop.Key}'. Editable fields: server_name, metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at_utc.";
+                    break;
+            }
+        }
+
+        /* Two accepted keys claiming ONE field — expires_at and expires_at_utc are the only pair that can.
+           Refused for the reason the settings tool refuses its alias pair: letting one silently win would
+           tell the caller both applied. */
+        if (error == null && changes.GroupBy(c => c.Field, StringComparer.Ordinal).Any(g => g.Count() > 1))
+        {
+            error = "'expires_at' and 'expires_at_utc' are two names for the same field; send only one of them.";
+        }
+
+        return (changes, error);
+    }
+
+    /// <summary>Whether two rules agree on every field update_mute_rule can move — the 'unchanged'
+    /// comparison. ORDINAL on the text fields (see the core's doc for why a case-only edit counts);
+    /// <c>Enabled</c> and <c>CreatedAtUtc</c> are excluded because the verb cannot move them, so including
+    /// them could only ever mask a difference the caller did not ask about.</summary>
+    private static bool SameEditableFields(MuteRule a, MuteRule b) =>
+        string.Equals(a.ServerName, b.ServerName, StringComparison.Ordinal)
+        && string.Equals(a.MetricName, b.MetricName, StringComparison.Ordinal)
+        && string.Equals(a.DatabasePattern, b.DatabasePattern, StringComparison.Ordinal)
+        && string.Equals(a.QueryTextPattern, b.QueryTextPattern, StringComparison.Ordinal)
+        && string.Equals(a.WaitTypePattern, b.WaitTypePattern, StringComparison.Ordinal)
+        && string.Equals(a.JobNamePattern, b.JobNamePattern, StringComparison.Ordinal)
+        && string.Equals(a.Reason, b.Reason, StringComparison.Ordinal)
+        && a.ExpiresAtUtc == b.ExpiresAtUtc;
 
     /// <summary>One rule by id, or null — an ordinal id match over the store's full read, which is the only
     /// read <see cref="IMuteRuleStore"/> offers.</summary>

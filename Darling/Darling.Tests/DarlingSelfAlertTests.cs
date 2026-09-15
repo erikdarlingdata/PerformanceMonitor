@@ -1166,6 +1166,84 @@ public sealed class DarlingSelfAlertTests
         Assert.Empty(h.Deliverer.Outcomes);
     }
 
+    /// <summary>
+    /// #3450: a rule edited in place through <c>update_mute_rule</c> is stale to THIS condition on the age it
+    /// actually has — the enable verb's claim, restated for the verb that moves every OTHER field. The claim
+    /// is driven through the real evaluator for the same reason as its sibling: what a reset costs is
+    /// measured in what this alert does and does not say, and an edit that stamped <c>created_at_utc</c>
+    /// would leave the rule a moment old, so the <c>Assert.Single</c> would find NOTHING — the reset shows up
+    /// as a missing alert, which is exactly how delete-and-re-create disarms this alert for every field edit
+    /// today.
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_ARuleEditedInPlaceThroughTheMcpVerb_IsStaleOnItsRealAge()
+    {
+        const string ruleId = "rule-edited";
+        const double authoredDaysAgo = 30d;
+        var authored = MuteClock.AddDays(-authoredDaysAgo);
+
+        var store = new FakeMuteRuleStore().Seed(Mute(authoredDaysAgo, id: ruleId));
+        Assert.Equal(authored, store.Row(ruleId)!.CreatedAtUtc);
+
+        Assert.Equal("updated", StatusOf(await DarlingMcpAlertTools.UpdateMuteRuleCore(
+            store, ruleId, "{\"reason\":\"root cause found\",\"job_name_pattern\":\"nightly\"}")));
+
+        var h = new Harness();
+        await h.Build().ApplyStaleMuteRulesAsync(await store.LoadAllAsync(), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteMetric, fired.MetricName);
+        Assert.Contains($"oldest {authoredDaysAgo:F0} days", fired.DetailText, StringComparison.Ordinal);
+        Assert.Equal(authored, store.Row(ruleId)!.CreatedAtUtc);
+
+        /* The counterfactual, on the same terms as the enable verb's: a FRESH rule put through the same edit
+           is not stale, so the fire above is a claim about the preserved date and not about the rule merely
+           being enabled and unbounded. */
+        const string freshId = "rule-edited-fresh";
+        var freshStore = new FakeMuteRuleStore().Seed(Mute(ageDays: 0, id: freshId));
+        Assert.Equal("updated", StatusOf(await DarlingMcpAlertTools.UpdateMuteRuleCore(
+            freshStore, freshId, "{\"reason\":\"root cause found\"}")));
+
+        var fresh = new Harness();
+        await fresh.Build().ApplyStaleMuteRulesAsync(await freshStore.LoadAllAsync(), Ct);
+        Assert.Empty(fresh.Deliverer.Outcomes);
+    }
+
+    /// <summary>
+    /// #3450, the expiry arm in BOTH directions through the real evaluator. Adding an <c>expires_at_utc</c>
+    /// by edit gives the rule a built-in reviewer, so the condition goes silent (the bounded-rule exclusion
+    /// above) — the issue's own example, "adding an expires_at to a rule that should stop being permanent",
+    /// done without the delete/recreate that used to be the only headless path. Clearing it with an explicit
+    /// null makes the rule permanent again AND stale on its REAL age immediately — which is only true because
+    /// neither edit moved <c>created_at_utc</c>; a stamped date would buy the cleared rule a fresh
+    /// <c>StaleMuteAge</c> of invisibility.
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_AnExpiryAddedByEdit_SilencesTheCondition_AndClearingItRestoresTheRealAge()
+    {
+        const string ruleId = "rule-bounded-by-edit";
+        var authored = MuteClock.AddDays(-(StaleDays + 5));
+
+        var store = new FakeMuteRuleStore().Seed(Mute(StaleDays + 5, id: ruleId));
+
+        Assert.Equal("updated", StatusOf(await DarlingMcpAlertTools.UpdateMuteRuleCore(
+            store, ruleId, $"{{\"expires_at_utc\":\"{MuteClock.AddDays(30):O}\"}}")));
+
+        var whileBounded = new Harness();
+        await whileBounded.Build().ApplyStaleMuteRulesAsync(await store.LoadAllAsync(), Ct);
+        Assert.Empty(whileBounded.Deliverer.Outcomes);
+
+        Assert.Equal("updated", StatusOf(await DarlingMcpAlertTools.UpdateMuteRuleCore(
+            store, ruleId, "{\"expires_at_utc\":null}")));
+
+        var h = new Harness();
+        await h.Build().ApplyStaleMuteRulesAsync(await store.LoadAllAsync(), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteMetric, fired.MetricName);
+        Assert.Equal(authored, store.Row(ruleId)!.CreatedAtUtc);
+    }
+
     private static string StatusOf(string json) => DarlingMcpTestData.StatusOf(json);
 
     [Fact]

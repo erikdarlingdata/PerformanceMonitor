@@ -88,7 +88,7 @@ public sealed class DarlingWebEndpointsTests
            /api/catalog, the eight custom-alert-rule tools (#3285 — create/update/delete write, get/list/validate
            read against the compose catalog, test_custom_alert_rule (#3299) evaluate-now, and
            list_custom_alert_templates (#3285 Component 7) starter templates, none a
-           /api/read/{tool} mirror), the four alert-tuning WRITE tools, and the two server-onboarding WRITE tools
+           /api/read/{tool} mirror), the five alert-tuning WRITE tools, and the two server-onboarding WRITE tools
            (add_servers / remove_server) — all with no /api/read/{tool} 1:1 mirror, like mute_analysis_finding. */
         Assert.Equal(
             new[]
@@ -97,7 +97,7 @@ public sealed class DarlingWebEndpointsTests
                 "analyze_server", "create_custom_alert_rule", "create_custom_view", "create_mute_rule", "delete_custom_alert_rule",
                 "delete_custom_view", "delete_mute_rule", "describe_custom_view_catalog", "get_custom_alert_rule", "get_custom_view",
                 "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "mute_analysis_finding", "remove_server", "run_custom_view_panel",
-                "set_mute_rule_enabled", "test_custom_alert_rule", "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "validate_custom_alert_rule", "validate_custom_view",
+                "set_mute_rule_enabled", "test_custom_alert_rule", "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "update_mute_rule", "validate_custom_alert_rule", "validate_custom_view",
             },
             DarlingWebEndpoints.ExcludedToolNames.OrderBy(n => n, StringComparer.Ordinal).ToArray());
     }
