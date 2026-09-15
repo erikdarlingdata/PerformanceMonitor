@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Globalization;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -183,6 +185,51 @@ public sealed class CollectorCostRegressionDispersionTests
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
+    }
+
+
+    /// <summary>#3440: both conjuncts have to stay in the shipped predicate, and the mean one LOOKS removable.
+    ///
+    /// <para>At the shipped baseline window the mean conjunct is entailed by the p95 one for every possible
+    /// row, so no fixture above or anywhere else can exercise it. <c>percentile_disc(0.95)</c> over N rows
+    /// returns 1-based rank <c>ceil(0.95 * N)</c>, which equals N for every N up to 19 — so on a baseline of
+    /// at most 13 days <c>baseline_p95_ms_per_run</c> is exactly the MAXIMUM of the daily per-run costs. And
+    /// <c>baseline_ms_per_run</c> is <c>sum(sql_ms) / sum(runs)</c>, which is algebraically the run-weighted
+    /// mean of that same population and so can never exceed its maximum. Hence
+    /// <c>baseline_p95_ms_per_run &gt;= baseline_ms_per_run</c> unconditionally, and
+    /// <see cref="DarlingCollectorCostReader.CostRegression.ThresholdMsPerRun"/>'s <c>Math.Max</c> always
+    /// resolves to the p95 side on any row the query can return.</para>
+    ///
+    /// <para>The mean conjunct is retained anyway, and that is the point of this pin. The property the
+    /// change rests on — that this predicate selects a SUBSET of what it selected before — then holds by
+    /// CONSTRUCTION, because a conjunct was added and none was removed, rather than by an entailment whose
+    /// only precondition is a window constant in a different file. Above 19 baseline days DISC stops
+    /// returning the maximum, the entailment ends, and a predicate that had dropped the mean conjunct as
+    /// dead would silently loosen at that moment with nothing red to say so. The window assertion below is
+    /// what reports that boundary being crossed.</para></summary>
+    [Fact]
+    public void BothConjunctsStayShipped_AndTheEntailmentsWindowPreconditionStillHolds()
+    {
+        var sql = DarlingCollectorCostReader.RegressionSql;
+        Assert.Contains("sc.latest_ms_per_run > sc.baseline_ms_per_run * $3", sql, StringComparison.Ordinal);
+        Assert.Contains("sc.latest_ms_per_run > sc.baseline_p95_ms_per_run * $3", sql, StringComparison.Ordinal);
+
+        /* The window the evaluator passes as $1, read from the source rather than restated, because a
+           restated constant is the thing that goes stale. */
+        var evaluator = RepoFile.ReadRepoFileLf(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs");
+        var declaration = Regex.Match(
+            evaluator, @"CostRegressionBaselineWindow\s*=\s*TimeSpan\.FromDays\((?<days>\d+)\)");
+        Assert.True(declaration.Success, "CostRegressionBaselineWindow's declaration was not found");
+
+        var windowDays = int.Parse(declaration.Groups["days"].Value, CultureInfo.InvariantCulture);
+        var maxBaselineDays = windowDays - 1;   /* the latest day is excluded from its own baseline */
+        var discRank = (int)Math.Ceiling(0.95 * maxBaselineDays);
+
+        /* While DISC's rank is the population size, the p95 IS the maximum and the mean conjunct is dead
+           weight kept deliberately. When this stops holding, the mean conjunct becomes load-bearing and the
+           paragraph above is the thing to read. */
+        Assert.Equal(maxBaselineDays, discRank);
     }
 
     /* One run per day, so total_sql_ms IS that day's per-run cost. */

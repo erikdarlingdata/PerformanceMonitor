@@ -168,6 +168,17 @@ ORDER BY day";
     /// upper mode's excess large. The measured firing was 17,548 ms/run against a 6,477 ms mean on a
     /// once-daily collector whose own worst run that week was 17,935 ms.</para>
     ///
+    /// <para><b>The mean conjunct is retained even though it is entailed at this window size.</b> DISC's
+    /// 1-based rank is <c>ceil(0.95 * N)</c>, which equals N for every N up to 19, so on a baseline of at
+    /// most 13 days the p95 IS the maximum of the daily per-run costs; and <c>baseline_ms_per_run</c> is the
+    /// run-weighted mean of that same population, which cannot exceed its maximum. So the mean conjunct can
+    /// never independently exclude a row as shipped. Keeping it is what makes the narrowing property hold by
+    /// CONSTRUCTION — a conjunct added, none removed — rather than by that entailment, whose only
+    /// precondition is the window constant in <c>DarlingSelfAlertEvaluator</c>. Past 19 baseline days DISC
+    /// stops returning the maximum and the entailment ends, at which point a predicate that had dropped this
+    /// line as dead would loosen with nothing to say so.
+    /// <c>CollectorCostRegressionDispersionTests</c> pins both conjuncts and that window precondition.</para>
+    ///
     /// <para><b>The percentile is taken at the grain of the quantity under test, over DAYS.</b>
     /// <c>latest_ms_per_run</c> is one day's mean per-run cost, so the distribution it has to be unusual
     /// against is the distribution of DAILY per-run means, which is what <c>ranked.ms_per_run</c> is. A
