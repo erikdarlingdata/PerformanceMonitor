@@ -46,10 +46,16 @@ public sealed class OversizedPlanBacklogPins
     /* ---- the rung ------------------------------------------------------------------------------------ */
 
     [Fact]
-    public void V121_IsTheTopRung_AndCarriesBothFactColumnsPlusTheBacklogTable()
+    public void V121_IsRegisteredInTheLadder_AndCarriesBothFactColumnsPlusTheBacklogTable()
     {
+        /* The "I am the top rung" claims have moved ON to PgAlertCountKnobRungTests (V122), the same
+           handoff this file received from DeadlockRateBandRungTests (V120). Asserting `Scripts[^1].Version
+           == 121` here would claim this rung is still the newest, which is how the NEXT rung's build goes
+           red. What stays is the ladder-top agreement (rung-agnostic) and this rung's own registration,
+           stated against its own number. */
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(121, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(121, V121.Version);
+        Assert.True(V121.Version < StorageVersion.SchemaVersion);
         Assert.Equal("oversized-plan-backlog", V121.Name);
 
         /* BOTH fact tables. Only adding one would leave the other's capped rows permanently undescribable,
@@ -942,7 +948,7 @@ public sealed class OversizedPlanBacklogPins
     }
 
     [Fact]
-    public void TheViewersStoreProbe_HasAV121Sentinel_AtTheTopOfTheMap()
+    public void TheViewersStoreProbe_HasAV121Sentinel_AboveTheV120Arm()
     {
         /* The viewer refuses a store below RequiredStoreSchemaVersion, which is StorageVersion.SchemaVersion.
            MapProbedSchemaVersion answers newest-arm-first from capability sentinels, so a rung that bumps the
@@ -956,22 +962,29 @@ public sealed class OversizedPlanBacklogPins
         var viewer = ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.cs");
 
         /* The probe asks the question, the caller reads the answer, the map has the parameter — three sites,
-           and a sentinel present at only some of them shifts every LATER ordinal onto the wrong column. */
+           and a sentinel present at only some of them shifts every LATER ordinal onto the wrong column. The
+           two probe-site spellings are no longer end-anchored: `bool hasOversizedPlanBacklog = false)` and
+           `reader.GetBoolean(96));` each asserted this sentinel was the LAST one, which stopped being true
+           the moment V122 appended its own — a position within the signature, not its end, is what this
+           rung still owns. */
         Assert.Contains("table_name = 'oversized_plan_backlog'", viewer, StringComparison.Ordinal);
-        Assert.Contains("bool hasOversizedPlanBacklog = false)", viewer, StringComparison.Ordinal);
-        Assert.Contains("reader.GetBoolean(96));", viewer, StringComparison.Ordinal);
+        Assert.Contains("bool hasOversizedPlanBacklog = false", viewer, StringComparison.Ordinal);
+        Assert.Contains("reader.GetBoolean(96)", viewer, StringComparison.Ordinal);
 
-        /* And it is the TOP arm, above V120's. Newest-first is the whole contract of that method. */
+        /* Above V120's arm. Newest-first is the whole contract of that method; "the TOP arm" was V122's
+           claim to inherit, and PgAlertCountKnobRungTests holds it now. */
         var v121 = viewer.IndexOf("if (hasOversizedPlanBacklog)", StringComparison.Ordinal);
         var v120 = viewer.IndexOf("if (hasDeadlockRateBandKnobs)", StringComparison.Ordinal);
         Assert.True(v121 >= 0, "the viewer has no V121 sentinel arm — a fully-migrated store would map to 120");
         Assert.True(v120 >= 0, "the V120 arm is gone, so this pin is comparing against nothing");
-        Assert.True(v121 < v120, "the V121 arm sits below V120's, so a current store maps one rung low");
+        Assert.True(v121 < v120, "the V121 arm sits below V120's, so a store at exactly this rung maps one rung low");
 
-        /* The arm returns this build's version rather than a literal that could drift from it. */
-        Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
-            viewer[v121..], StringComparison.Ordinal);
+        /* The arm returns this rung's OWN number — the literal a demoted rung's test is allowed to carry
+           (its version, its probe ordinal, and the version its sentinel maps to). The `return
+           StorageVersion.SchemaVersion` spelling this pin used while V121 was the top rung is exactly the
+           claim that had to move: it stopped being satisfiable anywhere below the V122 arm the moment the
+           build's version bumped past this rung. */
+        Assert.Contains("return 121;", viewer[v121..], StringComparison.Ordinal);
     }
 
     [Fact]
