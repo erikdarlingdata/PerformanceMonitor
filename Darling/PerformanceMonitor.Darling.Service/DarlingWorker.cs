@@ -1561,6 +1561,9 @@ public sealed class DarlingWorker : BackgroundService
                 customAlertViewerSource,
                 deliverer,
                 muteRuleService.IsAlertMuted,
+                /* #3464: the same live master switch every other family consults — a closure over the
+                   settings adapter's pass-through read, so a control-plane flip gates the very next sweep. */
+                alertsEnabled: () => alertSettings.AlertsEnabled,
                 historyStore,
                 (int)s_customAlertSweepInterval.TotalSeconds,
                 s_customAlertSweepInterval,
@@ -2288,9 +2291,10 @@ public sealed class DarlingWorker : BackgroundService
                gate are now control-plane knobs read LIVE from config.Analysis (a reload takes effect on the next
                tick). When analysis is disabled the pass is skipped and NextAnalysisDue is left in the past, so
                re-enabling runs immediately. The next-due stamp advances up front (Lite's scheduler shape), so a
-               timed-out pass is skipped, not retried immediately. Delivery is gated on
-               analysis_notifications_enabled (Lite's D0 split: production unconditional, delivery gated) —
-               replacing the old alerts.enabled gate; the interval is clamped to Lite's 5-360 range. */
+               timed-out pass is skipped, not retried immediately. Delivery is gated on the master switch
+               AND analysis_notifications_enabled (ShouldNotifyAnalysisFindings — #3464; Lite's D0 split
+               stands: production unconditional, delivery gated); the interval is clamped to Lite's 5-360
+               range. */
             if (config.Analysis.Enabled && DateTime.UtcNow >= server.NextAnalysisDue)
             {
                 var intervalMinutes = Math.Clamp(config.Analysis.IntervalMinutes, MinAnalysisIntervalMinutes, MaxAnalysisIntervalMinutes);
@@ -2325,7 +2329,7 @@ public sealed class DarlingWorker : BackgroundService
                 else
                 {
                     await RunScheduledAnalysisAsync(
-                        server, planFetcher, notificationService, config.Analysis.NotificationsEnabled, stoppingToken);
+                        server, planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), stoppingToken);
                 }
             }
         }
@@ -3517,7 +3521,8 @@ public sealed class DarlingWorker : BackgroundService
     /// <para>Failure-isolated from the shared sweep on purpose: these are additive signals, and a broken
     /// PostgreSQL read must not cost a server its CPU or blocking alerts. Recording and mute handling stay
     /// with the deliverer, exactly as for an engine-emitted alert, so a PostgreSQL alert lands in the same
-    /// history and obeys the same mute rules as every other one.</para>
+    /// history and obeys the same mute rules as every other one. Gated on the master alerts switch before
+    /// anything is read or counted, exactly as the engine sweep and the self-alerts are (#3464).</para>
     /// </summary>
     private async Task EvaluatePostgresAlertsAsync(
         ServerRuntime runtime, AlertServerSnapshot snapshot, DarlingConfig config, CancellationToken cancellationToken)
@@ -3527,23 +3532,30 @@ public sealed class DarlingWorker : BackgroundService
             return;
         }
 
+        /* #3464: the master-switch gate this path never had. An earlier version of the #3013 comment
+           below named the gap and deliberately left it open as "a question about whether the Tier 0
+           predictors are deliberately exempt from the switch"; the answer arrived as an incident. The
+           switch's own contract (Darling/README.md, the alerts section) says `enabled: false` turns off
+           ALL alert evaluation, and the same document is what an operator silencing a fleet is acting on —
+           two OTHER families measured delivering through a fleet-wide mute are the subject of #3464, and
+           this path had the identical shape: no consult anywhere between the sweep and _alertDeliverer.
+           Master-off now means for the predictors what it means for the engine sweep: no reads, no
+           evaluation, no history rows, cooldown state frozen where it stands. Before RecordPass, so the
+           denominator stays truthful — a pass that never ran is not counted, which is the SAME rule the
+           engine (records after its early return) and EvaluateStoreAlertsAsync (returns before recording)
+           already follow. */
+        if (!config.Alerts.Enabled)
+        {
+            return;
+        }
+
         /* #3013: the PostgreSQL predictor group is a THIRD alert evaluation pass, and it has to say so
            or a PostgreSQL target's denominator reports two passes for three. One pass for the whole
            group, not one per check: the six checks below are independently failure-isolated exactly as
            AlertEngine's fourteen Check*Async calls are, and those fourteen are one pass. Isolation
-           granularity is not pass granularity. Recorded after the guard above because a pass that cannot
-           reach the store is not one.
-
-           NOT parity with the other two sites, and an earlier version of this comment wrongly claimed it
-           was. The shared engine records its pass after AlertEngine.EvaluateServerAsync's
-           !_settings.AlertsEnabled early return, and DarlingSelfAlertEvaluator.EvaluateStoreAlertsAsync
-           returns before recording on the same check. This path has no master-switch gate at all —
-           DarlingWorker holds no reference to AlertsEnabled anywhere — so with alerting switched off the
-           PostgreSQL predictors still read, still evaluate and still reach _alertDeliverer, and this
-           counts the pass that really did run. That gap pre-dates this counter and is a question about
-           whether the Tier 0 predictors are deliberately exempt from the switch, not something to settle
-           by gating a denominator: gating only this line would make the count deny passes that happened
-           and alerts that fired. The count stays truthful and the gap stays named. */
+           granularity is not pass granularity. Recorded after the guards above because a pass that cannot
+           reach the store — or that the master switch stopped before it ran (#3464) — is not one; that is
+           parity with both sibling sites, which this comment once had to disclaim. */
         _readFailures.RecordPass(snapshot.ServerKey);
 
         var readClock = Stopwatch.StartNew();
@@ -5219,6 +5231,26 @@ LIMIT 1";
     }
 
     /// <summary>
+    /// Whether a finished analysis pass may route its findings to the notification channels: the master
+    /// alerts switch AND the analysis family toggle, the exact idiom the connection-change gate
+    /// established (<c>!_settings.AlertsEnabled || !_notifyConnectionChanges()</c> —
+    /// DarlingSelfAlertEvaluator.ApplyConnectionOutcomeAsync). #3464's first measured bypass was this
+    /// decision made from the family toggle ALONE: an Analysis INFO card reached a live paging channel
+    /// 38 minutes into a fleet-wide mute, because "delivery gated on analysis_notifications_enabled"
+    /// had quietly REPLACED the master consult rather than adding to it. The split itself is unchanged
+    /// and deliberate (Lite's D0): the pass runs and persists findings whatever this returns — the
+    /// master switch's own contract (Darling/README.md, the alerts section) promises exactly that,
+    /// "turns off all alert evaluation and scheduled-analysis finding notifications (the analysis itself
+    /// still runs and persists findings)" — so the Recommendations tab keeps filling while the channels
+    /// stay silent, and the toggle remains the narrower knob for fleets that want alerting without
+    /// analysis mail. One predicate, called by BOTH analysis entry points (the scheduled tick and
+    /// analyze_now), so a third entry point has one right thing to call and the census test one shape to
+    /// pin. Static and pure so the truth table is testable without a worker.
+    /// </summary>
+    internal static bool ShouldNotifyAnalysisFindings(DarlingConfig config) =>
+        config.Alerts.Enabled && config.Analysis.NotificationsEnabled;
+
+    /// <summary>
     /// Runs the AN3 analysis pipeline for one connected server and routes the findings to the
     /// shared notification path — Lite's CollectionBackgroundService.RunAnalysisIfDueAsync
     /// per-server body transplanted: the in-flight guard skips a server whose previous
@@ -5568,10 +5600,13 @@ LIMIT 1";
         }
 
         /* postPassHook: null — analyze_now is an interactive diagnostic, and the force-plan bot only
-           rides the SCHEDULED cadence so an operator poking a server cannot spend its action budget. */
+           rides the SCHEDULED cadence so an operator poking a server cannot spend its action budget.
+           Findings still come back in the command result under master-off — the operator asked a question
+           and gets the answer — but the notification CHANNELS stay silent (#3464): an on-demand pass must
+           not be the one analysis entry point that can page through a mute. */
         var result = await RunAnalysisPassAsync(
             serverId, server.Config.StorageName, server.Config.DisplayName,
-            planFetcher, notificationService, config.Analysis.NotificationsEnabled, postPassHook: null, cancellationToken);
+            planFetcher, notificationService, ShouldNotifyAnalysisFindings(config), postPassHook: null, cancellationToken);
 
         return result.Status switch
         {
