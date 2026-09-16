@@ -19,11 +19,11 @@
  *   - The diff is the point: verdicts render previous band beside band, and a first sweep says
  *     "no previous sweep" rather than implying a quiet history.
  * The viewing span is user-configurable, DEFAULT HOURLY (the owner's ruling); the sweep CADENCE is read from
- * get_alert_settings' fleet_sweep group for display only — the Settings window and update_alert_settings own
- * that knob, and this page has no write affordance at all.
+ * get_alert_settings' fleet_sweep group for display only — the Settings window and the alert-settings write
+ * tool own that knob, and this page has no write affordance at all.
  */
 
-import { el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, localTime, relTime,
+import { el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, localTime, relTime, rollupTextId,
          fmtInt, bandClass, disclosure } from "../util.js";
 
 /* The watch-item state vocabulary — the label each FleetSweepWatchStateMachine state owes an operator. The
@@ -166,11 +166,21 @@ function sweepDocument(d) {
       ["This sweep ran inside the post-restart settle window — fleet staleness here is classified startup-transient, not an outage."]));
   }
 
-  /* The header tiles: counts the document already carries. */
+  /* The header tiles: counts the document already carries. Built through ONE closure with the number
+     aria-describedby-tied to its label — the #3031/#3045 wiring the fleet and AG rollups carry, deduped
+     per render so the ids stay stable across the poll. */
   const fleet = report.fleet || {};
   const bands = fleet.bands || {};
   const watch = report.watch || {};
   const whp = Array.isArray(d.would_have_paged) ? d.would_have_paged : null;
+  const usedIds = new Set();
+  const tile = (value, label, extraClass) => {
+    const lblId = rollupTextId(label, "lbl", usedIds);
+    return el("div", { class: "tile" + (extraClass ? " " + extraClass : "") }, [
+      el("div", { class: "num", text: String(value), "aria-describedby": lblId }),
+      el("div", { class: "lbl", id: lblId, text: label }),
+    ]);
+  };
   nodes.push(el("div", { class: "sweep-tiles" }, [
     tile(fmtInt(d.servers_reported) + " / " + fmtInt(d.servers_expected), "servers reported"),
     ...Object.keys(bands).sort().map((b) =>
@@ -392,13 +402,6 @@ function watchStateSev(state) {
 }
 
 /* ─────────────────────────── small shared builders ─────────────────────────── */
-
-function tile(value, label, extraClass) {
-  return el("div", { class: "tile" + (extraClass ? " " + extraClass : "") }, [
-    el("div", { class: "num", text: String(value) }),
-    el("div", { class: "lbl", text: label }),
-  ]);
-}
 
 function table(headers, rows) {
   return el("div", { class: "table-wrap" }, [
