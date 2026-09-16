@@ -79,8 +79,10 @@ public sealed class DarlingMcpFleetSweepTools
            MCP host registers ITS logger — the service host's, with real providers — so a child-read
            fault on this path leaves a trace instead of degrading silently, which was the one
            observation the #3473 review recorded against this tool. The /api/read mirror's shared
-           handler delegate has no logger seat and passes null, which is that path's pre-existing
-           behavior, not a regression. */
+           handler delegate still has no logger seat; its dispatch BUILDER captures the web host's
+           service logger for this entry (the same instance — the wiring is beside the entry in
+           DarlingWebEndpoints.BuildReadDispatch), so both hosts' paths trace, and only a dispatch
+           built without a host behind it still passes null here. */
         ILogger? logger,
         [Description("Hours of sweep timeline. Default 1 (the delivery ruling's default viewing span).")] int hours_back = 1,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
