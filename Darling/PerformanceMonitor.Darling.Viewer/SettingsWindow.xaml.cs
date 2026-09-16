@@ -780,6 +780,11 @@ public partial class SettingsWindow : Window
         AnalysisNotificationsCheckBox.IsChecked = r.AnalysisNotificationsEnabled;
         AnalysisNotifySeverityBox.Text = r.AnalysisNotifySeverity.ToString("0.0", CultureInfo.InvariantCulture);
         AnalysisNotifyCooldownBox.Text = r.AnalysisNotifyCooldownMinutes.ToString(CultureInfo.InvariantCulture);
+        /* #3466 (V124): the fleet sweep's own switch and cadence, prefilled beside Automated Analysis —
+           the other scheduled whole-fleet evaluation — and deliberately OUTSIDE the master-toggle
+           enable/disable group: sweeps keep running under a fleet-wide mute by contract. */
+        FleetSweepEnabledCheckBox.IsChecked = r.FleetSweepEnabled;
+        FleetSweepIntervalBox.Text = r.FleetSweepIntervalMinutes.ToString(CultureInfo.InvariantCulture);
         /* #1141/#1236: the delivery mode + per-event cap are now STORE-backed (the service honors them),
            seeded from the row like every other alert-engine control. */
         AlertDeliveryModeBox.SelectedIndex = r.DeliveryMode == "PerEvent" ? 1 : 0;
@@ -829,6 +834,7 @@ public partial class SettingsWindow : Window
             DatabaseStateEnabled = AlertDatabaseStateCheckBox.IsChecked == true,
             AnalysisEnabled = AnalysisEnabledCheckBox.IsChecked == true,
             AnalysisNotificationsEnabled = AnalysisNotificationsCheckBox.IsChecked == true,
+            FleetSweepEnabled = FleetSweepEnabledCheckBox.IsChecked == true,
             ExcludedDatabases = AlertExcludedDatabasesBox.Text
                 .Split(',')
                 .Select(s => s.Trim())
@@ -946,6 +952,16 @@ public partial class SettingsWindow : Window
         else
             errors.Add("Analysis re-notify cooldown must be between 30 and 10080 minutes.");
 
+        /* #3466 (V124): the bounds are the same named constants update_alert_settings enforces and the
+           worker clamps to, so the three writers into this column cannot disagree about what is
+           acceptable — the #3444 discipline, restated for a cadence. */
+        if (int.TryParse(FleetSweepIntervalBox.Text, out var fleetSweepInterval)
+            && fleetSweepInterval >= FleetSweepCadence.IntervalMinutesFloor
+            && fleetSweepInterval <= FleetSweepCadence.IntervalMinutesCeiling)
+            row.FleetSweepIntervalMinutes = fleetSweepInterval;
+        else
+            errors.Add($"Fleet sweep interval must be between {FleetSweepCadence.IntervalMinutesFloor} and {FleetSweepCadence.IntervalMinutesCeiling} minutes.");
+
         /* #1141/#1236: delivery mode + per-event cap (store-backed). */
         row.DeliveryMode = AlertDeliveryModeBox.SelectedIndex == 1 ? "PerEvent" : "Summary";
         if (int.TryParse(AlertPerEventMaxBox.Text, out var perEventMax) && perEventMax is >= 1 and <= 100)
@@ -1030,6 +1046,10 @@ public partial class SettingsWindow : Window
         AlertPerEventMaxBox.Text = "5";
         AnalysisIntervalBox.Text = "30";
         AnalysisNotifySeverityBox.Text = "1.5";
+        /* #3466 (V124): from the shared constant rather than a literal, so a moved default cannot
+           leave this button writing a cadence nobody chose. The checkbox resets to the shipped ON. */
+        FleetSweepEnabledCheckBox.IsChecked = true;
+        FleetSweepIntervalBox.Text = FleetSweepCadence.DefaultIntervalMinutes.ToString(CultureInfo.InvariantCulture);
         AlertExcludedDatabasesBox.Text = "";
         MuteRuleDefaultExpirationCombo.SelectedIndex = 1; // 24 hours
         UpdateAlertPreviewText();

@@ -689,6 +689,23 @@ public sealed class AlertsConfig
     [JsonPropertyName("pgBlockingCountThreshold")]
     public int PgBlockingCountThreshold { get; set; } = PostgresAlertEvaluator.BlockingCountThresholdDefault;
 
+    /// <summary>#3466 (V124): whether the scheduled fleet sweep runs at all. NOT the alert master
+    /// switch's business, deliberately: sweeps under <c>alerts.enabled: false</c> are the muted-mode
+    /// contract's whole point (the sweep keeps publishing and carries the would-have-paged ledger),
+    /// so this is the sweep's OWN switch, the way <c>analysis.enabled</c> is the analysis pipeline's.
+    /// Default true — see the V124 rung for why the feature does not ship dark.</summary>
+    [JsonPropertyName("fleetSweepEnabled")]
+    public bool FleetSweepEnabled { get; set; } = true;
+
+    /// <summary>#3466 (V124): how often the fleet sweep runs, in minutes. Seeded from
+    /// <see cref="FleetSweepCadence.DefaultIntervalMinutes"/>, named rather than restated, so this and
+    /// the V124 column default cannot disagree — the #3060 discipline the knobs above follow. The
+    /// worker clamps it on read to <see cref="FleetSweepCadence.IntervalMinutesFloor"/>–
+    /// <see cref="FleetSweepCadence.IntervalMinutesCeiling"/>, the same bounds
+    /// <c>update_alert_settings</c> and the Viewer's save gate enforce on the way in.</summary>
+    [JsonPropertyName("fleetSweepIntervalMinutes")]
+    public int FleetSweepIntervalMinutes { get; set; } = FleetSweepCadence.DefaultIntervalMinutes;
+
     /// <summary>#3368 (V120): the deadlock health band's WARNING tier, in deadlocks per hour normalised over
     /// the window a card counted them in. The band was <c>count &gt; 0</c>, so one resolved deadlock made a
     /// server Critical; the right rate differs per workload, which is #3297's argument for the control plane.

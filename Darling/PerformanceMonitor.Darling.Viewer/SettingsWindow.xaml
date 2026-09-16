@@ -617,6 +617,24 @@
                 <TextBlock Text="Requires SMTP or a webhook configured below for delivery; findings are recorded in the Alerts tab either way."
                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                            Margin="20,4,0,0" TextWrapping="Wrap"/>
+
+                <!-- #3466 (V124): Fleet Sweep Reports. Deliberately NOT gated by the master alerts toggle:
+                     sweeps keep running under a fleet-wide mute and carry the would-have-paged ledger,
+                     which is the muted-mode contract's whole point. -->
+                <TextBlock Text="Fleet Sweep Reports" FontWeight="SemiBold" FontSize="12"
+                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,14,0,4"/>
+                <TextBlock Text="Periodically sweep the whole fleet into a stateful report: per-server health verdicts, changes since the previous sweep, and watch items. Runs even when alerts are disabled — a muted fleet still gets a readable ledger of what would have paged."
+                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           Margin="20,0,0,4" TextWrapping="Wrap"/>
+                <CheckBox x:Name="FleetSweepEnabledCheckBox" Content="Enable fleet sweep reports"
+                          Margin="20,4,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
+                <StackPanel Orientation="Horizontal" Margin="20,6,0,0">
+                    <TextBlock Text="Sweep the fleet every" VerticalAlignment="Center" Margin="0,0,8,0"
+                               Foreground="{DynamicResource ForegroundBrush}"/>
+                    <TextBox x:Name="FleetSweepIntervalBox" Width="45" TextAlignment="Center" VerticalAlignment="Center"/>
+                    <TextBlock Text="minutes (15 - 1440)" VerticalAlignment="Center" Margin="4,0,0,0"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                </StackPanel>
             </StackPanel>
         </Border>
 

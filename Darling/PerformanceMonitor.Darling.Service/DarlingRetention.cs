@@ -143,6 +143,20 @@ public static class DarlingRetention
     internal const int OversizedPlanBacklogRetentionDays = DataRetentionBaseDays;
 
     /// <summary>
+    /// #3466 (lane 2): the fleet-sweep tables' horizon — the base data horizon, deliberately, because a
+    /// sweep document is a summary OF the base data and a sweep outliving the rows it summarized explains
+    /// nothing: its drill-downs dangle and its diffs cite evidence no reader can re-check. Runs and their
+    /// two children prune on the run's <c>swept_at</c>; watch items prune on <c>last_seen_at</c> — the
+    /// backlog's rule, and last-seen means SIGHTING, never evaluation (the engine carries the stamps
+    /// through a miss unchanged) — so an episode still being carried never loses its row, however old
+    /// its birth record is: an open item is at most one standing miss from its last sighting before the
+    /// exit bar closes it, while a row nothing ever resights ages out on schedule. Wired HERE, in the
+    /// lane that makes the engine write the tables, exactly as lane 1's rung doc promised — the backlog
+    /// precedent of retention landing beside the writer rather than beside the DDL.
+    /// </summary>
+    internal const int FleetSweepRetentionDays = DataRetentionBaseDays;
+
+    /// <summary>
     /// The terminal-status filter for the command purge — the two states
     /// <c>ViewerDataService.IsTerminal</c> recognizes, which are also the only two
     /// <c>DarlingCommandExecutor</c> ever writes (its report path and its stale-command reaper). A
@@ -688,6 +702,50 @@ public static class DarlingRetention
             else
             {
                 tablesFailed++;
+            }
+
+            /* #3466: the fleet-sweep tables (V123), written by FleetSweepEngine and pruned at
+               FleetSweepRetentionDays — see that constant for the horizon's reasoning. NOT in
+               CollectorCatalog.All (they are the sweep's own state, not a collector's rows), so the
+               catalog loop above skips them and nothing else prunes them; plain tables, never
+               hypertables, per the store's own doc — hourly-cadence volume needs no chunking and the
+               children's keys cannot carry a partition column.
+
+               ORDER: children before runs, because the children have no time column of their own — they
+               prune through their run's swept_at — and the tables carry no FKs (the writer's single
+               transaction owns that invariant), so deleting runs first would strand children the join
+               could never reach again. Each child's second arm sweeps up exactly that stranding from a
+               purge that failed between statements on an earlier day: the price of no FKs, paid as one
+               cheap NOT EXISTS over tables bounded at dozens of narrow rows per sweep, rather than as an
+               ordering constraint on every future purge. Failure-isolated per table like every sibling. */
+            foreach (var (table, sql) in new (string Table, string Sql)[]
+            {
+                (FleetSweepStore.VerdictsTableName,
+                    $"DELETE FROM {FleetSweepStore.VerdictsTableName} c"
+                    + $" WHERE c.sweep_id IN (SELECT r.sweep_id FROM {FleetSweepStore.RunsTableName} r WHERE r.swept_at < $1)"
+                    + $" OR NOT EXISTS (SELECT 1 FROM {FleetSweepStore.RunsTableName} r WHERE r.sweep_id = c.sweep_id)"),
+                (FleetSweepStore.WouldHavePagedTableName,
+                    $"DELETE FROM {FleetSweepStore.WouldHavePagedTableName} c"
+                    + $" WHERE c.sweep_id IN (SELECT r.sweep_id FROM {FleetSweepStore.RunsTableName} r WHERE r.swept_at < $1)"
+                    + $" OR NOT EXISTS (SELECT 1 FROM {FleetSweepStore.RunsTableName} r WHERE r.sweep_id = c.sweep_id)"),
+                (FleetSweepStore.RunsTableName,
+                    TimeSlicedDeleteSql(FleetSweepStore.RunsTableName, "swept_at")),
+                (FleetSweepStore.WatchItemsTableName,
+                    TimeSlicedDeleteSql(FleetSweepStore.WatchItemsTableName, "last_seen_at")),
+            })
+            {
+                var sweepRowsDeleted = await PurgeOneAsync(
+                    postgres, table, sql,
+                    utcNow.AddDays(-FleetSweepRetentionDays), logger, cancellationToken);
+                if (sweepRowsDeleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += sweepRowsDeleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
             }
 
             var summary = new PurgeSummary(tablesPurged, totalRowsDeleted, totalChunksDropped);

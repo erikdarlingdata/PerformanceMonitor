@@ -415,10 +415,15 @@ public sealed class PgAlertCountKnobRungTests
             .Max();
         Assert.Equal(command.Parameters.Count, highestPlaceholder);
 
-        /* The two new columns ride at the END — appended, the rule every knob rung on this table follows,
-           so every earlier ordinal keeps its column. */
-        Assert.Equal(9, Assert.IsType<NpgsqlParameter<int>>(command.Parameters[^2]).TypedValue);
-        Assert.Equal(11, Assert.IsType<NpgsqlParameter<int>>(command.Parameters[^1]).TypedValue);
+        /* This pair rode at the END when V122 was the newest rung. V124 (#3466) then appended the
+           fleet-sweep cadence knobs past it — the same append rule, applied by the next rung — so the
+           END now belongs to that rung's own pin (FleetSweepCadenceKnobRungTests) and THIS rung pins
+           its permanent absolute seats: $63/$64 in the upsert, indexes 62/63 in the bind, matching the
+           reader's GetInt32(62)/(63). Absolute is the point — appended columns never move again, which
+           is what "every earlier ordinal keeps its column" promises, and what this now asserts from
+           the seats themselves rather than from a distance-to-the-end that every later rung changes. */
+        Assert.Equal(9, Assert.IsType<NpgsqlParameter<int>>(command.Parameters[62]).TypedValue);
+        Assert.Equal(11, Assert.IsType<NpgsqlParameter<int>>(command.Parameters[63]).TypedValue);
     }
 
     /// <summary>Non-overlapping occurrences of <paramref name="needle"/>.</summary>

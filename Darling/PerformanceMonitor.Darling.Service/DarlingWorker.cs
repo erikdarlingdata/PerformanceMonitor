@@ -470,6 +470,20 @@ public sealed class DarlingWorker : BackgroundService
        per-server; only consulted when _timescaleAvailable. */
     private DateTime _nextCompressionCheckUtc = DateTime.MinValue;
 
+    /* MinValue = the first loop pass after startup runs the fleet sweep (#3466 lane 2), then on the
+       operator-configured cadence (fleet_sweep_interval_minutes, default hourly, clamped by
+       FleetSweepEngine.ClampIntervalMinutes). Fleet-level by definition — a sweep is one statement about
+       the whole fleet — so a single field. An immediate first sweep after a restart is deliberate: it
+       lands inside the engine's post-restart settle window and says so, which re-establishes the timeline
+       quickly with an honest startup-transient document rather than leaving an hours-wide gap. */
+    private DateTime _nextFleetSweepUtc = DateTime.MinValue;
+
+    /* The in-flight fleet sweep (#3466), tracked so the cadence above cannot start a second one on top of
+       it — the oversized-plan backlog's exact shape. A sweep still running when its next slot comes round
+       skips that slot; the following one diffs against whatever the last COMPLETE sweep persisted, so
+       nothing is lost but the slot. */
+    private Task? _fleetSweep;
+
     /* MinValue = the first sweep after startup records the store self-metrics snapshot (#2068), then every
        s_storeMetricsInterval. Fleet-level (one shared store), so it is a single field, not per-server. NOT
        gated on _timescaleAvailable at the loop: the dimension and whole-store rows apply to plain-PG stores
@@ -2102,6 +2116,42 @@ public sealed class DarlingWorker : BackgroundService
                into the plain collect.store_metrics table hourly, retention bounded by the sweep's own
                DELETE. Every store shape (the hypertable arm gates on _timescaleAvailable INSIDE);
                failure-isolated inside SweepStoreSelfMetricsAsync like the two checks above. */
+            /* #3466 (lane 2): the fleet sweep — the scheduled, stateful whole-fleet report. FIRE-AND-TRACK
+               like the oversized-plan backlog, not awaited like the purge: the sweep reads only the loopback
+               store, but it reads it once per monitored server, and a stalled store would otherwise hold
+               this loop for minutes — the field-herd shape one maintenance step over. Launched and tracked,
+               a slow sweep costs only its own next slots (the IsCompleted guard), and RunAsync never faults
+               (catch-all inside, quiet on cancellation), so the task can complete unobserved.
+
+               Gated on the sweep's OWN switch and deliberately NOT on config.Alerts.Enabled: sweeps under
+               master-off are the muted-mode contract's whole point — the report keeps publishing, carries
+               the mute in its header, and writes the would-have-paged ledger. The engine makes no delivery
+               call anywhere (delivery is lane 4's daily rollup), so the master-switch census has nothing of
+               this path's to count. The cadence is read ONCE into the local that both the stamp and the
+               engine's span math use, so a store reload swapping config mid-tick cannot make the document
+               claim a span the schedule never used — the retention-hold read-once discipline. Stamped
+               BEFORE the launch, like every cadence on this loop. */
+            if (config.Alerts.FleetSweepEnabled
+                && DateTime.UtcNow >= _nextFleetSweepUtc
+                && (_fleetSweep is null || _fleetSweep.IsCompleted))
+            {
+                var fleetSweepMinutes = FleetSweepEngine.ClampIntervalMinutes(config.Alerts.FleetSweepIntervalMinutes);
+                _nextFleetSweepUtc = DateTime.UtcNow.AddMinutes(fleetSweepMinutes);
+
+                /* The whole registered population, connected or not — a sweep is about the fleet, and a
+                   server that cannot be reached is exactly the kind of fact it must carry (its store rows
+                   go quiet, which the engine bands and explains) rather than skip. */
+                var fleetSweepServers = new List<(int ServerId, string ServerName)>(sweepTargets.Length);
+                foreach (var target in sweepTargets)
+                {
+                    fleetSweepServers.Add((target.Config.ServerId, target.Config.DisplayName));
+                }
+
+                _fleetSweep = FleetSweepEngine.RunAsync(
+                    postgres, fleetSweepServers, TimeSpan.FromMinutes(fleetSweepMinutes),
+                    config.Alerts.Enabled, _logger, stoppingToken);
+            }
+
             if (DateTime.UtcNow >= _nextStoreMetricsUtc)
             {
                 _nextStoreMetricsUtc = DateTime.UtcNow.Add(s_storeMetricsInterval);

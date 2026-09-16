@@ -236,6 +236,45 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
         return results;
     }
 
+    /// <summary>
+    /// The daily-summary signals for one server over an EXACT half-open window — the fleet sweep's
+    /// per-server read (#3466 lane 2), which is <see cref="GetDailySummaryRangeAsync"/> minus two
+    /// choices that are the calendar's contract rather than the SQL's: the <c>.Date</c> truncation
+    /// (a sweep span is sub-day and starts at the previous sweep's instant, not midnight) and the
+    /// per-call rollup probe (a sweep span ends at "now" and is capped at one day by
+    /// <c>FleetSweepCadence.IntervalMinutesCeiling</c>, so it always sits inside the 4-day raw window
+    /// and the raw tier is correct by construction rather than by routing).
+    ///
+    /// <para>The statement is <see cref="DailySummarySql.RangeSql"/> itself — the ONE aggregate the
+    /// calendar, <c>get_daily_summary</c> and now the sweep all band from, so the sweep's verdicts and
+    /// the day surfaces cannot disagree about the same signals. The SQL buckets by UTC day, so a span
+    /// crossing midnight returns one row per day touched; the caller sums the rows, which is exact
+    /// because every signal is an additive count over the same half-open window.</para>
+    ///
+    /// <para><b>Throws on a store fault, deliberately</b> — the engine-read posture
+    /// (<c>FleetSweepStore.GetLatestSweepAsync</c>'s reasoning): the sweep's caller must render a
+    /// failed read as a dead instrument, never as a quiet server, and only a raised fault lets it
+    /// tell those apart.</para>
+    /// </summary>
+    public static async Task<List<DailySummaryReadRow>> GetWindowSignalsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime fromUtc, DateTime toUtc, CancellationToken cancellationToken = default)
+    {
+        var results = new List<DailySummaryReadRow>();
+        await using var command = postgres.CreateCommand(DailySummarySql.RangeSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddTimestamp(command, fromUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, toUtc);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(ReadDailySummaryRow(reader));
+        }
+
+        return results;
+    }
+
     /// <summary>Daily summary for one server on a specific date (or today, UTC, when <paramref name="summaryDate"/>
     /// is null) — the viewer's <c>GetDailySummaryAsync</c>. Returns a No-Data row when the day had no collection.</summary>
     public static async Task<DailySummaryReadRow> GetDailySummaryAsync(
