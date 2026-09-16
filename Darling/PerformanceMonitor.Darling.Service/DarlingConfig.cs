@@ -368,21 +368,34 @@ public sealed class DarlingConfig
                 problems.Add($"{label}: host is required.");
             }
 
-            if (server.UsesSqlAuth)
+            if (server.UsesSqlAuth || server.UsesServicePrincipal)
             {
+                /* Service principal carries the SAME two fields as SQL auth — the client id in username, the
+                   client secret in encryptedPassword — so the requirement is identical; only the wording
+                   changes so the error names what the operator actually has to supply. */
                 if (string.IsNullOrWhiteSpace(server.Username))
                 {
-                    problems.Add($"{label}: sql auth requires username.");
+                    problems.Add(server.UsesServicePrincipal
+                        ? $"{label}: service principal auth requires username (the Entra application/client id)."
+                        : $"{label}: sql auth requires username.");
                 }
 
                 if (string.IsNullOrWhiteSpace(server.EncryptedPassword) && string.IsNullOrWhiteSpace(server.Password))
                 {
-                    problems.Add($"{label}: sql auth requires encryptedPassword (preferred; see --encrypt-password) or password.");
+                    problems.Add(server.UsesServicePrincipal
+                        ? $"{label}: service principal auth requires encryptedPassword (the client secret; preferred, see --encrypt-password) or password."
+                        : $"{label}: sql auth requires encryptedPassword (preferred; see --encrypt-password) or password.");
                 }
+            }
+            else if (server.UsesManagedIdentity)
+            {
+                /* Managed identity has no mandatory field: a system-assigned identity needs nothing, a
+                   user-assigned one puts its client id in username. No secret is ever stored. */
             }
             else if (!string.Equals(server.Auth, "integrated", StringComparison.OrdinalIgnoreCase))
             {
-                problems.Add($"{label}: auth must be 'integrated' or 'sql' (got '{server.Auth}').");
+                problems.Add($"{label}: auth must be 'integrated', 'sql', 'serviceprincipal', or 'managedidentity' " +
+                    $"(got '{server.Auth}'). The interactive Microsoft Entra modes are not supported for a headless collector.");
             }
 
             /* Caught here, in the pre-flight, rather than only where the connection string is built.
@@ -1782,6 +1795,31 @@ public sealed class MonitoredServer
 
     [JsonIgnore]
     public bool UsesSqlAuth => string.Equals(Auth, "sql", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Microsoft Entra service principal (application/client id + client secret) — non-interactive,
+    /// so it fits a headless collector. The client id is carried in <see cref="Username"/> and the secret in
+    /// <see cref="EncryptedPassword"/> (same DPAPI shape as a SQL password), so it needs no new config field.
+    /// #3484.</summary>
+    [JsonIgnore]
+    public bool UsesServicePrincipal => string.Equals(Auth, "serviceprincipal", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Azure managed identity (system- or user-assigned) — non-interactive and secret-less. A
+    /// user-assigned identity names its client id in <see cref="Username"/>; a system-assigned one leaves it
+    /// blank. #3484.</summary>
+    [JsonIgnore]
+    public bool UsesManagedIdentity => string.Equals(Auth, "managedidentity", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Either of the two non-interactive Microsoft Entra modes. The INTERACTIVE Entra modes (MFA,
+    /// device-code, default-credential) are deliberately not supported for an unattended service — they need a
+    /// broker or a signed-in user; Lite offers them, the headless collector does not.</summary>
+    [JsonIgnore]
+    public bool UsesEntra => UsesServicePrincipal || UsesManagedIdentity;
+
+    /// <summary>True when the connect path must have a resolved secret in hand. SQL auth (password) and
+    /// service principal (client secret) both carry one in <see cref="EncryptedPassword"/>/<see cref="Password"/>;
+    /// integrated and managed identity carry none.</summary>
+    [JsonIgnore]
+    public bool RequiresResolvedSecret => UsesSqlAuth || UsesServicePrincipal;
 
     /// <summary>
     /// <see cref="Engine"/> parsed. Anything unrecognized resolves to

@@ -142,8 +142,10 @@ SELECT
     public static string ResolveConnectionString(MonitoredServer config, ILogger? logger = null)
     {
         string? password = null;
-        if (config.UsesSqlAuth)
+        if (config.RequiresResolvedSecret)
         {
+            /* SQL auth (password) and service principal (client secret) both resolve their secret here from
+               EncryptedPassword; managed identity and integrated resolve none. #3484. */
             bool usedPlaintext;
             if (OperatingSystem.IsWindows())
             {

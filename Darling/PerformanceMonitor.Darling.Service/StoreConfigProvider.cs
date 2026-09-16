@@ -677,8 +677,10 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
             true);
         AddDrift(drift, "auth", Trimmed(file.Auth), Trimmed(store.Auth), StringComparison.OrdinalIgnoreCase, true);
 
-        if (store.UsesSqlAuth)
+        if (store.UsesSqlAuth || store.UsesEntra)
         {
+            /* Username is meaningful for sql auth, for a service principal (the client id), and for a
+               user-assigned managed identity (its client id) — anything but integrated. #3484. */
             AddDrift(
                 drift,
                 "username",
@@ -1610,10 +1612,12 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
             RemediationEncryptedPassword = reader.IsDBNull(18) ? null : reader.GetString(18),
         };
 
-        if (server.UsesSqlAuth && string.IsNullOrWhiteSpace(server.EncryptedPassword))
+        if (server.RequiresResolvedSecret && string.IsNullOrWhiteSpace(server.EncryptedPassword))
         {
+            /* Service principal keeps its client secret in the same EncryptedPassword slot as a SQL password,
+               so the bootstrap backfill (store row minted without the secret) covers it identically. #3484. */
             var matches = bootstrap.Servers.Where(s =>
-                s.UsesSqlAuth
+                s.RequiresResolvedSecret
                 && string.Equals(s.StorageName, server.StorageName, StringComparison.OrdinalIgnoreCase)
                 && string.Equals(s.Username, server.Username, StringComparison.Ordinal)).ToList();
 

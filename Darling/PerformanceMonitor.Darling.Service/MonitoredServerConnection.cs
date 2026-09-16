@@ -59,6 +59,26 @@ public static class MonitoredServerConnection
             builder.Password = resolvedPassword
                 ?? throw new InvalidOperationException($"Server '{server.DisplayName}' uses sql auth but no password was resolved.");
         }
+        else if (server.UsesServicePrincipal)
+        {
+            /* Microsoft Entra service principal (non-interactive), mirroring Lite's ApplyAuthentication: the
+               application/client id is the user, the client secret is the password — resolved from
+               EncryptedPassword exactly like a SQL password (RequiresResolvedSecret covers both). #3484. */
+            builder.Authentication = SqlAuthenticationMethod.ActiveDirectoryServicePrincipal;
+            builder.UserID = server.Username;
+            builder.Password = resolvedPassword
+                ?? throw new InvalidOperationException($"Server '{server.DisplayName}' uses service-principal auth but no client secret was resolved.");
+        }
+        else if (server.UsesManagedIdentity)
+        {
+            /* Azure managed identity (non-interactive), mirroring Lite: no secret. A user-assigned identity
+               names its client id in Username; a system-assigned one leaves it blank. #3484. */
+            builder.Authentication = SqlAuthenticationMethod.ActiveDirectoryManagedIdentity;
+            if (!string.IsNullOrWhiteSpace(server.Username))
+            {
+                builder.UserID = server.Username;
+            }
+        }
         else
         {
             builder.IntegratedSecurity = true;

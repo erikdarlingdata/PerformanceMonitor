@@ -175,6 +175,18 @@ public sealed class DarlingConfigTests
         var sqlNoCreds = ValidConfig(c => c.Servers[0].Auth = "sql").Validate();
         Assert.Contains(sqlNoCreds, p => p.Contains("requires username", StringComparison.Ordinal));
         Assert.Contains(sqlNoCreds, p => p.Contains("encryptedPassword", StringComparison.Ordinal));
+
+        /* #3484: a service principal takes the same two fields as sql auth (client id + secret), so a missing
+           secret is a hard error; supplied, it validates. */
+        Assert.Contains(
+            ValidConfig(c => { c.Servers[0].Auth = "serviceprincipal"; c.Servers[0].Username = "app-id"; c.Servers[0].EncryptedPassword = null; c.Servers[0].Password = null; }).Validate(),
+            p => p.Contains("service principal auth requires encryptedPassword", StringComparison.Ordinal));
+        Assert.Empty(
+            ValidConfig(c => { c.Servers[0].Auth = "serviceprincipal"; c.Servers[0].Username = "app-id"; c.Servers[0].EncryptedPassword = null; c.Servers[0].Password = "secret"; }).Validate());
+
+        /* Managed identity is secret-less and needs no mandatory field — valid with or without a user-assigned client id. */
+        Assert.Empty(ValidConfig(c => { c.Servers[0].Auth = "managedidentity"; c.Servers[0].Username = null; c.Servers[0].EncryptedPassword = null; c.Servers[0].Password = null; }).Validate());
+        Assert.Empty(ValidConfig(c => { c.Servers[0].Auth = "managedidentity"; c.Servers[0].Username = "user-assigned-id"; c.Servers[0].EncryptedPassword = null; c.Servers[0].Password = null; }).Validate());
     }
 
     [Fact]
@@ -244,6 +256,41 @@ public sealed class DarlingConfigTests
         /* SQL auth without a resolved password is a hard error, not a silent empty password. */
         Assert.Throws<InvalidOperationException>(() =>
             MonitoredServerConnection.BuildConnectionString(Server(s => { s.Auth = "sql"; s.Username = "u"; })));
+    }
+
+    [Fact]
+    public void ConnectionString_EntraServicePrincipal_SetsServicePrincipalAuth_WithClientIdAndSecret()
+    {
+        /* #3484: non-interactive Entra service principal — client id as UserID, client secret as Password
+           (resolved from EncryptedPassword like a SQL password), the ActiveDirectoryServicePrincipal mode set. */
+        var server = Server(s => { s.Auth = "serviceprincipal"; s.Username = "app-client-id"; s.Database = "app1"; });
+        var parsed = new SqlConnectionStringBuilder(MonitoredServerConnection.BuildConnectionString(server, "client-secret"));
+
+        Assert.Equal(SqlAuthenticationMethod.ActiveDirectoryServicePrincipal, parsed.Authentication);
+        Assert.Equal("app-client-id", parsed.UserID);
+        Assert.Equal("client-secret", parsed.Password);
+        Assert.False(parsed.IntegratedSecurity);
+
+        /* A service principal with no resolved secret is a hard error, exactly like sql auth. */
+        Assert.Throws<InvalidOperationException>(() =>
+            MonitoredServerConnection.BuildConnectionString(Server(s => { s.Auth = "serviceprincipal"; s.Username = "app"; })));
+    }
+
+    [Fact]
+    public void ConnectionString_ManagedIdentity_SetsManagedIdentityAuth_OptionalClientId_NoSecret()
+    {
+        /* #3484: managed identity is secret-less. A user-assigned identity names its client id in UserID; a
+           system-assigned identity omits it. Neither carries a password. */
+        var userAssigned = new SqlConnectionStringBuilder(
+            MonitoredServerConnection.BuildConnectionString(Server(s => { s.Auth = "managedidentity"; s.Username = "ua-client-id"; })));
+        Assert.Equal(SqlAuthenticationMethod.ActiveDirectoryManagedIdentity, userAssigned.Authentication);
+        Assert.Equal("ua-client-id", userAssigned.UserID);
+        Assert.False(userAssigned.IntegratedSecurity);
+
+        var systemAssigned = new SqlConnectionStringBuilder(
+            MonitoredServerConnection.BuildConnectionString(Server(s => { s.Auth = "managedidentity"; s.Username = null; })));
+        Assert.Equal(SqlAuthenticationMethod.ActiveDirectoryManagedIdentity, systemAssigned.Authentication);
+        Assert.True(string.IsNullOrEmpty(systemAssigned.UserID));
     }
 
     [Fact]
