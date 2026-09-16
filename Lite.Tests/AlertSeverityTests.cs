@@ -71,6 +71,20 @@ public class AlertSeverityTests
         Assert.Equal("#2eaef1", hex);
     }
 
+    /// <summary>#3466 lane 4: the fleet sweep's daily rollup is the second deliberate INFO arm, on the
+    /// digest's exact reasoning — a report to read, not a condition to act on, DECLARED so the next
+    /// #1136/#2090-style fall-through sweep cannot promote it to WARNING. It stays out of
+    /// <see cref="EveryFiredMetricName_HasASeverityArm_NotTheInfoFallThrough"/>'s inventory for the same
+    /// reason the digest does: that list asserts fired metrics DIFFER from the fall-through, and this one
+    /// matches it by design.</summary>
+    [Fact]
+    public void FleetSweepRollup_IsInfoBlueOnPurpose()
+    {
+        var (hex, badge, _) = AlertSeverity.ForMetric("Fleet Sweep Rollup");
+        Assert.Equal("INFO", badge);
+        Assert.Equal("#2eaef1", hex);
+    }
+
     [Fact]
     public void EmailBody_CriticalOverride_RendersCriticalNotInfo()
     {

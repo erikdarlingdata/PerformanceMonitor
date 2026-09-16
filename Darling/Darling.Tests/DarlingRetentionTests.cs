@@ -268,8 +268,9 @@ public sealed class DarlingRetentionTests
         Assert.Contains("cutoff {Cutoff:", body, StringComparison.Ordinal);
 
         /* Only the row-capped path: the time-sliced statement passes batchSize 1, where "batches" is
-           always 1 and would say nothing. */
-        Assert.Contains("if (batchSize > 1)", body, StringComparison.Ordinal);
+           always 1 and would say nothing — and the single-shot sentinel is excluded too, because its
+           "cap" is int.MaxValue and logging it as a real configuration would misread (#3471 review). */
+        Assert.Contains("if (batchSize > 1 && batchSize != SingleShotStatement)", body, StringComparison.Ordinal);
     }
 
     /* ---------------- run-record status/message (pure) ---------------- */

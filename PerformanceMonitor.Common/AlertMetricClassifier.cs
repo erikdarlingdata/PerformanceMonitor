@@ -142,10 +142,12 @@ namespace PerformanceMonitor.Common
                with no expiry, past every expiry the product offers. "Collector Cost Digest" (#3443) counts
                the (server, collector) pairs the digest listed; its threshold column is the 0 sentinel the
                NOT NULL column demands, because a report has no threshold, and the alert's own threshold
-               STRING says so. */
+               STRING says so. "Fleet Sweep Rollup" (#3466) is the digest's shape again: its value is the
+               count of sweeps the rollup covered, its threshold column the same 0 sentinel for the same
+               stated reason. */
             "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job"
                 or "Custom Alert Rules Unhealthy" or "Stale Mute Rules"
-                or "Collector Cost Digest" => $"{value:F0}",
+                or "Collector Cost Digest" or "Fleet Sweep Rollup" => $"{value:F0}",
 
             /* #1846: a state-only metric never had a number — its display value is a role, a connection
                state, a version or the literal "resolved", and the stored double is the 0 sentinel the

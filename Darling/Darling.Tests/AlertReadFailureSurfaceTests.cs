@@ -884,7 +884,7 @@ public sealed class AlertReadFailureSurfaceTests
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
         (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 13, 5),
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 7, 9),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 8, 10),
     };
 
     /// <summary>
@@ -938,9 +938,13 @@ public sealed class AlertReadFailureSurfaceTests
     /// collector-cost census read, whose swallowed failure decides that a tick routes nothing rather than
     /// guessing a channel, and the collector-cost digest read, whose swallowed failure costs a day's
     /// report. Both are the evidence an alerting decision is judged on — not context, not a write, not a
-    /// delivery — so both are counted rather than exempt, each under its own name with its own clock.</para>
+    /// delivery — so both are counted rather than exempt, each under its own name with its own clock.
+    /// An EIGHTH since #3466: the fleet-sweep rollup read, whose swallowed failure skips the day's rollup
+    /// tick without consuming the interval — counted because a fault folded into "empty day" would convert
+    /// an unreadable store into a permanently quiet channel, the quiet-is-not-clean misreading at the
+    /// delivery end.</para>
     /// </summary>
-    private const int CountedSites = 30;
+    private const int CountedSites = 31;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
@@ -970,6 +974,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Recently-failed-job check errored"] = "reads the monitored server's msdb on its own connection and timeout",
         ["Skipping recently-failed-job check"] = "the same msdb read, permission-denied arm; not a store read",
         ["Failed to check failed jobs"] = "the fetcher reads the monitored server's msdb; the block's only store op is a write both stores swallow",
+        ["CONVERTS the fault into the unreadable count"] = "a parse arm, not a read: the fleet-sweep rollup's store read is counted above it, and a document that does not parse becomes the rollup's own reportable unreadable count - the fault is evidence, not a swallow",
     };
 
     /// <summary>
@@ -1056,7 +1061,9 @@ public sealed class AlertReadFailureSurfaceTests
         /* The whole-tree totals, so a site MOVED between the scoped regions still has to be re-counted by
            a person rather than netting out silently. */
         Assert.Equal(CountedSites, totalCounted);
-        Assert.Equal(21, totalExempt);
+        /* 22nd since #3466: the rollup's parse arm, which converts a non-parsing sweep document into the
+           rollup's own unreadable count rather than a read failure. */
+        Assert.Equal(22, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

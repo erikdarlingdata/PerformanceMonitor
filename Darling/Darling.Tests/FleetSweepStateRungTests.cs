@@ -291,6 +291,8 @@ public sealed class FleetSweepStateRungTests
             FleetSweepStore.GetWatchItemsByStateSql,
             FleetSweepStore.GetOpenAndCarriedWatchItemsSql,
             FleetSweepStore.GetActiveWatchItemsSql,
+            FleetSweepStore.GetWouldHavePagedBySpanSql,
+            FleetSweepStore.GetSweepServerNamesBySpanSql,
         })
         {
             Assert.DoesNotContain("now()", sql, StringComparison.OrdinalIgnoreCase);
@@ -300,6 +302,34 @@ public sealed class FleetSweepStateRungTests
            trusting that generator-issued ids stay time-ordered. */
         Assert.Contains("ORDER BY swept_at DESC, sweep_id DESC", FleetSweepStore.GetLatestRunSql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 1", FleetSweepStore.GetLatestRunSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The rollup's two span reads (#3466 lane 4) carry the same both-bounds discipline as the run
+    /// span read — the span lives on the RUN's <c>swept_at</c>, so both statements join the run table
+    /// and window there, with both bounds the caller's parameters. And the ledger read carries NO
+    /// <c>alerts_enabled</c> predicate: rows only exist under master-off sweeps because the ENGINE
+    /// writes none otherwise, and a read-side restatement of a write-side guarantee would be the
+    /// second opinion that can drift.
+    /// </summary>
+    [Fact]
+    public void TheRollupSpanReads_WindowOnTheRunsInstant_WithBothBoundsTheCallers()
+    {
+        foreach (var sql in new[]
+        {
+            FleetSweepStore.GetWouldHavePagedBySpanSql,
+            FleetSweepStore.GetSweepServerNamesBySpanSql,
+        })
+        {
+            Assert.Contains("JOIN collect.fleet_sweep_runs r ON r.sweep_id", sql, StringComparison.Ordinal);
+            Assert.Contains("r.swept_at >= $1", sql, StringComparison.Ordinal);
+            Assert.Contains("r.swept_at <= $2", sql, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("alerts_enabled", FleetSweepStore.GetWouldHavePagedBySpanSql, StringComparison.Ordinal);
+
+        /* The names read is DISTINCT pairs — one names map for the render, not one row per sweep. */
+        Assert.Contains("SELECT DISTINCT v.server_id, v.server_name", FleetSweepStore.GetSweepServerNamesBySpanSql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -567,6 +597,33 @@ public sealed class FleetSweepStateRungTests
             FleetSweepWatchStateMachine.Closed, conditionHeld: false, consecutiveHits: 0, consecutiveMisses: 7);
         Assert.Equal(FleetSweepWatchStateMachine.Closed, stillClosed.State);
         Assert.False(stillClosed.JustClosed);
+    }
+
+    /// <summary>
+    /// The two child purges (verdicts, would-have-paged) are one whole-statement DELETE each — neither
+    /// time-sliced nor row-capped — so they must dispatch single-shot. Under the drain loop's default
+    /// batchSize of 1, an unsliced statement that deleted anything re-ran in full once more just to observe
+    /// zero rows: an extra whole-table DELETE on exactly the days the purge had work (#3471 review finding).
+    /// Source pin, because the shape is a call-site argument the compiler cannot distinguish from the
+    /// sliced siblings' correct batchSize of 1 in the same loop.
+    /// </summary>
+    [Fact]
+    public void TheUnslicedChildPurges_DispatchSingleShot()
+    {
+        var retention = RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingRetention.cs");
+
+        Assert.Contains("private const int SingleShotStatement = int.MaxValue;", retention, StringComparison.Ordinal);
+
+        /* Both unsliced children carry the sentinel; both sliced statements in the same loop keep 1. The
+           tuple rows are the pin's subject, so match them structurally rather than by line position. */
+        Assert.Equal(2, CountOf(retention, "SingleShotStatement),"));
+        Assert.Contains("TimeSlicedDeleteSql(FleetSweepStore.RunsTableName, \"swept_at\"), 1)", retention, StringComparison.Ordinal);
+        Assert.Contains("TimeSlicedDeleteSql(FleetSweepStore.WatchItemsTableName, \"last_seen_at\"), 1)", retention, StringComparison.Ordinal);
+
+        /* The single-shot sentinel must also stay out of the row-capped drain report, whose "cap" figure
+           would otherwise log as int.MaxValue and read as a real configuration. */
+        Assert.Contains("batchSize > 1 && batchSize != SingleShotStatement", retention, StringComparison.Ordinal);
     }
 
     /* ---- helpers -------------------------------------------------------------------------------------- */
