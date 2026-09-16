@@ -147,10 +147,12 @@ public static class DarlingRetention
     /// sweep document is a summary OF the base data and a sweep outliving the rows it summarized explains
     /// nothing: its drill-downs dangle and its diffs cite evidence no reader can re-check. Runs and their
     /// two children prune on the run's <c>swept_at</c>; watch items prune on <c>last_seen_at</c> — the
-    /// backlog's rule — so an episode still being carried (re-seen every sweep) never loses its row,
-    /// however old its birth record is. Wired HERE, in the lane that makes the engine write the tables,
-    /// exactly as lane 1's rung doc promised — the backlog precedent of retention landing beside the
-    /// writer rather than beside the DDL.
+    /// backlog's rule, and last-seen means SIGHTING, never evaluation (the engine carries the stamps
+    /// through a miss unchanged) — so an episode still being carried never loses its row, however old
+    /// its birth record is: an open item is at most one standing miss from its last sighting before the
+    /// exit bar closes it, while a row nothing ever resights ages out on schedule. Wired HERE, in the
+    /// lane that makes the engine write the tables, exactly as lane 1's rung doc promised — the backlog
+    /// precedent of retention landing beside the writer rather than beside the DDL.
     /// </summary>
     internal const int FleetSweepRetentionDays = DataRetentionBaseDays;
 

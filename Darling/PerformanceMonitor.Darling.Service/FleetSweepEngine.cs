@@ -506,9 +506,12 @@ public static class FleetSweepEngine
     /// EXCEPT where the sweep cannot honestly judge, and those items are OMITTED (rows untouched)
     /// rather than fed a fabricated miss: staleness items inside the settle window (staleness there is
     /// the restart, not the server), and any item on a server whose signal read faulted (unreadable is
-    /// neither hit nor quiet). The opened/closed stamps always describe the CURRENT episode — a
-    /// resurrected item clears the old episode's stamps, whose history lives in the sweep documents
-    /// that reported it.
+    /// neither hit nor quiet). One consequence of evaluating inside the settle window is decided, not
+    /// overlooked: a NON-staleness pending item missed there has its entry count reset — and that is
+    /// bounded, because the window is shorter than the floor cadence, so at most one sweep lands inside
+    /// it, and a single miss cannot close an open item under the exit bar. The opened/closed stamps
+    /// always describe the CURRENT episode — a resurrected item clears the old episode's stamps, whose
+    /// history lives in the sweep documents that reported it.
     /// </summary>
     private static List<FleetSweepWatchItem> AdvanceWatchItems(
         DateTime nowUtc,
@@ -611,9 +614,18 @@ public static class FleetSweepEngine
     }
 
     /// <summary>One advanced row image. Evidence is fresh on a hit and NULL on a miss — the store's
-    /// COALESCE keeps the standing evidence, so a carried item never cites nothing. The episode stamps
-    /// follow the state: opened is set on the opening sweep and cleared when a fresh episode begins;
-    /// closed is set on the closing sweep and cleared the moment the item is anything but closed.</summary>
+    /// COALESCE keeps the standing evidence, so a carried item never cites nothing. The last-seen pair
+    /// moves ONLY on a hit — last-seen means SIGHTING, lane 1's contract — because a miss is an
+    /// evaluation, and stamping evaluations would make every active row read "seen just now" forever:
+    /// a pending item that is never resighted stays pending, is re-evaluated every sweep, and a
+    /// re-stamped <c>last_seen_at</c> would keep it ahead of the retention arm keyed on that column for
+    /// the rest of the store's life, while the readers' <c>ORDER BY last_seen_at DESC</c> would rank
+    /// "most recently evaluated" — every active row, every sweep — which ranks nothing. Carrying the
+    /// stamps is safe for live episodes: an open item takes at most one standing miss before the exit
+    /// bar closes it, so a row still being carried is never more than one sweep from its last sighting.
+    /// The episode stamps follow the state: opened is set on the opening sweep and cleared when a fresh
+    /// episode begins; closed is set on the closing sweep and cleared the moment the item is anything
+    /// but closed.</summary>
     private static FleetSweepWatchItem BuildItemImage(
         FleetSweepWatchItem row,
         FleetSweepWatchStateMachine.WatchAdvance advance,
@@ -637,11 +649,11 @@ public static class FleetSweepEngine
             advance.ConsecutiveHits,
             advance.ConsecutiveMisses,
             row.FirstSeenSweepId,
-            sweepId,
+            hit is null ? row.LastSeenSweepId : sweepId,
             opened,
             closed,
             row.FirstSeenAtUtc,
-            nowUtc,
+            hit is null ? row.LastSeenAtUtc : nowUtc,
             hit?.Evidence);
     }
 

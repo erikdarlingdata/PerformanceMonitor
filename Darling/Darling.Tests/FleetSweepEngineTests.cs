@@ -227,6 +227,37 @@ public sealed class FleetSweepEngineTests
         Assert.Equal(1, advanced.ConsecutiveMisses);
     }
 
+    /// <summary>
+    /// Last-seen means SIGHTING — lane 1's contract for the pair. A miss is an evaluation, so the
+    /// counters move, but the sighting stamps carry through unchanged; only a hit stamps this sweep.
+    /// The alternative — stamping every evaluation — is quietly immortal state: a pending item that is
+    /// never resighted stays pending (the state machine resets its entry count and holds), the active
+    /// read re-evaluates it every sweep, and every evaluation would re-stamp <c>last_seen_at</c> fresh,
+    /// so the retention arm keyed on that column could never mature for exactly the rows nothing will
+    /// ever close — while the readers' <c>ORDER BY last_seen_at DESC</c> would rank "most recently
+    /// evaluated", which every active row is, every sweep.
+    /// </summary>
+    [Fact]
+    public void AMiss_DoesNotMoveTheSightingStamps_AndAHitDoes()
+    {
+        var standing = new FleetSweepWatchItem(
+            1, FleetSweepEngine.BandCriticalItemKey, "condition", FleetSweepWatchStateMachine.Pending,
+            1, 0, 100, 100, null, null, SpanStart, SpanStart, "{}");
+
+        /* Missed this sweep: the counters advance, the sighting pair stands where the last hit left it. */
+        var missed = ComposeSimple(new[] { Healthy(1, "server-a") }, activeItems: new[] { standing });
+        var missedItem = Assert.Single(missed.WatchItems);
+        Assert.Equal(1, missedItem.ConsecutiveMisses);
+        Assert.Equal(100, missedItem.LastSeenSweepId);
+        Assert.Equal(SpanStart, missedItem.LastSeenAtUtc);
+
+        /* Sighted this sweep: the pair stamps THIS sweep — the stamps are the sighting record. */
+        var sighted = ComposeSimple(new[] { CriticalDeadlocks(1, "server-a") }, activeItems: new[] { standing });
+        var sightedItem = Assert.Single(sighted.WatchItems);
+        Assert.Equal(sighted.Run.SweepId, sightedItem.LastSeenSweepId);
+        Assert.Equal(Now, sightedItem.LastSeenAtUtc);
+    }
+
     /* ─────────────────────── liveness: quiet is not clean ─────────────────────── */
 
     /// <summary>
