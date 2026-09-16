@@ -884,7 +884,7 @@ public sealed class AlertReadFailureSurfaceTests
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
         (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 13, 5),
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 7, 9),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 8, 9),
     };
 
     /// <summary>
@@ -938,9 +938,13 @@ public sealed class AlertReadFailureSurfaceTests
     /// collector-cost census read, whose swallowed failure decides that a tick routes nothing rather than
     /// guessing a channel, and the collector-cost digest read, whose swallowed failure costs a day's
     /// report. Both are the evidence an alerting decision is judged on — not context, not a write, not a
-    /// delivery — so both are counted rather than exempt, each under its own name with its own clock.</para>
+    /// delivery — so both are counted rather than exempt, each under its own name with its own clock.
+    /// An EIGHTH since #3466: the fleet-sweep rollup read, whose swallowed failure skips the day's rollup
+    /// tick without consuming the interval — counted because a fault folded into "empty day" would convert
+    /// an unreadable store into a permanently quiet channel, the quiet-is-not-clean misreading at the
+    /// delivery end.</para>
     /// </summary>
-    private const int CountedSites = 30;
+    private const int CountedSites = 31;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the

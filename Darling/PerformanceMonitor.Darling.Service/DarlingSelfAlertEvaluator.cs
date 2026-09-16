@@ -1564,8 +1564,12 @@ internal sealed class DarlingSelfAlertEvaluator
         var readClock = Stopwatch.StartNew();
         try
         {
+            /* One clock, restarted per read: the failure surface census requires the elapsed a fault
+               records to belong to the operation that faulted, not to everything the try ran first. */
             runs = await FleetSweepStore.GetSweepsBySpanForRollupAsync(postgres, spanStartUtc, now, cancellationToken);
+            readClock.Restart();
             ledger = await FleetSweepStore.GetWouldHavePagedBySpanAsync(postgres, spanStartUtc, now, cancellationToken);
+            readClock.Restart();
             serverNames = await FleetSweepStore.GetSweepServerNamesBySpanAsync(postgres, spanStartUtc, now, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
