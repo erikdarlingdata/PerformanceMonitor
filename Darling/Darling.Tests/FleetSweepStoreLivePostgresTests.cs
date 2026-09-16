@@ -255,6 +255,84 @@ public sealed class FleetSweepStoreLivePostgresTests
     }
 
     /// <summary>
+    /// The worklist names read (#3482), against a real store: the whole retained history in one map —
+    /// a server that departed after an early sweep is still nameable off that sweep's verdicts, which
+    /// is the read's reason to exist (the newest sweep cannot name a server hysteresis is still
+    /// carrying) — and the rename-determinism contract proven live: two names for one server_id, and
+    /// the NEWEST wins, because the statement's ORDER BY delivers it last and the reader overwrites
+    /// (the #3476 rule, held on the new statement too).
+    /// </summary>
+    [Fact]
+    public async Task TheWorklistNamesRead_CoversDepartedServers_AndTheNewestNameWins()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live worklist-names test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+
+        await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await migrate.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(migrate, null, ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        /* An empty store answers an empty map, not a throw — the log-and-degrade posture's happy
+           twin: nothing to name is not a fault. */
+        Assert.Empty(await FleetSweepStore.GetSweepServerNamesAsync(postgres, null, ct));
+
+        var sweepOneAt = new DateTime(2026, 9, 15, 10, 0, 0, DateTimeKind.Utc);
+        var run = new FleetSweepRun(
+            3001, sweepOneAt, sweepOneAt.AddHours(-1), sweepOneAt, null, true, 2, 2, true,
+            """{"alert_pass_counter":{"read":true}}""", """{"sweep":1}""");
+
+        /* Sweep 1: server 1 under its ORIGINAL name, server 2 present for the last time — the
+           departed server whose name will exist ONLY in this older sweep's verdicts. */
+        await FleetSweepStore.RecordSweepAsync(
+            postgres,
+            run,
+            new[]
+            {
+                new FleetSweepServerVerdict(1, "name-original", "Healthy", null, null, null),
+                new FleetSweepServerVerdict(2, "server-departed", "Healthy", null, null, null),
+            },
+            Array.Empty<FleetSweepWouldHavePagedEntry>(),
+            Array.Empty<FleetSweepWatchItem>(),
+            ct);
+
+        /* Sweep 2: server 1 RENAMED, server 2 gone from the fleet. */
+        await FleetSweepStore.RecordSweepAsync(
+            postgres,
+            run with
+            {
+                SweepId = 3002,
+                SweptAtUtc = sweepOneAt.AddHours(1),
+                SpanStartUtc = sweepOneAt,
+                SpanEndUtc = sweepOneAt.AddHours(1),
+                PreviousSweepId = 3001,
+                ReportJson = """{"sweep":2}""",
+            },
+            new[] { new FleetSweepServerVerdict(1, "name-renamed", "Healthy", "Healthy", null, null) },
+            Array.Empty<FleetSweepWouldHavePagedEntry>(),
+            Array.Empty<FleetSweepWatchItem>(),
+            ct);
+
+        var names = await FleetSweepStore.GetSweepServerNamesAsync(postgres, null, ct);
+
+        /* Two names for one id: the NEWEST sighting's spelling wins, deterministically. */
+        Assert.Equal("name-renamed", names[1]);
+
+        /* The departed server is still nameable — the whole-history read's reason to exist: the
+           newest sweep's verdicts no longer carry it, but a watch item may still. */
+        Assert.Equal("server-departed", names[2]);
+        Assert.Equal(2, names.Count);
+    }
+
+    /// <summary>
     /// The probe's arity, against a real store rather than by counting text: the SELECT returns
     /// exactly one boolean per <c>MapProbedSchemaVersion</c> parameter — the agreement the V122 lane
     /// verified and this rung extends by one — and feeding the map the ACTUAL sentinel row of a

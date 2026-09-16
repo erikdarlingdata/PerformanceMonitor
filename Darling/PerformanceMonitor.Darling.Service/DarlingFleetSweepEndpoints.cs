@@ -11,9 +11,11 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -115,6 +117,29 @@ internal static class DarlingFleetSweepEndpoints
     }
 
     /// <summary>
+    /// The worklist's names map (#3482), gated on the worklist actually naming a server. The read
+    /// scans the retained verdict history in one statement
+    /// (<see cref="FleetSweepStore.GetSweepServerNamesAsync"/> — see its SQL's doc for why the newest
+    /// sweep's verdicts cannot serve: a carried item can outlive its server's presence in the fleet),
+    /// so a worklist that is empty or all fleet-scope skips it — on a healthy fleet that is the
+    /// COMMON case, polled every 60 seconds by the page's refresh. One read for the whole batch,
+    /// log-and-degrade: a failed read costs the names (the client falls back to the bare id, exactly
+    /// the pre-#3482 rendering), never the worklist. Shared with <c>get_sweep_reports</c> the same
+    /// way <see cref="ValidateWatchState"/> is, so the two surfaces cannot drift on when — or
+    /// whether — names are joined.
+    /// </summary>
+    internal static async Task<Dictionary<int, string>> ReadWatchItemNamesAsync(
+        NpgsqlDataSource postgres,
+        IReadOnlyList<FleetSweepWatchItem> items,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        return items.Any(item => item.ServerId != FleetSweepStore.FleetScopeServerId)
+            ? await FleetSweepStore.GetSweepServerNamesAsync(postgres, logger, cancellationToken)
+            : new Dictionary<int, string>();
+    }
+
+    /// <summary>
     /// Maps the sweep feed's routes. Called once from <see cref="DarlingWebEndpoints.MapAll"/>, after
     /// the auth middleware like every other route. Handlers answer through the surface's standard
     /// shapes: data as JSON, refusals as 400 <c>{"error"}</c>, absence as 404, and a store fault as a
@@ -195,7 +220,8 @@ internal static class DarlingFleetSweepEndpoints
                 ? await FleetSweepStore.GetOpenAndCarriedWatchItemsAsync(postgres, app.Logger, context.RequestAborted)
                 : await FleetSweepStore.GetWatchItemsByStateAsync(postgres, state, app.Logger, context.RequestAborted);
 
-            return JsonResult(FleetSweepPresentation.BuildWatchItemsNode(items));
+            var names = await ReadWatchItemNamesAsync(postgres, items, app.Logger, context.RequestAborted);
+            return JsonResult(FleetSweepPresentation.BuildWatchItemsNode(items, names));
         });
     }
 

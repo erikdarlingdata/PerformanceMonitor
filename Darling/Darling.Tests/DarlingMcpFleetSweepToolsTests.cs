@@ -179,6 +179,13 @@ public sealed class DarlingMcpFleetSweepToolsTests
 
         Assert.Contains("FleetSweepPresentation.BuildTimelineNode(", source, StringComparison.Ordinal);
         Assert.Contains("FleetSweepPresentation.BuildSweepDetailNode(", source, StringComparison.Ordinal);
+
+        /* #3482: the worklist rides the same builder AND the same names gate-and-read the web feed
+           uses — the ValidateWatchState sharing pattern — so this tool's watch_items carry the same
+           server field the page reads, resolved by the same rules, or the two surfaces could name
+           the same worklist differently. */
+        Assert.Contains("FleetSweepPresentation.BuildWatchItemsNode(watchItems, watchItemNames)", source, StringComparison.Ordinal);
+        Assert.Contains("DarlingFleetSweepEndpoints.ReadWatchItemNamesAsync(", source, StringComparison.Ordinal);
     }
 
     /* ---------------- the /api/read mirror ---------------- */

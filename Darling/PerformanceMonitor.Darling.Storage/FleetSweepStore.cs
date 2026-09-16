@@ -390,6 +390,28 @@ AND   r.swept_at <= $2
 GROUP BY v.server_id, v.server_name
 ORDER BY v.server_id, MAX(r.swept_at), MAX(r.sweep_id);";
 
+    /// <summary>
+    /// Every (server_id, server_name) pair the RETAINED sweep history holds a verdict for — the
+    /// watch-item worklist's names map (#3482). No span, deliberately: the worklist is current-STATE
+    /// rows, and a carried item can outlive its server's presence in the fleet (a departure is a
+    /// miss, and misses are evaluations), so the newest sweep's verdicts cannot name it and any span
+    /// a caller picked would be a guess about how far back "far enough" is. The whole history is the
+    /// honest population, and it is bounded by the same base horizon that prunes the worklist itself:
+    /// a name this read cannot find is a name the store no longer holds anywhere.
+    ///
+    /// <para>Same dedup-and-determinism contract as <see cref="GetSweepServerNamesBySpanSql"/>: a
+    /// server RENAMED across its history carries two names for one server_id, the reader builds its
+    /// map last-write-wins, and the ORDER BY delivers each pair's newest sighting LAST (ascending on
+    /// when it was last swept, run id as the tiebreak, <see cref="GetLatestRunSql"/>'s rule) so the
+    /// newest name is deterministically the one that stays.</para>
+    /// </summary>
+    public const string GetSweepServerNamesSql = @"
+SELECT v.server_id, v.server_name
+FROM collect.fleet_sweep_server_verdicts v
+JOIN collect.fleet_sweep_runs r ON r.sweep_id = v.sweep_id
+GROUP BY v.server_id, v.server_name
+ORDER BY v.server_id, MAX(r.swept_at), MAX(r.sweep_id);";
+
     /// <summary>The shared watch-item column list — one list, one reader, the run-read rule.</summary>
     private const string WatchItemColumns = @"
 SELECT server_id, item_key, condition, state, consecutive_hits, consecutive_misses,
@@ -758,6 +780,46 @@ ORDER BY server_id, item_key;";
                renamed server's names oldest-first within its id, so the overwrite is what keeps the
                NEWEST name. Change either half and the winning spelling goes nondeterministic again. */
             names[reader.GetInt32(0)] = reader.GetString(1);
+        }
+
+        return names;
+    }
+
+    /// <summary>The whole retained history's (server_id, server_name) map — the presentation
+    /// surfaces' names for the watch-item worklist, whose rows can outlive their server's presence
+    /// in the fleet (see <see cref="GetSweepServerNamesSql"/> for why no span serves). Logs and
+    /// degrades to empty on a fault, the presentation-read discipline, and unlike the throwing span
+    /// sibling above: a failed lookup costs the NAMES — the render falls back to the bare id,
+    /// honestly — never the worklist it decorates.</summary>
+    public static async Task<Dictionary<int, string>> GetSweepServerNamesAsync(
+        NpgsqlDataSource postgres,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        var names = new Dictionary<int, string>();
+
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var command = new NpgsqlCommand(GetSweepServerNamesSql, connection)
+            {
+                CommandTimeout = CommandTimeoutSeconds,
+            };
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                /* Last-write-wins on purpose, PAIRED with the statement's ORDER BY — the span
+                   sibling's contract: the newest sighting arrives last, so the overwrite keeps the
+                   newest name. Change either half and the winning spelling goes nondeterministic. */
+                names[reader.GetInt32(0)] = reader.GetString(1);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogError("[FleetSweepStore] GetSweepServerNamesAsync failed: {Message}", ex.Message);
         }
 
         return names;
