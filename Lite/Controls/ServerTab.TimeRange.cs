@@ -117,6 +117,12 @@ public partial class ServerTab : UserControl
         ApplyTimeRangeRequested?.Invoke(TimeRangeCombo.SelectedIndex);
     }
 
+    /* The _refreshTimer null guard in both handlers below is doing two jobs. It always absorbed the
+       events InitializeComponent fires while applying the XAML defaults; since #3479 it is also what
+       lets the constructor restore the saved values through these same handlers without persisting
+       them back or touching a timer that is not built yet — the timer is constructed AFTER the
+       restore, so "timer exists" is exactly "a change is the user's". */
+
     private void AutoRefreshCheckBox_Changed(object sender, RoutedEventArgs e)
     {
         if (_refreshTimer == null) return;
@@ -130,25 +136,77 @@ public partial class ServerTab : UserControl
         {
             _refreshTimer.Stop();
         }
+
+        PersistAutoRefresh();
     }
 
     private void AutoRefreshInterval_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (_refreshTimer == null) return;
         UpdateAutoRefreshInterval();
+        PersistAutoRefresh();
     }
 
     private void UpdateAutoRefreshInterval()
     {
         if (AutoRefreshIntervalCombo == null) return;
 
-        _refreshTimer.Interval = AutoRefreshIntervalCombo.SelectedIndex switch
+        _refreshTimer.Interval = TimeSpan.FromSeconds(
+            AutoRefreshSecondsForIndex(AutoRefreshIntervalCombo.SelectedIndex));
+    }
+
+    /// <summary>
+    /// Seconds for each <c>AutoRefreshIntervalCombo</c> index — the ONE place the combo's items are
+    /// given meaning (#3479). The timer interval, the persisted value and the restore all route through
+    /// this pair, because the interval used to be mapped in one private switch with a silent default
+    /// arm, and persistence would have added a second and third copy for drift to live between.
+    /// <c>AutoRefreshMappingTests</c> pins the arm count to the XAML item count, so adding a combo item
+    /// without teaching both directions fails a test instead of falling silently into the default arm.
+    /// The default arm is the XAML default (one minute), preserving the old switch's behavior for an
+    /// impossible index.
+    /// </summary>
+    internal static int AutoRefreshSecondsForIndex(int index) => index switch
+    {
+        0 => 30,
+        1 => 60,
+        2 => 300,
+        _ => 60
+    };
+
+    /// <summary>
+    /// The restore direction: a stored seconds value back to a combo index. A value the combo does not
+    /// offer — a hand-edited settings.json, or a future build that once wrote intervals this one no
+    /// longer has — lands on the XAML default index rather than on nothing, so the combo can never come
+    /// up blank with the timer running an interval no item shows.
+    /// </summary>
+    internal static int AutoRefreshIndexForSeconds(int seconds) => seconds switch
+    {
+        30 => 0,
+        60 => 1,
+        300 => 2,
+        _ => 1
+    };
+
+    /// <summary>
+    /// #3479: remember both auto-refresh controls. Before this the pair was write-only in the other
+    /// direction — the XAML hardcoded checked/one-minute, the handlers moved only the in-memory timer,
+    /// and an operator who set five minutes was back at one on every launch. Same shape as
+    /// <see cref="PersistSelectedTimeRange"/> and for the same reasons: the App-level statics first so a
+    /// second tab opened THIS session constructs on the values just chosen, then one
+    /// <see cref="App.WriteSetting"/> for both keys — they change from the same toolbar gesture, and two
+    /// writes would be two chances for the file to hold half a preference. Failure is logged by
+    /// WriteSetting and never interrupts the refresh.
+    /// </summary>
+    private void PersistAutoRefresh()
+    {
+        App.AutoRefreshEnabled = AutoRefreshCheckBox.IsChecked == true;
+        App.AutoRefreshIntervalSeconds = AutoRefreshSecondsForIndex(AutoRefreshIntervalCombo.SelectedIndex);
+
+        App.WriteSetting("auto-refresh", root =>
         {
-            0 => TimeSpan.FromSeconds(30),
-            1 => TimeSpan.FromMinutes(1),
-            2 => TimeSpan.FromMinutes(5),
-            _ => TimeSpan.FromMinutes(1)
-        };
+            root["auto_refresh_enabled"] = App.AutoRefreshEnabled;
+            root["auto_refresh_interval_seconds"] = App.AutoRefreshIntervalSeconds;
+        });
     }
 
     private async void RefreshDataButton_Click(object sender, RoutedEventArgs e)
