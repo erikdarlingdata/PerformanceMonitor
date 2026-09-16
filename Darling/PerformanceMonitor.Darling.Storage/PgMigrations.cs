@@ -195,6 +195,7 @@ public static class PgMigrations
             + PgSchemaGenerator.GenerateQueryStatsPayloadColumnPreAdds() + "\n"
             + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
         new Migration(122, "pg-deadlock-blocking-count-knobs", V122Sql),
+        new Migration(123, "fleet-sweep-state", V123Sql),
     };
 
     /// <summary>
@@ -536,6 +537,39 @@ ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS pg_deadlock_count_threshold integer NOT NULL DEFAULT 1;
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS pg_blocking_count_threshold integer NOT NULL DEFAULT 1;";
+
+    /// <summary>
+    /// V123 — the fleet sweep's state store (#3466, lane 1 of the approved four-lane sequence): the
+    /// sweep-run tables and the watch-item worklist that make sweep-over-sweep diffing data instead of
+    /// a report reading its own predecessor. Pinned by <c>FleetSweepStateRungTests</c>.
+    ///
+    /// <para><b>The DDL comes from <see cref="FleetSweepStore.CreateTablesSql"/></b>, referenced here
+    /// rather than transcribed — the V38/V121 idiom. The statements that address the four tables live
+    /// beside that DDL, so the shape a store gets and the shape the code writes cannot drift; every
+    /// design decision (normalized verdicts, the NOT NULL instrument-liveness pair, the ledger's key,
+    /// the worklist's hysteresis columns, plain-not-hypertable) is argued on that constant's docs
+    /// rather than restated here.</para>
+    ///
+    /// <para><b>Darling-only, structurally and deliberately.</b> A sweep is a statement about a FLEET
+    /// — what changed across the monitored population since the last sweep — and Lite monitors one
+    /// server from one desktop with no fleet to summarize, so there is no Lite twin of this rung and
+    /// none planned; the cross-SKU twinning discipline applies to surfaces both SKUs can mean, and
+    /// this one only means anything centralized. The tables therefore live only in this ladder, like
+    /// the oversized-plan backlog before them.</para>
+    ///
+    /// <para><b>No GRANT and no provisioning change.</b> The <c>collect</c> schema carries blanket
+    /// SELECT for admin/viewer/mcp plus the owner-scoped <c>ALTER DEFAULT PRIVILEGES</c>, both
+    /// re-asserted every managed start (<c>DarlingManagedRoles</c>) and re-run in BYO mode by
+    /// <c>tools/provision-roles.sql</c>'s ON ALL TABLES form — so the web feed's viewer role and the
+    /// MCP role read these tables with no new statement, and the engine writes as the service owner,
+    /// so no write grant exists to add.</para>
+    ///
+    /// <para><b>Retention arrives with the engine (lane 2)</b>, the way the backlog's arrived beside
+    /// its sweep: runs and children prune on <c>swept_at</c> at the base data horizon, watch items on
+    /// <c>last_seen_at</c>. Deferring it is safe at this rung because nothing writes these tables
+    /// until the engine lands in the same release line — an empty table needs no pruning.</para>
+    /// </summary>
+    private const string V123Sql = FleetSweepStore.CreateTablesSql;
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
