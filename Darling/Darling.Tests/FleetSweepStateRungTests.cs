@@ -293,6 +293,7 @@ public sealed class FleetSweepStateRungTests
             FleetSweepStore.GetActiveWatchItemsSql,
             FleetSweepStore.GetWouldHavePagedBySpanSql,
             FleetSweepStore.GetSweepServerNamesBySpanSql,
+            FleetSweepStore.GetSweepServerNamesSql,
         })
         {
             Assert.DoesNotContain("now()", sql, StringComparison.OrdinalIgnoreCase);
@@ -334,6 +335,23 @@ public sealed class FleetSweepStateRungTests
            deterministically instead of leaving the winning spelling to the store's row order. */
         Assert.Contains("GROUP BY v.server_id, v.server_name", FleetSweepStore.GetSweepServerNamesBySpanSql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY v.server_id, MAX(r.swept_at), MAX(r.sweep_id)", FleetSweepStore.GetSweepServerNamesBySpanSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The worklist names read (#3482) is the span read's discipline minus the window — the WHOLE
+    /// retained history, deliberately unbounded, because the worklist is current-state rows whose
+    /// servers may only be named in sweeps older than any span a caller could honestly pick (a
+    /// carried item can outlive its server's presence in the fleet). Same schema-qualified join and
+    /// the SAME dedup-and-determinism contract as the span sibling: grouped pairs, each id's newest
+    /// sighting ordered LAST, so the last-write-wins reader deterministically keeps the newest name.
+    /// </summary>
+    [Fact]
+    public void TheWorklistNamesRead_TakesTheWholeHistory_WithTheSpanReadsDeterminism()
+    {
+        Assert.DoesNotContain("WHERE", FleetSweepStore.GetSweepServerNamesSql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("JOIN collect.fleet_sweep_runs r ON r.sweep_id", FleetSweepStore.GetSweepServerNamesSql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY v.server_id, v.server_name", FleetSweepStore.GetSweepServerNamesSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY v.server_id, MAX(r.swept_at), MAX(r.sweep_id)", FleetSweepStore.GetSweepServerNamesSql, StringComparison.Ordinal);
     }
 
     /// <summary>

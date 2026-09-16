@@ -299,7 +299,7 @@ public sealed class FleetSweepWebFeedTests
     }
 
     [Fact]
-    public void TheWatchItemsNode_CarriesTheBars_AndNamesTheFleetScope()
+    public void TheWatchItemsNode_CarriesTheBars_NamesWhatItCan_AndNeverNamesTheFleetScope()
     {
         var now = new DateTime(2026, 9, 15, 12, 0, 0, DateTimeKind.Utc);
         var items = new List<FleetSweepWatchItem>
@@ -308,9 +308,20 @@ public sealed class FleetSweepWebFeedTests
                 FleetSweepWatchStateMachine.Open, 2, 0, 1, 2, 2, null, now, now, "{\"sweep_id\":2}"),
             new(7, FleetSweepEngine.BandCriticalItemKey, "cond",
                 FleetSweepWatchStateMachine.Carried, 0, 1, 1, 2, 1, null, now, now, null),
+            new(9, FleetSweepEngine.BandCriticalItemKey, "cond",
+                FleetSweepWatchStateMachine.Carried, 0, 1, 1, 2, 1, null, now, now, null),
         };
 
-        var node = FleetSweepPresentation.BuildWatchItemsNode(items);
+        /* The map deliberately carries the fleet-scope sentinel's id: no verdict row should, but a
+           name for "the fleet" would be a fabrication however it reached the map, so the builder's
+           guard — not the map's hygiene — is what the omission below rests on. */
+        var names = new Dictionary<int, string>
+        {
+            [FleetSweepStore.FleetScopeServerId] = "a-name-that-must-not-render",
+            [7] = "sql-a",
+        };
+
+        var node = FleetSweepPresentation.BuildWatchItemsNode(items, names);
 
         /* The bars ride the payload, spliced from the machine's own constants — "1 miss" only means
            something beside "of 2 to close", and a client that hardcoded 2 would silently mis-render
@@ -319,8 +330,22 @@ public sealed class FleetSweepWebFeedTests
         Assert.Equal(FleetSweepWatchStateMachine.ExitConsecutiveSweeps, (int)node["exit_bar_sweeps"]!);
 
         var array = Assert.IsType<JsonArray>(node["items"]);
+
+        /* The fleet-scope sentinel: flagged, and NO server field even with its id in the map — the
+           fleet has no server name, and the fleet_scope flag is what a client renders from (#3482). */
         Assert.True((bool)array[0]!["fleet_scope"]!);   // the store's sentinel, named on the wire
+        Assert.False(Assert.IsType<JsonObject>(array[0]).ContainsKey("server"));
+
+        /* A member whose id resolves carries its display name — the field sweeps.js has preferred
+           since lane 3, which the feed never sent (#3482: the worklist rendered raw ids). */
         Assert.False((bool)array[1]!["fleet_scope"]!);
+        Assert.Equal("sql-a", (string?)array[1]!["server"]);
+
+        /* A name the retained history no longer holds is OMITTED — not fabricated, not null-padded:
+           the client's "server N" fallback is the honest degrade, exactly the pre-fix rendering. */
+        Assert.Equal(9, (int)array[2]!["server_id"]!);
+        Assert.False(Assert.IsType<JsonObject>(array[2]).ContainsKey("server"));
+
         Assert.IsType<JsonObject>(array[0]!["evidence"]);
         Assert.Null(array[1]!["evidence"]);             // a miss's null evidence stays null, not ""
         Assert.Equal(1, (int)array[1]!["consecutive_misses"]!);
@@ -387,6 +412,20 @@ public sealed class FleetSweepWebFeedTests
         /* The hysteresis position renders against the bars the API carries, never a hardcoded 2. */
         Assert.Contains("entry_bar_sweeps", src, StringComparison.Ordinal);
         Assert.Contains("exit_bar_sweeps", src, StringComparison.Ordinal);
+    }
+
+    /// <summary>The worklist names its rows in the feed's preference order (#3482): the fleet-scope
+    /// label for the sentinel FIRST (the fleet has no server name, so "server 0" would be the exact
+    /// misleading rendering the issue is about), then the display name the feed joins from the
+    /// retained verdict history, then the bare id as the honest degrade for a name the store no
+    /// longer holds. Source pin, the file's frontend convention.</summary>
+    [Fact]
+    public void TheWorklistRender_PrefersTheName_AndNeverSaysServerZeroForTheFleet()
+    {
+        Assert.Contains(
+            "w.fleet_scope ? \"Fleet\" : (w.server || \"server \" + w.server_id)",
+            FrontendSource("js/pages/sweeps.js"),
+            StringComparison.Ordinal);
     }
 
     /// <summary>The cadence knob is DISPLAY-ONLY on this page: it reads the same

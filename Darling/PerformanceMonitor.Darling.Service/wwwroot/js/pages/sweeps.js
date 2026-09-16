@@ -364,7 +364,10 @@ async function renderWatchItems(box) {
     ? table(
         ["Server", "Item", "State", "Position", "First seen", "Last seen", "Condition / evidence"],
         items.map((w) => [
-          cellText(w.fleet_scope ? "Fleet" : "server " + w.server_id),
+          /* The display name the feed joins from the retained verdict history (#3482); the bare id is
+             the degrade for a name the store no longer holds, and the fleet-scope sentinel renders as
+             the fleet — it has no server name, and "server 0" would be a fabrication. */
+          cellText(w.fleet_scope ? "Fleet" : (w.server || "server " + w.server_id)),
           cellText(w.item, "mono"),
           el("td", { class: watchStateSev(w.state), text: SWEEP_WATCH_STATE_LABELS[w.state] || w.state }),
           cellText(watchPosition(w, d)),
