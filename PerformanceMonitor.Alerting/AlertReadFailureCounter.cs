@@ -708,7 +708,8 @@ public sealed class AlertReadFailureCounter
     public const string FleetScopedReads =
         "the collector-cost regression self-alert and its two #3443 companions (the collector-cost census "
         + "read that decides paging-versus-digest routing, and the collector-cost digest read behind the "
-        + "daily report), the mute-rule reload, and the store background-job "
+        + "daily report), the mute-rule reload, the fleet-sweep rollup read behind the daily sweep report "
+        + "(#3466), and the store background-job "
         + "health reads behind compression-job health, store-job cadence and retention holds";
 
     /// <summary>

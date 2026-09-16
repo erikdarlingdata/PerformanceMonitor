@@ -244,7 +244,8 @@ public sealed class AlertReadFailureSurfaceTests
             }
         }
 
-        Assert.Equal(6, nullKeyReads.Count);
+        /* Seventh since #3466: the fleet-sweep rollup read, Darling-only like the store self-alerts. */
+        Assert.Equal(7, nullKeyReads.Count);
 
         var inventory = AlertReadFailureCounter.FleetScopedReads;
 
@@ -259,6 +260,7 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Contains(nullKeyReads, r => r.Contains("collector-cost census", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("collector-cost digest", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("background-job health", StringComparison.Ordinal));
+        Assert.Contains(nullKeyReads, r => r.Contains("fleet-sweep rollup", StringComparison.Ordinal));
         /* #3354: config_mute_rules belongs to the store, not to any monitored server, so its failed read
            lands in the instance total and in no server's count — exactly the case a per-server-only
            surface would have given no home. Recorded TWICE across the tree, once per SKU, and that is the
@@ -273,6 +275,7 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Contains("collector-cost digest", inventory, StringComparison.Ordinal);
         Assert.Contains("background-job health", inventory, StringComparison.Ordinal);
         Assert.Contains("mute-rule reload", inventory, StringComparison.Ordinal);
+        Assert.Contains("fleet-sweep rollup", inventory, StringComparison.Ordinal);
 
         /* And the phantom stays gone. Disk pressure's feed reads are exempt — a local filesystem read and a
            recorded-store-size lookup that is context for the alert text — so naming it here would send an
