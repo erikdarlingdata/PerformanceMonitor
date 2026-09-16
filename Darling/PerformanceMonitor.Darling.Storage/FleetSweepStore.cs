@@ -295,7 +295,7 @@ ON CONFLICT ON CONSTRAINT pk_fleet_sweep_watch_items DO UPDATE SET
     last_seen_at = EXCLUDED.last_seen_at,
     evidence_json = COALESCE(EXCLUDED.evidence_json, w.evidence_json);";
 
-    /// <summary>The shared run column list, written once so the two run reads cannot drift from
+    /// <summary>The shared run column list, written once so the three run reads cannot drift from
     /// each other or from the single reader that maps them.</summary>
     private const string RunColumns = @"
 SELECT sweep_id, swept_at, span_start, span_end, previous_sweep_id, alerts_enabled,
@@ -321,6 +321,12 @@ WHERE swept_at >= $1
 AND   swept_at <= $2
 ORDER BY swept_at DESC, sweep_id DESC;";
 
+    /// <summary>One sweep's run row by id — the web feed's detail read (lane 3), for the timeline
+    /// click-through and the deep link. Same column list as the other two run reads, so the one
+    /// mapper serves all three.</summary>
+    public const string GetRunSql = RunColumns + @"
+WHERE sweep_id = $1;";
+
     /// <summary>One sweep's per-server verdicts, in a stable render order.</summary>
     public const string GetVerdictsSql = @"
 SELECT server_id, server_name, band, previous_band, band_reason, verdict_json
@@ -342,9 +348,25 @@ SELECT server_id, item_key, condition, state, consecutive_hits, consecutive_miss
        first_seen_at, last_seen_at, evidence_json
 FROM collect.fleet_sweep_watch_items";
 
-    /// <summary>Watch items in one state — the web/MCP "what is open right now" read.</summary>
+    /// <summary>Watch items in one state — the web/MCP single-state read.</summary>
     public const string GetWatchItemsByStateSql = WatchItemColumns + @"
 WHERE state = $1
+ORDER BY last_seen_at DESC, server_id, item_key;";
+
+    /// <summary>
+    /// Watch items that are open OR carried — the presentation surfaces' "open right now" default
+    /// view, in ONE statement (#3466 lane 3). "Open right now" genuinely means the union: the open
+    /// state lasts exactly one sweep by design (the very next evaluation moves an open item to
+    /// carried or toward closed), so a read of <c>open</c> alone shows only items that opened on the
+    /// newest sweep and hides every standing episode. Two round trips would serve it, but the union
+    /// is one worklist with one ORDER BY, and two calls invite the two halves to be read at two
+    /// instants. Both literals are spliced from the state machine's own constants, the
+    /// <see cref="GetActiveWatchItemsSql"/> rule, so the statement and the machine cannot disagree
+    /// about the words. Pending is deliberately absent: an unconfirmed first sighting is exactly what
+    /// the hysteresis bars exist to withhold, and closed is the history the caller asks for by name.
+    /// </summary>
+    public const string GetOpenAndCarriedWatchItemsSql = WatchItemColumns + @"
+WHERE state IN ('" + FleetSweepWatchStateMachine.Open + "', '" + FleetSweepWatchStateMachine.Carried + @"')
 ORDER BY last_seen_at DESC, server_id, item_key;";
 
     /// <summary>
@@ -629,6 +651,29 @@ ORDER BY server_id, item_key;";
         return runs;
     }
 
+    /// <summary>
+    /// One sweep's run row by id, or null when no such sweep exists. THROWS on a store fault, like
+    /// the engine reads and unlike the span read: this serves the web feed's detail route, whose
+    /// degraded rendering is its own HTTP error body — and a fault swallowed into null here would be
+    /// answered as a 404, telling an operator a sweep the store holds does not exist. Null means
+    /// exactly "absent"; the caller maps the throw to its loud shape.
+    /// </summary>
+    public static async Task<FleetSweepRun?> GetSweepAsync(
+        NpgsqlDataSource postgres, long sweepId, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = new NpgsqlCommand(GetRunSql, connection)
+        {
+            CommandTimeout = CommandTimeoutSeconds,
+        };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = sweepId });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadRun(reader) : null;
+    }
+
     /// <summary>One sweep's per-server verdicts — presentation read, logs and degrades.</summary>
     public static async Task<List<FleetSweepServerVerdict>> GetServerVerdictsAsync(
         NpgsqlDataSource postgres, long sweepId, ILogger? logger, CancellationToken cancellationToken)
@@ -728,8 +773,39 @@ ORDER BY server_id, item_key;";
         return items;
     }
 
-    /// <summary>Maps one run row — ordinals match <see cref="RunColumns"/>, the one list both run
-    /// reads share.</summary>
+    /// <summary>Watch items open or carried — the "open right now" default view. Presentation read:
+    /// logs and degrades to empty, the <see cref="GetWatchItemsByStateAsync"/> posture.</summary>
+    public static async Task<List<FleetSweepWatchItem>> GetOpenAndCarriedWatchItemsAsync(
+        NpgsqlDataSource postgres, ILogger? logger, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        var items = new List<FleetSweepWatchItem>();
+
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var command = new NpgsqlCommand(GetOpenAndCarriedWatchItemsSql, connection)
+            {
+                CommandTimeout = CommandTimeoutSeconds,
+            };
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                items.Add(ReadWatchItem(reader));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogError("[FleetSweepStore] GetOpenAndCarriedWatchItemsAsync failed: {Message}", ex.Message);
+        }
+
+        return items;
+    }
+
+    /// <summary>Maps one run row — ordinals match <see cref="RunColumns"/>, the one list every run
+    /// read shares.</summary>
     private static FleetSweepRun ReadRun(NpgsqlDataReader reader)
     {
         return new FleetSweepRun(

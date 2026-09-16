@@ -1,0 +1,410 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #3466 lane 3: the fleet sweep web feed — the <c>/api/sweeps</c> routes' span/state binding, the
+/// <see cref="FleetSweepPresentation"/> wire shapes both presentation surfaces serve (lane 4's
+/// <c>get_sweep_reports</c> builds on the same builders), and the frontend parity pins.
+///
+/// <para>The JS is untested by convention (no JS runner in this repo), so the pins live where the
+/// repo's other frontend guards live: the API payload SHAPES are pinned here in C#, and the page's
+/// load-bearing vocabulary/branches are pinned by source scan — the
+/// <see cref="AlertTrayStatusLoggedTests"/> idiom, including its strict object-literal parser so a
+/// shape the parser cannot read fails loudly rather than comparing less.</para>
+/// </summary>
+public sealed class FleetSweepWebFeedTests
+{
+    /* ---- span binding: validated, refusing, and the same authority as the MCP surface ---------------- */
+
+    [Fact]
+    public void TheDefaultSpan_IsOneHour_TheOwnersRuling()
+    {
+        /* "configurable spans of time though, default hourly" — the ruling that split the surfaces.
+           At the shipped hourly cadence the default view lands on the newest sweep. */
+        Assert.Equal(1, DarlingFleetSweepEndpoints.DefaultSpanHours);
+    }
+
+    [Fact]
+    public void AnAbsentSpan_DefaultsToOneHour_EndingNow()
+    {
+        var error = DarlingFleetSweepEndpoints.ValidateSpan(null, null, out var hours, out var endUtc);
+
+        Assert.Null(error);
+        Assert.Equal(DarlingFleetSweepEndpoints.DefaultSpanHours, hours);
+        Assert.True((DateTime.UtcNow - endUtc).Duration() < TimeSpan.FromSeconds(30));
+    }
+
+    [Fact]
+    public void AReadableSpan_Binds_AndTheAnchorMovesTheEnd()
+    {
+        var error = DarlingFleetSweepEndpoints.ValidateSpan("24", "2026-01-02T03:04:05Z", out var hours, out var endUtc);
+
+        Assert.Null(error);
+        Assert.Equal(24, hours);
+        Assert.Equal(new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc), endUtc);
+    }
+
+    /// <summary>
+    /// An UNREADABLE span is refused, never defaulted — the #3287 filter discipline: a caller who
+    /// asked for a window they mistyped must not receive a complete-looking answer to a different
+    /// one. Out-of-range values and bad anchors are refused by <c>McpHelpers.ValidateWindow</c>, the
+    /// SAME authority every windowed MCP read applies, so the two surfaces speak one refusal
+    /// vocabulary (the prose says <c>hours_back</c>, the shared parser's spelling — the mute-rule
+    /// endpoints' accepted cosmetic consequence, one surface over).
+    /// </summary>
+    [Theory]
+    [InlineData("abc", null, "Invalid hours value 'abc'")]
+    [InlineData("", null, "Invalid hours value ''")]  // the endpoint maps empty to absent; this pins the pure helper's own arm
+    [InlineData("0", null, "Invalid hours_back value '0'")]
+    [InlineData("-3", null, "Invalid hours_back value '-3'")]
+    [InlineData("999", null, "exceeds maximum")]
+    [InlineData("4", "not-a-time", "Invalid as_of value")]
+    [InlineData("4", "2099-01-01T00:00:00Z", "in the future")]
+    public void AnUnusableSpanOrAnchor_IsRefused_NotSubstituted(string? rawHours, string? asOf, string expectedFragment)
+    {
+        var error = DarlingFleetSweepEndpoints.ValidateSpan(rawHours, asOf, out _, out _);
+
+        Assert.NotNull(error);
+        Assert.Contains(expectedFragment, error, StringComparison.Ordinal);
+    }
+
+    /* ---- the watch-state filter ------------------------------------------------------------------------ */
+
+    [Fact]
+    public void TheKnownWatchStates_AreExactlyTheStateMachines_InItsOrder()
+    {
+        Assert.Equal(
+            new[]
+            {
+                FleetSweepWatchStateMachine.Pending,
+                FleetSweepWatchStateMachine.Open,
+                FleetSweepWatchStateMachine.Carried,
+                FleetSweepWatchStateMachine.Closed,
+            },
+            DarlingFleetSweepEndpoints.KnownWatchStates);
+    }
+
+    [Fact]
+    public void EveryMachineState_IsAccepted_AndAbsentMeansTheDefaultView()
+    {
+        Assert.Null(DarlingFleetSweepEndpoints.ValidateWatchState(null));
+        foreach (var state in DarlingFleetSweepEndpoints.KnownWatchStates)
+        {
+            Assert.Null(DarlingFleetSweepEndpoints.ValidateWatchState(state));
+        }
+    }
+
+    /// <summary>An unknown state is refused naming the legal values — it would match nothing, and an
+    /// empty answer to a typo is indistinguishable from a clean worklist. Ordinal deliberately: the
+    /// wire states are the machine's exact spellings, so <c>Open</c> is not <c>open</c>.</summary>
+    [Theory]
+    [InlineData("garbage")]
+    [InlineData("Open")]
+    [InlineData("OPEN")]
+    public void AnUnknownState_IsRefused_NamingTheLegalValues(string state)
+    {
+        var error = DarlingFleetSweepEndpoints.ValidateWatchState(state);
+
+        Assert.NotNull(error);
+        Assert.Contains(FleetSweepWatchStateMachine.Carried, error, StringComparison.Ordinal);
+        Assert.Contains("omit for open + carried", error, StringComparison.Ordinal);
+    }
+
+    /* ---- the wire shapes: FleetSweepPresentation ------------------------------------------------------- */
+
+    private static FleetSweepRun Run(bool alertsEnabled = true, bool instrumentsAlive = true) => new(
+        SweepId: 638600000000000000,
+        SweptAtUtc: new DateTime(2026, 9, 15, 12, 0, 0, DateTimeKind.Utc),
+        SpanStartUtc: new DateTime(2026, 9, 15, 11, 0, 0, DateTimeKind.Utc),
+        SpanEndUtc: new DateTime(2026, 9, 15, 12, 0, 0, DateTimeKind.Utc),
+        PreviousSweepId: 638599964000000000,
+        AlertsEnabled: alertsEnabled,
+        ServersExpected: 3,
+        ServersReported: 2,
+        InstrumentsAlive: instrumentsAlive,
+        InstrumentLivenessJson: "{\"alive\":" + (instrumentsAlive ? "true" : "false") + ",\"notes\":[]}",
+        ReportJson: "{\"fleet\":{\"bands\":{\"Healthy\":2,\"Critical\":1}},\"alerts_enabled\":" + (alertsEnabled ? "true" : "false") + "}");
+
+    [Fact]
+    public void TheRunNode_CarriesTheHeaderFacts_AndEmbedsTheDocumentsAsObjects()
+    {
+        var node = FleetSweepPresentation.BuildRunNode(Run(alertsEnabled: false, instrumentsAlive: false));
+
+        foreach (var key in new[]
+        {
+            "sweep_id", "swept_at", "span_start", "span_end", "previous_sweep_id",
+            "alerts_enabled", "servers_expected", "servers_reported",
+            "instruments_alive", "instrument_liveness", "report",
+        })
+        {
+            Assert.True(node.ContainsKey(key), "missing key: " + key);
+        }
+
+        /* The two facts the spec requires on EVERY sweep ride the header, and here at their loud
+           values: the mute header and the liveness verdict. */
+        Assert.False((bool)node["alerts_enabled"]!);
+        Assert.False((bool)node["instruments_alive"]!);
+
+        /* The stored documents are EMBEDDED objects, not escaped strings — the BuildFullRuleNode
+           definition-embedding precedent, so no client parses a document out of a document. */
+        var report = Assert.IsType<JsonObject>(node["report"]);
+        Assert.Equal(2, (int)report["fleet"]!["bands"]!["Healthy"]!);
+        var liveness = Assert.IsType<JsonObject>(node["instrument_liveness"]);
+        Assert.False((bool)liveness["alive"]!);
+    }
+
+    [Fact]
+    public void AnUnparseablePayload_IsCarriedVerbatim_NeverDropped()
+    {
+        /* The fallback fails toward VISIBLE: a reader must see the field held something unreadable,
+           never an absence that looks deliberate. */
+        var embedded = FleetSweepPresentation.EmbedJson("not json at all");
+        Assert.Equal("not json at all", embedded!.GetValue<string>());
+
+        Assert.IsType<JsonObject>(FleetSweepPresentation.EmbedJson("{\"a\":1}"));
+        Assert.IsType<JsonArray>(FleetSweepPresentation.EmbedJson("[1,2]"));
+    }
+
+    [Fact]
+    public void TheDetailNode_UnderMasterOff_CarriesTheLedger_WithServerNamesJoined()
+    {
+        var verdicts = new List<FleetSweepServerVerdict>
+        {
+            new(7, "sql-a", "Critical", "Healthy", "deadlocks", "{\"deadlocks\":3}"),
+        };
+        var ledger = new List<FleetSweepWouldHavePagedEntry>
+        {
+            new(7, FleetSweepEngine.FamilyDeadlocks, "{\"value\":3,\"threshold\":1}"),
+            new(9, FleetSweepEngine.FamilyHighCpu, "{\"value\":12,\"threshold\":8}"),
+        };
+
+        var node = FleetSweepPresentation.BuildSweepDetailNode(Run(alertsEnabled: false), verdicts, ledger);
+
+        var rows = Assert.IsType<JsonArray>(node["would_have_paged"]);
+        Assert.Equal(2, rows.Count);
+
+        /* The name is joined from the verdicts the SAME sweep wrote — the ledger is the muted-mode
+           contract's table, and a bare id would make it the one table an operator cannot read. */
+        Assert.Equal("sql-a", (string?)rows[0]!["server"]);
+        Assert.Equal(FleetSweepEngine.FamilyDeadlocks, (string?)rows[0]!["family"]);
+        Assert.IsType<JsonObject>(rows[0]!["evidence"]);
+
+        /* A server the verdict list does not carry keeps its id and an honest null name, never a
+           fabricated one. */
+        Assert.Equal(9, (int)rows[1]!["server_id"]!);
+        Assert.Null(rows[1]!["server"]);
+    }
+
+    [Fact]
+    public void TheDetailNode_UnderMasterOff_CarriesAnEMPTYLedger_BecauseNothingToReportIsAStatement()
+    {
+        var node = FleetSweepPresentation.BuildSweepDetailNode(
+            Run(alertsEnabled: false), new List<FleetSweepServerVerdict>(), new List<FleetSweepWouldHavePagedEntry>());
+
+        var rows = Assert.IsType<JsonArray>(node["would_have_paged"]);
+        Assert.Empty(rows);
+    }
+
+    [Fact]
+    public void TheDetailNode_WithAlertsOn_OmitsTheLedgerKey_BecauseNoCheckWasMade()
+    {
+        /* The engine writes no ledger under alerts-on; an empty array here would claim a check that
+           was never made — the exact over-claim the derivation note in the evidence exists to stop. */
+        var node = FleetSweepPresentation.BuildSweepDetailNode(
+            Run(alertsEnabled: true), new List<FleetSweepServerVerdict>(), new List<FleetSweepWouldHavePagedEntry>());
+
+        Assert.False(node.ContainsKey("would_have_paged"));
+        Assert.True(node.ContainsKey("verdicts"));
+    }
+
+    [Theory]
+    [InlineData(null, "Critical", false)]        // a first sweep has no previous band to change from
+    [InlineData("Healthy", "Critical", true)]    // the transition the timeline exists to show
+    [InlineData("Warning", "Warning", false)]    // held steady
+    public void TheVerdictNode_PreComputesTheTransition(string? previous, string band, bool expectedChanged)
+    {
+        var node = FleetSweepPresentation.BuildVerdictNode(new FleetSweepServerVerdict(1, "s", band, previous, null, null));
+
+        Assert.Equal(expectedChanged, (bool)node["band_changed"]!);
+        Assert.Equal(band, (string?)node["band"]);
+        Assert.Equal(previous, (string?)node["previous_band"]);
+    }
+
+    [Fact]
+    public void TheWatchItemsNode_CarriesTheBars_AndNamesTheFleetScope()
+    {
+        var now = new DateTime(2026, 9, 15, 12, 0, 0, DateTimeKind.Utc);
+        var items = new List<FleetSweepWatchItem>
+        {
+            new(FleetSweepStore.FleetScopeServerId, FleetSweepEngine.InstrumentsDeadItemKey, "cond",
+                FleetSweepWatchStateMachine.Open, 2, 0, 1, 2, 2, null, now, now, "{\"sweep_id\":2}"),
+            new(7, FleetSweepEngine.BandCriticalItemKey, "cond",
+                FleetSweepWatchStateMachine.Carried, 0, 1, 1, 2, 1, null, now, now, null),
+        };
+
+        var node = FleetSweepPresentation.BuildWatchItemsNode(items);
+
+        /* The bars ride the payload, spliced from the machine's own constants — "1 miss" only means
+           something beside "of 2 to close", and a client that hardcoded 2 would silently mis-render
+           the day per-item thresholds arrive as data (the #3297 route the store doc reserves). */
+        Assert.Equal(FleetSweepWatchStateMachine.EntryConsecutiveSweeps, (int)node["entry_bar_sweeps"]!);
+        Assert.Equal(FleetSweepWatchStateMachine.ExitConsecutiveSweeps, (int)node["exit_bar_sweeps"]!);
+
+        var array = Assert.IsType<JsonArray>(node["items"]);
+        Assert.True((bool)array[0]!["fleet_scope"]!);   // the store's sentinel, named on the wire
+        Assert.False((bool)array[1]!["fleet_scope"]!);
+        Assert.IsType<JsonObject>(array[0]!["evidence"]);
+        Assert.Null(array[1]!["evidence"]);             // a miss's null evidence stays null, not ""
+        Assert.Equal(1, (int)array[1]!["consecutive_misses"]!);
+    }
+
+    [Fact]
+    public void TheTimelineNode_EchoesTheWindowItServed()
+    {
+        var start = new DateTime(2026, 9, 15, 11, 0, 0, DateTimeKind.Utc);
+        var end = new DateTime(2026, 9, 15, 12, 0, 0, DateTimeKind.Utc);
+
+        var node = FleetSweepPresentation.BuildTimelineNode(new List<FleetSweepRun> { Run() }, start, end);
+
+        /* The #2506 discipline's read end: a response that does not say what window it covers invites
+           the caller to assume the one it asked for. */
+        Assert.Equal(start.ToString("o"), (string?)node["span_start"]);
+        Assert.Equal(end.ToString("o"), (string?)node["span_end"]);
+        Assert.Equal(1, (int)node["count"]!);
+        Assert.Single(Assert.IsType<JsonArray>(node["sweeps"]));
+    }
+
+    /* ---- the frontend parity pins (the AlertTrayStatusLoggedTests idiom) ------------------------------- */
+
+    /// <summary>
+    /// The sweeps page's watch-state vocabulary is exactly the state machine's — key for key. JS
+    /// cannot reference the C# constants, so this is the cross-language join, parsed strictly (a
+    /// shape the parser cannot read fails loudly rather than comparing fewer keys).
+    /// </summary>
+    [Fact]
+    public void TheSweepPagesWatchStateLabels_MatchTheStateMachinesConstants()
+    {
+        var labels = ParseObjectLiteral(FrontendSource("js/pages/sweeps.js"), "export const SWEEP_WATCH_STATE_LABELS = {");
+
+        Assert.Equal(
+            new[]
+            {
+                FleetSweepWatchStateMachine.Carried,
+                FleetSweepWatchStateMachine.Closed,
+                FleetSweepWatchStateMachine.Open,
+                FleetSweepWatchStateMachine.Pending,
+            }.OrderBy(s => s, StringComparer.Ordinal),
+            labels.Keys.OrderBy(s => s, StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// Quiet-is-not-clean applies to the RENDER: a sweep with <c>instruments_alive: false</c> must
+    /// LOOK different — a red <c>role="alert"</c> banner on the document and a distinct class on its
+    /// timeline row — and the mute header must render the would-have-paged ledger whenever the
+    /// document carries one. Source pins, because the branches are the page's load-bearing contract
+    /// and there is no JS runner to execute them.
+    /// </summary>
+    [Fact]
+    public void TheSweepPage_RendersDeadInstrumentsLoudly_AndTheLedgerWheneverCarried()
+    {
+        var src = FrontendSource("js/pages/sweeps.js");
+
+        Assert.Contains("if (!d.instruments_alive)", src, StringComparison.Ordinal);
+        Assert.Contains("instruments-dead", src, StringComparison.Ordinal);
+        Assert.Contains("role: \"alert\"", src, StringComparison.Ordinal);
+
+        Assert.Contains("if (!d.alerts_enabled)", src, StringComparison.Ordinal);
+        Assert.Contains("Array.isArray(d.would_have_paged)", src, StringComparison.Ordinal);
+
+        /* The hysteresis position renders against the bars the API carries, never a hardcoded 2. */
+        Assert.Contains("entry_bar_sweeps", src, StringComparison.Ordinal);
+        Assert.Contains("exit_bar_sweeps", src, StringComparison.Ordinal);
+    }
+
+    /// <summary>The cadence knob is DISPLAY-ONLY on this page: it reads the same
+    /// <c>get_alert_settings</c> every settings surface reads, and the page carries no write call at
+    /// all — the Settings window and <c>update_alert_settings</c> own the knob (lane 2's V124).</summary>
+    [Fact]
+    public void TheSweepPage_ReadsTheCadence_AndWritesNothing()
+    {
+        var src = FrontendSource("js/pages/sweeps.js");
+
+        Assert.Contains("readTool(\"get_alert_settings\"", src, StringComparison.Ordinal);
+        Assert.Contains("fleet_sweep", src, StringComparison.Ordinal);
+        Assert.DoesNotContain("apiSend", src, StringComparison.Ordinal);
+        Assert.DoesNotContain("update_alert_settings", src, StringComparison.Ordinal);
+    }
+
+    /// <summary>The page is reachable: the shell carries the nav entry and the router routes the hash
+    /// to the renderer — the two wiring points a new page can silently miss.</summary>
+    [Fact]
+    public void TheSweepPage_IsWiredIntoTheShellAndTheRouter()
+    {
+        Assert.Contains("data-route=\"sweeps\" href=\"#/sweeps\"", FrontendSource("index.html"), StringComparison.Ordinal);
+
+        var app = FrontendSource("js/app.js");
+        Assert.Contains("import { renderSweeps } from \"./pages/sweeps.js\";", app, StringComparison.Ordinal);
+        Assert.Contains("renderSweeps(main)", app, StringComparison.Ordinal);
+        Assert.Contains("#/sweeps", app, StringComparison.Ordinal);
+    }
+
+    /* ---- helpers --------------------------------------------------------------------------------------- */
+
+    /// <summary>Parses a flat <c>key: "value",</c> object literal out of frontend source — the
+    /// <see cref="AlertTrayStatusLoggedTests"/> parser's strictness: any line inside the literal this
+    /// cannot read fails the test, so the parity check can never silently compare fewer keys.</summary>
+    private static Dictionary<string, string> ParseObjectLiteral(string source, string opener)
+    {
+        var open = source.IndexOf(opener, StringComparison.Ordinal);
+        Assert.True(open >= 0, "object literal not found: " + opener);
+
+        var close = source.IndexOf("};", open, StringComparison.Ordinal);
+        Assert.True(close > open, "object literal is not closed: " + opener);
+
+        var body = source.Substring(open, close - open);
+        body = body.Substring(body.IndexOf('{') + 1);
+
+        var pairs = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var rawLine in body.Split('\n'))
+        {
+            var line = rawLine.Trim().TrimEnd('\r');
+            if (line.Length == 0)
+            {
+                continue;
+            }
+
+            var match = Regex.Match(line, @"^""?(?<key>[A-Za-z0-9_+]+)""?\s*:\s*""(?<label>[^""]*)"",$");
+            Assert.True(match.Success, "unreadable line in " + opener + " — the parity check would compare fewer keys: " + line);
+            pairs[match.Groups["key"].Value] = match.Groups["label"].Value;
+        }
+
+        Assert.NotEmpty(pairs);
+        return pairs;
+    }
+
+    private static string FrontendSource(string relPath, [CallerFilePath] string thisFile = "")
+    {
+        var path = Path.GetFullPath(Path.Combine(
+            Path.GetDirectoryName(thisFile)!, "..", "PerformanceMonitor.Darling.Service", "wwwroot", relPath));
+        Assert.True(File.Exists(path), $"{relPath} not found at {path} (did the frontend move?)");
+        return File.ReadAllText(path);
+    }
+}

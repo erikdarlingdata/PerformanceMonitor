@@ -286,6 +286,11 @@ public static class DarlingWebEndpoints
         MapCustomAlerts(app, postgres);
         MapMuteRules(app, postgres);
 
+        /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
+           FleetSweepStore presentation reads lane 4's get_sweep_reports tool will serve — see
+           DarlingFleetSweepEndpoints for the span discipline and the seat posture. */
+        DarlingFleetSweepEndpoints.Map(app, postgres);
+
         /* The per-alert triage page's assembly endpoint (#2710): everything it serves is already reachable
            through the /api/read mirror above — it adds assembly (alert match + anchored sections), not reach. */
         DarlingTriageEndpoint.Map(app, postgres, analysis);

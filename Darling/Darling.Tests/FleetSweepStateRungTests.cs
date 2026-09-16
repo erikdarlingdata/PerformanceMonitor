@@ -284,10 +284,12 @@ public sealed class FleetSweepStateRungTests
             FleetSweepStore.InsertWouldHavePagedSql,
             FleetSweepStore.UpsertWatchItemSql,
             FleetSweepStore.GetLatestRunSql,
+            FleetSweepStore.GetRunSql,
             FleetSweepStore.GetRunsBySpanSql,
             FleetSweepStore.GetVerdictsSql,
             FleetSweepStore.GetWouldHavePagedSql,
             FleetSweepStore.GetWatchItemsByStateSql,
+            FleetSweepStore.GetOpenAndCarriedWatchItemsSql,
             FleetSweepStore.GetActiveWatchItemsSql,
         })
         {
@@ -317,6 +319,36 @@ public sealed class FleetSweepStateRungTests
         /* And the by-state read is parameterized, never interpolated — state names are constants
            today and a knob is the kind of thing that changes that. */
         Assert.Contains("WHERE state = $1", FleetSweepStore.GetWatchItemsByStateSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The presentation surfaces' "open right now" read is open UNION carried in ONE statement
+    /// (#3466 lane 3) — because the open state lasts exactly one sweep by design, so a read of
+    /// <c>open</c> alone shows only what opened on the newest sweep and hides every standing episode.
+    /// Both literals are spliced from the state machine's own constants (the active read's rule);
+    /// pending and closed are deliberately outside it — an unconfirmed sighting is what the entry bar
+    /// withholds, and closed is the history a caller asks for by name.
+    /// </summary>
+    [Fact]
+    public void TheOpenRightNowRead_IsOpenUnionCarried_DerivedFromTheConstants()
+    {
+        Assert.Contains(
+            "state IN ('" + FleetSweepWatchStateMachine.Open + "', '" + FleetSweepWatchStateMachine.Carried + "')",
+            FleetSweepStore.GetOpenAndCarriedWatchItemsSql,
+            StringComparison.Ordinal);
+
+        /* As QUOTED literals — the bare words sit inside column names (closed_sweep_id), so the pin
+           targets the state-literal spelling the WHERE clause would have to use. */
+        Assert.DoesNotContain("'" + FleetSweepWatchStateMachine.Pending + "'", FleetSweepStore.GetOpenAndCarriedWatchItemsSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("'" + FleetSweepWatchStateMachine.Closed + "'", FleetSweepStore.GetOpenAndCarriedWatchItemsSql, StringComparison.Ordinal);
+
+        /* Same render order as the single-state read, so the default view and a named-state view
+           cannot disagree about what "newest first" means. */
+        Assert.Contains("ORDER BY last_seen_at DESC, server_id, item_key", FleetSweepStore.GetOpenAndCarriedWatchItemsSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY last_seen_at DESC, server_id, item_key", FleetSweepStore.GetWatchItemsByStateSql, StringComparison.Ordinal);
+
+        /* The web feed's by-id detail read is parameterized like every other keyed read here. */
+        Assert.Contains("WHERE sweep_id = $1", FleetSweepStore.GetRunSql, StringComparison.Ordinal);
     }
 
     /* ---- the probe (three sites) ---------------------------------------------------------------------- */

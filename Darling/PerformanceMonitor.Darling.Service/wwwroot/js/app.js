@@ -11,6 +11,7 @@
  * refresh loop. Routes:
  *   #/fleet             — Fleet Overview (default)
  *   #/ag                — Availability Group topology (#991; nav entry revealed only when the store has AG data)
+ *   #/sweeps            — Fleet Sweep reports: the sweep-with-memory timeline (#3466)
  *   #/server/{name}     — one server's detail (Overview)
  *   #/server/{name}/{tab} — one server's detail, opened on a named sub-tab (pages/server-tabs.js)
  *   #/alerts            — fleet-wide Alert History
@@ -34,6 +35,7 @@ import { el, mount, apiGet, bandClass, localTime } from "./util.js";
 import { navigateServer } from "./panels.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
+import { renderSweeps } from "./pages/sweeps.js";
 import { renderServer } from "./pages/server.js";
 import { renderAlerts } from "./pages/alerts.js";
 import { renderAlertRuleList } from "./pages/alert-rules.js";
@@ -57,6 +59,7 @@ function currentRoute() {
   const h = location.hash || "#/fleet";
   if (h.startsWith("#/server/")) return serverRoute(h.slice("#/server/".length));
   if (h === "#/ag" || h === "#/ag/") return { name: "ag" };
+  if (h === "#/sweeps" || h === "#/sweeps/") return { name: "sweeps" };
   /* #/triage?server=...&metric=...&at=...&dedup=... (#2710) — the deep-link every alert webhook carries.
      The query rides INSIDE the hash (a static SPA route), so it is split off here and parsed by the page.
      Checked before #/alerts only for symmetry; the two prefixes cannot collide. */
@@ -112,6 +115,7 @@ function route() {
   setActiveNav(r);
   if (r.name === "server") renderServer(main, r.param, r.tab);
   else if (r.name === "ag") renderAg(main);
+  else if (r.name === "sweeps") renderSweeps(main);
   else if (r.name === "alerts") renderAlerts(main);
   else if (r.name === "alertRules") renderAlertRuleList(main);
   else if (r.name === "alertEditor") renderAlertEditor(main, r.id, r.template);
