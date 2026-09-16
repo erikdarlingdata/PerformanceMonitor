@@ -52,6 +52,7 @@ public sealed class DarlingWebAssetsTests
     [InlineData("js/notebook.js")]
     [InlineData("js/pages/ag.js")]
     [InlineData("js/pages/fleet.js")]
+    [InlineData("js/pages/sweeps.js")]
     [InlineData("js/pages/server.js")]
     [InlineData("js/pages/alerts.js")]
     [InlineData("js/pages/views.js")]

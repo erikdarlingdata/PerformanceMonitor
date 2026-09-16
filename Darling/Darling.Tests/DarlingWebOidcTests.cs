@@ -528,6 +528,15 @@ public sealed class DarlingWebOidcTests
     [InlineData(true, "PATCH", "/api/mute-rules/abc-123", true)]       // edit seat: partial update
     [InlineData(true, "PUT", "/api/mute-rules/abc-123/enabled", true)] // edit seat: enable/disable
     [InlineData(true, "DELETE", "/api/mute-rules/abc-123", true)]      // edit seat: delete
+    // The fleet sweep feed (#3466 lane 3) is a READ surface: every route is a GET, so both seats reach
+    // all of it — a sweep report is exactly what the viewer seat exists to grant — and any unsafe method
+    // against the prefix is born gated like every other write that does not exist yet.
+    [InlineData(true, "GET", "/api/sweeps", true)]                     // edit seat: the timeline
+    [InlineData(false, "GET", "/api/sweeps", true)]                    // viewer: the timeline
+    [InlineData(false, "GET", "/api/sweeps/latest", true)]             // viewer: the landing document
+    [InlineData(false, "GET", "/api/sweeps/638600000000000000", true)] // viewer: one sweep by id
+    [InlineData(false, "GET", "/api/sweeps/watch-items", true)]        // viewer: the watch worklist
+    [InlineData(false, "POST", "/api/sweeps", false)]                  // no sweep write exists; born gated anyway
     [InlineData(false, "POST", "/api/mute-rules", false)]              // viewer: no create
     [InlineData(false, "PATCH", "/api/mute-rules/abc-123", false)]     // no edit
     [InlineData(false, "PUT", "/api/mute-rules/abc-123/enabled", false)] // no flag flip
