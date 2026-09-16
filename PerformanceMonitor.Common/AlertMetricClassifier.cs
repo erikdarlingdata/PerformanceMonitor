@@ -86,11 +86,34 @@ namespace PerformanceMonitor.Common
         }
 
         /// <summary>
-        /// True for an ordinary (warning-severity) alert: actionable, neither a resolution notice
-        /// nor critical.
+        /// True for the metrics that are informational BY DESIGN — reports to read, not conditions to
+        /// act on. These are the deliberate INFO arms of <c>AlertSeverity.ForMetric</c> (#3443's
+        /// collector-cost digest and #3466's fleet sweep rollup), which is the surface email and
+        /// webhooks style from; the pins beside those arms exist so no fall-through sweep ever
+        /// "corrects" them into WARNING. This list is that same declaration for the surface THIS class
+        /// styles: the Alert History grids in both apps (Lite's <c>AlertsHistoryTab</c> and the Darling
+        /// Viewer's) derive their row's <c>IsWarning</c> from <see cref="IsWarning"/>, so without a
+        /// carve-out here the very rows the severity map keeps blue on purpose arrive in the one grid an
+        /// operator actually reads wearing the same amber "needs attention" highlight as a live alert —
+        /// the INFO design undone through an untouched second classifier (#3448 review).
+        ///
+        /// <para>The two lists must stay in step by hand, because they cannot by reference:
+        /// <c>AlertSeverity</c> is internal to the Notifications assembly, which references this one.
+        /// The lockstep test beside <c>CollectorCostDigest_IsInfoBlueOnPurpose</c> is what fails when a
+        /// third deliberate INFO metric is declared there and not here.</para>
+        /// </summary>
+        public static bool IsInformational(string? metricName) =>
+            metricName is "Collector Cost Digest" or "Fleet Sweep Rollup";
+
+        /// <summary>
+        /// True for an ordinary (warning-severity) alert: actionable, neither a resolution notice nor
+        /// critical — nor one of the <see cref="IsInformational"/> reports, whose exclusion leaves NO
+        /// predicate true, so no history-grid DataTrigger fires and the row renders in the default
+        /// chrome. That is deliberate: the grids have no INFO tier, and unhighlighted IS the
+        /// informational treatment — the row that asks for nothing gets styled like it.
         /// </summary>
         public static bool IsWarning(string? metricName) =>
-            !IsResolution(metricName) && !IsCritical(metricName);
+            !IsResolution(metricName) && !IsCritical(metricName) && !IsInformational(metricName);
 
         /// <summary>
         /// What the history grids render in place of a number for a <see cref="IsStateOnly"/> metric
