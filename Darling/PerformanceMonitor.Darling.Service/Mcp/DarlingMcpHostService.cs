@@ -469,6 +469,15 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* Register services that MCP tools need via dependency injection. */
             builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
             builder.Services.AddSingleton(new DarlingAnalysisService(postgres, planFetcher, _logger));
+            /* The HOST's logger, registered as the bare ILogger a tool method can take as a DI parameter
+               (the postgres pattern one line up — service-typed params are resolved per request and never
+               reach the advertised schema). Deliberately NOT the web app's own ILogger<T>: this builder
+               clears its logging providers two blocks up, so anything resolved from the app's logging
+               would be a logger with nowhere to write — the host's is the one wired to the service's
+               real providers, the same instance DarlingAnalysisService already receives. Closes the
+               #3473 review's observation: get_sweep_reports' child reads log-and-degrade, and before
+               this they degraded with no log trace anywhere on the MCP path. */
+            builder.Services.AddSingleton<ILogger>(_logger);
 
             /* #2339: publish the declared peer stores before the instructions are rendered, so the same
                snapshot feeds the instructions section, list_servers' peer_fleets block, and the

@@ -1,3 +1,4 @@
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using Xunit;
 
@@ -83,6 +84,28 @@ public class AlertSeverityTests
         var (hex, badge, _) = AlertSeverity.ForMetric("Fleet Sweep Rollup");
         Assert.Equal("INFO", badge);
         Assert.Equal("#2eaef1", hex);
+    }
+
+    /// <summary>The lockstep half of the two pins above (#3448 review). The severity map styles email
+    /// and webhooks, but the Alert History grids in BOTH apps style their rows from
+    /// <see cref="AlertMetricClassifier.IsWarning"/> — Lite's <c>AlertsHistoryTab</c> and the Darling
+    /// Viewer's each bind a DataTrigger to a row <c>IsWarning</c> derived from that one method — and
+    /// <c>IsWarning</c> is the complement of resolution/critical, so a metric this map deliberately
+    /// keeps INFO/blue still arrived in both grids amber, styled like a live actionable alert. The two
+    /// assemblies cannot reference each other's map (<c>AlertSeverity</c> is internal here, downstream
+    /// of Common), so this test IS the reference: a third deliberate INFO arm added to
+    /// <see cref="AlertSeverity.ForMetric"/> without joining
+    /// <see cref="AlertMetricClassifier.IsInformational"/> fails here, not in a user's grid.</summary>
+    [Theory]
+    [InlineData("Collector Cost Digest")]
+    [InlineData("Fleet Sweep Rollup")]
+    public void DeliberateInfoMetrics_AreNotWarnings_InTheHistoryGridClassifier(string metric)
+    {
+        var (_, badge, _) = AlertSeverity.ForMetric(metric);
+        Assert.Equal("INFO", badge);
+
+        Assert.True(AlertMetricClassifier.IsInformational(metric));
+        Assert.False(AlertMetricClassifier.IsWarning(metric));
     }
 
     [Fact]

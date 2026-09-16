@@ -370,15 +370,25 @@ ORDER BY w.sweep_id, w.server_id, w.alert_family;";
     /// The (server_id, server_name) pairs the span's sweeps carried verdicts for — one names map for
     /// the rollup's render, because the sweep DOCUMENTS carry watch events and ledger rows by bare
     /// id and a channel post naming "server id 7" would make the one surface an operator reads away
-    /// from the store the one surface that cannot name a server. DISTINCT because a server appears
+    /// from the store the one surface that cannot name a server. GROUP BY because a server appears
     /// once per sweep and the render needs it once.
+    ///
+    /// <para>The ORDER BY is the determinism every sibling span read in this file carries, applied to
+    /// the one case where this read has two rows for one id: a server RENAMED mid-span carries two
+    /// names for one server_id, and the reader builds its map last-write-wins — so the rows are
+    /// ordered with each pair's newest sighting LAST (ascending on when it was last swept, run id as
+    /// the tiebreak, <see cref="GetLatestRunSql"/>'s rule), which makes the newest name the one that
+    /// stays. Without it the winning spelling was whatever row order the store happened to return
+    /// for the dedup (#3473 review).</para>
     /// </summary>
     public const string GetSweepServerNamesBySpanSql = @"
-SELECT DISTINCT v.server_id, v.server_name
+SELECT v.server_id, v.server_name
 FROM collect.fleet_sweep_server_verdicts v
 JOIN collect.fleet_sweep_runs r ON r.sweep_id = v.sweep_id
 WHERE r.swept_at >= $1
-AND   r.swept_at <= $2;";
+AND   r.swept_at <= $2
+GROUP BY v.server_id, v.server_name
+ORDER BY v.server_id, MAX(r.swept_at), MAX(r.sweep_id);";
 
     /// <summary>The shared watch-item column list — one list, one reader, the run-read rule.</summary>
     private const string WatchItemColumns = @"
@@ -744,6 +754,9 @@ ORDER BY server_id, item_key;";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
+            /* Last-write-wins on purpose, PAIRED with the statement's ORDER BY: the SQL delivers a
+               renamed server's names oldest-first within its id, so the overwrite is what keeps the
+               NEWEST name. Change either half and the winning spelling goes nondeterministic again. */
             names[reader.GetInt32(0)] = reader.GetString(1);
         }
 

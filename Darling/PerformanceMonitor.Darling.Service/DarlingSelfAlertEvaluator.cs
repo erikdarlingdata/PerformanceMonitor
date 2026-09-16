@@ -1473,8 +1473,15 @@ internal sealed class DarlingSelfAlertEvaluator
 
         if (census.Count > 0)
         {
-            sb.Append("\nHeaviest collectors over the same window, every server together - a collector can be"
-                + " expensive without having moved, and a movement ranking cannot see that (#2862):");
+            /* The census is the routing denominator's read reused (GetTopAsync over
+               CollectorCostDenominatorWindow), NOT the movers' 14-day baseline — so the header names the
+               trailing 24 hours rather than claiming "the same window" as the section above it, which
+               told the reader the two rankings shared a baseline they do not (#3448 review). The figure
+               is spelled from the constant so the words cannot drift from the read. */
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\nHeaviest collectors over the trailing {CollectorCostDenominatorWindow.TotalHours:N0} hours,"
+                + $" every server together - a collector can be expensive without having moved, and a movement"
+                + $" ranking cannot see that (#2862):"));
         }
 
         var listed = 0;

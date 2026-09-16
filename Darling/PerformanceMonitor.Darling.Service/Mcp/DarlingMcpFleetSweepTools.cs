@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -71,6 +72,13 @@ public sealed class DarlingMcpFleetSweepTools
         "monitored server is touched.")]
     public static async Task<string> GetSweepReports(
         NpgsqlDataSource postgres,
+        /* DI-resolved like postgres (no [Description], so it never reaches the advertised schema): the
+           MCP host registers ITS logger — the service host's, with real providers — so a child-read
+           fault on this path leaves a trace instead of degrading silently, which was the one
+           observation the #3473 review recorded against this tool. The /api/read mirror's shared
+           handler delegate has no logger seat and passes null, which is that path's pre-existing
+           behavior, not a regression. */
+        ILogger? logger,
         [Description("Hours of sweep timeline. Default 1 (the delivery ruling's default viewing span).")] int hours_back = 1,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("One sweep's id, AS A STRING (from the timeline's sweep_id). When set, returns that " +
@@ -96,7 +104,7 @@ public sealed class DarlingMcpFleetSweepTools
                         "empty",
                         $"No sweep with id {id} exists - pruned by retention, or never recorded. The timeline " +
                         "(call this tool without sweep_id) shows what the store holds.")
-                    : (await BuildDetailAsync(postgres, run)).ToJsonString();
+                    : (await BuildDetailAsync(postgres, logger, run)).ToJsonString();
             }
 
             var windowError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -107,7 +115,7 @@ public sealed class DarlingMcpFleetSweepTools
 
             var windowStart = windowEnd.AddHours(-hours_back);
             var runs = await FleetSweepStore.GetSweepsBySpanAsync(
-                postgres, windowStart, windowEnd, null, CancellationToken.None);
+                postgres, windowStart, windowEnd, logger, CancellationToken.None);
 
             /* The latest sweep is the landing document — read OUTSIDE the caller's window on purpose, the
                web feed's own landing shape: an agent asking about a quiet historical hour still learns what
@@ -123,11 +131,11 @@ public sealed class DarlingMcpFleetSweepTools
             }
 
             var watchItems = watch_state is null
-                ? await FleetSweepStore.GetOpenAndCarriedWatchItemsAsync(postgres, null, CancellationToken.None)
-                : await FleetSweepStore.GetWatchItemsByStateAsync(postgres, watch_state, null, CancellationToken.None);
+                ? await FleetSweepStore.GetOpenAndCarriedWatchItemsAsync(postgres, logger, CancellationToken.None)
+                : await FleetSweepStore.GetWatchItemsByStateAsync(postgres, watch_state, logger, CancellationToken.None);
 
             var result = FleetSweepPresentation.BuildTimelineNode(runs, windowStart, windowEnd);
-            result["latest"] = await BuildDetailAsync(postgres, latest);
+            result["latest"] = await BuildDetailAsync(postgres, logger, latest);
             result["watch_state"] = watch_state ?? "open + carried (default)";
             result["watch_items"] = FleetSweepPresentation.BuildWatchItemsNode(watchItems);
             return result.ToJsonString();
@@ -139,17 +147,19 @@ public sealed class DarlingMcpFleetSweepTools
     }
 
     /// <summary>One sweep's full document — the web feed's <c>BuildDetailAsync</c> twin over the same
-    /// builders and the same presentation reads (log-and-degrade with no logger here; a child fault costs
-    /// its section, never the answer). The ledger is read only for a master-off sweep, because the engine
-    /// writes none otherwise and the builder OMITS the key on an alerts-on sweep by contract.</summary>
-    private static async Task<JsonObject> BuildDetailAsync(NpgsqlDataSource postgres, FleetSweepRun run)
+    /// builders and the same presentation reads, log-and-degrade with the host's logger (#3473 review):
+    /// a child fault still costs its section and never the answer, but now leaves a trace, so "why did
+    /// the ledger section disappear" is answerable from the service log instead of unknowable. The
+    /// ledger is read only for a master-off sweep, because the engine writes none otherwise and the
+    /// builder OMITS the key on an alerts-on sweep by contract.</summary>
+    private static async Task<JsonObject> BuildDetailAsync(NpgsqlDataSource postgres, ILogger? logger, FleetSweepRun run)
     {
         var verdicts = await FleetSweepStore.GetServerVerdictsAsync(
-            postgres, run.SweepId, null, CancellationToken.None);
+            postgres, run.SweepId, logger, CancellationToken.None);
 
         var ledger = run.AlertsEnabled
             ? new List<FleetSweepWouldHavePagedEntry>()
-            : await FleetSweepStore.GetWouldHavePagedAsync(postgres, run.SweepId, null, CancellationToken.None);
+            : await FleetSweepStore.GetWouldHavePagedAsync(postgres, run.SweepId, logger, CancellationToken.None);
 
         return FleetSweepPresentation.BuildSweepDetailNode(run, verdicts, ledger);
     }

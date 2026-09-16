@@ -2543,8 +2543,11 @@ public static class DarlingWebEndpoints
 
             /* ── fleet sweep reports (#3466 lane 4) ── the tool mirror beside the dedicated /api/sweeps
                routes, the /api/fleet + /api/read/get_fleet_overview coexistence: the page reads its own
-               routes, and the 1:1 read surface carries the tool like every other read. */
-            ["get_sweep_reports"] = (c, pg, an) => DarlingMcpFleetSweepTools.GetSweepReports(pg, Hours(c, 1), AsOf(c), Str(c, "sweep_id"), Str(c, "watch_state")),
+               routes, and the 1:1 read surface carries the tool like every other read. The null is the
+               tool's logger seat: the MCP host injects its service logger there (#3473 review), but this
+               shared handler delegate carries no logger, and null keeps the mirror's log-and-degrade
+               exactly as it has always been rather than inventing a second logging path for one entry. */
+            ["get_sweep_reports"] = (c, pg, an) => DarlingMcpFleetSweepTools.GetSweepReports(pg, null, Hours(c, 1), AsOf(c), Str(c, "sweep_id"), Str(c, "watch_state")),
 
             /* ── blocking / deadlocks ── */
             ["get_blocked_process_xml"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), as_of: AsOf(c)),
