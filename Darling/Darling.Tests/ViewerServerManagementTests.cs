@@ -250,13 +250,16 @@ public sealed class ViewerCommandSqlTests
     }
 }
 
-/// <summary>The pure auth mapping — the service honors integrated + SQL only; every Azure/Entra mode blocks,
-/// including any added later, because the mapping is a whitelist with a null default.</summary>
+/// <summary>The pure auth mapping — as of #3484 the service honors integrated, SQL, and the two non-interactive
+/// Entra modes (service principal, managed identity); the interactive Entra modes still block, including any
+/// added later, because the mapping is a whitelist with a null default.</summary>
 public sealed class ServerStoreCredentialTests
 {
     [Theory]
     [InlineData(AuthenticationTypes.Windows, "integrated")]
     [InlineData(AuthenticationTypes.SqlServer, "sql")]
+    [InlineData(AuthenticationTypes.ServicePrincipal, "serviceprincipal")]
+    [InlineData(AuthenticationTypes.ManagedIdentity, "managedidentity")]
     public void MapAuth_SupportedModes_MapToStoreAuth(string authType, string expected)
     {
         Assert.Equal(expected, ServerStoreCredential.MapAuth(authType));
@@ -265,20 +268,21 @@ public sealed class ServerStoreCredentialTests
 
     [Theory]
     [InlineData(AuthenticationTypes.EntraMFA)]
-    [InlineData(AuthenticationTypes.ServicePrincipal)]
-    [InlineData(AuthenticationTypes.ManagedIdentity)]
     [InlineData(AuthenticationTypes.EntraDefaultCredential)]
     [InlineData(AuthenticationTypes.EntraDeviceCode)]
-    public void MapAuth_AzureModes_AreUnsupported(string authType)
+    public void MapAuth_InteractiveEntraModes_AreUnsupported(string authType)
     {
+        /* #3484: a headless collector has nobody to answer a broker prompt, so the interactive modes still
+           block; the non-interactive service principal + managed identity are covered by the supported test. */
         Assert.Null(ServerStoreCredential.MapAuth(authType));
         Assert.False(ServerStoreCredential.IsSupported(authType));
     }
 
     [Fact]
-    public void RequiresSecret_OnlyForSql()
+    public void RequiresSecret_ForSqlAndServicePrincipal_NotWindowsOrManagedIdentity()
     {
         Assert.True(ServerStoreCredential.RequiresSecret(AuthenticationTypes.SqlServer));
+        Assert.True(ServerStoreCredential.RequiresSecret(AuthenticationTypes.ServicePrincipal));
         Assert.False(ServerStoreCredential.RequiresSecret(AuthenticationTypes.Windows));
         Assert.False(ServerStoreCredential.RequiresSecret(AuthenticationTypes.ManagedIdentity));
     }

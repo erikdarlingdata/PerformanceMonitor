@@ -124,6 +124,8 @@ public partial class AddMultipleServersDialog : Window
         if (useProfile)
         {
             if (SqlCredentialsPanel is not null) SqlCredentialsPanel.Visibility = Visibility.Collapsed;
+            if (ServicePrincipalPanel is not null) ServicePrincipalPanel.Visibility = Visibility.Collapsed;
+            if (ManagedIdentityPanel is not null) ManagedIdentityPanel.Visibility = Visibility.Collapsed;
         }
         else
         {
@@ -133,8 +135,10 @@ public partial class AddMultipleServersDialog : Window
 
     private void AuthMode_Changed(object sender, RoutedEventArgs e)
     {
-        if (SqlCredentialsPanel is null) return;
+        if (SqlCredentialsPanel is null || ServicePrincipalPanel is null || ManagedIdentityPanel is null) return;
         SqlCredentialsPanel.Visibility = SqlAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        ServicePrincipalPanel.Visibility = ServicePrincipalAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        ManagedIdentityPanel.Visibility = ManagedIdentityAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
     }
 
     // ── Preview ─────────────────────────────────────────────────────────────────────────────────────────
@@ -463,6 +467,40 @@ public partial class AddMultipleServersDialog : Window
         if (WindowsAuthRadio.IsChecked == true)
         {
             shared = new BulkSharedSettings { AuthType = AuthenticationTypes.Windows, EncryptMode = encryptMode, TrustServerCertificate = trustCert };
+            return true;
+        }
+
+        if (ServicePrincipalAuthRadio.IsChecked == true)
+        {
+            /* #3484: one Entra service principal (client id + secret) stamped on every pasted row — the tenant is
+               resolved per target by the driver. The secret is stored in the same DPAPI blob shape as SQL. */
+            var clientId = AzureClientIdBox.Text.Trim();
+            if (string.IsNullOrEmpty(clientId)) { error = "The Application (client) ID is required for service-principal authentication."; return false; }
+            var secret = AzureClientSecretBox.Password;
+            if (string.IsNullOrEmpty(secret)) { error = "The client secret is required for service-principal authentication."; return false; }
+            shared = new BulkSharedSettings
+            {
+                AuthType = AuthenticationTypes.ServicePrincipal,
+                Username = clientId,
+                EncryptedPassword = ViewerServerSecret.Protect(secret),
+                EncryptMode = encryptMode,
+                TrustServerCertificate = trustCert,
+            };
+            return true;
+        }
+
+        if (ManagedIdentityAuthRadio.IsChecked == true)
+        {
+            /* #3484: one shared managed identity — no secret. A user-assigned identity names its client id;
+               a system-assigned identity leaves it blank. */
+            var miClientId = ManagedIdentityClientIdBox.Text.Trim();
+            shared = new BulkSharedSettings
+            {
+                AuthType = AuthenticationTypes.ManagedIdentity,
+                Username = string.IsNullOrEmpty(miClientId) ? null : miClientId,
+                EncryptMode = encryptMode,
+                TrustServerCertificate = trustCert,
+            };
             return true;
         }
 

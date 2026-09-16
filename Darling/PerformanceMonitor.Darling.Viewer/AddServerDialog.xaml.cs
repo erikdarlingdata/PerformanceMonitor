@@ -25,12 +25,14 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <c>test_connect</c> command the SERVICE executes (it holds the network path + credentials); the dialog
 /// enqueues it and polls the result.
 ///
-/// <para><b>Auth + secrets.</b> The service connects with Windows (integrated) or SQL auth only, so those
-/// are the two modes written (Windows → <c>integrated</c>, SQL → <c>sql</c> + a DPAPI-LocalMachine password
-/// blob via <see cref="ViewerServerSecret"/>, never plaintext). A SQL credential PROFILE is resolved to its
-/// concrete username + secret at write time. The three Azure/Entra modes have no service connect path yet
-/// (<see cref="ServerStoreCredential"/>) and are blocked with a clear message rather than written
-/// un-honorable. Favorites stay viewer-local (<see cref="ViewerServerStore.SetFavorite"/>).</para>
+/// <para><b>Auth + secrets.</b> The service connects with Windows, SQL, and the two non-interactive Entra
+/// modes — service principal and managed identity (#3484) — so those are the modes written (Windows →
+/// <c>integrated</c>; SQL → <c>sql</c> + a DPAPI-LocalMachine password blob via <see cref="ViewerServerSecret"/>;
+/// service principal → <c>serviceprincipal</c> + the client secret in the same blob shape; managed identity →
+/// <c>managedidentity</c>, secret-less), never plaintext. A SQL credential PROFILE is resolved to its concrete
+/// username + secret at write time. The INTERACTIVE Entra modes (MFA / device-code / default-credential) have
+/// no headless connect path (<see cref="ServerStoreCredential"/>) and are blocked with a clear message rather
+/// than written un-honorable. Favorites stay viewer-local (<see cref="ViewerServerStore.SetFavorite"/>).</para>
 /// </summary>
 public partial class AddServerDialog : Window
 {
@@ -130,6 +132,25 @@ public partial class AddServerDialog : Window
                 StatusText.Text = "The stored password can't be read on this machine — leave it blank to keep it, or type a new one.";
             }
         }
+        else if (string.Equals(existing.Auth, ServerStoreCredential.ServicePrincipal, StringComparison.OrdinalIgnoreCase))
+        {
+            /* #3484: prefill a service principal — client id in the app-id box, the secret decrypted from the
+               blob like a SQL password (blank on save keeps the existing blob). */
+            ServicePrincipalAuthRadio.IsChecked = true;
+            AzureClientIdBox.Text = existing.Username ?? "";
+            var decrypted = OperatingSystem.IsWindows() ? ViewerServerSecret.TryUnprotect(existing.EncryptedPassword) : null;
+            AzureClientSecretBox.Password = decrypted ?? "";
+            if (decrypted is null && !string.IsNullOrEmpty(existing.EncryptedPassword))
+            {
+                StatusText.Text = "The stored client secret can't be read on this machine — leave it blank to keep it, or type a new one.";
+            }
+        }
+        else if (string.Equals(existing.Auth, ServerStoreCredential.ManagedIdentity, StringComparison.OrdinalIgnoreCase))
+        {
+            /* #3484: managed identity carries no secret — just the optional user-assigned client id. */
+            ManagedIdentityAuthRadio.IsChecked = true;
+            ManagedIdentityClientIdBox.Text = existing.Username ?? "";
+        }
         else
         {
             WindowsAuthRadio.IsChecked = true;
@@ -208,12 +229,10 @@ public partial class AddServerDialog : Window
         ServicePrincipalPanel.Visibility = ServicePrincipalAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
         ManagedIdentityPanel.Visibility = ManagedIdentityAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
 
-        /* Warn as soon as an Azure/Entra mode is picked — the service can't connect with it, and Save/Test
-           will block. (A profile-backed Azure identity is caught at resolve time.) */
-        var azureSelected = EntraMfaAuthRadio.IsChecked == true
-            || ServicePrincipalAuthRadio.IsChecked == true
-            || ManagedIdentityAuthRadio.IsChecked == true;
-        if (azureSelected)
+        /* Only the INTERACTIVE Entra mode is unsupported now (#3484): warn as soon as it is picked, since
+           Save/Test will block. Service principal and managed identity are supported and do not warn.
+           (A profile-backed interactive identity is caught at resolve time.) */
+        if (EntraMfaAuthRadio.IsChecked == true)
         {
             StatusText.Text = ServerStoreCredential.UnsupportedAuthMessage;
         }
@@ -221,17 +240,18 @@ public partial class AddServerDialog : Window
         {
             StatusText.Text = "";
         }
-        /* #2279: SQL auth means a password, and a password is stored as a DPAPI LocalMachine blob that ONLY the
-           machine writing it can decrypt. The service is what has to decrypt it, so a credential saved from a
-           viewer on another PC can never be used and the server fails to connect on every sweep afterwards —
-           the #2255 report. Said as soon as the mode is picked, in the same place and the same way the Azure
-           arm above says its piece, so it lands before the password is typed rather than after the save.
+        /* #2279: a stored secret — a SQL password OR a service-principal client secret (#3484) — is a DPAPI
+           LocalMachine blob ONLY the machine writing it can decrypt. The service is what has to decrypt it, so
+           a credential saved from a viewer on another PC than the service can never be used and the server
+           fails to connect on every sweep afterwards (the #2255 report). Said as soon as either secret-bearing
+           mode is picked, so it lands before the secret is typed rather than after the save.
 
            WARNED, not refused: a non-loopback store does not prove this viewer is remote (a BYO store on
            another host with the service local reads the same), and refusing would block a legitimate first-run
            Add. Silent for a loopback store, which is the managed single-box deploy and the overwhelmingly
            common case — a hint that fires for everyone is a hint nobody reads. */
-        else if (SqlAuthRadio.IsChecked == true && _dataService is { StoreIsOnThisMachine: false })
+        else if ((SqlAuthRadio.IsChecked == true || ServicePrincipalAuthRadio.IsChecked == true)
+            && _dataService is { StoreIsOnThisMachine: false })
         {
             StatusText.Text = SqlCredentialMachineBoundHint;
         }
@@ -337,7 +357,48 @@ public partial class AddServerDialog : Window
             return false;
         }
 
-        /* EntraMFA / ServicePrincipal / ManagedIdentity — no Darling service connect path. */
+        if (ServicePrincipalAuthRadio.IsChecked == true)
+        {
+            /* #3484: Entra service principal — the application/client id in username, the client secret in the
+               DPAPI blob (same shape as a SQL password), so the resolve mirrors SQL auth exactly. The tenant is
+               auto-discovered from the target by the driver, so AzureTenantIdBox is reference-only, not stored. */
+            auth = ServerStoreCredential.ServicePrincipal;
+            username = AzureClientIdBox.Text.Trim();
+            if (string.IsNullOrEmpty(username))
+            {
+                error = "The Application (client) ID is required for service-principal authentication.";
+                return false;
+            }
+
+            var typedSecret = AzureClientSecretBox.Password;
+            if (!string.IsNullOrEmpty(typedSecret))
+            {
+                encryptedPassword = ViewerServerSecret.Protect(typedSecret);
+                return true;
+            }
+
+            /* Blank secret on edit keeps the existing blob, exactly like a SQL password. */
+            if (_existing is not null && !string.IsNullOrEmpty(_existing.EncryptedPassword))
+            {
+                encryptedPassword = _existing.EncryptedPassword;
+                return true;
+            }
+
+            error = "The client secret is required for service-principal authentication.";
+            return false;
+        }
+
+        if (ManagedIdentityAuthRadio.IsChecked == true)
+        {
+            /* #3484: managed identity is secret-less. A user-assigned identity names its client id in username;
+               a system-assigned identity leaves it blank. No password blob is written. */
+            auth = ServerStoreCredential.ManagedIdentity;
+            var miClientId = ManagedIdentityClientIdBox.Text.Trim();
+            username = string.IsNullOrEmpty(miClientId) ? null : miClientId;
+            return true;
+        }
+
+        /* EntraMFA (and any other interactive Entra mode) — the headless service has no interactive connect path. */
         error = ServerStoreCredential.UnsupportedAuthMessage;
         return false;
     }
