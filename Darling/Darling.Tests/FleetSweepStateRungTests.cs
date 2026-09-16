@@ -328,8 +328,12 @@ public sealed class FleetSweepStateRungTests
 
         Assert.DoesNotContain("alerts_enabled", FleetSweepStore.GetWouldHavePagedBySpanSql, StringComparison.Ordinal);
 
-        /* The names read is DISTINCT pairs — one names map for the render, not one row per sweep. */
-        Assert.Contains("SELECT DISTINCT v.server_id, v.server_name", FleetSweepStore.GetSweepServerNamesBySpanSql, StringComparison.Ordinal);
+        /* The names read is deduplicated pairs — one names map for the render, not one row per sweep —
+           ordered so a renamed server's newest name arrives LAST within its id (#3473 review): the
+           reader builds the map last-write-wins, so newest-last is what makes the newest name win
+           deterministically instead of leaving the winning spelling to the store's row order. */
+        Assert.Contains("GROUP BY v.server_id, v.server_name", FleetSweepStore.GetSweepServerNamesBySpanSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY v.server_id, MAX(r.swept_at), MAX(r.sweep_id)", FleetSweepStore.GetSweepServerNamesBySpanSql, StringComparison.Ordinal);
     }
 
     /// <summary>
