@@ -1824,6 +1824,10 @@ internal sealed class DarlingSelfAlertEvaluator
             }
             catch (JsonException)
             {
+                /* A sweep document that did not parse becomes the rollup's own evidence: the store read
+                   above is the counted site, and this arm CONVERTS the fault into the unreadable count
+                   the rollup reports (an unreadable day must not read as a quiet one) rather than
+                   swallowing it. Counting it as a read failure would double-book the one read. */
                 unreadable++;
             }
         }

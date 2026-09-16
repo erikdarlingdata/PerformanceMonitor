@@ -884,7 +884,7 @@ public sealed class AlertReadFailureSurfaceTests
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
         (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 13, 5),
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 8, 9),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 8, 10),
     };
 
     /// <summary>
@@ -974,6 +974,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Recently-failed-job check errored"] = "reads the monitored server's msdb on its own connection and timeout",
         ["Skipping recently-failed-job check"] = "the same msdb read, permission-denied arm; not a store read",
         ["Failed to check failed jobs"] = "the fetcher reads the monitored server's msdb; the block's only store op is a write both stores swallow",
+        ["CONVERTS the fault into the unreadable count"] = "a parse arm, not a read: the fleet-sweep rollup's store read is counted above it, and a document that does not parse becomes the rollup's own reportable unreadable count - the fault is evidence, not a swallow",
     };
 
     /// <summary>
