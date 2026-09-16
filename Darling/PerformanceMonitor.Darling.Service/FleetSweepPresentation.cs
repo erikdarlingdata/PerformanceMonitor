@@ -38,7 +38,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// unconditionally — the spec requires the mute stated on every sweep, and quiet-is-not-clean applies
 /// to the render too. The detail shape carries <c>would_have_paged</c> whenever the sweep ran under
 /// master-off, INCLUDING empty: "muted, and nothing would have paged" is a statement the operator is
-/// owed, where an absent key reads as "nothing was checked".</para>
+/// owed, where an absent key reads as "nothing was checked". The EMBEDDED report obeys the same
+/// contract (#3478): documents persisted before the engine's storage gate carry a fabricated
+/// <c>would_have_paged: []</c> on alerts-on sweeps, immutably and for their whole retention, so
+/// <see cref="BuildRunNode"/> strips the key from the alerts-on embed — the render's copy, never the
+/// stored row — which also keeps the contract true against any future writer regression.</para>
 /// </summary>
 public static class FleetSweepPresentation
 {
@@ -71,11 +75,27 @@ public static class FleetSweepPresentation
     /// <summary>
     /// One run row on the wire: the header facts plus the document and liveness block embedded as
     /// objects. The mute header and the liveness verdict are ALWAYS present — the two facts the spec
-    /// requires stated on every sweep, so no client has to know a rule about their absence.
+    /// requires stated on every sweep, so no client has to know a rule about their absence. The
+    /// embedded report's <c>would_have_paged</c> obeys the class contract: absent on an alerts-on
+    /// sweep, stripped here (#3478) because legacy documents carry it fabricated.
     /// </summary>
     public static JsonObject BuildRunNode(FleetSweepRun run)
     {
         ArgumentNullException.ThrowIfNull(run);
+
+        var report = EmbedJson(run.ReportJson);
+
+        /* The back-compat arm of #3478: every alerts-on sweep persisted before the engine's storage
+           gate carries would_have_paged: [] — written unconditionally, never derived — and stored
+           documents are immutable, living out their retention as-written. The strip operates on the
+           freshly parsed embed (EmbedJson parses per call), NEVER the stored row, so the record keeps
+           what was written while the wire keeps the contract: on an alerts-on sweep no would-have-paged
+           check was made, and serving an empty ledger would claim one. The type guard keeps the
+           unparseable-payload arm intact — a verbatim string is carried whole, not probed. */
+        if (run.AlertsEnabled && report is JsonObject reportObject)
+        {
+            reportObject.Remove("would_have_paged");
+        }
 
         return new JsonObject
         {
@@ -89,7 +109,7 @@ public static class FleetSweepPresentation
             ["servers_reported"] = run.ServersReported,
             ["instruments_alive"] = run.InstrumentsAlive,
             ["instrument_liveness"] = EmbedJson(run.InstrumentLivenessJson),
-            ["report"] = EmbedJson(run.ReportJson),
+            ["report"] = report,
         };
     }
 
