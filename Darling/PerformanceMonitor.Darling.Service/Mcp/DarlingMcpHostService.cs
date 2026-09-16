@@ -713,6 +713,13 @@ public sealed class DarlingMcpHostService : BackgroundService
                    also powers the web /api/ag and the Availability Groups page (one reader, one banding). Like
                    get_fleet_overview this is a cross-server read the central store makes possible. */
                 .WithGeminiCompatibleTools<DarlingMcpAgTools>()
+                /* The fleet sweep reports read — get_sweep_reports (#3466) — the third cross-server read, and
+                   the one WITH MEMORY: the sweep timeline for a window, the newest sweep in full (mute header,
+                   would-have-paged ledger, instrument liveness), and the watch-item worklist, over the SAME
+                   FleetSweepStore presentation reads and FleetSweepPresentation builders the web /api/sweeps
+                   routes serve — one reader, one shape, the zero-drift rule get_fleet_overview and /api/fleet
+                   established, applied to the sweep rows. */
+                .WithGeminiCompatibleTools<DarlingMcpFleetSweepTools>()
                 /* The system_health parse-on-read family — get_health_parser_cpu_tasks / _io_issues /
                    _memory_broker / _memory_conditions / _memory_node_oom / _scheduler_issues /
                    _severe_errors / _significant_waits / _system_health — the same names the Dashboard

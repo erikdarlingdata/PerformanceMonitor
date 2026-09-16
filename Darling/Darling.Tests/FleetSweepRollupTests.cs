@@ -414,8 +414,8 @@ public class FleetSweepRollupTests
             < detail.IndexOf("pm-server-2: Warning -> Critical", StringComparison.Ordinal),
             "transitions must render chronologically, not in the read's newest-first order");
 
-        /* The fleet-as-of line is the NEWEST sweep's census. */
-        Assert.Contains("The fleet as of the newest covered sweep: Critical 2, Healthy 1.", detail, StringComparison.Ordinal);
+        /* The fleet-as-of line is the NEWEST READABLE sweep's census - and says so. */
+        Assert.Contains("The fleet as of the newest readable covered sweep: Critical 2, Healthy 1.", detail, StringComparison.Ordinal);
 
         /* The fleet-scope watch sentinel is named as the fleet. */
         Assert.Contains("instruments-dead on the fleet", detail, StringComparison.Ordinal);
@@ -457,7 +457,52 @@ public class FleetSweepRollupTests
             new[] { Run(1, Day.AddHours(-2), rawReport: "not json at all") },
             Array.Empty<FleetSweepLedgerSpanEntry>());
 
-        Assert.Contains("1 covered sweep documents did not parse", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("1 unreadable items across the covered sweeps' documents", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>A band census carrying a count no int holds must not KILL the rollup tick — GetInt32
+    /// answers one with FormatException/OverflowException, which the JsonException-only catch does not
+    /// swallow, and an escaped tick is a day-long silent outage of the exact feature that promises an
+    /// unreadable day cannot read as a quiet one. The corrupt census lands on the one unreadable counter,
+    /// and the fleet-as-of line keeps the newest sweep whose census WAS readable — which is what the line
+    /// says.</summary>
+    [Fact]
+    public async Task ABandCountNoIntHolds_IsCountedUnreadable_AndTheFleetAsOfLineKeepsTheNewestReadableCensus()
+    {
+        var fired = await FireAsync(
+            new[]
+            {
+                Run(1, Day.AddHours(-3), report: Report(
+                    bands: new Dictionary<string, int> { ["Healthy"] = 3 })),
+                Run(2, Day.AddHours(-2), rawReport:
+                    "{\"changes\":{\"band_transitions\":[]},\"watch\":{\"opened\":[],\"closed\":[]},"
+                    + "\"fleet\":{\"bands\":{\"Healthy\":99999999999}}}"),
+            },
+            Array.Empty<FleetSweepLedgerSpanEntry>());
+
+        Assert.Contains("1 unreadable items across the covered sweeps' documents", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains(
+            "The fleet as of the newest readable covered sweep: Healthy 3.", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>A watch entry missing its item, or carrying a server id no int holds, is counted on the
+    /// SAME unreadable counter rather than dropped silently — a watch event the rollup cannot render is
+    /// still a watch event the operator was owed, and one counter stated once keeps the honesty argument
+    /// whole.</summary>
+    [Fact]
+    public async Task AWatchEntryMissingItsFields_IsCountedUnreadable_NotSilentlyDropped()
+    {
+        var fired = await FireAsync(
+            new[]
+            {
+                Run(1, Day.AddHours(-2), rawReport:
+                    "{\"changes\":{\"band_transitions\":[]},"
+                    + "\"watch\":{\"opened\":[{\"server_id\":1},{\"item\":\"no-server\"}],\"closed\":[]},"
+                    + "\"fleet\":{\"bands\":{}}}"),
+            },
+            Array.Empty<FleetSweepLedgerSpanEntry>());
+
+        Assert.Contains("2 unreadable items across the covered sweeps' documents", fired.DetailText, StringComparison.Ordinal);
     }
 
     /* ---------------- the surfaces that read the metric name ---------------- */

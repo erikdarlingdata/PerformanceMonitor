@@ -35,31 +35,70 @@ namespace Darling.Tests;
 /// for its registrations, so it cannot go stale the way a hand-kept list does — and it fails the moment
 /// someone adds a class, rather than whenever an agent next reaches for the tool. That is the same
 /// reasoning as the tab pin being derived from the dispatch.</para>
+///
+/// <para><b>#3466 nearly repeated #2659.</b> <c>DarlingMcpFleetSweepTools</c> shipped with its tool
+/// documented, web-dispatched and counted in the instructions census — and no registration line, the exact
+/// shape above. This pin would have gone red where it runs; review caught it first. Two things hardened
+/// here in response: the declared set now also derives from <c>[McpServerTool]</c> METHODS (a tool method
+/// on a class that lost its type attribute is registered-and-invisible to an attribute-only census, and
+/// <c>WithGeminiCompatibleTools</c> scans methods, not the type attribute), and the assert became
+/// SET-EQUALITY — a registration naming a class that declares no tools registers NOTHING silently, a stale
+/// line that reads as coverage while delivering none, so it reds too.</para>
 /// </summary>
 public sealed class McpToolTypeRegistrationTests
 {
     [Fact]
-    public void EveryMcpServerToolTypeClass_IsRegisteredWithTheHost()
+    public void TheRegisteredToolTypes_AreExactlyTheDeclaredToolTypes()
     {
-        var declared = typeof(DarlingMcpHostService).Assembly
-            .GetTypes()
-            .Where(t => t.GetCustomAttribute<McpServerToolTypeAttribute>() is not null)
-            .Select(t => t.Name)
-            .OrderBy(n => n, StringComparer.Ordinal)
-            .ToList();
+        var declared = DeclaredToolTypeNames();
 
         Assert.NotEmpty(declared);
 
         var registered = RegisteredToolTypeNames();
 
-        var missing = declared.Where(n => !registered.Contains(n)).ToList();
+        var missing = declared.Where(n => !registered.Contains(n))
+            .OrderBy(n => n, StringComparer.Ordinal).ToList();
+        var stale = registered.Where(n => !declared.Contains(n))
+            .OrderBy(n => n, StringComparer.Ordinal).ToList();
 
         Assert.True(
             missing.Count == 0,
-            "These [McpServerToolType] classes are never registered with the MCP host, so every tool they "
+            "These tool classes are never registered with the MCP host, so every tool they "
             + "declare is unreachable over MCP even though its name exists and the web API dispatches it: "
             + string.Join(", ", missing)
             + ". Add a .WithGeminiCompatibleTools<T>() line in DarlingMcpHostService.");
+
+        Assert.True(
+            stale.Count == 0,
+            "These .WithGeminiCompatibleTools<T>() registrations name classes that declare no MCP tools, "
+            + "so each line registers nothing while reading as coverage: "
+            + string.Join(", ", stale)
+            + ". Remove the stale line, or restore the class's [McpServerTool] members.");
+    }
+
+    /// <summary>
+    /// The declared set, derived BOTH ways the SDK vocabulary can express a tool: classes carrying
+    /// <see cref="McpServerToolTypeAttribute"/>, unioned with classes carrying at least one
+    /// <see cref="McpServerToolAttribute"/> method — because the registration path
+    /// (<c>WithGeminiCompatibleTools</c>) scans METHODS, so a method-carrying class is a real tool surface
+    /// whether or not its type attribute survived a refactor.
+    /// </summary>
+    private static HashSet<string> DeclaredToolTypeNames()
+    {
+        var declared = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var type in typeof(DarlingMcpHostService).Assembly.GetTypes())
+        {
+            if (type.GetCustomAttribute<McpServerToolTypeAttribute>() is not null
+                || type.GetMethods(
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance)
+                    .Any(m => m.GetCustomAttribute<McpServerToolAttribute>() is not null))
+            {
+                declared.Add(type.Name);
+            }
+        }
+
+        return declared;
     }
 
     /// <summary>

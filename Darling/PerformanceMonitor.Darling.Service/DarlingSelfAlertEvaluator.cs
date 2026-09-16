@@ -1683,7 +1683,7 @@ internal sealed class DarlingSelfAlertEvaluator
         int Sweeps,
         int MutedSweeps,
         int LivenessIncidents,
-        int UnreadableDocuments,
+        int UnreadableItems,
         IReadOnlyList<RollupTransition> Transitions,
         IReadOnlyList<RollupWatchEvent> Opened,
         IReadOnlyList<RollupWatchEvent> Closed,
@@ -1697,7 +1697,7 @@ internal sealed class DarlingSelfAlertEvaluator
         /// all-clear post. An empty day (zero sweeps) is vacuously false through every term.</summary>
         public bool HasReportableContent =>
             Transitions.Count > 0 || Opened.Count > 0 || Closed.Count > 0
-            || LivenessIncidents > 0 || MutedSweeps > 0 || UnreadableDocuments > 0;
+            || LivenessIncidents > 0 || MutedSweeps > 0 || UnreadableItems > 0;
     }
 
     /// <summary>
@@ -1706,11 +1706,14 @@ internal sealed class DarlingSelfAlertEvaluator
     /// and the liveness verdict directly; the transitions and watch events are parsed out of each run's own
     /// document (<c>changes.band_transitions</c>, <c>watch.opened</c>, <c>watch.closed</c>) - the engine's
     /// persisted report is the authority on what each sweep SAID, and re-deriving transitions from verdict
-    /// rows here would be a second opinion that could disagree with it. A document that does not parse is
-    /// COUNTED (<see cref="FleetSweepRollupFacts.UnreadableDocuments"/>) rather than skipped silently, and
-    /// the count is itself reportable: an unreadable day must not render as a quiet one. Runs are processed
-    /// oldest-first whatever order the read served, so the transition list reads chronologically and the
-    /// band census standing at the end is the newest sweep's.
+    /// rows here would be a second opinion that could disagree with it. Anything unreadable is COUNTED
+    /// (<see cref="FleetSweepRollupFacts.UnreadableItems"/>) rather than skipped silently - a document that
+    /// does not parse, a band census carrying a count no int holds, a watch entry missing its item or a
+    /// usable server id - and the count is itself reportable: an unreadable day must not render as a quiet
+    /// one. One counter for every shape, stated as such in the render, because the operator's next move is
+    /// the same whichever piece was unreadable: read the sweep documents on the record surface. Runs are
+    /// processed oldest-first whatever order the read served, so the transition list reads chronologically
+    /// and the band census standing at the end is the newest READABLE sweep's.
     /// </summary>
     internal static FleetSweepRollupFacts ExtractRollupFacts(
         IReadOnlyList<FleetSweepRun> runs,
@@ -1769,8 +1772,8 @@ internal sealed class DarlingSelfAlertEvaluator
 
                 if (root.TryGetProperty("watch", out var watch) && watch.ValueKind == JsonValueKind.Object)
                 {
-                    AppendWatchEvents(watch, "opened", serverNames, opened);
-                    AppendWatchEvents(watch, "closed", serverNames, closed);
+                    unreadable += AppendWatchEvents(watch, "opened", serverNames, opened);
+                    unreadable += AppendWatchEvents(watch, "closed", serverNames, closed);
                 }
 
                 /* Ordered oldest-first, so the last readable band census standing is the newest one - the
@@ -1781,15 +1784,38 @@ internal sealed class DarlingSelfAlertEvaluator
                     && bands.ValueKind == JsonValueKind.Object)
                 {
                     var census = new List<KeyValuePair<string, int>>();
+                    var censusReadable = true;
                     foreach (var band in bands.EnumerateObject())
                     {
-                        if (band.Value.ValueKind == JsonValueKind.Number)
+                        if (band.Value.ValueKind != JsonValueKind.Number)
                         {
-                            census.Add(new KeyValuePair<string, int>(band.Name, band.Value.GetInt32()));
+                            continue;
                         }
+
+                        /* TryGetInt32, not GetInt32: a band count is engine-written and int-sized, so a
+                           JSON number an int cannot hold is a corrupt census - and GetInt32 answers it
+                           with FormatException/OverflowException, which the JsonException-only catch
+                           below would NOT swallow. An escape here kills the whole rollup tick for up to
+                           a day, the exact silent outage the unreadable counter exists to prevent. The
+                           corrupt census is counted unreadable like a corrupt document, and the
+                           fleet-as-of line keeps the newest sweep whose census WAS readable. */
+                        if (!band.Value.TryGetInt32(out var count))
+                        {
+                            censusReadable = false;
+                            break;
+                        }
+
+                        census.Add(new KeyValuePair<string, int>(band.Name, count));
                     }
 
-                    newestBands = census.OrderBy(b => b.Key, StringComparer.Ordinal).ToList();
+                    if (censusReadable)
+                    {
+                        newestBands = census.OrderBy(b => b.Key, StringComparer.Ordinal).ToList();
+                    }
+                    else
+                    {
+                        unreadable++;
+                    }
                 }
             }
             catch (JsonException)
@@ -1847,7 +1873,7 @@ internal sealed class DarlingSelfAlertEvaluator
 
         if (facts.NewestBands.Count > 0)
         {
-            sb.Append("\nThe fleet as of the newest covered sweep: ");
+            sb.Append("\nThe fleet as of the newest readable covered sweep: ");
             sb.Append(string.Join(", ", facts.NewestBands.Select(b =>
                 string.Create(CultureInfo.InvariantCulture, $"{b.Key} {b.Value}"))));
             sb.Append('.');
@@ -1898,11 +1924,12 @@ internal sealed class DarlingSelfAlertEvaluator
                 + $" they carry."));
         }
 
-        if (facts.UnreadableDocuments > 0)
+        if (facts.UnreadableItems > 0)
         {
             sb.Append(string.Create(CultureInfo.InvariantCulture,
-                $"\n{facts.UnreadableDocuments} covered sweep documents did not parse - counted here so an"
-                + $" unreadable day cannot read as a quiet one."));
+                $"\n{facts.UnreadableItems} unreadable items across the covered sweeps' documents - whole"
+                + $" documents or single entries that did not parse - counted here so an unreadable day"
+                + $" cannot read as a quiet one."));
         }
 
         if (facts.Transitions.Count > 0)
@@ -1976,30 +2003,38 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>The watch arrays' entries, resolved to render-ready events. The documents carry watch
     /// subjects by bare id (the engine's vocabulary); the span's verdict names resolve them, the fleet
     /// sentinel is named as the fleet, and a server no verdict named degrades to its id stated as such -
-    /// honest, never invented.</summary>
-    private static void AppendWatchEvents(
+    /// honest, never invented. Returns how many entries were UNREADABLE - missing their item, or carrying
+    /// a server id no int holds - so the caller counts them on the one unreadable counter rather than this
+    /// helper dropping them silently: a watch event the rollup cannot render is still a watch event the
+    /// operator was owed.</summary>
+    private static int AppendWatchEvents(
         JsonElement watch, string property, IReadOnlyDictionary<int, string> serverNames, List<RollupWatchEvent> events)
     {
         if (!watch.TryGetProperty(property, out var array) || array.ValueKind != JsonValueKind.Array)
         {
-            return;
+            return 0;
         }
 
+        var unreadable = 0;
         foreach (var entry in array.EnumerateArray())
         {
             var itemKey = StringProperty(entry, "item");
             if (itemKey is null
                 || !entry.TryGetProperty("server_id", out var serverId)
-                || serverId.ValueKind != JsonValueKind.Number)
+                || serverId.ValueKind != JsonValueKind.Number
+                || !serverId.TryGetInt32(out var serverIdValue))
             {
+                unreadable++;
                 continue;
             }
 
             events.Add(new RollupWatchEvent(
-                SubjectName(serverId.GetInt32(), serverNames),
+                SubjectName(serverIdValue, serverNames),
                 itemKey,
                 StringProperty(entry, "condition") ?? string.Empty));
         }
+
+        return unreadable;
     }
 
     private static string SubjectName(int serverId, IReadOnlyDictionary<int, string> serverNames) =>
