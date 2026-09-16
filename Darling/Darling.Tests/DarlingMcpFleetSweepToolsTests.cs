@@ -159,6 +159,35 @@ public sealed class DarlingMcpFleetSweepToolsTests
         Assert.Contains("Invalid sweep_id value 'abc'", result, StringComparison.Ordinal);
     }
 
+    /* ---------------- the shared builders: lane 3's shape pins cover this surface ---------------- */
+
+    /// <summary>
+    /// Both of this tool's read paths — the timeline and the <c>sweep_id</c> fetch — serve
+    /// <c>FleetSweepPresentation</c>'s builders, and that join is what makes lane 3's shape pins THIS
+    /// tool's pins too: the #3478 embedded-report contract (<c>would_have_paged</c> absent on an
+    /// alerts-on sweep, stripped from legacy documents that carry it fabricated, present under mute)
+    /// is held in <c>FleetSweepWebFeedTests</c> against the one builder both paths embed the stored
+    /// document through. A hand-rolled node in this file would put the tool outside those pins, and
+    /// the two surfaces could drift into different opinions about what a sweep looks like — the
+    /// zero-drift rule this source pin makes structural.
+    /// </summary>
+    [Fact]
+    public void BothReadPaths_ServeTheSharedBuilders_SoLane3sShapePinsCoverThisTool()
+    {
+        var source = RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpFleetSweepTools.cs");
+
+        Assert.Contains("FleetSweepPresentation.BuildTimelineNode(", source, StringComparison.Ordinal);
+        Assert.Contains("FleetSweepPresentation.BuildSweepDetailNode(", source, StringComparison.Ordinal);
+
+        /* #3482: the worklist rides the same builder AND the same names gate-and-read the web feed
+           uses — the ValidateWatchState sharing pattern — so this tool's watch_items carry the same
+           server field the page reads, resolved by the same rules, or the two surfaces could name
+           the same worklist differently. */
+        Assert.Contains("FleetSweepPresentation.BuildWatchItemsNode(watchItems, watchItemNames)", source, StringComparison.Ordinal);
+        Assert.Contains("DarlingFleetSweepEndpoints.ReadWatchItemNamesAsync(", source, StringComparison.Ordinal);
+    }
+
     /* ---------------- the /api/read mirror ---------------- */
 
     /// <summary>The read dispatch carries the tool (the catalog-parity test in

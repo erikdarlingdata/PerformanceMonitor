@@ -38,7 +38,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// unconditionally — the spec requires the mute stated on every sweep, and quiet-is-not-clean applies
 /// to the render too. The detail shape carries <c>would_have_paged</c> whenever the sweep ran under
 /// master-off, INCLUDING empty: "muted, and nothing would have paged" is a statement the operator is
-/// owed, where an absent key reads as "nothing was checked".</para>
+/// owed, where an absent key reads as "nothing was checked". The EMBEDDED report obeys the same
+/// contract (#3478): documents persisted before the engine's storage gate carry a fabricated
+/// <c>would_have_paged: []</c> on alerts-on sweeps, immutably and for their whole retention, so
+/// <see cref="BuildRunNode"/> strips the key from the alerts-on embed — the render's copy, never the
+/// stored row — which also keeps the contract true against any future writer regression.</para>
 /// </summary>
 public static class FleetSweepPresentation
 {
@@ -71,11 +75,27 @@ public static class FleetSweepPresentation
     /// <summary>
     /// One run row on the wire: the header facts plus the document and liveness block embedded as
     /// objects. The mute header and the liveness verdict are ALWAYS present — the two facts the spec
-    /// requires stated on every sweep, so no client has to know a rule about their absence.
+    /// requires stated on every sweep, so no client has to know a rule about their absence. The
+    /// embedded report's <c>would_have_paged</c> obeys the class contract: absent on an alerts-on
+    /// sweep, stripped here (#3478) because legacy documents carry it fabricated.
     /// </summary>
     public static JsonObject BuildRunNode(FleetSweepRun run)
     {
         ArgumentNullException.ThrowIfNull(run);
+
+        var report = EmbedJson(run.ReportJson);
+
+        /* The back-compat arm of #3478: every alerts-on sweep persisted before the engine's storage
+           gate carries would_have_paged: [] — written unconditionally, never derived — and stored
+           documents are immutable, living out their retention as-written. The strip operates on the
+           freshly parsed embed (EmbedJson parses per call), NEVER the stored row, so the record keeps
+           what was written while the wire keeps the contract: on an alerts-on sweep no would-have-paged
+           check was made, and serving an empty ledger would claim one. The type guard keeps the
+           unparseable-payload arm intact — a verbatim string is carried whole, not probed. */
+        if (run.AlertsEnabled && report is JsonObject reportObject)
+        {
+            reportObject.Remove("would_have_paged");
+        }
 
         return new JsonObject
         {
@@ -89,7 +109,7 @@ public static class FleetSweepPresentation
             ["servers_reported"] = run.ServersReported,
             ["instruments_alive"] = run.InstrumentsAlive,
             ["instrument_liveness"] = EmbedJson(run.InstrumentLivenessJson),
-            ["report"] = EmbedJson(run.ReportJson),
+            ["report"] = report,
         };
     }
 
@@ -171,21 +191,31 @@ public static class FleetSweepPresentation
     /// <see cref="FleetSweepWatchStateMachine.ExitConsecutiveSweeps"/>, spliced from the machine's own
     /// constants), because "1 consecutive miss" only means something beside "of 2 to close", and a
     /// client that hardcoded the bars would silently mis-render the day they become per-item data
-    /// (the #3297 route the store doc reserves).
+    /// (the #3297 route the store doc reserves) — and each row NAMED (#3482), the detail node's own
+    /// rule one section over: the worklist is the one table an operator reads to see what is still
+    /// standing, and a row keyed on a bare id made it the one table on the page that could not name
+    /// its server. The names map is the caller's batch read
+    /// (<see cref="FleetSweepStore.GetSweepServerNamesAsync"/>); the <c>server</c> field is present
+    /// exactly when it means something — omitted on the fleet-scope sentinel (the fleet has no server
+    /// name, and emitting one would be a fabrication) and omitted when the id resolves to no retained
+    /// verdict row, where the client's "server N" fallback is the honest degrade.
     /// </summary>
-    public static JsonObject BuildWatchItemsNode(IReadOnlyList<FleetSweepWatchItem> items)
+    public static JsonObject BuildWatchItemsNode(
+        IReadOnlyList<FleetSweepWatchItem> items, IReadOnlyDictionary<int, string> serverNamesById)
     {
         ArgumentNullException.ThrowIfNull(items);
+        ArgumentNullException.ThrowIfNull(serverNamesById);
 
         var array = new JsonArray();
         foreach (var item in items)
         {
-            array.Add(new JsonObject
+            var fleetScope = item.ServerId == FleetSweepStore.FleetScopeServerId;
+            var node = new JsonObject
             {
                 ["server_id"] = item.ServerId,
                 /* The fleet-scope sentinel named on the wire, so no client has to know that 0 means
                    the fleet — the store constant is the one authority for the number. */
-                ["fleet_scope"] = item.ServerId == FleetSweepStore.FleetScopeServerId,
+                ["fleet_scope"] = fleetScope,
                 ["item"] = item.ItemKey,
                 ["condition"] = item.Condition,
                 ["state"] = item.State,
@@ -198,7 +228,17 @@ public static class FleetSweepPresentation
                 ["first_seen_at"] = item.FirstSeenAtUtc.ToString("o"),
                 ["last_seen_at"] = item.LastSeenAtUtc.ToString("o"),
                 ["evidence"] = item.EvidenceJson is null ? null : EmbedJson(item.EvidenceJson),
-            });
+            };
+
+            /* The fleet-scope guard is explicit rather than left to a map miss: no verdict row SHOULD
+               carry the sentinel id, but a name for "the fleet" would be a fabrication however it got
+               into the map, and the fleet_scope flag above is the field a client renders from. */
+            if (!fleetScope && serverNamesById.TryGetValue(item.ServerId, out var serverName))
+            {
+                node["server"] = serverName;
+            }
+
+            array.Add(node);
         }
 
         return new JsonObject

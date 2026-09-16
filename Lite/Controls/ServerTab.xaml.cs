@@ -186,16 +186,29 @@ public partial class ServerTab : UserControl
             _ => 1
         };
 
-        /* Auto-refresh every 60 seconds */
-        _refreshTimer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromSeconds(60)
-        };
+        /* #3479: restore the auto-refresh toggle and interval the same way the time range is restored
+           above — from the App-level setting, before _refreshTimer exists. Setting these fires their
+           Changed handlers, which no-op on the _refreshTimer null guard, so the restore cannot
+           save-echo the values it just loaded or poke a timer that is not built yet; the switch's
+           default arm keeps the XAML defaults (checked, one minute) as the fresh-install fallback. */
+        AutoRefreshIntervalCombo.SelectedIndex = AutoRefreshIndexForSeconds(App.AutoRefreshIntervalSeconds);
+        AutoRefreshCheckBox.IsChecked = App.AutoRefreshEnabled;
+
+        _refreshTimer = new DispatcherTimer();
         _refreshTimer.Tick += async (s, e) =>
         {
             await RefreshAllDataAsync();
         };
-        _refreshTimer.Start();
+        /* The interval comes off the just-restored combo through the same call a live selection change
+           makes, so the constructor and AutoRefreshInterval_Changed cannot disagree about what an index
+           means. Start was unconditional when the box could only ever construct checked; now that it can
+           restore unchecked, an ungated Start would mean "unchecked, but refreshing anyway" until the
+           first toggle. */
+        UpdateAutoRefreshInterval();
+        if (AutoRefreshCheckBox.IsChecked == true)
+        {
+            _refreshTimer.Start();
+        }
 
         /* When this tab isn't selected the timer skips its data refresh (see RefreshAllDataAsync);
            refresh once when it becomes visible again so it isn't showing stale data on return. */

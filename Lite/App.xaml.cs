@@ -92,6 +92,23 @@ public partial class App : Application
     /// </summary>
     public static int DefaultTimeRangeHours { get; set; } = 4;
 
+    /// <summary>
+    /// Whether the server-tab auto-refresh timer starts running (#3479). One preference across every
+    /// tab, like <see cref="DefaultTimeRangeHours"/> above: the reporter's mental model is "the app's
+    /// refresh setting", so a tab opened after the change and a tab restored at the next launch must
+    /// both take it — per-tab rows would make the same toggle mean different things in different tabs.
+    /// </summary>
+    public static bool AutoRefreshEnabled { get; set; } = true;
+
+    /// <summary>
+    /// The server-tab auto-refresh interval in seconds (#3479). Stored in its unit rather than as the
+    /// toolbar combo's index for the same reason the time range stores hours: an index is a fact about
+    /// today's XAML, and reordering the combo would silently re-meaning every settings.json in the
+    /// field. <c>ServerTab.AutoRefreshIndexForSeconds</c> maps a value this combo does not offer back
+    /// to the XAML default, so a hand-edited 45 cannot pick a fourth interval into existence.
+    /// </summary>
+    public static int AutoRefreshIntervalSeconds { get; set; } = 60;
+
     /* Alert settings */
     public static bool AlertsEnabled { get; set; } = true;
     public static bool NotifyConnectionChanges { get; set; } = true;
@@ -886,6 +903,12 @@ public partial class App : Application
             "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
+    /// <summary>
+    /// Loads the per-tab UI defaults: the time range, and — since #3479 — the auto-refresh toggle and
+    /// interval, which ride here rather than in a fourth loader because they are the same class of
+    /// setting (a toolbar default every new <c>ServerTab</c> reads) and the comments around
+    /// <see cref="ReportBadSettingValues"/> count exactly three loaders.
+    /// </summary>
     private static void LoadDefaultTimeRange()
     {
         var settings = SettingsFileGuard.Read(Path.Combine(ConfigDirectory, "settings.json"));
@@ -917,9 +940,24 @@ public partial class App : Application
                 DefaultTimeRangeHours = val.WholeNumber(DefaultTimeRangeHours);
             }
 
-            /* #2444: this loader already named its one key, which is the behaviour LoadAlertSettings could
-               not manage across eighty-seven. It now says so through the shared reporter instead of its own
-               log line, so the startup dialog can name this key beside the others. */
+            /* #3479: written by ServerTab.PersistAutoRefresh when the toolbar controls change, read only
+               here. No range check on the seconds — legality is the restore switch's job (a value the
+               combo does not offer restores the XAML default), which is the same division of labor
+               default_time_range_hours has with the TimeRangeCombo restore switch. */
+            if (read.TryGetProperty("auto_refresh_enabled", out var refreshOn))
+            {
+                AutoRefreshEnabled = refreshOn.Bool(AutoRefreshEnabled);
+            }
+
+            if (read.TryGetProperty("auto_refresh_interval_seconds", out var refreshSeconds))
+            {
+                AutoRefreshIntervalSeconds = refreshSeconds.WholeNumber(AutoRefreshIntervalSeconds);
+            }
+
+            /* #2444: this loader named its keys even when it had only one, which is the behaviour
+               LoadAlertSettings could not manage across eighty-seven. It says so through the shared
+               reporter instead of its own log line, so the startup dialog can name these keys beside
+               the others. */
             ReportBadSettingValues(read.Problems);
         }
         catch (Exception ex)
@@ -927,8 +965,9 @@ public partial class App : Application
             /* The document parsed and every value read is shape-checked rather than caught, so nothing
                EXPECTED lands here any more. Kept because an unexpected throw must not take startup down. */
             AppLogger.Warn("Settings",
-                $"settings.json key 'default_time_range_hours' could not be read ({ex.Message}); the " +
-                $"default of {DefaultTimeRangeHours} hours is in use.");
+                $"settings.json tab-default keys could not be read ({ex.Message}); the defaults " +
+                $"({DefaultTimeRangeHours} hour range, auto-refresh {(AutoRefreshEnabled ? "on" : "off")} " +
+                $"at {AutoRefreshIntervalSeconds}s) are in use.");
         }
     }
 

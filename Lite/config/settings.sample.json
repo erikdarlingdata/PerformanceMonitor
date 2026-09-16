@@ -137,6 +137,14 @@
   "color_theme": "Dark",               // "Dark" | "Light" | "CoolBreeze"
   "default_time_range_hours": 4,       // initial range on every chart
 
+  // ---- Auto-refresh (#3479) ------------------------------------------------------------------------
+  // The server-tab toolbar's Auto-refresh checkbox and interval picker, written by the app when
+  // either changes and restored on every tab at the next launch. One preference for all tabs.
+  // The interval is stored in seconds, not as a picker position; a value the picker does not
+  // offer restores the default.
+  "auto_refresh_enabled": true,
+  "auto_refresh_interval_seconds": 60, // 30 | 60 | 300
+
   // ---- Overview and sidebar state -----------------------------------------------------------------
   // Written by the app as you use it, not settings you would normally hand-edit.
   "overview_sort_mode": "Cpu",         // "Cpu" | "Name"; unrecognised -> "Cpu"

@@ -399,6 +399,45 @@ public sealed class FleetSweepEngineTests
     }
 
     /// <summary>
+    /// The stored DOCUMENT carries the ledger key exactly when the check ran (#3478): absent on an
+    /// alerts-on sweep, because the would-have-paged derivation never executed there and a stored
+    /// <c>[]</c> would fabricate a check that was never made — the over-claim caught live, where the
+    /// unconditional emission put the fabricated key on every alerts-on sweep and every reader of the
+    /// embedded report saw a muted-mode claim about an unmuted fleet. Under mute the key is present
+    /// INCLUDING empty ("muted, and nothing would have paged" is a statement the operator is owed),
+    /// and populated in the engine's own row shape when the silence cost something.
+    /// </summary>
+    [Fact]
+    public void TheReportDocument_CarriesTheLedgerKey_ExactlyWhenTheCheckRan()
+    {
+        /* Alerts on: no check, no key — never a fabricated []. */
+        using (var doc = JsonDocument.Parse(
+            ComposeSimple(new[] { CriticalDeadlocks(1, "server-a") }).Run.ReportJson))
+        {
+            Assert.False(doc.RootElement.TryGetProperty("would_have_paged", out _));
+        }
+
+        /* Muted and quiet: present-and-empty — the finding, not an absence. */
+        using (var doc = JsonDocument.Parse(
+            ComposeSimple(new[] { Healthy(1, "server-a") }, alertsEnabled: false).Run.ReportJson))
+        {
+            var ledger = doc.RootElement.GetProperty("would_have_paged");
+            Assert.Equal(JsonValueKind.Array, ledger.ValueKind);
+            Assert.Equal(0, ledger.GetArrayLength());
+        }
+
+        /* Muted with a Critical verdict: populated, one row per (server, family). */
+        using (var doc = JsonDocument.Parse(
+            ComposeSimple(new[] { CriticalDeadlocks(1, "server-a") }, alertsEnabled: false).Run.ReportJson))
+        {
+            var rows = doc.RootElement.GetProperty("would_have_paged").EnumerateArray().ToList();
+            var row = Assert.Single(rows);
+            Assert.Equal(1, row.GetProperty("server_id").GetInt32());
+            Assert.Equal(FleetSweepEngine.FamilyDeadlocks, row.GetProperty("family").GetString());
+        }
+    }
+
+    /// <summary>
     /// The engine makes no delivery call — the structural half of the master-off contract, beside the
     /// behavioural pin above. <c>AlertMasterSwitchSurfaceTests</c>' census scans every production file
     /// for the delivery seams and fails on any un-censused caller, so the strong guarantee lives

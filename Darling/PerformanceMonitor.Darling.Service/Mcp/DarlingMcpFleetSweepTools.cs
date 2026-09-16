@@ -134,10 +134,16 @@ public sealed class DarlingMcpFleetSweepTools
                 ? await FleetSweepStore.GetOpenAndCarriedWatchItemsAsync(postgres, logger, CancellationToken.None)
                 : await FleetSweepStore.GetWatchItemsByStateAsync(postgres, watch_state, logger, CancellationToken.None);
 
+            /* The worklist's names, through the web feed's own gate-and-read (#3482) — the
+               ValidateWatchState sharing pattern, so the two surfaces cannot drift on when names are
+               joined, and a failed read costs the names, never the worklist. */
+            var watchItemNames = await DarlingFleetSweepEndpoints.ReadWatchItemNamesAsync(
+                postgres, watchItems, logger, CancellationToken.None);
+
             var result = FleetSweepPresentation.BuildTimelineNode(runs, windowStart, windowEnd);
             result["latest"] = await BuildDetailAsync(postgres, logger, latest);
             result["watch_state"] = watch_state ?? "open + carried (default)";
-            result["watch_items"] = FleetSweepPresentation.BuildWatchItemsNode(watchItems);
+            result["watch_items"] = FleetSweepPresentation.BuildWatchItemsNode(watchItems, watchItemNames);
             return result.ToJsonString();
         }
         catch (Exception ex)

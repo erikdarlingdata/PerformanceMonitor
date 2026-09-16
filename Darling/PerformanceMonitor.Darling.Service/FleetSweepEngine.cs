@@ -90,7 +90,11 @@ public sealed record FleetSweepComposition(
 /// from them. What the ledger claims is exactly what it can prove: conditions the sweep's own scoring
 /// banded Critical while the fleet was muted, which on the evidence day was the only surface that
 /// carried an 18-minute CPU pin. The derivation is stated here so nobody reads the ledger as the
-/// alert engine's counterfactual output.</para>
+/// alert engine's counterfactual output. The DOCUMENT carries the ledger member exactly when the
+/// check ran (#3478): present — including empty — under master-off, ABSENT under alerts-on, because
+/// a stored <c>[]</c> on a sweep whose derivation never executed is a fabricated check, not an empty
+/// result. Documents persisted before that gate carry the fabricated key immutably;
+/// <see cref="FleetSweepPresentation.BuildRunNode"/> strips it at render for those.</para>
 ///
 /// <para><b>Restart awareness is a gate, not a heuristic.</b> The service's own start instant is the
 /// detector (<see cref="FleetSweepInstrumentCounters.ServiceStartedUtc"/>); inside
@@ -269,21 +273,26 @@ public static class FleetSweepEngine
         var currentIds = readings.Select(r => r.ServerId).ToHashSet();
         var departedServers = previousVerdicts.Where(v => !currentIds.Contains(v.ServerId)).Select(v => v.ServerName).ToList();
 
-        var report = new
+        /* An ordered member list rather than one anonymous type, because one member is CONDITIONAL
+           and an anonymous type cannot omit a member per instance (#3478). OrderedDictionary keeps
+           the muted document byte-identical to the anonymous shape it replaced — same key order,
+           same member spellings, same serializer — because stored documents are immutable and their
+           readers pin the muted shape. */
+        var report = new OrderedDictionary<string, object?>
         {
-            sweep_id = sweepId,
-            swept_at = nowUtc.ToString("o"),
-            span_start = spanStartUtc.ToString("o"),
-            span_end = nowUtc.ToString("o"),
+            ["sweep_id"] = sweepId,
+            ["swept_at"] = nowUtc.ToString("o"),
+            ["span_start"] = spanStartUtc.ToString("o"),
+            ["span_end"] = nowUtc.ToString("o"),
             /* The mute header the spec requires on EVERY sweep, so the state cannot fade from
                operator memory. */
-            alerts_enabled = alertsEnabled,
-            previous_sweep_id = previousRun?.SweepId,
+            ["alerts_enabled"] = alertsEnabled,
+            ["previous_sweep_id"] = previousRun?.SweepId,
             /* Null anchor stated, never implied: a first sweep diffs against nothing and says so. */
-            no_previous_sweep = previousRun is null,
-            post_restart_window = inSettleWindow,
-            instruments_alive = liveness.Alive,
-            fleet = new
+            ["no_previous_sweep"] = previousRun is null,
+            ["post_restart_window"] = inSettleWindow,
+            ["instruments_alive"] = liveness.Alive,
+            ["fleet"] = new
             {
                 servers_expected = serversExpected,
                 servers_reported = serversReported,
@@ -292,7 +301,7 @@ public static class FleetSweepEngine
                     .OrderBy(g => g.Key, StringComparer.Ordinal)
                     .ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal),
             },
-            changes = new
+            ["changes"] = new
             {
                 band_transitions = transitions.Select(v => new
                 {
@@ -304,7 +313,7 @@ public static class FleetSweepEngine
                 new_servers = newServers,
                 departed_servers = departedServers,
             },
-            watch = new
+            ["watch"] = new
             {
                 opened = watchItems.Where(w => w.OpenedSweepId == sweepId)
                     .Select(w => new { server_id = w.ServerId, item = w.ItemKey, condition = w.Condition }),
@@ -319,15 +328,25 @@ public static class FleetSweepEngine
                         consecutive_misses = w.ConsecutiveMisses,
                     }),
             },
-            would_have_paged = wouldHavePaged.Select(w => new
+        };
+
+        /* The document carries the ledger member exactly when the check ran (#3478). Under alerts-on
+           the derivation above never executes, so a stored [] would not be an empty result — it would
+           fabricate a check that was never made, the precise over-claim the presentation contract
+           forbids and the live sighting caught. Present-and-empty under mute stays a statement:
+           "muted, and nothing would have paged". */
+        if (!alertsEnabled)
+        {
+            report["would_have_paged"] = wouldHavePaged.Select(w => new
             {
                 server_id = w.ServerId,
                 family = w.AlertFamily,
                 evidence = w.EvidenceJson,
-            }),
-            critical_servers = verdicts.Where(v => string.Equals(v.Band, criticalLabel, StringComparison.Ordinal))
-                .Select(v => new { server = v.ServerName, reason = v.BandReason }),
-        };
+            });
+        }
+
+        report["critical_servers"] = verdicts.Where(v => string.Equals(v.Band, criticalLabel, StringComparison.Ordinal))
+            .Select(v => new { server = v.ServerName, reason = v.BandReason });
 
         var run = new FleetSweepRun(
             sweepId,
