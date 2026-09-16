@@ -13,6 +13,8 @@ using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -136,7 +138,7 @@ public sealed class DarlingMcpFleetSweepToolsTests
     {
         await using var dead = NpgsqlDataSource.Create(DeadStore);
 
-        var result = await DarlingMcpFleetSweepTools.GetSweepReports(dead, hoursBack, asOf, sweepId, watchState);
+        var result = await DarlingMcpFleetSweepTools.GetSweepReports(dead, NullLogger.Instance, hoursBack, asOf, sweepId, watchState);
 
         Assert.Contains(expectedFragment, result, StringComparison.Ordinal);
         /* A refusal, not a swallowed store error — the dead store was never reached. */
@@ -152,7 +154,7 @@ public sealed class DarlingMcpFleetSweepToolsTests
         await using var dead = NpgsqlDataSource.Create(DeadStore);
 
         /* The out-of-range hours_back would refuse FIRST if the window were bound on this path. */
-        var result = await DarlingMcpFleetSweepTools.GetSweepReports(dead, 999, null, "abc", null);
+        var result = await DarlingMcpFleetSweepTools.GetSweepReports(dead, NullLogger.Instance, 999, null, "abc", null);
 
         Assert.Contains("Invalid sweep_id value 'abc'", result, StringComparison.Ordinal);
     }
@@ -190,6 +192,11 @@ public sealed class DarlingMcpFleetSweepToolsTests
     {
         var services = new ServiceCollection();
         services.AddSingleton(typeof(NpgsqlDataSource), _ => null!);
+        /* Mirrors the host's AddSingleton<ILogger>(_logger) (#3473 review): the tool's logger is a
+           DI-resolved service parameter like postgres, and this registration is what keeps it OUT of
+           the advertised schema — remove it and the no-required-params assertion below goes red,
+           because the logger parameter carries no default. */
+        services.AddSingleton(typeof(ILogger), _ => NullLogger.Instance);
         services.AddMcpServer().WithGeminiCompatibleTools<DarlingMcpFleetSweepTools>();
         using var provider = services.BuildServiceProvider();
         return provider.GetServices<McpServerTool>().ToDictionary(t => t.ProtocolTool.Name, t => t.ProtocolTool);
@@ -205,5 +212,10 @@ public sealed class DarlingMcpFleetSweepToolsTests
         Assert.True(violations.Count == 0, "Gemini-incompatible schema keywords leaked:\n" + string.Join("\n", violations));
 
         Assert.Empty(DarlingMcpSchemaAssert.RequiredOf(tool.InputSchema));
+
+        /* The service seats stay off the wire: an agent is offered the four described knobs and
+           nothing else — neither the store nor the logger is a parameter a client can send. */
+        Assert.DoesNotContain("logger", tool.InputSchema.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("postgres", tool.InputSchema.ToString(), StringComparison.Ordinal);
     }
 }
