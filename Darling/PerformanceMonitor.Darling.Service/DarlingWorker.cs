@@ -2169,6 +2169,24 @@ public sealed class DarlingWorker : BackgroundService
                     {
                         _logger.LogDebug(ex, "collector-cost self-alert evaluation failed");
                     }
+
+                    /* #3466 (lane 4): the fleet sweep's DAILY channel rollup — the delivery half the sweep
+                       engine deliberately does not have. Attempted on this same hourly tick because the
+                       ceiling is enforced inside (one post per trailing day, and only on a day with
+                       something to say — 23 of every 24 ticks cost one dictionary lookup); master-gated
+                       inside like every self-alert, so master-off delivers nothing while the sweeps keep
+                       publishing to the web feed. Deliberately NOT gated on FleetSweepEnabled: sweeps
+                       recorded before the switch went off are still the trailing day's record, and with the
+                       sweep off the store simply serves an empty day, which posts nothing. Failure-isolated
+                       like its sibling above. */
+                    try
+                    {
+                        await _selfAlerts.EvaluateFleetSweepRollupAsync(_postgres!, stoppingToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogDebug(ex, "fleet-sweep rollup evaluation failed");
+                    }
                 }
             }
 

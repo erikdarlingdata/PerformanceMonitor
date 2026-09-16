@@ -291,6 +291,8 @@ public sealed class FleetSweepStateRungTests
             FleetSweepStore.GetWatchItemsByStateSql,
             FleetSweepStore.GetOpenAndCarriedWatchItemsSql,
             FleetSweepStore.GetActiveWatchItemsSql,
+            FleetSweepStore.GetWouldHavePagedBySpanSql,
+            FleetSweepStore.GetSweepServerNamesBySpanSql,
         })
         {
             Assert.DoesNotContain("now()", sql, StringComparison.OrdinalIgnoreCase);
@@ -300,6 +302,34 @@ public sealed class FleetSweepStateRungTests
            trusting that generator-issued ids stay time-ordered. */
         Assert.Contains("ORDER BY swept_at DESC, sweep_id DESC", FleetSweepStore.GetLatestRunSql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 1", FleetSweepStore.GetLatestRunSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The rollup's two span reads (#3466 lane 4) carry the same both-bounds discipline as the run
+    /// span read — the span lives on the RUN's <c>swept_at</c>, so both statements join the run table
+    /// and window there, with both bounds the caller's parameters. And the ledger read carries NO
+    /// <c>alerts_enabled</c> predicate: rows only exist under master-off sweeps because the ENGINE
+    /// writes none otherwise, and a read-side restatement of a write-side guarantee would be the
+    /// second opinion that can drift.
+    /// </summary>
+    [Fact]
+    public void TheRollupSpanReads_WindowOnTheRunsInstant_WithBothBoundsTheCallers()
+    {
+        foreach (var sql in new[]
+        {
+            FleetSweepStore.GetWouldHavePagedBySpanSql,
+            FleetSweepStore.GetSweepServerNamesBySpanSql,
+        })
+        {
+            Assert.Contains("JOIN collect.fleet_sweep_runs r ON r.sweep_id", sql, StringComparison.Ordinal);
+            Assert.Contains("r.swept_at >= $1", sql, StringComparison.Ordinal);
+            Assert.Contains("r.swept_at <= $2", sql, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("alerts_enabled", FleetSweepStore.GetWouldHavePagedBySpanSql, StringComparison.Ordinal);
+
+        /* The names read is DISTINCT pairs — one names map for the render, not one row per sweep. */
+        Assert.Contains("SELECT DISTINCT v.server_id, v.server_name", FleetSweepStore.GetSweepServerNamesBySpanSql, StringComparison.Ordinal);
     }
 
     /// <summary>

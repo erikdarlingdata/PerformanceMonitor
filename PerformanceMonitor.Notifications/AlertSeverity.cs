@@ -90,6 +90,10 @@ internal static class AlertSeverity
                accident, so a digest relying on it would be corrected into a WARNING by the next sweep and
                the demotion would silently undo itself. */
             "Collector Cost Digest" => ("#2eaef1", "INFO", "\U0001F535"),
+            /* #3466 lane 4: the fleet sweep's daily rollup joins the digest as the second deliberate
+               INFO arm, for the digest's exact reason — it is a report to read, not a condition to act
+               on, and the declaration is what keeps the next fall-through sweep from promoting it. */
+            "Fleet Sweep Rollup" => ("#2eaef1", "INFO", "\U0001F535"),
             "Version Store (PVS)" => ("#D97706", "WARNING", "\U0001F7E0"),
             "AG Failover" => ("#D97706", "WARNING", "\U0001F7E0"),
             "AG Replica Disconnected" => ("#DC2626", "CRITICAL", "\U0001F534"),

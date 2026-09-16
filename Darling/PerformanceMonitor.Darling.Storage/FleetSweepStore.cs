@@ -49,6 +49,16 @@ public sealed record FleetSweepWouldHavePagedEntry(
     string AlertFamily,
     string EvidenceJson);
 
+/// <summary>One would-have-paged ledger row inside a SPAN of sweeps — the daily rollup's read
+/// (#3466 lane 4), keyed back to the sweep that recorded it so the rollup can say how many sweeps a
+/// mute covered, not just how many rows it produced. Server NAMES are resolved separately (see
+/// <see cref="FleetSweepStore.GetSweepServerNamesBySpanSql"/>) so one names map serves the ledger
+/// AND the watch events the sweep documents carry by bare id.</summary>
+public sealed record FleetSweepLedgerSpanEntry(
+    long SweepId,
+    int ServerId,
+    string AlertFamily);
+
 /// <summary>One watch item's stored row — the full image, because the engine reads the row, runs
 /// <see cref="FleetSweepWatchStateMachine.Advance"/>, and hands the result back whole.</summary>
 public sealed record FleetSweepWatchItem(
@@ -341,6 +351,35 @@ FROM collect.fleet_sweep_would_have_paged
 WHERE sweep_id = $1
 ORDER BY server_id, alert_family;";
 
+    /// <summary>
+    /// Every would-have-paged ledger row across a SPAN of sweeps — the daily rollup's read (#3466
+    /// lane 4). Joined to the run table because the span lives on the run's <c>swept_at</c>, and
+    /// BOTH bounds are the caller's (#2506) like every span read here. Rows only exist under
+    /// master-off sweeps (the engine writes none otherwise), so no <c>alerts_enabled</c> predicate
+    /// restates what the write path already guarantees.
+    /// </summary>
+    public const string GetWouldHavePagedBySpanSql = @"
+SELECT w.sweep_id, w.server_id, w.alert_family
+FROM collect.fleet_sweep_would_have_paged w
+JOIN collect.fleet_sweep_runs r ON r.sweep_id = w.sweep_id
+WHERE r.swept_at >= $1
+AND   r.swept_at <= $2
+ORDER BY w.sweep_id, w.server_id, w.alert_family;";
+
+    /// <summary>
+    /// The (server_id, server_name) pairs the span's sweeps carried verdicts for — one names map for
+    /// the rollup's render, because the sweep DOCUMENTS carry watch events and ledger rows by bare
+    /// id and a channel post naming "server id 7" would make the one surface an operator reads away
+    /// from the store the one surface that cannot name a server. DISTINCT because a server appears
+    /// once per sweep and the render needs it once.
+    /// </summary>
+    public const string GetSweepServerNamesBySpanSql = @"
+SELECT DISTINCT v.server_id, v.server_name
+FROM collect.fleet_sweep_server_verdicts v
+JOIN collect.fleet_sweep_runs r ON r.sweep_id = v.sweep_id
+WHERE r.swept_at >= $1
+AND   r.swept_at <= $2;";
+
     /// <summary>The shared watch-item column list — one list, one reader, the run-read rule.</summary>
     private const string WatchItemColumns = @"
 SELECT server_id, item_key, condition, state, consecutive_hits, consecutive_misses,
@@ -609,6 +648,106 @@ ORDER BY server_id, item_key;";
         }
 
         return verdicts;
+    }
+
+    /// <summary>
+    /// The runs inside a span for the DAILY ROLLUP (#3466 lane 4) — the same statement as
+    /// <see cref="GetSweepsBySpanAsync"/> with the opposite fault posture, the
+    /// <see cref="GetServerVerdictsForEngineAsync"/> split restated for delivery: the rollup posts
+    /// NOTHING on an empty day by design, so a store fault swallowed into an empty list would
+    /// convert an unreadable store into a permanently quiet channel with no artifact anywhere — the
+    /// quiet-is-not-clean misreading, applied to delivery. The throw lands in the evaluator's catch,
+    /// which counts it on the swallowed-read surface (#3013) and skips the tick without consuming
+    /// the daily interval, so the next tick asks again.
+    /// </summary>
+    public static async Task<List<FleetSweepRun>> GetSweepsBySpanForRollupAsync(
+        NpgsqlDataSource postgres,
+        DateTime spanStartUtc,
+        DateTime spanEndUtc,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        var runs = new List<FleetSweepRun>();
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = new NpgsqlCommand(GetRunsBySpanSql, connection)
+        {
+            CommandTimeout = CommandTimeoutSeconds,
+        };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = AsNaive(spanStartUtc) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = AsNaive(spanEndUtc) });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            runs.Add(ReadRun(reader));
+        }
+
+        return runs;
+    }
+
+    /// <summary>The span's would-have-paged ledger rows — the daily rollup's read. Throws on a store
+    /// fault, for <see cref="GetSweepsBySpanForRollupAsync"/>'s reason: a mute's cost degraded to an
+    /// empty list would render the one day the ledger exists for as a clean one.</summary>
+    public static async Task<List<FleetSweepLedgerSpanEntry>> GetWouldHavePagedBySpanAsync(
+        NpgsqlDataSource postgres,
+        DateTime spanStartUtc,
+        DateTime spanEndUtc,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        var entries = new List<FleetSweepLedgerSpanEntry>();
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = new NpgsqlCommand(GetWouldHavePagedBySpanSql, connection)
+        {
+            CommandTimeout = CommandTimeoutSeconds,
+        };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = AsNaive(spanStartUtc) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = AsNaive(spanEndUtc) });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            entries.Add(new FleetSweepLedgerSpanEntry(
+                reader.GetInt64(0),
+                reader.GetInt32(1),
+                reader.GetString(2)));
+        }
+
+        return entries;
+    }
+
+    /// <summary>The span's (server_id, server_name) map — the daily rollup's names for the ids the
+    /// sweep documents and ledger rows carry bare. Throws on a store fault like its two rollup
+    /// siblings; a missing name degrades in the RENDER (to the bare id, honestly), never here.</summary>
+    public static async Task<Dictionary<int, string>> GetSweepServerNamesBySpanAsync(
+        NpgsqlDataSource postgres,
+        DateTime spanStartUtc,
+        DateTime spanEndUtc,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        var names = new Dictionary<int, string>();
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = new NpgsqlCommand(GetSweepServerNamesBySpanSql, connection)
+        {
+            CommandTimeout = CommandTimeoutSeconds,
+        };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = AsNaive(spanStartUtc) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = AsNaive(spanEndUtc) });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            names[reader.GetInt32(0)] = reader.GetString(1);
+        }
+
+        return names;
     }
 
     /// <summary>

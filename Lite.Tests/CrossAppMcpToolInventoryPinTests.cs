@@ -201,6 +201,16 @@ public sealed class CrossAppMcpToolInventoryPinTests
            Common on the port. Port it, then remove this entry (the ratchet only shrinks). */
         "get_ag_health",
 
+        /* #3466: the fleet sweep report read (get_sweep_reports) over the four collect.fleet_sweep_*
+           tables — the scheduled, stateful whole-fleet summaries only a central store can hold. Darling-ONLY
+           by architecture, the get_fleet_overview kind of entry taken one step further: a sweep is one
+           statement about a FLEET diffed against its own persisted previous statement, and Lite (a
+           single-instance app over local DuckDB) has neither a fleet to sweep nor the sweep-state tables —
+           its store never creates them, and no Lite loop writes a sweep for a twin to read. If Lite ever
+           gains a multi-server store and a sweep engine, port this and delete the entry; the ratchet only
+           shrinks. */
+        "get_sweep_reports",
+
         /* #1600 + #1602: the Custom Views (CV2) tools — the Darling MCP server's write surface (the six that
            CRUD the user-authored dashboards/notebooks in the central Postgres store's config.custom_views and
            run back a composed panel's data), plus describe_custom_view_catalog (#1602, read-only), which serves

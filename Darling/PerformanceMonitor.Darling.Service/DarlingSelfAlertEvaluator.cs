@@ -13,6 +13,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -348,6 +349,52 @@ internal sealed class DarlingSelfAlertEvaluator
     /// A digest has no active flag and no resolution edge: it is a report of a measurement, not a condition
     /// that can be entered and left, so there is nothing to clear.</summary>
     private readonly ConcurrentDictionary<string, DateTime> _lastCostDigest = new();
+
+    /// <summary>
+    /// The metric name the fleet sweep's DAILY ROLLUP fires under (#3466 lane 4). A WEBHOOK AUTOMATION KEY
+    /// like its siblings — the alert-history grids, the severity map's declared INFO arm and any downstream
+    /// consumer key on it — so it is a const and must stay stable across releases.
+    /// </summary>
+    internal const string FleetSweepRollupMetric = "Fleet Sweep Rollup";
+
+    /// <summary>Fleet-level key, non-numeric so it never collides with a real server_id (the
+    /// <see cref="DiskKey"/> shape).</summary>
+    private const string FleetSweepRollupKey = "sweeprollup";
+
+    /// <summary>
+    /// How often the sweep rollup is sent — and unlike every sibling interval, this one is a RULING rather
+    /// than a tuning choice: the #3466 delivery contract bounds the sweep feature's channel presence at ONE
+    /// post per day, a CEILING and not a default ("a daily digest channel notification is fine, but not an
+    /// hourly one"). The web feed is the workhorse at full sweep cadence; report-class content any finer than
+    /// daily in a paging channel trains operators to ignore the channel, which is the failure mode half the
+    /// alerting issues exist to undo. The interval is also the rollup's COVERED SPAN: each post summarizes
+    /// the trailing day and only the trailing day, so what a post claims to cover and how often one can
+    /// arrive are the same number and cannot drift apart.
+    ///
+    /// <para><b>In-memory, like <see cref="CollectorCostDigestInterval"/>, and a restart costs one extra
+    /// rollup.</b> The same accepted failure class: an extra copy of a report is the cheapest possible
+    /// failure, and the rollup is recomputed from the sweep store every time rather than accumulated in
+    /// process, so nothing is lost in either direction.</para>
+    /// </summary>
+    internal static readonly TimeSpan FleetSweepRollupInterval = TimeSpan.FromDays(1);
+
+    /// <summary>How many band transitions the rollup spells out — the <see cref="MaxListedCostMovers"/>
+    /// reasoning: one bounded message. A churning fleet at hourly cadence can move bands dozens of times a
+    /// day, and the web timeline is where that day is READ; the rollup states the total beside the cap so
+    /// it never implies it showed everything.</summary>
+    private const int MaxListedRollupTransitions = 20;
+
+    /// <summary>How many watch-item events (per direction) the rollup spells out.</summary>
+    private const int MaxListedRollupWatchEvents = 10;
+
+    /// <summary>How many servers a would-have-paged family names before eliding — the ledger block must
+    /// stay readable on the fleet-wide day it exists for.</summary>
+    private const int MaxListedRollupLedgerServers = 10;
+
+    /// <summary>When the rollup was last sent — the <see cref="_lastCostDigest"/> idiom, one fixed key. A
+    /// rollup is a report of a period, not a condition: no active flag, no resolution edge, nothing to
+    /// clear.</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _lastSweepRollup = new();
 
     /// <summary>The fixed key for the fleet-level Store Disk Pressure edge (not a real server).</summary>
     private const string DiskKey = "store";
@@ -1459,6 +1506,515 @@ internal sealed class DarlingSelfAlertEvaluator
 
         return (shortMessage, sb.ToString());
     }
+
+    /* ------------------------- #3466 lane 4: the fleet sweep's daily rollup ------------------------- */
+
+    /// <summary>
+    /// FLEET-level (#3466 lane 4): the fleet sweep's DAILY CHANNEL ROLLUP - one message, at most once per
+    /// <see cref="FleetSweepRollupInterval"/>, summarizing the trailing day of sweeps: the band transitions,
+    /// the watch items that opened and closed, the sweeps that could not prove their instruments, and -
+    /// whenever any covered sweep ran under the alert master switch - the would-have-paged ledger those
+    /// sweeps carried, rendered explicitly so the operator sees what the silence cost. The digest machinery
+    /// reused whole (#3448's publish leg, per the spec): the same daily-interval dedup, the same
+    /// empty-sends-nothing gate, the same declared INFO arm, the same shared mute seam, the same funnel.
+    ///
+    /// <para><b>Gated on the master switch up front, before the first store read (#3464)</b> - and here the
+    /// gate IS the delivery contract rather than merely joining it: the sweep ENGINE deliberately keeps
+    /// running under master-off (the muted-mode contract - the report surface is never blinded), so this
+    /// method is the one and only place the sweep feature touches a channel, and master-off means it
+    /// touches nothing. The gate does not consume the interval, so re-enabling does not leave a day of
+    /// silence behind it: the first tick after re-enable delivers a rollup covering ITS trailing day,
+    /// muted sweeps included.</para>
+    ///
+    /// <para><b>The catch-up semantics are deliberately narrow, and stated so nobody widens them by
+    /// accident.</b> A rollup only ever covers the trailing day. A mute longer than a day therefore has
+    /// muted days that never get a channel post of their own - by design: a post recapping an unbounded
+    /// backlog would be either unbounded or silently truncated, and the flood it delivers on re-enable is
+    /// the exact thing an operator's mute usually exists to prevent. The sweep documents are the PERMANENT
+    /// record - every muted sweep stands in the web feed and <c>get_sweep_reports</c> with its mute header
+    /// and its ledger, for as long as retention holds it - and the first post-re-enable rollup states how
+    /// many of ITS covered sweeps ran muted, so the operator is told there is history to read rather than
+    /// left to discover it.</para>
+    ///
+    /// <para>Called from the worker's hourly store-metrics tick beside the collector-cost evaluation; 23 of
+    /// every 24 ticks cost one dictionary lookup. Testable through
+    /// <see cref="ApplyFleetSweepRollupAsync"/> with a recording deliverer and a controllable clock.</para>
+    /// </summary>
+    public async Task EvaluateFleetSweepRollupAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        /* #3464: the master gate before the first store read - the EvaluateCollectorCostAsync shape.
+           ALSO consulted inside the apply, like every sibling, so a direct caller cannot skip it. */
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (_lastSweepRollup.TryGetValue(FleetSweepRollupKey, out var lastSent)
+            && now - lastSent < FleetSweepRollupInterval)
+        {
+            return;
+        }
+
+        var spanStartUtc = now - FleetSweepRollupInterval;
+
+        List<FleetSweepRun> runs;
+        List<FleetSweepLedgerSpanEntry> ledger;
+        Dictionary<int, string> serverNames;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            runs = await FleetSweepStore.GetSweepsBySpanForRollupAsync(postgres, spanStartUtc, now, cancellationToken);
+            ledger = await FleetSweepStore.GetWouldHavePagedBySpanAsync(postgres, spanStartUtc, now, cancellationToken);
+            serverNames = await FleetSweepStore.GetSweepServerNamesBySpanAsync(postgres, spanStartUtc, now, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A failed read skips the tick WITHOUT consuming the interval, and it is counted: the rollup
+               posts nothing on an empty day by design, so a fault folded into "empty" would convert an
+               unreadable store into a permanently quiet channel - the quiet-is-not-clean misreading at the
+               delivery end. The next hourly tick asks again. */
+            _logger?.LogDebug(ex, "fleet-sweep rollup read failed after {ElapsedMs} ms", readClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "fleet-sweep rollup self-alert", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        await ApplyFleetSweepRollupAsync(runs, ledger, serverNames, spanStartUtc, now, cancellationToken);
+    }
+
+    /// <summary>
+    /// The apply half of <see cref="EvaluateFleetSweepRollupAsync"/>, split out so the fire/dedup lifecycle
+    /// is unit-testable with a recording deliverer, a controllable clock and fixture rows - the
+    /// <see cref="ApplyCollectorCostDigestAsync"/> shape, seam for seam.
+    ///
+    /// <para><b>A day with nothing to say posts NOTHING - not a one-line all-clear.</b> Argued rather than
+    /// assumed, because the alternative is defensible and was considered: the digest precedent is exact
+    /// ("empty sends nothing" - a message that says a read returned no rows is the channel noise #3443
+    /// exists to end), and the owner's cadence ruling names the failure mode (report-class content in a
+    /// paging channel trains operators to ignore the channel). The clincher is quiet-is-not-clean: an
+    /// honest all-clear would have to carry the instrument-liveness proof behind it, and a daily post
+    /// carrying proof-of-quiet is a report card - the exact thing the ruling bounds. The affirmative
+    /// all-clear already exists where it can afford its evidence: the web feed, every sweep, at full
+    /// cadence, each document proving its own instruments. Channel silence is therefore backed by
+    /// instrument-proved quiet on the record surface, never by absence. And a quiet day does not consume
+    /// the interval, so the first day with something to say is not delayed by the quiet day evaluated
+    /// before it.</para>
+    ///
+    /// <para><b>What counts as something to say</b> is <see cref="FleetSweepRollupFacts.HasReportableContent"/>:
+    /// a band transition, a watch item opening or closing, a sweep that could not prove its instruments, a
+    /// sweep document that did not parse (an unreadable day must not read as a quiet one), or any covered
+    /// sweep having run under master-off - the last one reportable even with an EMPTY ledger, because
+    /// "muted, and nothing would have paged" is a statement the operator is owed where silence would read
+    /// as "nothing was checked".</para>
+    ///
+    /// <para><b>No resolution edge, no severity override</b> - the digest's reasoning verbatim: a rollup is
+    /// a measurement of a period, not a condition, and it fires with <c>severity: null</c> so the
+    /// per-metric map's DECLARED INFO arm decides (#3443's precedent - declared rather than left to the
+    /// identical fall-through, so the next #1136/#2090-style sweep cannot "fix" it into a WARNING). Muted
+    /// through the shared seam like every sibling.</para>
+    /// </summary>
+    internal async Task ApplyFleetSweepRollupAsync(
+        IReadOnlyList<FleetSweepRun> runs,
+        IReadOnlyList<FleetSweepLedgerSpanEntry> ledger,
+        IReadOnlyDictionary<int, string> serverNames,
+        DateTime spanStartUtc,
+        DateTime spanEndUtc,
+        CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (_lastSweepRollup.TryGetValue(FleetSweepRollupKey, out var lastSent)
+            && now - lastSent < FleetSweepRollupInterval)
+        {
+            return;
+        }
+
+        var facts = ExtractRollupFacts(runs, ledger, serverNames);
+        if (!facts.HasReportableContent)
+        {
+            return;
+        }
+
+        _lastSweepRollup[FleetSweepRollupKey] = now;
+        var (shortMessage, detail) = RenderFleetSweepRollup(facts, spanStartUtc, spanEndUtc);
+
+        await FireAsync(
+            FleetSweepRollupKey, StoreServerLabel, FleetSweepRollupMetric,
+            currentValue: facts.Sweeps.ToString(CultureInfo.InvariantCulture),
+            /* There is no threshold - the digest's exact posture, stated in the string because the NOT NULL
+               column demands a value and "report" is the honest one. */
+            thresholdValue: "no threshold (report)",
+            detail: detail,
+            /* No override: the per-metric map's declared INFO arm decides. See the remarks. */
+            severity: null,
+            shortMessage: shortMessage,
+            /* The count of sweeps the rollup covers - a genuine whole number (AlertMetricClassifier renders
+               it as a count, the digest's shape). */
+            numericCurrentValue: facts.Sweeps,
+            numericThresholdValue: 0,
+            cancellationToken);
+    }
+
+    /// <summary>One band transition a covered sweep reported: the server by name (the documents carry names
+    /// on transitions), the two bands, and the stated reason when the new band needed defending.</summary>
+    internal sealed record RollupTransition(string Server, string From, string To, string? Reason);
+
+    /// <summary>One watch-item event (opened or closed) a covered sweep reported, with the subject already
+    /// resolved for a channel render: the server name from the span's verdicts, "the fleet" for the
+    /// fleet-scope sentinel, or the bare id stated as such when no verdict named it.</summary>
+    internal sealed record RollupWatchEvent(string Subject, string ItemKey, string Condition);
+
+    /// <summary>One would-have-paged family aggregated across the span's muted sweeps: how many ledger rows
+    /// it produced and which servers (resolved names, sorted) produced them.</summary>
+    internal sealed record RollupLedgerFamily(string Family, int Rows, IReadOnlyList<string> Servers);
+
+    /// <summary>
+    /// Everything one rollup says, extracted pure from the day's run rows, the span's ledger rows and the
+    /// span's names map - so the reportable-content decision and the render read one value and the tests
+    /// drive both with fixtures. The counts are TOTALS; the render caps what it lists and states the
+    /// remainder, so a figure here and a line count there can legitimately differ only by a stated
+    /// "+ N more".
+    /// </summary>
+    internal sealed record FleetSweepRollupFacts(
+        int Sweeps,
+        int MutedSweeps,
+        int LivenessIncidents,
+        int UnreadableDocuments,
+        IReadOnlyList<RollupTransition> Transitions,
+        IReadOnlyList<RollupWatchEvent> Opened,
+        IReadOnlyList<RollupWatchEvent> Closed,
+        IReadOnlyList<RollupLedgerFamily> Ledger,
+        int LedgerRows,
+        int LedgerServers,
+        IReadOnlyList<KeyValuePair<string, int>> NewestBands)
+    {
+        /// <summary>Whether the day earned a channel post - see <see cref="ApplyFleetSweepRollupAsync"/>'s
+        /// remarks for why each member of this disjunction is reportable and why their absence is NOT an
+        /// all-clear post. An empty day (zero sweeps) is vacuously false through every term.</summary>
+        public bool HasReportableContent =>
+            Transitions.Count > 0 || Opened.Count > 0 || Closed.Count > 0
+            || LivenessIncidents > 0 || MutedSweeps > 0 || UnreadableDocuments > 0;
+    }
+
+    /// <summary>
+    /// Extracts the rollup's facts from the day's rows - PURE (no clock, no I/O), so
+    /// <c>FleetSweepRollupTests</c> drives every branch with fixtures. The run columns carry the mute header
+    /// and the liveness verdict directly; the transitions and watch events are parsed out of each run's own
+    /// document (<c>changes.band_transitions</c>, <c>watch.opened</c>, <c>watch.closed</c>) - the engine's
+    /// persisted report is the authority on what each sweep SAID, and re-deriving transitions from verdict
+    /// rows here would be a second opinion that could disagree with it. A document that does not parse is
+    /// COUNTED (<see cref="FleetSweepRollupFacts.UnreadableDocuments"/>) rather than skipped silently, and
+    /// the count is itself reportable: an unreadable day must not render as a quiet one. Runs are processed
+    /// oldest-first whatever order the read served, so the transition list reads chronologically and the
+    /// band census standing at the end is the newest sweep's.
+    /// </summary>
+    internal static FleetSweepRollupFacts ExtractRollupFacts(
+        IReadOnlyList<FleetSweepRun> runs,
+        IReadOnlyList<FleetSweepLedgerSpanEntry> ledger,
+        IReadOnlyDictionary<int, string> serverNames)
+    {
+        var ordered = runs.OrderBy(r => r.SweptAtUtc).ThenBy(r => r.SweepId).ToList();
+
+        var muted = 0;
+        var liveness = 0;
+        var unreadable = 0;
+        var transitions = new List<RollupTransition>();
+        var opened = new List<RollupWatchEvent>();
+        var closed = new List<RollupWatchEvent>();
+        IReadOnlyList<KeyValuePair<string, int>> newestBands = Array.Empty<KeyValuePair<string, int>>();
+
+        foreach (var run in ordered)
+        {
+            if (!run.AlertsEnabled)
+            {
+                muted++;
+            }
+
+            if (!run.InstrumentsAlive)
+            {
+                liveness++;
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(run.ReportJson);
+                var root = document.RootElement;
+
+                if (root.ValueKind != JsonValueKind.Object)
+                {
+                    unreadable++;
+                    continue;
+                }
+
+                if (root.TryGetProperty("changes", out var changes)
+                    && changes.ValueKind == JsonValueKind.Object
+                    && changes.TryGetProperty("band_transitions", out var bandTransitions)
+                    && bandTransitions.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var transition in bandTransitions.EnumerateArray())
+                    {
+                        var server = StringProperty(transition, "server");
+                        var from = StringProperty(transition, "from");
+                        var to = StringProperty(transition, "to");
+                        if (server is not null && from is not null && to is not null)
+                        {
+                            transitions.Add(new RollupTransition(server, from, to, StringProperty(transition, "reason")));
+                        }
+                    }
+                }
+
+                if (root.TryGetProperty("watch", out var watch) && watch.ValueKind == JsonValueKind.Object)
+                {
+                    AppendWatchEvents(watch, "opened", serverNames, opened);
+                    AppendWatchEvents(watch, "closed", serverNames, closed);
+                }
+
+                /* Ordered oldest-first, so the last readable band census standing is the newest one - the
+                   "where the fleet ended the day" line. */
+                if (root.TryGetProperty("fleet", out var fleet)
+                    && fleet.ValueKind == JsonValueKind.Object
+                    && fleet.TryGetProperty("bands", out var bands)
+                    && bands.ValueKind == JsonValueKind.Object)
+                {
+                    var census = new List<KeyValuePair<string, int>>();
+                    foreach (var band in bands.EnumerateObject())
+                    {
+                        if (band.Value.ValueKind == JsonValueKind.Number)
+                        {
+                            census.Add(new KeyValuePair<string, int>(band.Name, band.Value.GetInt32()));
+                        }
+                    }
+
+                    newestBands = census.OrderBy(b => b.Key, StringComparer.Ordinal).ToList();
+                }
+            }
+            catch (JsonException)
+            {
+                unreadable++;
+            }
+        }
+
+        var families = ledger
+            .GroupBy(entry => entry.AlertFamily, StringComparer.Ordinal)
+            .OrderBy(g => g.Key, StringComparer.Ordinal)
+            .Select(g => new RollupLedgerFamily(
+                g.Key,
+                g.Count(),
+                g.Select(entry => SubjectName(entry.ServerId, serverNames))
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(name => name, StringComparer.Ordinal)
+                    .ToList()))
+            .ToList();
+
+        return new FleetSweepRollupFacts(
+            ordered.Count, muted, liveness, unreadable,
+            transitions, opened, closed,
+            families, ledger.Count,
+            ledger.Select(entry => entry.ServerId).Distinct().Count(),
+            newestBands);
+    }
+
+    /// <summary>
+    /// Renders the rollup - PURE and static like <see cref="RenderCollectorCostDigest"/>, so the DOCUMENT a
+    /// human reads is assertable: <c>FleetSweepRollupTests</c> parses this output and holds its printed
+    /// figures to each other (the header's counts against the lines rendered, the ledger's total against
+    /// its family lines, the mute sentence against the sweep count it claims). Every section renders only
+    /// when it has something to say; the frame states the covered window explicitly (the #2506 echo
+    /// discipline - a report that does not say what window it covers invites the reader to assume a
+    /// different one) and names the web feed as the record surface, because the rollup is the day's
+    /// CEILING, not the day.
+    /// </summary>
+    internal static (string ShortMessage, string Detail) RenderFleetSweepRollup(
+        FleetSweepRollupFacts facts, DateTime spanStartUtc, DateTime spanEndUtc)
+    {
+        var shortMessage = string.Create(CultureInfo.InvariantCulture,
+            $"Fleet sweep rollup: {facts.Sweeps} sweeps - {facts.Transitions.Count} band transitions,"
+            + $" {facts.Opened.Count} watch items opened, {facts.Closed.Count} closed,"
+            + $" {facts.LivenessIncidents} liveness incidents, {facts.MutedSweeps} muted sweeps");
+
+        var sb = new StringBuilder();
+        sb.Append(shortMessage).Append('.');
+        sb.Append(string.Create(CultureInfo.InvariantCulture,
+            $" This is a REPORT, not an incident - the fleet sweep's one channel post for the day (#3466's"
+            + $" delivery ruling: the web feed's Fleet Sweeps timeline is the workhorse at full cadence, and"
+            + $" channel delivery is bounded at one daily rollup). It covers {spanStartUtc:o} to"
+            + $" {spanEndUtc:o} - the trailing day only, never a recap of older history, because the sweep"
+            + $" documents are the permanent record and this is their ceiling."));
+
+        if (facts.NewestBands.Count > 0)
+        {
+            sb.Append("\nThe fleet as of the newest covered sweep: ");
+            sb.Append(string.Join(", ", facts.NewestBands.Select(b =>
+                string.Create(CultureInfo.InvariantCulture, $"{b.Key} {b.Value}"))));
+            sb.Append('.');
+        }
+
+        if (facts.MutedSweeps > 0)
+        {
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n{facts.MutedSweeps} of the {facts.Sweeps} covered sweeps ran with the alert master"
+                + $" switch OFF. Delivery was off while they ran; the sweeps kept publishing to the web feed"
+                + $" with the mute stated on every document - the muted-mode contract."));
+
+            if (facts.LedgerRows > 0)
+            {
+                sb.Append(string.Create(CultureInfo.InvariantCulture,
+                    $"\nThe would-have-paged ledger those sweeps carried - what the silence cost:"
+                    + $" {facts.LedgerRows} rows across {facts.LedgerServers} servers and"
+                    + $" {facts.Ledger.Count} families:"));
+
+                foreach (var family in facts.Ledger)
+                {
+                    sb.Append(string.Create(CultureInfo.InvariantCulture,
+                        $"\n- {family.Family}: {family.Rows} rows on "));
+                    sb.Append(string.Join(", ", family.Servers.Take(MaxListedRollupLedgerServers)));
+                    if (family.Servers.Count > MaxListedRollupLedgerServers)
+                    {
+                        sb.Append(string.Create(CultureInfo.InvariantCulture,
+                            $" + {family.Servers.Count - MaxListedRollupLedgerServers} more servers"));
+                    }
+                }
+
+                sb.Append("\nEach row carries its evidence on the sweep document it rode in on - the figures"
+                    + " and the thresholds they crossed live there, not here.");
+            }
+            else
+            {
+                sb.Append("\nThose sweeps carried an EMPTY would-have-paged ledger - muted, and nothing the"
+                    + " sweep's scoring banded Critical. That is a statement, not an absence: the check was"
+                    + " made on every muted sweep.");
+            }
+        }
+
+        if (facts.LivenessIncidents > 0)
+        {
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n{facts.LivenessIncidents} covered sweeps could NOT prove their instruments were alive."
+                + $" Quiet is not clean - read those sweeps' liveness blocks before believing any quiet card"
+                + $" they carry."));
+        }
+
+        if (facts.UnreadableDocuments > 0)
+        {
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n{facts.UnreadableDocuments} covered sweep documents did not parse - counted here so an"
+                + $" unreadable day cannot read as a quiet one."));
+        }
+
+        if (facts.Transitions.Count > 0)
+        {
+            sb.Append("\nBand transitions, chronological:");
+            var listed = 0;
+            foreach (var transition in facts.Transitions)
+            {
+                if (listed >= MaxListedRollupTransitions)
+                {
+                    break;
+                }
+
+                sb.Append(string.Create(CultureInfo.InvariantCulture,
+                    $"\n- {transition.Server}: {transition.From} -> {transition.To}"));
+                if (transition.Reason is not null)
+                {
+                    sb.Append(" (").Append(transition.Reason).Append(')');
+                }
+
+                listed++;
+            }
+
+            if (facts.Transitions.Count > listed)
+            {
+                sb.Append(string.Create(CultureInfo.InvariantCulture,
+                    $"\n+ {facts.Transitions.Count - listed} more band transitions (see the web timeline)."));
+            }
+        }
+
+        AppendWatchSection(sb, "opened", facts.Opened);
+        AppendWatchSection(sb, "closed", facts.Closed);
+
+        sb.Append("\nEvery sweep in full - verdicts, evidence, liveness blocks and the ledger rows' own"
+            + " figures - lives on the Fleet Sweeps web page and get_sweep_reports. This rollup is the"
+            + " day's ceiling, not the record.");
+
+        return (shortMessage, sb.ToString());
+    }
+
+    /// <summary>One watch-event section ("opened" or "closed"), rendered only when it has rows, capped with
+    /// a stated remainder like every list in this document.</summary>
+    private static void AppendWatchSection(StringBuilder sb, string verb, IReadOnlyList<RollupWatchEvent> events)
+    {
+        if (events.Count == 0)
+        {
+            return;
+        }
+
+        sb.Append("\nWatch items ").Append(verb).Append(':');
+        var listed = 0;
+        foreach (var item in events)
+        {
+            if (listed >= MaxListedRollupWatchEvents)
+            {
+                break;
+            }
+
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n- {item.ItemKey} on {item.Subject}: {item.Condition}"));
+            listed++;
+        }
+
+        if (events.Count > listed)
+        {
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n+ {events.Count - listed} more (see the watch-item worklist)."));
+        }
+    }
+
+    /// <summary>The watch arrays' entries, resolved to render-ready events. The documents carry watch
+    /// subjects by bare id (the engine's vocabulary); the span's verdict names resolve them, the fleet
+    /// sentinel is named as the fleet, and a server no verdict named degrades to its id stated as such -
+    /// honest, never invented.</summary>
+    private static void AppendWatchEvents(
+        JsonElement watch, string property, IReadOnlyDictionary<int, string> serverNames, List<RollupWatchEvent> events)
+    {
+        if (!watch.TryGetProperty(property, out var array) || array.ValueKind != JsonValueKind.Array)
+        {
+            return;
+        }
+
+        foreach (var entry in array.EnumerateArray())
+        {
+            var itemKey = StringProperty(entry, "item");
+            if (itemKey is null
+                || !entry.TryGetProperty("server_id", out var serverId)
+                || serverId.ValueKind != JsonValueKind.Number)
+            {
+                continue;
+            }
+
+            events.Add(new RollupWatchEvent(
+                SubjectName(serverId.GetInt32(), serverNames),
+                itemKey,
+                StringProperty(entry, "condition") ?? string.Empty));
+        }
+    }
+
+    private static string SubjectName(int serverId, IReadOnlyDictionary<int, string> serverNames) =>
+        serverId == FleetSweepStore.FleetScopeServerId
+            ? "the fleet"
+            : serverNames.TryGetValue(serverId, out var name)
+                ? name
+                : string.Create(CultureInfo.InvariantCulture, $"server id {serverId}");
+
+    private static string? StringProperty(JsonElement element, string property) =>
+        element.ValueKind == JsonValueKind.Object
+        && element.TryGetProperty(property, out var value)
+        && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
 
     /// <summary>
     /// Edge-applies "Agent Not Running" (#1433 Phase 2) from the target's latest FRESH agent_status snapshot
