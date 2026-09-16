@@ -142,8 +142,11 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
 
     [Theory]
     [InlineData("[{\"database\":\"x\"}]")]                                        // missing host
-    [InlineData("[{\"host\":\"x\",\"auth\":\"Entra\"}]")]                         // Entra/MFA rejected
-    [InlineData("[{\"host\":\"x\",\"auth\":\"ManagedIdentity\"}]")]              // Managed Identity rejected
+    [InlineData("[{\"host\":\"x\",\"auth\":\"Entra\"}]")]                         // bare/interactive Entra rejected
+    [InlineData("[{\"host\":\"x\",\"auth\":\"EntraMFA\"}]")]                      // interactive MFA rejected (#3484)
+    [InlineData("[{\"host\":\"x\",\"auth\":\"DeviceCode\"}]")]                    // interactive device-code rejected (#3484)
+    [InlineData("[{\"host\":\"x\",\"auth\":\"ServicePrincipal\"}]")]             // SP without client id/secret (#3484)
+    [InlineData("[{\"host\":\"x\",\"auth\":\"ServicePrincipal\",\"username\":\"app\"}]")] // SP without secret (#3484)
     [InlineData("[{\"host\":\"x\",\"auth\":\"SQL\"}]")]                          // SQL without username/password
     [InlineData("[{\"host\":\"x\",\"auth\":\"SQL\",\"username\":\"u\"}]")]       // SQL without password
     [InlineData("[{\"host\":\"x\",\"encrypt_mode\":\"nope\"}]")]                 // bad encrypt_mode enum
@@ -210,6 +213,42 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
         Assert.True(entry.ProbeConfig.ReadOnlyIntent);
         /* read_only_intent flows into the storage identity key (host:RO), matching the shared identity rule. */
         Assert.Equal(ServerIdHelper.BuildStorageName("sql02", "AppDb", true), entry.StorageKey);
+    }
+
+    [Fact]
+    public void ParseRequest_ServicePrincipalEntry_CarriesClientIdAndSecret_ForProbe()
+    {
+        /* #3484: a non-interactive Entra service principal — the application/client id in username, the client
+           secret in password, DPAPI-encrypted after a successful probe exactly like a SQL password. */
+        var (entries, invalid, wholeError) = DarlingMcpServerAdminTools.ParseRequest(
+            "[{\"host\":\"azuredb.database.windows.net\",\"database\":\"AppDb\",\"auth\":\"ServicePrincipal\"," +
+            "\"username\":\"11111111-2222-3333-4444-555555555555\",\"password\":\"the-client-secret\"}]");
+
+        Assert.Null(wholeError);
+        Assert.Empty(invalid);
+        var entry = Assert.Single(entries);
+        Assert.Equal("serviceprincipal", entry.ProbeConfig.Auth);
+        Assert.True(entry.ProbeConfig.UsesServicePrincipal);
+        Assert.Equal("11111111-2222-3333-4444-555555555555", entry.ProbeConfig.Username);
+        Assert.Equal("the-client-secret", entry.PlaintextPassword);
+    }
+
+    [Fact]
+    public void ParseRequest_ManagedIdentityEntry_CarriesNoSecret_OptionalUserAssignedClientId()
+    {
+        /* #3484: managed identity is secret-less. A user-assigned identity names its client id in username; a
+           system-assigned identity omits it. Either way no secret is carried or stored. */
+        var (entries, invalid, wholeError) = DarlingMcpServerAdminTools.ParseRequest(
+            "[{\"host\":\"azuredb.database.windows.net\",\"auth\":\"ManagedIdentity\"," +
+            "\"username\":\"66666666-7777-8888-9999-000000000000\"}]");
+
+        Assert.Null(wholeError);
+        Assert.Empty(invalid);
+        var entry = Assert.Single(entries);
+        Assert.Equal("managedidentity", entry.ProbeConfig.Auth);
+        Assert.True(entry.ProbeConfig.UsesManagedIdentity);
+        Assert.Equal("66666666-7777-8888-9999-000000000000", entry.ProbeConfig.Username);
+        Assert.Null(entry.PlaintextPassword);
     }
 
     [Fact]
