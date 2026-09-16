@@ -124,6 +124,14 @@ public sealed class AlertMasterSwitchSurfaceTests
         new("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "RunAnalysisPassAsync", 1, GateMode.GatedCaller,
             "guarded by notifyFindings, which every entry point computes via ShouldNotifyAnalysisFindings (pinned)"),
 
+        /* #3467: the same-statement-pileup finding's delivery — the collection-cadence analysis path.
+           Same family as the scheduled pass's site above and the same predicate, consulted INLINE
+           because this member has no notifyFindings parameter to inherit: the finding is produced and
+           persisted unconditionally (D0) and the one NotifyAsync sits under
+           ShouldNotifyAnalysisFindings(config), master AND family. */
+        new("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs", "EvaluateSameStatementPileupAsync", 1, GateMode.Inline,
+            "ShouldNotifyAnalysisFindings(config)"),
+
         /* The user-authored rules (#3464 gated them): the public entry consults the injected master
            switch before the rule load; the deliver site sits two private hops below it, chain pinned. */
         new("Darling/PerformanceMonitor.Darling.Service/CustomAlertEvaluator.cs", "DeliverFireAsync", 1, GateMode.GatedCaller,
@@ -150,6 +158,11 @@ public sealed class AlertMasterSwitchSurfaceTests
         /* Lite's analysis notify, the same first bypass in the other SKU: the notify local comes from the
            Lite twin of ShouldNotifyAnalysisFindings, pinned in both directions below. */
         new("Lite/Services/CollectionBackgroundService.cs", "RunAnalysisIfDueAsync", 1, GateMode.Inline,
+            "ShouldNotifyAnalysisFindings"),
+
+        /* #3467: Lite's pileup sweep — the Darling entry's twin, same family, same predicate, same D0
+           split (production unconditional, delivery gated). */
+        new("Lite/Services/CollectionBackgroundService.cs", "RunPileupSweepAsync", 1, GateMode.Inline,
             "ShouldNotifyAnalysisFindings"),
 
         /* The channel probes: four per settings window, one per channel shape. */
@@ -372,11 +385,12 @@ public sealed class AlertMasterSwitchSurfaceTests
     }
 
     /// <summary>
-    /// Gap 1's fix, held in both directions: the one NotifyAsync site is guarded by the notifyFindings
-    /// parameter; every entry point computes that parameter through ShouldNotifyAnalysisFindings; the
-    /// predicate is the AND of the master switch and the family toggle; and the family toggle appears in
-    /// the worker NOWHERE else — so no future call site can hand the notification service the toggle
-    /// alone, which is verbatim how the bypass shipped ("replacing the old alerts.enabled gate").
+    /// Gap 1's fix, held in both directions: every NotifyAsync site is guarded — the scheduled pass's
+    /// through the notifyFindings parameter both entry points compute via ShouldNotifyAnalysisFindings,
+    /// and the #3467 pileup sweep's through the same predicate consulted inline; the predicate is the
+    /// AND of the master switch and the family toggle; and the family toggle appears in the worker
+    /// NOWHERE else — so no future call site can hand the notification service the toggle alone, which
+    /// is verbatim how the bypass shipped ("replacing the old alerts.enabled gate").
     /// </summary>
     [Fact]
     public void AnalysisNotifications_AreDecidedByTheMasterSwitchAndTheFamilyToggle_Everywhere()
@@ -384,15 +398,22 @@ public sealed class AlertMasterSwitchSurfaceTests
         var stripped = CSharpSourceWalker.StripCommentsAndStrings(Read("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs"));
         var members = MemberStarts(stripped);
 
-        /* The site is guarded. */
+        /* The scheduled site is guarded. */
         var (start, end) = MemberRange(members, stripped, "RunAnalysisPassAsync");
         var notifyAt = LineOf(stripped, ".NotifyAsync(", start, end);
         Assert.True(notifyAt >= 0, "#3464 pin: RunAnalysisPassAsync no longer notifies");
         Assert.True(LineOf(stripped, "if (notifyFindings)", start, notifyAt) >= 0,
             "#3464: the NotifyAsync site must sit under the notifyFindings guard");
 
-        /* Both entry points compute the guard through the predicate. */
-        Assert.Equal(2, Regex.Matches(stripped, @"ShouldNotifyAnalysisFindings\(config\)").Count);
+        /* #3467: the pileup sweep's site is guarded by the same predicate, consulted inline. */
+        var (pileStart, pileEnd) = MemberRange(members, stripped, "EvaluateSameStatementPileupAsync");
+        var pileNotifyAt = LineOf(stripped, ".NotifyAsync(", pileStart, pileEnd);
+        Assert.True(pileNotifyAt >= 0, "#3467 pin: EvaluateSameStatementPileupAsync no longer notifies");
+        Assert.True(LineOf(stripped, "if (ShouldNotifyAnalysisFindings(config))", pileStart, pileNotifyAt) >= 0,
+            "#3467: the pileup NotifyAsync site must sit under ShouldNotifyAnalysisFindings(config)");
+
+        /* Both scheduled entry points plus the pileup sweep compute the guard through the predicate. */
+        Assert.Equal(3, Regex.Matches(stripped, @"ShouldNotifyAnalysisFindings\(config\)").Count);
 
         /* The predicate is the AND'd idiom, and the family toggle exists nowhere else in the worker. */
         Assert.Contains("config.Alerts.Enabled && config.Analysis.NotificationsEnabled", stripped, StringComparison.Ordinal);
@@ -408,6 +429,16 @@ public sealed class AlertMasterSwitchSurfaceTests
             "#3464: Lite's NotifyAsync site must sit under the notify guard");
         Assert.True(LineOf(lite, "ShouldNotifyAnalysisFindings()", liteStart, liteNotifyAt) >= 0,
             "#3464: Lite's notify local must come from ShouldNotifyAnalysisFindings");
+
+        /* #3467: Lite's pileup sweep, same holds. */
+        var (litePileStart, litePileEnd) = MemberRange(liteMembers, lite, "RunPileupSweepAsync");
+        var litePileNotifyAt = LineOf(lite, ".NotifyAsync(", litePileStart, litePileEnd);
+        Assert.True(litePileNotifyAt >= 0, "#3467 pin: Lite's RunPileupSweepAsync no longer notifies");
+        Assert.True(LineOf(lite, "if (notify)", litePileStart, litePileNotifyAt) >= 0,
+            "#3467: Lite's pileup NotifyAsync site must sit under the notify guard");
+        Assert.True(LineOf(lite, "ShouldNotifyAnalysisFindings()", litePileStart, litePileNotifyAt) >= 0,
+            "#3467: Lite's pileup notify local must come from ShouldNotifyAnalysisFindings");
+
         Assert.Contains("App.AlertsEnabled && App.AnalysisNotificationsEnabled", lite, StringComparison.Ordinal);
         Assert.Single(Regex.Matches(lite, Regex.Escape("App.AnalysisNotificationsEnabled")));
     }
@@ -510,8 +541,13 @@ public sealed class AlertMasterSwitchSurfaceTests
             Read("Darling/PerformanceMonitor.Darling.Service/DarlingSelfAlertEvaluator.cs"),
             StringComparison.Ordinal);
 
+        /* #3467 widened this sentence from "scheduled-analysis" to "analysis": the pileup finding is an
+           analysis-finding notification produced on the COLLECTION cadence, so the narrower wording
+           would have described a promise smaller than the one the gates keep — and an operator reading
+           it could reasonably have concluded a non-scheduled finding escapes the master switch, which is
+           the exact class of confusion #3464 was about. */
         Assert.Contains(
-            "turns off all alert evaluation **and** scheduled-analysis finding notifications",
+            "turns off all alert evaluation **and** analysis finding notifications",
             Read("Darling/README.md"),
             StringComparison.Ordinal);
     }

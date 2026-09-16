@@ -123,6 +123,25 @@ AND   analysis_time <= $3
 ORDER BY analysis_time DESC, severity DESC
 LIMIT $4";
 
+    /*
+        #3467: the latest-batch read excludes SAME_STATEMENT_PILEUP rows from DEFINING the batch, and
+        overlays the ones NEWER than it. The MAX(analysis_time) contract (#2448) is that the newest
+        batch is one indivisible statement about the server — the complete output of one analysis
+        pass. Pileup findings are written per collection sweep, one or two rows at a time, so letting
+        one of them claim the MAX would replace the last complete pass with a single-row "analysis"
+        and make the server read HEALTHIER mid-incident — the exact misreading #2448 exists to
+        prevent, arriving through the write cadence instead of a torn batch. The overlay is
+        self-limiting: a pileup row is visible from its firing until the next scheduled pass
+        completes (≤ the analysis interval), then ages out of "latest" while remaining in the
+        windowed reads and its incident's occurrence trail. The epoch COALESCE keeps pileup rows
+        visible where no scheduled batch exists to anchor on — which is never a disabled-analysis
+        deployment (the pileup sweep rides the same analysis-enabled gate, so a store with analysis
+        off gains no pileup rows either), but IS a young install whose pileup fired before the
+        scheduled pass's 24-hour data-span gate let a first batch exist, and an install where
+        analysis was toggled off after pileup rows landed but before any scheduled batch did.
+        Lite's FindingStore carries the identical shape; the two are pinned against each other by
+        SameStatementPileupSourceCensusTests.BothFindingStores_CarveThePileupRowsOutOfTheLatestBatch_Identically.
+    */
     public const string GetLatestFindingsSql = @"
 SELECT finding_id, analysis_time, server_id, server_name, database_name,
        time_range_start, time_range_end, severity, confidence, category,
@@ -131,8 +150,18 @@ SELECT finding_id, analysis_time, server_id, server_name, database_name,
        incident_id, remediation_action_json, drill_down_json
 FROM analysis_findings
 WHERE server_id = $1
-AND   analysis_time = (
-    SELECT MAX(analysis_time) FROM analysis_findings WHERE server_id = $1
+AND   (
+    analysis_time = (
+        SELECT MAX(analysis_time) FROM analysis_findings
+        WHERE server_id = $1 AND root_fact_key <> 'SAME_STATEMENT_PILEUP'
+    )
+    OR (
+        root_fact_key = 'SAME_STATEMENT_PILEUP'
+        AND analysis_time > COALESCE((
+            SELECT MAX(analysis_time) FROM analysis_findings
+            WHERE server_id = $1 AND root_fact_key <> 'SAME_STATEMENT_PILEUP'
+        ), TIMESTAMP '1970-01-01')
+    )
 )
 ORDER BY severity DESC";
 

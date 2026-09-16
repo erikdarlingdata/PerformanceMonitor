@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
@@ -58,6 +59,13 @@ public class CollectionBackgroundService : BackgroundService
        was that a pass which never finishes leaves this marker set FOREVER and the server is then
        skipped in silence on every later cycle. */
     private readonly ConcurrentDictionary<int, AnalysisPassState> _analysisInFlight = new();
+
+    /* #3467: per-server newest query_snapshots collection_time the pileup sweep has already
+       evaluated, so the one-minute loop over a one-minute collector produces one evaluation per
+       snapshot instant rather than re-persisting the same evidence. In-memory on purpose — after a
+       restart the worst case is one repeated evaluation whose finding folds onto the same incident
+       id and whose notification the cooldown suppresses. */
+    private readonly ConcurrentDictionary<int, DateTime> _lastPileupSnapshotEvaluated = new();
 
     /* How far past its budget an in-flight pass must be before the loop starts reporting it. The
        ordinary overrun already gets the "exceeded Ns" warning; this is for the pass that ignored
@@ -207,6 +215,12 @@ public class CollectionBackgroundService : BackgroundService
 
                 /* Periodic dismissed-archive-alert sidecar retention (rolling 180-day purge) */
                 await RunDismissedAlertsCleanupIfDueAsync();
+
+                /* #3467: the same-statement-pileup finding, evaluated at collection cadence — NOT on
+                   the analysis interval, which is the whole point (the measured incident's evidence sat
+                   in the store 21 minutes before the scheduled pass described it). Runs every loop tick,
+                   right behind the collectors that write its input. */
+                await RunPileupSweepAsync(stoppingToken);
 
                 /* Periodic scheduled analysis + high-severity finding notifications */
                 await RunAnalysisIfDueAsync(stoppingToken);
@@ -437,6 +451,142 @@ public class CollectionBackgroundService : BackgroundService
     /// </summary>
     internal static bool ShouldNotifyAnalysisFindings() =>
         App.AlertsEnabled && App.AnalysisNotificationsEnabled;
+
+    /// <summary>
+    /// #3467: one same-statement-pileup evaluation per enabled server, per collection cycle — Lite's
+    /// twin of the Darling worker's EvaluateSameStatementPileupAsync. Reads the newest active-query
+    /// snapshot window (v_query_snapshots alone; the trigger must survive Query-Store-less
+    /// deployments, #2296), hands it to the shared detector, and routes any detection through the
+    /// SAME finding machinery the scheduled pass uses — mute-filter → materialize → drill-down →
+    /// persist → notify-if-delivering — so the finding inherits the mute registry, the occurrence
+    /// folding that makes episode two a recurrence on episode one's incident trail, notify_severity,
+    /// and the incident-keyed cooldown, and adds no delivery SEMANTICS of its own. It is a new delivery
+    /// call site, which is a different thing and is accounted for as one: the single NotifyAsync below
+    /// sits under the ShouldNotifyAnalysisFindings local, carries its own #3465 census entry (Inline),
+    /// and is pinned in both directions by AlertMasterSwitchSurfaceTests.
+    ///
+    /// <para>Production is gated by App.AnalysisEnabled (D0 — findings persist whatever the master
+    /// switch says); delivery alone rides ShouldNotifyAnalysisFindings (#3464). The whole sweep is
+    /// best-effort per cycle: a fault costs one log line and this cycle's evaluation, never the
+    /// collection loop — a live pileup is re-derived by the next cycle for as long as it lasts.</para>
+    /// </summary>
+    private async Task RunPileupSweepAsync(CancellationToken stoppingToken)
+    {
+        if (!App.AnalysisEnabled || _duckDb == null || _serverManager == null || _notificationService == null)
+        {
+            return;
+        }
+
+        var notify = ShouldNotifyAnalysisFindings();
+        var reader = new PileupSnapshotReader(_duckDb, _logger);
+        var findingStore = new FindingStore(_duckDb);
+
+        foreach (var server in _serverManager.GetEnabledServers())
+        {
+            if (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+
+            var serverName = RemoteCollectorService.GetServerNameForStorage(server);
+            var serverId = RemoteCollectorService.GetDeterministicHashCode(serverName);
+
+            try
+            {
+                /* Window floor: lookback + staleness margin behind "now", so the newest instant's
+                   full baseline window is covered even when the newest snapshot is a few minutes
+                   old. The detector applies the real staleness rule against the newest instant. */
+                var floor = DateTime.UtcNow.AddMinutes(
+                    -(SameStatementPileupDetector.BaselineLookbackMinutes + SameStatementPileupDetector.StaleSnapshotCutoffMinutes));
+                var rows = await reader.ReadWindowAsync(serverId, floor, stoppingToken);
+                if (rows.Count == 0)
+                {
+                    continue;
+                }
+
+                /* One evaluation per snapshot instant (see the field). The stamp advances only once
+                   the instant's outcome is settled — evaluated clean, fully muted, or persisted —
+                   never before the persist: stamped early, a transient InsertFindingsAsync fault
+                   would mark a firing instant "done" and lose its finding for good if the episode
+                   cleared before the next cycle. Left behind on a fault, the next cycle re-derives
+                   instead, and the downstream machinery absorbs the replay — a duplicate persist
+                   folds onto the same incident trail, a duplicate notify dies in the incident-keyed
+                   cooldown (the Darling twin states the full argument). */
+                var latest = DateTime.MinValue;
+                foreach (var row in rows)
+                {
+                    if (row.CollectionTime > latest)
+                    {
+                        latest = row.CollectionTime;
+                    }
+                }
+
+                if (_lastPileupSnapshotEvaluated.TryGetValue(serverId, out var evaluated) && latest <= evaluated)
+                {
+                    continue;
+                }
+
+                var detections = SameStatementPileupDetector.Evaluate(serverName, rows, DateTime.UtcNow);
+                if (detections.Count == 0)
+                {
+                    _lastPileupSnapshotEvaluated[serverId] = latest;
+                    continue;
+                }
+
+                /* The scheduled pass's two-phase persist, transplanted: mute-filter materializes the
+                   survivors, drill-down evidence attaches between the phases, the insert commits the
+                   set or nothing (#2448). */
+                var context = new AnalysisContext
+                {
+                    ServerId = serverId,
+                    ServerName = serverName,
+                    TimeRangeStart = latest.AddMinutes(-SameStatementPileupDetector.BaselineLookbackMinutes),
+                    TimeRangeEnd = latest,
+                    CancellationToken = stoppingToken,
+                    ShutdownToken = stoppingToken,
+                };
+
+                var findings = await findingStore.FilterMutedFindingsAsync(
+                    detections.Select(d => d.Story).ToList(), context);
+                if (findings.Count == 0)
+                {
+                    _lastPileupSnapshotEvaluated[serverId] = latest;
+                    continue;
+                }
+
+                var drillDownByHash = detections.ToDictionary(d => d.Story.StoryPathHash, d => d.DrillDown);
+                foreach (var finding in findings)
+                {
+                    if (drillDownByHash.TryGetValue(finding.StoryPathHash, out var drillDown))
+                    {
+                        finding.DrillDown = drillDown;
+                    }
+                }
+
+                await findingStore.InsertFindingsAsync(findings, context);
+                _lastPileupSnapshotEvaluated[serverId] = latest;
+
+                _logger?.LogWarning(
+                    "Same-statement pileup detected on {Server}: {Count} finding(s) at snapshot {Snapshot:u}, peak severity {Severity:F2}",
+                    serverName, findings.Count, latest, findings.Max(f => f.Severity));
+
+                if (notify)
+                {
+                    await _notificationService.NotifyAsync(findings);
+                }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(
+                    "Same-statement pileup evaluation failed for {Server} — skipped this cycle; the next cycle re-evaluates a fresher window: {Message}",
+                    serverName, ex.Message);
+            }
+        }
+    }
 
     /// <summary>
     /// Runs the triage engine for each enabled server on the independent
