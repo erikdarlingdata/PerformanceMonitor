@@ -173,6 +173,15 @@ public static class DarlingRetention
     private const int DeleteTimeoutSeconds = 300;
 
     /// <summary>
+    /// Batch size for a purge statement that is neither time-sliced nor row-capped — one execution IS the
+    /// whole purge. No real row count reaches this cap, so the drain loop's "cleared >= cap means there may
+    /// be more" test is never true and the single execution is terminal. Under the default batchSize of 1
+    /// an unsliced statement that did any real work re-ran in full once more just to observe zero rows — an
+    /// extra whole-table DELETE on exactly the days the purge had something to do (found by review on #3471).
+    /// </summary>
+    private const int SingleShotStatement = int.MaxValue;
+
+    /// <summary>
     /// Purges every collector table past its shared <see cref="CollectorScheduleDefaults"/>
     /// RetentionDays, plus collection_log past <see cref="CollectionLogRetentionDays"/>,
     /// config_alert_log past <see cref="AlertHistoryRetentionDays"/>, terminal
@@ -718,25 +727,33 @@ public static class DarlingRetention
                purge that failed between statements on an earlier day: the price of no FKs, paid as one
                cheap NOT EXISTS over tables bounded at dozens of narrow rows per sweep, rather than as an
                ordering constraint on every future purge. Failure-isolated per table like every sibling. */
-            foreach (var (table, sql) in new (string Table, string Sql)[]
+            /* The children's statements are neither time-sliced nor row-capped — one execution IS the
+               whole purge — so they dispatch single-shot. Under the default batchSize the drain loop's
+               "cleared >= cap means there may be more" contract inverts for an unsliced statement: any
+               real work (>= 1 row) re-ran the full DELETE once more just to confirm emptiness, an extra
+               whole-table statement on exactly the days the purge had something to do. */
+            foreach (var (table, sql, batch) in new (string Table, string Sql, int Batch)[]
             {
                 (FleetSweepStore.VerdictsTableName,
                     $"DELETE FROM {FleetSweepStore.VerdictsTableName} c"
                     + $" WHERE c.sweep_id IN (SELECT r.sweep_id FROM {FleetSweepStore.RunsTableName} r WHERE r.swept_at < $1)"
-                    + $" OR NOT EXISTS (SELECT 1 FROM {FleetSweepStore.RunsTableName} r WHERE r.sweep_id = c.sweep_id)"),
+                    + $" OR NOT EXISTS (SELECT 1 FROM {FleetSweepStore.RunsTableName} r WHERE r.sweep_id = c.sweep_id)",
+                    SingleShotStatement),
                 (FleetSweepStore.WouldHavePagedTableName,
                     $"DELETE FROM {FleetSweepStore.WouldHavePagedTableName} c"
                     + $" WHERE c.sweep_id IN (SELECT r.sweep_id FROM {FleetSweepStore.RunsTableName} r WHERE r.swept_at < $1)"
-                    + $" OR NOT EXISTS (SELECT 1 FROM {FleetSweepStore.RunsTableName} r WHERE r.sweep_id = c.sweep_id)"),
+                    + $" OR NOT EXISTS (SELECT 1 FROM {FleetSweepStore.RunsTableName} r WHERE r.sweep_id = c.sweep_id)",
+                    SingleShotStatement),
                 (FleetSweepStore.RunsTableName,
-                    TimeSlicedDeleteSql(FleetSweepStore.RunsTableName, "swept_at")),
+                    TimeSlicedDeleteSql(FleetSweepStore.RunsTableName, "swept_at"), 1),
                 (FleetSweepStore.WatchItemsTableName,
-                    TimeSlicedDeleteSql(FleetSweepStore.WatchItemsTableName, "last_seen_at")),
+                    TimeSlicedDeleteSql(FleetSweepStore.WatchItemsTableName, "last_seen_at"), 1),
             })
             {
                 var sweepRowsDeleted = await PurgeOneAsync(
                     postgres, table, sql,
-                    utcNow.AddDays(-FleetSweepRetentionDays), logger, cancellationToken);
+                    utcNow.AddDays(-FleetSweepRetentionDays), logger, cancellationToken,
+                    batchSize: batch);
                 if (sweepRowsDeleted is not null)
                 {
                     tablesPurged++;
@@ -1145,7 +1162,9 @@ public static class DarlingRetention
             /* batchSize 1 for the TIME-SLICED statement: it has no row cap, so "fewer than the cap"
                degenerates to "deleted zero rows" — a slice that clears anything means older slices may
                remain. A ROW-capped caller passes its cap instead, which restores the drain loop's real
-               contract (a full-cap batch means there may be more). */
+               contract (a full-cap batch means there may be more). An UNSLICED caller — one statement
+               that IS the whole purge — passes SingleShotStatement, under which no real row count can
+               reach the cap and the one execution is terminal. */
             var batches = 0;
             var drained = await DrainBatchesAsync(
                 async ct =>
@@ -1172,7 +1191,7 @@ public static class DarlingRetention
                is the #2386 failure mode exactly: a purge that removed one bounded slice and reported
                success looked identical in the log to one that cleared everything expired. One batch means
                the table was already inside its horizon; many means there was a backlog and it is gone. */
-            if (batchSize > 1)
+            if (batchSize > 1 && batchSize != SingleShotStatement)
             {
                 logger?.LogInformation(
                     "Retention purge drained {Rows} row(s) from {Table} in {Batches} batch(es) (cap {Cap}), cutoff {Cutoff:yyyy-MM-dd HH:mm}Z",

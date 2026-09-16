@@ -599,6 +599,33 @@ public sealed class FleetSweepStateRungTests
         Assert.False(stillClosed.JustClosed);
     }
 
+    /// <summary>
+    /// The two child purges (verdicts, would-have-paged) are one whole-statement DELETE each — neither
+    /// time-sliced nor row-capped — so they must dispatch single-shot. Under the drain loop's default
+    /// batchSize of 1, an unsliced statement that deleted anything re-ran in full once more just to observe
+    /// zero rows: an extra whole-table DELETE on exactly the days the purge had work (#3471 review finding).
+    /// Source pin, because the shape is a call-site argument the compiler cannot distinguish from the
+    /// sliced siblings' correct batchSize of 1 in the same loop.
+    /// </summary>
+    [Fact]
+    public void TheUnslicedChildPurges_DispatchSingleShot()
+    {
+        var retention = RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingRetention.cs");
+
+        Assert.Contains("private const int SingleShotStatement = int.MaxValue;", retention, StringComparison.Ordinal);
+
+        /* Both unsliced children carry the sentinel; both sliced statements in the same loop keep 1. The
+           tuple rows are the pin's subject, so match them structurally rather than by line position. */
+        Assert.Equal(2, CountOf(retention, "SingleShotStatement),"));
+        Assert.Contains("TimeSlicedDeleteSql(FleetSweepStore.RunsTableName, \"swept_at\"), 1)", retention, StringComparison.Ordinal);
+        Assert.Contains("TimeSlicedDeleteSql(FleetSweepStore.WatchItemsTableName, \"last_seen_at\"), 1)", retention, StringComparison.Ordinal);
+
+        /* The single-shot sentinel must also stay out of the row-capped drain report, whose "cap" figure
+           would otherwise log as int.MaxValue and read as a real configuration. */
+        Assert.Contains("batchSize > 1 && batchSize != SingleShotStatement", retention, StringComparison.Ordinal);
+    }
+
     /* ---- helpers -------------------------------------------------------------------------------------- */
 
     /// <summary>The column list of an INSERT statement — the names between the target's opening
