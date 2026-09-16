@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service;
@@ -171,6 +172,52 @@ public sealed class FleetSweepWebFeedTests
         Assert.False((bool)liveness["alive"]!);
     }
 
+    /// <summary>
+    /// THE #3487 pin: every tick-scale id in a serialized sweep payload is a JSON STRING. A sweep id
+    /// is <c>DateTime.UtcNow.Ticks</c>-scale (~6.4e17), roughly 70x past JavaScript's
+    /// <c>Number.MAX_SAFE_INTEGER</c> (2^53 ≈ 9.0e15), so a JSON number carrying one is rounded by
+    /// every JS consumer's <c>JSON.parse</c> — ~128-tick granularity at this magnitude, measured
+    /// live: 639251940075451830 parsed to 639251940075451800, and the Fleet Sweeps page's drill-down
+    /// fetched a neighbor the store never held. The input side always took <c>sweep_id</c> as a
+    /// string (exact-parse-or-refuse — pinned in <see cref="DarlingMcpFleetSweepToolsTests"/>); this
+    /// pins the output side of the same rule, on the one builder both surfaces serve — the shared
+    /// builders make it <c>get_sweep_reports</c>' pin too.
+    /// </summary>
+    [Fact]
+    public void TheRunNode_SpellsItsTickScaleIds_AsJsonStrings()
+    {
+        var node = FleetSweepPresentation.BuildRunNode(Run());
+
+        Assert.Equal(JsonValueKind.String, node["sweep_id"]!.GetValueKind());
+        Assert.Equal("638600000000000000", node["sweep_id"]!.GetValue<string>());
+        Assert.Equal(JsonValueKind.String, node["previous_sweep_id"]!.GetValueKind());
+        Assert.Equal("638599964000000000", node["previous_sweep_id"]!.GetValue<string>());
+
+        /* On the serialized wire, QUOTED — the byte shape the whole issue is about. */
+        var json = node.ToJsonString();
+        Assert.Contains("\"sweep_id\":\"638600000000000000\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"previous_sweep_id\":\"638599964000000000\"", json, StringComparison.Ordinal);
+
+        /* The detail node wraps the same builder, so the sweep_id fetch serves the same spelling. */
+        var detail = FleetSweepPresentation.BuildSweepDetailNode(
+            Run(), new List<FleetSweepServerVerdict>(), new List<FleetSweepWouldHavePagedEntry>());
+        Assert.Equal(JsonValueKind.String, detail["sweep_id"]!.GetValueKind());
+    }
+
+    /// <summary>A first sweep's null <c>previous_sweep_id</c> stays JSON null — an absence is not a
+    /// spelling, and the page's <c>previous_sweep_id == null</c> branch (the "no previous sweep"
+    /// badge) rests on it: the string <c>"null"</c> would be a truthy non-answer that renders as an
+    /// id.</summary>
+    [Fact]
+    public void AFirstSweeps_NullPreviousSweepId_StaysNull_NotAStringSpellingOfNull()
+    {
+        var node = FleetSweepPresentation.BuildRunNode(Run() with { PreviousSweepId = null });
+
+        Assert.True(node.ContainsKey("previous_sweep_id"), "the key must be PRESENT — a first sweep states its null, never omits it");
+        Assert.Null(node["previous_sweep_id"]);
+        Assert.Contains("\"previous_sweep_id\":null", node.ToJsonString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void AnUnparseablePayload_IsCarriedVerbatim_NeverDropped()
     {
@@ -214,6 +261,44 @@ public sealed class FleetSweepWebFeedTests
         /* The strip probes only a parsed OBJECT: an unparseable alerts-on payload still rides verbatim
            — the fail-toward-visible arm is not a casualty of the gate. */
         var unreadable = Run(alertsEnabled: true) with { ReportJson = "not json at all" };
+        Assert.Equal("not json at all", FleetSweepPresentation.BuildRunNode(unreadable)["report"]!.GetValue<string>());
+    }
+
+    /// <summary>
+    /// #3487's arm B, the #3478 render-rule shape one test up: the stored report document spells its
+    /// two ids as JSON numbers — the engine's deliberate stored spelling (longs are exact .NET-side;
+    /// the reasoning is on the record at its composition site) — and stored documents are immutable,
+    /// so every persisted document carries numeric ids for its whole retention. The run node re-spells
+    /// the two fields on the FRESHLY PARSED embed, never the stored row, so the embedded copy obeys
+    /// the same string contract as the header fields beside it. The fixture's id is the live
+    /// measurement's: the value below is exactly the one a JS consumer parsed to …800.
+    /// </summary>
+    [Fact]
+    public void TheRunNode_RespellsTheEmbeddedDocumentsIds_AsStrings_OnTheParsedCopy()
+    {
+        var legacy = Run() with
+        {
+            ReportJson = "{\"sweep_id\":639251940075451830,\"previous_sweep_id\":639251903948800000,\"alerts_enabled\":true}",
+        };
+
+        var report = Assert.IsType<JsonObject>(FleetSweepPresentation.BuildRunNode(legacy)["report"]);
+        Assert.Equal("639251940075451830", report["sweep_id"]!.GetValue<string>());
+        Assert.Equal("639251903948800000", report["previous_sweep_id"]!.GetValue<string>());
+
+        /* A first sweep's stored document carries previous_sweep_id: null — the re-spell probes only
+           a NUMBER, so the null stays null beside its no_previous_sweep companion. */
+        var first = Run() with
+        {
+            PreviousSweepId = null,
+            ReportJson = "{\"sweep_id\":639251940075451830,\"previous_sweep_id\":null}",
+        };
+        var firstReport = Assert.IsType<JsonObject>(FleetSweepPresentation.BuildRunNode(first)["report"]);
+        Assert.True(firstReport.ContainsKey("previous_sweep_id"));
+        Assert.Null(firstReport["previous_sweep_id"]);
+
+        /* An unparseable payload still rides verbatim — the re-spell probes only a parsed OBJECT,
+           the same guard the #3478 strip stands behind. */
+        var unreadable = Run() with { ReportJson = "not json at all" };
         Assert.Equal("not json at all", FleetSweepPresentation.BuildRunNode(unreadable)["report"]!.GetValue<string>());
     }
 
@@ -349,6 +434,30 @@ public sealed class FleetSweepWebFeedTests
         Assert.IsType<JsonObject>(array[0]!["evidence"]);
         Assert.Null(array[1]!["evidence"]);             // a miss's null evidence stays null, not ""
         Assert.Equal(1, (int)array[1]!["consecutive_misses"]!);
+    }
+
+    /// <summary>The worklist's four sweep-id anchors ride as strings too (#3487) — they are exactly
+    /// the ids an agent would feed back to the <c>sweep_id</c> fetch, and a rounded
+    /// <c>opened_sweep_id</c> would send that drill-down to a sweep that never existed. The nullable
+    /// arms hold: an item that has never opened or closed carries honest nulls, not spellings of
+    /// null.</summary>
+    [Fact]
+    public void TheWatchItemsNode_SpellsItsSweepIdAnchors_AsJsonStrings()
+    {
+        var now = new DateTime(2026, 9, 15, 12, 0, 0, DateTimeKind.Utc);
+        var items = new List<FleetSweepWatchItem>
+        {
+            new(7, FleetSweepEngine.BandCriticalItemKey, "cond", FleetSweepWatchStateMachine.Open,
+                2, 0, 638600000000000000, 638600036000000000, 638600036000000000, null, now, now, null),
+        };
+
+        var row = Assert.IsType<JsonArray>(
+            FleetSweepPresentation.BuildWatchItemsNode(items, new Dictionary<int, string>())["items"])[0]!;
+
+        Assert.Equal("638600000000000000", row["first_seen_sweep_id"]!.GetValue<string>());
+        Assert.Equal("638600036000000000", row["last_seen_sweep_id"]!.GetValue<string>());
+        Assert.Equal("638600036000000000", row["opened_sweep_id"]!.GetValue<string>());
+        Assert.Null(row["closed_sweep_id"]);
     }
 
     [Fact]

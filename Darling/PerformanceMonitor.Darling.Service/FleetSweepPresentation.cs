@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using PerformanceMonitor.Darling.Storage;
@@ -43,6 +44,14 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>would_have_paged: []</c> on alerts-on sweeps, immutably and for their whole retention, so
 /// <see cref="BuildRunNode"/> strips the key from the alerts-on embed — the render's copy, never the
 /// stored row — which also keeps the contract true against any future writer regression.</para>
+///
+/// <para><b>Tick-scale ids are JSON STRINGS on the wire (#3487).</b> A sweep id is
+/// <c>DateTime.UtcNow.Ticks</c>-scale (~6.4e17), roughly 70x past JavaScript's
+/// <c>Number.MAX_SAFE_INTEGER</c> (2^53), so a JSON number carrying one silently loses its low-order
+/// digits in any double-based client's <c>JSON.parse</c> — see <see cref="SweepIdString"/> for the
+/// measured arithmetic. Every id these builders emit rides as a string, and the two id fields inside
+/// the embedded stored report are converted on the freshly parsed copy (the #3478 render-rule shape,
+/// one paragraph up).</para>
 /// </summary>
 public static class FleetSweepPresentation
 {
@@ -85,25 +94,39 @@ public static class FleetSweepPresentation
 
         var report = EmbedJson(run.ReportJson);
 
-        /* The back-compat arm of #3478: every alerts-on sweep persisted before the engine's storage
-           gate carries would_have_paged: [] — written unconditionally, never derived — and stored
-           documents are immutable, living out their retention as-written. The strip operates on the
-           freshly parsed embed (EmbedJson parses per call), NEVER the stored row, so the record keeps
-           what was written while the wire keeps the contract: on an alerts-on sweep no would-have-paged
-           check was made, and serving an empty ledger would claim one. The type guard keeps the
-           unparseable-payload arm intact — a verbatim string is carried whole, not probed. */
-        if (run.AlertsEnabled && report is JsonObject reportObject)
+        /* The render rules over the freshly parsed embed (EmbedJson parses per call) — NEVER the
+           stored row, so the record keeps what was written while the wire keeps the contract. The
+           type guard keeps the unparseable-payload arm intact on both rules: a verbatim string is
+           carried whole, not probed. */
+        if (report is JsonObject reportObject)
         {
-            reportObject.Remove("would_have_paged");
+            /* The back-compat arm of #3478: every alerts-on sweep persisted before the engine's
+               storage gate carries would_have_paged: [] — written unconditionally, never derived —
+               and stored documents are immutable, living out their retention as-written. On an
+               alerts-on sweep no would-have-paged check was made, and serving an empty ledger would
+               claim one. */
+            if (run.AlertsEnabled)
+            {
+                reportObject.Remove("would_have_paged");
+            }
+
+            /* #3487's arm B, the same never-touch-stored-rows shape: the stored document spells its
+               two ids as JSON numbers (the engine's deliberate choice — see the composition site's
+               reasoning in FleetSweepEngine), and every persisted document carries them that way for
+               its whole retention. The wire contract is SweepIdString's, so the embed's copies are
+               re-spelled as strings here — which also keeps the embed's ids usable if the engine
+               ever changes its stored spelling, because the restring is a no-op on a string. */
+            RestringTickScaleId(reportObject, "sweep_id");
+            RestringTickScaleId(reportObject, "previous_sweep_id");
         }
 
         return new JsonObject
         {
-            ["sweep_id"] = run.SweepId,
+            ["sweep_id"] = SweepIdString(run.SweepId),
             ["swept_at"] = run.SweptAtUtc.ToString("o"),
             ["span_start"] = run.SpanStartUtc.ToString("o"),
             ["span_end"] = run.SpanEndUtc.ToString("o"),
-            ["previous_sweep_id"] = run.PreviousSweepId,
+            ["previous_sweep_id"] = SweepIdString(run.PreviousSweepId),
             ["alerts_enabled"] = run.AlertsEnabled,
             ["servers_expected"] = run.ServersExpected,
             ["servers_reported"] = run.ServersReported,
@@ -221,12 +244,17 @@ public static class FleetSweepPresentation
                 ["state"] = item.State,
                 ["consecutive_hits"] = item.ConsecutiveHits,
                 ["consecutive_misses"] = item.ConsecutiveMisses,
-                ["first_seen_sweep_id"] = item.FirstSeenSweepId,
-                ["last_seen_sweep_id"] = item.LastSeenSweepId,
-                ["opened_sweep_id"] = item.OpenedSweepId,
-                ["closed_sweep_id"] = item.ClosedSweepId,
+                /* Sweep ids, so they ride as strings like the run node's (#3487) — a worklist row's
+                   anchors are exactly the ids an agent would feed back to the sweep_id fetch. */
+                ["first_seen_sweep_id"] = SweepIdString(item.FirstSeenSweepId),
+                ["last_seen_sweep_id"] = SweepIdString(item.LastSeenSweepId),
+                ["opened_sweep_id"] = SweepIdString(item.OpenedSweepId),
+                ["closed_sweep_id"] = SweepIdString(item.ClosedSweepId),
                 ["first_seen_at"] = item.FirstSeenAtUtc.ToString("o"),
                 ["last_seen_at"] = item.LastSeenAtUtc.ToString("o"),
+                /* Evidence rides VERBATIM, a numeric sweep_id included (the instruments-dead item's
+                   stored evidence carries one): it is the engine's stored word, shown whole so a
+                   reader can disagree with it, and the anchors above are the drill-down keys. */
                 ["evidence"] = item.EvidenceJson is null ? null : EmbedJson(item.EvidenceJson),
             };
 
@@ -248,6 +276,38 @@ public static class FleetSweepPresentation
             ["exit_bar_sweeps"] = FleetSweepWatchStateMachine.ExitConsecutiveSweeps,
             ["items"] = array,
         };
+    }
+
+    /// <summary>
+    /// A tick-scale id spelled as a JSON STRING; null stays null, because "no previous sweep" is an
+    /// absence, not a spelling. The arithmetic that makes this load-bearing (#3487): sweep ids are
+    /// <c>DateTime.UtcNow.Ticks</c>-scale (~6.4e17), roughly 70x past JavaScript's
+    /// <c>Number.MAX_SAFE_INTEGER</c> (2^53 ≈ 9.0e15), so every JS consumer's <c>JSON.parse</c>
+    /// rounds a numeric one to the nearest representable double — ~128-tick granularity at this
+    /// magnitude, measured live on a production store: 639251940075451830 parsed to
+    /// 639251940075451800, and the drill-down fetched a neighbor that was never recorded. The INPUT
+    /// side was designed against exactly this double from day one (<c>get_sweep_reports</c> takes
+    /// <c>sweep_id</c> as a string with exact-parse-or-refuse — #2548's rule); this closes the
+    /// OUTPUT side, which had been handing every consumer a value already through the double.
+    /// </summary>
+    private static JsonValue? SweepIdString(long? id) =>
+        id is null ? null : JsonValue.Create(id.Value.ToString(CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// Re-spells one field of a freshly parsed embedded document from a JSON number to a JSON string
+    /// (<see cref="SweepIdString"/>'s contract, applied to a document this layer did not build). The
+    /// probe is deliberately narrow: an absent key stays absent, a null stays null, and a value that
+    /// is not a whole number the store's <c>bigint</c> could have produced — including one already a
+    /// string — is left exactly as stored, because this is a spelling rule, not a repair.
+    /// </summary>
+    private static void RestringTickScaleId(JsonObject document, string key)
+    {
+        if (document.TryGetPropertyValue(key, out var value)
+            && value is JsonValue number
+            && number.TryGetValue<long>(out var id))
+        {
+            document[key] = JsonValue.Create(id.ToString(CultureInfo.InvariantCulture));
+        }
     }
 
     /// <summary>

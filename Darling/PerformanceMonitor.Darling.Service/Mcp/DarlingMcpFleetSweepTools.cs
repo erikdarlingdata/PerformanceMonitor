@@ -42,7 +42,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// integers, far past the 2^53 boundary where a JSON number silently loses low-order digits in any
 /// double-based client — an id that made that round trip matches nothing, and the store would answer
 /// the honest-looking "no such sweep". The tool takes the id as a string and rejects one it cannot
-/// parse EXACTLY, rather than silently querying a rounded neighbor.</para>
+/// parse EXACTLY, rather than silently querying a rounded neighbor. Since #3487 the shared builders
+/// EMIT every sweep id as a string too — the output side had been handing consumers a value already
+/// through the double, which is how the web drill-down fetched sweeps that were "never recorded".</para>
 /// </summary>
 [McpServerToolType]
 public sealed class DarlingMcpFleetSweepTools
@@ -54,7 +56,8 @@ public sealed class DarlingMcpFleetSweepTools
         "sweep in full (per-server verdicts with band transitions pre-computed, plus its would-have-paged " +
         "ledger when one was taken), and the watch-item worklist with its hysteresis position; pass sweep_id " +
         "(as a STRING - the ids are too large for a JSON number to round-trip) to fetch one sweep in full " +
-        "instead. " +
+        "instead. Every sweep id the payload carries (sweep_id, previous_sweep_id, the watch items' " +
+        "*_sweep_id anchors) is spelled as a JSON string for the same reason - pass one back verbatim. " +
         "Two honesty rules ride every payload, and both carry field-level meaning an agent must read. " +
         "MUTE SEMANTICS: alerts_enabled on a sweep states the alert master switch AS THE SWEEP RAN - false " +
         "means DELIVERY WAS OFF: nothing paged while that sweep's window elapsed, however bad the window was. " +

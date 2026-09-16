@@ -280,6 +280,15 @@ public static class FleetSweepEngine
            readers pin the muted shape. */
         var report = new OrderedDictionary<string, object?>
         {
+            /* The stored document's two ids stay JSON NUMBERS, decided at #3487 (which re-spelled
+               them as strings on every WIRE payload, because tick-scale ids round in a double-based
+               client's JSON.parse). The store is .NET-side and a long round-trips a bigint exactly,
+               so the stored record never lies where it lives — the lie only ever happened at the JS
+               boundary, and guarding that boundary is the presentation layer's job, which re-spells
+               these two fields on the freshly parsed embed at render. Changing the stored spelling
+               instead would buy nothing the render rule does not already provide, and would cost a
+               permanent vintage split: stored documents are immutable, so every reader of the raw
+               rows would need to handle both spellings for the store's whole retention. */
             ["sweep_id"] = sweepId,
             ["swept_at"] = nowUtc.ToString("o"),
             ["span_start"] = spanStartUtc.ToString("o"),
