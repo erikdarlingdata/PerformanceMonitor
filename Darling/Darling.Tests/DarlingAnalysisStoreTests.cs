@@ -207,7 +207,15 @@ public sealed class DarlingAnalysisStoreTests
         Assert.Contains("AND   analysis_time >= $2", PgFindingStore.GetRecentFindingsSql);
         Assert.Contains("AND   analysis_time <= $3", PgFindingStore.GetRecentFindingsSql);
         Assert.Contains("remediation_action_json", PgFindingStore.GetLatestFindingsSql);
-        Assert.Contains("SELECT MAX(analysis_time) FROM analysis_findings WHERE server_id = $1", PgFindingStore.GetLatestFindingsSql);
+
+        /* #3467: the batch anchor is still #2448's MAX(analysis_time), but pileup rows are carved out
+           of DEFINING it — a per-sweep SAME_STATEMENT_PILEUP row claiming the MAX would replace the
+           last complete analysis pass and read the server HEALTHIER mid-incident. The anchor now spans
+           two lines in the const, so it is pinned as the two fragments that actually appear; the full
+           carve-out contract (overlay arm, epoch anchor, Lite twin parity) belongs to
+           SameStatementPileupSourceCensusTests.BothFindingStores_CarveThePileupRowsOutOfTheLatestBatch_Identically. */
+        Assert.Contains("SELECT MAX(analysis_time) FROM analysis_findings", PgFindingStore.GetLatestFindingsSql);
+        Assert.Contains("WHERE server_id = $1 AND root_fact_key <> 'SAME_STATEMENT_PILEUP'", PgFindingStore.GetLatestFindingsSql);
 
         /* Mute reads span per-server AND global rows — NULL (the canonical all-servers marker) plus
            legacy server_id = 0 rows written by the pre-fix tool path — like both twins. */
