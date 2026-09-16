@@ -16,11 +16,15 @@ namespace PerformanceMonitor.Analysis;
 
 /// <summary>
 /// Detects a SAME-STATEMENT PILEUP in one active-query snapshot: N concurrent sessions on one
-/// statement, all past a floor of elapsed time, at least one suspended on an IO-class wait, where the
-/// same statement's recent snapshots show sub-second in-flight observations. That combination is the
-/// live signature of a parameterized plan flipping to an IO-heavy shape — every caller shares the
-/// plan, so every tenant inherits it at once and the copies pile up on PAGEIOLATCH while the
-/// statement's own recent history says it has no business running for seconds (#3467).
+/// statement IN ONE DATABASE, all past a floor of elapsed time, at least one suspended on an
+/// IO-class wait, where the same statement's recent snapshots in that database show sub-second
+/// in-flight observations. That combination is the live signature of a parameterized plan flipping
+/// to an IO-heavy shape — every caller shares the plan, so every tenant inherits it at once and the
+/// copies pile up on PAGEIOLATCH while the statement's own recent history says it has no business
+/// running for seconds (#3467). The database is part of the predicate because it is part of the
+/// mechanism: a compiled-plan cache entry is keyed per database, so "every caller shares one flipped
+/// plan" is only true within one (#3474 — the grouping remarks on <see cref="Evaluate"/> carry the
+/// measured evidence).
 ///
 /// <para><b>Why this exists as its own detector instead of a scheduled-analysis fact.</b> The measured
 /// incident (#3467, 2026-09-15, one production store class on a multi-tenant server) ran ~90 seconds
@@ -50,7 +54,18 @@ namespace PerformanceMonitor.Analysis;
 /// session past 10 s, and three of the four were routine batch shapes (a sync job at n = 5 / 13 s, a
 /// permission rebuild at n = 3, a nightly catalog scan at n = 3 / 24 s) that fail BOTH the IO-wait gate
 /// (zero IO-class waits) and the baseline gate (no in-window observation, or priors already slow). The
-/// fourth was the measured incident. Each constant's derivation is stated on the constant, in the unit
+/// fourth was the measured incident. Those distributions were measured under the detector's original
+/// SERVER-WIDE grouping predicate; the predicate is per-database now (#3474), and the derived numbers
+/// carry over without a re-pull because the scoping is a PARTITION of the old groups, never a
+/// widening: every server-wide group either survives intact (all of its rows in one database) or
+/// splits into smaller per-database groups, each facing the same session floor, elapsed floor, IO
+/// gate, and baseline gate with fewer rows behind it — so every gate is strictly HARDER to pass under
+/// the scoped predicate, and a derivation that was conservative server-wide stays conservative
+/// per-database. The measured incident itself was single-database, evidence-checked against the
+/// store's own snapshot rows on #3474 (all three convoy sessions in one tenant database — the "ten
+/// tenants" of the incident narrative are application-level tenants inside it, sharing exactly one
+/// parameterized plan), so its group, its 2.08 severity, and the four-instants-in-four-server-days
+/// specificity claim are unchanged. Each constant's derivation is stated on the constant, in the unit
 /// the gate compares (#3463's lesson), and the calibration is pinned by
 /// <c>SameStatementPileupDetectorTests</c>.</para>
 ///
@@ -229,10 +244,15 @@ public static class SameStatementPileupDetector
     /// (almost always zero or one). Pure and clock-driven by <paramref name="utcNow"/> so the
     /// measured incident replays verbatim in tests.
     ///
-    /// <para>Rows are grouped by statement identity — <c>query_hash</c> (the DMV's statement hash,
-    /// shared across sessions running the same parameterized statement) with a text-hash surrogate for
-    /// the rare null-hash row. Two sessions on the same statement are two rows with one identity and
-    /// two session_ids at one collection_time.</para>
+    /// <para>Rows are grouped by (database, statement identity): <see cref="DatabaseScope"/> paired
+    /// with <see cref="StatementIdentity"/> — <c>query_hash</c> (the DMV's statement hash, shared
+    /// across sessions running the same parameterized statement) with a text-hash surrogate for the
+    /// rare null-hash row. The database is part of the key because it is part of the claim: a
+    /// compiled-plan cache entry is keyed per database, so textually-identical SQL in two tenant
+    /// databases shares a query_hash by construction and shares NO plan — a cross-database group
+    /// would count sessions that never touched the plan the finding blames (#3474). Two sessions on
+    /// the same statement in one database are two rows with one group key and two session_ids at one
+    /// collection_time.</para>
     ///
     /// <para><b>Clock basis</b>: <c>CollectionTime</c> arrives as NAIVE UTC — both SKUs' collector
     /// runners stamp a batch with <c>DateTime.UtcNow</c> and store it in an offset-less column — so it
@@ -268,8 +288,15 @@ public static class SameStatementPileupDetector
 
         var baselineFloor = latest.AddMinutes(-BaselineLookbackMinutes);
 
-        /* The candidate groups: the newest instant's rows, by statement identity. */
-        foreach (var group in usable.Where(r => r.CollectionTime == latest).GroupBy(StatementIdentity))
+        /* The candidate groups: the newest instant's rows, by (database, statement identity). The
+           conflation the database key closes is measured, not hypothetical: within the same hour as
+           the incident, the same statement text ran 9.7 s in a DIFFERENT tenant database on the same
+           server — under the server-wide key, one snapshot's timing away from joining the incident's
+           pack and rewriting its severity arithmetic with a session that never touched its plan
+           (#3474; the review on #3469 predicted the shape, the store's snapshots confirmed it). */
+        foreach (var group in usable
+            .Where(r => r.CollectionTime == latest)
+            .GroupBy(r => (Database: DatabaseScope(r), Identity: StatementIdentity(r))))
         {
             var pack = group.ToList();
             var sessions = pack.Select(r => r.SessionId).Distinct().Count();
@@ -309,14 +336,23 @@ public static class SameStatementPileupDetector
                 continue;
             }
 
-            /* The baseline: the same statement's in-flight observations across the lookback, strictly
-               BEFORE the pileup instant (the pileup's own rows are the anomaly, not the norm). All of
-               them sub-second, and at least one of them present — see the two constants for why both
-               halves are load-bearing. */
-            var identity = group.Key;
+            /* The baseline: the same statement's in-flight observations IN THE SAME DATABASE across
+               the lookback, strictly BEFORE the pileup instant (the pileup's own rows are the anomaly,
+               not the norm). All of them sub-second, and at least one of them present — see the two
+               constants for why both halves are load-bearing. The database filter closes both
+               directions of cross-database pollution (#3474): another database's fast history must
+               not vouch for a statement that is new-and-slow where it actually runs — "normally
+               sub-second" is a claim about THIS database's plan — and another database's unrelated
+               slow occurrence must not suppress a real pileup here. The suppression direction fails
+               toward quiet, and its shape was in the store: the measured 9.7-second foreign-database
+               copy above sat one baseline window away from silencing the incident database's next
+               episode. */
+            var identity = group.Key.Identity;
+            var databaseScope = group.Key.Database;
             var baseline = usable
                 .Where(r => r.CollectionTime < latest
                             && r.CollectionTime >= baselineFloor
+                            && DatabaseScope(r) == databaseScope
                             && StatementIdentity(r) == identity)
                 .ToList();
             if (baseline.Count < MinBaselineObservations
@@ -325,8 +361,20 @@ public static class SameStatementPileupDetector
                 continue;
             }
 
+            /* The group is single-database by construction, so the finding's database is the KEY,
+               not a pick. The previous shape — FirstOrDefault over the pack's rows — was
+               nondeterministic for a multi-database pack (rows tie on collection_time, and row order
+               is not guaranteed stable), and ComputeIncidentId folds on databaseName: a pick that
+               moved between evaluations re-fingerprinted the same recurring pileup onto different
+               incident ids, destabilizing exactly the occurrence folding the detector was built
+               around and the stable trigger token #2138's force-plan bot wants (#3469's review named
+               the instability; #3474 closes it structurally). The empty scope — rows the DMV
+               reported with no database name — carries null, the same null the old pick produced for
+               an all-null pack, so nothing downstream of the story changes. */
+            var databaseName = databaseScope.Length == 0 ? null : databaseScope;
+
             detections.Add(BuildDetection(
-                serverName, identity, pack, baseline, minElapsedMs, sessions, ioWaiters, latest));
+                serverName, identity, databaseName, pack, baseline, minElapsedMs, sessions, ioWaiters, latest));
         }
 
         return detections;
@@ -357,6 +405,31 @@ public static class SameStatementPileupDetector
     }
 
     /// <summary>
+    /// The database half of the group key: the row's <c>database_name</c> as the DMV reported it,
+    /// trimmed, with null and whitespace folded to one empty scope (a request the DMV could not
+    /// attribute still groups with its identity-mates rather than fragmenting per row). No case
+    /// folding and no aliasing beyond the trim: the collector projects the engine's own name for the
+    /// database, which is stable across rows from one server, and any further normalization here
+    /// would be a second spelling of the value <see cref="ComputeIncidentId"/> folds on.
+    ///
+    /// <para><b>The tempdb rule.</b> A row the DMV attributes to tempdb scopes to tempdb — its own
+    /// (tempdb, statement) group, its baseline drawn only from tempdb-attributed history. The shape
+    /// is measured, not hypothetical: the incident statement joins a #temp table, and the day before
+    /// the incident a 16.5 s copy of it was recorded with tempdb as its database context — the
+    /// request's context followed the temp object (#3474). Reattributing such a row to the tenant
+    /// database it "really" ran for is deliberately NOT attempted: the snapshot carries no reliable
+    /// session-to-database mapping at read time to do it with, and a guessed attribution would
+    /// poison exactly the per-database baseline this scoping exists to keep clean — one wrong guess
+    /// plants multi-second rows in another database's history, which then suppresses that database's
+    /// next real pileup, and that failure direction is quiet. Being honest about what the DMV said
+    /// costs something bounded and visible instead: a pileup whose copies split between tempdb
+    /// attribution and tenant attribution fires only if one of the partitions clears the session
+    /// floor on its own.</para>
+    /// </summary>
+    public static string DatabaseScope(SnapshotRow row) =>
+        string.IsNullOrWhiteSpace(row.DatabaseName) ? string.Empty : row.DatabaseName.Trim();
+
+    /// <summary>
     /// The statement identity a pileup groups and fingerprints on: the row's <c>query_hash</c> when
     /// present (the sys.dm_exec_requests statement hash — identical across sessions running the same
     /// parameterized statement, and independent of Query Store), else a text-hash surrogate over the
@@ -379,6 +452,7 @@ public static class SameStatementPileupDetector
     private static Detection BuildDetection(
         string serverName,
         string identity,
+        string? databaseName,
         List<SnapshotRow> pack,
         List<SnapshotRow> baseline,
         long minElapsedMs,
@@ -387,7 +461,6 @@ public static class SameStatementPileupDetector
         DateTime snapshotTime)
     {
         var severity = ComputeSeverity(sessions, minElapsedMs);
-        var databaseName = pack.Select(r => r.DatabaseName).FirstOrDefault(d => !string.IsNullOrEmpty(d));
         var baselineMaxMs = baseline.Max(r => r.ElapsedMs);
         var leader = pack.OrderByDescending(r => r.ElapsedMs).First();
 
