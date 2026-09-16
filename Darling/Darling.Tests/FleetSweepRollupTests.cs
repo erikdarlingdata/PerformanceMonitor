@@ -447,6 +447,61 @@ public class FleetSweepRollupTests
         Assert.Contains("the check was made on every muted sweep", fired.DetailText, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3478's document-shape split cannot move the rollup, pinned rather than assumed: the extraction
+    /// never consults the document's <c>would_have_paged</c> member — its ledger figures ride the
+    /// STORE's rows (the ledger argument) — so all three vintages the store can hold extract identical
+    /// facts: a muted document carrying the key (the gated writer's shape), an alerts-on document
+    /// without it (post-gate), and a legacy alerts-on document carrying the fabricated <c>[]</c>
+    /// (immutable, living out its retention). None lands on the unreadable counter, and the ledger
+    /// totals are the rows' — the muted document's own single-row member does not leak in.
+    /// </summary>
+    [Fact]
+    public void TheExtraction_ReadsTheLedgerFromTheStoresRows_WhateverVintageTheDocumentIs()
+    {
+        object Doc(object[]? ledgerMember) => ledgerMember is null
+            ? Report(
+                transitions: new[] { Transition("pm-server-1", "Healthy", "Critical") },
+                bands: new Dictionary<string, int> { ["Critical"] = 1 })
+            : new
+            {
+                changes = new { band_transitions = new[] { Transition("pm-server-1", "Healthy", "Critical") } },
+                watch = new { opened = Array.Empty<object>(), closed = Array.Empty<object>() },
+                fleet = new { bands = new Dictionary<string, int> { ["Critical"] = 1 } },
+                would_have_paged = ledgerMember,
+            };
+
+        var runs = new[]
+        {
+            /* Muted, key present-and-populated — the gated writer's muted shape. */
+            Run(1, Day.AddHours(-3), alertsEnabled: false, rawReport: JsonSerializer.Serialize(
+                Doc(new object[] { new { server_id = 1, family = "deadlocks", evidence = "{}" } }))),
+            /* Legacy alerts-on, the fabricated [] — what the store holds from before the gate. */
+            Run(2, Day.AddHours(-2), rawReport: JsonSerializer.Serialize(Doc(Array.Empty<object>()))),
+            /* Post-gate alerts-on: no key at all. */
+            Run(3, Day.AddHours(-1), rawReport: JsonSerializer.Serialize(Doc(null))),
+        };
+
+        var ledger = new[]
+        {
+            new FleetSweepLedgerSpanEntry(1, 1, "deadlocks"),
+            new FleetSweepLedgerSpanEntry(1, 2, "deadlocks"),
+        };
+
+        var facts = DarlingSelfAlertEvaluator.ExtractRollupFacts(runs, ledger, Names);
+
+        Assert.Equal(3, facts.Sweeps);
+        Assert.Equal(0, facts.UnreadableItems);   /* no vintage is a parse casualty */
+        Assert.Equal(3, facts.Transitions.Count); /* the members it DOES read, read on every vintage */
+
+        /* TWO rows from the store against ONE row inside the muted document: the figures are the
+           rows', which is the tolerance — the key can come, go, or lie empty without moving these. */
+        Assert.Equal(2, facts.LedgerRows);
+        Assert.Equal(2, facts.LedgerServers);
+        var family = Assert.Single(facts.Ledger);
+        Assert.Equal(2, family.Rows);
+    }
+
     /// <summary>An unreadable sweep document is COUNTED and the count is itself reportable — an unreadable
     /// day must not read as a quiet one, which is the quiet-is-not-clean rule applied to this feature's own
     /// artifacts.</summary>

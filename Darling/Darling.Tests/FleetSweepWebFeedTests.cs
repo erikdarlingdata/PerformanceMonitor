@@ -183,6 +183,56 @@ public sealed class FleetSweepWebFeedTests
         Assert.IsType<JsonArray>(FleetSweepPresentation.EmbedJson("[1,2]"));
     }
 
+    /// <summary>
+    /// THE legacy-doc pin (#3478): every alerts-on sweep persisted before the engine's storage gate
+    /// carries a fabricated <c>would_have_paged: []</c> — written unconditionally, never derived — and
+    /// stored documents are immutable, living out their retention as-written. The run node strips the
+    /// key from the EMBEDDED report on an alerts-on sweep, so the render contract (absent means no
+    /// check was made) holds across the legacy store without a data migration — and against any future
+    /// writer regression. Both surfaces and both read paths ride this one builder: the timeline embeds
+    /// run nodes, and the sweep_id fetch's detail node wraps the same one.
+    /// </summary>
+    [Fact]
+    public void TheRunNode_StripsTheFabricatedLedgerKey_FromALegacyAlertsOnDocument()
+    {
+        var legacy = Run(alertsEnabled: true) with
+        {
+            ReportJson = "{\"alerts_enabled\":true,\"would_have_paged\":[]}",
+        };
+
+        var node = FleetSweepPresentation.BuildRunNode(legacy);
+        var report = Assert.IsType<JsonObject>(node["report"]);
+        Assert.False(report.ContainsKey("would_have_paged"));
+
+        /* The sweep_id fetch path serves the same stripped embed, and its top-level gate still holds —
+           neither layer of an alerts-on detail claims the check. */
+        var detail = FleetSweepPresentation.BuildSweepDetailNode(
+            legacy, new List<FleetSweepServerVerdict>(), new List<FleetSweepWouldHavePagedEntry>());
+        Assert.False(Assert.IsType<JsonObject>(detail["report"]).ContainsKey("would_have_paged"));
+        Assert.False(detail.ContainsKey("would_have_paged"));
+
+        /* The strip probes only a parsed OBJECT: an unparseable alerts-on payload still rides verbatim
+           — the fail-toward-visible arm is not a casualty of the gate. */
+        var unreadable = Run(alertsEnabled: true) with { ReportJson = "not json at all" };
+        Assert.Equal("not json at all", FleetSweepPresentation.BuildRunNode(unreadable)["report"]!.GetValue<string>());
+    }
+
+    /// <summary>The strip is alerts-on ONLY: a muted document's ledger key is the muted-mode contract's
+    /// whole point and rides the embed untouched — including empty, because present-and-empty is the
+    /// statement ("muted, and nothing would have paged"), not a shape accident.</summary>
+    [Fact]
+    public void TheRunNode_LeavesTheLedgerKey_OnAMutedDocument()
+    {
+        var muted = Run(alertsEnabled: false) with
+        {
+            ReportJson = "{\"alerts_enabled\":false,\"would_have_paged\":[]}",
+        };
+
+        var report = Assert.IsType<JsonObject>(FleetSweepPresentation.BuildRunNode(muted)["report"]);
+        var rows = Assert.IsType<JsonArray>(report["would_have_paged"]);
+        Assert.Empty(rows);
+    }
+
     [Fact]
     public void TheDetailNode_UnderMasterOff_CarriesTheLedger_WithServerNamesJoined()
     {
