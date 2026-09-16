@@ -545,6 +545,190 @@ public class SameStatementPileupDetectorTests
         Assert.Equal(2, detections.Select(d => d.Story.StoryPathHash).Distinct().Count());
     }
 
+    /* ─────────────────────────── database scoping (#3474) ─────────────────────────── */
+
+    /// <summary>
+    /// The conflation kill-shot (#3469's review, then measured on the evidence day: within the same
+    /// hour as the incident, the same statement text ran 9.7 s in a DIFFERENT tenant database on the
+    /// same server — one snapshot's timing from joining the pack under a server-wide key). Three
+    /// same-hash sessions in three databases are three one-session groups, not a pileup: a
+    /// compiled-plan cache entry is keyed per database, so these sessions never shared the plan the
+    /// finding would have blamed. Each database carries its own sub-second history, so ONLY the
+    /// shared-database condition is missing — under the old server-wide key this window produced one
+    /// notify-eligible "pileup" whose members shared nothing but text.
+    /// </summary>
+    [Fact]
+    public void ThreeDatabases_SharingAHash_AreThreeGroups_NotAPileup()
+    {
+        List<SameStatementPileupDetector.SnapshotRow> window =
+        [
+            Row(PileupAt, 649, 29_000, wait: "PAGEIOLATCH_SH", status: "suspended", db: "tenant_a"),
+            Row(PileupAt, 311, 28_000, wait: "PAGEIOLATCH_SH", status: "suspended", db: "tenant_b"),
+            Row(PileupAt, 847, 27_000, wait: null, status: "running", db: "tenant_c"),
+            Row(PileupAt.AddMinutes(-3), 300, 54, db: "tenant_a"),
+            Row(PileupAt.AddMinutes(-3), 301, 61, db: "tenant_b"),
+            Row(PileupAt.AddMinutes(-3), 302, 48, db: "tenant_c"),
+        ];
+
+        Assert.Empty(SameStatementPileupDetector.Evaluate(IncidentServer, window, JustAfterPileup));
+    }
+
+    /// <summary>
+    /// Baseline isolation, the vouching direction: "normally sub-second" is a claim about THIS
+    /// database's plan. A real pileup in one database with no in-window history of its own is not
+    /// vouched for by another database's fast history of the same hash — and once the pileup
+    /// database's own observation exists, the same window fires, attributed to and counted from that
+    /// database alone: the concurrent same-hash copy in the other database joins neither the session
+    /// count nor the pack minimum the severity is priced on.
+    /// </summary>
+    [Fact]
+    public void AnotherDatabasesFastHistory_NeitherVouches_NorJoinsThePack()
+    {
+        List<SameStatementPileupDetector.SnapshotRow> window =
+        [
+            Row(PileupAt, 649, 29_000, wait: "PAGEIOLATCH_SH", status: "suspended", db: "tenant_a"),
+            Row(PileupAt, 311, 28_000, wait: "PAGEIOLATCH_SH", status: "suspended", db: "tenant_a"),
+            Row(PileupAt, 847, 27_000, wait: null, status: "running", db: "tenant_a"),
+            /* A concurrent same-hash copy in ANOTHER database, slower than the pack's own minimum —
+               the measured near-miss shape. It must not become a fourth session or the new minimum. */
+            Row(PileupAt, 512, 26_000, wait: "PAGEIOLATCH_SH", status: "suspended", db: "tenant_b"),
+            /* And the other database's fast history for the same hash, in the window. Under the
+               server-wide baseline this row vouched for tenant_a's pack. */
+            Row(PileupAt.AddMinutes(-3), 300, 54, db: "tenant_b"),
+        ];
+
+        /* Unproven where it actually runs: no finding. */
+        Assert.Empty(SameStatementPileupDetector.Evaluate(IncidentServer, window, JustAfterPileup));
+
+        /* With tenant_a's own sub-second observation present, the identical window fires — the
+           foreign rows' presence changes nothing in either direction. */
+        window.Add(Row(PileupAt.AddMinutes(-4), 299, 61, db: "tenant_a"));
+
+        var detection = Assert.Single(SameStatementPileupDetector.Evaluate(IncidentServer, window, JustAfterPileup));
+        Assert.Equal("tenant_a", detection.Story.DatabaseName);
+        Assert.Equal(3.0, detection.Story.RootFactValue, precision: 4);
+        Assert.Equal(27_000.0, detection.Story.LeafFactValue!.Value, precision: 4);
+    }
+
+    /// <summary>
+    /// Baseline isolation, the suppression direction — the one that fails QUIET. The measured
+    /// near-miss row verbatim: the same statement text at 9.7 s / 7.4M reads in a different tenant
+    /// database, within the same hour as the incident. Under the server-wide baseline that row
+    /// breaks the sub-second ceiling for EVERY database's pack and silences the real pileup; scoped,
+    /// it is the other database's story and the incident fires exactly as measured.
+    /// </summary>
+    [Fact]
+    public void AnotherDatabasesSlowRow_DoesNotSuppressARealPileup()
+    {
+        var window = MeasuredIncidentWindow();
+        window.Add(Row(PileupAt.AddMinutes(-8), 512, 9_700, logicalReads: 7_400_000, db: "tenant_other"));
+
+        var detection = Assert.Single(SameStatementPileupDetector.Evaluate(IncidentServer, window, JustAfterPileup));
+        Assert.Equal(IncidentDb, detection.Story.DatabaseName);
+        Assert.Equal(SameStatementPileupDetector.SeverityCap, detection.Story.Severity, precision: 4);
+    }
+
+    /// <summary>
+    /// The tempdb rule (#3474, measured: the day before the incident, a 16.5 s copy of the incident
+    /// statement was recorded with tempdb as its database context — the statement joins a #temp
+    /// table and the request's context followed it). A tempdb-attributed row scopes to tempdb: it
+    /// neither joins a tenant database's pack nor rewrites its arithmetic, tempdb-attributed
+    /// sessions can form their own pileup, and that pileup's baseline is drawn only from
+    /// tempdb-attributed history — honest about what the DMV said, with no reattribution guessing
+    /// (DatabaseScope's remarks carry why a guess would poison the baselines this scoping cleans).
+    /// </summary>
+    [Fact]
+    public void TempdbAttributedRows_GroupAmongThemselves()
+    {
+        /* The measured wrinkle beside the measured incident: the 16.5 s tempdb-attributed copy at
+           the pileup instant. Under a database-blind key it would have become the pack's fourth
+           session AND its new minimum (16.5 s, not 27.7 s), repricing the severity with a row from a
+           context the plan does not live in. */
+        var window = MeasuredIncidentWindow();
+        window.Add(Row(PileupAt, 950, 16_500, wait: "PAGEIOLATCH_SH", status: "suspended", waitMs: 5, db: "tempdb"));
+
+        var detection = Assert.Single(SameStatementPileupDetector.Evaluate(IncidentServer, window, JustAfterPileup));
+        Assert.Equal(IncidentDb, detection.Story.DatabaseName);
+        Assert.Equal(3.0, detection.Story.RootFactValue, precision: 4);
+        Assert.Equal(27_703.0, detection.Story.LeafFactValue!.Value, precision: 4);
+
+        /* Tempdb-attributed sessions form their own (tempdb, statement) group, vouched by
+           tempdb-attributed history. */
+        List<SameStatementPileupDetector.SnapshotRow> tempdbPileup =
+        [
+            Row(PileupAt, 960, 22_000, wait: "PAGEIOLATCH_SH", status: "suspended", db: "tempdb"),
+            Row(PileupAt, 961, 21_000, wait: "PAGEIOLATCH_SH", status: "suspended", db: "tempdb"),
+            Row(PileupAt, 962, 20_000, wait: null, status: "running", db: "tempdb"),
+            Row(PileupAt.AddMinutes(-3), 963, 70, db: "tempdb"),
+        ];
+
+        var tempdbDetection = Assert.Single(
+            SameStatementPileupDetector.Evaluate(IncidentServer, tempdbPileup, JustAfterPileup));
+        Assert.Equal("tempdb", tempdbDetection.Story.DatabaseName);
+
+        /* And a tenant database's history cannot vouch for a tempdb-scoped pack: the same pileup
+           with its only prior observation attributed to the tenant database stays quiet. */
+        var crossVouched = tempdbPileup
+            .Select(r => r.CollectionTime == PileupAt ? r : r with { DatabaseName = IncidentDb })
+            .ToList();
+
+        Assert.Empty(SameStatementPileupDetector.Evaluate(IncidentServer, crossVouched, JustAfterPileup));
+    }
+
+    /// <summary>
+    /// The fold-attribution fix, pinned as behavior: the finding's database IS the group key's, so
+    /// row order cannot move it. The previous shape — a first-non-empty pick over the pack — could
+    /// hand the same recurring pileup different database names across evaluations when row order
+    /// shifted (rows tie on collection_time), and ComputeIncidentId folds on databaseName, so the
+    /// fold key itself wobbled (#3469's review, first-listed consequence). Permuting the window's
+    /// row order must never move the database or the fingerprint.
+    /// </summary>
+    [Fact]
+    public void TheFindingsDatabase_IsTheGroupKeys_UnderAnyRowOrder()
+    {
+        var window = MeasuredIncidentWindow();
+
+        List<List<SameStatementPileupDetector.SnapshotRow>> permutations =
+        [
+            window,
+            Enumerable.Reverse(window).ToList(),
+            window.OrderBy(r => r.SessionId).ToList(),
+            window.OrderByDescending(r => r.ElapsedMs).ToList(),
+        ];
+
+        foreach (var permutation in permutations)
+        {
+            var detection = Assert.Single(
+                SameStatementPileupDetector.Evaluate(IncidentServer, permutation, JustAfterPileup));
+
+            Assert.Equal(IncidentDb, detection.Story.DatabaseName);
+            Assert.Equal(
+                SameStatementPileupDetector.ComputeIncidentId(IncidentServer, IncidentDb, IncidentHash),
+                detection.Story.IncidentId);
+        }
+    }
+
+    /// <summary>
+    /// Rows the DMV reported with no database name fold to one empty scope: they still group with
+    /// their identity-mates (fragmenting per row would make an unattributed pileup undetectable),
+    /// and the finding carries a null database — the same null the pick-based shape produced for an
+    /// all-null pack, so nothing downstream of the story changes.
+    /// </summary>
+    [Fact]
+    public void RowsWithoutADatabaseName_ShareOneScope_AndCarryANullDatabase()
+    {
+        List<SameStatementPileupDetector.SnapshotRow> window =
+        [
+            Row(PileupAt, 970, 25_000, wait: "PAGEIOLATCH_SH", status: "suspended", db: null),
+            Row(PileupAt, 971, 24_000, wait: "PAGEIOLATCH_SH", status: "suspended", db: "  "),
+            Row(PileupAt, 972, 23_000, wait: null, status: "running", db: null),
+            Row(PileupAt.AddMinutes(-3), 973, 45, db: null),
+        ];
+
+        var detection = Assert.Single(SameStatementPileupDetector.Evaluate(IncidentServer, window, JustAfterPileup));
+        Assert.Null(detection.Story.DatabaseName);
+    }
+
     /* ─────────────────────────── Query Store independence ─────────────────────────── */
 
     /// <summary>
