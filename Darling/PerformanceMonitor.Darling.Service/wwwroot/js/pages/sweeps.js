@@ -110,6 +110,14 @@ function spanControl() {
 
 async function renderDetail(box) {
   mount(box, loadingStrip("Loading sweep…"));
+  /* sweep_id arrives as a JSON STRING (#3487): the ids are tick-scale, ~70x past
+     Number.MAX_SAFE_INTEGER, so a JSON number here had already been rounded by JSON.parse and this
+     fetch asked for a neighbor that was never recorded. The string rides this page's existing code
+     unchanged: the concat below concatenates it verbatim, the timeline's active check compares it
+     strictly against a value only ever assigned from s.sweep_id (like with like), and the
+     no-previous-sweep test is previous_sweep_id == null, which a non-empty string never satisfies.
+     Nothing on this page does arithmetic on an id, and the timeline's order is the API's own
+     (by swept_at) — keep it that way: an id is a name here, not a number. */
   const res = await apiGet(selectedSweepId != null ? "/api/sweeps/" + selectedSweepId : "/api/sweeps/latest");
   if (res.kind === "error") {
     if (res.status === 404) {

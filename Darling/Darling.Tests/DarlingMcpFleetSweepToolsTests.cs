@@ -120,6 +120,20 @@ public sealed class DarlingMcpFleetSweepToolsTests
         Assert.Contains("fleet_sweep", description, StringComparison.Ordinal);
     }
 
+    /// <summary>#3487's output side, stated where an agent reads: every sweep id the payload carries
+    /// rides as a JSON string — the input half of #2548's rule was always described, and the output
+    /// half now closes the loop, so a quoted id reads as the contract rather than a quirk. The
+    /// emission itself is pinned in <c>FleetSweepWebFeedTests</c> on the shared builders.</summary>
+    [Fact]
+    public void Description_StatesTheIds_AreEmittedAsStrings()
+    {
+        var description = ToolMethods().Single()
+            .GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+        Assert.Contains("spelled as a JSON string", description, StringComparison.Ordinal);
+        Assert.Contains("pass one back verbatim", description, StringComparison.Ordinal);
+    }
+
     /* ---------------- refusals, before the store is ever touched ---------------- */
 
     [Theory]
