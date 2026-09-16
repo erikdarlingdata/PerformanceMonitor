@@ -196,6 +196,7 @@ public static class PgMigrations
             + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
         new Migration(122, "pg-deadlock-blocking-count-knobs", V122Sql),
         new Migration(123, "fleet-sweep-state", V123Sql),
+        new Migration(124, "fleet-sweep-cadence-knobs", V124Sql),
     };
 
     /// <summary>
@@ -570,6 +571,48 @@ ALTER TABLE config.config_alert_settings
     /// until the engine lands in the same release line — an empty table needs no pruning.</para>
     /// </summary>
     private const string V123Sql = FleetSweepStore.CreateTablesSql;
+
+    /// <summary>
+    /// V124 — the fleet sweep's cadence knobs on the singleton <c>config_alert_settings</c> row
+    /// (#3466, lane 2): whether the scheduled fleet sweep runs, and how often. The spec's own words —
+    /// "at a user-configured cadence (hourly by default)" — make the cadence an operator knob from
+    /// birth, so it ships on the control plane rather than graduating to it later the way #3297 and
+    /// #3444's constants had to. Pinned by <c>FleetSweepCadenceKnobRungTests</c>.
+    ///
+    /// <para><b>This row is the precedent, not an approximation of one.</b> The scheduled-analysis
+    /// cadence — the product's one existing "run a whole-fleet evaluation every N minutes" knob —
+    /// lives here as <c>analysis_enabled</c>/<c>analysis_interval_minutes</c> (control-plane Stage 1),
+    /// reaches the service through <c>StoreConfigProvider</c>'s wholesale config swap, and is exposed
+    /// through <c>get_alert_settings</c>/<c>update_alert_settings</c> with write bounds that match the
+    /// read-side clamp. The sweep's pair takes exactly that path. It is NOT an alert and delivers
+    /// nothing — the master switch deliberately does not govern it, because sweeps under master-off
+    /// are the muted-mode contract's whole point — but "the alert-settings row" has been the home of
+    /// every operator-tunable evaluation cadence since V17, and a second config table for two columns
+    /// would split the surface <c>update_alert_settings</c> documents.</para>
+    ///
+    /// <para><b>The column defaults ARE the shared constants</b> (<c>TRUE</c>, and
+    /// <c>FleetSweepCadence.DefaultIntervalMinutes</c> — restated as literals here only because a rung
+    /// is a SQL string, and pinned equal by the rung tests). Enabled-by-default is deliberate: the
+    /// feature is dogfooded in a separate environment before any production install per the owner's
+    /// deployment note, and a report surface that ships dark is a report surface nobody evaluates.</para>
+    ///
+    /// <para><b>Darling-only, structurally</b> — the V123 reasoning continues: Lite has no fleet to
+    /// sweep, so there is no Lite twin of these knobs and <c>McpAlertSettingsKeyTests</c> records the
+    /// omitted <c>fleet_sweep</c> group as a decision with a paying test.</para>
+    ///
+    /// <para><b>No CHECK enforcing the bounds</b>, matching V119/V120/V122: the floor and ceiling are
+    /// <c>FleetSweepCadence</c>'s named constants, enforced as the <c>update_alert_settings</c> write
+    /// bound, the Viewer's save gate, and the worker's read-side clamp — the raw-in/clamped-out split
+    /// every knob on this table uses. No reload beacon of its own: V17's statement-level
+    /// <c>trg_bump_alert_settings</c> already bumps <c>config_service.config_version</c> on any write
+    /// here, so the running service picks a cadence change up on its next sweep with no restart. No
+    /// GRANT: this table carries table-level grants with no column carve.</para>
+    /// </summary>
+    private const string V124Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS fleet_sweep_enabled boolean NOT NULL DEFAULT TRUE;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS fleet_sweep_interval_minutes integer NOT NULL DEFAULT 60;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

@@ -557,6 +557,39 @@ ORDER BY server_id, item_key;";
     }
 
     /// <summary>
+    /// One sweep's per-server verdicts for the ENGINE's diff — the same statement as
+    /// <see cref="GetServerVerdictsAsync"/> with the opposite fault posture, and the split is the
+    /// point: this read is sweep N's join target for previous-band and transition computation, and a
+    /// fault swallowed into empty would make every server read as NEW to the sweep — a diff that
+    /// restates absolutes because the store failed, the same misreading <see cref="GetLatestSweepAsync"/>
+    /// throws to prevent. The presentation read keeps its log-and-degrade posture for the surfaces
+    /// that have their own degraded rendering; the engine has none, so it throws and the sweep fails
+    /// loudly instead of publishing a wrong document.
+    /// </summary>
+    public static async Task<List<FleetSweepServerVerdict>> GetServerVerdictsForEngineAsync(
+        NpgsqlDataSource postgres, long sweepId, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        var verdicts = new List<FleetSweepServerVerdict>();
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = new NpgsqlCommand(GetVerdictsSql, connection)
+        {
+            CommandTimeout = CommandTimeoutSeconds,
+        };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = sweepId });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            verdicts.Add(ReadVerdict(reader));
+        }
+
+        return verdicts;
+    }
+
+    /// <summary>
     /// The runs inside a span, newest first — the web feed's read (lane 3). Logs and returns empty
     /// on a fault, the presentation-read discipline (PgFindingStore): the surfaces this serves have
     /// their own degraded rendering, and an exception here would take the whole page with it.
@@ -616,13 +649,7 @@ ORDER BY server_id, item_key;";
             await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                verdicts.Add(new FleetSweepServerVerdict(
-                    reader.GetInt32(0),
-                    reader.GetString(1),
-                    reader.GetString(2),
-                    reader.IsDBNull(3) ? null : reader.GetString(3),
-                    reader.IsDBNull(4) ? null : reader.GetString(4),
-                    reader.IsDBNull(5) ? null : reader.GetString(5)));
+                verdicts.Add(ReadVerdict(reader));
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -717,6 +744,19 @@ ORDER BY server_id, item_key;";
             reader.GetBoolean(8),
             reader.GetString(9),
             reader.GetString(10));
+    }
+
+    /// <summary>Maps one verdict row — ordinals match <see cref="GetVerdictsSql"/>, the one statement
+    /// both the engine read and the presentation read execute.</summary>
+    private static FleetSweepServerVerdict ReadVerdict(NpgsqlDataReader reader)
+    {
+        return new FleetSweepServerVerdict(
+            reader.GetInt32(0),
+            reader.GetString(1),
+            reader.GetString(2),
+            reader.IsDBNull(3) ? null : reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4),
+            reader.IsDBNull(5) ? null : reader.GetString(5));
     }
 
     /// <summary>Maps one watch-item row — ordinals match <see cref="WatchItemColumns"/>.</summary>

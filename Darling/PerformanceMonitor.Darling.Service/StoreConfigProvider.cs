@@ -989,11 +989,12 @@ INSERT INTO config_alert_settings (
     file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes,
     retention_hold_warn_ratio, retention_hold_critical_ratio,
     deadlock_warn_per_hour, deadlock_critical_per_hour,
-    pg_deadlock_count_threshold, pg_blocking_count_threshold)
+    pg_deadlock_count_threshold, pg_blocking_count_threshold,
+    fleet_sweep_enabled, fleet_sweep_interval_minutes)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
         $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63,
-        $64, $65)
+        $64, $65, $66, $67)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -1080,6 +1081,11 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
            reports back. */
         command.Parameters.AddWithValue(a.PgDeadlockCountThreshold);
         command.Parameters.AddWithValue(a.PgBlockingCountThreshold);
+        /* #3466, bound in the same order the V124 columns were appended. Seeded RAW like every sibling:
+           the cadence clamp lives at the worker's read (FleetSweepCadence's bounds), so what the store
+           holds is what get_alert_settings reports back. */
+        command.Parameters.AddWithValue(a.FleetSweepEnabled);
+        command.Parameters.AddWithValue(a.FleetSweepIntervalMinutes);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -1352,7 +1358,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes,
        retention_hold_warn_ratio, retention_hold_critical_ratio,
        deadlock_warn_per_hour, deadlock_critical_per_hour,
-       pg_deadlock_count_threshold, pg_blocking_count_threshold
+       pg_deadlock_count_threshold, pg_blocking_count_threshold,
+       fleet_sweep_enabled, fleet_sweep_interval_minutes
 FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -1470,6 +1477,13 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
                shipped default on every worker start. */
             PgDeadlockCountThreshold = reader.GetInt32(62),
             PgBlockingCountThreshold = reader.GetInt32(63),
+
+            /* #3466 fleet-sweep cadence knobs appended (V124) at ordinals 64-65. Same reachability rule
+               as every appended knob: ApplyToConfig replaces config.Alerts wholesale, so a column selected
+               but not read here -- or read but not selected -- would silently reset the knob to the shipped
+               default on every worker start. */
+            FleetSweepEnabled = reader.GetBoolean(64),
+            FleetSweepIntervalMinutes = reader.GetInt32(65),
         };
         var analysis = new AnalysisConfig
         {

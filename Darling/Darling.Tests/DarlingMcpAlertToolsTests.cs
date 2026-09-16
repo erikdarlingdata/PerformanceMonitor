@@ -744,7 +744,11 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* #3444: inside the write bound (>= 1), deliberately NOT the shipped 1s, and deliberately NOT the
            SQL Server numbers above (3 and 5) — equal pairs would let a payload that emitted the wrong
            engine's figure under either key round-trip unnoticed. */
-        PgDeadlockCountThreshold: 4, PgBlockingCountThreshold: 6);
+        PgDeadlockCountThreshold: 4, PgBlockingCountThreshold: 6,
+        /* #3466 (V124): inside the write bound [15, 1440], deliberately NOT the shipped 60 — a sample
+           equal to the default would let a payload that dropped the column and fell back to the default
+           still match — and enabled deliberately FALSE against the shipped TRUE for the same reason. */
+        FleetSweepEnabled: false, FleetSweepIntervalMinutes: 240);
 
     [Fact]
     public void AlertSettingsSql_ReadsSingleGlobalRow()

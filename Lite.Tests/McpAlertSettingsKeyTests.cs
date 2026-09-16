@@ -138,6 +138,17 @@ public sealed class McpAlertSettingsKeyTests
     /// file: there is now more than one, and a numeral here would go stale without going red.</summary>
     private const string SelfAlertsGroup = "self_alerts";
 
+    /// <summary>#3466 (V124): the third group Darling reports and Lite deliberately does not. The fleet
+    /// sweep is a scheduled report about a FLEET — what changed across the monitored population since the
+    /// last sweep — and Lite monitors one server from one desktop with no fleet to summarize: nothing in
+    /// this SKU references the sweep engine, the sweep store, or the cadence constants, which is checkable
+    /// and checked (<see cref="GetAlertSettings_OmitsFleetSweep_BecauseLiteHasNoFleetToSweep"/>). Emitting
+    /// <c>fleet_sweep.enabled</c>/<c>fleet_sweep.interval_minutes</c> here would advertise knobs this
+    /// product cannot act on — the placeholder failure this file's history rejected for
+    /// <c>ag.disconnect_refire_minutes</c>. Omission is the honest answer; if Lite ever grows a fleet,
+    /// that test is where it shows up.</summary>
+    private const string FleetSweepGroup = "fleet_sweep";
+
     /// <summary>#3368: the other group Darling reports and Lite does not. The health-band tiers decide what
     /// colour a server's card reads and how the worst-first ranking and <c>get_fleet_overview</c> count bands
     /// — and Lite has NO health band at all: it never constructs <c>ServerHealthMetrics</c>, never calls
@@ -277,7 +288,7 @@ public sealed class McpAlertSettingsKeyTests
 
         foreach (var (group, darlingKeys) in darling)
         {
-            if (group == SelfAlertsGroup || group == HealthBandsGroup) continue;
+            if (group == SelfAlertsGroup || group == HealthBandsGroup || group == FleetSweepGroup) continue;
 
             if (!root.TryGetProperty(group, out var element))
             {
@@ -396,6 +407,37 @@ public sealed class McpAlertSettingsKeyTests
             .ToArray();
 
         Assert.Empty(bandCallers);
+    }
+
+    /// <summary>
+    /// #3466 (V124): the group-level omission's paying test, in the health-bands shape's three halves.
+    /// Darling must still emit the group (or the exemption above is dead weight hiding a Darling
+    /// regression), Lite must still not emit it, and the absence of the machinery the knobs would tune is
+    /// checkable rather than assertable — so it is checked: no Lite source references the sweep engine,
+    /// the sweep state store, the cadence constants, or the store columns. If Lite ever grows a fleet to
+    /// sweep, this scan is where that shows up, the group comes out of the parity skip, and the members
+    /// compare — #2426's ag history, repeated at group grain.
+    /// </summary>
+    [Fact]
+    public void GetAlertSettings_OmitsFleetSweep_BecauseLiteHasNoFleetToSweep()
+    {
+        Assert.Contains(FleetSweepGroup, DarlingPayloadShape().Select(g => g.Key));
+        Assert.DoesNotContain(FleetSweepGroup, KeysOf(Settings()));
+
+        var liteRoot = Path.GetDirectoryName(FindRepoFile(Path.Combine("Lite", "PerformanceMonitorLite.csproj")))!;
+        var fleetSweepCallers = Directory
+            .EnumerateFiles(liteRoot, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                     && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => File.ReadAllText(f) is var text
+                     && (text.Contains("FleetSweepEngine", StringComparison.Ordinal)
+                      || text.Contains("FleetSweepStore", StringComparison.Ordinal)
+                      || text.Contains("FleetSweepCadence", StringComparison.Ordinal)
+                      || text.Contains("fleet_sweep_interval_minutes", StringComparison.Ordinal)))
+            .Select(f => Path.GetFileName(f))
+            .ToArray();
+
+        Assert.Empty(fleetSweepCallers);
     }
 
     /// <summary>

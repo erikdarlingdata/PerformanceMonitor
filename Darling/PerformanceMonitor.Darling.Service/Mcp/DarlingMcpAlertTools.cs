@@ -325,6 +325,16 @@ public sealed class DarlingMcpAlertTools
             notify_severity = s.AnalysisNotifySeverity,
             /* #2107: was a hardcoded 360 in Darling while Lite passed a configured value through. */
             notify_cooldown_minutes = s.AnalysisNotifyCooldownMinutes
+        },
+        /* #3466 (V124): the fleet sweep's own switch and cadence — the scheduled whole-fleet report,
+           NOT an alert family. The alert master switch deliberately does not govern it (sweeps under
+           alerts_enabled: false carry the would-have-paged ledger, which is the muted-mode contract's
+           whole point), so it gets its own group rather than a member of one the master switch covers.
+           Darling-only: Lite has no fleet to sweep, and McpAlertSettingsKeyTests records the omission. */
+        fleet_sweep = new
+        {
+            enabled = s.FleetSweepEnabled,
+            interval_minutes = s.FleetSweepIntervalMinutes
         }
     };
 
@@ -419,6 +429,11 @@ public sealed class DarlingMcpAlertTools
         "is Critical' reading these tiers replaced. Setting critical BELOW warn is accepted and means every " +
         "banded rate is Critical. " +
         "Two keys govern the PostgreSQL versions of the two count alerts and are NOT the same numbers as their SQL Server neighbours: deadlocks.pg_count_threshold and blocking.pg_count_threshold, both accepting 1 upward. They sit inside those groups rather than a section of their own so both engines' figures are visible together, but tuning deadlocks.count_threshold does NOT move the PostgreSQL gate and tuning deadlocks.pg_count_threshold does NOT move the SQL Server one. The enabled switch in each group DOES govern both engines. They are separate because the reason to move the SQL Server deadlock figure is agreement with health_bands.deadlock_warn_per_hour, and a PostgreSQL server has no deadlock band at all - its deadlocks are served by get_pg_deadlocks and are structurally absent from the fleet deadlock total - while on the blocking side the SQL Server count is engine-recorded blocked-process reports and the PostgreSQL one is distinct root blockers in a periodic SAMPLE of pg_stat_activity. Both PostgreSQL keys are ignored on a store with no PostgreSQL targets. " +
+        "The fleet_sweep group is NOT an alert family and the alerts_enabled master switch does not govern it: " +
+        "fleet_sweep.enabled turns the scheduled whole-fleet sweep report on or off, and " +
+        "fleet_sweep.interval_minutes (15\u20131440, default 60) is its cadence. Sweeps deliberately keep running " +
+        "under alerts_enabled: false \u2014 that is when they carry the would-have-paged ledger \u2014 so muting the " +
+        "fleet does not blind the report surface. " +
         "For silencing ONE recurring signature for a " +
         "long stretch, use create_mute_rule instead of a long delivery cooldown: a mute is scoped, expires, is " +
         "listed by get_mute_rules, and still logs the alert, where the cooldown is global to every fingerprint " +
@@ -1567,6 +1582,27 @@ public sealed class DarlingMcpAlertTools
                             /* #2107: the clamp matches the shared engine's documented [30, 10080]. */
                             case "notify_cooldown_minutes": AddInt("analysis_notify_cooldown_minutes", n, "analysis.notify_cooldown_minutes", 30, 10080); break;
                             default: error = $"Unknown field 'analysis.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                /* #3466 (V124): bounds are FleetSweepCadence's named constants — the same figures the
+                   worker clamps to on read and the Viewer's save gate enforces — so no value this tool
+                   accepts is a value another surface then silently rewrites, the "setting did not
+                   stick" parity every knob group above holds. The bounds' own reasoning (a sweep span
+                   must hold enough samples to band on; a sweep rarer than daily starves the lane-4
+                   rollup) lives on the constants. */
+                case "fleet_sweep":
+                    Group(prop.Value, "fleet_sweep", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("fleet_sweep_enabled", n, "fleet_sweep.enabled"); break;
+                            case "interval_minutes":
+                                AddInt("fleet_sweep_interval_minutes", n, "fleet_sweep.interval_minutes",
+                                    FleetSweepCadence.IntervalMinutesFloor, FleetSweepCadence.IntervalMinutesCeiling);
+                                break;
+                            default: error = $"Unknown field 'fleet_sweep.{k}'."; break;
                         }
                     });
                     break;
