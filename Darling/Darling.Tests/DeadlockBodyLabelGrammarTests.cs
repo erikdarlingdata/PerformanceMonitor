@@ -123,7 +123,7 @@ public class DeadlockBodyLabelGrammarTests
            counter-example that says it does not: the numbered form #3442 started with. */
         var pattern = WebLabelPattern();
 
-        Assert.False(pattern.IsMatch("Process 1: SPID 325"));
-        Assert.True(pattern.IsMatch("Process A: SPID 325"));
+        Assert.DoesNotMatch(pattern, "Process 1: SPID 325");
+        Assert.Matches(pattern, "Process A: SPID 325");
     }
 }

@@ -1377,7 +1377,7 @@ public class EntraDeviceCodeTests
 
         /* ONE warning, handed a value. Counted rather than merely found: the call going missing
            altogether is the loss this half of the pin exists to catch. */
-        Assert.Equal(1, Regex.Matches(claimBody, @"AppLogger\s*\.\s*Warn\s*\(").Count);
+        Assert.Single(Regex.Matches(claimBody, @"AppLogger\s*\.\s*Warn\s*\("));
 
         var claimLiterals =
             CSharpSourceWalker.StringLiteralBodies(raw)
@@ -1405,9 +1405,8 @@ public class EntraDeviceCodeTests
 
         var degradedPath = claimBody[degraded..];
 
-        Assert.Equal(
-            1, Regex.Matches(degradedPath, @"acquiredTarget is (not )?null").Count);
-        Assert.Equal(1, Regex.Matches(degradedPath, @"Challenge:\s*(not )?null").Count);
+        Assert.Single(Regex.Matches(degradedPath, @"acquiredTarget is (not )?null"));
+        Assert.Single(Regex.Matches(degradedPath, @"Challenge:\s*(not )?null"));
 
         var noIdentity = Regex.Match(degradedPath, @"acquiredTarget is (not )?null").Index;
         var stillWaiting = Regex.Match(degradedPath, @"Challenge:\s*(not )?null").Index;
@@ -1444,8 +1443,8 @@ public class EntraDeviceCodeTests
 
         var arms = CSharpSourceWalker.BraceBalanced(code, armsOpen);
 
-        Assert.Equal(0, Regex.Matches(arms, @"acquiredTarget is (not )?null").Count);
-        Assert.Equal(0, Regex.Matches(arms, @"Challenge:\s*(not )?null").Count);
+        Assert.Empty(Regex.Matches(arms, @"acquiredTarget is (not )?null"));
+        Assert.Empty(Regex.Matches(arms, @"Challenge:\s*(not )?null"));
 
         /* And the messages are where they were moved to, so this pin cannot be satisfied by a
            function that spells nothing anywhere. Their CONTENT is the behavioural pin's business. */

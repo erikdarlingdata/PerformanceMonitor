@@ -586,6 +586,6 @@ public class AlertBodyClockFrameDisciplineTests
     {
         Assert.NotNull(context);
         return Assert.Single(
-            context!.Details.SelectMany(d => d.Fields).Where(f => f.Label == label)).Value;
+            context!.Details.SelectMany(d => d.Fields), f => f.Label == label).Value;
     }
 }
