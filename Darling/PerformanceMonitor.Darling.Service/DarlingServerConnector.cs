@@ -166,7 +166,7 @@ SELECT
                 if (string.IsNullOrWhiteSpace(config.Password))
                 {
                     throw new InvalidOperationException(
-                        $"Server '{config.DisplayName}' uses sql auth but has neither encryptedPassword nor password.");
+                        $"Server '{config.DisplayName}' requires a secret (a SQL password or a service-principal client secret) but has neither encryptedPassword nor password.");
                 }
 
                 usedPlaintext = !DarlingSecretSource.IsReference(config.Password);

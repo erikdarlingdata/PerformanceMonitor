@@ -307,9 +307,20 @@ public partial class AddServerDialog : Window
                 return false;
             }
 
-            /* Profile auth is SqlServer here (the only profile type the service honors). Resolve its concrete
-               secret and write those onto the row — the store keeps concrete creds; profiles are a viewer
-               authoring convenience the store needs no table for. */
+            auth = mapped;
+
+            /* A managed-identity profile carries no secret (#3485 review): take its username (the optional
+               user-assigned client id) and write no blob. Demanding a secret would make an MI profile
+               unusable — one is never stored, so the secret check below could never pass. */
+            if (!ServerStoreCredential.RequiresSecret(profile.AuthType))
+            {
+                username = string.IsNullOrWhiteSpace(profile.Username) ? null : profile.Username;
+                return true;
+            }
+
+            /* Secret-bearing profiles (SQL, service principal): resolve the concrete secret and write it onto
+               the row — the store keeps concrete creds; profiles are a viewer authoring convenience the store
+               needs no table for. */
             var secret = _profileStore.GetSecret(profile.Id);
             if (secret is null || string.IsNullOrEmpty(secret.Value.Password))
             {
@@ -317,7 +328,6 @@ public partial class AddServerDialog : Window
                 return false;
             }
 
-            auth = mapped;
             username = string.IsNullOrWhiteSpace(secret.Value.Username) ? profile.Username : secret.Value.Username;
             encryptedPassword = ViewerServerSecret.Protect(secret.Value.Password);
             return true;
@@ -346,8 +356,12 @@ public partial class AddServerDialog : Window
                 return true;
             }
 
-            /* Blank password on edit → keep the existing stored blob (Lite's "blank means leave it"). */
-            if (_existing is not null && !string.IsNullOrEmpty(_existing.EncryptedPassword))
+            /* Blank password on edit → keep the existing stored blob (Lite's "blank means leave it") — but ONLY
+               when the row was ALREADY SQL auth, so switching INTO SQL from another secret-bearing mode (service
+               principal) cannot silently reuse that mode's secret as a SQL password (#3485 review). */
+            if (_existing is not null
+                && string.Equals(_existing.Auth, ServerStoreCredential.Sql, StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrEmpty(_existing.EncryptedPassword))
             {
                 encryptedPassword = _existing.EncryptedPassword;
                 return true;
@@ -377,8 +391,12 @@ public partial class AddServerDialog : Window
                 return true;
             }
 
-            /* Blank secret on edit keeps the existing blob, exactly like a SQL password. */
-            if (_existing is not null && !string.IsNullOrEmpty(_existing.EncryptedPassword))
+            /* Blank secret on edit keeps the existing blob — but ONLY when the row was ALREADY a service
+               principal, so switching INTO SP from SQL cannot silently reuse the old SQL password as the client
+               secret (#3485 review). */
+            if (_existing is not null
+                && string.Equals(_existing.Auth, ServerStoreCredential.ServicePrincipal, StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrEmpty(_existing.EncryptedPassword))
             {
                 encryptedPassword = _existing.EncryptedPassword;
                 return true;

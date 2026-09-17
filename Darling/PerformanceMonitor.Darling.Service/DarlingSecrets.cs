@@ -127,7 +127,7 @@ public static class DarlingSecrets
         }
 
         throw new InvalidOperationException(
-            $"Server '{server.DisplayName}' uses sql auth but has neither encryptedPassword nor password.");
+            $"Server '{server.DisplayName}' requires a secret (a SQL password or a service-principal client secret) but has neither encryptedPassword nor password.");
     }
 
     /// <summary>

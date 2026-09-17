@@ -25,8 +25,9 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <c>config.config_monitored_servers</c> via the existing <see cref="ViewerDataService.UpsertMonitoredServerAsync"/>.
 /// The shared credential is resolved ONCE (one <see cref="ViewerServerSecret.Protect"/> call) and the same DPAPI
 /// blob is stamped onto every row — the Darling service has no store-side profile concept, so a picked profile
-/// is resolved to concrete creds here (the asymmetry vs Lite, which mints one shared profile). Only the two auth
-/// modes the service honors are offered (Windows / SQL / a SQL profile); Test All runs SEQUENTIALLY through the
+/// is resolved to concrete creds here (the asymmetry vs Lite, which mints one shared profile). The four auth
+/// modes the service honors are offered (Windows / SQL / Service Principal / Managed Identity, or a profile of
+/// one of them); Test All runs SEQUENTIALLY through the
 /// service's <c>test_connect</c> command (the service drains commands serially, so viewer-side parallelism would
 /// be theater). Duplicates are skipped via the shared <see cref="ServerIdHelper"/> identity, case-folded. The
 /// single AddServerDialog is not edited.
@@ -111,7 +112,7 @@ public partial class AddMultipleServersDialog : Window
         }
     }
 
-    // ── Credential source + auth mode (copied idiom from AddServerDialog, trimmed to Windows / SQL / profile) ──
+    // ── Credential source + auth mode (copied idiom from AddServerDialog: Windows / SQL / Service Principal / Managed Identity / profile) ──
 
     private void CredentialSource_Changed(object sender, RoutedEventArgs e)
     {
@@ -444,6 +445,21 @@ public partial class AddMultipleServersDialog : Window
             {
                 error = ServerStoreCredential.UnsupportedAuthMessage;
                 return false;
+            }
+
+            /* A managed-identity profile carries no secret (#3485 review): build the shared settings from its
+               username (the optional client id) with no blob. Demanding a secret would make an MI profile
+               unusable in bulk too, since one is never stored. */
+            if (!ServerStoreCredential.RequiresSecret(profile.AuthType))
+            {
+                shared = new BulkSharedSettings
+                {
+                    AuthType = profile.AuthType,
+                    Username = string.IsNullOrWhiteSpace(profile.Username) ? null : profile.Username,
+                    EncryptMode = encryptMode,
+                    TrustServerCertificate = trustCert,
+                };
+                return true;
             }
 
             var secret = _profileStore.GetSecret(profile.Id);
