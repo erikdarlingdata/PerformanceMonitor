@@ -564,6 +564,45 @@ public sealed class FleetSweepWebFeedTests
         Assert.Contains("#/sweeps", app, StringComparison.Ordinal);
     }
 
+    /* ---- the logger seat: the service log, not the provider-less app factory ---------------------------- */
+
+    /// <summary>
+    /// The web host clears the dashboard app's logging providers (deliberate — framework noise has no
+    /// seat in the service log), which makes <c>app.Logger</c> a logger with nowhere to write. These
+    /// routes' log-and-degrade store reads used to log through it, so every web-path degradation line
+    /// went nowhere — the same gap class the MCP host closed for <c>get_sweep_reports</c> with
+    /// <c>AddSingleton&lt;ILogger&gt;(_logger)</c> (#3473 review). The fix is one thread: the host
+    /// hands <c>_logger</c> to <c>MapAll</c> beside the providers it cleared (two halves of one
+    /// decision, stated at the ClearProviders site), the sweep wiring takes that seat, and nothing in
+    /// the endpoint file reaches for <c>app.Logger</c> again — a fresh handler that did would compile
+    /// and silently regress, which is exactly what this source pin exists to catch.
+    /// </summary>
+    [Fact]
+    public void TheSweepRoutes_LogThroughTheServiceLogger_NotTheProviderlessAppFactory()
+    {
+        var endpoints = RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingFleetSweepEndpoints.cs");
+
+        /* The seat: the wiring receives the service logger by parameter… */
+        Assert.Contains(
+            "internal static void Map(WebApplication app, NpgsqlDataSource postgres, ILogger logger)",
+            endpoints, StringComparison.Ordinal);
+
+        /* …and no handler in the file writes through the app's cleared factory. Scanned as CODE
+           (comments and literals stripped): the doc prose above the wiring deliberately names
+           app.Logger to teach the rule, and prose must stay free to do that while code cannot
+           regress — the CSharpSourceWalker separation every code-shape pin in this project rides. */
+        Assert.DoesNotContain("app.Logger", CSharpSourceWalker.StripCommentsAndStrings(endpoints), StringComparison.Ordinal);
+
+        /* The host's half of the design: providers cleared AND its own logger handed to the seats. */
+        var host = RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
+        Assert.Contains("builder.Logging.ClearProviders();", host, StringComparison.Ordinal);
+        Assert.Contains(
+            "DarlingWebEndpoints.MapAll(_app, postgres, _collectorState, _logger);",
+            host, StringComparison.Ordinal);
+    }
+
     /* ---- helpers --------------------------------------------------------------------------------------- */
 
     /// <summary>Parses a flat <c>key: "value",</c> object literal out of frontend source — the

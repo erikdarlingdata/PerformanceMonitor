@@ -216,6 +216,28 @@ public sealed class DarlingMcpFleetSweepToolsTests
         Assert.DoesNotContain("get_sweep_reports", DarlingWebEndpoints.ExcludedToolNames);
     }
 
+    /// <summary>The mirror's logger seat (#3473 review, the web half): the dispatch entry hands the
+    /// tool the BUILDER's captured logger — <c>MapAll</c> builds the dispatch with the web host's
+    /// service logger, the same instance the MCP host injects with <c>AddSingleton&lt;ILogger&gt;</c>
+    /// — so the mirror's child reads trace into the service log instead of the hardcoded null this
+    /// entry carried while the dashboard app's provider-less factory was the only alternative. The
+    /// shared <c>ReadToolHandler</c> delegate stays three-seat; the logger rides by closure.</summary>
+    [Fact]
+    public void TheMirrorsLoggerSeat_TakesTheCapturedServiceLogger_NotAHardcodedNull()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+
+        /* The entry passes the captured logger, and MapAll is the caller that supplies it. */
+        Assert.Contains("DarlingMcpFleetSweepTools.GetSweepReports(pg, logger,", source, StringComparison.Ordinal);
+        Assert.Contains("BuildReadDispatch(logger)", source, StringComparison.Ordinal);
+
+        /* The delegate itself did NOT grow a seat — the ~100-entry table stays three-parameter,
+           which is the whole reason the logger rides by closure. */
+        Assert.Contains(
+            "internal delegate Task<string> ReadToolHandler(HttpContext context, NpgsqlDataSource postgres, DarlingAnalysisService analysis);",
+            source, StringComparison.Ordinal);
+    }
+
     /// <summary>The house rule every tool suite applies: the instructions an MCP client plans against
     /// must carry the tool — and for this one, the same two field contracts the description carries,
     /// because the instructions' cross-server section is where an agent first meets the sweep.</summary>

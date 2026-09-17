@@ -18,6 +18,7 @@ using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Analysis;
@@ -219,8 +220,13 @@ public static class DarlingWebEndpoints
     /// Maps the web dashboard's HTTP endpoints onto <paramref name="app"/>, reading from <paramref name="postgres"/>
     /// (the VIEWER-role store pool). Called ONCE from the web host's pipeline, after the auth middleware and before
     /// the static files. Every route lives under <c>/api/*</c> so the SPA's static surface never collides.
+    ///
+    /// <para><paramref name="logger"/> is the HOST SERVICE's logger — the seat every log-and-degrade route below
+    /// writes through. Deliberately NOT <c>app.Logger</c>: the host clears the dashboard app's logging providers
+    /// (both halves of that decision are stated at its ClearProviders site), so the app's own factory writes
+    /// nowhere, and a degradation line logged through it would vanish.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger)
     {
         /* Liveness AND collection state (#2953). The one health surface that does not read the store, which
            makes it the only one that can answer when the store IS the problem — so it reports the collector's
@@ -262,7 +268,7 @@ public static class DarlingWebEndpoints
         });
 
         /* One GET per read-only tool, calling the tool method directly (no SQL/projection re-implementation). */
-        foreach (var (name, handler) in BuildReadDispatch())
+        foreach (var (name, handler) in BuildReadDispatch(logger))
         {
             app.MapGet("/api/read/" + name, async (HttpContext context) =>
             {
@@ -288,8 +294,9 @@ public static class DarlingWebEndpoints
 
         /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
            FleetSweepStore presentation reads lane 4's get_sweep_reports tool will serve — see
-           DarlingFleetSweepEndpoints for the span discipline and the seat posture. */
-        DarlingFleetSweepEndpoints.Map(app, postgres);
+           DarlingFleetSweepEndpoints for the span discipline, the seat posture, and why its logger
+           seat takes the service logger threaded here rather than app.Logger. */
+        DarlingFleetSweepEndpoints.Map(app, postgres, logger);
 
         /* The per-alert triage page's assembly endpoint (#2710): everything it serves is already reachable
            through the /api/read mirror above — it adds assembly (alert match + anchored sections), not reach. */
@@ -2520,8 +2527,15 @@ public static class DarlingWebEndpoints
     /// tool, binding its parameters from the query string and calling the matching public static tool method. The
     /// keys ARE the <c>/api/read/*</c> surface — the parity test asserts they equal the <c>[McpServerTool]</c>
     /// catalog minus <see cref="ExcludedToolNames"/>.
+    ///
+    /// <para><paramref name="logger"/> rides by CLOSURE into the one entry whose tool takes a logger seat
+    /// (<c>get_sweep_reports</c>) — the <see cref="ReadToolHandler"/> delegate stays three-seat, because a
+    /// fourth parameter would touch every entry for the one tool that logs. <see cref="MapAll"/> builds the
+    /// dispatch WITH the host service's logger; callers with no host behind them (the parity tests, the triage
+    /// section runner — neither maps that entry) build it bare, and there the null is the honest value: no
+    /// service log is wired to receive anything.</para>
     /// </summary>
-    internal static IReadOnlyDictionary<string, ReadToolHandler> BuildReadDispatch()
+    internal static IReadOnlyDictionary<string, ReadToolHandler> BuildReadDispatch(ILogger? logger = null)
     {
         return new Dictionary<string, ReadToolHandler>(StringComparer.Ordinal)
         {
@@ -2543,11 +2557,15 @@ public static class DarlingWebEndpoints
 
             /* ── fleet sweep reports (#3466 lane 4) ── the tool mirror beside the dedicated /api/sweeps
                routes, the /api/fleet + /api/read/get_fleet_overview coexistence: the page reads its own
-               routes, and the 1:1 read surface carries the tool like every other read. The null is the
-               tool's logger seat: the MCP host injects its service logger there (#3473 review), but this
-               shared handler delegate carries no logger, and null keeps the mirror's log-and-degrade
-               exactly as it has always been rather than inventing a second logging path for one entry. */
-            ["get_sweep_reports"] = (c, pg, an) => DarlingMcpFleetSweepTools.GetSweepReports(pg, null, Hours(c, 1), AsOf(c), Str(c, "sweep_id"), Str(c, "watch_state")),
+               routes, and the 1:1 read surface carries the tool like every other read. The captured
+               logger is the tool's logger seat — the web host's SERVICE logger when MapAll built this
+               dispatch, the same instance the MCP host injects with AddSingleton<ILogger> (#3473
+               review) — so the mirror's child reads log-and-degrade into the same service log both
+               hosts' other paths use, instead of the hardcoded null this entry carried while the
+               dashboard app's provider-less factory was the only alternative. Closure, not a fourth
+               ReadToolHandler seat: widening the shared delegate would touch every entry in this
+               table for the one tool that logs. */
+            ["get_sweep_reports"] = (c, pg, an) => DarlingMcpFleetSweepTools.GetSweepReports(pg, logger, Hours(c, 1), AsOf(c), Str(c, "sweep_id"), Str(c, "watch_state")),
 
             /* ── blocking / deadlocks ── */
             ["get_blocked_process_xml"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), as_of: AsOf(c)),

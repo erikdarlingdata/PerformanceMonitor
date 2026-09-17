@@ -703,7 +703,15 @@ public sealed class DarlingWebHostService : BackgroundService
                 }
             });
 
-            /* Suppress ASP.NET Core console logging — the service's own logger reports lifecycle. */
+            /* The logging split, both halves decided here: ASP.NET framework/request noise is deliberately
+               SILENCED (ClearProviders — the service's own logger narrates lifecycle, and Kestrel's
+               per-request chatter has no seat in the service log), and the APP-LEVEL log-and-degrade lines
+               are deliberately ROUTED to the service's real logger, by handing _logger to MapAll's endpoint
+               seats below. The two are one design: clearing providers makes app.Logger a logger with nowhere
+               to write, so an endpoint that logged through it would degrade with no trace — the exact gap
+               the MCP host closed for its tools with AddSingleton<ILogger>(_logger) (#3473 review), closed
+               here at the wiring seam instead because this host maps routes directly rather than resolving
+               tool parameters through DI. */
             builder.Logging.ClearProviders();
             builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
@@ -881,7 +889,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 });
             }
 
-            DarlingWebEndpoints.MapAll(_app, postgres, _collectorState);
+            DarlingWebEndpoints.MapAll(_app, postgres, _collectorState, _logger);
             _app.UseDefaultFiles();
             _app.UseStaticFiles();
 
