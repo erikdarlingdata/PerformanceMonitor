@@ -346,11 +346,30 @@ public sealed class AlertEngineTests
            into the process-wide AlertReadFailureCounter.Shared. */
         public AlertReadFailureCounter? ReadFailures { get; set; }
 
-        public AlertEngine Build(bool withFailedJobsFetcher = false) => new(
+        /* #3497: the Agent-job resolver seam, null by default so every pre-existing pin builds the
+           pre-#3497 engine. Tests set AgentJobNames (the answer map), flip AgentJobResolverThrows for
+           the degrade arm, and read AgentJobResolverCalls for what the engine actually asked. */
+        public IReadOnlyDictionary<AgentJobStepKey, AgentJobStepNames>? AgentJobNames { get; set; }
+        public bool AgentJobResolverThrows { get; set; }
+        public List<IReadOnlyList<AgentJobStepKey>> AgentJobResolverCalls { get; } = new();
+
+        public AlertEngine Build(bool withFailedJobsFetcher = false, bool withAgentJobResolver = false) => new(
             Settings, Adapter, StateStore, Deliverer,
             isAlertMuted: _ => Muted,
             failedJobsFetcher: withFailedJobsFetcher
                 ? (_, _, _) => { FailedJobFetches++; return Task.FromResult(new List<FailedJobInfo>(FailedJobs)); }
+                : null,
+            agentJobStepResolver: withAgentJobResolver
+                ? (_, keys, _) =>
+                {
+                    AgentJobResolverCalls.Add(keys);
+                    if (AgentJobResolverThrows)
+                    {
+                        throw new InvalidOperationException("msdb resolver is down");
+                    }
+
+                    return Task.FromResult(AgentJobNames ?? new Dictionary<AgentJobStepKey, AgentJobStepNames>());
+                }
                 : null,
             resolutionCallback: (r, _) => { Resolutions.Add(r); return Task.CompletedTask; },
             logger: null,
@@ -1460,6 +1479,11 @@ public sealed class AlertEngineTests
        NEVER SUPPRESSION — the tiers stay, every card still fires, the annotation states what IS and
        never a verdict, and every degrade arm costs the annotation rather than the page. ---------------- */
 
+    /// <summary>msdb job_id AB6D9F63-3B01-4E15-9F34-B0A0F0B355A2, step 3, in SQL Agent's own spelling
+    /// (the byte-order pin lives in <see cref="AgentJobStepQueryTests"/>).</summary>
+    private const string AgentProgramName = "SQLAgent - TSQL JobStep (Job 0x639F6DAB013B154E9F34B0A0F0B355A2 : Step 3)";
+    private static readonly AgentJobStepKey AgentKey = new(Guid.Parse("AB6D9F63-3B01-4E15-9F34-B0A0F0B355A2"), 3);
+
     private static LongRunningQueryInfo BackupSession(int sessionId = 120, string db = "StackOverflow") => new()
     {
         SessionId = sessionId,
@@ -1576,6 +1600,190 @@ public sealed class AlertEngineTests
             detail.Split('\n').Count(line => line.Contains("Active maintenance: BACKUP DATABASE", StringComparison.Ordinal)));
         Assert.EndsWith("Active maintenance: 2 more maintenance session(s) not shown", detail, StringComparison.Ordinal);
         Assert.Contains("10m 0s elapsed", detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Lrq_AgentJobStepSession_NamesTheJobAndStepOnTheCard()
+    {
+        /* #3497's acceptance shape, through the engine: a card whose session is an Agent job step names
+           the job and step, resolved through the host seam in one call carrying the parsed key. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.AgentJobNames = new Dictionary<AgentJobStepKey, AgentJobStepNames>
+        {
+            [AgentKey] = new("nightly index maintenance", "Reorganize fragmented indexes")
+        };
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 71,
+            DatabaseName = "StackOverflow",
+            QueryText = "ALTER INDEX [IX_Users_Rep] ON [dbo].[Users] REORGANIZE",
+            ProgramName = AgentProgramName,
+            ElapsedSeconds = 2159,
+            QueryHash = "0x9AAF0129E4E9AD07"
+        });
+
+        await h.Build(withAgentJobResolver: true).EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Long-Running Query", fired.MetricName);
+        Assert.Contains(
+            "  Running under Agent job: nightly index maintenance, step 3 (Reorganize fragmented indexes)",
+            fired.DetailText!, StringComparison.Ordinal);
+        var asked = Assert.Single(h.AgentJobResolverCalls);
+        Assert.Equal(AgentKey, Assert.Single(asked));
+    }
+
+    [Fact]
+    public async Task Lrq_ResolverFailure_DegradesToTheUnresolvedForm_AndTheCardStillDelivers()
+    {
+        /* A resolver that THROWS (transport fault, host bug — the hosts' own permission arms degrade to
+           an empty map before throwing can happen) still states the Agent-job fact the parse alone
+           establishes, in the unresolved form carrying the raw job-id marker — the hex an operator can
+           match against the Program field by eye. The card delivers either way. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.AgentJobResolverThrows = true;
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 71,
+            DatabaseName = "StackOverflow",
+            QueryText = "ALTER INDEX [IX_Users_Rep] ON [dbo].[Users] REORGANIZE",
+            ProgramName = AgentProgramName,
+            ElapsedSeconds = 2159,
+            QueryHash = "0x9AAF0129E4E9AD07"
+        });
+
+        await h.Build(withAgentJobResolver: true).EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains(
+            "  Running under Agent job: (name unresolved) Job 0x639F6DAB013B154E9F34B0A0F0B355A2, step 3",
+            fired.DetailText!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Lrq_NoResolverWired_TheCardIsByteIdenticalToToday()
+    {
+        /* THE REGRESSION PIN for hosts (and tests) that wire no resolver: null means "no resolution was
+           attempted", and an Agent session's card renders exactly the pre-#3497 shape — raw Program
+           field, no annotation, no unresolved marker claiming a lookup that never ran. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 71,
+            DatabaseName = "StackOverflow",
+            QueryText = "ALTER INDEX [IX_Users_Rep] ON [dbo].[Users] REORGANIZE",
+            ProgramName = AgentProgramName,
+            ElapsedSeconds = 2159,
+            QueryHash = "0x9AAF0129E4E9AD07"
+        });
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.DoesNotContain("Running under Agent job", fired.DetailText!, StringComparison.Ordinal);
+        Assert.Contains($"  Program: {AgentProgramName}", fired.DetailText!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Lrq_NonAgentSessions_NeverInvokeTheResolver_AndRenderByteIdentically()
+    {
+        /* The other half of the regression pin: with the resolver WIRED, an application connection's
+           card is untouched and no msdb round trip happens at all — the annotation keys off the parse,
+           and the parse refuses everything but the machine-emitted job-step form. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 71,
+            DatabaseName = "StackOverflow",
+            QueryText = "SELECT COUNT_BIG(*) FROM dbo.Users AS u",
+            ProgramName = "HammerDB",
+            ElapsedSeconds = 2159,
+            QueryHash = "0x9AAF0129E4E9AD07"
+        });
+
+        await h.Build(withAgentJobResolver: true).EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.DoesNotContain("Running under Agent job", fired.DetailText!, StringComparison.Ordinal);
+        Assert.Empty(h.AgentJobResolverCalls);
+    }
+
+    [Fact]
+    public async Task Lrq_ResolverIsAskedOnlyForTheShownSessions_Deduped()
+    {
+        /* One msdb round trip per delivered card, scoped to what the card will SHOW: the display cap
+           bounds the parse, and two sessions of the same (job, step) cost one key. The fourth session —
+           past the cap — is never asked about, so a name is never fetched for a session nobody sees. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        var jobB = "SQLAgent - TSQL JobStep (Job 0x00112233445566778899AABBCCDDEEFF : Step 2)";
+        var jobC = "SQLAgent - TSQL JobStep (Job 0xFFEEDDCCBBAA99887766554433221100 : Step 9)";
+        LongRunningQueryInfo Row(int sessionId, long elapsed, string program) => new()
+        {
+            SessionId = sessionId,
+            DatabaseName = "StackOverflow",
+            QueryText = "ALTER INDEX [IX] ON [dbo].[Users] REORGANIZE",
+            ProgramName = program,
+            ElapsedSeconds = elapsed,
+            QueryHash = "0x9AAF0129E4E9AD07"
+        };
+        h.Adapter.LongRunning.Add(Row(71, 4000, AgentProgramName));
+        h.Adapter.LongRunning.Add(Row(72, 3900, AgentProgramName));
+        h.Adapter.LongRunning.Add(Row(73, 3800, jobB));
+        h.Adapter.LongRunning.Add(Row(74, 3700, jobC));
+
+        await h.Build(withAgentJobResolver: true).EvaluateServerAsync(Harness.Snapshot());
+
+        var asked = Assert.Single(h.AgentJobResolverCalls);
+        Assert.Equal(2, asked.Count);
+        Assert.Equal(AgentKey, asked[0]);
+        Assert.True(AgentJobStepQuery.TryParseProgramName(jobB, out var jobBKey));
+        Assert.Equal(jobBKey, asked[1]);
+    }
+
+    [Fact]
+    public async Task Lrq_TheAnnotationIsFingerprintInert_ARefireFoldsIntoTheSameIncident()
+    {
+        /* The blast-radius verdict, pinned through the engine: the #1140 fingerprint hashes (server,
+           type, query_hash) and the annotation is a rendered FIELD, so a card that re-fires with a
+           different elapsed and a DIFFERENT annotation state (resolved, then unresolvable) carries the
+           SAME DedupKey — dedup, per-fingerprint delivery cooldowns and PagerDuty correlation all key on
+           it, and none of them may see a new incident because a job name resolved. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.AgentJobNames = new Dictionary<AgentJobStepKey, AgentJobStepNames>
+        {
+            [AgentKey] = new("nightly index maintenance", "Reorganize fragmented indexes")
+        };
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 71,
+            DatabaseName = "StackOverflow",
+            QueryText = "ALTER INDEX [IX_Users_Rep] ON [dbo].[Users] REORGANIZE",
+            ProgramName = AgentProgramName,
+            ElapsedSeconds = 2159,
+            QueryHash = "0x9AAF0129E4E9AD07"
+        });
+        var engine = h.Build(withAgentJobResolver: true);
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        /* Past the cooldown, longer elapsed, and the resolver now answers nothing — msdb rights revoked
+           between fires, say. Same statement, same hash, same incident. */
+        h.Now = h.Now.AddMinutes(6);
+        h.AgentJobNames = new Dictionary<AgentJobStepKey, AgentJobStepNames>();
+        h.Adapter.LongRunning[0].ElapsedSeconds = 5400;
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        var first = Assert.Single(h.Deliverer.Outcomes[0].Context!.Incidents!);
+        var second = Assert.Single(h.Deliverer.Outcomes[1].Context!.Incidents!);
+        Assert.Equal(first.DedupKey, second.DedupKey);
+        Assert.Contains("(name unresolved)", h.Deliverer.Outcomes[1].DetailText!, StringComparison.Ordinal);
     }
 
     /* ---------------- tempdb ---------------- */

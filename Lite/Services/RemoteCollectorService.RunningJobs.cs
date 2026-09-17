@@ -83,4 +83,61 @@ public partial class RemoteCollectorService
 
         return items;
     }
+
+    /// <summary>
+    /// The #3497 Agent-job name lookup for a firing Long-Running Query card — the shared
+    /// <see cref="AgentJobStepQuery"/> run live against the monitored server's msdb at alert-check
+    /// time, on the same connection path and with the same degrade discipline as
+    /// <see cref="GetRecentlyFailedJobsAsync"/> above: a login without SELECT on the msdb job tables,
+    /// or any transient fault, answers an EMPTY map rather than failing the alert cycle, and the card
+    /// then renders the unresolved form carrying the raw job-id marker — annotation, never suppression;
+    /// the card itself fired before this read ran. The caller gates Azure SQL DB (no Agent) and
+    /// no-msdb logins before calling, mirroring the failed-jobs caller.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<AgentJobStepKey, AgentJobStepNames>> GetAgentJobStepNamesAsync(
+        ServerConnection server,
+        IReadOnlyList<AgentJobStepKey> keys,
+        CancellationToken cancellationToken = default)
+    {
+        if (keys.Count == 0)
+        {
+            return new Dictionary<AgentJobStepKey, AgentJobStepNames>();
+        }
+
+        try
+        {
+            using var sqlConnection = await CreateConnectionAsync(server, cancellationToken);
+            using var command = new SqlCommand(AgentJobStepQuery.BuildSql(keys.Count), sqlConnection);
+            command.CommandTimeout = CommandTimeoutSeconds;
+            for (int i = 0; i < keys.Count; i++)
+            {
+                /* Bound as uniqueidentifier so the engine's type system does the compare — the byte-order
+                   conversion already happened once, in AgentJobStepQuery.TryParseProgramName. */
+                command.Parameters.Add(new SqlParameter(AgentJobStepQuery.JobIdParameter(i), System.Data.SqlDbType.UniqueIdentifier) { Value = keys[i].JobId });
+                command.Parameters.Add(new SqlParameter(AgentJobStepQuery.StepIdParameter(i), System.Data.SqlDbType.Int) { Value = keys[i].StepId });
+            }
+
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return await AgentJobStepQuery.ReadAsync(reader, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Microsoft.Data.SqlClient.SqlException ex) when (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
+        {
+            /* #2512's shared set, the failed-jobs arm's exact reasoning: expected for read-only
+               monitoring accounts, and the remedy is direct table SELECTs (msdb.dbo.sysjobs and
+               sysjobsteps), NOT SQLAgentReaderRole (#1823). */
+            _logger?.LogDebug("Skipping the Agent job-name lookup for '{Server}' (needs SELECT on msdb.dbo.sysjobs and sysjobsteps — SQLAgentReaderRole alone is not enough; see the monitoring-login grants in the README). The Long-Running Query card renders the unresolved form: {Message}", server.DisplayName, ex.Message);
+            return new Dictionary<AgentJobStepKey, AgentJobStepNames>();
+        }
+        catch (Exception ex)
+        {
+            /* Unexpected error — Warning for the same reason as the failed-jobs arm, and the same
+               refusal to fault the alert cycle over an annotation. */
+            _logger?.LogWarning("Agent job-name lookup for '{Server}' errored — the Long-Running Query card renders the unresolved form: {Message}", server.DisplayName, ex.Message);
+            return new Dictionary<AgentJobStepKey, AgentJobStepNames>();
+        }
+    }
 }

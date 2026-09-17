@@ -167,6 +167,127 @@ public class AlertContextBuildersTests
         Assert.Null(context.Incidents);
     }
 
+    /* ---------------- #3497: the Agent-job annotation ---------------- */
+
+    /// <summary>msdb job_id AB6D9F63-3B01-4E15-9F34-B0A0F0B355A2, step 3, spelled the way SQL Agent
+    /// spells it: the job_id's binary(16) hex (Data1–Data3 little-endian — the byte-order pin lives in
+    /// AgentJobStepQueryTests).</summary>
+    private const string AgentProgramName = "SQLAgent - TSQL JobStep (Job 0x639F6DAB013B154E9F34B0A0F0B355A2 : Step 3)";
+    private static readonly Guid AgentJobId = Guid.Parse("AB6D9F63-3B01-4E15-9F34-B0A0F0B355A2");
+
+    [Fact]
+    public void BuildLongRunningQueryContext_NullAgentMap_RendersNoAnnotation_TheByteIdenticalArm()
+    {
+        /* The regression posture: NULL (the default, every pre-#3497 caller) means no resolution was
+           attempted, and an Agent session's card renders exactly as before — raw Program field only. */
+        var context = AlertContextBuilders.BuildLongRunningQueryContext(Server, new List<LongRunningQueryInfo>
+        {
+            Lrq(71, 314, db: "StackOverflow", program: AgentProgramName, query: "ALTER INDEX IX_Users_Rep ON dbo.Users REORGANIZE")
+        });
+
+        Assert.NotNull(context);
+        Assert.DoesNotContain(context!.Details[0].Fields, f => f.Label == "Running under Agent job");
+        Assert.Contains(("Program", AgentProgramName), context.Details[0].Fields);
+    }
+
+    [Fact]
+    public void BuildLongRunningQueryContext_ResolvedAgentJob_NamesTheJobAndStep_DirectlyUnderProgram()
+    {
+        var names = new Dictionary<AgentJobStepKey, AgentJobStepNames>
+        {
+            [new AgentJobStepKey(AgentJobId, 3)] = new("nightly index maintenance", "Reorganize fragmented indexes")
+        };
+
+        var context = AlertContextBuilders.BuildLongRunningQueryContext(Server, new List<LongRunningQueryInfo>
+        {
+            Lrq(71, 314, db: "StackOverflow", program: AgentProgramName, query: "ALTER INDEX IX_Users_Rep ON dbo.Users REORGANIZE")
+        }, agentJobNames: names);
+
+        Assert.NotNull(context);
+        var fields = context!.Details[0].Fields;
+        var programIndex = fields.FindIndex(f => f.Label == "Program");
+        Assert.Equal(programIndex + 1, fields.FindIndex(f => f.Label == "Running under Agent job"));
+        Assert.Contains(("Running under Agent job", "nightly index maintenance, step 3 (Reorganize fragmented indexes)"), fields);
+    }
+
+    [Fact]
+    public void BuildLongRunningQueryContext_ResolvedJobWithNoStepRow_NamesTheJob_WithoutInventingAStepName()
+    {
+        /* sysjobsteps had no row (deleted or renumbered step) — the LEFT JOIN arm: the JOB is the fact
+           that closes the triage, so it still renders; only the parenthetical step name is omitted. */
+        var names = new Dictionary<AgentJobStepKey, AgentJobStepNames>
+        {
+            [new AgentJobStepKey(AgentJobId, 3)] = new("nightly index maintenance", null)
+        };
+
+        var context = AlertContextBuilders.BuildLongRunningQueryContext(Server, new List<LongRunningQueryInfo>
+        {
+            Lrq(71, 314, db: "StackOverflow", program: AgentProgramName, query: "SELECT 1")
+        }, agentJobNames: names);
+
+        Assert.Contains(("Running under Agent job", "nightly index maintenance, step 3"), context!.Details[0].Fields);
+    }
+
+    [Fact]
+    public void BuildLongRunningQueryContext_UnresolvedAgentJob_StatesTheFact_AndCarriesTheRawMarker()
+    {
+        /* A NON-null EMPTY map says a resolution ran and answered nothing (msdb denied, transient fault,
+           job deleted): the card still states the Agent-job fact the parse alone establishes, in the
+           unresolved form whose hex matches the Program field's spelling byte for byte — never an error,
+           never a fabricated name. */
+        var context = AlertContextBuilders.BuildLongRunningQueryContext(Server, new List<LongRunningQueryInfo>
+        {
+            Lrq(71, 314, db: "StackOverflow", program: AgentProgramName, query: "SELECT 1")
+        }, agentJobNames: new Dictionary<AgentJobStepKey, AgentJobStepNames>());
+
+        Assert.Contains(
+            ("Running under Agent job", "(name unresolved) Job 0x639F6DAB013B154E9F34B0A0F0B355A2, step 3"),
+            context!.Details[0].Fields);
+    }
+
+    [Fact]
+    public void BuildLongRunningQueryContext_NonAgentSession_WithAMapSupplied_RendersByteIdentically()
+    {
+        /* The other regression pin: an application connection's card is untouched even when a resolution
+           ran for a sibling session — the annotation keys off the parse, not off the map's presence. */
+        var withMap = AlertContextBuilders.BuildLongRunningQueryContext(Server, new List<LongRunningQueryInfo>
+        {
+            Lrq(71, 314, db: "StackOverflow", program: "HammerDB", query: "SELECT 1", hash: "0x9AAF0129E4E9AD07")
+        }, agentJobNames: new Dictionary<AgentJobStepKey, AgentJobStepNames>());
+        var withoutMap = AlertContextBuilders.BuildLongRunningQueryContext(Server, new List<LongRunningQueryInfo>
+        {
+            Lrq(71, 314, db: "StackOverflow", program: "HammerDB", query: "SELECT 1", hash: "0x9AAF0129E4E9AD07")
+        });
+
+        Assert.Equal(
+            AlertContextBuilders.ContextToDetailText(withoutMap),
+            AlertContextBuilders.ContextToDetailText(withMap));
+    }
+
+    [Fact]
+    public void BuildLongRunningQueryContext_TheAnnotationIsFingerprintInert()
+    {
+        /* #1140's dedup key hashes (server, type, query_hash) and the annotation is a FIELD — so a card
+           that re-fires with the job name freshly resolved (or freshly unresolvable) folds into the same
+           incident. Pinned rather than merely stated: same rows, three annotation states, one DedupKey. */
+        List<LongRunningQueryInfo> Rows() => new()
+        {
+            Lrq(71, 314, db: "StackOverflow", program: AgentProgramName, query: "SELECT 1", hash: "0x9AAF0129E4E9AD07")
+        };
+        var resolved = AlertContextBuilders.BuildLongRunningQueryContext(Server, Rows(),
+            agentJobNames: new Dictionary<AgentJobStepKey, AgentJobStepNames>
+            {
+                [new AgentJobStepKey(AgentJobId, 3)] = new("nightly index maintenance", "step name")
+            });
+        var unresolved = AlertContextBuilders.BuildLongRunningQueryContext(Server, Rows(),
+            agentJobNames: new Dictionary<AgentJobStepKey, AgentJobStepNames>());
+        var unannotated = AlertContextBuilders.BuildLongRunningQueryContext(Server, Rows());
+
+        var key = Assert.Single(unannotated!.Incidents!).DedupKey;
+        Assert.Equal(key, Assert.Single(resolved!.Incidents!).DedupKey);
+        Assert.Equal(key, Assert.Single(unresolved!.Incidents!).DedupKey);
+    }
+
     /* ---------------- #3495: the High CPU active-maintenance annotation ---------------- */
 
     [Fact]

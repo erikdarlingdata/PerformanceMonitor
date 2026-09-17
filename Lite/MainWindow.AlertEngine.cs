@@ -251,6 +251,36 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// The engine's #3497 Agent-job name resolver for the Long-Running Query card — the live-msdb seam
+    /// beside <see cref="FetchFailedJobsForAlertAsync"/>, with its exact gate: only online,
+    /// non-Azure-SQL-DB servers whose login has msdb access are queried (Azure SQL DB has no SQL Agent;
+    /// a login without msdb can't read sysjobs), and every other case answers an EMPTY map, which the
+    /// card renders as the unresolved form — annotation, never suppression: the card already fired, and
+    /// this read can only ever add the job's name to it.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<AgentJobStepKey, AgentJobStepNames>> FetchAgentJobStepNamesForAlertAsync(
+        string serverKey, IReadOnlyList<AgentJobStepKey> keys, CancellationToken cancellationToken)
+    {
+        var server = _serverManager.GetAllServers().FirstOrDefault(s =>
+            RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)).ToString() == serverKey);
+        var connStatus = server != null ? _serverManager.GetConnectionStatus(server.Id) : null;
+
+        if (server == null
+            || _collectorService == null
+            || connStatus == null
+            || connStatus.IsOnline != true
+            || connStatus.SqlEngineEdition == 5
+            || !connStatus.HasMsdbAccess)
+        {
+            return new Dictionary<AgentJobStepKey, AgentJobStepNames>();
+        }
+
+        /* GetAgentJobStepNamesAsync degrades every read failure (permissions, transient) to an empty
+           map itself, so a broken msdb read can't fail the sweep — the failed-jobs fetcher's rule. */
+        return await _collectorService.GetAgentJobStepNamesAsync(server, keys, cancellationToken);
+    }
+
+    /// <summary>
     /// The engine's resolution callback: Lite's tray-only "Resolved/Cleared" toasts. The engine
     /// supplies the pre-forwarding loop's exact title/message strings and already applied the
     /// old gates (only on an active→inactive transition, never suppressed/disabled); every

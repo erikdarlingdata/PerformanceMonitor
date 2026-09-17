@@ -3511,6 +3511,11 @@ public sealed class DarlingWorker : BackgroundService
             muteRuleService.IsAlertMuted,
             failedJobsFetcher: (serverKey, lookbackMinutes, ct) =>
                 FetchFailedJobsAsync(servers, serverKey, lookbackMinutes, ct),
+            /* #3497: the Long-Running Query card's Agent-job name lookup — the same live-msdb seam shape
+               as the failed-jobs feed above, and the same degrade discipline: every failure is an empty
+               map, so a denied or broken msdb read costs a card its job NAME and never the card. */
+            agentJobStepResolver: (serverKey, keys, ct) =>
+                FetchAgentJobStepNamesAsync(servers, serverKey, keys, ct),
             resolutionCallback: async (resolution, _) =>
             {
                 /* #1681: same shared shape as the firing line the engine's funnel writes, so an engine
@@ -6043,6 +6048,82 @@ LIMIT 1";
             _logger.LogWarning("[{Server}] Recently-failed-job check errored: {Message}",
                 runtime.Config.DisplayName, ex.Message);
             return new List<FailedJobInfo>();
+        }
+    }
+
+    /// <summary>
+    /// The engine's #3497 Agent-job name lookup: one <see cref="AgentJobStepQuery"/> round trip against
+    /// the monitored server's msdb for the (job, step) pairs a firing Long-Running Query card is about to
+    /// show. Gated and degraded exactly like <see cref="FetchFailedJobsAsync"/> one method up, because it
+    /// is the same kind of read against the same tables' neighborhood: engine-gated first (msdb, SQL Agent
+    /// and the job-step program_name are SQL Server concepts — a PostgreSQL target must not pay for a
+    /// SqlConnection it can never open), no Azure SQL DB (no msdb there), permission-denied → Info + empty
+    /// map (expected for read-only monitoring logins; the alert cycle proceeds and the card renders the
+    /// unresolved form with the raw job-id marker — ANNOTATION, NEVER SUPPRESSION: the card itself already
+    /// fired before this read ran), anything else → Warning + empty map.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<AgentJobStepKey, AgentJobStepNames>> FetchAgentJobStepNamesAsync(
+        List<ServerLoopState> servers, string serverKey, IReadOnlyList<AgentJobStepKey> keys, CancellationToken cancellationToken)
+    {
+        /* Lookup only — held briefly under the lock (the command loop reconciles the list concurrently),
+           then the connection I/O runs outside it. */
+        ServerRuntime? runtime;
+        lock (_serversLock)
+        {
+            runtime = servers
+                .Select(s => s.Runtime)
+                .FirstOrDefault(r => r is not null
+                    && string.Equals(r.ServerId.ToString(CultureInfo.InvariantCulture), serverKey, StringComparison.Ordinal));
+        }
+
+        if (keys.Count == 0
+            || runtime is null
+            || runtime.Target.Engine != CollectorTargetEngine.SqlServer
+            || runtime.Target.IsAzureSqlDb)
+        {
+            return new Dictionary<AgentJobStepKey, AgentJobStepNames>();
+        }
+
+        try
+        {
+            using var connection = new SqlConnection(runtime.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+
+            using var command = new SqlCommand(AgentJobStepQuery.BuildSql(keys.Count), connection) { CommandTimeout = 10 };
+            for (int i = 0; i < keys.Count; i++)
+            {
+                /* Bound as uniqueidentifier so the ENGINE's type system does the compare — the byte-order
+                   conversion already happened once, in AgentJobStepQuery.TryParseProgramName, and binding a
+                   string here would invite a second, divergent spelling of it. */
+                command.Parameters.Add(new SqlParameter(AgentJobStepQuery.JobIdParameter(i), SqlDbType.UniqueIdentifier) { Value = keys[i].JobId });
+                command.Parameters.Add(new SqlParameter(AgentJobStepQuery.StepIdParameter(i), SqlDbType.Int) { Value = keys[i].StepId });
+            }
+
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return await AgentJobStepQuery.ReadAsync(reader, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (SqlException ex) when (SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
+        {
+            /* Same shared set, same reasoning, same remedy naming as the failed-jobs arm: every number in
+               it means the login cannot read what it asked for, the response is to answer nothing rather
+               than fail the alert cycle, and SQLAgentReaderRole is NOT the remedy (it gates sp_help_job*
+               only). Info because a read-only monitoring login hits this on every Agent-annotated fire. */
+            _logger.LogInformation("[{Server}] Skipping the Agent job-name lookup for the Long-Running Query card (needs SELECT on msdb.dbo.sysjobs and sysjobsteps — SQLAgentReaderRole alone is not enough; see the monitoring-login grants in the README). The card renders the unresolved form: {Message}",
+                runtime.Config.DisplayName, ex.Message);
+            return new Dictionary<AgentJobStepKey, AgentJobStepNames>();
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter, for FetchFailedJobsAsync's exact reason: this
+               reads the MONITORED SERVER's msdb, not the store, and pooling the two would put a target-side
+               outage in a number the operator reads as store contention. */
+            _logger.LogWarning("[{Server}] Agent job-name lookup for the Long-Running Query card errored — the card renders the unresolved form: {Message}",
+                runtime.Config.DisplayName, ex.Message);
+            return new Dictionary<AgentJobStepKey, AgentJobStepNames>();
         }
     }
 

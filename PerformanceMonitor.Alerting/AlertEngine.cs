@@ -98,7 +98,17 @@ public sealed class AlertEngine
     private readonly IAlertDeliverer _deliverer;
     private readonly Func<AlertMuteContext, bool> _isAlertMuted;
     private readonly Func<string, int, CancellationToken, Task<List<FailedJobInfo>>>? _failedJobsFetcher;
+    private readonly Func<string, IReadOnlyList<AgentJobStepKey>, CancellationToken, Task<IReadOnlyDictionary<AgentJobStepKey, AgentJobStepNames>>>? _agentJobStepResolver;
     private readonly Func<AlertResolution, CancellationToken, Task>? _resolutionCallback;
+
+    /// <summary>
+    /// The #3497 degrade arm's value: a resolver that THREW gets this instead of null, because the two
+    /// mean different things to the card — null says "no resolution was attempted" (render exactly as
+    /// before #3497), empty says "a resolution ran and answered nothing" (render the unresolved form,
+    /// which still states the Agent-job fact the parse alone establishes and carries the raw marker).
+    /// </summary>
+    private static readonly IReadOnlyDictionary<AgentJobStepKey, AgentJobStepNames> s_noAgentJobNames =
+        new Dictionary<AgentJobStepKey, AgentJobStepNames>();
     private readonly ILogger? _logger;
     private readonly Func<DateTime> _utcNow;
 
@@ -225,6 +235,15 @@ public sealed class AlertEngine
     /// it stays host-supplied: hosts run <see cref="FailedJobsQuery"/> on their own connections
     /// and degrade failures to an empty list. Null disables the failed-jobs check entirely.
     /// </param>
+    /// <param name="agentJobStepResolver">
+    /// #3497's live msdb job-name lookup (serverKey, parsed job/step keys, ct) — host-supplied for the
+    /// same reason as <paramref name="failedJobsFetcher"/>: job names live in the monitored server's
+    /// msdb, not in any collected table. Hosts run <see cref="AgentJobStepQuery.BuildSql"/> on their own
+    /// connections and degrade every failure (permission denied, transient, deleted job) to an empty
+    /// map. Called only inside the Long-Running Query FIRE branch — one msdb round trip per delivered
+    /// card, never per sweep — and only for sessions whose program_name parses as an Agent job step.
+    /// Null disables the annotation entirely: the card renders byte-identically to before #3497.
+    /// </param>
     /// <param name="resolutionCallback">
     /// Optional condition-recovered hook (see <see cref="AlertResolution"/>). Null = resolutions
     /// are tracked but not reported (state transitions still occur).
@@ -246,6 +265,7 @@ public sealed class AlertEngine
         IAlertDeliverer deliverer,
         Func<AlertMuteContext, bool> isAlertMuted,
         Func<string, int, CancellationToken, Task<List<FailedJobInfo>>>? failedJobsFetcher = null,
+        Func<string, IReadOnlyList<AgentJobStepKey>, CancellationToken, Task<IReadOnlyDictionary<AgentJobStepKey, AgentJobStepNames>>>? agentJobStepResolver = null,
         Func<AlertResolution, CancellationToken, Task>? resolutionCallback = null,
         ILogger? logger = null,
         Func<DateTime>? utcNow = null,
@@ -257,6 +277,7 @@ public sealed class AlertEngine
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
         _isAlertMuted = isAlertMuted ?? throw new ArgumentNullException(nameof(isAlertMuted));
         _failedJobsFetcher = failedJobsFetcher;
+        _agentJobStepResolver = agentJobStepResolver;
         _resolutionCallback = resolutionCallback;
         _logger = logger;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
@@ -1262,7 +1283,63 @@ public sealed class AlertEngine
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :365 */
                     _lastLongRunningQueryAlert[key] = now;                          /* :366 */
 
-                    var lrqContext = AlertContextBuilders.BuildLongRunningQueryContext(serverName, longRunning, lrqOccurrences.Decorate); /* :379 */
+                    /* #3497: name the Agent job on the card. FIRE-time resolution, deliberately, over
+                       capture-time: no schema change on either store, and the degrade is per-card rather
+                       than baked into collected rows — a failed msdb lookup costs THIS card the job name
+                       and the next fire tries again. Only the sessions the card will SHOW are parsed (the
+                       builder's own display cap), deduped so N sessions of one job cost one key, and the
+                       host answers all keys in ONE msdb round trip (AgentJobStepQuery.BuildSql). Inside
+                       the cooldown-gated fire branch, so a quiet sweep pays nothing.
+
+                       ANNOTATION, NEVER SUPPRESSION — the #3495 contract, sibling card: the read above,
+                       the threshold, the fingerprint observation and the fire decision are all made before
+                       this exists; it can only ever add a field. The keys never reach
+                       LongRunningQueryIncidents, so the fingerprint (query_hash) is untouched by
+                       construction — a card that re-fires with a different elapsed, or with the job name
+                       freshly resolved, folds into the same incident it always did.
+
+                       Degrade arms, each distinct on purpose: no resolver wired, or no Agent sessions
+                       shown → agentJobNames stays NULL and the builder renders the pre-#3497 card
+                       byte-identically; a resolver that THREW → the empty map, so parsed sessions render
+                       the unresolved form with the raw job-id marker (the host's own permission arm
+                       already degrades a denied msdb read to an empty map before it can throw — this
+                       catch is the belt over resolver bugs and transport faults). NOT counted on #3013's
+                       surface: that counter is store reads, and this reads the MONITORED SERVER's msdb —
+                       the same exemption FetchFailedJobsAsync documents. */
+                    IReadOnlyDictionary<AgentJobStepKey, AgentJobStepNames>? agentJobNames = null;
+                    if (_agentJobStepResolver is not null)
+                    {
+                        var agentKeys = new List<AgentJobStepKey>();
+                        int shownCount = Math.Min(AlertContextBuilders.LongRunningQueryDisplayCap, longRunning.Count);
+                        for (int i = 0; i < shownCount; i++)
+                        {
+                            if (AgentJobStepQuery.TryParseProgramName(longRunning[i].ProgramName, out var jobKey)
+                                && !agentKeys.Contains(jobKey))
+                            {
+                                agentKeys.Add(jobKey);
+                            }
+                        }
+
+                        if (agentKeys.Count > 0)
+                        {
+                            try
+                            {
+                                agentJobNames = await _agentJobStepResolver(key, agentKeys, ct);
+                            }
+                            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                            {
+                                throw;
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger?.LogWarning("Could not resolve Agent job names for the Long-Running Query card on {Server} — the card renders the unresolved form: {Message}",
+                                    serverName, ex.Message);
+                                agentJobNames = s_noAgentJobNames;
+                            }
+                        }
+                    }
+
+                    var lrqContext = AlertContextBuilders.BuildLongRunningQueryContext(serverName, longRunning, lrqOccurrences.Decorate, agentJobNames); /* :379 + #3497 */
                     var detailText = AlertContextBuilders.ContextToDetailText(lrqContext);                       /* :380 */
 
                     /* :382-392. ShortMessage = the toast body of :374. */

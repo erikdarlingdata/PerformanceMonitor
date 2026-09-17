@@ -575,14 +575,37 @@ public static class AlertContextBuilders
         return context;
     }
 
+    /// <summary>
+    /// The Long-Running Query card's render budget: sessions shown per card. A display cap, NOT an
+    /// observation cap (#2362 keeps the fingerprint observation list uncapped) — named because two
+    /// call sites have to agree on it: <see cref="BuildLongRunningQueryContext"/> renders this many,
+    /// and the engine resolves Agent-job names (#3497) for exactly the same subset, so a name is never
+    /// fetched for a session the card will not show.
+    /// </summary>
+    public const int LongRunningQueryDisplayCap = 3;
+
+    /// <summary>
+    /// <paramref name="agentJobNames"/> is #3497's annotation input — <b>annotation, never
+    /// suppression</b>: the same sessions render, the same incidents are fingerprinted, every card
+    /// still fires; a session whose <c>program_name</c> carries the SQLAgent job-step form merely
+    /// gains one field naming the job, because "that is the maintenance job, running as scheduled,
+    /// merely long" should not have to be reconstructed from the statement shape and the hour, twelve
+    /// times a night. NULL (the default, and every pre-#3497 caller) renders the card byte-identically
+    /// to before — no resolution was attempted, so nothing is claimed. NON-null says a resolution ran:
+    /// a parsed Agent session whose key the map lacks (msdb denied, lookup failed, job deleted) renders
+    /// the UNRESOLVED form, still stating the fact the parse alone establishes and carrying the raw
+    /// job-id marker so the operator can match it against the Program field's hex by eye. The
+    /// annotation states what IS, never a verdict.
+    /// </summary>
     public static AlertContext? BuildLongRunningQueryContext(
         string serverName, List<LongRunningQueryInfo> queries,
-        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null)
+        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null,
+        IReadOnlyDictionary<AgentJobStepKey, AgentJobStepNames>? agentJobNames = null)
     {
         if (queries.Count == 0) return null;
 
         var context = new AlertContext();
-        var shown = queries.GetRange(0, Math.Min(3, queries.Count));
+        var shown = queries.GetRange(0, Math.Min(LongRunningQueryDisplayCap, queries.Count));
         foreach (var q in shown)
         {
             var item = new AlertDetailItem
@@ -595,6 +618,20 @@ public static class AlertContextBuilders
                 item.Fields.Add(("Database", q.DatabaseName));
             if (!string.IsNullOrEmpty(q.ProgramName))
                 item.Fields.Add(("Program", q.ProgramName));
+            /* #3497: directly under Program, so the raw form and the resolved name read as one fact.
+               Fields never enter AlertFingerprint.ForKey — the dedup key hashes (server, type,
+               query_hash) only — so the annotation is fingerprint-inert by construction: a card that
+               re-fires with a different elapsed or a freshly resolved name folds into the same
+               incident it always did. Pinned in the owning suites rather than merely stated. */
+            if (agentJobNames is not null && AgentJobStepQuery.TryParseProgramName(q.ProgramName, out var jobKey))
+            {
+                item.Fields.Add(("Running under Agent job",
+                    agentJobNames.TryGetValue(jobKey, out var jobNames)
+                        ? jobNames.StepName is { Length: > 0 }
+                            ? $"{jobNames.JobName}, step {jobKey.StepId} ({jobNames.StepName})"
+                            : $"{jobNames.JobName}, step {jobKey.StepId}"
+                        : $"(name unresolved) Job 0x{AgentJobStepQuery.ToProgramNameHex(jobKey.JobId)}, step {jobKey.StepId}"));
+            }
             if (!string.IsNullOrEmpty(q.QueryText))
                 item.Fields.Add(("Query", TruncateText(q.QueryText)));
             item.Fields.Add(("CPU Time", $"{q.CpuTimeMs:N0} ms"));
