@@ -61,7 +61,11 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// production store on its three busiest servers, cold and warm. The whole pass is dominated by
     /// one read — the forced-plan check at <b>1,744.9 ms</b> cold, scanning ~6.0 GB of
     /// <c>query_store_stats</c>; every other read in the family lands under 3 ms. Ten seconds is 5.7x
-    /// that worst case, so it absorbs a substantial stall rather than only the happy path.</para>
+    /// that worst case, so it absorbs a substantial stall rather than only the happy path. That margin
+    /// has been measured being eaten once: the collection-signals read's whole-history top-N sort grew
+    /// with the 90-day retention fill until its cold excursions clocked ~12 s against this deadline —
+    /// the first measured breach — and #3496 restored the margin by making that read chunk-orderable
+    /// rather than by moving this number.</para>
     ///
     /// <para><b>Bounded above</b> by the cadence this pass runs on: <c>s_alertSweepInterval</c> is
     /// 30 s, so one stalled read must still leave the pass able to finish inside the interval that
