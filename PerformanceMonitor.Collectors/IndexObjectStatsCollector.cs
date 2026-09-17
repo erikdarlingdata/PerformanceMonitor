@@ -191,6 +191,154 @@ GROUP BY
     ios.index_id
 OPTION(RECOMPILE);
 
+/* Stage the per-index DEFINITION catalog ONCE, then build the metadata set-based - the
+   sp_IndexCleanup technique (#3508). The stats DMVs above already stage this way; the
+   definition reads used to run as five correlated subqueries in the final projection
+   (key/include FOR XML, two FK EXISTS, and the compression TOP(1)), each re-probing the live
+   catalog once per index - so a wide schema paid per index (a 54K-index database spent ~28s
+   in this body). Staging drops that to one scan apiece; the emitted strings and flags are
+   byte-identical. */
+SELECT
+    ic.object_id,
+    ic.index_id,
+    ic.column_id,
+    ic.key_ordinal,
+    ic.is_included_column,
+    ic.is_descending_key,
+    column_name = c.name
+INTO #index_columns
+FROM sys.index_columns AS ic
+JOIN sys.columns AS c
+  ON  c.object_id = ic.object_id
+  AND c.column_id = ic.column_id
+OPTION(RECOMPILE);
+
+CREATE CLUSTERED INDEX cx_index_columns
+    ON #index_columns (object_id, index_id, is_included_column, key_ordinal);
+
+/* key_columns/included_columns reproduce sp_IndexCleanup's delimited STUFF/FOR XML
+   representation EXACTLY (QUOTENAME + ' DESC', key order for keys, name order for the include
+   set), built once here by correlating to the staged #index_columns instead of the live
+   catalog. key_ordinal > 0 drops the partitioning column that rides at key_ordinal = 0 on a
+   partitioned index (sp_IndexCleanup fix ae32a4c) so it cannot land as a phantom leading key. */
+SELECT
+    d.object_id,
+    d.index_id,
+    key_columns =
+        STUFF
+        (
+          (
+            SELECT
+                N', ' +
+                QUOTENAME(ic.column_name) +
+                CASE
+                    WHEN ic.is_descending_key = 1
+                    THEN N' DESC'
+                    ELSE N''
+                END
+            FROM #index_columns AS ic
+            WHERE ic.object_id = d.object_id
+            AND   ic.index_id = d.index_id
+            AND   ic.is_included_column = 0
+            AND   ic.key_ordinal > 0
+            ORDER BY
+                ic.key_ordinal
+            FOR
+                XML
+                PATH(''),
+                TYPE
+          ).value('text()[1]', 'nvarchar(max)'),
+          1,
+          2,
+          ''
+        ),
+    included_columns =
+        STUFF
+        (
+          (
+            SELECT
+                N', ' +
+                QUOTENAME(ic.column_name)
+            FROM #index_columns AS ic
+            WHERE ic.object_id = d.object_id
+            AND   ic.index_id = d.index_id
+            AND   ic.is_included_column = 1
+            ORDER BY
+                ic.column_name
+            FOR
+                XML
+                PATH(''),
+                TYPE
+          ).value('text()[1]', 'nvarchar(max)'),
+          1,
+          2,
+          ''
+        )
+INTO #index_definitions
+FROM
+(
+    SELECT DISTINCT
+        object_id,
+        index_id
+    FROM #index_columns
+) AS d
+OPTION(RECOMPILE);
+
+/* FK protections (sp_IndexCleanup guards on is_foreign_key_reference): one set-based pass over
+   the staged KEY columns (is_included_column = 0) instead of a correlated EXISTS per index.
+   is_foreign_key = a key column backs an outgoing FK (supporting index); is_foreign_key_reference
+   = a key column is referenced by an incoming FK. */
+SELECT DISTINCT
+    ic.object_id,
+    ic.index_id
+INTO #foreign_key_supporting
+FROM #index_columns AS ic
+JOIN sys.foreign_key_columns AS fkc
+  ON  fkc.parent_object_id = ic.object_id
+  AND fkc.parent_column_id = ic.column_id
+WHERE ic.is_included_column = 0
+OPTION(RECOMPILE);
+
+SELECT DISTINCT
+    ic.object_id,
+    ic.index_id
+INTO #foreign_key_referenced
+FROM #index_columns AS ic
+JOIN sys.foreign_key_columns AS fkc
+  ON  fkc.referenced_object_id = ic.object_id
+  AND fkc.referenced_column_id = ic.column_id
+WHERE ic.is_included_column = 0
+OPTION(RECOMPILE);
+
+/* Compression aggregated to the index grain: the lowest level across partitions, so an index
+   with ANY uncompressed partition surfaces as NONE (sp_IndexCleanup's compressibility signal).
+   One windowed scan instead of a correlated TOP(1) per index; ties resolve to the same lowest
+   data_compression level, hence the same desc the correlated ORDER BY returned. */
+SELECT
+    p.object_id,
+    p.index_id,
+    p.data_compression_desc
+INTO #index_compression
+FROM
+(
+    SELECT
+        p.object_id,
+        p.index_id,
+        p.data_compression_desc,
+        rn =
+            ROW_NUMBER() OVER
+            (
+                PARTITION BY
+                    p.object_id,
+                    p.index_id
+                ORDER BY
+                    p.data_compression
+            )
+    FROM sys.partitions AS p
+) AS p
+WHERE p.rn = 1
+OPTION(RECOMPILE);
+
 SELECT
     sqlserver_start_time = (SELECT osi.sqlserver_start_time FROM sys.dm_os_sys_info AS osi),
     database_name = DB_NAME(),
@@ -237,132 +385,23 @@ SELECT
     page_io_latch_wait_count = os.page_io_latch_wait_count,
     page_io_latch_wait_in_ms = os.page_io_latch_wait_in_ms,
     /* Per-index DEFINITION metadata for monitor-side UNUSED/DUPLICATE analysis (sp_IndexCleanup
-       parity, Stage 1). key_columns/included_columns reproduce sp_IndexCleanup's delimited
-       STUFF/FOR XML representation EXACTLY (QUOTENAME + ' DESC', key order for keys, name order
-       for the include set) so Stage-2 string-comparison dedupe ports cleanly. */
-    key_columns =
-        STUFF
-        (
-          (
-            SELECT
-                N', ' +
-                QUOTENAME(c.name) +
-                CASE
-                    WHEN ic.is_descending_key = 1
-                    THEN N' DESC'
-                    ELSE N''
-                END
-            FROM sys.index_columns AS ic
-            JOIN sys.columns AS c
-              ON  c.object_id = ic.object_id
-              AND c.column_id = ic.column_id
-            WHERE ic.object_id = i.object_id
-            AND   ic.index_id = i.index_id
-            AND   ic.is_included_column = 0
-            /* key_ordinal > 0: on a partitioned index the partitioning column rides along in
-               sys.index_columns at key_ordinal = 0 when it is NOT a real key, and without this
-               guard it lands FIRST (ORDER BY key_ordinal) as a phantom leading key -- poisoning
-               every Stage-2 duplicate/subset comparison and any DDL rendered from key_columns.
-               Mirrors sp_IndexCleanup fix ae32a4c (five aggregations gained this same filter). */
-            AND   ic.key_ordinal > 0
-            ORDER BY
-                ic.key_ordinal
-            FOR
-                XML
-                PATH(''),
-                TYPE
-          ).value('text()[1]', 'nvarchar(max)'),
-          1,
-          2,
-          ''
-        ),
-    included_columns =
-        STUFF
-        (
-          (
-            SELECT
-                N', ' +
-                QUOTENAME(c.name)
-            FROM sys.index_columns AS ic
-            JOIN sys.columns AS c
-              ON  c.object_id = ic.object_id
-              AND c.column_id = ic.column_id
-            WHERE ic.object_id = i.object_id
-            AND   ic.index_id = i.index_id
-            AND   ic.is_included_column = 1
-            ORDER BY
-                c.name
-            FOR
-                XML
-                PATH(''),
-                TYPE
-          ).value('text()[1]', 'nvarchar(max)'),
-          1,
-          2,
-          ''
-        ),
+       parity, Stage 1), read from the temps staged above rather than rebuilt per index in this
+       projection. key_columns/included_columns keep sp_IndexCleanup's delimited STUFF/FOR XML
+       representation EXACTLY so Stage-2 string-comparison dedupe ports cleanly. */
+    key_columns = defs.key_columns,
+    included_columns = defs.included_columns,
     filter_definition = i.filter_definition,
     is_unique_constraint = i.is_unique_constraint,
-    /* FK protections (sp_IndexCleanup guards on is_foreign_key_reference): aggregated to the index
-       grain over KEY columns (is_included_column = 0), matching its per-column derivation from
-       sys.foreign_key_columns. is_foreign_key = a key column backs an outgoing FK (supporting
-       index); is_foreign_key_reference = a key column is referenced by an incoming FK. */
+    /* FK protections (sp_IndexCleanup guards on is_foreign_key_reference): a key column backs an
+       outgoing FK (is_foreign_key) or is referenced by an incoming FK (is_foreign_key_reference).
+       Presence in the staged sets IS the flag. */
     is_foreign_key =
-        CONVERT
-        (
-            bit,
-            CASE
-                WHEN EXISTS
-                     (
-                         SELECT
-                             1/0
-                         FROM sys.index_columns AS ic
-                         JOIN sys.foreign_key_columns AS fkc
-                           ON  fkc.parent_object_id = ic.object_id
-                           AND fkc.parent_column_id = ic.column_id
-                         WHERE ic.object_id = i.object_id
-                         AND   ic.index_id = i.index_id
-                         AND   ic.is_included_column = 0
-                     )
-                THEN 1
-                ELSE 0
-            END
-        ),
+        CONVERT(bit, CASE WHEN fks.object_id IS NOT NULL THEN 1 ELSE 0 END),
     is_foreign_key_reference =
-        CONVERT
-        (
-            bit,
-            CASE
-                WHEN EXISTS
-                     (
-                         SELECT
-                             1/0
-                         FROM sys.index_columns AS ic
-                         JOIN sys.foreign_key_columns AS fkc
-                           ON  fkc.referenced_object_id = ic.object_id
-                           AND fkc.referenced_column_id = ic.column_id
-                         WHERE ic.object_id = i.object_id
-                         AND   ic.index_id = i.index_id
-                         AND   ic.is_included_column = 0
-                     )
-                THEN 1
-                ELSE 0
-            END
-        ),
+        CONVERT(bit, CASE WHEN fkr.object_id IS NOT NULL THEN 1 ELSE 0 END),
     is_disabled = i.is_disabled,
-    /* Compression state aggregated to the index grain: the lowest level across partitions, so an
-       index with ANY uncompressed partition surfaces as NONE (sp_IndexCleanup's compressibility
-       signal). */
-    data_compression_desc =
-    (
-        SELECT TOP (1)
-            p.data_compression_desc
-        FROM sys.partitions AS p
-        WHERE p.object_id = i.object_id
-        AND   p.index_id = i.index_id
-        ORDER BY
-            p.data_compression
-    ),
+    /* Lowest compression level across partitions, staged in #index_compression above. */
+    data_compression_desc = comp.data_compression_desc,
     optimize_for_sequential_key = " + optimizeForSequentialKey + @",
     fill_factor = i.fill_factor,
     is_padded = i.is_padded,
@@ -395,6 +434,18 @@ LEFT JOIN #usage AS us
 LEFT JOIN #ops AS os
   ON  os.object_id = i.object_id
   AND os.index_id = i.index_id
+LEFT JOIN #index_definitions AS defs
+  ON  defs.object_id = i.object_id
+  AND defs.index_id = i.index_id
+LEFT JOIN #foreign_key_supporting AS fks
+  ON  fks.object_id = i.object_id
+  AND fks.index_id = i.index_id
+LEFT JOIN #foreign_key_referenced AS fkr
+  ON  fkr.object_id = i.object_id
+  AND fkr.index_id = i.index_id
+LEFT JOIN #index_compression AS comp
+  ON  comp.object_id = i.object_id
+  AND comp.index_id = i.index_id
 WHERE o.is_ms_shipped = 0
 AND   o.type IN (N'U', N'V')
 OPTION(RECOMPILE);";
