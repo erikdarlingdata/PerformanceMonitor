@@ -309,12 +309,15 @@ public partial class AddServerDialog : Window
 
             auth = mapped;
 
-            /* A managed-identity profile carries no secret (#3485 review): take its username (the optional
-               user-assigned client id) and write no blob. Demanding a secret would make an MI profile
-               unusable — one is never stored, so the secret check below could never pass. */
+            /* A managed-identity profile carries no secret (#3485 review): take its optional user-assigned
+               client id from ManagedIdentityClientId (a profile's Username is populated for SQL only, never
+               for MI — reading it here would silently downgrade a user-assigned identity to system-assigned)
+               and write no blob. Integrated profiles fall here too and carry neither, so username stays null.
+               Demanding a secret would make an MI profile unusable — one is never stored, so the secret check
+               below could never pass. */
             if (!ServerStoreCredential.RequiresSecret(profile.AuthType))
             {
-                username = string.IsNullOrWhiteSpace(profile.Username) ? null : profile.Username;
+                username = string.IsNullOrWhiteSpace(profile.ManagedIdentityClientId) ? null : profile.ManagedIdentityClientId;
                 return true;
             }
 

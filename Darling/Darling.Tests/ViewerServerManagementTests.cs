@@ -433,8 +433,9 @@ public sealed class ViewerServerMigrationTests
     public void Projection_ManagedIdentity_Projects_SecretLess_CarryingUserAssignedClientId()
     {
         /* #3484: managed identity carries no secret. A system-assigned identity projects with a null username;
-           a user-assigned identity carries its client id through Username, the only field it has (#3485 review —
-           the earlier version dropped it, silently turning a user-assigned identity into a system-assigned one). */
+           a user-assigned identity carries its client id through the store row's Username, the only field it
+           has (#3485 review — the earlier version dropped it, silently turning a user-assigned identity into a
+           system-assigned one). */
         using var systemAssigned = new Fixture();
         systemAssigned.ServerStore.AddServer(
             new ViewerServerEntry { ServerName = "azure", DisplayName = "Azure", AuthenticationType = AuthenticationTypes.ManagedIdentity },
@@ -462,6 +463,34 @@ public sealed class ViewerServerMigrationTests
         Assert.Equal("managedidentity", uaRow!.Auth);
         Assert.Equal("ua-client-id", uaRow.Username);
         Assert.True(string.IsNullOrEmpty(uaRow.EncryptedPassword));
+
+        /* PROFILE-BACKED user-assigned MI (#3485 second review): the id lives on the profile's
+           ManagedIdentityClientId, NOT its Username — a profile's Username is populated for SQL profiles only.
+           The earlier fix read profile.Username here, which is always null for an MI profile, so a
+           profile-backed user-assigned identity silently downgraded to system-assigned. */
+        using var profileBacked = new Fixture();
+        var miProfile = new ViewerCredentialProfile
+        {
+            Name = "ua-mi-profile",
+            AuthType = AuthenticationTypes.ManagedIdentity,
+            ManagedIdentityClientId = "profile-ua-id",
+        };
+        profileBacked.ProfileStore.AddProfile(miProfile);
+        profileBacked.ServerStore.AddServer(
+            new ViewerServerEntry
+            {
+                ServerName = "azure",
+                DisplayName = "Azure",
+                AuthenticationType = AuthenticationTypes.ManagedIdentity,
+                CredentialProfileId = miProfile.Id,
+            },
+            null, null);
+        var (profRow, profReason) = profileBacked.Migration.TryProjectEntry(profileBacked.ServerStore.GetAllServers()[0]);
+        Assert.Null(profReason);
+        Assert.NotNull(profRow);
+        Assert.Equal("managedidentity", profRow!.Auth);
+        Assert.Equal("profile-ua-id", profRow.Username);
+        Assert.True(string.IsNullOrEmpty(profRow.EncryptedPassword));
     }
 
     [Fact]

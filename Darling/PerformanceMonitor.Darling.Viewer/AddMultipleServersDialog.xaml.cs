@@ -448,14 +448,17 @@ public partial class AddMultipleServersDialog : Window
             }
 
             /* A managed-identity profile carries no secret (#3485 review): build the shared settings from its
-               username (the optional client id) with no blob. Demanding a secret would make an MI profile
-               unusable in bulk too, since one is never stored. */
+               optional user-assigned client id in ManagedIdentityClientId (a profile's Username is populated
+               for SQL only, never for MI — reading it here would silently downgrade a user-assigned identity
+               to system-assigned) with no blob. Integrated profiles fall here too and carry neither, so the
+               id stays null. Demanding a secret would make an MI profile unusable in bulk too, since one is
+               never stored. */
             if (!ServerStoreCredential.RequiresSecret(profile.AuthType))
             {
                 shared = new BulkSharedSettings
                 {
                     AuthType = profile.AuthType,
-                    Username = string.IsNullOrWhiteSpace(profile.Username) ? null : profile.Username,
+                    Username = string.IsNullOrWhiteSpace(profile.ManagedIdentityClientId) ? null : profile.ManagedIdentityClientId,
                     EncryptMode = encryptMode,
                     TrustServerCertificate = trustCert,
                 };

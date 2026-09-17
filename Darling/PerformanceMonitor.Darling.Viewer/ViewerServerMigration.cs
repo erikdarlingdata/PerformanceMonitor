@@ -175,12 +175,14 @@ public sealed class ViewerServerMigration
         if (!ServerStoreCredential.RequiresSecret(effectiveAuthType))
         {
             /* Integrated and managed identity carry no secret (#3484). Managed identity still carries its
-               OPTIONAL user-assigned client id through Username — the only field it has — or a user-assigned
-               identity silently migrates as system-assigned (#3485 review). The id is on the profile when
-               profile-backed, otherwise on the entry's own ManagedIdentityClientId. */
+               OPTIONAL user-assigned client id, which the store row holds in Username — the only field it
+               has — or a user-assigned identity silently migrates as system-assigned (#3485 review). The
+               SOURCE of that id is the profile's ManagedIdentityClientId when profile-backed (a profile's
+               Username is populated for SQL only, never for MI), otherwise the entry's own
+               ManagedIdentityClientId. */
             if (storeAuth == ServerStoreCredential.ManagedIdentity)
             {
-                var miClientId = profile?.Username ?? entry.ManagedIdentityClientId;
+                var miClientId = profile?.ManagedIdentityClientId ?? entry.ManagedIdentityClientId;
                 row.Username = string.IsNullOrWhiteSpace(miClientId) ? null : miClientId.Trim();
             }
             return (row, null);
