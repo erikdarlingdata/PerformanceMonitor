@@ -99,8 +99,12 @@ namespace PerformanceMonitor.Common
         ///
         /// <para>The two lists must stay in step by hand, because they cannot by reference:
         /// <c>AlertSeverity</c> is internal to the Notifications assembly, which references this one.
-        /// The lockstep test beside <c>CollectorCostDigest_IsInfoBlueOnPurpose</c> is what fails when a
-        /// third deliberate INFO metric is declared there and not here.</para>
+        /// The from-source census beside <c>CollectorCostDigest_IsInfoBlueOnPurpose</c> is what holds
+        /// them there: it reads <c>ForMetric</c>'s deliberate INFO arms out of that method's SOURCE and
+        /// this method's names out of THIS file's, and asserts set-equality — so a third INFO arm
+        /// declared there fails the census even when both this list and the behavior theory's
+        /// InlineData rows were forgotten, the both-forgotten hole an InlineData theory structurally
+        /// cannot close (#3476 review).</para>
         /// </summary>
         public static bool IsInformational(string? metricName) =>
             metricName is "Collector Cost Digest" or "Fleet Sweep Rollup";

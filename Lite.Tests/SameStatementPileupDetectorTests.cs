@@ -630,12 +630,14 @@ public class SameStatementPileupDetectorTests
 
     /// <summary>
     /// The tempdb rule (#3474, measured: the day before the incident, a 16.5 s copy of the incident
-    /// statement was recorded with tempdb as its database context — the statement joins a #temp
-    /// table and the request's context followed it). A tempdb-attributed row scopes to tempdb: it
-    /// neither joins a tenant database's pack nor rewrites its arithmetic, tempdb-attributed
-    /// sessions can form their own pileup, and that pileup's baseline is drawn only from
-    /// tempdb-attributed history — honest about what the DMV said, with no reattribution guessing
-    /// (DatabaseScope's remarks carry why a guess would poison the baselines this scoping cleans).
+    /// statement was recorded with tempdb as its database context — the session's execution context
+    /// WAS tempdb, reaching the tenant tables by three-part names; a #temp join moves nothing). A
+    /// tempdb-attributed row scopes to tempdb: it neither joins a tenant database's pack nor
+    /// rewrites its arithmetic, tempdb-attributed sessions can form their own pileup, and that
+    /// pileup's baseline is drawn only from tempdb-attributed history — correct plan-cache grouping
+    /// (a compiled plan is keyed by its context database's dbid, so the tempdb-context copies share
+    /// one among themselves), not reattribution guessing (DatabaseScope's remarks carry why a
+    /// reattributed row would blame the wrong plan and poison the baselines this scoping cleans).
     /// </summary>
     [Fact]
     public void TempdbAttributedRows_GroupAmongThemselves()

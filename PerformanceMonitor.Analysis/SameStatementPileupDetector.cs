@@ -414,17 +414,24 @@ public static class SameStatementPileupDetector
     ///
     /// <para><b>The tempdb rule.</b> A row the DMV attributes to tempdb scopes to tempdb — its own
     /// (tempdb, statement) group, its baseline drawn only from tempdb-attributed history. The shape
-    /// is measured, not hypothetical: the incident statement joins a #temp table, and the day before
-    /// the incident a 16.5 s copy of it was recorded with tempdb as its database context — the
-    /// request's context followed the temp object (#3474). Reattributing such a row to the tenant
-    /// database it "really" ran for is deliberately NOT attempted: the snapshot carries no reliable
-    /// session-to-database mapping at read time to do it with, and a guessed attribution would
-    /// poison exactly the per-database baseline this scoping exists to keep clean — one wrong guess
-    /// plants multi-second rows in another database's history, which then suppresses that database's
-    /// next real pileup, and that failure direction is quiet. Being honest about what the DMV said
-    /// costs something bounded and visible instead: a pileup whose copies split between tempdb
-    /// attribution and tenant attribution fires only if one of the partitions clears the session
-    /// floor on its own.</para>
+    /// is measured, not hypothetical: the day before the incident a 16.5 s copy of the incident
+    /// statement was recorded with tempdb as its database context (#3474). The mechanics: the DMV's
+    /// database_id is the SESSION's execution context, and joining a #temp table does not move it —
+    /// the row reads tempdb because the session's context genuinely was tempdb, with the statement
+    /// reaching other databases' tables by three-part names. And that grounds this scoping in
+    /// plan-cache semantics rather than mere honesty about the DMV: compiled-plan cache entries are
+    /// keyed by the context database's dbid, so tempdb-context copies of a statement share a
+    /// tempdb-keyed plan AMONG THEMSELVES — the (tempdb, statement) group is the same
+    /// one-shared-plan story every other group tells. Reattributing such a row to the tenant
+    /// database whose tables it read is deliberately NOT attempted, for two reasons that compound:
+    /// the reattributed row would blame a plan that is not the one convoying — the tenant-keyed
+    /// cache entry is a different plan from the tempdb-keyed one actually running — and it would
+    /// plant multi-second rows in the tenant database's history, poisoning exactly the per-database
+    /// baseline this scoping exists to keep clean, which then suppresses that database's next real
+    /// pileup, and that failure direction is quiet. The correct grouping's cost is bounded and
+    /// visible instead: a pileup whose copies split between tempdb context and tenant context fires
+    /// only if one of the partitions clears the session floor on its own — and by the keying above,
+    /// those partitions really are running different plans.</para>
     /// </summary>
     public static string DatabaseScope(SnapshotRow row) =>
         string.IsNullOrWhiteSpace(row.DatabaseName) ? string.Empty : row.DatabaseName.Trim();

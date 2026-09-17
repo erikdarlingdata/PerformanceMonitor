@@ -1,3 +1,7 @@
+using System;
+using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using Xunit;
@@ -93,9 +97,10 @@ public class AlertSeverityTests
     /// <c>IsWarning</c> is the complement of resolution/critical, so a metric this map deliberately
     /// keeps INFO/blue still arrived in both grids amber, styled like a live actionable alert. The two
     /// assemblies cannot reference each other's map (<c>AlertSeverity</c> is internal here, downstream
-    /// of Common), so this test IS the reference: a third deliberate INFO arm added to
-    /// <see cref="AlertSeverity.ForMetric"/> without joining
-    /// <see cref="AlertMetricClassifier.IsInformational"/> fails here, not in a user's grid.</summary>
+    /// of Common), so these pins are the reference for the KNOWN arms — and only for those: an
+    /// InlineData theory exercises the strings someone remembered to list, so the from-source census
+    /// (<see cref="TheDeliberateInfoArms_AreExactlyTheHistoryGridCarveOuts"/>) is what fails for a
+    /// third arm nobody listed (#3476 review).</summary>
     [Theory]
     [InlineData("Collector Cost Digest")]
     [InlineData("Fleet Sweep Rollup")]
@@ -106,6 +111,142 @@ public class AlertSeverityTests
 
         Assert.True(AlertMetricClassifier.IsInformational(metric));
         Assert.False(AlertMetricClassifier.IsWarning(metric));
+    }
+
+    /// <summary>The lockstep, held by census rather than by memory (#3476 review). The InlineData pins
+    /// above test BEHAVIOR for the arms someone remembered to list, and that is the hole the classifier's
+    /// doc used to paper over: a third deliberate INFO arm added to <see cref="AlertSeverity.ForMetric"/>
+    /// while forgetting BOTH <see cref="AlertMetricClassifier.IsInformational"/> and a new InlineData row
+    /// failed nothing. This census closes it the #3466 way (<c>McpToolTypeRegistrationTests</c>): derive
+    /// both lists from SOURCE and assert set-equality, so the both-forgotten case reds here.
+    ///
+    /// <para><b>The INFO side is enumerated from ForMetric's source and classified by ForMetric
+    /// itself:</b> every string-literal switch arm is read out of AlertSeverity.cs (comments stripped
+    /// first, so a metric named in prose cannot join the census), and an arm is "deliberately INFO"
+    /// exactly when the COMPILED method renders it identically to the unmapped fall-through — the
+    /// declared-yet-fall-through-identical rendering IS the design being pinned, and letting the method
+    /// classify its own arms means the census cannot go stale if the INFO tier's hex or badge ever
+    /// changes, and cannot misread a WARNING arm.</para>
+    ///
+    /// <para><b>The classifier side is enumerated from ITS source rather than by invocation, and that is
+    /// the stronger arm:</b> invoking <c>IsInformational</c> can confirm membership for names already in
+    /// hand, but no probe set can ENUMERATE a pattern's members — a stale name kept there after a metric
+    /// rename is invisible to every probe derived from ForMetric, and the stale direction is half of what
+    /// a set-equality census exists for (the MCP census's stale-registration arm, one assembly over).
+    /// Invocation still runs as the belt: both parsed sets must agree with the compiled classifier in
+    /// both directions, so the regex cannot silently drift from what the code does.</para></summary>
+    [Fact]
+    public void TheDeliberateInfoArms_AreExactlyTheHistoryGridCarveOuts()
+    {
+        /* Every declared metric-name arm in ForMetric's switch, from source. */
+        var severitySource = StripComments(File.ReadAllText(RepoSourcePath(
+            "PerformanceMonitor.Notifications", "AlertSeverity.cs")));
+
+        var declaredArms = Regex
+            .Matches(severitySource, "\"(?<lit>[^\"]+)\"(?:\\s+or\\s+\"(?<lit>[^\"]+)\")*\\s*=>")
+            .SelectMany(m => m.Groups["lit"].Captures.Select(c => c.Value))
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.True(
+            declaredArms.Count > 0,
+            "Found no string-literal switch arms in AlertSeverity.cs. If ForMetric's shape changed, this "
+            + "census needs to learn the new one rather than be deleted — it is the only thing that fails "
+            + "when a deliberate INFO arm joins neither IsInformational nor the InlineData pins above.");
+
+        /* The deliberate INFO arms: declared, and rendered by the compiled method exactly like the
+           unmapped fall-through. INFO is the fall-through's own rendering, which is why an arm that
+           matches it is a declaration rather than an accident (CollectorCostDigest_IsInfoBlueOnPurpose's
+           point) — and why source is the only place the declared set can be read from at all. */
+        const string probe = "no-such-metric-name";
+        Assert.DoesNotContain(probe, declaredArms);
+        var fallThrough = AlertSeverity.ForMetric(probe);
+
+        var deliberateInfo = declaredArms
+            .Where(name => AlertSeverity.ForMetric(name) == fallThrough)
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.NotEmpty(deliberateInfo);
+
+        /* IsInformational's names, from ITS source. */
+        var classifierSource = StripComments(File.ReadAllText(RepoSourcePath(
+            "PerformanceMonitor.Common", "AlertMetricClassifier.cs")));
+
+        var isInformational = Regex.Match(
+            classifierSource, @"IsInformational\s*\([^)]*\)\s*=>\s*\w+\s+is\s+(?<body>[^;]+);");
+
+        Assert.True(
+            isInformational.Success,
+            "Could not read IsInformational's name list out of AlertMetricClassifier.cs. If the method's "
+            + "shape changed, teach the census the new one rather than deleting it.");
+
+        var carveOuts = Regex
+            .Matches(isInformational.Groups["body"].Value, "\"(?<lit>[^\"]+)\"")
+            .Select(m => m.Groups["lit"].Value)
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.NotEmpty(carveOuts);
+
+        /* Set-equality, each direction failing with the fix in hand. */
+        var missing = deliberateInfo.Except(carveOuts).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        var stale = carveOuts.Except(deliberateInfo).OrderBy(n => n, StringComparer.Ordinal).ToList();
+
+        Assert.True(
+            missing.Count == 0,
+            "These metrics render INFO-blue on purpose in email and webhooks, but the Alert History grids "
+            + "in both apps will style them amber like live actionable alerts, because "
+            + "AlertMetricClassifier.IsInformational does not name them: " + string.Join(", ", missing)
+            + ". Add them there, and an InlineData row on the behavior theory above.");
+
+        Assert.True(
+            stale.Count == 0,
+            "AlertMetricClassifier.IsInformational names metrics that are not deliberate INFO arms of "
+            + "AlertSeverity.ForMetric — a stale or renamed entry that un-highlights history rows the "
+            + "severity map does not keep blue: " + string.Join(", ", stale));
+
+        /* The belt: the parsed sets must agree with the COMPILED classifier, both directions — a
+           censused carve-out the method rejects means the parse drifted from the code, and a non-INFO
+           arm the method accepts means the code grew reach the parse cannot see. The IsWarning check
+           is the user-facing consequence itself, now held for every future arm rather than only the
+           two the InlineData theory lists. */
+        foreach (var name in deliberateInfo)
+        {
+            Assert.True(AlertMetricClassifier.IsInformational(name));
+            Assert.False(AlertMetricClassifier.IsWarning(name));
+        }
+
+        foreach (var name in declaredArms.Except(deliberateInfo))
+        {
+            Assert.False(AlertMetricClassifier.IsInformational(name));
+        }
+    }
+
+    /// <summary>Block and line comments removed, so a metric name mentioned in prose — both censused
+    /// files name several in theirs — cannot join a source census. No string literal in either file
+    /// contains a comment opener, which is what keeps the lexer-free strip honest.</summary>
+    private static string StripComments(string source) =>
+        Regex.Replace(source, @"/\*.*?\*/|//[^\r\n]*", string.Empty, RegexOptions.Singleline);
+
+    /// <summary>Walks up from the test output directory to the checkout — the
+    /// <c>McpToolTypeRegistrationTests.HostSourcePath</c> shape, for the same reason: a coverage
+    /// question should be answerable from source without standing up either assembly's host.</summary>
+    private static string RepoSourcePath(string project, string file)
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+
+        while (dir is not null)
+        {
+            var candidate = Path.Combine(dir.FullName, project, file);
+
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+
+            dir = dir.Parent;
+        }
+
+        throw new FileNotFoundException(
+            $"Could not locate {project}/{file} by walking up from the test output directory.");
     }
 
     [Fact]
