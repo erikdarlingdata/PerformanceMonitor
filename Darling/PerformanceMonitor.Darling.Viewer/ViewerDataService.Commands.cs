@@ -283,6 +283,20 @@ public sealed class TestConnectServer
     [JsonPropertyName("engine")]
     public string Engine { get; set; } = "sqlserver";
 
+    /// <summary>
+    /// TCP port for a PostgreSQL target on a non-default port — the same contract as
+    /// <c>MonitoredServer.Port</c>, which is what the service deserializes this into: <c>0</c> means "the
+    /// driver's default" (5432), and a SQL Server target carries a non-default port in <see cref="Host"/> as
+    /// <c>host,1433</c> (#3499). OMITTED at the default, unlike <see cref="Engine"/> which is always emitted:
+    /// engine going explicit was #3244's point (silence there gets GUESSED at, and 17 is a major in both
+    /// vocabularies), while an absent port already means exactly one thing to the deserializer — and omitting
+    /// it keeps every SQL Server request's args_json byte-identical to what the dialogs sent before this
+    /// field existed.
+    /// </summary>
+    [JsonPropertyName("port")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int Port { get; set; }
+
     [JsonPropertyName("host")]
     public string Host { get; set; } = "";
 

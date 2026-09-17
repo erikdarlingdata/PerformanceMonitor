@@ -36,25 +36,62 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
         <!-- Header -->
         <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Add SQL Server Connection" FontSize="18" FontWeight="Bold" Margin="0,0,0,15"
                    Foreground="{DynamicResource ForegroundBrush}"/>
 
+        <!-- Database Engine (#3499). SQL Server stays the checked default so an untouched dialog renders
+             exactly the pre-engine-selector form — the regression pin the tests hold. Selecting PostgreSQL
+             swaps the engine-specific parts of the form (EngineMode_Changed): the PostgreSQL options panel
+             appears, the SQL-Server-only auth modes and connection options hide, and SQL auth is forced,
+             because it is the one mode the service's PostgreSQL connect path honors. -->
+        <TextBlock Grid.Row="1" Text="Database Engine" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,12">
+            <RadioButton x:Name="SqlServerEngineRadio" Content="SQL Ser_ver" GroupName="EngineGroup"
+                         Foreground="{DynamicResource ForegroundBrush}" IsChecked="True"
+                         Checked="EngineMode_Changed" Margin="0,0,16,0"/>
+            <RadioButton x:Name="PostgresEngineRadio" Content="Postgre_SQL" GroupName="EngineGroup"
+                         Foreground="{DynamicResource ForegroundBrush}"
+                         Checked="EngineMode_Changed"
+                         ToolTip="PostgreSQL or Amazon Aurora PostgreSQL. Connects with username/password auth; Aurora typically also needs 'Trust server certificate' (it presents an RDS CA a stock trust store does not know)."/>
+        </StackPanel>
+
         <!-- Server Name -->
-        <TextBlock Grid.Row="1" Text="Server Name / Address" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
-        <TextBox Grid.Row="2" x:Name="ServerNameBox" Margin="0,0,0,12"/>
+        <TextBlock Grid.Row="3" Text="Server Name / Address" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <TextBox Grid.Row="4" x:Name="ServerNameBox" Margin="0,0,0,12"/>
 
         <!-- Display Name -->
-        <TextBlock Grid.Row="3" Text="Display Name (optional)" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
-        <TextBox Grid.Row="4" x:Name="DisplayNameBox" Margin="0,0,0,12"/>
+        <TextBlock Grid.Row="5" Text="Display Name (optional)" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <TextBox Grid.Row="6" x:Name="DisplayNameBox" Margin="0,0,0,12"/>
+
+        <!-- PostgreSQL options (#3499) — shown only on the PostgreSQL arm, so the SQL Server form is
+             untouched. Port is the one PostgreSQL-only field; blank means the driver default (5432), the
+             same omitted-means-default contract as the MCP add_servers tool's port parameter, so a
+             default-port target added here derives the SAME identity as one onboarded over MCP with port
+             omitted. TLS reuses the shared Encryption + Trust controls below — the note says how the
+             service maps them onto sslmode, so the operator is not left guessing at SQL Server vocabulary. -->
+        <StackPanel Grid.Row="7" x:Name="PostgresOptionsPanel" Visibility="Collapsed" Margin="0,0,0,12">
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                <TextBlock Text="Port:" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Width="110"/>
+                <TextBox x:Name="PortBox" Width="100" TextAlignment="Right"
+                         ToolTip="Leave blank for the default (5432). Set it only for a PostgreSQL instance on a non-default port — the port is part of the server's identity, so two instances on one host stay distinct."/>
+                <TextBlock Text="blank = 5432, the default" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           FontSize="11" VerticalAlignment="Center" Margin="8,0,0,0"/>
+            </StackPanel>
+            <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"
+                       Text="PostgreSQL targets connect with username/password authentication. The Database box below is optional — blank connects to the maintenance database ('postgres'), which the cluster-wide collectors read from. Encryption maps to sslmode: Optional → prefer; Mandatory/Strict → verify-full, or require when 'Trust server certificate' is checked (typically needed for Aurora)."/>
+        </StackPanel>
 
         <!-- Authentication. The credential source is either inline per-server auth or a shared credential
              profile (the Darling service resolves the profile at connect time — the viewer never connects).
              This is declarative config the service consumes. -->
-        <TextBlock Grid.Row="5" Text="Authentication" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
-        <StackPanel Grid.Row="6" Margin="0,0,0,12">
+        <TextBlock Grid.Row="8" Text="Authentication" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <StackPanel Grid.Row="9" Margin="0,0,0,12">
             <!-- Credential source: inline (per-server) vs a shared credential profile -->
             <RadioButton Content="Configure c_redentials on this server"
                          Foreground="{DynamicResource ForegroundBrush}" IsChecked="True"
@@ -91,7 +128,7 @@
         </StackPanel>
 
         <!-- SQL Auth Credentials -->
-        <StackPanel Grid.Row="7" x:Name="SqlCredentialsPanel" Visibility="Collapsed" Margin="0,0,0,12">
+        <StackPanel Grid.Row="10" x:Name="SqlCredentialsPanel" Visibility="Collapsed" Margin="0,0,0,12">
             <TextBlock Text="Username" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
             <TextBox x:Name="UsernameBox" Margin="0,0,0,8"/>
             <TextBlock Text="Password" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
@@ -99,14 +136,14 @@
         </StackPanel>
 
         <!-- Entra MFA Credentials -->
-        <StackPanel Grid.Row="7" x:Name="EntraMfaPanel" Visibility="Collapsed" Margin="0,0,0,12">
+        <StackPanel Grid.Row="10" x:Name="EntraMfaPanel" Visibility="Collapsed" Margin="0,0,0,12">
             <TextBlock Text="Username (optional)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
             <TextBox x:Name="EntraMfaUsernameBox" Margin="0,0,0,8"
                      ToolTip="Optional: the UPN the service should pre-populate the authentication dialog with."/>
         </StackPanel>
 
         <!-- Service Principal Credentials -->
-        <StackPanel Grid.Row="7" x:Name="ServicePrincipalPanel" Visibility="Collapsed" Margin="0,0,0,12">
+        <StackPanel Grid.Row="10" x:Name="ServicePrincipalPanel" Visibility="Collapsed" Margin="0,0,0,12">
             <TextBlock Text="Client (Application) ID" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
             <TextBox x:Name="AzureClientIdBox" Margin="0,0,0,8"
                      ToolTip="The Application (client) ID of the Entra app registration / service principal."/>
@@ -118,7 +155,7 @@
         </StackPanel>
 
         <!-- Managed Identity Credentials -->
-        <StackPanel Grid.Row="7" x:Name="ManagedIdentityPanel" Visibility="Collapsed" Margin="0,0,0,12">
+        <StackPanel Grid.Row="10" x:Name="ManagedIdentityPanel" Visibility="Collapsed" Margin="0,0,0,12">
             <TextBlock Text="User-Assigned Identity Client ID (optional)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
             <TextBox x:Name="ManagedIdentityClientIdBox" Margin="0,0,0,8"
                      ToolTip="Leave blank to use the system-assigned managed identity. Set to a client id to use a specific user-assigned identity."/>
@@ -127,8 +164,8 @@
         </StackPanel>
 
         <!-- Connection Options -->
-        <TextBlock Grid.Row="8" Text="Connection Options" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
-        <StackPanel Grid.Row="9" Margin="0,0,0,12">
+        <TextBlock Grid.Row="11" Text="Connection Options" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+        <StackPanel Grid.Row="12" Margin="0,0,0,12">
             <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
                 <TextBlock Text="Encryption:" Foreground="{DynamicResource ForegroundBrush}" VerticalAlignment="Center" Width="110"/>
                 <ComboBox x:Name="EncryptModeComboBox" Width="150" SelectedIndex="1">

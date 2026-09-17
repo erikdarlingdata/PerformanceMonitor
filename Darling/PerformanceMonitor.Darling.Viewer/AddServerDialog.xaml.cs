@@ -33,6 +33,17 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// username + secret at write time. The INTERACTIVE Entra modes (MFA / device-code / default-credential) have
 /// no headless connect path (<see cref="ServerStoreCredential"/>) and are blocked with a clear message rather
 /// than written un-honorable. Favorites stay viewer-local (<see cref="ViewerServerStore.SetFavorite"/>).</para>
+///
+/// <para><b>Engine (#3499).</b> The dialog authors both engines the service monitors: SQL Server (the checked
+/// default — an untouched dialog renders the exact pre-selector form) and PostgreSQL, which the service had
+/// carried end to end (registry row, probe, collectors) while this dialog could not say the word — the MCP
+/// <c>add_servers</c> tool and <c>--add-server</c> were the only onboarding routes. The PostgreSQL arm exposes
+/// the one PG-only field (port, blank = 5432) and reuses the shared Database/Encryption/Trust controls (the
+/// service maps the latter two onto sslmode); the SQL-Server-only controls (the Entra/Windows auth modes,
+/// read-only intent, multi-subnet failover) hide, and auth is pinned to SQL — the one mode the PostgreSQL
+/// connect path honors, enforced again at save with the same rule the backend applies. Engine and port ride
+/// through Test Connection and into the registry row, and the row shape matches <c>add_servers</c> exactly:
+/// one server, one identity, whichever door it came in through.</para>
 /// </summary>
 public partial class AddServerDialog : Window
 {
@@ -91,8 +102,22 @@ public partial class AddServerDialog : Window
 
         _existing = existing;
         _originalServerId = existing.ServerId;
-        Title = "Edit SQL Server";
-        HeaderText.Text = "Edit SQL Server Connection";
+
+        /* #3499: the engine radios REFLECT the row and are LOCKED on edit. The engine is part of what the
+           server IS — every collect.* row under this server_id was collected as that engine — and #2158 made
+           an edit keep its identity, so flipping the radio here would interleave two engines' histories under
+           one id. Recognition goes through IsPostgres (the TargetEngine parse) rather than a token compare,
+           because a darling.json-seeded row holds its raw spelling ("aurora-postgresql", "PostgreSQL", ...). */
+        if (existing.IsPostgres)
+        {
+            PostgresEngineRadio.IsChecked = true;
+            PortBox.Text = existing.Port > 0 ? existing.Port.ToString(CultureInfo.InvariantCulture) : "";
+        }
+        SqlServerEngineRadio.IsEnabled = false;
+        PostgresEngineRadio.IsEnabled = false;
+        SqlServerEngineRadio.ToolTip = EngineLockedOnEditTooltip;
+        PostgresEngineRadio.ToolTip = EngineLockedOnEditTooltip;
+        ApplyEngineTitle(existing.IsPostgres);
 
         ServerNameBox.Text = existing.Host;
         DisplayNameBox.Text = existing.Name;
@@ -272,6 +297,110 @@ public partial class AddServerDialog : Window
         "to connect. Add it from a viewer on the service's host, run --add-server there, or use an env:/file: " +
         "reference instead.";
 
+    /// <summary>
+    /// #3499: swaps the engine-specific parts of the form. The SQL Server arm is the XAML's default state —
+    /// this handler must restore EXACTLY that state on the way back, which is why it only ever toggles
+    /// Visibility (a hidden checkbox keeps its IsChecked, so an edited row's stored read-only-intent /
+    /// multi-subnet values survive the round trip untouched) and never resets a value.
+    ///
+    /// <para>The PostgreSQL arm hides the auth modes the backend refuses for a PG target — Windows/Kerberos
+    /// and all the Entra modes — and force-checks SQL auth, the one inline mode left, rather than leaving the
+    /// operator a picker with one choice. The credential-profile source stays offered (a SQL profile is a
+    /// valid PG credential); a profile resolving to a non-SQL mode is refused at build time with the same
+    /// tailored message, the #3486 discipline of naming what IS supported instead of a bare no.</para>
+    /// </summary>
+    private void EngineMode_Changed(object sender, RoutedEventArgs e)
+    {
+        /* XAML parse order: this fires for the default-checked SQL Server radio while the later-declared
+           panels are still null. The XAML defaults already ARE the SQL Server arm, so returning is correct. */
+        if (PostgresOptionsPanel is null || InlineAuthRadios is null ||
+            ReadOnlyIntentCheckBox is null || MultiSubnetFailoverCheckBox is null)
+        {
+            return;
+        }
+
+        var postgres = PostgresEngineRadio.IsChecked == true;
+
+        PostgresOptionsPanel.Visibility = postgres ? Visibility.Visible : Visibility.Collapsed;
+
+        /* SQL-Server-only connection options: ApplicationIntent and MultiSubnetFailover are AG-listener/FCI
+           concepts the PostgreSQL connection builder never reads. Hidden, not unchecked — see the summary. */
+        ReadOnlyIntentCheckBox.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
+        MultiSubnetFailoverCheckBox.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
+
+        WindowsAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
+        EntraMfaAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
+        ServicePrincipalAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
+        ManagedIdentityAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
+
+        /* Force-check SQL auth on the PostgreSQL arm so a hidden radio can never be the CHECKED one — a
+           checked-but-invisible Windows radio would build an integrated-auth PG row the save gate then
+           refuses, an error the operator was given no control to avoid. Going back to SQL Server leaves SQL
+           auth checked: it is a valid SQL Server mode, and un-picking a choice the operator made is worse. */
+        if (postgres && SqlAuthRadio.IsChecked != true)
+        {
+            SqlAuthRadio.IsChecked = true;
+        }
+
+        ApplyEngineTitle(postgres);
+    }
+
+    /// <summary>The window title + header for the current engine and Add/Edit mode. On the SQL Server arm the
+    /// strings are byte-identical to the pre-#3499 dialog — that is the regression pin, not a coincidence.</summary>
+    private void ApplyEngineTitle(bool postgres)
+    {
+        var noun = postgres ? "PostgreSQL Server" : "SQL Server";
+        var verb = _existing is null ? "Add" : "Edit";
+        Title = $"{verb} {noun}";
+        HeaderText.Text = $"{verb} {noun} Connection";
+    }
+
+    /// <summary>The engine radios are disabled on edit; the tooltip says why, so the lock reads as a rule
+    /// rather than a bug (#3499).</summary>
+    private const string EngineLockedOnEditTooltip =
+        "The engine is part of what this server IS — its collected history is keyed to it — so an edit can't " +
+        "change it. To move a host between engines, add it as a new server and remove this one.";
+
+    /// <summary>
+    /// The #3499 belt on the save/test path: the backend refuses every non-SQL auth mode for a PostgreSQL
+    /// target (the same rule in DarlingConfig.Validate and the MCP add_servers validation), so the dialog
+    /// refuses it too rather than writing a row the service will fail on every sweep. The hidden radios make
+    /// this unreachable from the inline modes; a credential PROFILE resolving to integrated / service
+    /// principal / managed identity is the live route here. Tailored like #3486's refusals: it names what IS
+    /// supported and how to proceed, not just what is not.
+    /// </summary>
+    internal const string PostgresRequiresSqlAuthMessage =
+        "A PostgreSQL target requires username/password (SQL) authentication — integrated/Kerberos and the " +
+        "Microsoft Entra modes are not supported for PostgreSQL targets, matching what the service accepts. " +
+        "Enter a username and password, or pick a credential profile that carries one.";
+
+    /// <summary>
+    /// Parses the PostgreSQL port box (#3499): blank (or an explicit 0) is 0, "use the driver's default"
+    /// (5432) — the same omitted-means-default contract as the MCP add_servers tool's <c>port</c> field, so a
+    /// default-port target added here derives the SAME identity as one onboarded over MCP with port omitted.
+    /// Otherwise an integer in [1, 65535], range-checked here to match that tool's validation rather than
+    /// failing later inside Npgsql. Pure — pinned by Darling.Tests.
+    /// </summary>
+    internal static (int Port, string? Error) ParsePortText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return (0, null);
+        }
+
+        if (!int.TryParse(text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var port))
+        {
+            return (0, "Port must be a number — leave it blank for the default (5432).");
+        }
+
+        if (port is not 0 && port is < 1 or > 65535)
+        {
+            return (0, $"Port must be between 1 and 65535 (got {port}), or blank for the default (5432).");
+        }
+
+        return (port, null);
+    }
+
     private string GetSelectedEncryptMode() => EncryptModeComboBox.SelectedIndex switch
     {
         1 => "Mandatory",
@@ -436,9 +565,43 @@ public partial class AddServerDialog : Window
             return null;
         }
 
+        var isPostgres = PostgresEngineRadio.IsChecked == true;
+
+        /* #3499: the engine string. An EDIT carries the row's stored spelling VERBATIM — the radios are
+           locked, and rewriting "aurora-postgresql" to "postgres" would be the dialog silently re-spelling a
+           value it did not author (harmless to TargetEngine, but an edit must not mangle what it was not asked
+           to change). An Add writes the canonical token the radio names — the same value add_servers stores. */
+        var engine = _existing?.Engine
+            ?? (isPostgres ? MonitoredServerRow.EnginePostgres : MonitoredServerRow.EngineSqlServer);
+
+        /* Port is PostgreSQL-only (a SQL Server target carries its port in the host string), so only the PG
+           arm reads the box; the SQL Server arm PRESERVES a stored value rather than zeroing it — only ever
+           non-zero for a row onboarded elsewhere, and an edit must not mangle it. */
+        var port = _existing?.Port ?? 0;
+        if (isPostgres)
+        {
+            var (parsedPort, portError) = ParsePortText(PortBox.Text);
+            if (portError is not null)
+            {
+                error = portError;
+                return null;
+            }
+
+            port = parsedPort;
+        }
+
         if (!TryResolveCredential(out var auth, out var username, out var encryptedPassword, out var credError))
         {
             error = credError;
+            return null;
+        }
+
+        /* The #3499 belt: the hidden radios keep the inline modes honest, so the live route here is a
+           credential profile resolving to a mode the PostgreSQL connect path refuses. Same rule, same place
+           in the flow, as the backend's own validation — the two onboarding paths cannot disagree. */
+        if (isPostgres && !string.Equals(auth, ServerStoreCredential.Sql, StringComparison.OrdinalIgnoreCase))
+        {
+            error = PostgresRequiresSqlAuthMessage;
             return null;
         }
 
@@ -464,11 +627,16 @@ public partial class AddServerDialog : Window
                row is keyed by this id, so re-deriving it abandons the whole of that server's history. The old
                shape wrote a row under the new hash and deleted the old one, which left the REGISTRY tidy and
                the history orphaned with nothing pointing at it: the failure looked like a server that had
-               never been monitored. Derivation now runs only where there is no history to lose. */
-            ServerId = _originalServerId ?? ViewerDataService.ComputeServerId(host, database, readOnlyIntent),
+               never been monitored. Derivation now runs only where there is no history to lose. #3499 feeds
+               engine and port into the derivation — the #2218 identity, and what makes a dialog-added
+               PostgreSQL target derive the SAME id add_servers would; both are inert on the SQL Server arm,
+               so every SQL Server Add derives the byte-identical id it always did. */
+            ServerId = _originalServerId ?? ViewerDataService.ComputeServerId(host, database, readOnlyIntent, engine, port),
             Name = displayName,
             Host = host,
             Database = database,
+            Engine = engine,
+            Port = port,
             Auth = auth,
             Username = username,
             EncryptedPassword = encryptedPassword,
@@ -523,8 +691,11 @@ public partial class AddServerDialog : Window
                its identity, a row's server_id no longer has to equal the hash of its own address, so the old
                id-based lookup would miss exactly the row it exists to protect. Comparing ids afterwards is
                what excludes "collided with myself" — an edit that leaves the address alone, or that only
-               renames or re-credentials the server. */
-            var occupant = await _dataService.GetMonitoredServerByAddressAsync(row.Host, row.Database, row.ReadOnlyIntent);
+               renames or re-credentials the server. #3499 widened the address to the full #2218 identity
+               (engine + port), so a PostgreSQL target no longer collides with a SQL Server registration that
+               merely shares its host — the guard was comparing a narrower identity than the product keys on. */
+            var occupant = await _dataService.GetMonitoredServerByAddressAsync(
+                row.Host, row.Database, row.ReadOnlyIntent, row.IsPostgres, row.Port);
             if (occupant is not null && occupant.ServerId != row.ServerId)
             {
                 StatusText.Text = "A server with this address (and database / read-only intent) is already monitored. Edit it from Manage Servers instead.";
@@ -587,6 +758,12 @@ public partial class AddServerDialog : Window
             {
                 Name = row.Name,
                 Host = row.Host,
+                /* #3499: engine + port ride to the probe exactly as they will ride to the registry, so Test
+                   Connection exercises the connection the save will store — a PostgreSQL target is probed as
+                   one (#3244's reply then answers in the right version vocabulary), not guessed at as SQL
+                   Server and failed against the wrong driver. */
+                Engine = row.Engine,
+                Port = row.Port,
                 Database = row.Database,
                 Auth = row.Auth,
                 Username = row.Username,
