@@ -65,9 +65,30 @@ public static class CollectorScheduleOverlay
                 item.RetentionDays = retention;
             }
 
+            /* V125 (#3477): the scope layers the way its column resolves — NULL falls through (the
+               fleet value already applied stays), a non-null value (INCLUDING empty, the explicit
+               "no scope") overwrites. Same reading as StoreConfigProvider.ResolveDatabaseScope. */
+            if (row.Databases is not null)
+            {
+                item.DatabasesText = FormatDatabases(row.Databases);
+            }
+
             item.Enabled = row.Enabled;
         }
     }
+
+    /// <summary>Comma-joined for the grid — the Settings window's excluded-databases format.</summary>
+    public static string FormatDatabases(IReadOnlyList<string> databases) => string.Join(", ", databases);
+
+    /// <summary>Parses the grid's comma-separated scope exactly the way the Settings window parses
+    /// excluded databases (split on comma, trim, drop blanks) — one entry discipline for the two
+    /// instruments that must agree on what a name is.</summary>
+    public static List<string> ParseDatabases(string? text) =>
+        (text ?? "")
+            .Split(',')
+            .Select(s => s.Trim())
+            .Where(s => s.Length > 0)
+            .ToList();
 
     /// <summary>True when the store holds any override row for this server (the editor's "custom vs. use
     /// default" initial state).</summary>
@@ -99,14 +120,24 @@ public static class CollectorScheduleOverlay
                ENABLING a default-OFF collector (long_query_completions) at fleet scope wrote
                NOTHING and silently never took effect, while the same edit at SERVER scope (which
                writes every row unconditionally) did. That asymmetry is the #2061 report. */
+            var databases = ParseDatabases(item.DatabasesText);
+
+            /* #3477: a non-empty scope is an override in its own right — a collector at default
+               cadence scoped to one database must still write its fleet row, or the scope silently
+               never takes effect (the #2064/#2061 skipped-row failure, one column over). */
             if (item.FrequencyMinutes == def.FrequencyMinutes
                 && item.RetentionDays == def.RetentionDays
-                && item.Enabled == def.DefaultEnabled)
+                && item.Enabled == def.DefaultEnabled
+                && databases.Count == 0)
             {
                 continue; /* Matches the code default — no override row (keeps the table sparse). */
             }
 
-            rows.Add(new CollectorScheduleRow(null, item.Name, item.FrequencyMinutes, item.RetentionDays, item.Enabled));
+            /* A blank scope on a fleet row writes NULL, not an empty array: at fleet level there is
+               no lower layer to opt back out of, and NULL is this table's "column not overridden". */
+            rows.Add(new CollectorScheduleRow(
+                null, item.Name, item.FrequencyMinutes, item.RetentionDays, item.Enabled,
+                databases.Count > 0 ? databases : null));
         }
 
         return rows;
@@ -123,7 +154,13 @@ public static class CollectorScheduleOverlay
 
         return edited
             .Where(item => CollectorScheduleDefaults.All.ContainsKey(item.Name))
-            .Select(item => new CollectorScheduleRow(serverId, item.Name, item.FrequencyMinutes, item.RetentionDays, item.Enabled))
+            /* #3477: WYSIWYG holds for the scope column too — a blank box writes the EXPLICIT empty
+               array (not NULL), so a customizing server collects exactly the shown scope and a
+               fleet-level scope cannot bleed through a server whose grid shows none. The empty/NULL
+               distinction is the resolver's documented contract. */
+            .Select(item => new CollectorScheduleRow(
+                serverId, item.Name, item.FrequencyMinutes, item.RetentionDays, item.Enabled,
+                ParseDatabases(item.DatabasesText)))
             .ToList();
     }
 }

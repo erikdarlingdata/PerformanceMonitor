@@ -1635,7 +1635,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     {
         var overrides = new List<ScheduleOverride>();
         using var command = new NpgsqlCommand(
-            "SELECT server_id, collector_name, frequency_minutes, retention_days, enabled FROM config_collector_schedules", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+            "SELECT server_id, collector_name, frequency_minutes, retention_days, enabled, databases FROM config_collector_schedules", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -1644,7 +1644,12 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                 reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetInt32(2),
                 reader.IsDBNull(3) ? null : reader.GetInt32(3),
-                reader.GetBoolean(4)));
+                reader.GetBoolean(4),
+                /* V125 (#3477): NULL and an empty array are DIFFERENT readings here and both must
+                   survive the round trip — NULL falls through the layering, an explicit empty array
+                   is "no scope at this level" and stops it. Collapsing them at read time would make
+                   a server's opt-out of a fleet scope silently re-inherit that scope. */
+                reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5)));
         }
 
         return overrides;
@@ -1765,6 +1770,63 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         return def.RetentionDays;
     }
 
+    /// <summary>
+    /// The effective per-collector database scope (#3477) for one collector on one server: the
+    /// per-server row's <c>databases</c> if the column is NOT NULL, else the fleet row's, else
+    /// unscoped — the same per-column layering <see cref="ResolveSchedule"/> applies, with the one
+    /// array-specific reading layered on top: a NULL column falls through, an explicit EMPTY array is
+    /// "no scope at this level" and STOPS the fall-through, which is how one server opts back out of
+    /// a fleet-wide scope without naming every database it has. Returns the sanitized allow-list;
+    /// empty = every database the server enumerates (today's behavior). Pure — unit-testable without
+    /// a store. <c>excludedDatabases</c> is deliberately NOT consulted here: the exclusion wins
+    /// downstream, inside the same enumeration statements, where the ENGINE compares both lists'
+    /// names under one collation reality (<see cref="PerformanceMonitor.Collectors.DatabaseScopeFilter"/>).
+    /// </summary>
+    public static IReadOnlyList<string> ResolveDatabaseScope(string collectorName, int serverId, IReadOnlyList<ScheduleOverride>? overrides)
+    {
+        ScheduleOverride? perServer = null;
+        ScheduleOverride? fleet = null;
+        if (overrides is not null)
+        {
+            foreach (var o in overrides)
+            {
+                if (!string.Equals(o.CollectorName, collectorName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (o.ServerId == serverId)
+                {
+                    perServer = o;
+                }
+                else if (o.ServerId is null)
+                {
+                    fleet = o;
+                }
+            }
+        }
+
+        var scope = perServer?.Databases ?? fleet?.Databases;
+        if (scope is null || scope.Count == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        /* Sanitize the ValidRetention way: blank entries are hand-edit noise, not databases, and a
+           list that sanitizes to nothing degrades to "no scope" — the direction that keeps
+           collecting rather than silently collecting nothing on a row full of whitespace. */
+        var names = new List<string>(scope.Count);
+        foreach (var name in scope)
+        {
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                names.Add(name.Trim());
+            }
+        }
+
+        return names;
+    }
+
     /// <summary>A retention override is honored only when &gt;= 1 day; 0/negative would invert the purge
     /// cutoff and delete everything, so it degrades to "no override" (fall through to the default).</summary>
     private static int? ValidRetention(int? days) => days is int v && v >= 1 ? v : null;
@@ -1801,8 +1863,12 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         reader.IsDBNull(ordinal) ? new List<string>() : reader.GetFieldValue<string[]>(ordinal).ToList();
 }
 
-/// <summary>One sparse <c>config_collector_schedules</c> row — NULL <c>ServerId</c> = fleet-wide.</summary>
-public sealed record ScheduleOverride(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled);
+/// <summary>One sparse <c>config_collector_schedules</c> row — NULL <c>ServerId</c> = fleet-wide.
+/// <see cref="Databases"/> is the V125 per-collector allow-list (#3477): null = the column was NULL
+/// (no scope at this level, fall through), an empty list = the EXPLICIT "no scope" that stops the
+/// fall-through; the null/empty distinction is load-bearing and <see cref="StoreConfigProvider.ResolveDatabaseScope"/>
+/// documents it. Defaulted so every pre-V125 construction reads as "no scope column written".</summary>
+public sealed record ScheduleOverride(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled, IReadOnlyList<string>? Databases = null);
 
 /// <summary>The resolved per-collector schedule (override layered on <see cref="CollectorScheduleDefaults"/>).</summary>
 public sealed record EffectiveSchedule(int FrequencyMinutes, int RetentionDays, bool Enabled);

@@ -26,6 +26,15 @@ public sealed class CollectorScheduleEditItem
     public bool Enabled { get; set; } = true;
     public int FrequencyMinutes { get; set; }
     public int RetentionDays { get; set; }
+
+    /// <summary>
+    /// The V125 per-collector database scope (#3477) as the grid edits it: comma-separated names,
+    /// the same entry format the Settings window's excluded-databases box uses, so the two
+    /// instruments agree on how a name is typed as well as how it is matched. Blank = no scope =
+    /// every database the server enumerates. <see cref="CollectorScheduleOverlay"/> owns the
+    /// parse/format round trip; presets never touch it (they change frequencies only).
+    /// </summary>
+    public string DatabasesText { get; set; } = "";
 }
 
 /// <summary>

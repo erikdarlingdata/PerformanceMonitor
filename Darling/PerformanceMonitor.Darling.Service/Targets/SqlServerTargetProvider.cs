@@ -128,14 +128,19 @@ public sealed class SqlServerTargetProvider : ITargetProvider
     /// set — a difference here would show up as one edition silently monitoring fewer databases.</para>
     /// </summary>
     public (string ConnectionString, CollectorQuery Query) BuildDatabaseListPlan(
-        string connectionString, IReadOnlyList<string>? excludedDatabases)
+        string connectionString, IReadOnlyList<string>? excludedDatabases, IReadOnlyList<string>? databaseScope)
     {
+        /* #3477: the scope's allow-list rides the same statement as the exclusion, so both are the
+           engine's own name comparison (case folded under the default collations here) and the
+           composed predicate is scoped-in AND NOT excluded — the exclusion keeps its veto. */
+        var (scopeClause, parameters) = DatabaseScopeFilter.Build(databaseScope, "name");
         var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(excludedDatabases, "name");
+        parameters.AddRange(exclusionParameters);
 
         return (
             WithDatabase(connectionString, "master"),
             new CollectorQuery(
-                $"SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 {exclusionClause} ORDER BY name;",
-                exclusionParameters));
+                $"SELECT name FROM sys.databases WHERE state_desc = N'ONLINE' AND database_id > 0 {scopeClause} {exclusionClause} ORDER BY name;",
+                parameters));
     }
 }

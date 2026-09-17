@@ -244,19 +244,25 @@ public sealed class ViewerCollectorSchedulesSqlTests
     {
         var sql = ViewerDataService.CollectorScheduleFleetUpsertSql;
         Assert.Contains("INSERT INTO config_collector_schedules", sql, StringComparison.Ordinal);
-        Assert.Contains("VALUES (NULL, $1, $2, $3, $4)", sql, StringComparison.Ordinal);
+        /* $5 is the V125 databases scope (#3477) — pinned at the FULL arity, because the four-place
+           prefix is a substring of the five-place list and a prefix pin would keep passing while a
+           dropped fifth bind shifted nothing visible. */
+        Assert.Contains("VALUES (NULL, $1, $2, $3, $4, $5)", sql, StringComparison.Ordinal);
         Assert.Contains("ON CONFLICT (collector_name) WHERE server_id IS NULL DO UPDATE", sql, StringComparison.Ordinal);
         Assert.Contains("frequency_minutes = EXCLUDED.frequency_minutes", sql, StringComparison.Ordinal);
         Assert.Contains("retention_days = EXCLUDED.retention_days", sql, StringComparison.Ordinal);
         Assert.Contains("enabled = EXCLUDED.enabled", sql, StringComparison.Ordinal);
+        Assert.Contains("databases = EXCLUDED.databases", sql, StringComparison.Ordinal);
     }
 
     [Fact]
     public void ServerUpsert_ArbitratesOnServerIdCollectorName_WhereServerIdIsNotNull()
     {
         var sql = ViewerDataService.CollectorScheduleServerUpsertSql;
-        Assert.Contains("VALUES ($1, $2, $3, $4, $5)", sql, StringComparison.Ordinal);
+        /* $6 is the V125 databases scope (#3477); full arity for the fleet pin's reason. */
+        Assert.Contains("VALUES ($1, $2, $3, $4, $5, $6)", sql, StringComparison.Ordinal);
         Assert.Contains("ON CONFLICT (server_id, collector_name) WHERE server_id IS NOT NULL DO UPDATE", sql, StringComparison.Ordinal);
+        Assert.Contains("databases = EXCLUDED.databases", sql, StringComparison.Ordinal);
     }
 
     [Fact]
