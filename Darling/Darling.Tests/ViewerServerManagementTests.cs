@@ -250,13 +250,16 @@ public sealed class ViewerCommandSqlTests
     }
 }
 
-/// <summary>The pure auth mapping — the service honors integrated + SQL only; every Azure/Entra mode blocks,
-/// including any added later, because the mapping is a whitelist with a null default.</summary>
+/// <summary>The pure auth mapping — as of #3484 the service honors integrated, SQL, and the two non-interactive
+/// Entra modes (service principal, managed identity); the interactive Entra modes still block, including any
+/// added later, because the mapping is a whitelist with a null default.</summary>
 public sealed class ServerStoreCredentialTests
 {
     [Theory]
     [InlineData(AuthenticationTypes.Windows, "integrated")]
     [InlineData(AuthenticationTypes.SqlServer, "sql")]
+    [InlineData(AuthenticationTypes.ServicePrincipal, "serviceprincipal")]
+    [InlineData(AuthenticationTypes.ManagedIdentity, "managedidentity")]
     public void MapAuth_SupportedModes_MapToStoreAuth(string authType, string expected)
     {
         Assert.Equal(expected, ServerStoreCredential.MapAuth(authType));
@@ -265,20 +268,21 @@ public sealed class ServerStoreCredentialTests
 
     [Theory]
     [InlineData(AuthenticationTypes.EntraMFA)]
-    [InlineData(AuthenticationTypes.ServicePrincipal)]
-    [InlineData(AuthenticationTypes.ManagedIdentity)]
     [InlineData(AuthenticationTypes.EntraDefaultCredential)]
     [InlineData(AuthenticationTypes.EntraDeviceCode)]
-    public void MapAuth_AzureModes_AreUnsupported(string authType)
+    public void MapAuth_InteractiveEntraModes_AreUnsupported(string authType)
     {
+        /* #3484: a headless collector has nobody to answer a broker prompt, so the interactive modes still
+           block; the non-interactive service principal + managed identity are covered by the supported test. */
         Assert.Null(ServerStoreCredential.MapAuth(authType));
         Assert.False(ServerStoreCredential.IsSupported(authType));
     }
 
     [Fact]
-    public void RequiresSecret_OnlyForSql()
+    public void RequiresSecret_ForSqlAndServicePrincipal_NotWindowsOrManagedIdentity()
     {
         Assert.True(ServerStoreCredential.RequiresSecret(AuthenticationTypes.SqlServer));
+        Assert.True(ServerStoreCredential.RequiresSecret(AuthenticationTypes.ServicePrincipal));
         Assert.False(ServerStoreCredential.RequiresSecret(AuthenticationTypes.Windows));
         Assert.False(ServerStoreCredential.RequiresSecret(AuthenticationTypes.ManagedIdentity));
     }
@@ -376,17 +380,17 @@ public sealed class ViewerServerMigrationTests
         var (row, reason) = fixture.Migration.TryProjectEntry(fixture.ServerStore.GetAllServers()[0]);
 
         Assert.Null(row);
-        Assert.Contains("no stored password", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("requires a stored secret", reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]
     [InlineData(AuthenticationTypes.EntraMFA)]
-    [InlineData(AuthenticationTypes.ServicePrincipal)]
-    [InlineData(AuthenticationTypes.ManagedIdentity)]
     [InlineData(AuthenticationTypes.EntraDefaultCredential)]
     [InlineData(AuthenticationTypes.EntraDeviceCode)]
-    public void Projection_AzureAuth_IsSkipped(string authType)
+    public void Projection_InteractiveEntraAuth_IsSkipped(string authType)
     {
+        /* #3484: the interactive Entra modes have no headless connect path, so they are skipped as "not
+           supported"; the non-interactive service principal + managed identity now project (below). */
         using var fixture = new Fixture();
         fixture.ServerStore.AddServer(
             new ViewerServerEntry { ServerName = "azure", DisplayName = "Azure", AuthenticationType = authType },
@@ -396,6 +400,97 @@ public sealed class ViewerServerMigrationTests
 
         Assert.Null(row);
         Assert.Contains("not supported", reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Projection_ServicePrincipal_SkipsWithoutSecret_ProjectsWithOne()
+    {
+        /* #3484: a service principal projects like SQL auth — the client id as username, the client secret
+           resolved into the same DPAPI blob; skipped when no secret is stored. */
+        using var noSecret = new Fixture();
+        noSecret.ServerStore.AddServer(
+            new ViewerServerEntry { ServerName = "azure", DisplayName = "Azure", AuthenticationType = AuthenticationTypes.ServicePrincipal },
+            null, null);
+        var (skippedRow, skipReason) = noSecret.Migration.TryProjectEntry(noSecret.ServerStore.GetAllServers()[0]);
+        Assert.Null(skippedRow);
+        Assert.Contains("requires a stored secret", skipReason, StringComparison.OrdinalIgnoreCase);
+
+        using var withSecret = new Fixture();
+        withSecret.ServerStore.AddServer(
+            new ViewerServerEntry { ServerName = "azure", DisplayName = "Azure", AuthenticationType = AuthenticationTypes.ServicePrincipal },
+            "app-client-id", "the-client-secret");
+        var (row, reason) = withSecret.Migration.TryProjectEntry(withSecret.ServerStore.GetAllServers()[0]);
+        Assert.Null(reason);
+        Assert.NotNull(row);
+        Assert.Equal("serviceprincipal", row!.Auth);
+        Assert.Equal("app-client-id", row.Username);
+        Assert.NotNull(row.EncryptedPassword);
+        /* The service must be able to read the client secret the migrate wrote. */
+        Assert.Equal("the-client-secret", DarlingSecrets.Unprotect(row.EncryptedPassword!));
+    }
+
+    [Fact]
+    public void Projection_ManagedIdentity_Projects_SecretLess_CarryingUserAssignedClientId()
+    {
+        /* #3484: managed identity carries no secret. A system-assigned identity projects with a null username;
+           a user-assigned identity carries its client id through the store row's Username, the only field it
+           has (#3485 review — the earlier version dropped it, silently turning a user-assigned identity into a
+           system-assigned one). */
+        using var systemAssigned = new Fixture();
+        systemAssigned.ServerStore.AddServer(
+            new ViewerServerEntry { ServerName = "azure", DisplayName = "Azure", AuthenticationType = AuthenticationTypes.ManagedIdentity },
+            null, null);
+        var (sysRow, sysReason) = systemAssigned.Migration.TryProjectEntry(systemAssigned.ServerStore.GetAllServers()[0]);
+        Assert.Null(sysReason);
+        Assert.NotNull(sysRow);
+        Assert.Equal("managedidentity", sysRow!.Auth);
+        Assert.True(string.IsNullOrEmpty(sysRow.EncryptedPassword));
+        Assert.Null(sysRow.Username);
+
+        using var userAssigned = new Fixture();
+        userAssigned.ServerStore.AddServer(
+            new ViewerServerEntry
+            {
+                ServerName = "azure",
+                DisplayName = "Azure",
+                AuthenticationType = AuthenticationTypes.ManagedIdentity,
+                ManagedIdentityClientId = "ua-client-id",
+            },
+            null, null);
+        var (uaRow, uaReason) = userAssigned.Migration.TryProjectEntry(userAssigned.ServerStore.GetAllServers()[0]);
+        Assert.Null(uaReason);
+        Assert.NotNull(uaRow);
+        Assert.Equal("managedidentity", uaRow!.Auth);
+        Assert.Equal("ua-client-id", uaRow.Username);
+        Assert.True(string.IsNullOrEmpty(uaRow.EncryptedPassword));
+
+        /* PROFILE-BACKED user-assigned MI (#3485 second review): the id lives on the profile's
+           ManagedIdentityClientId, NOT its Username — a profile's Username is populated for SQL profiles only.
+           The earlier fix read profile.Username here, which is always null for an MI profile, so a
+           profile-backed user-assigned identity silently downgraded to system-assigned. */
+        using var profileBacked = new Fixture();
+        var miProfile = new ViewerCredentialProfile
+        {
+            Name = "ua-mi-profile",
+            AuthType = AuthenticationTypes.ManagedIdentity,
+            ManagedIdentityClientId = "profile-ua-id",
+        };
+        profileBacked.ProfileStore.AddProfile(miProfile);
+        profileBacked.ServerStore.AddServer(
+            new ViewerServerEntry
+            {
+                ServerName = "azure",
+                DisplayName = "Azure",
+                AuthenticationType = AuthenticationTypes.ManagedIdentity,
+                CredentialProfileId = miProfile.Id,
+            },
+            null, null);
+        var (profRow, profReason) = profileBacked.Migration.TryProjectEntry(profileBacked.ServerStore.GetAllServers()[0]);
+        Assert.Null(profReason);
+        Assert.NotNull(profRow);
+        Assert.Equal("managedidentity", profRow!.Auth);
+        Assert.Equal("profile-ua-id", profRow.Username);
+        Assert.True(string.IsNullOrEmpty(profRow.EncryptedPassword));
     }
 
     [Fact]
@@ -554,20 +649,35 @@ public sealed class BulkServerOnboardingMappingTests
 
     [Theory]
     [InlineData(AuthenticationTypes.EntraMFA)]
-    [InlineData(AuthenticationTypes.ServicePrincipal)]
-    [InlineData(AuthenticationTypes.ManagedIdentity)]
     [InlineData(AuthenticationTypes.EntraDefaultCredential)]
     [InlineData(AuthenticationTypes.EntraDeviceCode)]
-    public void BuildMonitoredServerRow_AzureAuth_IsRejected_TheBelt(string authType)
+    public void BuildMonitoredServerRow_InteractiveEntraAuth_IsRejected_TheBelt(string authType)
     {
-        // The trimmed radios never offer these, but a picked profile could resolve to one — the mapping helper
-        // still rejects (mirrors the single dialog's MapAuth-null block).
+        // #3484: the non-interactive Entra modes (service principal, managed identity) now map through; only the
+        // interactive modes stay rejected at the MapAuth-null belt (a picked profile could still resolve to one —
+        // this mirrors the single dialog's block).
         var (row, error) = AddMultipleServersDialog.BuildMonitoredServerRow(
             Line("azure.database.windows.net"),
             new BulkSharedSettings { AuthType = authType });
 
         Assert.Null(row);
         Assert.False(string.IsNullOrEmpty(error));
+    }
+
+    [Theory]
+    [InlineData(AuthenticationTypes.ServicePrincipal, "serviceprincipal")]
+    [InlineData(AuthenticationTypes.ManagedIdentity, "managedidentity")]
+    public void BuildMonitoredServerRow_NonInteractiveEntra_MapsThrough(string authType, string storeAuth)
+    {
+        // #3484: service principal + managed identity are honored, so the shared settings map onto a row (the
+        // client id in username, the client secret in the DPAPI blob for SP; MI carries neither).
+        var (row, error) = AddMultipleServersDialog.BuildMonitoredServerRow(
+            Line("azure.database.windows.net"),
+            new BulkSharedSettings { AuthType = authType, Username = "app-id", EncryptedPassword = "DPAPI-BLOB==" });
+
+        Assert.Null(error);
+        Assert.NotNull(row);
+        Assert.Equal(storeAuth, row!.Auth);
     }
 
     [Fact]
@@ -639,14 +749,22 @@ public sealed class BulkServerOnboardingMappingTests
     }
 
     [Fact]
-    public void BuildTestConnectServer_AzureAuth_IsRejected()
+    public void BuildTestConnectServer_InteractiveEntra_IsRejected_ServicePrincipalMapsThrough()
     {
+        // #3484: an interactive Entra mode is still rejected at the belt...
+        var (rejected, rejectError) = AddMultipleServersDialog.BuildTestConnectServer(
+            Line("azure"),
+            new BulkSharedSettings { AuthType = AuthenticationTypes.EntraMFA });
+        Assert.Null(rejected);
+        Assert.False(string.IsNullOrEmpty(rejectError));
+
+        // ...while a service principal builds the probe (Auth mapped to serviceprincipal).
         var (test, error) = AddMultipleServersDialog.BuildTestConnectServer(
             Line("azure"),
-            new BulkSharedSettings { AuthType = AuthenticationTypes.ServicePrincipal });
-
-        Assert.Null(test);
-        Assert.False(string.IsNullOrEmpty(error));
+            new BulkSharedSettings { AuthType = AuthenticationTypes.ServicePrincipal, Username = "app-id", EncryptedPassword = "DPAPI-BLOB==" });
+        Assert.Null(error);
+        Assert.NotNull(test);
+        Assert.Equal("serviceprincipal", test!.Auth);
     }
 
     [Fact]

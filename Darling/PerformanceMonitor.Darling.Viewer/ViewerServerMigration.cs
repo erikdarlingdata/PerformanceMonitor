@@ -29,12 +29,13 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// server the user has since removed from the store (the marker is written only after a clean pass).
 /// Read-only seats and a disconnected viewer skip it (nothing to write).</para>
 ///
-/// <para><b>Secrets.</b> An integrated-auth entry migrates with no secret. A SQL-auth entry (inline or via a
-/// SQL credential profile) has its password read from Windows Credential Manager and re-sealed as the
-/// service-decryptable DPAPI-LocalMachine blob (<see cref="ViewerServerSecret"/>); a SQL entry whose secret
-/// cannot be resolved is skipped rather than imported broken. Azure/Entra auth modes the service can't honor
-/// (<see cref="ServerStoreCredential"/>) are skipped. Favorites are NOT migrated — they stay viewer-local in
-/// <see cref="ViewerServerStore"/>.</para>
+/// <para><b>Secrets.</b> An integrated-auth and a managed-identity entry migrate with no secret. A SQL-auth or
+/// service-principal entry (inline or via a SQL credential profile) has its secret — a password or a client
+/// secret — read from Windows Credential Manager and re-sealed as the service-decryptable DPAPI-LocalMachine
+/// blob (<see cref="ViewerServerSecret"/>); such an entry whose secret cannot be resolved is skipped rather
+/// than imported broken. Only the INTERACTIVE Entra modes the service can't honor
+/// (<see cref="ServerStoreCredential"/>) are skipped outright. Favorites are NOT migrated — they stay
+/// viewer-local in <see cref="ViewerServerStore"/>.</para>
 /// </summary>
 public sealed class ViewerServerMigration
 {
@@ -163,27 +164,39 @@ public sealed class ViewerServerMigration
         var storeAuth = ServerStoreCredential.MapAuth(effectiveAuthType);
         if (storeAuth is null)
         {
-            /* Any Entra mode — the Darling service has no connect path that acquires a token, so
-               MapAuth's whitelist answers null for every one of them, including modes added after
-               this line was written. */
+            /* An INTERACTIVE Entra mode — MapAuth's whitelist answers null for the modes the headless service
+               cannot honor (MFA / device-code / default-credential), including any added after this line; the
+               non-interactive service principal + managed identity map through (#3484). */
             return (null, $"auth '{effectiveAuthType}' is not supported by the service");
         }
 
         var row = BuildBaseRow(entry, storeAuth);
 
-        if (storeAuth != ServerStoreCredential.Sql)
+        if (!ServerStoreCredential.RequiresSecret(effectiveAuthType))
         {
-            /* Integrated — no secret. */
+            /* Integrated and managed identity carry no secret (#3484). Managed identity still carries its
+               OPTIONAL user-assigned client id, which the store row holds in Username — the only field it
+               has — or a user-assigned identity silently migrates as system-assigned (#3485 review). The
+               SOURCE of that id is the profile's ManagedIdentityClientId when profile-backed (a profile's
+               Username is populated for SQL only, never for MI), otherwise the entry's own
+               ManagedIdentityClientId. */
+            if (storeAuth == ServerStoreCredential.ManagedIdentity)
+            {
+                var miClientId = profile?.ManagedIdentityClientId ?? entry.ManagedIdentityClientId;
+                row.Username = string.IsNullOrWhiteSpace(miClientId) ? null : miClientId.Trim();
+            }
             return (row, null);
         }
 
+        /* SQL and service principal both resolve a secret — a SQL password or a client secret — from the
+           profile or the server store, and store it in the same DPAPI blob. */
         var credential = profile is not null
             ? _profileStore.GetSecret(profile.Id)
             : _serverStore.GetCredential(entry.Id);
 
         if (credential is null || string.IsNullOrEmpty(credential.Value.Password))
         {
-            return (null, "SQL auth with no stored password");
+            return (null, $"auth '{effectiveAuthType}' requires a stored secret, but none is present");
         }
 
         row.Username = string.IsNullOrWhiteSpace(credential.Value.Username) ? row.Username : credential.Value.Username;
