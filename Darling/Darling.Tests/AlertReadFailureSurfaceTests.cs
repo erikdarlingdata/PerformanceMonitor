@@ -883,7 +883,7 @@ public sealed class AlertReadFailureSurfaceTests
     /// </summary>
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
-        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 13, 5),
+        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 14, 5),
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 8, 10),
     };
 
@@ -942,9 +942,12 @@ public sealed class AlertReadFailureSurfaceTests
     /// An EIGHTH since #3466: the fleet-sweep rollup read, whose swallowed failure skips the day's rollup
     /// tick without consuming the interval — counted because a fault folded into "empty day" would convert
     /// an unreadable store into a permanently quiet channel, the quiet-is-not-clean misreading at the
-    /// delivery end.</para>
+    /// delivery end. And <c>AlertEngine.cs</c> carries a FOURTEENTH since #3495: the maintenance-annotation
+    /// probe on the High CPU fire path — counted because its swallowed failure silently costs the card the
+    /// one line that closes the triage, and an operator chasing a mystery backup deserves to see that the
+    /// probe went blind rather than that no maintenance ran.</para>
     /// </summary>
-    private const int CountedSites = 31;
+    private const int CountedSites = 32;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
