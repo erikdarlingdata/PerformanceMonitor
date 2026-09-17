@@ -793,14 +793,231 @@ public class WebhookAlertService
     }
 
     /// <summary>
+    /// Slack's documented ceiling on ONE text object's characters — per text object, not per message, so a
+    /// section block's mrkdwn text is bound by it however few blocks the message carries. Exceeding it
+    /// rejects the WHOLE message (HTTP 400, spelled <c>invalid_attachments</c> when the blocks ride inside
+    /// the colored attachment), not just the oversized block. Measured live (#3493), on the first two
+    /// nights of digest delivery: both big-fleet stores' 20-mover Collector Cost Digests failed exactly
+    /// this way while the small store's 1-mover digest delivered — and one store's Fleet Sweep Rollup
+    /// delivered through the SAME webhook 80 milliseconds after its digest failed, so the webhook was
+    /// never the suspect. The single <c>*Details*</c> section was over this ceiling.
+    /// </summary>
+    internal const int SlackTextObjectLimit = 3000;
+
+    /// <summary>
+    /// Slack's documented ceiling on blocks per message. The prose splitter
+    /// (<see cref="AddSlackProseSections"/>) spends only what the payload's OTHER blocks leave over,
+    /// because a fifty-first block fails the delivery as surely as an oversized text object does.
+    /// </summary>
+    internal const int SlackMessageBlockLimit = 50;
+
+    /// <summary>The prose sections' leading header — on the FIRST section only; see
+    /// <see cref="AddSlackProseSections"/> for why continuations carry nothing.</summary>
+    private const string SlackProseHeader = "*Details*\n";
+
+    /// <summary>Marks the continuation halves of a single line hard-split by
+    /// <see cref="SplitProseIntoSectionSafeLines"/>, so the reader sees one line that was cut rather
+    /// than two that were written.</summary>
+    private const string SlackProseContinuationMarker = "(cont.) ";
+
+    /// <summary>How much of the first omitted line the stated-omission line quotes. Enough to identify a
+    /// digest mover (collector, server and the headline figures all sit in the line's first stretch);
+    /// bounded so a pathological line cannot blow the omission line past the very ceiling it exists to
+    /// respect.</summary>
+    private const int SlackOmissionFragmentLimit = 120;
+
+    /// <summary>
+    /// The room the omission-path packing holds back in its final block for the stated-omission line:
+    /// the line's fixed text (~93 chars), a 13-digit separator-grouped line count, and the quoted
+    /// fragment at its cap plus its own truncation ellipsis — 231 worst case, rounded up.
+    /// </summary>
+    private const int SlackOmissionReserve = 256;
+
+    /// <summary>
+    /// Appends <paramref name="prose"/> as however many mrkdwn <c>section</c> blocks it takes to keep
+    /// every text object inside <see cref="SlackTextObjectLimit"/> — the
+    /// <see cref="AddSlackFieldSections"/> precedent one level up (#3493). The split lands on LINE
+    /// boundaries, because the long-prose producers are line-oriented documents (the Collector Cost
+    /// Digest is one mover per line) and a line cut mid-thought misstates a figure. Consecutive sections
+    /// carry no divider between them, so a split reads as one continued document; only the first section
+    /// leads with the <c>*Details*</c> header, and continuations carry nothing — a repeated header would
+    /// read as several detail sections rather than one that continued.
+    ///
+    /// <para><b>The block budget, and what yields to it.</b> <paramref name="blockBudget"/> is what the
+    /// payload's other blocks leave under <see cref="SlackMessageBlockLimit"/>, and the PROSE is what
+    /// degrades when it cannot fit — never the structured details. The precedence is decided by what the
+    /// real payload shapes carry: the producers with long prose (the digest, the self-alerts) fire with
+    /// no structured context at all, and the alerts with heavy per-incident details carry prose that is
+    /// short or suppressed as redundant (<see cref="AlertDetailText.ProseForDelivery"/>), so the yielding
+    /// branch never costs a real payload both halves at once.</para>
+    ///
+    /// <para><b>Degrading is stated, never silent.</b> A prose the budget cannot hold keeps as many whole
+    /// lines as fit and ends with one omission line naming HOW MANY lines were dropped and quoting the
+    /// first of them — the producers rank their lines most-significant-first (the digest orders movers by
+    /// magnitude), so the first dropped line is the headline of what the reader is not seeing, and an
+    /// omission note that is itself vague would recreate the silent-truncation problem one level up. The
+    /// full text has always lived in the alert row and the email body, so the omission line points there
+    /// the way <see cref="TsqlWebhookHint"/> already does.</para>
+    ///
+    /// <para>A budget of one matches the pre-#3493 block cost exactly (the old single section also cost
+    /// one block), so a payload whose OTHER blocks already crowd the message limit is no worse off than
+    /// it ever was — the prose does not decide that verdict.</para>
+    /// </summary>
+    private static void AddSlackProseSections(List<object> blocks, string prose, int blockBudget)
+    {
+        /* Uniform per-section line capacity, sized to the first section (the only one carrying the
+           header): continuations run a header's width under the ceiling, which keeps the packing
+           single-pass. */
+        var capacity = SlackTextObjectLimit - SlackProseHeader.Length;
+
+        /* The one-section fast path IS the pre-#3493 rendering, byte for byte — 1-mover digests and
+           every ordinary alert take it, so their payloads do not change shape at all. */
+        if (prose.Length <= capacity)
+        {
+            blocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*Details*\n{prose}" } });
+            return;
+        }
+
+        var lines = SplitProseIntoSectionSafeLines(prose, capacity);
+        var texts = PackProseLines(lines, capacity, blockBudget);
+
+        for (var i = 0; i < texts.Count; i++)
+        {
+            var text = i == 0 ? SlackProseHeader + texts[i] : texts[i];
+            blocks.Add(new { type = "section", text = new { type = "mrkdwn", text } });
+        }
+    }
+
+    /// <summary>
+    /// The prose, as lines that each fit a section on their own. A single line longer than
+    /// <paramref name="capacity"/> — pathological, but a delivery that fails over it would be this bug
+    /// again — hard-splits at character boundaries, every continuation piece marked with
+    /// <see cref="SlackProseContinuationMarker"/>.
+    /// </summary>
+    private static List<string> SplitProseIntoSectionSafeLines(string prose, int capacity)
+    {
+        var lines = new List<string>();
+        foreach (var raw in prose.Split('\n'))
+        {
+            if (raw.Length <= capacity)
+            {
+                lines.Add(raw);
+                continue;
+            }
+
+            var start = 0;
+            while (start < raw.Length)
+            {
+                var prefix = start == 0 ? string.Empty : SlackProseContinuationMarker;
+                var take = Math.Min(capacity - prefix.Length, raw.Length - start);
+                lines.Add(prefix + raw.Substring(start, take));
+                start += take;
+            }
+        }
+
+        return lines;
+    }
+
+    /// <summary>
+    /// Packs <paramref name="lines"/> greedily into section texts of at most <paramref name="capacity"/>
+    /// characters. When the packing fits <paramref name="blockBudget"/> that is the answer; when it does
+    /// not, the lines are repacked into exactly the budget with the final section reserving
+    /// <see cref="SlackOmissionReserve"/> for the stated-omission line, which then closes the document.
+    /// </summary>
+    private static List<string> PackProseLines(List<string> lines, int capacity, int blockBudget)
+    {
+        var texts = new List<string>();
+        var sb = new StringBuilder();
+        foreach (var line in lines)
+        {
+            if (sb.Length > 0 && sb.Length + 1 + line.Length > capacity)
+            {
+                texts.Add(sb.ToString());
+                sb.Clear();
+            }
+
+            if (sb.Length > 0)
+            {
+                sb.Append('\n');
+            }
+
+            sb.Append(line);
+        }
+
+        if (sb.Length > 0)
+        {
+            texts.Add(sb.ToString());
+        }
+
+        if (texts.Count <= blockBudget)
+        {
+            return texts;
+        }
+
+        /* Over budget: repack into exactly blockBudget sections, the last one holding room back for the
+           omission line. Blocks before the last pack identically to the pass above, so this can never
+           fit MORE lines than the pass that already overflowed — the omission line is always earned. */
+        texts.Clear();
+        sb.Clear();
+        var placed = 0;
+        while (placed < lines.Count)
+        {
+            var line = lines[placed];
+            var finalBlock = texts.Count == blockBudget - 1;
+            var reserve = finalBlock ? SlackOmissionReserve + 1 : 0;
+            var joiner = sb.Length > 0 ? 1 : 0;
+
+            if (sb.Length + joiner + line.Length + reserve > capacity)
+            {
+                if (finalBlock)
+                {
+                    break;
+                }
+
+                texts.Add(sb.ToString());
+                sb.Clear();
+                continue;
+            }
+
+            if (joiner == 1)
+            {
+                sb.Append('\n');
+            }
+
+            sb.Append(line);
+            placed++;
+        }
+
+        var dropped = lines.Count - placed;
+        var firstDropped = lines[placed];
+        var fragment = firstDropped.Length <= SlackOmissionFragmentLimit
+            ? firstDropped
+            : firstDropped[..SlackOmissionFragmentLimit] + "...";
+        var noun = dropped == 1 ? "line" : "lines";
+        var omission = string.Create(CultureInfo.InvariantCulture,
+            $"... and {dropped:N0} more {noun}, first omitted: \"{fragment}\" - see email or in-app Alert Details for the full text.");
+
+        if (sb.Length > 0)
+        {
+            sb.Append('\n');
+        }
+
+        sb.Append(omission);
+        texts.Add(sb.ToString());
+        return texts;
+    }
+
+    /// <summary>
     /// Builds a Slack incoming webhook payload with a colored attachment sidebar.
     /// Uses Slack Block Kit for rich formatting.
     /// <para>#2710: a non-null <paramref name="triageUrl"/> adds an actions block with a LINK button (a url
     /// button needs no interactivity config on the webhook, unlike an action_id button) pointing at the
     /// computed triage page, placed above the "Sent by" context footer. Null renders the pre-#2710 payload.</para>
-    /// <para>#3297: <paramref name="detailText"/> is the alert's flat prose detail, rendered as its own
-    /// mrkdwn <c>section</c> block directly under the field block — Block Kit's home for prose, and above
-    /// the per-incident dividers so the remedy reads before the drill-down.</para>
+    /// <para>#3297: <paramref name="detailText"/> is the alert's flat prose detail, rendered as mrkdwn
+    /// <c>section</c> blocks directly under the field block — Block Kit's home for prose, and above
+    /// the per-incident dividers so the remedy reads before the drill-down. #3493: as many section blocks
+    /// as its size needs rather than one, each inside Slack's per-text-object ceiling and all of them
+    /// inside the message's block budget — see <see cref="AddSlackProseSections"/>.</para>
     /// </summary>
     internal static string BuildSlackPayload(
         string metricName,
@@ -860,22 +1077,23 @@ public class WebhookAlertService
 
         AddSlackFieldSections(blocks, fields);
 
-        /* #3297: the prose detail, before the per-incident dividers. */
-        if (prose is not null)
-        {
-            blocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*Details*\n{prose}" } });
-        }
+        /* #3493: everything that renders BELOW the prose is composed first, into its own list, because
+           the prose splitter can only spend what the rest of the message leaves under the 50-block
+           budget — and "the rest" includes blocks that have not been appended yet. The visual order is
+           unchanged: the tail is appended after the prose sections, exactly where these blocks always
+           rendered. */
+        var tailBlocks = new List<object>();
 
         if (context?.Details != null)
         {
             foreach (var detail in context.Details)
             {
-                blocks.Add(new { type = "divider" });
+                tailBlocks.Add(new { type = "divider" });
 
                 if (detail.IsCodeBlock)
                 {
                     /* Remediation T-SQL: point at the email / in-app dialog, never inline it. */
-                    blocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*{detail.Heading}*\n{TsqlWebhookHint}" } });
+                    tailBlocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*{detail.Heading}*\n{TsqlWebhookHint}" } });
                     continue;
                 }
 
@@ -883,7 +1101,7 @@ public class WebhookAlertService
                 {
                     /* Advice prose flows as a single mrkdwn section; the synthesized Body is
                        "Investigation: ...\n\nRemediation: ..." which Slack renders verbatim. */
-                    blocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*{detail.Heading}*\n{detail.Body}" } });
+                    tailBlocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*{detail.Heading}*\n{detail.Body}" } });
                     continue;
                 }
 
@@ -895,7 +1113,7 @@ public class WebhookAlertService
                     detailFields.Add(new { type = "mrkdwn", text = $"*{label}:*\n{value}" });
                 }
 
-                AddSlackFieldSections(blocks, detailFields);
+                AddSlackFieldSections(tailBlocks, detailFields);
             }
         }
 
@@ -903,7 +1121,7 @@ public class WebhookAlertService
            the boilerplate. A url button opens the link directly with no Slack app interactivity required. */
         if (triageUrl is not null)
         {
-            blocks.Add(new
+            tailBlocks.Add(new
             {
                 type = "actions",
                 elements = new object[]
@@ -927,11 +1145,21 @@ public class WebhookAlertService
             contextElements.Add(new { type = "mrkdwn", text = branding.SnoozeHint });
         }
 
-        blocks.Add(new
+        tailBlocks.Add(new
         {
             type = "context",
             elements = contextElements
         });
+
+        /* #3297: the prose detail, before the per-incident dividers; #3493: split across as many section
+           blocks as its size needs, inside the block budget the head and tail leave over. */
+        if (prose is not null)
+        {
+            AddSlackProseSections(blocks, prose,
+                blockBudget: Math.Max(1, SlackMessageBlockLimit - blocks.Count - tailBlocks.Count));
+        }
+
+        blocks.AddRange(tailBlocks);
 
         var payload = new
         {
