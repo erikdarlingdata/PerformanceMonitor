@@ -1201,6 +1201,22 @@ public sealed class DarlingWorker : BackgroundService
         };
 
     /// <summary>
+    /// Maps the web host's published TLS-certificate snapshot to the report the evaluator consumes (#3514):
+    /// a null snapshot — nothing served, or <c>Clear()</c>ed when the dashboard stopped — becomes
+    /// <c>Configured=false</c> (the evaluator's resolve arm), and a live snapshot carries its expiry and
+    /// identity through. Pure + static so the null-to-unconfigured seam pins in a unit test rather than only
+    /// through the sweep loop — the <see cref="BuildStoreUpgradeReport"/> precedent, and the seam the #3514
+    /// review flagged as previously tested only from the sides.
+    /// </summary>
+    internal static DarlingSelfAlertEvaluator.WebTlsCertReport BuildWebTlsCertReport(
+        WebTlsCertificateState.Snapshot? snapshot)
+        => new(
+            Configured: snapshot is not null,
+            NotAfterUtc: snapshot?.NotAfterUtc ?? default,
+            Subject: snapshot?.Subject ?? string.Empty,
+            Thumbprint: snapshot?.Thumbprint ?? string.Empty);
+
+    /// <summary>
     /// Everything after the (optional) managed-Postgres bootstrap: store connection, migration,
     /// Timescale adoption, delta seeding, and the collection/alert/analysis loop. Split from
     /// <see cref="ExecuteAsync"/> so the bootstrap's finally can stop the bundled server after
@@ -2132,14 +2148,8 @@ public sealed class DarlingWorker : BackgroundService
             if (_selfAlerts is not null && DateTime.UtcNow >= _nextWebTlsCheckUtc)
             {
                 _nextWebTlsCheckUtc = DateTime.UtcNow.Add(s_webTlsCheckInterval);
-                var certSnap = _webTlsCertState.Read();
                 await _selfAlerts.EvaluateWebTlsCertificateAsync(
-                    new DarlingSelfAlertEvaluator.WebTlsCertReport(
-                        Configured: certSnap is not null,
-                        NotAfterUtc: certSnap?.NotAfterUtc ?? default,
-                        Subject: certSnap?.Subject ?? string.Empty,
-                        Thumbprint: certSnap?.Thumbprint ?? string.Empty),
-                    stoppingToken);
+                    BuildWebTlsCertReport(_webTlsCertState.Read()), stoppingToken);
             }
 
             /* #1581: the compression-job self-heal backstop. TimescaleDB compression policy jobs can silently
