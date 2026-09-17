@@ -165,10 +165,13 @@ public sealed class PostgresAddServerDialogTests
     /// The per-engine swap hides rather than resets: the SQL-Server-only controls (read-only intent,
     /// multi-subnet failover — AG-listener/FCI concepts the PostgreSQL connection builder never reads) toggle
     /// Visibility only, so a hidden checkbox keeps its IsChecked and an edited row's stored values survive the
-    /// round trip. And the PostgreSQL arm force-checks SQL auth so a hidden radio can never be the checked one.
+    /// round trip. The PostgreSQL arm hides EVERY auth-type radio — SqlAuthRadio included, so a PG target never
+    /// shows a lone radio mislabeled "SQL Server Authentication" — and force-checks SQL auth so its
+    /// username/password panel still renders (UpdateAuthPanels keys on IsChecked, not Visibility) and no hidden
+    /// radio can ever be the checked one.
     /// </summary>
     [Fact]
-    public void ThePostgresArm_HidesSqlServerOnlyControls_AndForcesSqlAuth()
+    public void ThePostgresArm_HidesEveryAuthTypeRadio_AndForceChecksSqlAuth()
     {
         var source = ReadDialogSource();
 
@@ -178,6 +181,10 @@ public sealed class PostgresAddServerDialogTests
         Assert.Contains("EntraMfaAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;", source, StringComparison.Ordinal);
         Assert.Contains("ServicePrincipalAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;", source, StringComparison.Ordinal);
         Assert.Contains("ManagedIdentityAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;", source, StringComparison.Ordinal);
+
+        /* #3499 follow-up: the SQL-auth radio is hidden on the PG arm too (no lone one-choice picker), while
+           still force-checked so its username/password panel keeps showing. */
+        Assert.Contains("SqlAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;", source, StringComparison.Ordinal);
         Assert.Contains("if (postgres && SqlAuthRadio.IsChecked != true)", source, StringComparison.Ordinal);
 
         /* Hiding must never be resetting — an unchecking regression here mangles the edit round trip. */
