@@ -429,7 +429,22 @@
   // A file-only block (not seeded into the control plane): it describes the deployment topology of THIS
   // box, which must not be editable from a peer's Viewer. An edit takes effect on the next service restart.
   //
+  // "storeName" (OPTIONAL, OPT-IN) is a short LABEL for THIS store itself -- the box name -- where
+  // "thisStoreCovers" stays a sentence. When set, every store self-alert (Store Disk Pressure, Retention
+  // Held, the Collector Cost Digest, the Fleet Sweep Rollup, all twelve families) fires under this label
+  // instead of the constant "Monitor Store", so two stores delivering into one channel and one work-item
+  // board stop colliding: the card names the host, and the delivery fingerprint (dedup_key) becomes
+  // distinct per store. SETTING IT IS ACCEPTING A RE-KEY: the label is part of that fingerprint, so open
+  // downstream work items keyed on the old one are orphaned and fresh ones start beside them -- which is
+  // why it is opt-in, why there is deliberately NO hostname fallback, and why unset stays byte-identical
+  // to every release before the field existed. Two consequences to plan for: mute rules match the alert
+  // row's spelling, so re-scope any self-alert mute from "Monitor Store" to the new label; and do NOT
+  // reuse a monitored server's display name -- the two would be indistinguishable on every shared surface,
+  // including the triage page, and nothing polices it (the registry is store-authoritative after seeding,
+  // so config validation cannot see it).
+  //
   // "peers": {
+  //   "storeName": "prod-sql-use1-monitor-01",
   //   "thisStoreCovers": "the 42 us-east-1 SQL Server primaries",
   //   "stores": [
   //     {
@@ -445,6 +460,7 @@
   //   ]
   // }
   "peers": {
+    "storeName": "",
     "thisStoreCovers": "",
     "stores": []
   }

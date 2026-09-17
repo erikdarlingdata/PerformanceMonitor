@@ -66,12 +66,15 @@ internal static class DarlingPeerDirectory
     /// Handed around as one value so a caller cannot read a coverage line that disagrees with the peer
     /// list it was published beside.
     /// </summary>
-    internal sealed record Snapshot(string ThisStoreCovers, IReadOnlyList<Peer> Peers)
+    internal sealed record Snapshot(string ThisStoreCovers, IReadOnlyList<Peer> Peers, string StoreName = "")
     {
         /// <summary>Nothing declared — the shipped default, and byte-for-byte today's behavior.</summary>
         public static readonly Snapshot Empty = new("", Array.Empty<Peer>());
 
-        /// <summary>True when the operator declared neither a coverage sentence nor any peer.</summary>
+        /// <summary>True when the operator declared neither a coverage sentence nor any peer.
+        /// <see cref="StoreName"/> deliberately does NOT count (#3500): the label exists to name the store
+        /// on its own self-alerts, not to disclose a fleet split, so setting it alone must not summon the
+        /// Fleet Coverage instructions section or any other peers-declared surface.</summary>
         public bool IsEmpty => string.IsNullOrWhiteSpace(ThisStoreCovers) && Peers.Count == 0;
 
         /// <summary>The peers whose declared <c>matches</c> cover a name, in declaration order.</summary>
@@ -157,7 +160,10 @@ internal static class DarlingPeerDirectory
             .Where(p => p.Name.Length > 0 || p.Covers.Length > 0)
             .ToList();
 
-        return new Snapshot((config.ThisStoreCovers ?? "").Trim(), peers);
+        /* storeName rides the same publish so the triage endpoint (#3500) reads the label through the one
+           ambient, fail-closed channel the peers block already has, rather than growing a second config
+           load: whitespace-only trims to "" here, which every reader treats as "not opted in". */
+        return new Snapshot((config.ThisStoreCovers ?? "").Trim(), peers, (config.StoreName ?? "").Trim());
     }
 
     /// <summary>A peer's one-line disclosure — "name — what it covers", or just whichever half exists.</summary>

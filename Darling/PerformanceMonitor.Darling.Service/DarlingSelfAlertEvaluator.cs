@@ -424,8 +424,53 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <c>get_collection_log</c> against an unresolvable server and rendered three resolver errors on every
     /// store alert. Renaming it must stay in step with <c>DarlingTriageEndpoint.IsFleetLevelStoreServer</c>,
     /// which is why both sides now read one symbol.</para>
+    ///
+    /// <para>Since #3500 this is the DEFAULT rather than the only spelling: an operator running several
+    /// stores can set <c>peers.storeName</c> and every fleet-level self-alert fires under that label instead,
+    /// through <see cref="EffectiveStoreLabel"/> and the <see cref="_storeLabel"/> field — the ONE seam every
+    /// fire site reads, pinned from source by the tests, so a thirteenth family cannot quietly hardcode this
+    /// constant back in. Unset stays byte-identical to before the field existed.</para>
     /// </summary>
     internal const string StoreServerLabel = "Monitor Store";
+
+    /// <summary>
+    /// Resolves the configured <c>peers.storeName</c> into the label the fleet-level self-alerts fire under
+    /// (#3500): the trimmed name when one is set, else <see cref="StoreServerLabel"/>. PURE and the ONLY
+    /// place the fallback decision lives, so the evaluator and any other consumer cannot answer it two ways.
+    /// A storeName spelled exactly as the constant resolves TO the constant — same bytes, same fingerprints,
+    /// no re-key — rather than being treated as an opt-in that changes nothing but the key shape.
+    /// </summary>
+    internal static string EffectiveStoreLabel(string? configuredStoreName)
+    {
+        var trimmed = (configuredStoreName ?? "").Trim();
+        return trimmed.Length == 0 || string.Equals(trimmed, StoreServerLabel, StringComparison.Ordinal)
+            ? StoreServerLabel
+            : trimmed;
+    }
+
+    /// <summary>
+    /// The label every fleet-level self-alert fires under — <see cref="StoreServerLabel"/> unless the
+    /// operator opted into <c>peers.storeName</c> (#3500). Resolved ONCE at construction because the peers
+    /// block is file-only and restart-only (unlike the hot-reloading store-backed knobs, whose seams are
+    /// <c>Func</c>s for that reason): a <c>Func</c> here would claim a liveness the config cannot deliver.
+    /// </summary>
+    private readonly string _storeLabel;
+
+    /// <summary>
+    /// The delivery identity key for one fleet-level self-alert family (#3500): the family key itself when
+    /// the label is the shipped constant, else the label prefixed on — <c>"dc1-monitor-01:store"</c>. The
+    /// serverKey is what the delivery fingerprint's no-incident fallback concatenates with the metric
+    /// (<c>WebhookAlertService.DerivePagerDutyDedupKey</c>: <c>{serverKey}:{metric}</c>), so WITHOUT this the
+    /// opted-in label would change every card while two stores' work items kept colliding on the identical
+    /// key — the exact half of #3500 that bites. The family key stays inside the qualified form because the
+    /// per-object families (retention, compression, job cadence) rely on it to keep per-object cooldowns and
+    /// history identities apart; only the LABEL is new. History storage is unaffected either way: every
+    /// non-numeric key already collapses into the write-only server_id 0 bucket (#3456), and the cooldown
+    /// seed already refuses to read it, so qualifying the key re-keys nothing but the fingerprint — which is
+    /// the re-key the operator accepted by setting the field.
+    /// </summary>
+    private string StoreKey(string familyKey) =>
+        _storeLabel == StoreServerLabel ? familyKey : _storeLabel + ":" + familyKey;
 
     /* Custom-alert-rule health edge state (#3304). FLEET-level like disk pressure (the rules are a fleet
        concept, not per-server), so a single fixed sentinel key. Standing condition (the AG-Sync-Fell-Behind /
@@ -688,7 +733,8 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<int>? storeJobCadenceWarnPercent = null,
         Func<double>? retentionHoldWarnRatio = null,
         Func<double>? retentionHoldCriticalRatio = null,
-        AlertReadFailureCounter? readFailures = null)
+        AlertReadFailureCounter? readFailures = null,
+        string? storeName = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
@@ -719,6 +765,10 @@ internal sealed class DarlingSelfAlertEvaluator
         _retentionHoldCriticalRatio =
             retentionHoldCriticalRatio ?? (() => TimescaleSupport.RetentionHoldCriticalRatioDefault);
         _readFailures = readFailures;
+        /* #3500: unsupplied (or blank) falls back to the shipped constant, so an evaluator built without the
+           seam behaves like a store that never opted in — the AG-seam discipline, and the byte-identical
+           promise the opt-in stands on. */
+        _storeLabel = EffectiveStoreLabel(storeName);
     }
 
     /// <summary>
@@ -1390,7 +1440,7 @@ internal sealed class DarlingSelfAlertEvaluator
         var (shortMessage, detail) = RenderCollectorCostDigest(movers, census);
 
         await FireAsync(
-            CollectorCostDigestKey, StoreServerLabel, CollectorCostDigestMetric,
+            StoreKey(CollectorCostDigestKey), _storeLabel, CollectorCostDigestMetric,
             currentValue: movers.Count.ToString(CultureInfo.InvariantCulture),
             /* There is no threshold. Saying so in the string is the point of the string: this surface
                exists because the same figures under a threshold could not be judged from a card. The
@@ -1654,7 +1704,7 @@ internal sealed class DarlingSelfAlertEvaluator
         var (shortMessage, detail) = RenderFleetSweepRollup(facts, spanStartUtc, spanEndUtc);
 
         await FireAsync(
-            FleetSweepRollupKey, StoreServerLabel, FleetSweepRollupMetric,
+            StoreKey(FleetSweepRollupKey), _storeLabel, FleetSweepRollupMetric,
             currentValue: facts.Sweeps.ToString(CultureInfo.InvariantCulture),
             /* There is no threshold - the digest's exact posture, stated in the string because the NOT NULL
                column demands a value and "report" is the honest one. */
@@ -2744,7 +2794,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     ? $" The store measured {FormatGb(size)} at its last self-metrics sample."
                     : "";
                 await FireAsync(
-                    DiskKey, StoreServerLabel, DiskPressureMetric, reason,
+                    StoreKey(DiskKey), _storeLabel, DiskPressureMetric, reason,
                     $"{warnPercent.ToString("0.#", CultureInfo.InvariantCulture)}% free",
                     detail: reason + storeText + " When the store volume fills, collection and every write stop " +
                         "for the WHOLE fleet, and a headless service has no dashboard to warn you. Free space on the " +
@@ -2767,7 +2817,7 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             _lastAlertedDiskPressurePercent.TryRemove(DiskKey, out _);
             await RecordResolutionAsync(new AlertResolution(
-                DiskKey, StoreServerLabel, DiskPressureMetric,
+                StoreKey(DiskKey), _storeLabel, DiskPressureMetric,
                 DiskPressureResolvedMetric, "Monitor store volume free space recovered"), cancellationToken);
         }
     }
@@ -2830,7 +2880,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 _lastCustomRuleHealthAlert[CustomRuleHealthKey] = now;
                 var (shortMessage, detail) = RenderCustomRuleHealth(report);
                 await FireAsync(
-                    CustomRuleHealthKey, StoreServerLabel, CustomRuleHealthMetric,
+                    StoreKey(CustomRuleHealthKey), _storeLabel, CustomRuleHealthMetric,
                     currentValue: report.TotalIssues.ToString(CultureInfo.InvariantCulture),
                     thresholdValue: "0",
                     detail: detail,
@@ -2847,7 +2897,7 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             _lastCustomRuleHealthAlert.TryRemove(CustomRuleHealthKey, out _);
             await RecordResolutionAsync(new AlertResolution(
-                CustomRuleHealthKey, StoreServerLabel, CustomRuleHealthMetric,
+                StoreKey(CustomRuleHealthKey), _storeLabel, CustomRuleHealthMetric,
                 CustomRuleHealthResolvedMetric,
                 "All custom alert rules compile and are firing-eligible again"), cancellationToken);
         }
@@ -3001,7 +3051,7 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 _lastStaleMuteAlert.TryRemove(StaleMuteKey, out _);
                 await RecordResolutionAsync(new AlertResolution(
-                    StaleMuteKey, StoreServerLabel, StaleMuteMetric, StaleMuteResolvedMetric,
+                    StoreKey(StaleMuteKey), _storeLabel, StaleMuteMetric, StaleMuteResolvedMetric,
                     "No mute rule is suppressing alerts without an expiry any more"), cancellationToken);
             }
 
@@ -3025,7 +3075,7 @@ internal sealed class DarlingSelfAlertEvaluator
         var (shortMessage, detail) = RenderStaleMuteRules(stale, now, blanket);
 
         await FireAsync(
-            StaleMuteKey, StoreServerLabel, StaleMuteMetric,
+            StoreKey(StaleMuteKey), _storeLabel, StaleMuteMetric,
             currentValue: stale.Count.ToString(CultureInfo.InvariantCulture),
             thresholdValue: "0",
             detail: detail,
@@ -3068,8 +3118,11 @@ internal sealed class DarlingSelfAlertEvaluator
     /// cannot reach this decision at all, whatever else it silences. The narrowing is also strictly
     /// one-directional: an explicitly-naming rule still has to pass the FULL matcher against this alert's
     /// real context, so a rule naming the metric but scoped to some monitored server does not suppress a
-    /// fleet-level condition whose server is the synthetic <see cref="StoreServerLabel"/>, and one carrying
-    /// a database or wait pattern does not either — this alert has no such dimension to match.</para>
+    /// fleet-level condition whose server is the store's label (<see cref="StoreServerLabel"/>, or the
+    /// opted-in <c>peers.storeName</c> — #3500's mute-rule coupling: the context below carries the SAME label
+    /// the fired row does, so a rule scoped to either spelling matches exactly the rows that spelling names),
+    /// and one carrying a database or wait pattern does not either — this alert has no such dimension to
+    /// match.</para>
     ///
     /// <para>Judged on the evaluator's injected clock via <see cref="MuteRule.MatchesAt"/>, so the rule's
     /// expiry is read on the same instant the staleness ages are, and an operator's explicit mute lapses
@@ -3078,11 +3131,11 @@ internal sealed class DarlingSelfAlertEvaluator
     /// That is the audit trail an operator gets for this decision, and it is what makes the decision
     /// answerable rather than invisible.</para>
     /// </summary>
-    private static MuteRule? FindExplicitMute(IReadOnlyList<MuteRule> rules, DateTime now)
+    private MuteRule? FindExplicitMute(IReadOnlyList<MuteRule> rules, DateTime now)
     {
         var context = new AlertMuteContext
         {
-            ServerName = StoreServerLabel,
+            ServerName = _storeLabel,
             MetricName = StaleMuteMetric
         };
 
@@ -3237,7 +3290,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         : " The pre-upgrade data directory is kept as a rollback copy for the next couple of service starts, then deleted automatically.";
 
                 await FireAsync(
-                    StoreUpgradeKey, StoreServerLabel, StoreUpgradeMetric,
+                    StoreKey(StoreUpgradeKey), _storeLabel, StoreUpgradeMetric,
                     degraded ? $"PostgreSQL {report.ToMajor} (cleanup incomplete)" : $"PostgreSQL {report.ToMajor}",
                     $"PostgreSQL {report.FromMajor}",
                     detail: $"The monitor's own store was upgraded in place from PostgreSQL {report.FromMajor} to {report.ToMajor}.{timescale} " +
@@ -3262,7 +3315,7 @@ internal sealed class DarlingSelfAlertEvaluator
             }
 
             await FireAsync(
-                StoreUpgradeKey, StoreServerLabel, StoreUpgradeMetric,
+                StoreKey(StoreUpgradeKey), _storeLabel, StoreUpgradeMetric,
                 $"PostgreSQL {report.FromMajor} (upgrade failed)", $"PostgreSQL {report.ToMajor}",
                 detail: $"The monitor's own store FAILED to upgrade from PostgreSQL {report.FromMajor} to {report.ToMajor}, at step '{report.FailedStep}': {report.FailureMessage} " +
                     $"The store reverted to PostgreSQL {report.FromMajor} and is collecting normally — no data was lost, because the pre-upgrade data directory is never modified until the upgrade succeeds. " +
@@ -3390,7 +3443,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     _lastJobOverCadenceAlert[key] = now;
                     bool critical = percent >= 100.0;
                     await FireAsync(
-                        JobCadenceKeyPrefix + key, StoreServerLabel, JobCadenceMetric,
+                        StoreKey(JobCadenceKeyPrefix + key), _storeLabel, JobCadenceMetric,
                         $"{percent:F0}% of schedule interval", $"{warnPercent}%",
                         detail: $"Store background {label} last ran for {durationMs / 1000.0:F0}s against a " +
                             $"{job.ScheduleIntervalMs / 1000.0:F0}s schedule interval ({percent:F0}%). " +
@@ -3421,9 +3474,11 @@ internal sealed class DarlingSelfAlertEvaluator
             else if (_activeJobOverCadence.TryRemove(key, out var was) && was)
             {
                 await RecordResolutionAsync(new AlertResolution(
-                    JobCadenceKeyPrefix + key, StoreServerLabel, JobCadenceMetric,
+                    StoreKey(JobCadenceKeyPrefix + key), _storeLabel, JobCadenceMetric,
                     "Store Job Cadence Recovered",
-                    $"Monitor Store: {label} is back under {warnPercent}% of its schedule interval"), cancellationToken);
+                    /* The message names the store through the label too (#3500): an opted-in store's
+                       resolution prose must not call it by the constant its own rows no longer carry. */
+                    $"{_storeLabel}: {label} is back under {warnPercent}% of its schedule interval"), cancellationToken);
             }
         }
     }
@@ -3538,7 +3593,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     bool critical = ratio >= criticalRatio;
                     double spanDays = (policy.SpanSeconds ?? 0) / 86400.0;
                     await FireAsync(
-                        RetentionHoldKeyPrefix + key, StoreServerLabel, RetentionHoldMetric,
+                        StoreKey(RetentionHoldKeyPrefix + key), _storeLabel, RetentionHoldMetric,
                         $"{ratio:F1}x its {policy.DropAfter} horizon", $"{warnRatio:F1}x",
                         detail: $"Store {label} is HELD PAUSED by the rollup-coverage gate, and the tier now " +
                             $"holds {spanDays:F1} days across {policy.ChunkCount} chunk(s) against a configured " +
@@ -3595,9 +3650,10 @@ internal sealed class DarlingSelfAlertEvaluator
             : $"is back under {warnRatio:F1}x its {policy.DropAfter} horizon";
 
         await RecordResolutionAsync(new AlertResolution(
-            RetentionHoldKeyPrefix + key, StoreServerLabel, RetentionHoldMetric,
+            StoreKey(RetentionHoldKeyPrefix + key), _storeLabel, RetentionHoldMetric,
             "Retention Hold Cleared",
-            $"Monitor Store: {label} {why}"), cancellationToken);
+            /* Label rather than the constant for the #3500 reason the cadence recovery gives. */
+            $"{_storeLabel}: {label} {why}"), cancellationToken);
     }
 
     /// <summary>
@@ -3649,7 +3705,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 {
                     _compressionJobState[key] = CompressionJobHealth.ReArmed;
                     await FireAsync(
-                        CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
+                        StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} was stuck ({job.Reason}) and has been automatically re-armed " +
                             "(alter_job next_start => now). A stuck compression policy halts the store's archival tier, so " +
@@ -3671,7 +3727,7 @@ internal sealed class DarlingSelfAlertEvaluator
                        never loop alter_job on it, and page: a human must re-arm it (or grant ownership). */
                     _compressionJobState[key] = CompressionJobHealth.Escalated;
                     await FireAsync(
-                        CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
+                        StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} is stuck ({job.Reason}) and the service could NOT re-arm it — " +
                             "alter_job failed, usually because the store login does not own the job. Compression is halted, " +
@@ -3690,7 +3746,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 _compressionJobState[key] = CompressionJobHealth.Escalated;
                 _lastCompressionJobAlert[key] = now;
                 await FireAsync(
-                    CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
+                    StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
                     job.Reason, "running on schedule",
                     detail: $"TimescaleDB {label} is STILL stuck ({job.Reason}) after an automatic re-arm last cycle — it " +
                         "re-hung, so the service has STOPPED auto-re-arming it. This is a product-bug signal: the compression " +
@@ -3708,7 +3764,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 {
                     _lastCompressionJobAlert[key] = now;
                     await FireAsync(
-                        CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
+                        StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} remains stuck ({job.Reason}) after escalation — still not compressing. " +
                             "Manual intervention is required; the service will not auto-re-arm it.",
@@ -3733,7 +3789,7 @@ internal sealed class DarlingSelfAlertEvaluator
             _compressionJobState.TryRemove(key, out _);
             _lastCompressionJobAlert.TryRemove(key, out _);
             await RecordResolutionAsync(new AlertResolution(
-                CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
+                StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
                 "Compression Job Recovered",
                 $"TimescaleDB compression job {key} is running on schedule again"), cancellationToken);
         }
