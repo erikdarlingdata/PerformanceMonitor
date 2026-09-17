@@ -139,7 +139,7 @@ public sealed class PostgresAddServerDialogTests
     [Fact]
     public void TheXamlDefaultState_IsTheSqlServerForm()
     {
-        var xaml = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "AddServerDialog.xaml"));
+        var xaml = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "AddServerDialog.xaml");
 
         Assert.Contains("x:Name=\"SqlServerEngineRadio\"", xaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"PostgresEngineRadio\"", xaml, StringComparison.Ordinal);
@@ -245,18 +245,9 @@ public sealed class PostgresAddServerDialogTests
 
     /* ─────────────────────────────── helpers ─────────────────────────────── */
 
+    /* The shared reader, not a private walk-up: RepoFileAdoptionTests holds the census that exactly one
+       file declares the reader and everyone else adopts it — the same helper-proliferation rule the #3489
+       review nit asked for, enforced. */
     private static string ReadDialogSource() =>
-        ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Viewer", "AddServerDialog.xaml.cs"));
-
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relative));
-    }
+        RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "AddServerDialog.xaml.cs");
 }
