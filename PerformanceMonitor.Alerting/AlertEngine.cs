@@ -1343,6 +1343,11 @@ public sealed class AlertEngine
                         }
                     }
 
+                    /* The resolver's time must not ride into whatever the block awaits next: a delivery
+                       fault after this point should record its own elapsed, not the msdb lookup's on top
+                       — the clock-to-itself rule, applied on the operation's EXIT as well as its entry. */
+                    readClock.Restart();
+
                     var lrqContext = AlertContextBuilders.BuildLongRunningQueryContext(serverName, longRunning, lrqOccurrences.Decorate, agentJobNames); /* :379 + #3497 */
                     var detailText = AlertContextBuilders.ContextToDetailText(lrqContext);                       /* :380 */
 
