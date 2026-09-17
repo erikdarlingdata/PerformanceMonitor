@@ -1,9 +1,14 @@
 name: Claude Auto Review
 
-# Reviews every pull request into dev or main when it is opened or updated. The review is
-# advisory (it posts comments) and is deliberately NOT a required status check, so it never
-# blocks a merge. It no-ops cleanly until the CLAUDE_CODE_OAUTH_TOKEN repo secret is set, and on
-# fork PRs (which do not receive secrets), so neither case shows a failed check.
+# Reviews every pull request into dev or main when it is opened or updated. The review posts
+# comments for its findings and ends every run with ONE formal verdict review (the VERDICT
+# PROTOCOL in the prompt below): changes-requested when a finding is substantive, a comment
+# review otherwise. This workflow itself is still deliberately NOT a required status check --
+# enforcement lives in claude-review-guard.yml, whose verdict arm fails while the newest verdict
+# is changes-requested, so a substantive finding becomes a red check instead of a comment that
+# auto-merge outruns (the #3470-#3473 train shipped six findings in one night that way; one was
+# real). It no-ops cleanly until the CLAUDE_CODE_OAUTH_TOKEN repo secret is set, and on fork PRs
+# (which do not receive secrets), so neither case shows a failed check.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -55,7 +60,23 @@ jobs:
             The PR branch is already checked out in the working directory.
             Use `gh pr comment` for top-level feedback, and
             `mcp__github_inline_comment__create_inline_comment` (with confirmed: true) for
-            specific line-level issues. Only post GitHub comments — do not emit review text as
-            plain messages.
+            specific line-level issues. Only post GitHub comments and reviews — do not emit
+            review text as plain messages.
+
+            VERDICT PROTOCOL — ALWAYS POST a verdict. After every comment is posted, end the
+            review by submitting exactly ONE formal GitHub review:
+            - Any substantive finding — a correctness bug, a security hole, a data-integrity
+              risk, or a violation of a contract the code is supposed to keep — means:
+                gh pr review ${{ github.event.pull_request.number }} --request-changes --body "<verdict>"
+              where <verdict> is a numbered summary of the substantive findings.
+            - Otherwise:
+                gh pr review ${{ github.event.pull_request.number }} --comment --body "LGTM — <one line on what was checked>"
+            Substantive explicitly does NOT include style nits, observations you yourself label
+            non-blocking, or tradeoffs the code or the PR description already documents as
+            deliberate: those stay comments, and the verdict is the clean one.
+            Never use --approve — this token cannot approve without an org setting this repo
+            does not enable, and no gate needs it. The guard's rule is newest-verdict-wins: on
+            a re-review after new commits, review the NEW diff and submit a fresh verdict, and
+            a clean fresh verdict clears an earlier changes-requested by itself.
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*)"
