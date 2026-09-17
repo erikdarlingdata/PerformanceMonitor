@@ -248,7 +248,8 @@ public sealed class DarlingFleetDtoJsonTests
             "\"is_azure_sql_db\"", "\"is_azure_mi\"", "\"is_silenced\"", "\"tags\"", "\"band\"", "\"status\"",
             "\"is_online\"", "\"last_collection\"", "\"cpu_percent\"", "\"total_cpu_percent\"",
             "\"cpu_severity\"", "\"memory_severity\"", "\"blocking_count\"", "\"blocking_severity\"",
-            "\"deadlock_count\"", "\"deadlock_last_seen\"", "\"deadlock_severity\"", "\"threads_severity\"",
+            "\"deadlock_count\"", "\"deadlock_last_seen\"", "\"deadlock_rate_per_hour\"",
+            "\"deadlock_severity\"", "\"threads_severity\"",
             "\"failed_collector_count\"", "\"collector_severity\"", "\"overall_metric_severity\"",
         })
         {
@@ -678,11 +679,18 @@ public sealed class DarlingFleetReaderLivePostgresTests
             await InsertBlockedProcessAsync(connection, XeServerId, XeName, at.AddMinutes(1), ct);
             await InsertDmvBlockingAsync(connection, XeServerId, XeName, at, ct);
 
-            /* DMV-only server: 3 DMV snapshots (fallback), 1 deadlock. */
+            /* DMV-only server: 3 DMV snapshots (fallback), and enough deadlocks to clear the rate tier. */
             await InsertDmvBlockingAsync(connection, DmvServerId, DmvName, at, ct);
             await InsertDmvBlockingAsync(connection, DmvServerId, DmvName, at.AddMinutes(1), ct);
             await InsertDmvBlockingAsync(connection, DmvServerId, DmvName, at.AddMinutes(2), ct);
-            await InsertDeadlockAsync(connection, DmvServerId, DmvName, at, ct);
+            /* 25 inside the one-hour card window, so the deadlock RATE is 25/hr and clears #3368's 20/hr
+               Critical tier with headroom. One deadlock no longer bands anything, and this server has to
+               stay CRITICAL for the worst-first ordering assertion below to compare across bands rather
+               than within one. Seconds apart so every row lands inside [now-1h, now]. */
+            for (var i = 0; i < 25; i++)
+            {
+                await InsertDeadlockAsync(connection, DmvServerId, DmvName, at.AddSeconds(i), ct);
+            }
 
             /* Fresh collection for both so freshness reads Online (not Offline). */
             await InsertCollectionLogAsync(connection, XeServerId, XeName, now.AddSeconds(-30), ct);
@@ -704,9 +712,10 @@ public sealed class DarlingFleetReaderLivePostgresTests
             Assert.True(xe.IsAzureSqlDb);
             Assert.False(xe.IsAzureManagedInstance);
 
-            /* DMV fallback: 3 events + a deadlock -> Critical band. */
+            /* DMV fallback: 3 events -> Warning on the blocking axis, 25 deadlocks/hr -> Critical on the
+               deadlock axis, and worst-wins makes the card Critical. */
             Assert.Equal(3, dmv.BlockingCount);
-            Assert.Equal(1, dmv.DeadlockCount);
+            Assert.Equal(25, dmv.DeadlockCount);
             Assert.Equal(FleetHealthBand.Critical, dmv.Band);
 
             /* A box edition (3) is neither Azure flag — the composer keeps the on-prem badges. */

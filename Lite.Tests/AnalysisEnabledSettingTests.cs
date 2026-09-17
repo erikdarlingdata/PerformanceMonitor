@@ -7,6 +7,7 @@
  */
 
 using PerformanceMonitorLite;
+using PerformanceMonitorLite.Services;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -41,5 +42,42 @@ public class AnalysisEnabledSettingTests
 
         // Restore the shipped default so sibling test classes observe the production default.
         App.AnalysisEnabled = true;
+    }
+
+    /// <summary>#3464: analysis notification DELIVERY is the master alerts switch AND the family toggle —
+    /// the same AND'd idiom Lite's connection edge uses — where before this the family toggle decided
+    /// alone, so an operator who flipped the master switch off still got analysis mail (the measured
+    /// Darling incident delivered 38 minutes into a fleet-wide mute; Lite's gate had the identical shape).
+    /// Production stays ungated by BOTH (the D0 split this file already pins).</summary>
+    [Fact]
+    public void ShouldNotifyAnalysisFindings_RequiresTheMasterSwitch_AndTheFamilyToggle()
+    {
+        try
+        {
+            /* The measured bypass: family toggle on, master OFF — must not deliver. */
+            App.AlertsEnabled = false;
+            App.AnalysisNotificationsEnabled = true;
+            Assert.False(CollectionBackgroundService.ShouldNotifyAnalysisFindings());
+
+            /* The family toggle keeps working under master on — it is the narrower knob, not a synonym. */
+            App.AlertsEnabled = true;
+            App.AnalysisNotificationsEnabled = false;
+            Assert.False(CollectionBackgroundService.ShouldNotifyAnalysisFindings());
+
+            App.AlertsEnabled = false;
+            App.AnalysisNotificationsEnabled = false;
+            Assert.False(CollectionBackgroundService.ShouldNotifyAnalysisFindings());
+
+            /* Both on — the only combination that delivers. */
+            App.AlertsEnabled = true;
+            App.AnalysisNotificationsEnabled = true;
+            Assert.True(CollectionBackgroundService.ShouldNotifyAnalysisFindings());
+        }
+        finally
+        {
+            /* Shipped defaults, restored for sibling classes (this file's own discipline). */
+            App.AlertsEnabled = true;
+            App.AnalysisNotificationsEnabled = false;
+        }
     }
 }

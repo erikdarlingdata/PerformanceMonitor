@@ -125,4 +125,38 @@ public interface IAlertStateStore
     /// </summary>
     Task SaveIncidentOccurrencesAsync(
         string serverKey, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states);
+
+    /// <summary>
+    /// Loads one subject's persisted <see cref="AlertPersistenceGate"/> state (#3282) — the built-in gauge
+    /// alerts' "how long has this condition held" counters, keyed the same (server, metric) way the
+    /// watermarks are. Returns <c>null</c> when nothing is persisted, which the caller reads as
+    /// <see cref="AlertPersistenceRecord.Initial"/>.
+    ///
+    /// <para>Persistence is the requirement, not an optimization, and it buys two different things. The
+    /// <c>Firing</c> flag is what stops a restart re-announcing an incident the operator already has open:
+    /// the pre-#3282 CPU check kept that flag in memory only, so the first post-restart sweep over a
+    /// standing condition delivered it again. The counters are what stop a restart mid-excursion throwing
+    /// away a streak that was about to fire.</para>
+    ///
+    /// <para>A host that cannot persist may return <c>null</c> and no-op the save. The degradation is
+    /// stated rather than hidden: the gate then lives for one process lifetime, so a restart resets the
+    /// streak and a sustained condition re-arms from zero — it fires N samples later, never "never". That
+    /// is strictly better than the pre-#3282 behaviour and is the intended fallback, not a broken state.</para>
+    /// </summary>
+    Task<AlertPersistenceRecord?> LoadAlertPersistenceAsync(string serverKey, string metricName);
+
+    /// <summary>
+    /// Upserts one subject's <see cref="AlertPersistenceGate"/> state (#3282).
+    ///
+    /// <para>Unlike the watermark saves this is NOT on-change-only — it runs on every observation that
+    /// advances the gate, because a streak that is not persisted as it builds is a streak a restart can only
+    /// lose. That is still low frequency: one small upsert per server per new gauge sample (about one a
+    /// minute per server), and the caller skips the write entirely when the record is unchanged, which is
+    /// what the value-equality of <see cref="AlertPersistenceRecord"/> is for.</para>
+    ///
+    /// <para>Implementations absorb their own failures like the watermark writes. A dropped save costs the
+    /// streak on a restart, never a missed or duplicated alert: the gate has already decided this
+    /// observation's outcome from the in-memory record by the time this is called.</para>
+    /// </summary>
+    Task SaveAlertPersistenceAsync(string serverKey, string metricName, AlertPersistenceRecord record);
 }

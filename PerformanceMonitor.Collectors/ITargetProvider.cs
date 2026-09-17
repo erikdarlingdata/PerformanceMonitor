@@ -73,7 +73,12 @@ public interface ITargetProvider
     /// inaccessible master has a meaningful fallback (collect from the one connected database) and a
     /// re-probe throttle; on PostgreSQL a login that cannot read <c>pg_database</c> cannot monitor the
     /// server at all, so there is nothing to fall back to. That policy stays with the runner.</para>
+    /// <para><paramref name="databaseScope"/> is the per-collector allow-list (#3477), applied INSIDE
+    /// the enumeration query beside the exclusion so both instruments match names under the engine's
+    /// own comparison semantics — never client-side, where a .NET comparer would have its own opinion
+    /// of what a name is. Null/empty = unscoped (today's list); the exclusion still wins because the
+    /// composed predicate is scoped-in AND NOT excluded.</para>
     /// </summary>
     (string ConnectionString, CollectorQuery Query) BuildDatabaseListPlan(
-        string connectionString, IReadOnlyList<string>? excludedDatabases);
+        string connectionString, IReadOnlyList<string>? excludedDatabases, IReadOnlyList<string>? databaseScope);
 }

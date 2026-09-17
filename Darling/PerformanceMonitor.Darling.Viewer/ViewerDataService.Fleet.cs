@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -644,7 +645,14 @@ public sealed class FleetRollup
 
         if (s.CpuSeverity >= HealthSeverity.Warning)
         {
-            parts.Add($"CPU {s.CpuDisplay}");
+            /* #3281: the figure that DECIDED, through the clause the service's own reason line uses. This
+               card's CpuDisplay renders "100% (ACU 87%)" — true, and it leads with the
+               percent-of-allocated reading under a "CPU" label, which is the attribution the band exists
+               to stop a reader making. The fixed-capacity arm keeps the fuller display, which carries the
+               per-process split. */
+            parts.Add(
+                FleetCpuProvenance.CapacityBandClause(s.AcuUtilizationPercent, s.CpuSource)
+                ?? $"CPU {s.CpuDisplay}");
         }
         if (s.ThreadsSeverity >= HealthSeverity.Warning)
         {
@@ -660,7 +668,12 @@ public sealed class FleetRollup
         }
         if (s.DeadlockSeverity >= HealthSeverity.Warning && s.DeadlockCount > 0)
         {
-            parts.Add($"Deadlocks {s.DeadlockCount}");
+            /* #3368: the RATE is what banded, so the reason names it — the same wording the service's
+               fleet card uses, so the two surfaces read alike. An unrateable window prints the count
+               alone, which is exactly what the band had to go on. */
+            parts.Add(s.DeadlockRatePerHour.HasValue
+                ? $"Deadlocks {s.DeadlockCount} ({s.DeadlockRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr)"
+                : $"Deadlocks {s.DeadlockCount}");
         }
         if (s.CollectorSeverity >= HealthSeverity.Warning)
         {

@@ -119,6 +119,44 @@ public static class DarlingRetention
     internal const int PlanForceLedgerRetentionDays = 365;
 
     /// <summary>
+    /// <c>collect.oversized_plan_backlog</c> (#3392) keeps a row this long past its LAST SIGHTING — not past
+    /// its creation, and not past its capture.
+    ///
+    /// <para><b>Why <c>last_seen_at</c> is the right column.</b> A backlog row exists to explain a
+    /// <c>query_stats</c> / <c>procedure_stats</c> row whose plan XML was omitted for size. Once every fact
+    /// row that could reference that plan has aged out, the backlog entry explains nothing and its content is
+    /// a plan nobody can reach a row for. Keying the horizon on the sighting rather than the insert also
+    /// means a plan that is STILL being collected is never pruned — a 144-day cache resident (measured on the
+    /// fleet's outlier server) keeps its content for as long as it keeps recurring, which is the whole point
+    /// of going back for it.</para>
+    ///
+    /// <para><see cref="DataRetentionBaseDays"/> rather than a literal of the same value, so the backlog stays
+    /// worth exactly as long as the data it explains instead of holding at 30 on its own if that window ever
+    /// moves. It is also the horizon <c>CollectorScheduleDefaults</c> gives both feeding collectors
+    /// today.</para>
+    ///
+    /// <para>Like <see cref="AlertHistoryRetentionDays"/> and <see cref="PlanForceLedgerRetentionDays"/> this
+    /// is neither a collector (no schedule entry) nor a hypertable, and nothing else prunes it — so this
+    /// horizon is the only thing bounding a table whose rows carry megabytes of plan XML each. No operator
+    /// setting governs it, so the constant is the single source of truth.</para>
+    /// </summary>
+    internal const int OversizedPlanBacklogRetentionDays = DataRetentionBaseDays;
+
+    /// <summary>
+    /// #3466 (lane 2): the fleet-sweep tables' horizon — the base data horizon, deliberately, because a
+    /// sweep document is a summary OF the base data and a sweep outliving the rows it summarized explains
+    /// nothing: its drill-downs dangle and its diffs cite evidence no reader can re-check. Runs and their
+    /// two children prune on the run's <c>swept_at</c>; watch items prune on <c>last_seen_at</c> — the
+    /// backlog's rule, and last-seen means SIGHTING, never evaluation (the engine carries the stamps
+    /// through a miss unchanged) — so an episode still being carried never loses its row, however old
+    /// its birth record is: an open item is at most one standing miss from its last sighting before the
+    /// exit bar closes it, while a row nothing ever resights ages out on schedule. Wired HERE, in the
+    /// lane that makes the engine write the tables, exactly as lane 1's rung doc promised — the backlog
+    /// precedent of retention landing beside the writer rather than beside the DDL.
+    /// </summary>
+    internal const int FleetSweepRetentionDays = DataRetentionBaseDays;
+
+    /// <summary>
     /// The terminal-status filter for the command purge — the two states
     /// <c>ViewerDataService.IsTerminal</c> recognizes, which are also the only two
     /// <c>DarlingCommandExecutor</c> ever writes (its report path and its stale-command reaper). A
@@ -133,6 +171,15 @@ public static class DarlingRetention
        keeps a large first purge from ever hitting a timeout at all — a single unbounded DELETE could roll
        back on a long backlog and never catch up (retried tomorrow with a day MORE to delete). */
     private const int DeleteTimeoutSeconds = 300;
+
+    /// <summary>
+    /// Batch size for a purge statement that is neither time-sliced nor row-capped — one execution IS the
+    /// whole purge. No real row count reaches this cap, so the drain loop's "cleared >= cap means there may
+    /// be more" test is never true and the single execution is terminal. Under the default batchSize of 1
+    /// an unsliced statement that did any real work re-ran in full once more just to observe zero rows — an
+    /// extra whole-table DELETE on exactly the days the purge had something to do (found by review on #3471).
+    /// </summary>
+    private const int SingleShotStatement = int.MaxValue;
 
     /// <summary>
     /// Purges every collector table past its shared <see cref="CollectorScheduleDefaults"/>
@@ -639,6 +686,85 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* collect.oversized_plan_backlog (#3392) purges on last_seen_at at
+               OversizedPlanBacklogRetentionDays. NOT in CollectorCatalog.All (it is written by the collector
+               runner's post-write hook and by the backlog sweep, not by a collector definition), so the loop
+               above skips it, and nothing else prunes it.
+               A batched DELETE, never a hypertable: the table's PRIMARY KEY is the dm_exec_query_stats row
+               identity, and a hypertable's unique constraint must include the partitioning column — which a
+               handle-and-offsets key cannot, so conversion would reject the key that makes the upsert an
+               upsert. TimescaleSupport excludes PK-bearing tables for the same reason.
+               The work bound is the one-day SLICE, not an index seek: the primary key leads with server_id
+               and this DELETE has no server_id predicate, so it cannot be seeked here — the same shape as
+               the force ledger's purge above and adequate for the same reason. The measured arrival rate is a
+               handful of long-lived plans per server, so there is never much to scan.
+               Failure-isolated like every sibling: a failed statement is warned + counted, the sweep goes on. */
+            var backlogDeleted = await PurgeOneAsync(
+                postgres, OversizedPlanBacklog.TableName,
+                TimeSlicedDeleteSql(OversizedPlanBacklog.TableName, "last_seen_at"),
+                utcNow.AddDays(-OversizedPlanBacklogRetentionDays), logger, cancellationToken);
+            if (backlogDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += backlogDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            /* #3466: the fleet-sweep tables (V123), written by FleetSweepEngine and pruned at
+               FleetSweepRetentionDays — see that constant for the horizon's reasoning. NOT in
+               CollectorCatalog.All (they are the sweep's own state, not a collector's rows), so the
+               catalog loop above skips them and nothing else prunes them; plain tables, never
+               hypertables, per the store's own doc — hourly-cadence volume needs no chunking and the
+               children's keys cannot carry a partition column.
+
+               ORDER: children before runs, because the children have no time column of their own — they
+               prune through their run's swept_at — and the tables carry no FKs (the writer's single
+               transaction owns that invariant), so deleting runs first would strand children the join
+               could never reach again. Each child's second arm sweeps up exactly that stranding from a
+               purge that failed between statements on an earlier day: the price of no FKs, paid as one
+               cheap NOT EXISTS over tables bounded at dozens of narrow rows per sweep, rather than as an
+               ordering constraint on every future purge. Failure-isolated per table like every sibling. */
+            /* The children's statements are neither time-sliced nor row-capped — one execution IS the
+               whole purge — so they dispatch single-shot. Under the default batchSize the drain loop's
+               "cleared >= cap means there may be more" contract inverts for an unsliced statement: any
+               real work (>= 1 row) re-ran the full DELETE once more just to confirm emptiness, an extra
+               whole-table statement on exactly the days the purge had something to do. */
+            foreach (var (table, sql, batch) in new (string Table, string Sql, int Batch)[]
+            {
+                (FleetSweepStore.VerdictsTableName,
+                    $"DELETE FROM {FleetSweepStore.VerdictsTableName} c"
+                    + $" WHERE c.sweep_id IN (SELECT r.sweep_id FROM {FleetSweepStore.RunsTableName} r WHERE r.swept_at < $1)"
+                    + $" OR NOT EXISTS (SELECT 1 FROM {FleetSweepStore.RunsTableName} r WHERE r.sweep_id = c.sweep_id)",
+                    SingleShotStatement),
+                (FleetSweepStore.WouldHavePagedTableName,
+                    $"DELETE FROM {FleetSweepStore.WouldHavePagedTableName} c"
+                    + $" WHERE c.sweep_id IN (SELECT r.sweep_id FROM {FleetSweepStore.RunsTableName} r WHERE r.swept_at < $1)"
+                    + $" OR NOT EXISTS (SELECT 1 FROM {FleetSweepStore.RunsTableName} r WHERE r.sweep_id = c.sweep_id)",
+                    SingleShotStatement),
+                (FleetSweepStore.RunsTableName,
+                    TimeSlicedDeleteSql(FleetSweepStore.RunsTableName, "swept_at"), 1),
+                (FleetSweepStore.WatchItemsTableName,
+                    TimeSlicedDeleteSql(FleetSweepStore.WatchItemsTableName, "last_seen_at"), 1),
+            })
+            {
+                var sweepRowsDeleted = await PurgeOneAsync(
+                    postgres, table, sql,
+                    utcNow.AddDays(-FleetSweepRetentionDays), logger, cancellationToken,
+                    batchSize: batch);
+                if (sweepRowsDeleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += sweepRowsDeleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
+            }
+
             var summary = new PurgeSummary(tablesPurged, totalRowsDeleted, totalChunksDropped);
             logger?.LogInformation(
                 "Retention purge: {Tables} table(s) purged, {Rows} row(s) deleted, {Chunks} chunk(s) dropped, {Failed} failed, {ElapsedMs}ms",
@@ -1036,7 +1162,9 @@ public static class DarlingRetention
             /* batchSize 1 for the TIME-SLICED statement: it has no row cap, so "fewer than the cap"
                degenerates to "deleted zero rows" — a slice that clears anything means older slices may
                remain. A ROW-capped caller passes its cap instead, which restores the drain loop's real
-               contract (a full-cap batch means there may be more). */
+               contract (a full-cap batch means there may be more). An UNSLICED caller — one statement
+               that IS the whole purge — passes SingleShotStatement, under which no real row count can
+               reach the cap and the one execution is terminal. */
             var batches = 0;
             var drained = await DrainBatchesAsync(
                 async ct =>
@@ -1063,7 +1191,7 @@ public static class DarlingRetention
                is the #2386 failure mode exactly: a purge that removed one bounded slice and reported
                success looked identical in the log to one that cleared everything expired. One batch means
                the table was already inside its horizon; many means there was a backlog and it is gone. */
-            if (batchSize > 1)
+            if (batchSize > 1 && batchSize != SingleShotStatement)
             {
                 logger?.LogInformation(
                     "Retention purge drained {Rows} row(s) from {Table} in {Batches} batch(es) (cap {Cap}), cutoff {Cutoff:yyyy-MM-dd HH:mm}Z",

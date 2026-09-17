@@ -361,6 +361,40 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
         Assert.Equal("Regressed Queries", context.Details[3].Heading);
     }
 
+    /// <summary>
+    /// The boundary the webhook redaction rule depends on, asserted rather than assumed
+    /// (review catch on #3297): a GENERATED remediation command only ever lands in an
+    /// <see cref="AlertDetailItem"/> flagged <c>IsCodeBlock</c> — which every webhook channel replaces
+    /// with <c>TsqlWebhookHint</c> before anything leaves the process — and NEVER in the flat prose
+    /// <c>detailText</c>, which since #3297 rides out to those same channels verbatim.
+    /// <para>Fold the command into the detail text and it would bypass the redaction with no other test
+    /// noticing, because both surfaces render "correctly" either way. This is the PLAN_REGRESSION finding,
+    /// which is the case that actually has a generated command.</para>
+    /// </summary>
+    [Fact]
+    public void TheGeneratedRemediationCommand_RidesOnlyInTheCodeBlockItem_NeverInTheProseDetailText()
+    {
+        var finding = MakeFinding("planreg000000001", rootFactKey: "PLAN_REGRESSION",
+            drillDown: RegressedQueriesDrillDown());
+
+        var context = FindingMessageFormatter.BuildContext(finding, notifyThreshold: 1.5);
+        var detailText = FindingMessageFormatter.DetailText(finding, notifyThreshold: 1.5);
+
+        /* The command exists, and it is in the redacted item. */
+        var codeBlock = Assert.Single(context.Details, d => d.IsCodeBlock);
+        Assert.Contains("sp_query_store_force_plan", codeBlock.Body);
+
+        /* And nowhere in the prose that now reaches a webhook. */
+        Assert.DoesNotContain("sp_query_store_force_plan", detailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("DBCC", detailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("ALTER DATABASE", detailText, StringComparison.Ordinal);
+
+        /* The prose is finding METADATA, which is what makes the boundary hold by construction rather
+           than by each author remembering it. */
+        Assert.Contains("Story:", detailText, StringComparison.Ordinal);
+        Assert.Contains("Severity:", detailText, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void BuildContext_UnknownFactKey_OmitsAdviceAndTsql()
     {

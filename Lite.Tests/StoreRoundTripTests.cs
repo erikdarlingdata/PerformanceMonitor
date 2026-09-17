@@ -57,8 +57,10 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
             CurrentValueText: "92.5%", ThresholdValueText: "80%",
             NumericCurrentValue: null, NumericThresholdValue: null,
             Delivery: AlertDelivery.FromFanout(
-                new EmailFanoutResult(EmailAttempted: true, EmailSent: true, SendError: null,
-                                      WebhookSent: false, AnyChannelConfigured: true),
+                new EmailFanoutResult(
+                    EmailOutcome: AlertChannelOutcome.Delivered, SendError: null,
+                    WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null,
+                    AnyChannelConfigured: true),
                 muted: false, trayChannelPresent: true),
             Muted: false, DetailText: "detail text", ContextJson: "{\"k\":1}"));
 
@@ -93,8 +95,10 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
             CurrentValueText: "87% (Total CPU)", ThresholdValueText: "80%",
             NumericCurrentValue: null, NumericThresholdValue: null,
             Delivery: AlertDelivery.FromFanout(
-                new EmailFanoutResult(EmailAttempted: true, EmailSent: true, SendError: null,
-                                      WebhookSent: false, AnyChannelConfigured: true),
+                new EmailFanoutResult(
+                    EmailOutcome: AlertChannelOutcome.Delivered, SendError: null,
+                    WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null,
+                    AnyChannelConfigured: true),
                 muted: false, trayChannelPresent: true),
             Muted: false, DetailText: null, ContextJson: null));
 
@@ -115,8 +119,10 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
             CurrentValueText: "not-a-number", ThresholdValueText: "also-bad",
             NumericCurrentValue: 1.8, NumericThresholdValue: 1.5,
             Delivery: AlertDelivery.FromFanout(
-                new EmailFanoutResult(EmailAttempted: false, EmailSent: false, SendError: null,
-                                      WebhookSent: false, AnyChannelConfigured: false),
+                new EmailFanoutResult(
+                    EmailOutcome: AlertChannelOutcome.NotAttempted, SendError: null,
+                    WebhookOutcome: AlertChannelOutcome.NotAttempted, WebhookSendError: null,
+                    AnyChannelConfigured: false),
                 muted: false, trayChannelPresent: true),
             Muted: false, DetailText: null, ContextJson: null));
 
@@ -253,6 +259,48 @@ public class StoreRoundTripTests : IClassFixture<SharedDuckDbFixture>, IDisposab
         await RecordWithContextAsync(store, "23", "Wraparound Risk", "tray", JsonWith("100%done"));
         Assert.NotNull(await store.GetLastAlertTimeAsync("23", "Wraparound Risk", "100%done"));
         Assert.Null(await store.GetLastAlertTimeAsync("23", "Wraparound Risk", "100Xdone"));
+    }
+
+    /// <summary>
+    /// #3456, against the real store: a seed read for an UNPARSEABLE server key must decline rather than
+    /// read the collapsed <c>server_id = 0</c> bucket. The write side collapses every such key (the
+    /// self-alert family's composites, the sentinels) into that bucket — pinned first, because the seed's
+    /// refusal only means something if the rows really do land there — and the old parse-to-0 read then
+    /// answered any collapsed key's question with <c>MAX(alert_time)</c> over ALL of them: the fleet-wide
+    /// last send of the metric, which is how one server's delivery throttled its siblings' first notices.
+    /// The refusal covers the asking key's OWN rows too (nothing in the bucket says which key wrote a row)
+    /// and the literal key "0" (the bucket's own name); both read null, which reads as a first notice and
+    /// fails toward posting. Darling's <c>PgAlertHistoryStore</c> shares the mapping and the SQL shape —
+    /// this is the query-for-query twin the class doc claims, exercised on the engine tests can reach.
+    /// </summary>
+    [Fact]
+    public async Task SeedReads_ForUnparseableServerKeys_DeclineRatherThanReadTheCollapsedBucket()
+    {
+        var store = new DuckDbAlertHistoryStore(_duckDb);
+
+        /* The write-side collapse, pinned as a fact rather than assumed: the composite key's row lands at
+           server_id 0. */
+        await RecordAsync(store, "cost:12:wait_stats", "Collector Cost Regression", "webhook", null);
+        var row = await ReadSingleAlertRowAsync();
+        Assert.NotNull(row);
+        Assert.Equal(0, row!.ServerId);
+
+        /* The banked shape's seam: a same-metric sibling key asks, and the fresh bucket row must NOT
+           answer — that answer was the throttle. Neither may the writing key's own question, nor "0"'s. */
+        Assert.Null(await store.GetLastWebhookSentUtcAsync("cost:11:wait_stats", "Collector Cost Regression"));
+        Assert.Null(await store.GetLastWebhookSentUtcAsync("cost:12:wait_stats", "Collector Cost Regression"));
+        Assert.Null(await store.GetLastAlertTimeAsync("cost:12:wait_stats", "Collector Cost Regression"));
+        Assert.Null(await store.GetLastWebhookSentUtcAsync("0", "Collector Cost Regression"));
+
+        /* The email seed declines the same way — same mapping, same bucket. */
+        await RecordAsync(store, "ag:5:replica", "AG Replica Health", "email", null);
+        Assert.Null(await store.GetLastEmailSentUtcAsync("ag:5:replica", "AG Replica Health"));
+
+        /* The control: integer keys still seed per-server from their own rows only, so the #1145/#981
+           restart guarantee is untouched for the population that has always had it. */
+        await RecordAsync(store, "7", "Collector Cost Regression", "webhook", null);
+        Assert.NotNull(await store.GetLastWebhookSentUtcAsync("7", "Collector Cost Regression"));
+        Assert.Null(await store.GetLastWebhookSentUtcAsync("8", "Collector Cost Regression"));
     }
 
     [Fact]

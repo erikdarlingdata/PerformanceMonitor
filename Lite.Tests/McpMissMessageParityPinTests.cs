@@ -74,6 +74,11 @@ public sealed class McpMissMessageParityPinTests
         "This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
         "Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.",
 
+        /* get_collection_log. Byte-identical in DarlingMcpDataTools and Lite McpHealthTools, and it was
+           the only shared miss sentence this list did not name. Darling's sentinel population gets its
+           OWN sentences ahead of these three, so what is compared here stays the monitored-server text. */
+        "This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.",
+
         /* get_memory_clerks */
         "This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks.",
 

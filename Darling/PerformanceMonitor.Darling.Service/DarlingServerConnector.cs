@@ -142,8 +142,10 @@ SELECT
     public static string ResolveConnectionString(MonitoredServer config, ILogger? logger = null)
     {
         string? password = null;
-        if (config.UsesSqlAuth)
+        if (config.RequiresResolvedSecret)
         {
+            /* SQL auth (password) and service principal (client secret) both resolve their secret here from
+               EncryptedPassword; managed identity and integrated resolve none. #3484. */
             bool usedPlaintext;
             if (OperatingSystem.IsWindows())
             {
@@ -164,7 +166,7 @@ SELECT
                 if (string.IsNullOrWhiteSpace(config.Password))
                 {
                     throw new InvalidOperationException(
-                        $"Server '{config.DisplayName}' uses sql auth but has neither encryptedPassword nor password.");
+                        $"Server '{config.DisplayName}' requires a secret (a SQL password or a service-principal client secret) but has neither encryptedPassword nor password.");
                 }
 
                 usedPlaintext = !DarlingSecretSource.IsReference(config.Password);

@@ -45,15 +45,18 @@ namespace PerformanceMonitor.Common
         /// previously alerted has cleared — rather than an actionable alert. Recognizes every
         /// resolution suffix the alert engines emit: "&#8230; Cleared", "&#8230; Resolved",
         /// "&#8230; Restored" (e.g. Blocking Cleared, CPU Resolved, Capture Restored, Server Restored),
-        /// plus "&#8230; Resumed", "&#8230; Restarted", "&#8230; Recovered" and "&#8230; Reconnected".
+        /// plus "&#8230; Resumed", "&#8230; Restarted", "&#8230; Recovered", "&#8230; Reconnected" and
+        /// "&#8230; Renewed".
         ///
-        /// Those last four were the same #1225 drift one layer down: Darling's self-alert recoveries have
+        /// Those middle four were the same #1225 drift one layer down: Darling's self-alert recoveries have
         /// been emitting "Collection Resumed", "Agent Restarted" and "Compression Job Recovered" — genuine
         /// resolution rows, written by the very same <c>RecordResolutionAsync</c> path as the recognized
         /// "Capture Restored" — and every one of them was landing in the history grids styled as a live
         /// actionable alert, because the suffix list had never caught up with the alerts. The AG family
-        /// (#991) adds "AG Replica Reconnected", "AG Sync Recovered" and "AG Data Movement Resumed", so
-        /// the list is completed here rather than adding a fifth unrecognized suffix.
+        /// (#991) adds "AG Replica Reconnected", "AG Sync Recovered" and "AG Data Movement Resumed", and the
+        /// web-dashboard TLS certificate expiry self-alert (#3514) adds "&#8230; Renewed" ("Web TLS
+        /// Certificate Renewed", the natural word for a certificate replaced before it lapsed), so the list is
+        /// completed here rather than emitting an unrecognized suffix.
         ///
         /// No actionable metric name in either app contains any of these words, so widening the match
         /// cannot turn a real alert green.
@@ -69,7 +72,8 @@ namespace PerformanceMonitor.Common
                 || metricName.Contains("Resumed", StringComparison.Ordinal)
                 || metricName.Contains("Restarted", StringComparison.Ordinal)
                 || metricName.Contains("Recovered", StringComparison.Ordinal)
-                || metricName.Contains("Reconnected", StringComparison.Ordinal);
+                || metricName.Contains("Reconnected", StringComparison.Ordinal)
+                || metricName.Contains("Renewed", StringComparison.Ordinal);
         }
 
         /// <summary>
@@ -86,11 +90,38 @@ namespace PerformanceMonitor.Common
         }
 
         /// <summary>
-        /// True for an ordinary (warning-severity) alert: actionable, neither a resolution notice
-        /// nor critical.
+        /// True for the metrics that are informational BY DESIGN — reports to read, not conditions to
+        /// act on. These are the deliberate INFO arms of <c>AlertSeverity.ForMetric</c> (#3443's
+        /// collector-cost digest and #3466's fleet sweep rollup), which is the surface email and
+        /// webhooks style from; the pins beside those arms exist so no fall-through sweep ever
+        /// "corrects" them into WARNING. This list is that same declaration for the surface THIS class
+        /// styles: the Alert History grids in both apps (Lite's <c>AlertsHistoryTab</c> and the Darling
+        /// Viewer's) derive their row's <c>IsWarning</c> from <see cref="IsWarning"/>, so without a
+        /// carve-out here the very rows the severity map keeps blue on purpose arrive in the one grid an
+        /// operator actually reads wearing the same amber "needs attention" highlight as a live alert —
+        /// the INFO design undone through an untouched second classifier (#3448 review).
+        ///
+        /// <para>The two lists must stay in step by hand, because they cannot by reference:
+        /// <c>AlertSeverity</c> is internal to the Notifications assembly, which references this one.
+        /// The from-source census beside <c>CollectorCostDigest_IsInfoBlueOnPurpose</c> is what holds
+        /// them there: it reads <c>ForMetric</c>'s deliberate INFO arms out of that method's SOURCE and
+        /// this method's names out of THIS file's, and asserts set-equality — so a third INFO arm
+        /// declared there fails the census even when both this list and the behavior theory's
+        /// InlineData rows were forgotten, the both-forgotten hole an InlineData theory structurally
+        /// cannot close (#3476 review).</para>
+        /// </summary>
+        public static bool IsInformational(string? metricName) =>
+            metricName is "Collector Cost Digest" or "Fleet Sweep Rollup";
+
+        /// <summary>
+        /// True for an ordinary (warning-severity) alert: actionable, neither a resolution notice nor
+        /// critical — nor one of the <see cref="IsInformational"/> reports, whose exclusion leaves NO
+        /// predicate true, so no history-grid DataTrigger fires and the row renders in the default
+        /// chrome. That is deliberate: the grids have no INFO tier, and unhighlighted IS the
+        /// informational treatment — the row that asks for nothing gets styled like it.
         /// </summary>
         public static bool IsWarning(string? metricName) =>
-            !IsResolution(metricName) && !IsCritical(metricName);
+            !IsResolution(metricName) && !IsCritical(metricName) && !IsInformational(metricName);
 
         /// <summary>
         /// What the history grids render in place of a number for a <see cref="IsStateOnly"/> metric
@@ -134,8 +165,20 @@ namespace PerformanceMonitor.Common
             /* #1839 total blocked wait — seconds, whole (the numeric is already seconds, not ms). */
             "Blocking Wait Time" => $"{value:F0} s",
 
-            /* Count metrics — whole-number event counts. */
-            "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job" => $"{value:F0}",
+            /* Count metrics — whole-number event counts. "Custom Alert Rules Unhealthy" (#3304) is the
+               fleet-level self-alert whose value is the COUNT of custom rules that are broken or never-firing;
+               a whole number like its siblings, not a state, so it renders here rather than joining
+               IsStateOnly (its "Custom Alert Rules Recovered" resolution is state-only via IsResolution).
+               "Stale Mute Rules" (#3306) is the same shape: the count of mute rules still suppressing alerts
+               with no expiry, past every expiry the product offers. "Collector Cost Digest" (#3443) counts
+               the (server, collector) pairs the digest listed; its threshold column is the 0 sentinel the
+               NOT NULL column demands, because a report has no threshold, and the alert's own threshold
+               STRING says so. "Fleet Sweep Rollup" (#3466) is the digest's shape again: its value is the
+               count of sweeps the rollup covered, its threshold column the same 0 sentinel for the same
+               stated reason. */
+            "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job"
+                or "Custom Alert Rules Unhealthy" or "Stale Mute Rules"
+                or "Collector Cost Digest" or "Fleet Sweep Rollup" => $"{value:F0}",
 
             /* #1846: a state-only metric never had a number — its display value is a role, a connection
                state, a version or the literal "resolved", and the stored double is the 0 sentinel the
@@ -240,10 +283,15 @@ namespace PerformanceMonitor.Common
 
                        "Store Runtime Upgrade" — the PostgreSQL MAJOR VERSION ("PostgreSQL 18"), on both
                        sides: 18 as the "current value" and 17 as the "threshold". A version is an
-                       identity, not a quantity, and nothing about the store's upgrade is measured. */
+                       identity, not a quantity, and nothing about the store's upgrade is measured.
+
+                       "Web TLS Certificate Expiring" (#3514) — the current value is the certificate's expiry
+                       DATE ("expires 2026-... (in 10 days)" / "expired 2026-..."), a date rather than a
+                       measurement, and the fire site passes the 0 sentinel for both numeric columns. */
                     or "Collection Stopped"
                     or "Compression Job Stuck"
-                    or "Store Runtime Upgrade" => true,
+                    or "Store Runtime Upgrade"
+                    or "Web TLS Certificate Expiring" => true,
                 _ => false,
             };
         }

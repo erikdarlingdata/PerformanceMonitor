@@ -158,6 +158,7 @@ public class AzureAuthConnectionStringTests
     [InlineData(AuthenticationTypes.SqlServer, "SQL Server")]
     [InlineData(AuthenticationTypes.Windows, "Windows")]
     [InlineData(AuthenticationTypes.EntraDefaultCredential, "Azure — Existing Sign-In (az login)")]
+    [InlineData(AuthenticationTypes.EntraDeviceCode, "Azure — Device Code (browser on any device)")]
     public void AuthenticationDisplay_MapsEachMode(string authType, string expected)
     {
         var server = new ServerConnection { AuthenticationType = authType };
@@ -186,6 +187,7 @@ public class AzureAuthConnectionStringTests
     [InlineData(AuthenticationTypes.ServicePrincipal)]
     [InlineData(AuthenticationTypes.ManagedIdentity)]
     [InlineData(AuthenticationTypes.EntraDefaultCredential)]
+    [InlineData(AuthenticationTypes.EntraDeviceCode)]
     public void BuildSites_ProduceIdenticalAuthShape_PerMode(string authType)
     {
         // Production builder (ServerConnection) call shape: (username, password, AzureClientId, ManagedIdentityClientId).

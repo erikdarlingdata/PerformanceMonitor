@@ -97,14 +97,35 @@ namespace PerformanceMonitor.Alerting;
 /// in no server's count, which is why the surface reports BOTH numbers. A per-server-only figure would
 /// have given those conditions no home at all, reproducing #3013's own defect one level down.</para>
 ///
+/// <para><b>Every count is reported with the stamp and the name that identify it.</b> A count on this
+/// surface never ages out of a window, so a bare number cannot separate a healed startup artefact from a
+/// live episode — <c>last_error</c>'s #3010 lesson, and it applies once per population rather than once
+/// per surface. Each of the three counts a reading carries therefore has its own newest-failure trio
+/// taken from its own bucket: this server's, the fleet bucket's, and the instance-wide newest whatever its
+/// scope. The fleet one is the load-bearing addition, because a failure recorded under a null key belongs
+/// to no server, so no <see cref="ReadFor"/> key can reach the per-server trio that would name it — a
+/// fleet-scoped failure was countable and not identifiable, on exactly the conditions the null key exists
+/// to give a home to. The fourth population, the failures on OTHER servers, is the subtraction of the two
+/// parts from the total: it gets no count and no trio here, deliberately, because this class holds no
+/// newest failure for it and a count with nothing to date it is the defect rather than the fix.</para>
+///
 /// <para><b>Thread-safety.</b> Many alert passes run concurrently across servers. Counters are
 /// <see cref="Interlocked"/> longs; the per-server map is a <see cref="ConcurrentDictionary{TKey,TValue}"/>
 /// of boxed holders so an increment never replaces an entry. The newest failure's stamp, name and elapsed
 /// are one immutable value exchanged as a reference, so those three ARE atomic together — that one is
 /// load-bearing, because the elapsed is only meaningful as the elapsed of the read the other two name, and
-/// a blend of two failures would be a wrong classification rather than a stale one. The COUNTS carry no
-/// such guarantee and need none: a total and a per-server count sampled a microsecond apart is not a defect
-/// this surface can be misread on.</para>
+/// a blend of two failures would be a wrong classification rather than a stale one.</para>
+///
+/// <para>The COUNTS are not atomic together and cannot be, but their relative ORDER is load-bearing and is
+/// stated at both ends. Two of the block's readings are cross-scope — a count read against the trio that
+/// identifies it, and a total read against the two parts subtracted from it — so a pair sampled a
+/// microsecond apart is a defect this surface can be misread on, in two specific directions. Both are
+/// closed by ordering rather than by locking: <see cref="RecordReadFailure"/> publishes a failure's
+/// identity ahead of the count it identifies and the instance total ahead of either bucket, and
+/// <see cref="ReadFor"/> mirrors it, sampling every count before its trio and the total last of the three.
+/// One half of that was wrong when the cross-scope subtraction was first written, and the assertion that
+/// found it reported about six negative readings per thousand — so neither half is a stylistic
+/// preference.</para>
 /// </summary>
 public sealed class AlertReadFailureCounter
 {
@@ -149,7 +170,14 @@ public sealed class AlertReadFailureCounter
 
     /* Failures that belong to no server: the fleet-scoped store self-alerts. Held apart from the
        per-server map rather than under a sentinel key, so no reader can accidentally resolve a server
-       named after the sentinel and be handed the fleet bucket. */
+       named after the sentinel and be handed the fleet bucket.
+
+       Its count and its newest-failure trio are both READ, by every per-server reading: a failure here
+       belongs to no server, so no per-server bucket holds it and no ReadFor key can reach it, which left
+       the instance total as the only trace it made and made the condition that went blind unnameable. Its
+       Passes field is deliberately NOT read — no caller records a fleet-scoped pass, so a denominator for
+       this bucket would be a permanent zero, which is the confident-zero shape this class exists to
+       remove rather than add. */
     private readonly ServerCounts _fleet = new ServerCounts();
 
     private long _instanceReadFailures;
@@ -228,14 +256,31 @@ public sealed class AlertReadFailureCounter
         var newest = new LastFailure(nowTicks, name, elapsed);
 
         var bucket = string.IsNullOrWhiteSpace(serverKey) ? _fleet : Bucket(serverKey!);
-        Interlocked.Increment(ref bucket.ReadFailures);
-        Interlocked.Exchange(ref bucket.Newest, newest);
 
-        /* The instance side carries the same trio. Its ELAPSED reaches no surface today — nothing renders
-           ReadInstance — so it is not on the tuple that method returns; the value is shared rather than
-           recomputed because a second construction is a second chance to disagree. */
-        Interlocked.Increment(ref _instanceReadFailures);
+        /* PUBLICATION ORDER, and both halves of it are load-bearing. The instance side carries the same
+           trio as the bucket — every reading renders the instance stamp, read name and elapsed beside the
+           instance count, so that count is dated and named exactly the way the per-server one is — and the
+           value is shared with the bucket rather than recomputed, because a second construction is a second
+           chance to disagree.
+
+           IDENTITY BEFORE COUNT, per scope. A count published first is observable for as long as the next
+           instruction takes with nothing beside it to date or name it, which is precisely the reading this
+           block exists to make impossible. Published this way round, a reader that has seen a nonzero count
+           has already had the trio available, so "every count carries its trio" holds at every instant and
+           not merely once the writer has finished. The reverse pairing — a trio published with the count
+           still at zero — is the harmless one: it claims no count it cannot identify.
+
+           INSTANCE BEFORE BUCKET. The instance total is what the two parts are subtracted from to name the
+           failures on OTHER servers, so it must never trail them; if a bucket were incremented first, a
+           reader could see a bucket that the total had not counted yet and the subtraction would come out
+           NEGATIVE, which on a health surface reads as a broken instrument rather than a small number.
+           Incremented this way round the total leads by however many writes are in flight, so the
+           subtraction can read transiently high and never below zero. High is a number; negative is not.
+           ReadFor's own sampling order is the other half of both guarantees and says so. */
         Interlocked.Exchange(ref _instanceNewest, newest);
+        Interlocked.Exchange(ref bucket.Newest, newest);
+        Interlocked.Increment(ref _instanceReadFailures);
+        Interlocked.Increment(ref bucket.ReadFailures);
     }
 
     /// <summary>
@@ -272,7 +317,21 @@ public sealed class AlertReadFailureCounter
     /// <param name="ServerAlertPasses">Alert evaluation passes for this server — the denominator.</param>
     /// <param name="InstanceReadFailures">
     /// Swallowed alerting-side store reads across every server AND the fleet-scoped store self-alerts,
-    /// which belong to no server and would otherwise appear nowhere.
+    /// which belong to no server and appear in no per-server count.
+    ///
+    /// <para>The three populations this total spans are readable from the block rather than blended into
+    /// it: <paramref name="ServerReadFailures"/> is this server's, <paramref name="FleetReadFailures"/> is
+    /// the part belonging to no server, and the remainder — this total less those two — is what failed on
+    /// OTHER servers. That remainder is deliberately not a member here: this counter holds no newest
+    /// failure for it, and a count with nothing to date or name it is the gap the three stamps on this
+    /// record exist to close.</para>
+    ///
+    /// <para>This total LEADS its two parts by however many failures are in flight while the reading is
+    /// taken, by construction — see the publication and sampling orders in
+    /// <see cref="RecordReadFailure"/> and <see cref="ReadFor"/>. So the remainder can read a failure or
+    /// two high on a service that is failing reads concurrently, and can never read below zero. That
+    /// direction is the deliberate one: a count slightly high is a number, and a negative count on a
+    /// health surface is a broken instrument.</para>
     /// </param>
     /// <param name="LastFailureAtUtc">
     /// When the newest failure for this server happened, or null if it has none. The currency term: a
@@ -299,6 +358,50 @@ public sealed class AlertReadFailureCounter
     /// beside ANOTHER failure's name would be worse — a confident classification of the wrong read.</para>
     /// </param>
     /// <param name="CountingSinceUtc">When counting began — see <see cref="CountingSince"/>.</param>
+    /// <param name="FleetReadFailures">
+    /// Swallowed alerting-side store reads that belong to NO server — the fleet-scoped conditions named by
+    /// <see cref="FleetScopedReads"/>.
+    ///
+    /// <para>The figure that makes a nonzero <paramref name="InstanceReadFailures"/> readable from a server
+    /// whose own count is zero. Without it that total spans two populations an operator would act on
+    /// differently and cannot tell apart: a blind read on another server, which the same block on that
+    /// server answers, and a blind read on a condition that belongs to no server, which no per-server block
+    /// answers at all. Two of the conditions in that set are the store background-job health reads, whose
+    /// alerts are what would say the store itself is in trouble — so this count is most likely to be
+    /// nonzero exactly when the population it isolates is the one that matters.</para>
+    /// </param>
+    /// <param name="FleetLastFailureAtUtc">
+    /// When the newest fleet-scoped failure happened, or null if there has been none. The currency term for
+    /// <paramref name="FleetReadFailures"/>: that count never ages out of a window, so without a stamp a
+    /// healed episode from hours ago and one still in progress read identically.
+    /// </param>
+    /// <param name="FleetLastFailureRead">
+    /// Which fleet-scoped read failed most recently — the one field that says WHICH of those conditions
+    /// went blind, rather than that one did.
+    /// </param>
+    /// <param name="FleetLastFailureElapsedMs">
+    /// How long that newest fleet-scoped read ran before it faulted, in milliseconds, or null if there has
+    /// been none.
+    ///
+    /// <para>Read it against what the named read actually is, not against the alert pass's deadline: the
+    /// store background-job health reads swallow their own faults one level down and run on their own
+    /// budget, so for that entry this is a plain duration for whatever faulted rather than evidence about
+    /// who ended it.</para>
+    /// </param>
+    /// <param name="InstanceLastFailureAtUtc">
+    /// When the newest failure ANYWHERE in this service happened, whatever its scope, or null if there has
+    /// been none. The currency term for <paramref name="InstanceReadFailures"/>, and the only one that
+    /// covers the other-server population — which has no count of its own on this record.
+    ///
+    /// <para>It makes no claim about scope: it is the newest of every failure this counter has seen, so it
+    /// may name a per-server read, a fleet-scoped one, or one on a server the caller did not ask about.
+    /// <paramref name="FleetLastFailureAtUtc"/> is the one that is attributable by construction.</para>
+    /// </param>
+    /// <param name="InstanceLastFailureRead">Which read failed most recently anywhere in this service.</param>
+    /// <param name="InstanceLastFailureElapsedMs">
+    /// How long that newest failing read anywhere ran before it faulted, in milliseconds, or null if there
+    /// has been none.
+    /// </param>
     public sealed record Reading(
         long ServerReadFailures,
         long ServerAlertPasses,
@@ -306,7 +409,14 @@ public sealed class AlertReadFailureCounter
         DateTime? LastFailureAtUtc,
         string? LastFailureRead,
         long? LastFailureElapsedMs,
-        DateTime CountingSinceUtc);
+        DateTime CountingSinceUtc,
+        long FleetReadFailures,
+        DateTime? FleetLastFailureAtUtc,
+        string? FleetLastFailureRead,
+        long? FleetLastFailureElapsedMs,
+        DateTime? InstanceLastFailureAtUtc,
+        string? InstanceLastFailureRead,
+        long? InstanceLastFailureElapsedMs);
 
     /// <summary>
     /// Reads one server's figures. An unseen key reads as zeroes, not as an absence — the surface
@@ -315,46 +425,103 @@ public sealed class AlertReadFailureCounter
     ///
     /// <para>A null or blank key is deliberately NOT a route to the fleet bucket, even though
     /// <see cref="RecordReadFailure"/> writes there for one: this is the PER-SERVER read, and a caller
-    /// with no server in hand wants <see cref="ReadInstance"/>. The fleet bucket still reaches every
-    /// reader through <c>InstanceReadFailures</c>, which is the field that exists for it.</para>
+    /// with no server in hand wants <see cref="ReadInstance"/>. The fleet bucket reaches every reader
+    /// through <c>FleetReadFailures</c> and its own newest-failure trio, which are on every reading
+    /// whatever key was asked for — those fields exist for it, and are the reason a failure belonging to
+    /// no server is nameable from a surface that requires one.</para>
     /// </summary>
     public Reading ReadFor(string? serverKey)
     {
         var bucket = string.IsNullOrWhiteSpace(serverKey) ? null : Lookup(serverKey!);
+
+        /* SAMPLING ORDER — the mirror of RecordReadFailure's publication order, and the other half of both
+           guarantees it states. Every count first, the instance total LAST of the three, and only then the
+           trios.
+
+           COUNTS BEFORE TRIOS, because identity is published before the count it identifies: a reader that
+           has already seen a nonzero count is guaranteed a trio, since the trio was in place before that
+           count became visible and is never cleared. Sampling a trio FIRST would allow a null trio beside a
+           count read afterwards — a count with nothing to date it, which is the defect and not the fix.
+
+           THE TOTAL LAST, because the writer increments it before the bucket: the total therefore leads the
+           buckets, and sampling it after them keeps it at least their sum, so the subtraction that names the
+           failures on OTHER servers cannot come out negative. Both orders are needed — reading the total
+           last while the writer incremented the bucket first still reads a bucket the total has not counted.
+           Not a theoretical pairing: the assertion that discriminates them found the write order wrong the
+           first time it ran, at about six negative readings per thousand. */
         var serverFailures = bucket is null ? 0L : Interlocked.Read(ref bucket.ReadFailures);
         var serverPasses = bucket is null ? 0L : Interlocked.Read(ref bucket.Passes);
 
-        /* ONE read of the trio, so the stamp, the name and the elapsed on the returned reading always
+        /* The fleet bucket is read on EVERY reading, not only when the caller has no server: these failures
+           belong to no server, so a reader who asked about one still needs them to make sense of the
+           instance total standing beside their own zero. */
+        var fleetFailures = Interlocked.Read(ref _fleet.ReadFailures);
+        var instanceFailures = Interlocked.Read(ref _instanceReadFailures);
+
+        /* ONE read of each trio, so the stamp, the name and the elapsed on the returned reading always
            describe the same failure. Taking them from three fields could pair one failure's elapsed with
            another's name, which would make the client-versus-server classification wrong rather than
            merely stale — and would pass every single-threaded test. */
         var newest = bucket is null ? null : Volatile.Read(ref bucket.Newest);
+        var fleetNewest = Volatile.Read(ref _fleet.Newest);
+        var instanceNewest = Volatile.Read(ref _instanceNewest);
 
+        /* Named arguments, not positional. Fourteen of them repeat four shapes across three scopes, so a
+           reordering compiles while pairing one scope's stamp with another scope's read name — a confident
+           wrong attribution, which is the defect class this block exists to remove rather than produce. */
         return new Reading(
-            serverFailures,
-            serverPasses,
-            Interlocked.Read(ref _instanceReadFailures),
-            newest is null ? null : new DateTime(newest.Ticks, DateTimeKind.Utc),
-            newest?.Read,
+            ServerReadFailures: serverFailures,
+            ServerAlertPasses: serverPasses,
+            InstanceReadFailures: instanceFailures,
+            LastFailureAtUtc: Stamp(newest),
+            LastFailureRead: newest?.Read,
             /* Null exactly when the stamp above is null, from the same value rather than from a matching
                test, so the two cannot disagree even in principle: an elapsed with no stamp beside it would
                be a duration belonging to no event. A zero elapsed is a real reading — a read that faulted
                immediately — rather than an absence, which is why the absence is carried by the null. */
-            newest?.ElapsedMs,
-            CountingSince);
+            LastFailureElapsedMs: newest?.ElapsedMs,
+            CountingSinceUtc: CountingSince,
+            /* Each of the other two counts carries the same trio, from its own single value, for the same
+               reason: a count on this surface with no stamp to date it and no name to attribute it is the
+               #3010 mistake one level down, and the fleet count is the one no per-server bucket can ever
+               supply. */
+            FleetReadFailures: fleetFailures,
+            FleetLastFailureAtUtc: Stamp(fleetNewest),
+            FleetLastFailureRead: fleetNewest?.Read,
+            FleetLastFailureElapsedMs: fleetNewest?.ElapsedMs,
+            InstanceLastFailureAtUtc: Stamp(instanceNewest),
+            InstanceLastFailureRead: instanceNewest?.Read,
+            InstanceLastFailureElapsedMs: instanceNewest?.ElapsedMs);
     }
+
+    /// <summary>
+    /// A failure's tick count as a UTC <see cref="DateTime"/>, or null for no failure.
+    ///
+    /// <para>One helper for all three scopes rather than the expression written out three times: the three
+    /// stamps must render identically, and three copies of a <c>DateTimeKind</c> argument is three chances
+    /// for one of them to say <c>Unspecified</c> and serialize without its offset.</para>
+    /// </summary>
+    private static DateTime? Stamp(LastFailure? failure) =>
+        failure is null ? null : new DateTime(failure.Ticks, DateTimeKind.Utc);
 
     private ServerCounts? Lookup(string serverKey) =>
         _byServer.TryGetValue(serverKey, out var counts) ? counts : null;
 
-    /// <summary>The instance-wide figures, for a caller with no server in hand.</summary>
-    public (long ReadFailures, DateTime? LastFailureAtUtc, string? LastFailureRead) ReadInstance()
+    /// <summary>
+    /// The instance-wide figures, for a caller with no server in hand.
+    ///
+    /// <para>Carries the whole trio, including the elapsed, so this route and the instance fields on
+    /// <see cref="Reading"/> cannot differ about which facts about the newest failure exist. A tuple
+    /// missing one of them would be a second definition of the same event.</para>
+    /// </summary>
+    public (long ReadFailures, DateTime? LastFailureAtUtc, string? LastFailureRead, long? LastFailureElapsedMs) ReadInstance()
     {
         var newest = Volatile.Read(ref _instanceNewest);
         return (
             Interlocked.Read(ref _instanceReadFailures),
-            newest is null ? null : new DateTime(newest.Ticks, DateTimeKind.Utc),
-            newest?.Read);
+            Stamp(newest),
+            newest?.Read,
+            newest?.ElapsedMs);
     }
 
     /// <summary>Every server key that has recorded a pass or a failure — for a fleet-level reader.</summary>
@@ -379,16 +546,30 @@ public sealed class AlertReadFailureCounter
             return null;
         }
 
+        /* The failures on OTHER servers, by subtraction: the instance total, less this server's, less the
+           fleet-scoped ones that belong to no server. Stated as arithmetic over three figures the block
+           also carries, so a reader can check it, and NOT rendered as a field of its own — this counter
+           holds no newest failure for that population, and a fourth count with nothing to date or name it
+           would be the same defect the three stamps here exist to close. The writer increments the total
+           before either part and the reader samples it after both, so the total leads and this cannot come
+           out negative; it can read a failure or two high while failures are landing concurrently, which
+           is the direction chosen deliberately. */
+        var otherServers =
+            reading.InstanceReadFailures - reading.ServerReadFailures - reading.FleetReadFailures;
+
         if (reading.ServerReadFailures == 0)
         {
             return string.Format(
                 CultureInfo.InvariantCulture,
                 "No alerting-side store read has failed for this server, but {0} failed elsewhere in this "
-                + "service since {1:yyyy-MM-dd HH:mm}Z — on another server, or on a store self-alert that "
-                + "belongs to no server. This server's alerting is reading fine; the service's is not "
-                + "entirely.",
+                + "service since {1:yyyy-MM-dd HH:mm}Z: {2} on store self-alerts that belong to no server, "
+                + "and {3} on other servers.{4} This server's alerting is reading fine; the service's is "
+                + "not entirely.",
                 reading.InstanceReadFailures,
-                reading.CountingSinceUtc);
+                reading.CountingSinceUtc,
+                reading.FleetReadFailures,
+                otherServers,
+                FleetSentence(reading));
         }
 
         var stamp = reading.LastFailureAtUtc.HasValue
@@ -430,13 +611,61 @@ public sealed class AlertReadFailureCounter
             "{0} alerting-side store read(s) for this server failed and were logged but reached no health "
             + "surface{1}, over {2} alert pass(es) since {3:yyyy-MM-dd HH:mm}Z. Each one is a condition this "
             + "server was not judged on for that pass — not a fired alert that was lost, and not a collector "
-            + "failure ({4} across this whole service).{5}",
+            + "failure.{4} Across this whole service {5} alerting-side read(s) failed: {0} here, {6} on "
+            + "store self-alerts that belong to no server, and {7} on other servers.{8}",
             reading.ServerReadFailures,
             stamp,
             reading.ServerAlertPasses,
             reading.CountingSinceUtc,
+            which,
             reading.InstanceReadFailures,
-            which);
+            reading.FleetReadFailures,
+            otherServers,
+            FleetSentence(reading));
+    }
+
+    /// <summary>
+    /// Names the newest fleet-scoped failure, or renders nothing when there has been none.
+    ///
+    /// <para>Its own sentence rather than part of the count, because the count and the name answer
+    /// different halves of one question: how much of the service total belongs to no server, and WHICH of
+    /// those conditions went blind. The read name is the only attributable one on the block — the newest
+    /// failure anywhere may be on a server the caller did not ask about, so it is reported as scope-free,
+    /// while this one belongs to the fleet bucket by construction.</para>
+    /// </summary>
+    private static string FleetSentence(Reading reading)
+    {
+        if (reading.FleetReadFailures == 0)
+        {
+            return string.Empty;
+        }
+
+        var stamp = reading.FleetLastFailureAtUtc.HasValue
+            ? string.Format(
+                CultureInfo.InvariantCulture,
+                " at {0:yyyy-MM-dd HH:mm:ss}Z",
+                reading.FleetLastFailureAtUtc.Value)
+            : string.Empty;
+
+        /* The elapsed rides along for the same reason it does on the per-server sentence, and without the
+           client-versus-server framing: the store background-job health reads in this set swallow their own
+           faults one level down and run on their own budget rather than the alert pass's, so a bound to
+           compare against is not something this formatter can name for the fleet scope. */
+        var ran = reading.FleetLastFailureElapsedMs.HasValue
+            ? string.Format(
+                CultureInfo.InvariantCulture,
+                ", which ran {0} ms before it failed",
+                reading.FleetLastFailureElapsedMs.Value)
+            : string.Empty;
+
+        return string.Format(
+            CultureInfo.InvariantCulture,
+            " The newest of the ones belonging to no server was the {0} read{1}{2}.",
+            string.IsNullOrWhiteSpace(reading.FleetLastFailureRead)
+                ? "unnamed"
+                : reading.FleetLastFailureRead,
+            stamp,
+            ran);
     }
 
     /// <summary>
@@ -453,10 +682,35 @@ public sealed class AlertReadFailureCounter
     /// collector-cost regression self-alert, which does. An operator reading the phantom list would
     /// have hunted a disk-pressure read that cannot fail into this number, and would not have thought
     /// to check the one that can.</para>
+    ///
+    /// <para>The mute-rule reload is the member of this set whose failure leaves a cache that is correct
+    /// and STALE rather than absent — the rules already in force stay in force, so nothing is un-muted, but
+    /// a rule written or deleted during the outage is not honoured yet. Nothing else can tell that apart
+    /// from a cache that is correct and current: the rule list, every mute surface and the stale-mute
+    /// condition all read what the last successful load put there. A nonzero instance total naming this
+    /// read is the artefact, which is why it is counted rather than exempt.</para>
+    ///
+    /// <para>#3443 grew the collector-cost condition from one read to three, and they are named apart
+    /// rather than folded into one entry because they blind DIFFERENT things: the regression read is the
+    /// predicate's own evidence, the census read is the fan-out denominator that decides which channel a
+    /// finding reaches, and the digest read is the daily report's movers. A failure of any one of them
+    /// skips the rest of that tick, so an operator chasing a nonzero count needs to know which stage went
+    /// quiet — a blind denominator and a blind report are not the same outage.</para>
+    ///
+    /// <para>It is also the case that only ONE member of this set — the mute-rule reload — can be produced
+    /// by BOTH SKUs, and that is load-bearing for a constant both descriptions concatenate. The others are
+    /// Darling store self-alerts that have no Lite equivalent at all, so naming them there describes a
+    /// shared inventory rather than promising a Lite reading. The mute-rule reload is different: Lite
+    /// performs that read, Lite swallows its failure, and Lite's call site therefore records it here too.
+    /// A read this constant names on a SKU that cannot increment it would be this class's own defect — a
+    /// confident zero — reproduced in its documentation.</para>
     /// </summary>
     public const string FleetScopedReads =
-        "the collector-cost regression self-alert, and the store background-job health reads behind "
-        + "compression-job health, store-job cadence and retention holds";
+        "the collector-cost regression self-alert and its two #3443 companions (the collector-cost census "
+        + "read that decides paging-versus-digest routing, and the collector-cost digest read behind the "
+        + "daily report), the mute-rule reload, the fleet-sweep rollup read behind the daily sweep report "
+        + "(#3466), and the store background-job "
+        + "health reads behind compression-job health, store-job cadence and retention holds";
 
     /// <summary>
     /// The window these figures cover, and the window they do NOT.
@@ -500,6 +754,20 @@ public sealed class AlertReadFailureCounter
         + "question, not this one. instance_read_failures spans every server on this service plus the "
         + "fleet-scoped conditions that belong to no server and so appear in no per-server count: "
         + FleetScopedReads + ". "
+        + "fleet_read_failures is how many of that total belong to no server, and it is what makes a "
+        + "nonzero service count readable from a server whose own count is zero: those two populations "
+        + "take opposite actions, since a blind fleet-scoped read means the store's own self-alerts went "
+        + "quiet and two of them are the reads whose alerts would say the store is in trouble, while one on "
+        + "another server is answered by reading this same block there. Every count here carries its own "
+        + "newest-failure stamp, read name and elapsed, so none of them sits undated: last_failure_* are "
+        + "THIS server's, fleet_last_failure_* are the fleet-scoped conditions' and are attributable by "
+        + "construction, and instance_last_failure_* are the newest failure anywhere in this service "
+        + "whatever its scope - so that last trio may name a read on a server you did not ask about and "
+        + "makes no claim about which. The third population is a subtraction: instance_read_failures minus "
+        + "server_read_failures minus fleet_read_failures is how many failed on OTHER servers. It is "
+        + "deliberately not a field, because nothing here holds a newest failure for it and a count with "
+        + "nothing to date or name it is the gap the three stamps close; read this block on those servers "
+        + "to attribute it. "
         + "server_alert_passes is a denominator for judging whether the failure count is large, not a rate: a "
         + "pass issues many reads, and the number of passes per sweep differs by host and by target engine: a "
         + "Darling sweep of a SQL Server target runs two (the shared engine's conditions and the service's "

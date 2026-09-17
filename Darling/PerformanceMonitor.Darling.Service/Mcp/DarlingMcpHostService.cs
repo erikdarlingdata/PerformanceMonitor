@@ -469,6 +469,15 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* Register services that MCP tools need via dependency injection. */
             builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
             builder.Services.AddSingleton(new DarlingAnalysisService(postgres, planFetcher, _logger));
+            /* The HOST's logger, registered as the bare ILogger a tool method can take as a DI parameter
+               (the postgres pattern one line up — service-typed params are resolved per request and never
+               reach the advertised schema). Deliberately NOT the web app's own ILogger<T>: this builder
+               clears its logging providers two blocks up, so anything resolved from the app's logging
+               would be a logger with nowhere to write — the host's is the one wired to the service's
+               real providers, the same instance DarlingAnalysisService already receives. Closes the
+               #3473 review's observation: get_sweep_reports' child reads log-and-degrade, and before
+               this they degraded with no log trace anywhere on the MCP path. */
+            builder.Services.AddSingleton<ILogger>(_logger);
 
             /* #2339: publish the declared peer stores before the instructions are rendered, so the same
                snapshot feeds the instructions section, list_servers' peer_fleets block, and the
@@ -573,6 +582,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                    while one of OUR collectors was stalled mid-read. Darling-only: the arm is installed by
                    DarlingCollectorRunner's server-scoped path, which Lite's runner does not have. */
                 .WithGeminiCompatibleTools<DarlingMcpStallProbeTools>()
+                /* #3398 get_oversized_plan_backlog - the V121 worklist of cached plans the capture cap
+                   declined, and what the out-of-band sweep has done about each one. Darling-only: the
+                   sweep is a fleet-level errand on the headless worker's own cadence, which Lite's
+                   single-instance runner has no counterpart of. */
+                .WithGeminiCompatibleTools<DarlingMcpOversizedPlanBacklogTools>()
                 /* #1496 get_long_query_completions — the opt-in long-query completion trace (rpc/batch over
                    the duration threshold + attentions), over Darling's Postgres store (STORED read). */
                 .WithGeminiCompatibleTools<DarlingMcpLongQueryTools>()
@@ -708,6 +722,13 @@ public sealed class DarlingMcpHostService : BackgroundService
                    also powers the web /api/ag and the Availability Groups page (one reader, one banding). Like
                    get_fleet_overview this is a cross-server read the central store makes possible. */
                 .WithGeminiCompatibleTools<DarlingMcpAgTools>()
+                /* The fleet sweep reports read — get_sweep_reports (#3466) — the third cross-server read, and
+                   the one WITH MEMORY: the sweep timeline for a window, the newest sweep in full (mute header,
+                   would-have-paged ledger, instrument liveness), and the watch-item worklist, over the SAME
+                   FleetSweepStore presentation reads and FleetSweepPresentation builders the web /api/sweeps
+                   routes serve — one reader, one shape, the zero-drift rule get_fleet_overview and /api/fleet
+                   established, applied to the sweep rows. */
+                .WithGeminiCompatibleTools<DarlingMcpFleetSweepTools>()
                 /* The system_health parse-on-read family — get_health_parser_cpu_tasks / _io_issues /
                    _memory_broker / _memory_conditions / _memory_node_oom / _scheduler_issues /
                    _severe_errors / _significant_waits / _system_health — the same names the Dashboard
@@ -731,6 +752,15 @@ public sealed class DarlingMcpHostService : BackgroundService
                    data for a self-test loop. The mcp role carries the narrow INSERT/UPDATE/DELETE grant on ONLY
                    config.custom_views (mirroring viewer's) — never the config pivot or the secret columns. */
                 .WithGeminiCompatibleTools<DarlingMcpCustomViewTools>()
+                /* The custom-alert-rule MANAGEMENT tools (#3285) - the second WRITE surface: list_custom_alert_rules
+                   / get_custom_alert_rule / validate_custom_alert_rule / create_custom_alert_rule /
+                   update_custom_alert_rule / delete_custom_alert_rule. They CRUD the user-authored threshold-alert
+                   rules in config.custom_alert_rules through the SAME CustomAlertRuleStore the web editor uses and the
+                   SAME CustomAlertRuleDefinition.TryParse the CustomAlertEvaluator applies when it loads a rule (no
+                   divergent second impl), validating every definition before it stores. The mcp role carries the
+                   narrow INSERT/UPDATE/DELETE grant on ONLY config.custom_alert_rules (granted under V116), never the
+                   config pivot or the secret columns. */
+                .WithGeminiCompatibleTools<DarlingMcpCustomAlertTools>()
                 /* The server-onboarding WRITE tools — add_servers (BULK) / remove_server: an MCP client can stand up
                    or tear down FLEET monitoring conversationally. The service-side twin of the Viewer's Add / Add-
                    Multiple dialogs: add_servers validates each entry, probes the connection IN-PROCESS (the service

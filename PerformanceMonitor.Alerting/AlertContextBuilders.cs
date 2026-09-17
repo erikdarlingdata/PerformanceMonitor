@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Alerting;
@@ -94,11 +95,15 @@ public static class AlertContextBuilders
             });
         }
 
+        /* The alert-level attachment, for the ONE card an unfiltered Summary send produces: it lists every
+           incident, so the first report in the window belongs to something it describes. Each incident also
+           carries its own (#3330, in GroupBlocking) for the two paths that render a SUBSET — the per-event
+           splitter and #3313's delivery filter — where "the first in the window" is another incident's. */
         var firstXml = filtered.FirstOrDefault(e => e.HasReportXml)?.BlockedProcessReportXml;
         if (!string.IsNullOrEmpty(firstXml))
         {
             context.AttachmentXml = firstXml;
-            context.AttachmentFileName = "blocked_process_report.xml";
+            context.AttachmentFileName = AlertIncidentAttachment.BlockedProcessReportFileName;
         }
 
         AlertIncidentRenderer.Apply(context, Decorate(shown.Select(g => g.Incident).ToList(), decorateIncidents));
@@ -137,11 +142,14 @@ public static class AlertContextBuilders
         if (filtered.Count == 0) return null;
 
         var context = new AlertContext();
+        /* The alert-level attachment, for the ONE card an unfiltered Summary send produces — see the same
+           note in BuildBlockingContext. Each incident carries its own graph too (#3330, in
+           GroupParsedDeadlocks). */
         var firstGraph = filtered.FirstOrDefault(d => d.HasDeadlockXml)?.DeadlockGraphXml;
         if (!string.IsNullOrEmpty(firstGraph))
         {
             context.AttachmentXml = firstGraph;
-            context.AttachmentFileName = "deadlock_graph.xml";
+            context.AttachmentFileName = AlertIncidentAttachment.DeadlockGraphFileName;
         }
 
         /* One parse pass per deadlock: the fingerprint's object set and the discrete Database fact's
@@ -165,6 +173,11 @@ public static class AlertContextBuilders
                 item.Fields.Add(("Victim SQL", TruncateText(p.Row.VictimSqlText)));
             if (!string.IsNullOrEmpty(p.Row.ProcessSummary))
                 item.Fields.Add(("Processes", p.Row.ProcessSummary));
+            /* #3442: the same per-party facts the fingerprinted item carries. Both render paths take
+               them from the one parse in ParseDeadlocks, because the two lists disagreeing on what a
+               deadlock's parties were is the #2108 defect in a narrower place. */
+            foreach (var party in p.Parties)
+                item.Fields.Add(party);
 
             context.Details.Add(item);
         }
@@ -435,28 +448,45 @@ public static class AlertContextBuilders
         BlockingIncidentGrouper.Group(
             serverName,
             filtered.Select(e => new BlockingIncidentGrouper.BlockedEvent(
-                e.DatabaseName, e.ContentiousObject, e.BlockedSqlText, e.BlockingSqlText, e.WaitTimeMs, e.LockMode)));
+                e.DatabaseName, e.ContentiousObject, e.BlockedSqlText, e.BlockingSqlText, e.WaitTimeMs, e.LockMode,
+                /* #3330: the row's own report travels with it, so the group can attach the one belonging to
+                   its own fingerprint. HasReportXml is false for every DMV-snapshot row, which has no
+                   report — null here, and an incident grouped only from those gets no attachment. */
+                e.HasReportXml
+                    ? new AlertIncidentAttachment(
+                        e.BlockedProcessReportXml, AlertIncidentAttachment.BlockedProcessReportFileName)
+                    : null)));
 
-    /* The graph parse, shared by the render path and #2216's observation path. Both the fingerprint's object
-       set and the #2109 Database fact come off the same pass, so parsing once per deadlock is the point. */
-    private static List<(DeadlockAlertRow Row, IReadOnlyList<string> Objects, IReadOnlyList<string> Databases)>
+    /* The graph parse, shared by the render path and #2216's observation path. The fingerprint's object
+       set, the #2109 Database fact and #3442's per-party facts all come off the same pass, so parsing once
+       per deadlock is the point. */
+    private static List<(DeadlockAlertRow Row, IReadOnlyList<string> Objects, IReadOnlyList<string> Databases,
+        IReadOnlyList<(string Label, string Value)> Parties)>
         ParseDeadlocks(IReadOnlyList<DeadlockAlertRow> filtered) =>
         filtered
             .Select(d => (Row: d,
                 Objects: DeadlockObjectExtractor.FromGraphXml(d.DeadlockGraphXml),
-                Databases: DeadlockObjectExtractor.DatabasesFromGraphXml(d.DeadlockGraphXml)))
+                Databases: DeadlockObjectExtractor.DatabasesFromGraphXml(d.DeadlockGraphXml),
+                Parties: d.PartyFacts))
             .ToList();
 
     /* #1140: fingerprint each deadlock by its sorted involved-object set, across ALL deadlocks in the window,
        grouped so recurrences over the same objects collapse to one incident with a count. */
     private static List<DeadlockIncidentGrouper.DeadlockGroup> GroupParsedDeadlocks(
         string serverName,
-        List<(DeadlockAlertRow Row, IReadOnlyList<string> Objects, IReadOnlyList<string> Databases)> parsed) =>
+        List<(DeadlockAlertRow Row, IReadOnlyList<string> Objects, IReadOnlyList<string> Databases,
+            IReadOnlyList<(string Label, string Value)> Parties)> parsed) =>
         DeadlockIncidentGrouper.Group(
             serverName,
             parsed.Select(p => new DeadlockIncidentGrouper.DeadlockEvent(
                 p.Objects,
-                DeadlockDetailFields(p.Databases, p.Row.VictimSqlText, p.Row.ProcessSummary))));
+                DeadlockDetailFields(p.Databases, p.Row.VictimSqlText, p.Row.ProcessSummary, p.Parties),
+                /* #3330: the deadlock's own graph travels with it, so each incident attaches the graph for
+                   the deadlock its card actually describes. */
+                p.Row.HasDeadlockXml
+                    ? new AlertIncidentAttachment(
+                        p.Row.DeadlockGraphXml, AlertIncidentAttachment.DeadlockGraphFileName)
+                    : null)));
 
     private static List<DeadlockIncidentGrouper.DeadlockGroup> GroupDeadlocks(
         string serverName, IReadOnlyList<DeadlockAlertRow> filtered) =>
@@ -481,15 +511,23 @@ public static class AlertContextBuilders
     }
 
     /* #1141/#2109: forensic detail carried on a deadlock incident — the representative event's
-       databases, victim SQL, and process summary. Since #2108 these render on the incident's own
-       summary item too, not just per-event cards. */
+       databases, victim SQL, process summary, and #3442's per-party facts. Since #2108 these render on
+       the incident's own summary item too, not just per-event cards.
+
+       The parties are appended AFTER the three existing facts rather than interleaved with them. Every
+       consumer that re-reads this body by label takes the FIRST line matching a prefix it knows —
+       AlertMuteContext.PopulateFromDetailText's Database / Victim SQL pre-fill most directly — so a new
+       fact ahead of one of those would change which value a consumer resolves without changing any
+       consumer. Behind them, it cannot. */
     private static List<AlertIncidentField>? DeadlockDetailFields(
-        IReadOnlyList<string> databases, string? victimSql, string? processes)
+        IReadOnlyList<string> databases, string? victimSql, string? processes,
+        IReadOnlyList<(string Label, string Value)> parties)
     {
         var f = new List<AlertIncidentField>();
         if (databases.Count > 0) f.Add(new AlertIncidentField("Database", string.Join(", ", databases)));
         if (!string.IsNullOrWhiteSpace(victimSql)) f.Add(new AlertIncidentField("Victim SQL", TruncateText(victimSql)));
         if (!string.IsNullOrWhiteSpace(processes)) f.Add(new AlertIncidentField("Processes", processes!));
+        foreach (var (label, value) in parties) f.Add(new AlertIncidentField(label, value));
         return f.Count > 0 ? f : null;
     }
 
@@ -537,14 +575,37 @@ public static class AlertContextBuilders
         return context;
     }
 
+    /// <summary>
+    /// The Long-Running Query card's render budget: sessions shown per card. A display cap, NOT an
+    /// observation cap (#2362 keeps the fingerprint observation list uncapped) — named because two
+    /// call sites have to agree on it: <see cref="BuildLongRunningQueryContext"/> renders this many,
+    /// and the engine resolves Agent-job names (#3497) for exactly the same subset, so a name is never
+    /// fetched for a session the card will not show.
+    /// </summary>
+    public const int LongRunningQueryDisplayCap = 3;
+
+    /// <summary>
+    /// <paramref name="agentJobNames"/> is #3497's annotation input — <b>annotation, never
+    /// suppression</b>: the same sessions render, the same incidents are fingerprinted, every card
+    /// still fires; a session whose <c>program_name</c> carries the SQLAgent job-step form merely
+    /// gains one field naming the job, because "that is the maintenance job, running as scheduled,
+    /// merely long" should not have to be reconstructed from the statement shape and the hour, twelve
+    /// times a night. NULL (the default, and every pre-#3497 caller) renders the card byte-identically
+    /// to before — no resolution was attempted, so nothing is claimed. NON-null says a resolution ran:
+    /// a parsed Agent session whose key the map lacks (msdb denied, lookup failed, job deleted) renders
+    /// the UNRESOLVED form, still stating the fact the parse alone establishes and carrying the raw
+    /// job-id marker so the operator can match it against the Program field's hex by eye. The
+    /// annotation states what IS, never a verdict.
+    /// </summary>
     public static AlertContext? BuildLongRunningQueryContext(
         string serverName, List<LongRunningQueryInfo> queries,
-        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null)
+        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null,
+        IReadOnlyDictionary<AgentJobStepKey, AgentJobStepNames>? agentJobNames = null)
     {
         if (queries.Count == 0) return null;
 
         var context = new AlertContext();
-        var shown = queries.GetRange(0, Math.Min(3, queries.Count));
+        var shown = queries.GetRange(0, Math.Min(LongRunningQueryDisplayCap, queries.Count));
         foreach (var q in shown)
         {
             var item = new AlertDetailItem
@@ -557,6 +618,20 @@ public static class AlertContextBuilders
                 item.Fields.Add(("Database", q.DatabaseName));
             if (!string.IsNullOrEmpty(q.ProgramName))
                 item.Fields.Add(("Program", q.ProgramName));
+            /* #3497: directly under Program, so the raw form and the resolved name read as one fact.
+               Fields never enter AlertFingerprint.ForKey — the dedup key hashes (server, type,
+               query_hash) only — so the annotation is fingerprint-inert by construction: a card that
+               re-fires with a different elapsed or a freshly resolved name folds into the same
+               incident it always did. Pinned in the owning suites rather than merely stated. */
+            if (agentJobNames is not null && AgentJobStepQuery.TryParseProgramName(q.ProgramName, out var jobKey))
+            {
+                item.Fields.Add(("Running under Agent job",
+                    agentJobNames.TryGetValue(jobKey, out var jobNames)
+                        ? jobNames.StepName is { Length: > 0 }
+                            ? $"{jobNames.JobName}, step {jobKey.StepId} ({jobNames.StepName})"
+                            : $"{jobNames.JobName}, step {jobKey.StepId}"
+                        : $"(name unresolved) Job 0x{AgentJobStepQuery.ToProgramNameHex(jobKey.JobId)}, step {jobKey.StepId}"));
+            }
             if (!string.IsNullOrEmpty(q.QueryText))
                 item.Fields.Add(("Query", TruncateText(q.QueryText)));
             item.Fields.Add(("CPU Time", $"{q.CpuTimeMs:N0} ms"));
@@ -573,6 +648,108 @@ public static class AlertContextBuilders
         /* #1140: dedup key = query_hash (stable across literals/plans). Null hash -> no incident. */
         AlertIncidentRenderer.Apply(context, Decorate(LongRunningQueryIncidents(serverName, shown).ToList(), decorateIncidents));
         return context;
+    }
+
+    /* ---------------- High CPU: the active-maintenance annotation (#3495) ---------------- */
+
+    /// <summary>
+    /// How many maintenance sessions the High CPU card names before stating an omission instead of
+    /// growing without bound — the same budget the Long-Running Query card gives its own sessions
+    /// (<see cref="BuildLongRunningQueryContext"/> shows three), because both caps answer the same
+    /// question: how many lines help a reader before they stop reading. Never a silent cut: sessions
+    /// past the cap are counted on a stated-omission line, the #3494 discipline.
+    /// </summary>
+    public const int ActiveMaintenanceMaxLines = 3;
+
+    /// <summary>
+    /// The statement heads that read as system maintenance on a CPU card (#3495's BACKUP DATABASE /
+    /// RESTORE, plus ALTER INDEX — the issue's "plausibly, same shape": an online rebuild burns the SQL
+    /// CPU share exactly the way backup compression does). Matched against the TRIMMED head of the
+    /// captured statement text, case-insensitively, and deliberately NOT as a contains-anywhere search:
+    /// a head match can miss a maintenance statement buried mid-batch, which costs the card its
+    /// annotation and nothing else, while a contains match can NAME maintenance on a card where none
+    /// runs (someone's dynamic-SQL builder mentioning BACKUP DATABASE in a literal) — and an annotation
+    /// whose whole value is being trustworthy must fail toward silence.
+    /// </summary>
+    public static readonly IReadOnlyList<string> MaintenanceStatementHeads = new[]
+    {
+        "BACKUP DATABASE",
+        "BACKUP LOG",
+        "RESTORE DATABASE",
+        "RESTORE LOG",
+        "ALTER INDEX"
+    };
+
+    /// <summary>
+    /// The matched maintenance head for one session's statement text, normalized to the canonical
+    /// uppercase spelling for the card line — or null when the session is not a maintenance shape.
+    /// </summary>
+    public static string? TryGetMaintenanceStatementHead(string? queryText)
+    {
+        if (string.IsNullOrWhiteSpace(queryText)) return null;
+
+        var head = queryText.TrimStart();
+        foreach (var candidate in MaintenanceStatementHeads)
+        {
+            if (head.StartsWith(candidate, StringComparison.OrdinalIgnoreCase))
+                return candidate;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// #3495's one-line form, appended to the High CPU card's detail text when the fire-time
+    /// active-session snapshot holds system maintenance:
+    /// <c>Active maintenance: BACKUP DATABASE (RdsAdminService), 17m 3s elapsed, ASYNC_IO_COMPLETION</c>
+    /// — program name, elapsed, wait, straight off the session row. One line per concurrent maintenance
+    /// session in the input's own order (the read returns elapsed DESC, so the longest-running — the
+    /// likeliest pin — leads), capped at <see cref="ActiveMaintenanceMaxLines"/> with the omission
+    /// stated.
+    ///
+    /// <para><b>Annotation, never suppression</b> — the #3495 contract, spelled here because this is
+    /// the function that could most easily drift into judging: the tiers stay where they are, the page
+    /// still fires, and the line states what IS (session kind, program, elapsed, wait) and never a
+    /// verdict. A backup pinning CPU at 04:30 with the store idle is routine; the same pin at 14:30
+    /// under checkout load is a capacity finding with a named cause — that judgment belongs to the
+    /// reader, and suppressing or down-tiering CPU alerts during backups would blind exactly the case
+    /// where the overlap matters.</para>
+    ///
+    /// <para>Returns "" when no maintenance session is present, which is the regression pin: the
+    /// caller string-appends this, so an empty answer leaves the card BYTE-identical to today.</para>
+    /// </summary>
+    public static string BuildActiveMaintenanceDetail(IReadOnlyList<LongRunningQueryInfo> activeSessions)
+    {
+        if (activeSessions.Count == 0) return "";
+
+        var sb = new StringBuilder();
+        int named = 0;
+        int omitted = 0;
+        foreach (var session in activeSessions)
+        {
+            var head = TryGetMaintenanceStatementHead(session.QueryText);
+            if (head is null) continue;
+
+            if (named == ActiveMaintenanceMaxLines)
+            {
+                omitted++;
+                continue;
+            }
+
+            named++;
+            sb.Append("\n  Active maintenance: ").Append(head);
+            if (!string.IsNullOrEmpty(session.ProgramName))
+                sb.Append(" (").Append(session.ProgramName).Append(')');
+            sb.Append(", ").Append(FormatDuration(session.ElapsedSeconds)).Append(" elapsed");
+            if (!string.IsNullOrEmpty(session.WaitType))
+                sb.Append(", ").Append(session.WaitType);
+        }
+
+        /* The #3494 discipline: whole lines that fit, then a stated omission — never a silent cut. */
+        if (omitted > 0)
+            sb.Append("\n  Active maintenance: ").Append(omitted).Append(" more maintenance session(s) not shown");
+
+        return sb.ToString();
     }
 
     /* Returns the volumes whose free space is under the configured % or GB threshold (a 0 threshold
@@ -733,7 +910,10 @@ public static class AlertContextBuilders
                     ("Avg Duration", FormatDuration(j.AvgDurationSeconds)),
                     ("P95 Duration", FormatDuration(j.P95DurationSeconds)),
                     ("% of Average", j.PercentOfAverage.HasValue ? $"{j.PercentOfAverage:F0}%" : "N/A"),
-                    ("Started", j.StartTime.ToString("yyyy-MM-dd HH:mm:ss"))
+                    /* The run start is the monitored server's own clock; the alert time beside it, and
+                       "Incident Since" below it, are UTC. Rendered through AlertTimestamp so the value
+                       states which. */
+                    ("Started", AlertTimestamp.ForServerInstant(j.StartTime, j.UtcOffsetMinutes))
                 }
             });
         }
@@ -743,9 +923,30 @@ public static class AlertContextBuilders
         return context;
     }
 
+    /// <summary>
+    /// The failed-Agent-job context: one item per failure in the lookback window, capped at five.
+    /// </summary>
+    /// <param name="windowEndUtc">
+    /// The instant the window was read, in UTC, and <paramref name="lookbackMinutes"/> its length — together
+    /// the <see cref="FailureWindowHeading"/> item.
+    /// <para><b>Why the body states its own window.</b> The window is longer than the interval between
+    /// firings, so consecutive alerts overlap and a failure appears in every body whose window contains it.
+    /// That is what a window report does, and it is NOT narrowed to "new since the last alert": the only
+    /// discriminator available is the engine's failed-job watermark, which holds the newest RUN START it has
+    /// reported — and a job whose run started before that instant and failed after it is new, not repeated,
+    /// so filtering on it would drop a failure nobody has been told about. Losing a repeat costs a reader a
+    /// second look; losing a first report costs them the page. So the repeat stays and the window is
+    /// declared, which is what lets a reader tell "this failed again" from "this is the same failure in a
+    /// later window". <c>sysjobhistory.instance_id</c> is the append cursor that would make a cursored body
+    /// exact; the watermark is not it.</para>
+    /// <para>Null omits the item, for a caller with no clock — the window is a fact about the read, not
+    /// about the rows, so it is stated only when the reader actually supplied it.</para>
+    /// </param>
+    /// <param name="lookbackMinutes">The window's length in minutes, as configured.</param>
     public static AlertContext? BuildFailedJobContext(
         string serverName, List<FailedJobInfo> jobs,
-        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null)
+        Func<IReadOnlyList<AlertIncident>, IReadOnlyList<AlertIncident>>? decorateIncidents = null,
+        DateTime? windowEndUtc = null, int lookbackMinutes = 0)
     {
         if (jobs.Count == 0) return null;
 
@@ -763,6 +964,19 @@ public static class AlertContextBuilders
             context.Details.Add(item);
         }
 
+        if (windowEndUtc is DateTime endUtc && lookbackMinutes > 0)
+        {
+            context.Details.Add(new AlertDetailItem
+            {
+                Heading = FailureWindowHeading,
+                Fields = new()
+                {
+                    (FailureWindowFromLabel, AlertTimestamp.Utc(endUtc.AddMinutes(-lookbackMinutes))),
+                    (FailureWindowToLabel, AlertTimestamp.Utc(endUtc))
+                }
+            });
+        }
+
         /* #1140: dedup key per job (job name, scoped to the instance via serverName) — mirrors
            BuildAnomalousJobContext so two distinct failed jobs are distinct incidents under the
            #1154 per-fingerprint cooldown instead of coalescing on the metric key. */
@@ -770,23 +984,27 @@ public static class AlertContextBuilders
         return context;
     }
 
+    /// <summary>Heading of the failed-job body's window item. Declared, not spelled inline, because a
+    /// heading is what a reader keys on and the tests assert it.</summary>
+    public const string FailureWindowHeading = "Failure Window";
+
+    /// <summary>Label of the window's start fact. A fact name is a consumer API — see
+    /// <see cref="AlertIncidentRenderer"/>.</summary>
+    public const string FailureWindowFromLabel = "From";
+
+    /// <summary>Label of the window's end fact.</summary>
+    public const string FailureWindowToLabel = "To";
+
     /// <summary>
     /// Flattens an <see cref="AlertContext"/> into the plain-text detail block persisted in alert
     /// history and rendered in plain-text notification bodies. Null when there is nothing to render.
+    /// <para>The implementation lives in <see cref="AlertDetailText.Flatten"/>, in the Notifications
+    /// project, because the delivery channels there decide whether an alert's prose detail adds anything
+    /// over its structured context by comparing against this exact text — and that project cannot
+    /// reference this one. Kept as the name every fire site already calls.</para>
     /// </summary>
-    public static string? ContextToDetailText(AlertContext? context)
-    {
-        if (context == null || context.Details.Count == 0) return null;
-        var sb = new System.Text.StringBuilder();
-        foreach (var detail in context.Details)
-        {
-            if (sb.Length > 0) sb.AppendLine();
-            sb.AppendLine(detail.Heading);
-            foreach (var (label, value) in detail.Fields)
-                sb.AppendLine($"  {label}: {value}");
-        }
-        return sb.ToString().TrimEnd();
-    }
+    public static string? ContextToDetailText(AlertContext? context) =>
+        AlertDetailText.Flatten(context);
 
     /// <summary>
     /// Collapses newlines to spaces, trims, and truncates to <paramref name="maxLength"/> with a

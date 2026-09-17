@@ -17,16 +17,24 @@ namespace PerformanceMonitorLite.Tests;
 /// </summary>
 public class MuteRuleServiceTests
 {
-    /// <summary>In-memory fake; InsertAsync optionally throws to exercise the error path.</summary>
+    /// <summary>In-memory fake; the persist and the READ each optionally throw to exercise the two error
+    /// paths, which are opposite by design — a failed persist must not enter the cache, and a failed read
+    /// must not empty it.</summary>
     private sealed class FakeMuteRuleStore : IMuteRuleStore
     {
         private readonly bool _throwOnInsert;
         public List<MuteRule> Persisted { get; } = new();
 
+        /// <summary>#3354: when set, the READ faults the way a store blip makes it fault.</summary>
+        public bool ThrowOnLoad { get; set; }
+
         public FakeMuteRuleStore(bool throwOnInsert = false) => _throwOnInsert = throwOnInsert;
 
         public Task<IReadOnlyList<MuteRule>> LoadAllAsync()
-            => Task.FromResult<IReadOnlyList<MuteRule>>(Persisted.ToList());
+        {
+            if (ThrowOnLoad) throw new InvalidOperationException("store read boom");
+            return Task.FromResult<IReadOnlyList<MuteRule>>(Persisted.ToList());
+        }
 
         public Task InsertAsync(MuteRule rule)
         {
@@ -74,6 +82,49 @@ public class MuteRuleServiceTests
         /* Persist-then-cache: nothing persisted, and the cache must be empty too
            (the deliberate Dashboard behaviour change in §4.2). */
         Assert.Empty(store.Persisted);
+        Assert.Empty(service.GetRules());
+    }
+
+    /// <summary>
+    /// #3354, asserted on THIS SKU as well: a failed reload must not reduce the set of rules in force.
+    /// Lite's store used to swallow the read fault and return an empty list with no log line at all, so
+    /// Lite lost every mute on a DuckDB blip and left no artefact of having done so. The invariant lives in
+    /// the shared service — the read is awaited before the cache assignment and nothing catches — and this
+    /// is the arm that says Lite's compilation of it behaves the same way Darling's does.
+    /// </summary>
+    [Fact]
+    public async Task LoadAsync_ReadFails_TheRulesAlreadyInForceStayInForce()
+    {
+        var store = new FakeMuteRuleStore();
+        var service = new MuteRuleService(store, new AppLoggerAdapter<MuteRuleService>());
+
+        await service.AddRuleAsync(NewRule("rule-1"));
+        await service.LoadAsync();
+        Assert.Single(service.GetRules());
+
+        store.ThrowOnLoad = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(service.LoadAsync);
+
+        Assert.Single(service.GetRules());
+        Assert.Contains(service.GetRules(), r => r.Id == "rule-1");
+    }
+
+    /// <summary>
+    /// The arm that keeps the one above from being satisfied by a cache that never updates: a SUCCESSFUL
+    /// empty read is an operator deleting their last rule, and it still empties the cache.
+    /// </summary>
+    [Fact]
+    public async Task LoadAsync_ReadSucceedsAndIsEmpty_TheCacheIsEmptied()
+    {
+        var store = new FakeMuteRuleStore();
+        var service = new MuteRuleService(store, new AppLoggerAdapter<MuteRuleService>());
+
+        await service.AddRuleAsync(NewRule("rule-1"));
+        Assert.Single(service.GetRules());
+
+        store.Persisted.Clear();
+        await service.LoadAsync();
+
         Assert.Empty(service.GetRules());
     }
 }

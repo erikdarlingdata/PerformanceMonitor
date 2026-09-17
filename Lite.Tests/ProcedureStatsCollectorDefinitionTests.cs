@@ -29,6 +29,12 @@ public sealed class ProcedureStatsCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();
 
+    /// <summary>The drain-time fix (shared with query_stats): a per-row DATALENGTH cap on the captured
+    /// plan XML, sourced from QueryPlanXmlCaptureLimits rather than a literal repeated per collector.
+    /// Built from the constant so a change to the cap moves this expectation with it.</summary>
+    private static readonly string PlanXmlSizeGuardedFragment =
+        "query_plan_xml=CASEWHENDATALENGTH(tqp.query_plan)>" + QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes + "THENNULLELSEtqp.query_planEND";
+
     private static string Collapse(string sql) => Regex.Replace(sql, @"\s+", "");
 
     [Fact]
@@ -109,14 +115,18 @@ public sealed class ProcedureStatsCollectorDefinitionTests
     }
 
     [Fact]
-    public void PayloadColumns_MatchSchema_35Columns()
+    public void PayloadColumns_MatchSchema_36Columns()
     {
         var names = ProcedureStatsCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
-        Assert.Equal(35, names.Length);
+        Assert.Equal(36, names.Length);
         Assert.Equal("database_name", names[0]);
         Assert.Equal("plan_handle", names[26]);
         Assert.Equal("delta_spills", names[33]);
         Assert.Equal("query_plan_xml", names[34]);   /* trailing plan column (#1262) */
+        /* #3392: appended after it, so every earlier ordinal is stable. BigInt because DATALENGTH over an
+           nvarchar(max) expression returns bigint, and a module-grain plan is measured in megabytes. */
+        Assert.Equal("query_plan_xml_bytes", names[35]);
+        Assert.Equal(CollectorColumnType.BigInt, ProcedureStatsCollector.Instance.PayloadColumns[35].Type);
     }
 
     [Fact]
@@ -148,7 +158,7 @@ public sealed class ProcedureStatsCollectorDefinitionTests
         var plan = ProcedureStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas, capturePlanXml: true));
         var collapsed = Collapse(plan.Text);
 
-        Assert.Single(Regex.Matches(collapsed, Regex.Escape("query_plan_xml=tqp.query_plan")));
+        Assert.Single(Regex.Matches(collapsed, Regex.Escape(PlanXmlSizeGuardedFragment)));
         Assert.Single(Regex.Matches(collapsed, Regex.Escape("sys.dm_exec_text_query_plan(CONVERT(varbinary(64),ranked.plan_handle,1),0,-1)AStqp")));
         Assert.DoesNotContain("dm_exec_text_query_plan(s.plan_handle", collapsed, StringComparison.Ordinal);
 
@@ -170,7 +180,7 @@ public sealed class ProcedureStatsCollectorDefinitionTests
         var plan = ProcedureStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas, isAzureSqlDb: true, capturePlanXml: true));
         var collapsed = Collapse(plan.Text);
 
-        Assert.Contains("query_plan_xml=tqp.query_plan", collapsed, StringComparison.Ordinal);
+        Assert.Contains(PlanXmlSizeGuardedFragment, collapsed, StringComparison.Ordinal);
         Assert.Contains("sys.dm_exec_text_query_plan(CONVERT(varbinary(64),ranked.plan_handle,1),0,-1)AStqp", collapsed, StringComparison.Ordinal);
         Assert.True(
             collapsed.IndexOf("dm_exec_text_query_plan", StringComparison.Ordinal)
@@ -187,18 +197,36 @@ public sealed class ProcedureStatsCollectorDefinitionTests
         var deltas = new RecordingCollectorDeltaCalculator();
         var context = CollectorTestContext.Make(deltas, capturePlanXml: true);
 
-        /* Flag on = the SELECT carries the trailing query_plan_xml column at ordinal 27. */
+        /* Flag on = the SELECT carries the trailing query_plan_xml column at ordinal 27, then #3392's
+           query_plan_xml_bytes at 28. */
         var row = MakeSqlRow(planHandle: "0x0600");
-        var row28 = row.Append((object)"<ShowPlanXML>proc</ShowPlanXML>").ToArray();
+        var row29 = row
+            .Append((object)"<ShowPlanXML>proc</ShowPlanXML>")
+            .Append((object)9_000_000L)
+            .ToArray();
 
-        using var reader = new FakeCollectorDataReader(row28);
+        using var reader = new FakeCollectorDataReader(row29);
         var rows = await ProcedureStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
         var writer = new RecordingCollectorRowWriter();
         ProcedureStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
 
-        Assert.Equal(35, writer.Values.Count);
+        Assert.Equal(36, writer.Values.Count);
         Assert.Equal("<ShowPlanXML>proc</ShowPlanXML>", writer.Values[34]);   /* query_plan_xml payload slot */
+        Assert.Equal(9_000_000L, writer.Values[35]);                          /* #3392: query_plan_xml_bytes */
+
+        /* #3392: 9 MB is over the cap, so this row IS a backlog candidate — and the offsets it hands back
+           are the module-grain literals the plan apply passes, never per-statement values this DMV family
+           does not have. A deferred fetch with different offsets would be a different plan. */
+        var observation = ProcedureStatsCollector.Instance.DescribeOversizedPlan(rows[0]);
+        Assert.NotNull(observation);
+        Assert.Equal("0x0600", observation!.Value.PlanHandle);
+        Assert.Equal(ProcedureStatsCollector.ModuleStatementStartOffset, observation.Value.StatementStartOffset);
+        Assert.Equal(ProcedureStatsCollector.ModuleStatementEndOffset, observation.Value.StatementEndOffset);
+        Assert.Equal(9_000_000L, observation.Value.ObservedBytes);
+        /* No query_hash: sys.dm_exec_procedure_stats has none, and this collector's readers key on the
+           sql_handle and on the object identity instead. */
+        Assert.Null(observation.Value.QueryHash);
     }
 
     [Fact]
@@ -214,8 +242,13 @@ public sealed class ProcedureStatsCollectorDefinitionTests
 
         var writer = new RecordingCollectorRowWriter();
         ProcedureStatsCollector.Instance.WritePayload(rows[0], writer, context);
-        Assert.Equal(35, writer.Values.Count);
+        Assert.Equal(36, writer.Values.Count);
         Assert.Null(writer.Values[34]);   /* query_plan_xml null when the flag is off */
+        Assert.Null(writer.Values[35]);   /* #3392: and no measurement either */
+
+        /* No measurement is not an oversized plan: null is "nobody measured", which is what a
+           plan-capture-off host and an aged-out handle both produce. */
+        Assert.Null(ProcedureStatsCollector.Instance.DescribeOversizedPlan(rows[0]));
         Assert.All(deltas.Calls, c => Assert.Equal("0x0600", c.Key));
         Assert.Equal(
             new[] { "proc_stats_exec", "proc_stats_worker", "proc_stats_elapsed", "proc_stats_reads", "proc_stats_writes", "proc_stats_phys_reads", "proc_stats_spills" },

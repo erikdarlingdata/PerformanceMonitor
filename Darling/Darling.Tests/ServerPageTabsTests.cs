@@ -812,7 +812,15 @@ public sealed class ServerPageTabsTests
            moment a comment happened to contain one, which is the shape of check that converts an open question
            into false confidence. The helper THROWS without an emptyText, and every tab is built during the
            DOM-shim run, so a table panel that forgot one cannot reach a browser. */
-        Assert.Contains("function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2)", js, StringComparison.Ordinal);
+        /* The WHOLE signature, so emptyText is asserted to be a declared parameter rather than something
+           read off an options object. #3278 appended `noteKey = null` - an opt-in server-supplied caveat,
+           unrelated to this guard - and the literal is spelled out here rather than truncated at emptyText
+           because a prefix match would stop noticing a parameter inserted BEFORE it. */
+        Assert.Contains(
+            "function table(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, "
+            + "noteKey = null)",
+            js,
+            StringComparison.Ordinal);
         Assert.Contains(
             "if (!emptyText) throw new Error(\"table(\" + title + \"): a table panel must explain its own empty state.\");",
             js,
@@ -896,6 +904,17 @@ public sealed class ServerPageTabsTests
     /// <para>Composites name their reads inside their own function bodies rather than in a tab, so their reads
     /// are mapped here explicitly — and the map is asserted against the functions, so it cannot quietly go
     /// stale and start passing a tab it no longer describes.</para>
+    ///
+    /// <para><b>One sanctioned duplicate, and the condition on it is what keeps it one (#3434).</b> A read
+    /// fetched twice with DIFFERENT parameters is two questions rather than one query run twice, and
+    /// <c>fanout()</c> cannot serve it: fanout is several panels over one fetch, so two panels differing in a
+    /// parameter have no shared response to slice. The PostgreSQL Storage tab is that case —
+    /// <c>get_pg_index_bloat</c> in #3278's answerless-first order, and again under <c>answered_only</c> so
+    /// the answered population is requested rather than paged past. The exemption is conditional on the
+    /// distinguishing parameter actually appearing in that tab's block and on the count being exactly two, so
+    /// a second copy of the DEFAULT read — the duplicate this rule exists to catch — is not covered by it;
+    /// and every entry is asserted to have been USED, because an exemption matching nothing is one that has
+    /// silently stopped describing the page.</para>
     /// </summary>
     [Fact]
     public void NoTab_FetchesTheSameReadTwice()
@@ -922,6 +941,16 @@ public sealed class ServerPageTabsTests
 
         var problems = new List<string>();
 
+        /* The one duplicate with an argument: registry/tab -> the read, and the parameter that makes the
+           second fetch a different question. Keyed on both halves because a read duplicated on some OTHER
+           tab is not what this argument was made about. */
+        var parameterisedTwice = new Dictionary<string, (string Read, string Distinguisher)>(StringComparer.Ordinal)
+        {
+            ["POSTGRES_TABS/storage"] = ("get_pg_index_bloat", "answered_only: true"),
+        };
+
+        var exemptionsUsed = new HashSet<string>(StringComparer.Ordinal);
+
         /* Per REGISTRY, not over the whole file. The blocks are delimited by the next tab's id, so a single
            whole-file sweep would run the SQL Server registry's last tab straight through the PostgreSQL
            registry's header comment and attribute its reads to a tab that does not fetch them. */
@@ -945,6 +974,20 @@ public sealed class ServerPageTabsTests
 
                 foreach (var dupe in reads.GroupBy(r => r, StringComparer.Ordinal).Where(g => g.Count() > 1))
                 {
+                    var key = registry + "/" + ids[i].Groups[1].Value;
+
+                    /* EVERY condition, not just the allowlist hit: the right read, exactly twice, and the
+                       distinguishing parameter present in this block. Dropping any one of them turns a
+                       named exemption into a blanket one for that tab. */
+                    if (parameterisedTwice.TryGetValue(key, out var sanctioned)
+                        && string.Equals(sanctioned.Read, dupe.Key, StringComparison.Ordinal)
+                        && dupe.Count() == 2
+                        && block.Contains(sanctioned.Distinguisher, StringComparison.Ordinal))
+                    {
+                        exemptionsUsed.Add(key);
+                        continue;
+                    }
+
                     problems.Add($"{registry} tab '{ids[i].Groups[1].Value}' fetches {dupe.Key} {dupe.Count()} times");
                 }
             }
@@ -952,6 +995,13 @@ public sealed class ServerPageTabsTests
 
         Assert.True(problems.Count == 0,
             string.Join("; ", problems) + " — several panels over one read is what fanout() is for.");
+
+        /* And the exemptions describe the page they claim to. An entry that matches nothing passes this
+           rule vacuously for whatever it was written about, which is the shape every stale allowlist in
+           this file is guarded against. */
+        Assert.Equal(
+            parameterisedTwice.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray(),
+            exemptionsUsed.OrderBy(k => k, StringComparer.Ordinal).ToArray());
 
         /* And fanout carries the same empty-state rule the two descriptor helpers do, so routing a panel through
            it is never the way to lose the sentence. */

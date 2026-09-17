@@ -26,7 +26,7 @@
         <!-- Format hint -->
         <TextBlock Grid.Row="1" TextWrapping="Wrap" FontSize="11" Margin="0,0,0,10"
                    Foreground="{DynamicResource ForegroundMutedBrush}"
-                   Text="Paste one server per line as: server[, display name][, database]. A non-default port rides the server name SQL Server style — sql01,2433 — and is told apart from a display name by being a pure number. Fields separate on a comma, or on a tab for spreadsheet pastes (a display name with a comma, or one that is only digits, needs the tab form). Blank lines and lines starting with # are ignored. All servers share the authentication and encryption below — the Darling service connects with Windows or SQL authentication (a SQL credential is entered once and stamped, encrypted, onto every server). Duplicates of servers you already monitor are skipped."/>
+                   Text="Paste one server per line as: server[, display name][, database]. A non-default port rides the server name SQL Server style — sql01,2433 — and is told apart from a display name by being a pure number. Fields separate on a comma, or on a tab for spreadsheet pastes (a display name with a comma, or one that is only digits, needs the tab form). Blank lines and lines starting with # are ignored. All servers share the authentication and encryption below — the Darling service connects with Windows, SQL, or a non-interactive Entra mode (Service Principal or Managed Identity); a SQL password or service-principal secret is entered once and stamped, encrypted, onto every server. Duplicates of servers you already monitor are skipped."/>
 
         <!-- Paste box -->
         <TextBlock Grid.Row="2" Text="Servers" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
@@ -58,13 +58,18 @@
                            Text="No credential profiles exist yet. Create one under Manage Servers → Credential Profiles."/>
             </StackPanel>
 
-            <!-- Inline shared auth radios. Only the two modes the Darling service honors — Windows / SQL. The
-                 three Azure/Entra modes have no service connect path, so bulk does not offer them (single-add
-                 shows-then-blocks them; showing them here per row would be theater). -->
+            <!-- Inline shared auth radios. The four modes the Darling service honors (#3484): Windows, SQL, and
+                 the two non-interactive Entra modes — service principal and managed identity — entered ONCE and
+                 stamped on every row. The interactive Entra modes have no headless connect path, so bulk (like
+                 single-add) does not write them. -->
             <StackPanel x:Name="InlineAuthRadios" Margin="0,4,0,0">
                 <RadioButton x:Name="WindowsAuthRadio" Content="_Windows Authentication" Foreground="{DynamicResource ForegroundBrush}"
                              IsChecked="True" Checked="AuthMode_Changed" Margin="0,0,0,4"/>
                 <RadioButton x:Name="SqlAuthRadio" Content="S_QL Server Authentication" Foreground="{DynamicResource ForegroundBrush}"
+                             Checked="AuthMode_Changed" Margin="0,0,0,4"/>
+                <RadioButton x:Name="ServicePrincipalAuthRadio" Content="Azure — Service _Principal" Foreground="{DynamicResource ForegroundBrush}"
+                             Checked="AuthMode_Changed" Margin="0,0,0,4"/>
+                <RadioButton x:Name="ManagedIdentityAuthRadio" Content="Azure — _Managed Identity" Foreground="{DynamicResource ForegroundBrush}"
                              Checked="AuthMode_Changed"/>
             </StackPanel>
 
@@ -76,6 +81,27 @@
                 <PasswordBox x:Name="PasswordBox"/>
                 <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,6,0,0"
                            Text="The password is encrypted with the service host's machine key (DPAPI-LocalMachine), so it can be decrypted only on the machine running the Darling service — the supported single-box deploy."/>
+            </StackPanel>
+
+            <!-- Service Principal Credentials (one client id + secret stamped on every row — a single Entra app
+                 monitoring the whole pasted fleet) -->
+            <StackPanel x:Name="ServicePrincipalPanel" Visibility="Collapsed" Margin="0,8,0,0">
+                <TextBlock Text="Client (Application) ID" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+                <TextBox x:Name="AzureClientIdBox" Margin="0,0,0,8"
+                         ToolTip="The Application (client) ID of the Entra app registration / service principal."/>
+                <TextBlock Text="Client Secret" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+                <PasswordBox x:Name="AzureClientSecretBox"/>
+                <TextBlock TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,6,0,0"
+                           Text="The client secret is encrypted with the service host's machine key (DPAPI-LocalMachine), so it can be decrypted only on the machine running the Darling service. The tenant is resolved automatically from each target."/>
+            </StackPanel>
+
+            <!-- Managed Identity (one shared identity — no secret) -->
+            <StackPanel x:Name="ManagedIdentityPanel" Visibility="Collapsed" Margin="0,8,0,0">
+                <TextBlock Text="User-Assigned Identity Client ID (optional)" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,4"/>
+                <TextBox x:Name="ManagedIdentityClientIdBox" Margin="0,0,0,8"
+                         ToolTip="Leave blank to use the system-assigned managed identity. Set to a client id to use a specific user-assigned identity."/>
+                <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource ForegroundMutedBrush}" FontSize="11"
+                           Text="Managed Identity only works when the Darling service runs on an Azure VM / resource that has a managed identity assigned. Use Service Principal for non-interactive auth from a workstation."/>
             </StackPanel>
 
             <!-- Encryption -->

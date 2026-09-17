@@ -68,6 +68,24 @@ VALUES ($1, $2, 'S1', 'Nightly ETL', 'job-1', true, $3, 3600, 900, 1200, 42, tru
             insert.Parameters.Add(new DuckDBParameter { Value = ServerId });
             insert.Parameters.Add(new DuckDBParameter { Value = snapshotTime.AddMinutes(-60) });
             await insert.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+
+            /* #3421: the server's own UTC offset, which the anomalous-jobs read projects beside
+               start_time so the alert body can state that server-local instant in UTC. Non-zero on
+               purpose: at 0 the assertion below would pass whether or not the offset was read.
+
+               edition / product_version / product_level / engine_edition are NOT NULL on Lite's
+               server_properties (DuckDbSchemaGenerator's own overlay, which the engine-neutral
+               CollectorColumn does not encode) where Darling's twin leaves them nullable — so the two
+               stores' seeds are NOT interchangeable, and the Darling shape fails here at runtime. */
+            using var props = connection.CreateCommand();
+            props.CommandText = @"
+INSERT INTO server_properties
+    (collection_id, collection_time, server_id, server_name,
+     edition, product_version, product_level, engine_edition, utc_offset_minutes)
+VALUES (1, $1, $2, 'S1', 'Developer Edition', '16.0.4150.1', 'RTM', 3, -240)";
+            props.Parameters.Add(new DuckDBParameter { Value = snapshotTime });
+            props.Parameters.Add(new DuckDBParameter { Value = ServerId });
+            await props.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
         await initializer.CreateArchiveViewsAsync();
@@ -96,6 +114,13 @@ VALUES ($1, $2, 'S1', 'Nightly ETL', 'job-1', true, $3, 3600, 900, 1200, 42, tru
         Assert.True(result.SnapshotIsFresh);
         var job = Assert.Single(result.Jobs);
         Assert.Equal("Nightly ETL", job.JobName);
+
+        /* #3421: the collected offset rides with the row, and the row states the server-local
+           start_time in UTC from it. Asserted as the INSTANT rather than as rendered text - a pinned
+           string passes under a sign error as readily as under the right sign. This is also the only
+           place the offset subquery in the DuckDB read is exercised against a real store. */
+        Assert.Equal(-240, job.UtcOffsetMinutes);
+        Assert.Equal(job.StartTime.AddMinutes(240), job.StartTimeUtc);
     }
 
     [Fact]

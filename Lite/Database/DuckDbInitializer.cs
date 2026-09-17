@@ -271,7 +271,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 57;
+    internal const int CurrentSchemaVersion = 59;
 
     private readonly string _archivePath;
 
@@ -1545,6 +1545,64 @@ public class DuckDbInitializer
                     /* Already nullable, or the table does not exist yet (fresh install creates it
                        correctly from the generator) — neither is fatal. */
                     _logger?.LogWarning("Migration to v57 on {Column} encountered an error (non-fatal): {Error}", column, ex.Message);
+                }
+            }
+        }
+
+        if (fromVersion < 58)
+        {
+            /* v58 (#3282): the built-in alert catalog's persistence-gate state, porting Darling's V118.
+               Before this no built-in alert required its condition to PERSIST — one sample over the bar
+               fired and the next sample under it resolved — so a momentary CPU spike was indistinguishable
+               from sustained saturation. New table only; fresh installs get it from
+               GetAllTableStatements() and this CREATE is for an existing database, idempotent so a re-run
+               is a no-op.
+
+               Nothing to backfill, and nothing that could be: an absent row means "no streak and no open
+               incident", which is exactly what every server looked like before the gate existed. The first
+               few sweeps after the upgrade build the streak, so the first post-upgrade High CPU arrives
+               once the condition has actually held.
+
+               Non-fatal, matching v54's posture: without the table the load returns null and the gate
+               lives for one process lifetime — a restart re-arms it from zero rather than breaking the
+               alert path. */
+            _logger?.LogInformation("Running migration to v58: adding config_alert_persistence_state");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, Schema.CreateAlertPersistenceStateTable);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v58 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 59)
+        {
+            /* v59 (#3392): query_stats and procedure_stats gain query_plan_xml_bytes — the measured
+               DATALENGTH of the row's cached-plan XML, selected beside the plan itself on the hosts that
+               capture plans. Appended at the end of both PayloadColumns lists, so the positional appender
+               and old parquet are unaffected.
+
+               Lite never sets CapturePlanXml, so this column is always NULL here and the query text Lite
+               sends is unchanged. It is still REQUIRED on this side: the appender writes one value per
+               declared payload column, so a database without the column fails EndRow() on the first
+               query_stats or procedure_stats batch — the whole batch, not the column. Fresh installs get
+               it from DuckDbSchemaGenerator; this ALTER is for an existing database and is idempotent.
+
+               Non-fatal per column, matching v35's posture — the plan-column rung this mirrors. */
+            _logger?.LogInformation("Running migration to v59: query_stats + procedure_stats gain query_plan_xml_bytes");
+
+            foreach (var table in new[] { "query_stats", "procedure_stats" })
+            {
+                try
+                {
+                    await ExecuteNonQueryAsync(connection,
+                        $"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS query_plan_xml_bytes BIGINT");
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning("Migration to v59 on {Table} encountered an error (non-fatal): {Error}", table, ex.Message);
                 }
             }
         }

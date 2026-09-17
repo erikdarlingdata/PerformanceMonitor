@@ -139,9 +139,11 @@ public sealed partial class ViewerDataService
     /// (2) Lite's server-local <c>last_execution_time</c> staleness filter and its utcOffsetMinutes
     /// parameter are dropped (the viewer has no per-server UTC offset; the delta HAVING already excludes
     /// plans that never ran in the window); (3) the LATERAL fetches only query_text; the collected
-    /// query_plan_xml is not carried per row (it can be multi-KB) — instead bool_or(query_plan_xml IS NOT
-    /// NULL) rides back as has_query_plan to gate the grid's Query Plan column, and the plan itself is
-    /// fetched on demand by <see cref="GetQueryStatsPlanXmlAsync"/>.
+    /// query_plan_xml is not carried per row (it can be multi-KB) — instead a bool_or presence test rides
+    /// back as has_query_plan to gate the grid's Query Plan column, and the plan itself is
+    /// fetched on demand by <see cref="GetQueryStatsPlanXmlAsync"/>. The flag answers "the server had a plan
+    /// for this row", which is what the on-demand fetch can act on; it has never promised the fetch will
+    /// find content, since a digest can outlive the dimension row the GC pruned.
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top.
     /// </summary>
     public const string TopQueriesSql = """
@@ -192,8 +194,14 @@ public sealed partial class ViewerDataService
                    CTE aggregates the whole window and needs only a presence flag, and reading the
                    resolving view would make Postgres join the plan dimension per row to evaluate
                    it (it can drop an unreferenced unique join, but the COALESCE references it).
-                   The LATERAL below, which needs the actual text, does read the view. */
-                bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL) AS has_query_plan,
+                   The LATERAL below, which needs the actual text, does read the view.
+
+                   The third term is the capped rows (#3392), and it needs no cap literal to find
+                   them: DATALENGTH of a NULL plan is NULL, so a non-null query_plan_xml_bytes
+                   means the server HAD a plan for this row, and a row with a size but neither an
+                   inline plan nor a digest is one the size cap declined. Those are exactly the rows
+                   the backlog goes back for, and GetQueryStatsPlanXmlAsync reads it. */
+                bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL OR query_plan_xml_bytes IS NOT NULL) AS has_query_plan,
                 host_object_name
             FROM query_stats
             WHERE server_id = $1
@@ -596,8 +604,8 @@ public sealed partial class ViewerDataService
 
     /// <summary>
     /// Formats a SQL-server-local wall-clock time (dm_exec_* last_execution_time / creation_time /
-    /// cached_time, plan_correction's action stamps, msdb Agent's job start time — NOT naive UTC) for
-    /// the grid, in the current display mode. Empty when null.
+    /// cached_time, msdb Agent's job start time, the blocked-process report's transaction and batch
+    /// stamps — NOT naive UTC) for the grid, in the current display mode. Empty when null.
     ///
     /// <para>The counterpart to <see cref="FormatStoredUtc"/>. Exactly one of the pair applies the
     /// collected offset, and which one depends only on the column's frame; picking the wrong one is

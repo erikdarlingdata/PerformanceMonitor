@@ -130,11 +130,20 @@ public sealed class AlertEngineTests
             /* The seam contract: fetch-then-filter client-side, like Lite's loop. */
             Task.FromResult(PoisonWaits.FindAll(w => w.AvgMsPerWait >= thresholdMs));
 
+        /* #3495's degrade arm: the CPU card's fire-time maintenance probe rides this same seam, and the
+           pin that a failed probe costs the annotation and never the alert needs a read that faults. */
+        public bool ThrowOnLongRunningRead { get; set; }
+
         public Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(
             string serverKey, int thresholdMinutes, int maxResults,
             bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc,
             IReadOnlyList<string> excludedDatabases, CancellationToken cancellationToken = default)
         {
+            if (ThrowOnLongRunningRead)
+            {
+                throw new InvalidOperationException("active-session read is down");
+            }
+
             LastLrqArgs = (thresholdMinutes, maxResults, excludeSpServerDiagnostics, excludeWaitFor, excludeBackups, excludeMiscWaits, excludeCdc, excludedDatabases);
             return Task.FromResult(new List<LongRunningQueryInfo>(LongRunning));
         }
@@ -187,6 +196,33 @@ public sealed class AlertEngineTests
         }
     }
 
+    /// <summary>A state store whose persistence SAVE always throws — everything else behaves. #3282's
+    /// degradation path: the gate must keep working from its in-memory record.</summary>
+    private sealed class ThrowingPersistenceSaveStore : IAlertStateStore
+    {
+        private readonly FakeStateStore _inner = new();
+
+        public int SaveAttempts { get; private set; }
+
+        public Task<int?> LoadEdgeTriggerWatermarkAsync(string serverKey, string metricName) => _inner.LoadEdgeTriggerWatermarkAsync(serverKey, metricName);
+        public Task SaveEdgeTriggerWatermarkAsync(string serverKey, string metricName, int watermark) => _inner.SaveEdgeTriggerWatermarkAsync(serverKey, metricName, watermark);
+        public Task<DateTime?> LoadFailedJobWatermarkAsync(string serverKey) => _inner.LoadFailedJobWatermarkAsync(serverKey);
+        public Task SaveFailedJobWatermarkAsync(string serverKey, DateTime watermark) => _inner.SaveFailedJobWatermarkAsync(serverKey, watermark);
+        public Task SaveDatabaseStateAlertedAsync(string serverKey, string databaseName, string effectiveState) => _inner.SaveDatabaseStateAlertedAsync(serverKey, databaseName, effectiveState);
+        public Task ClearDatabaseStateAlertedAsync(string serverKey, string databaseName) => _inner.ClearDatabaseStateAlertedAsync(serverKey, databaseName);
+        public Task<IReadOnlyDictionary<string, IncidentOccurrenceState>> LoadIncidentOccurrencesAsync(string serverKey, string metricName) => _inner.LoadIncidentOccurrencesAsync(serverKey, metricName);
+        public Task SaveIncidentOccurrencesAsync(string serverKey, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states) => _inner.SaveIncidentOccurrencesAsync(serverKey, metricName, states);
+
+        public Task<AlertPersistenceRecord?> LoadAlertPersistenceAsync(string serverKey, string metricName) =>
+            Task.FromResult<AlertPersistenceRecord?>(null);
+
+        public Task SaveAlertPersistenceAsync(string serverKey, string metricName, AlertPersistenceRecord record)
+        {
+            SaveAttempts++;
+            throw new InvalidOperationException("persistence store is down");
+        }
+    }
+
     private sealed class FakeStateStore : IAlertStateStore
     {
         public Dictionary<(string Key, string Metric), int> EdgeWatermarks { get; } = new();
@@ -225,6 +261,21 @@ public sealed class AlertEngineTests
                     ? states
                     : new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal));
 
+
+        /* #3282: REAL persistence, not a no-op — the gate's whole point is that it survives a restart, and
+           a fake that forgot the record would let a broken seed path pass. Keyed like both real stores. */
+        public Dictionary<(string Key, string Metric), AlertPersistenceRecord> Persistence { get; } = new();
+        public List<(string Key, string Metric, AlertPersistenceRecord Record)> SavedPersistence { get; } = new();
+
+        public Task<AlertPersistenceRecord?> LoadAlertPersistenceAsync(string serverKey, string metricName) =>
+            Task.FromResult(Persistence.TryGetValue((serverKey, metricName), out var r) ? (AlertPersistenceRecord?)r : null);
+
+        public Task SaveAlertPersistenceAsync(string serverKey, string metricName, AlertPersistenceRecord record)
+        {
+            Persistence[(serverKey, metricName)] = record;
+            SavedPersistence.Add((serverKey, metricName, record));
+            return Task.CompletedTask;
+        }
         public Task SaveIncidentOccurrencesAsync(string serverKey, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states)
         {
             /* Replace-the-set, exactly like both real stores: whatever arrives IS the metric's state, so an
@@ -295,21 +346,56 @@ public sealed class AlertEngineTests
            into the process-wide AlertReadFailureCounter.Shared. */
         public AlertReadFailureCounter? ReadFailures { get; set; }
 
-        public AlertEngine Build(bool withFailedJobsFetcher = false) => new(
+        /* #3497: the Agent-job resolver seam, null by default so every pre-existing pin builds the
+           pre-#3497 engine. Tests set AgentJobNames (the answer map), flip AgentJobResolverThrows for
+           the degrade arm, and read AgentJobResolverCalls for what the engine actually asked. */
+        public IReadOnlyDictionary<AgentJobStepKey, AgentJobStepNames>? AgentJobNames { get; set; }
+        public bool AgentJobResolverThrows { get; set; }
+        public List<IReadOnlyList<AgentJobStepKey>> AgentJobResolverCalls { get; } = new();
+
+        public AlertEngine Build(bool withFailedJobsFetcher = false, bool withAgentJobResolver = false) => new(
             Settings, Adapter, StateStore, Deliverer,
             isAlertMuted: _ => Muted,
             failedJobsFetcher: withFailedJobsFetcher
                 ? (_, _, _) => { FailedJobFetches++; return Task.FromResult(new List<FailedJobInfo>(FailedJobs)); }
+                : null,
+            agentJobStepResolver: withAgentJobResolver
+                ? (_, keys, _) =>
+                {
+                    AgentJobResolverCalls.Add(keys);
+                    if (AgentJobResolverThrows)
+                    {
+                        throw new InvalidOperationException("msdb resolver is down");
+                    }
+
+                    return Task.FromResult(AgentJobNames ?? new Dictionary<AgentJobStepKey, AgentJobStepNames>());
+                }
                 : null,
             resolutionCallback: (r, _) => { Resolutions.Add(r); return Task.CompletedTask; },
             logger: null,
             utcNow: () => Now,
             readFailures: ReadFailures);
 
+        /* #3282: every snapshot gets a DISTINCT, increasing CPU sample instant unless the test says
+           otherwise, because that is the realistic case — the sweep sees a new ring-buffer sample each
+           time — and because the alternative default would be dishonest in both directions. A fixed
+           instant would make every sweep a stale re-read and silently freeze the CPU gate in tests that
+           are not about the gate; a null would put them on the no-sample-instant DEGRADATION path while
+           reading like the normal one. Tests that want a stale re-read pass the same instant twice, and
+           the one test about the null path passes it explicitly. */
+        private static int s_sampleTick;
+
         public static AlertServerSnapshot Snapshot(
             double? sqlCpu = null, double? totalCpu = null,
-            bool isOnline = true, bool isAzureSqlDb = false, bool suppressed = false) =>
-            new(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed);
+            bool isOnline = true, bool isAzureSqlDb = false, bool suppressed = false,
+            DateTime? cpuSampleTime = null, bool noCpuSampleTime = false) =>
+            new(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed,
+                noCpuSampleTime
+                    ? null
+                    : cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick)));
+
+        /// <summary>The instant distinct sample times are counted from — arbitrary, only the ordering matters.</summary>
+        public static readonly DateTime SampleBase = new(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
     }
 
     private static BlockedProcessAlertRow BlockingRow(
@@ -352,17 +438,57 @@ public sealed class AlertEngineTests
         Assert.Equal(0, h.Adapter.BlockingFetches);
     }
 
-    /* ---------------- CPU ---------------- */
+    /* ---------------- CPU: the #3282 persistence gate ---------------- */
+
+    /// <summary>
+    /// Drives <paramref name="samples"/> consecutive sweeps, each carrying a DISTINCT and increasing CPU
+    /// sample instant — one gate observation per call, which is what the gate counts. Returns the instant
+    /// of the last sample so a caller can keep the sequence going.
+    /// </summary>
+    private static async Task<DateTime> DriveCpuAsync(
+        AlertEngine engine, double? sqlCpu, double? totalCpu, int samples,
+        DateTime from, bool suppressed = false)
+    {
+        var at = from;
+        for (var i = 0; i < samples; i++)
+        {
+            at = at.AddMinutes(1);
+            await engine.EvaluateServerAsync(
+                Harness.Snapshot(sqlCpu: sqlCpu, totalCpu: totalCpu, suppressed: suppressed, cpuSampleTime: at));
+        }
+
+        return at;
+    }
 
     [Fact]
-    public async Task Cpu_FiresAtThresholdInclusive_ThenCooldownSuppressesRepeat()
+    public async Task Cpu_OneSampleOverTheBar_DoesNotFire()
     {
-        /* Lite AlertEngine.cs:65-67 (>= threshold) and :72 (cooldown gates the repeat). */
+        /* THE #3282 defect, stated as a pin: a single sample over the threshold used to be an incident.
+           This is the assertion that reddens if CpuBreachSamples goes back to 1. */
         var h = new Harness();
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 80));
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: 1, from: Harness.SampleBase);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task Cpu_FiresOnlyOnTheThirdConsecutiveBreachingSample_ThenCooldownSuppressesRepeat()
+    {
+        /* Lite AlertEngine.cs:65-67 (>= threshold) and :72 (cooldown gates the repeat), now behind the
+           gate: the threshold comparison and the delivered shape are UNCHANGED, only the number of
+           samples it takes to get there. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples - 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("High CPU", fired.MetricName);
         Assert.Equal("80% (Total CPU)", fired.CurrentValue);    /* :82 current-value shape, :64 label */
@@ -376,83 +502,337 @@ public sealed class AlertEngineTests
 
         /* Same breach 1 minute later: inside the 5-minute cooldown — no repeat (:72). */
         h.Now = h.Now.AddMinutes(1);
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 85));
+        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 85, samples: 1, from: at);
         Assert.Single(h.Deliverer.Outcomes);
 
-        /* After the cooldown elapses the standing breach re-fires (CPU is level-triggered). */
+        /* After the cooldown elapses the STANDING breach re-fires. #3282 changed what counts as an
+           incident, deliberately not how often a standing one repeats: the gate's rising edge is a
+           separate question from the reminder cadence, and silencing the reminder would be a second
+           behaviour change nobody asked for. */
         h.Now = h.Now.AddMinutes(5);
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 85));
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 85, samples: 1, from: at);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Cpu_AStreakBrokenByOneClearSample_NeverFires()
+    {
+        /* Two breaches, one sample under the bar, then two more breaches: four breaching samples in all
+           and never three in a ROW, so nothing fires. The reset is what makes "sustained" mean sustained
+           rather than "often". */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: 2, from: Harness.SampleBase);
+        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: 1, from: at);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: 2, from: at);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task Cpu_RepeatedSampleInstant_DoesNotAdvanceTheStreak()
+    {
+        /* The reason the gate counts SAMPLES and not sweeps. The alert sweep is 30 seconds and a CPU
+           sample advances about a minute, so the sweep re-reads the same row roughly every other pass.
+           Here the SAME instant is offered CpuBreachSamples x 3 times: one observation, no fire.
+
+           Without the freshness check this test fires, and with it the measured excursions stay
+           suppressed — that is the whole difference between fixing #3282 and adding 90 seconds of
+           latency to it. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var stuck = Harness.SampleBase.AddMinutes(1);
+        for (var i = 0; i < AlertEngine.CpuBreachSamples * 3; i++)
+        {
+            await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 95, cpuSampleTime: stuck));
+        }
+
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* Two genuinely new samples on top of that one observation reach the bar. */
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples - 1, from: stuck);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task Cpu_TheMeasuredTwoMinuteExcursion_IsNotAnIncident()
+    {
+        /* A replay of the worst real excursion behind #3282, one minute per stored sample: total CPU
+           39 → 68 → 73 → 93 → 93 → 53 → 55 → 21 against the 80% default. Two consecutive samples at or
+           above the bar, then back to a ~20% baseline. The pre-gate engine delivered a High CPU at 93%
+           and a CPU Resolved at 55% about 147 seconds apart; both are noise, and neither should appear. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var at = Harness.SampleBase;
+        foreach (var total in new double[] { 39, 68, 73, 93, 93, 53, 55, 21 })
+        {
+            at = at.AddMinutes(1);
+            await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: total - 3, totalCpu: total, cpuSampleTime: at));
+        }
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
     }
 
     [Fact]
     public async Task Cpu_ModeSelection_HappensInsideTheEngine()
     {
         /* CpuPercentForAlert semantics (Lite LocalDataService.Overview.cs:143-144):
-           Total → TotalCpuPercent ?? CpuPercent; SqlOnly → CpuPercent. */
+           Total → TotalCpuPercent ?? CpuPercent; SqlOnly → CpuPercent. Unchanged by #3282 — the gate
+           sits after the mode selection, so each engine here is driven CpuBreachSamples times. */
         var h = new Harness();
         h.Settings.CpuEnabled = true;
 
+        /* The sample instant is threaded FORWARD across the sub-cases rather than restarted, because every
+           h.Build() here shares one state store: a re-used instant is a sample the gate has already
+           counted, so restarting the sequence silently freezes it and each sub-case would assert against
+           an engine that observed nothing. (Found by running these, not by reading them.) */
+        var at = Harness.SampleBase;
+
         /* SqlProcess mode compares the SQL value even when total is higher. */
         h.Settings.CpuAlertMode = CpuAlertMode.SqlProcess;
-        await h.Build().EvaluateServerAsync(Harness.Snapshot(sqlCpu: 50, totalCpu: 95));
+        at = await DriveCpuAsync(h.Build(), sqlCpu: 50, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: at);
         Assert.Empty(h.Deliverer.Outcomes);
 
-        await h.Build().EvaluateServerAsync(Harness.Snapshot(sqlCpu: 85, totalCpu: 95));
+        at = await DriveCpuAsync(h.Build(), sqlCpu: 85, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: at);
         Assert.Equal("85% (SQL CPU)", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
 
-        /* TotalServer mode falls back to the SQL value when no total is available. */
-        h.Deliverer.Outcomes.Clear();
-        h.Settings.CpuAlertMode = CpuAlertMode.TotalServer;
-        await h.Build().EvaluateServerAsync(Harness.Snapshot(sqlCpu: 90, totalCpu: null));
+        /* TotalServer mode falls back to the SQL value when no total is available. A fresh harness, so the
+           incident the sub-case above opened cannot mask this one's rising edge. */
+        h = new Harness { Settings = { CpuEnabled = true, CpuAlertMode = CpuAlertMode.TotalServer } };
+        at = await DriveCpuAsync(h.Build(), sqlCpu: 90, totalCpu: null, samples: AlertEngine.CpuBreachSamples, from: at);
         Assert.Equal("90% (Total CPU)", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
 
-        /* No CPU sample at all → no alert (:66 HasValue gate). */
-        h.Deliverer.Outcomes.Clear();
-        await h.Build().EvaluateServerAsync(Harness.Snapshot(sqlCpu: null, totalCpu: null));
+        /* No CPU sample at all → no alert (:66 HasValue gate), on a fresh harness so nothing is open. */
+        h = new Harness { Settings = { CpuEnabled = true, CpuAlertMode = CpuAlertMode.TotalServer } };
+        await DriveCpuAsync(h.Build(), sqlCpu: null, totalCpu: null, samples: AlertEngine.CpuBreachSamples, from: at);
         Assert.Empty(h.Deliverer.Outcomes);
     }
 
     [Fact]
-    public async Task Cpu_RecoveryEmitsResolution_WithLiteToastStrings_UnlessSuppressed()
+    public async Task Cpu_ResolvesOnlyAfterTwoConsecutiveClearSamples_WithLiteToastStrings_UnlessSuppressed()
     {
-        /* Lite AlertEngine.cs:101-113 — active→inactive announces "CPU Resolved" gated on
-           !suppressPopups && enabled (:107). */
+        /* Lite AlertEngine.cs:101-113 — the "CPU Resolved" strings are unchanged; what changed is that
+           ONE sample under the bar no longer announces a recovery. */
         var h = new Harness();
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 90));
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 20, totalCpu: 40));
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
 
+        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: AlertEngine.CpuClearSamples - 1, from: at);
+        Assert.Empty(h.Resolutions);
+
+        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: 1, from: at);
         var resolution = Assert.Single(h.Resolutions);
         Assert.Equal("CPU Resolved", resolution.Title);                       /* :110 */
         Assert.Equal("SRV-A: Total CPU back to 40%", resolution.Message);     /* :111 */
         Assert.Equal("High CPU", resolution.MetricName);
 
-        /* Suppressed recovery still flips the active state but says nothing (:107). */
+        /* Suppressed: the gate still advances (suppression is evaluate-but-don't-deliver) and says
+           nothing (:107). */
         h.Resolutions.Clear();
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 90, suppressed: true));
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 20, totalCpu: 40, suppressed: true));
+        h.Deliverer.Outcomes.Clear();
+        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.CpuBreachSamples, from: at, suppressed: true);
+        await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: AlertEngine.CpuClearSamples, from: at, suppressed: true);
         Assert.Empty(h.Resolutions);
+        Assert.Empty(h.Deliverer.Outcomes);
     }
 
     [Fact]
-    public async Task Cpu_Suppressed_SetsActiveButDoesNotDeliverOrStampCooldown()
+    public async Task Cpu_ABreachBeforeTheClearThreshold_KeepsTheIncidentOpen()
     {
-        /* Lite AlertEngine.cs:71-72 — active is recorded, but the !suppressPopups gate sits
-           BEFORE the cooldown stamp, so nothing is delivered and nothing is stamped. */
+        /* The other half of the resolve rule, and the shape #3282 measured as "fired at 99% and resolved
+           to 23% within two minutes": an open incident that dips under the bar for one sample is still
+           the same incident, so no resolve/re-fire pair is produced. */
         var h = new Harness();
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 90, suppressed: true));
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 23, samples: 1, from: at);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: 1, from: at);
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task Cpu_MissingValueFreezesTheGate_AndNeverAnnouncesARecovery()
+    {
+        /* A CPU sample that stops arriving is not a recovery. The pre-#3282 code fell through to its
+           resolve arm on a null value and sent "SRV-A: Total CPU back to %" — a recovery message with
+           no number in it, about a measurement nobody took. The streak is frozen instead, so the sample
+           that eventually arrives continues where the last real one left off. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        at = await DriveCpuAsync(engine, sqlCpu: null, totalCpu: null, samples: 5, from: at);
+        Assert.Empty(h.Resolutions);
+
+        /* And the frozen streak is the BREACH streak: one real clear sample still is not enough. */
+        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: 1, from: at);
+        Assert.Empty(h.Resolutions);
+
+        await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: 1, from: at);
+        Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task Cpu_NoSampleInstant_CountsEverySweep()
+    {
+        /* The documented DEGRADATION for a host that supplies no sample instant (see
+           AlertServerSnapshot.CpuSampleTimeUtc). Persistence is then per-sweep rather than per-sample —
+           weaker, but the alert still fires, because silence is the one failure a monitoring product
+           cannot tell apart from health. Pinned so the fallback is a decision rather than an accident. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        for (var i = 0; i < AlertEngine.CpuBreachSamples; i++)
+        {
+            await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 95, noCpuSampleTime: true));
+        }
+
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task Cpu_PersistsTheStreakAndResumesAcrossARestart()
+    {
+        /* Erik's restart requirement, first half: a partly-built streak must not be lost in a way that
+           makes a sustained event never fire. It is PERSISTED, so a new engine over the same store
+           resumes and the very next sample completes the streak — rather than restarting the count, which
+           would delay a real saturation event by CpuBreachSamples samples on every service restart. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+
+        var at = await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples - 1, from: Harness.SampleBase);
         Assert.Empty(h.Deliverer.Outcomes);
 
-        /* Un-suppressed one second later: fires immediately — no cooldown was stamped. */
-        h.Now = h.Now.AddSeconds(1);
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 90));
+        var persisted = Assert.Single(h.StateStore.Persistence);
+        Assert.Equal(AlertEngine.CpuPersistenceMetric, persisted.Key.Metric);
+        Assert.Equal(AlertEngine.CpuBreachSamples - 1, persisted.Value.State.ConsecutiveBreaches);
+        Assert.False(persisted.Value.State.Firing);
+
+        /* A brand-new engine over the same state store IS the restart. */
+        await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: 1, from: at);
         Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task Cpu_ARestartDoesNotReAnnounceAnAlreadyOpenIncident()
+    {
+        /* Erik's restart requirement, second half, and the reason the Firing bit had to leave memory: the
+           pre-#3282 flag was in-memory only, so the first post-restart sweep over a standing condition
+           delivered the same incident again. The persisted bit means the restarted engine knows the
+           incident is open, and the only thing that can produce another message is the ordinary cooldown
+           reminder — which is why the clock is left alone here. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+
+        var at = await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+
+        var restarted = h.Build();
+        at = await DriveCpuAsync(restarted, sqlCpu: 70, totalCpu: 95, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* And it resolves normally rather than being orphaned. */
+        at = await DriveCpuAsync(restarted, sqlCpu: 20, totalCpu: 30, samples: AlertEngine.CpuClearSamples, from: at);
+        Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task Cpu_TheGateAdvancesUnderSuppression_SoOneUnsuppressedSampleDelivers()
+    {
+        /* Suppression is evaluate-but-don't-deliver, and that has to remain true of the GATE and not just
+           of the send: a suppressed streak must count, so that un-acknowledging a server reports the
+           condition it is actually in rather than starting a fresh three-sample wait.
+
+           This pin exists because its Lite twin cannot be run here. Lite.Tests is net10.0-windows and its
+           harness is the WPF app, so LiteAlertForwardingTests.SuppressedSweep_... is CI's to execute —
+           and it is the exact claim that test now depends on after #3282. The engine is shared, so
+           asserting it here makes the Lite edit a verified claim rather than a plausible one. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveCpuAsync(engine, sqlCpu: 95, totalCpu: 99, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase, suppressed: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* One UNsuppressed sample: the incident is already open from the suppressed streak, so this is the
+           standing-condition delivery rather than a rising edge that has to be earned again. */
+        await DriveCpuAsync(engine, sqlCpu: 95, totalCpu: 99, samples: 1, from: at);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task Cpu_APersistenceSaveFailure_StillFires_AndIsNotCountedAsASwallowedRead()
+    {
+        /* Two claims, and the second is the one that is easy to get wrong — I did.
+
+           The gate decides each observation from its IN-MEMORY record, so a store that cannot be written
+           costs the streak across a restart and never an alert: the incident still fires on the third
+           sample.
+
+           And the failure is NOT recorded on #3013's counter. That counter is about READS the alert pass
+           performs and swallows, against a denominator of alert passes, and an operator reads a non-zero
+           value as the pass going blind on a condition. A write in its numerator says that about a
+           condition that was in fact evaluated correctly — only the memory of it was lost. Same call
+           SaveOccurrencesAsync already makes for the same reason, and it is a claim no compiler or
+           text-assertion can carry. */
+        var counter = new AlertReadFailureCounter(() => new DateTime(2026, 9, 5, 8, 0, 0, DateTimeKind.Utc));
+        var store = new ThrowingPersistenceSaveStore();
+        var h = new Harness { ReadFailures = counter };
+        h.Settings.CpuEnabled = true;
+
+        var engine = new AlertEngine(
+            h.Settings, h.Adapter, store, h.Deliverer, _ => false,
+            resolutionCallback: (r, _) => { h.Resolutions.Add(r); return Task.CompletedTask; },
+            utcNow: () => h.Now, readFailures: counter);
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+
+        Assert.True(store.SaveAttempts > 0, "the engine must have tried to persist, or this pin proves nothing");
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(0, counter.ReadFor(Key).ServerReadFailures);
+        Assert.Equal(0, counter.ReadFor(Key).InstanceReadFailures);
+
+        /* And it resolves normally too — a broken save must not strand an open incident. */
+        await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 30, samples: AlertEngine.CpuClearSamples,
+            from: Harness.SampleBase.AddMinutes(AlertEngine.CpuBreachSamples));
+        Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
+    public void CpuGateDefaults_AreDerivedFromTheSampleCadence()
+    {
+        /* The numbers are a real decision, so they are pinned rather than left to drift silently. Three
+           breaching samples at the ~60-second SCHEDULER_MONITOR cadence is about three minutes, which is
+           above every excursion measured on the fleet for #3282 (42-147 seconds, median 87 s, worst two
+           consecutive one-minute samples over the bar). Clearing is deliberately FASTER than firing: a
+           late resolve is a stale open incident, an early one is the resolve/fire pair this issue exists
+           to remove. */
+        Assert.Equal(3, AlertEngine.CpuBreachSamples);
+        Assert.Equal(2, AlertEngine.CpuClearSamples);
+        Assert.True(AlertEngine.CpuClearSamples < AlertEngine.CpuBreachSamples);
+        Assert.True(AlertEngine.CpuClearSamples > 1);
+
+        /* The persisted subject is the metric an operator already knows, not a second spelling of it. */
+        Assert.Equal("High CPU", AlertEngine.CpuPersistenceMetric);
     }
 
     /* ---------------- mute ---------------- */
@@ -467,13 +847,13 @@ public sealed class AlertEngineTests
         h.Muted = true;
         var engine = h.Build();
 
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 90));
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
         Assert.True(Assert.Single(h.Deliverer.Outcomes).Muted);
 
         /* Unmuting inside the cooldown does not re-fire — the muted fire stamped it (:76). */
         h.Muted = false;
         h.Now = h.Now.AddMinutes(1);
-        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 90));
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: 1, from: at);
         Assert.Single(h.Deliverer.Outcomes);
     }
 
@@ -1094,6 +1474,318 @@ public sealed class AlertEngineTests
         Assert.Contains("StageDb", args.Excluded);
     }
 
+    /* ---------------- the sibling card annotations: #3495 (High CPU names active maintenance)
+       and #3497 (Long-Running Query names the Agent job). One contract, spelled once: ANNOTATION,
+       NEVER SUPPRESSION — the tiers stay, every card still fires, the annotation states what IS and
+       never a verdict, and every degrade arm costs the annotation rather than the page. ---------------- */
+
+    /// <summary>msdb job_id AB6D9F63-3B01-4E15-9F34-B0A0F0B355A2, step 3, in SQL Agent's own spelling
+    /// (the byte-order pin lives in <see cref="AgentJobStepQueryTests"/>).</summary>
+    private const string AgentProgramName = "SQLAgent - TSQL JobStep (Job 0x639F6DAB013B154E9F34B0A0F0B355A2 : Step 3)";
+    private static readonly AgentJobStepKey AgentKey = new(Guid.Parse("AB6D9F63-3B01-4E15-9F34-B0A0F0B355A2"), 3);
+
+    private static LongRunningQueryInfo BackupSession(int sessionId = 120, string db = "StackOverflow") => new()
+    {
+        SessionId = sessionId,
+        DatabaseName = db,
+        QueryText = "BACKUP DATABASE [StackOverflow] TO VIRTUAL_DEVICE = 'x' WITH COMPRESSION",
+        ProgramName = "RdsAdminService",
+        ElapsedSeconds = 1034, /* 17m 14s */
+        WaitType = "ASYNC_IO_COMPLETION"
+    };
+
+    [Fact]
+    public async Task Cpu_FiringDuringActiveMaintenance_NamesTheBackupOnTheCard()
+    {
+        /* #3495's acceptance shape, through the engine: a CPU page that fires while a backup session is
+           active names it — program, elapsed, wait, straight off the session row — because everything on
+           this line was knowable at fire time from the same active-session surface the operator read by
+           hand. The LRQ ALERT stays disabled here on purpose: the annotation is the CPU card's own read,
+           not a rider on the long-running-query check (whose excludeBackups opt-out exists precisely to
+           keep this session OFF that alert). */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.ExcludedDatabasesList.Add("StageDb");
+        h.Adapter.LongRunning.Add(BackupSession());
+        var engine = h.Build();
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("High CPU", fired.MetricName);
+        Assert.Equal(
+            "  Total CPU: 95%\n  Threshold: 80%\n  Active maintenance: BACKUP DATABASE (RdsAdminService), 17m 14s elapsed, ASYNC_IO_COMPLETION",
+            fired.DetailText);
+
+        /* The probe reads the RAW snapshot: threshold 0 (every running session), the bounded row budget,
+           all five noise opt-outs OFF (excludeBackups would remove exactly what this line names), and an
+           EMPTY exclusion list even though the settings carry one — an excluded database's backup still
+           burns this server's CPU. The LRQ check is disabled, so the recorded args are the probe's own. */
+        var args = h.Adapter.LastLrqArgs!.Value;
+        Assert.Equal(0, args.ThresholdMinutes);
+        Assert.Equal(AlertEngine.ActiveMaintenanceProbeMaxRows, args.MaxResults);
+        Assert.False(args.Diag || args.WaitFor || args.Backups || args.Misc || args.Cdc);
+        Assert.Empty(args.Excluded);
+    }
+
+    [Fact]
+    public async Task Cpu_NoMaintenanceSession_TheCardIsByteIdenticalToToday()
+    {
+        /* THE REGRESSION PIN: absent any maintenance shape, the annotation contributes zero bytes — the
+           exact pre-#3495 detail text, not a blank line, not an empty marker. An ordinary busy session in
+           the snapshot is not maintenance and must not be named as such. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 71,
+            DatabaseName = "StackOverflow",
+            QueryText = "SELECT u.Reputation FROM dbo.Users AS u WHERE u.Id = 1",
+            ProgramName = "HammerDB",
+            ElapsedSeconds = 5400,
+            WaitType = "CXPACKET"
+        });
+        var engine = h.Build();
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("  Total CPU: 95%\n  Threshold: 80%", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task Cpu_MaintenanceProbeFailure_CostsTheAnnotation_NeverThePage()
+    {
+        /* The degrade arm: the probe sits INSIDE the fire branch, after the condition was decided, so a
+           faulted read leaves a byte-identical pre-#3495 card and the page delivers. Counted on #3013's
+           surface — it is a store read the alert pass swallowed — under its own read name, so an operator
+           can tell an annotation gone blind from a condition gone blind. */
+        var counter = new AlertReadFailureCounter(() => new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc));
+        var h = new Harness { ReadFailures = counter };
+        h.Settings.CpuEnabled = true;
+        h.Adapter.ThrowOnLongRunningRead = true;
+        var engine = h.Build();
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("High CPU", fired.MetricName);
+        Assert.Equal("  Total CPU: 95%\n  Threshold: 80%", fired.DetailText);
+
+        var reading = counter.ReadFor(Key);
+        Assert.Equal(1, reading.ServerReadFailures);
+        Assert.Equal("CPU maintenance annotation", reading.LastFailureRead);
+    }
+
+    [Fact]
+    public async Task Cpu_ConcurrentMaintenanceSessions_OneLineEach_CappedWithAStatedOmission()
+    {
+        /* Multiple concurrent maintenance sessions get one line each in the read's own order (elapsed
+           DESC — the longest-running, likeliest pin leads), bounded by the shared display budget with the
+           omission STATED — the #3494 discipline, never a silent cut. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        for (int i = 0; i < 5; i++)
+        {
+            var s = BackupSession(sessionId: 120 + i, db: $"db{i}");
+            s.ElapsedSeconds = 600 - (i * 60);
+            h.Adapter.LongRunning.Add(s);
+        }
+        var engine = h.Build();
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+
+        var detail = Assert.Single(h.Deliverer.Outcomes).DetailText!;
+        Assert.Equal(AlertContextBuilders.ActiveMaintenanceMaxLines,
+            detail.Split('\n').Count(line => line.Contains("Active maintenance: BACKUP DATABASE", StringComparison.Ordinal)));
+        Assert.EndsWith("Active maintenance: 2 more maintenance session(s) not shown", detail, StringComparison.Ordinal);
+        Assert.Contains("10m 0s elapsed", detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Lrq_AgentJobStepSession_NamesTheJobAndStepOnTheCard()
+    {
+        /* #3497's acceptance shape, through the engine: a card whose session is an Agent job step names
+           the job and step, resolved through the host seam in one call carrying the parsed key. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.AgentJobNames = new Dictionary<AgentJobStepKey, AgentJobStepNames>
+        {
+            [AgentKey] = new("nightly index maintenance", "Reorganize fragmented indexes")
+        };
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 71,
+            DatabaseName = "StackOverflow",
+            QueryText = "ALTER INDEX [IX_Users_Rep] ON [dbo].[Users] REORGANIZE",
+            ProgramName = AgentProgramName,
+            ElapsedSeconds = 2159,
+            QueryHash = "0x9AAF0129E4E9AD07"
+        });
+
+        await h.Build(withAgentJobResolver: true).EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Long-Running Query", fired.MetricName);
+        Assert.Contains(
+            "  Running under Agent job: nightly index maintenance, step 3 (Reorganize fragmented indexes)",
+            fired.DetailText!, StringComparison.Ordinal);
+        var asked = Assert.Single(h.AgentJobResolverCalls);
+        Assert.Equal(AgentKey, Assert.Single(asked));
+    }
+
+    [Fact]
+    public async Task Lrq_ResolverFailure_DegradesToTheUnresolvedForm_AndTheCardStillDelivers()
+    {
+        /* A resolver that THROWS (transport fault, host bug — the hosts' own permission arms degrade to
+           an empty map before throwing can happen) still states the Agent-job fact the parse alone
+           establishes, in the unresolved form carrying the raw job-id marker — the hex an operator can
+           match against the Program field by eye. The card delivers either way. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.AgentJobResolverThrows = true;
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 71,
+            DatabaseName = "StackOverflow",
+            QueryText = "ALTER INDEX [IX_Users_Rep] ON [dbo].[Users] REORGANIZE",
+            ProgramName = AgentProgramName,
+            ElapsedSeconds = 2159,
+            QueryHash = "0x9AAF0129E4E9AD07"
+        });
+
+        await h.Build(withAgentJobResolver: true).EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains(
+            "  Running under Agent job: (name unresolved) Job 0x639F6DAB013B154E9F34B0A0F0B355A2, step 3",
+            fired.DetailText!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Lrq_NoResolverWired_TheCardIsByteIdenticalToToday()
+    {
+        /* THE REGRESSION PIN for hosts (and tests) that wire no resolver: null means "no resolution was
+           attempted", and an Agent session's card renders exactly the pre-#3497 shape — raw Program
+           field, no annotation, no unresolved marker claiming a lookup that never ran. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 71,
+            DatabaseName = "StackOverflow",
+            QueryText = "ALTER INDEX [IX_Users_Rep] ON [dbo].[Users] REORGANIZE",
+            ProgramName = AgentProgramName,
+            ElapsedSeconds = 2159,
+            QueryHash = "0x9AAF0129E4E9AD07"
+        });
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.DoesNotContain("Running under Agent job", fired.DetailText!, StringComparison.Ordinal);
+        Assert.Contains($"  Program: {AgentProgramName}", fired.DetailText!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Lrq_NonAgentSessions_NeverInvokeTheResolver_AndRenderByteIdentically()
+    {
+        /* The other half of the regression pin: with the resolver WIRED, an application connection's
+           card is untouched and no msdb round trip happens at all — the annotation keys off the parse,
+           and the parse refuses everything but the machine-emitted job-step form. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 71,
+            DatabaseName = "StackOverflow",
+            QueryText = "SELECT COUNT_BIG(*) FROM dbo.Users AS u",
+            ProgramName = "HammerDB",
+            ElapsedSeconds = 2159,
+            QueryHash = "0x9AAF0129E4E9AD07"
+        });
+
+        await h.Build(withAgentJobResolver: true).EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.DoesNotContain("Running under Agent job", fired.DetailText!, StringComparison.Ordinal);
+        Assert.Empty(h.AgentJobResolverCalls);
+    }
+
+    [Fact]
+    public async Task Lrq_ResolverIsAskedOnlyForTheShownSessions_Deduped()
+    {
+        /* One msdb round trip per delivered card, scoped to what the card will SHOW: the display cap
+           bounds the parse, and two sessions of the same (job, step) cost one key. The fourth session —
+           past the cap — is never asked about, so a name is never fetched for a session nobody sees. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        var jobB = "SQLAgent - TSQL JobStep (Job 0x00112233445566778899AABBCCDDEEFF : Step 2)";
+        var jobC = "SQLAgent - TSQL JobStep (Job 0xFFEEDDCCBBAA99887766554433221100 : Step 9)";
+        LongRunningQueryInfo Row(int sessionId, long elapsed, string program) => new()
+        {
+            SessionId = sessionId,
+            DatabaseName = "StackOverflow",
+            QueryText = "ALTER INDEX [IX] ON [dbo].[Users] REORGANIZE",
+            ProgramName = program,
+            ElapsedSeconds = elapsed,
+            QueryHash = "0x9AAF0129E4E9AD07"
+        };
+        h.Adapter.LongRunning.Add(Row(71, 4000, AgentProgramName));
+        h.Adapter.LongRunning.Add(Row(72, 3900, AgentProgramName));
+        h.Adapter.LongRunning.Add(Row(73, 3800, jobB));
+        h.Adapter.LongRunning.Add(Row(74, 3700, jobC));
+
+        await h.Build(withAgentJobResolver: true).EvaluateServerAsync(Harness.Snapshot());
+
+        var asked = Assert.Single(h.AgentJobResolverCalls);
+        Assert.Equal(2, asked.Count);
+        Assert.Equal(AgentKey, asked[0]);
+        Assert.True(AgentJobStepQuery.TryParseProgramName(jobB, out var jobBKey));
+        Assert.Equal(jobBKey, asked[1]);
+    }
+
+    [Fact]
+    public async Task Lrq_TheAnnotationIsFingerprintInert_ARefireFoldsIntoTheSameIncident()
+    {
+        /* The blast-radius verdict, pinned through the engine: the #1140 fingerprint hashes (server,
+           type, query_hash) and the annotation is a rendered FIELD, so a card that re-fires with a
+           different elapsed and a DIFFERENT annotation state (resolved, then unresolvable) carries the
+           SAME DedupKey — dedup, per-fingerprint delivery cooldowns and PagerDuty correlation all key on
+           it, and none of them may see a new incident because a job name resolved. */
+        var h = new Harness();
+        h.Settings.LongRunningQueryEnabled = true;
+        h.AgentJobNames = new Dictionary<AgentJobStepKey, AgentJobStepNames>
+        {
+            [AgentKey] = new("nightly index maintenance", "Reorganize fragmented indexes")
+        };
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 71,
+            DatabaseName = "StackOverflow",
+            QueryText = "ALTER INDEX [IX_Users_Rep] ON [dbo].[Users] REORGANIZE",
+            ProgramName = AgentProgramName,
+            ElapsedSeconds = 2159,
+            QueryHash = "0x9AAF0129E4E9AD07"
+        });
+        var engine = h.Build(withAgentJobResolver: true);
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        /* Past the cooldown, longer elapsed, and the resolver now answers nothing — msdb rights revoked
+           between fires, say. Same statement, same hash, same incident. */
+        h.Now = h.Now.AddMinutes(6);
+        h.AgentJobNames = new Dictionary<AgentJobStepKey, AgentJobStepNames>();
+        h.Adapter.LongRunning[0].ElapsedSeconds = 5400;
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        var first = Assert.Single(h.Deliverer.Outcomes[0].Context!.Incidents!);
+        var second = Assert.Single(h.Deliverer.Outcomes[1].Context!.Incidents!);
+        Assert.Equal(first.DedupKey, second.DedupKey);
+        Assert.Contains("(name unresolved)", h.Deliverer.Outcomes[1].DetailText!, StringComparison.Ordinal);
+    }
+
     /* ---------------- tempdb ---------------- */
 
     [Fact]
@@ -1399,6 +2091,43 @@ public sealed class AlertEngineTests
         Assert.Equal(firstFailure.AddMinutes(30), h.StateStore.FailedJobWatermarks[Key]);
     }
 
+    /// <summary>
+    /// #3421: the engine hands the builder the window it actually read, so the body states the span it
+    /// reports rather than leaving a reader to infer it from a repeat. A wiring pin: the builder's own
+    /// tests prove the item's shape, and nothing else would notice the two arguments being dropped.
+    /// <para>The body is deliberately NOT narrowed to "new since the last alert" — see
+    /// <see cref="AlertContextBuilders.BuildFailedJobContext"/> for why the watermark cannot tell an
+    /// already-reported failure from one that appeared late with an older run start.</para>
+    /// </summary>
+    [Fact]
+    public async Task FailedJobs_BodyStatesTheWindowTheEngineRead()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Settings.FailedJobLookbackMinutes = 45;
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var firedAt = h.Now;
+        h.FailedJobs.Add(new FailedJobInfo
+        {
+            JobName = "Backup.Full", JobId = "j1",
+            RunDateTime = firedAt.AddMinutes(-10), UtcOffsetMinutes = 0
+        });
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.NotNull(fired.DetailText);
+        Assert.Contains(AlertContextBuilders.FailureWindowHeading, fired.DetailText!, StringComparison.Ordinal);
+        Assert.Contains(
+            $"{AlertContextBuilders.FailureWindowToLabel}: {AlertTimestamp.Utc(firedAt)}",
+            fired.DetailText!, StringComparison.Ordinal);
+        /* The CONFIGURED length, not a constant: a hardcoded 60 would pass at the shipped default. */
+        Assert.Contains(
+            $"{AlertContextBuilders.FailureWindowFromLabel}: {AlertTimestamp.Utc(firedAt.AddMinutes(-45))}",
+            fired.DetailText!, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task FailedJobs_GatedOnOnlineAndNotAzure_AndSuppressionHoldsTheWatermark()
     {
@@ -1669,8 +2398,13 @@ public sealed class AlertEngineTests
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        await engine.EvaluateServerAsync(new AlertServerSnapshot("101", "SRV-A", true, 70, 90, false, false));
-        await engine.EvaluateServerAsync(new AlertServerSnapshot("202", "SRV-B", true, 70, 90, false, false));
+        /* #3282: CpuBreachSamples distinct samples per server, since High CPU no longer fires on one. */
+        for (var i = 1; i <= AlertEngine.CpuBreachSamples; i++)
+        {
+            var at = Harness.SampleBase.AddMinutes(i);
+            await engine.EvaluateServerAsync(new AlertServerSnapshot("101", "SRV-A", true, 70, 90, false, false, at));
+            await engine.EvaluateServerAsync(new AlertServerSnapshot("202", "SRV-B", true, 70, 90, false, false, at));
+        }
 
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
         Assert.Equal(new[] { "101", "202" }, h.Deliverer.Outcomes.Select(o => o.ServerKey).ToArray());
@@ -2136,5 +2870,43 @@ public sealed class AlertEngineTests
         Assert.Equal("Database State", o.MetricName);
         Assert.Equal(PerformanceMonitor.Notifications.AlertSeverityLevel.Critical, o.Severity);
         Assert.Contains("no baseline", o.ShortMessage);
+    }
+
+    /// <summary>
+    /// #3297 delivers this alert's detail block on every channel, which makes a fact stated under two
+    /// labels a thing an operator reads twice rather than a harmless internal duplication. The pending
+    /// case is where that is easy to reintroduce: <c>Expected State</c> already IS "(no baseline yet)"
+    /// whenever the baseline is missing, so a second field restating it looks like new information while
+    /// adding none.
+    ///
+    /// <para>An occurrence COUNT rather than a field-name list: a list would pass while the same fact
+    /// arrived under a label nobody thought to enumerate, which is the failure this is guarding.</para>
+    /// </summary>
+    [Fact]
+    public async Task DatabaseState_PendingCriticalFirstObservation_StatesTheMissingBaselineOnce()
+    {
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Payments", StateDesc = "SUSPECT", ExpectedState = "" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var detail = Assert.Single(h.Deliverer.Outcomes).DetailText!;
+
+        Assert.Contains("no baseline", detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, CountOccurrences(detail, "baseline"));
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        int count = 0, index = 0;
+        while ((index = haystack.IndexOf(needle, index, StringComparison.OrdinalIgnoreCase)) >= 0)
+        {
+            count++;
+            index += needle.Length;
+        }
+
+        return count;
     }
 }

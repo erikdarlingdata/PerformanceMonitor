@@ -578,11 +578,16 @@ public partial class RemoteCollectorService
                 return;
             }
 
-            // Skip MFA servers if user has cancelled authentication
-            // This prevents repeated popup dialogs during background data collection
-            if (server.AuthenticationType == AuthenticationTypes.EntraMFA && serverStatus.UserCancelledMfa)
+            /* Skip a server whose interactive sign-in the user already declined, so background
+               collection does not keep raising the thing they dismissed. Asked about the MODE rather
+               than tested against EntraMFA, for the reason ServerManager's gate gives: a new
+               interactive mode must not inherit "keeps prompting" from an omission. Device code
+               reaches this for a sharper reason than MFA does - its code expires in about three
+               minutes, so a declined sign-in re-raised every cycle is a window the user closes over
+               and over while the server never collects. */
+            if (AuthenticationTypes.RequiresInteractiveSignIn(server.AuthenticationType) && serverStatus.UserCancelledMfa)
             {
-                AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} SKIPPED - MFA authentication cancelled by user");
+                AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} SKIPPED - interactive authentication cancelled by user");
                 return;
             }
 
@@ -1214,18 +1219,21 @@ WHERE server_id = $3";
 
     /// <summary>
     /// Creates a SQL connection to a remote server.
-    /// Throws InvalidOperationException if MFA authentication was cancelled by user.
+    /// Throws InvalidOperationException if an interactive sign-in was cancelled by the user.
     /// </summary>
     protected async Task<SqlConnection> CreateConnectionAsync(ServerConnection server, CancellationToken cancellationToken)
     {
-        // For MFA servers, serialize authentication attempts to prevent multiple popups
-        bool isMfaServer = server.AuthenticationType == AuthenticationTypes.EntraMFA;
+        /* Serialize authentication for any mode that can put a window in front of the user, so two
+           collectors starting together cannot raise two prompts. Asked about the mode, not tested
+           against EntraMFA: both interactive modes need the same single-file treatment, and device
+           code needs it more - two code windows at once are two codes, one of which is wrong. */
+        bool isInteractiveServer = AuthenticationTypes.RequiresInteractiveSignIn(server.AuthenticationType);
         bool mfaLockAcquired = false;
 
         try
         {
-            // Acquire MFA lock first (if applicable) to serialize authentication
-            if (isMfaServer)
+            // Acquire the interactive-auth lock first (if applicable) to serialize authentication
+            if (isInteractiveServer)
             {
                 await s_mfaAuthLock.WaitAsync(cancellationToken);
                 mfaLockAcquired = true;
@@ -1234,8 +1242,8 @@ WHERE server_id = $3";
                 var serverStatus = _serverManager.GetConnectionStatus(server.Id);
                 if (serverStatus.UserCancelledMfa)
                 {
-                    AppLogger.Info("Collector", $"  [{server.DisplayName}] MFA authentication already cancelled - aborting");
-                    throw new InvalidOperationException("MFA authentication cancelled by user. Please connect to the server explicitly to retry.");
+                    AppLogger.Info("Collector", $"  [{server.DisplayName}] interactive authentication already cancelled - aborting");
+                    throw new InvalidOperationException("Interactive authentication cancelled by user. Please connect to the server explicitly to retry.");
                 }
             }
 
@@ -1255,20 +1263,46 @@ WHERE server_id = $3";
                 return await RetryHelper.ExecuteWithRetryAsync(async () =>
                 {
                     var connection = new SqlConnection(connStr);
-                    
+
+                    /* Inside the retry lambda, not outside it. A retried open needs a FRESH code -
+                       the previous one may already be spent or expired - and disposing the previous
+                       attempt is what closes the window showing it. Null for every mode but device
+                       code. Linked so either side can end the wait: the collector's own token on
+                       shutdown, the prompt window's Cancel when the user gives up. Which of the two
+                       fired is read back below, because they mean different things. */
+                    using var deviceCode = EntraDeviceCodeAuth.Begin(builder);
+                    using var openCancellation = deviceCode is null
+                        ? null
+                        : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deviceCode.Token);
+
                     try
                     {
-                        await connection.OpenAsync(cancellationToken);
+                        await connection.OpenAsync(openCancellation?.Token ?? cancellationToken);
                         return connection;
                     }
-                    catch (Exception ex) when (isMfaServer)
+                    catch (Exception ex) when (isInteractiveServer)
                     {
-                        // Detect MFA cancellation and mark immediately so other waiting connections abort
-                        if (MfaAuthenticationHelper.IsMfaCancelledException(ex))
+                        /* Mark a user-declined sign-in immediately, so the other connections queued
+                           behind the lock abort instead of each raising their own prompt.
+
+                           Two detections, because the two interactive modes fail differently. Entra
+                           MFA reports cancellation in the exception MESSAGE, which is all the broker
+                           gives. Device code reports it as the cancellation of the token above - and
+                           the collector's own token is linked into that same source, so the token
+                           alone cannot say which side fired. A shutdown is not a decline: flagging
+                           one would leave the server skipped for the rest of the session over an app
+                           restart nobody chose. */
+                        var userDeclined =
+                            MfaAuthenticationHelper.IsMfaCancelledException(ex) ||
+                            (deviceCode is not null
+                                && deviceCode.Token.IsCancellationRequested
+                                && !cancellationToken.IsCancellationRequested);
+
+                        if (userDeclined)
                         {
                             var serverStatus = _serverManager.GetConnectionStatus(server.Id);
                             serverStatus.UserCancelledMfa = true;
-                            AppLogger.Info("Collector", $"  [{server.DisplayName}] MFA authentication cancelled by user - flagging to abort other pending connections");
+                            AppLogger.Info("Collector", $"  [{server.DisplayName}] interactive authentication cancelled by user - flagging to abort other pending connections");
                         }
                         throw;
                     }

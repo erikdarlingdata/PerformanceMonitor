@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Text.Json;
@@ -17,6 +18,7 @@ using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Analysis;
@@ -59,9 +61,16 @@ public static class DarlingWebEndpoints
     /// is the compute-heavy plan-analysis phase-2 work; the Custom Views tools (#1599) are served by their OWN
     /// richer web endpoints (<c>/api/views</c> CRUD + <c>/api/compose/run</c> + the <c>/api/catalog</c> compose
     /// vocabulary that <c>describe_custom_view_catalog</c> mirrors), not a <c>/api/read/{tool}</c> query-string mirror;
-    /// and the alert-tuning tools (<c>update_alert_settings</c> / <c>create_mute_rule</c> / <c>delete_mute_rule</c>)
-    /// WRITE the alert config, and the server-onboarding tools (<c>add_servers</c> / <c>remove_server</c>) WRITE the
-    /// monitored-server registry, so — like <c>mute_analysis_finding</c> — they have no read endpoint.</summary>
+    /// the four mute-rule write verbs (<c>create_mute_rule</c> / <c>update_mute_rule</c> / <c>delete_mute_rule</c> /
+    /// <c>set_mute_rule_enabled</c>) are the Custom Views disposition since #3450 — served by their OWN dedicated
+    /// endpoints (<c>/api/mute-rules</c>, see <see cref="MapMuteRules"/>), never a query-string mirror of a write;
+    /// <c>update_alert_settings</c> WRITEs the alert config with no web surface at all, and the server-onboarding tools
+    /// (<c>add_servers</c> / <c>remove_server</c>) WRITE the
+    /// monitored-server registry, so — like <c>mute_analysis_finding</c> — they have no read endpoint. The
+    /// custom-alert-rule tools (#3285) are the same disposition as the Custom Views tools: <c>create</c> /
+    /// <c>update</c> / <c>delete</c> write <c>config.custom_alert_rules</c> and <c>get</c> / <c>list</c> /
+    /// <c>validate_custom_alert_rule</c> read/validate against the compose catalog, none a <c>/api/read/{tool}</c>
+    /// mirror.</summary>
     public static readonly IReadOnlySet<string> ExcludedToolNames = new HashSet<string>(StringComparer.Ordinal)
     {
         "analyze_server",
@@ -80,9 +89,19 @@ public static class DarlingWebEndpoints
         "run_custom_view_panel",
         "update_alert_settings",
         "create_mute_rule",
+        "update_mute_rule",
         "delete_mute_rule",
+        "set_mute_rule_enabled",
         "add_servers",
         "remove_server",
+        "create_custom_alert_rule",
+        "get_custom_alert_rule",
+        "list_custom_alert_rules",
+        "update_custom_alert_rule",
+        "delete_custom_alert_rule",
+        "validate_custom_alert_rule",
+        "test_custom_alert_rule",
+        "list_custom_alert_templates",
     };
 
     /// <summary>The window (hours) the fleet card blocking / deadlock counts default to — the WPF Overview's window.</summary>
@@ -201,8 +220,13 @@ public static class DarlingWebEndpoints
     /// Maps the web dashboard's HTTP endpoints onto <paramref name="app"/>, reading from <paramref name="postgres"/>
     /// (the VIEWER-role store pool). Called ONCE from the web host's pipeline, after the auth middleware and before
     /// the static files. Every route lives under <c>/api/*</c> so the SPA's static surface never collides.
+    ///
+    /// <para><paramref name="logger"/> is the HOST SERVICE's logger — the seat every log-and-degrade route below
+    /// writes through. Deliberately NOT <c>app.Logger</c>: the host clears the dashboard app's logging providers
+    /// (both halves of that decision are stated at its ClearProviders site), so the app's own factory writes
+    /// nowhere, and a degradation line logged through it would vanish.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger)
     {
         /* Liveness AND collection state (#2953). The one health surface that does not read the store, which
            makes it the only one that can answer when the store IS the problem — so it reports the collector's
@@ -244,7 +268,7 @@ public static class DarlingWebEndpoints
         });
 
         /* One GET per read-only tool, calling the tool method directly (no SQL/projection re-implementation). */
-        foreach (var (name, handler) in BuildReadDispatch())
+        foreach (var (name, handler) in BuildReadDispatch(logger))
         {
             app.MapGet("/api/read/" + name, async (HttpContext context) =>
             {
@@ -265,6 +289,14 @@ public static class DarlingWebEndpoints
         }
 
         MapCustomViews(app, postgres);
+        MapCustomAlerts(app, postgres);
+        MapMuteRules(app, postgres);
+
+        /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
+           FleetSweepStore presentation reads lane 4's get_sweep_reports tool will serve — see
+           DarlingFleetSweepEndpoints for the span discipline, the seat posture, and why its logger
+           seat takes the service logger threaded here rather than app.Logger. */
+        DarlingFleetSweepEndpoints.Map(app, postgres, logger);
 
         /* The per-alert triage page's assembly endpoint (#2710): everything it serves is already reachable
            through the /api/read mirror above — it adds assembly (alert match + anchored sections), not reach. */
@@ -459,6 +491,405 @@ public static class DarlingWebEndpoints
                 ? JsonNodeResult(outcome.Payload)
                 : ErrorResult(outcome.Error!, outcome.IsServerError ? StatusCodes.Status500InternalServerError : StatusCodes.Status400BadRequest);
         });
+    }
+
+    /// <summary>
+    /// The custom-alert-rule web API (#3285, Component 7's backend) — the SAME surface the
+    /// <see cref="Mcp.DarlingMcpCustomAlertTools"/> MCP tools expose, mirrored onto HTTP so a web editor (its JS
+    /// deferred) can list / read / create / update / delete / validate / test the user-authored alert rules and
+    /// browse the starter templates. Deliberately a THIN wrapper, never a second implementation: persistence is
+    /// the same <see cref="CustomAlertRuleStore"/>, definition validation the same
+    /// <see cref="CustomAlertRuleDefinition.TryParse"/> authority, delete the same
+    /// <see cref="CustomAlertEvaluator.ResolveAndDeleteRuleAsync"/> (so an open incident is force-resolved before
+    /// the FK cascade drops its state, #3305), templates the same <see cref="CustomAlertTemplates"/>, and
+    /// evaluate-now the same <see cref="Mcp.DarlingMcpCustomAlertTools.TestCustomAlertRule"/> seam — so the web
+    /// and MCP surfaces cannot drift. The routes shadow <see cref="MapCustomViews"/> exactly: the reads are open
+    /// to any seat; the writes (POST/PUT/DELETE, plus the two evaluate POSTs) require <c>application/json</c> (the
+    /// CSRF gate) and are born gated by the host's method-based write gate
+    /// (<see cref="Hosting.DarlingWebSeat.IsRequestAllowed"/> refuses a read-only seat everything unsafe except
+    /// <c>POST /api/compose/run</c>), so a viewer seat gets a 403 on every one of them without this method
+    /// naming the gate. The store/evaluator run on the host's least-privilege VIEWER pool (the same
+    /// <paramref name="postgres"/> the reads and <c>/api/compose/run</c> use — never the owner pool).
+    /// </summary>
+    private static void MapCustomAlerts(WebApplication app, NpgsqlDataSource postgres)
+    {
+        var store = new CustomAlertRuleStore(postgres);
+
+        /* List — a bare array of summaries (no definition), carrying 'enabled'; [] when none. */
+        app.MapGet("/api/alerts", async (HttpContext context) =>
+        {
+            var rules = await store.ListAsync(context.RequestAborted);
+            return JsonNodeResult(BuildRuleSummariesNode(rules));
+        });
+
+        /* Get one — full, including the definition and 'enabled'; 404 when missing. */
+        app.MapGet("/api/alerts/{id:long}", async (HttpContext context, long id) =>
+        {
+            var result = await store.GetAsync(id, context.RequestAborted);
+            return result is CustomAlertRuleResult.Ok ok && ok.Rule is not null
+                ? JsonNodeResult(BuildFullRuleNode(ok.Rule))
+                : AlertNotFoundResult();
+        });
+
+        /* Create — 201 + Location; 400 on a bad body/definition, 409 on a duplicate name. The definition is
+           VALIDATED (CustomAlertRuleDefinition.TryParse — the SAME authority the evaluator applies on load)
+           BEFORE any store hit, so a stored rule always parses. application/json required (CSRF defense). */
+        app.MapPost("/api/alerts", async (HttpContext context) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var (request, bodyError) = await ParseAlertBodyAsync(context);
+            if (request is null)
+            {
+                return ErrorResult(bodyError!, StatusCodes.Status400BadRequest);
+            }
+
+            var (parsed, definitionError) = CustomAlertRuleDefinition.TryParse(request.DefinitionJson);
+            if (parsed is null || definitionError is not null)
+            {
+                return ErrorResult(definitionError ?? "definition is invalid.", StatusCodes.Status400BadRequest);
+            }
+
+            try
+            {
+                var result = await store.CreateAsync(
+                    request.Name, request.Description, request.DefinitionJson, request.Enabled,
+                    updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                return result switch
+                {
+                    CustomAlertRuleResult.Ok ok => CreatedResult(context, $"/api/alerts/{ok.Rule!.Id}", BuildFullRuleNode(ok.Rule)),
+                    CustomAlertRuleResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
+                    CustomAlertRuleResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
+                    _ => ErrorResult("Could not create the alert rule.", StatusCodes.Status500InternalServerError),
+                };
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return ErrorResult($"Error saving alert rule: {ex.Message}", StatusCodes.Status500InternalServerError);
+            }
+        });
+
+        /* Update — 200 on success; 400 bad body/definition, 404 gone, 409 stale-version OR duplicate name. A
+           full replace (the client sends the whole rule it edited), exactly like PUT /api/views: 'version' is
+           required, and a mismatch is a 409, not a silent clobber. application/json required. */
+        app.MapPut("/api/alerts/{id:long}", async (HttpContext context, long id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var (request, bodyError) = await ParseAlertBodyAsync(context);
+            if (request is null)
+            {
+                return ErrorResult(bodyError!, StatusCodes.Status400BadRequest);
+            }
+
+            if (request.Version is not { } expectedVersion)
+            {
+                return ErrorResult("'version' is required for an update (optimistic concurrency).", StatusCodes.Status400BadRequest);
+            }
+
+            var (parsed, definitionError) = CustomAlertRuleDefinition.TryParse(request.DefinitionJson);
+            if (parsed is null || definitionError is not null)
+            {
+                return ErrorResult(definitionError ?? "definition is invalid.", StatusCodes.Status400BadRequest);
+            }
+
+            try
+            {
+                var result = await store.UpdateAsync(
+                    id, request.Name, request.Description, request.DefinitionJson, request.Enabled, expectedVersion,
+                    updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+                return result switch
+                {
+                    CustomAlertRuleResult.Ok ok => JsonNodeResult(BuildFullRuleNode(ok.Rule!)),
+                    CustomAlertRuleResult.NotFound => AlertNotFoundResult(),
+                    CustomAlertRuleResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
+                    CustomAlertRuleResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
+                    _ => ErrorResult("Could not update the alert rule.", StatusCodes.Status500InternalServerError),
+                };
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return ErrorResult($"Error saving alert rule: {ex.Message}", StatusCodes.Status500InternalServerError);
+            }
+        });
+
+        /* Delete — 204 on success, 404 when missing. application/json required. Routes through
+           CustomAlertEvaluator.ResolveAndDeleteRuleAsync (NOT store.DeleteAsync): any OPEN incident is
+           force-resolved — a recovery row written to alert history — BEFORE the delete's FK cascade drops the
+           per-server state that says which (rule, server) pairs were firing (#3305), so nothing is left showing
+           as firing forever. The resolve is best-effort inside that method (its own failure isolation), so a
+           resolve blip never blocks the delete the operator asked for. Same call the MCP delete tool makes;
+           logger null here as there (the recovery row still writes; only the service-log line is skipped). */
+        app.MapDelete("/api/alerts/{id:long}", async (HttpContext context, long id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            try
+            {
+                var result = await CustomAlertEvaluator.ResolveAndDeleteRuleAsync(postgres, id, logger: null, context.RequestAborted);
+                return result is CustomAlertRuleResult.Ok ? Results.NoContent() : AlertNotFoundResult();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return ErrorResult($"Error deleting alert rule: {ex.Message}", StatusCodes.Status500InternalServerError);
+            }
+        });
+
+        /* The starter templates (#3325): the SAME code-defined set the list_custom_alert_templates MCP tool
+           returns, byte-identical (wraps that tool), mapped through the shared ToHttpResult exactly as the
+           /api/read/* tool endpoints map their string results. Read-only, touches no store; open to any seat. */
+        app.MapGet("/api/alert-templates", async () =>
+            ToHttpResult(await Mcp.DarlingMcpCustomAlertTools.ListCustomAlertTemplates()));
+
+        /* Validate — dry-run a definition WITHOUT persisting; returns {valid, error}. The definition rides as an
+           embedded JSON object (same as create/update bodies), validated by the SAME
+           CustomAlertRuleDefinition.TryParse authority the MCP validate_custom_alert_rule tool uses, so the two
+           verdicts cannot diverge. A POST (application/json required); born gated like the mutations — an
+           evaluate/validate is an editor affordance, not a read the viewer seat is granted. */
+        app.MapPost("/api/alerts/validate", async (HttpContext context) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var (definitionJson, bodyError) = await ParseDefinitionBodyAsync(context);
+            if (definitionJson is null)
+            {
+                return ErrorResult(bodyError!, StatusCodes.Status400BadRequest);
+            }
+
+            var (parsed, validationError) = CustomAlertRuleDefinition.TryParse(definitionJson);
+            return JsonNodeResult(new JsonObject
+            {
+                ["valid"] = parsed is not null && validationError is null,
+                ["error"] = validationError,
+            });
+        });
+
+        /* Test (evaluate-now) — for a SAVED rule (rule_id) OR a supplied definition, read the metric's CURRENT
+           value on each in-scope server and report whether it WOULD breach right now, delivering/persisting
+           nothing. Wraps the MCP test_custom_alert_rule tool for zero divergence: that method resolves the
+           in-scope servers, runs the SHARED EvaluateScalarNowAsync per-server scalar seam, and applies
+           ClassifyTestValue — all on the pool it is handed, which here is the host's VIEWER pool (exactly as
+           /api/compose/run runs the composer — never the owner pool). rule_id XOR definition is enforced inside
+           the tool; its result is mapped through the shared ToHttpResult like every /api/read/* tool string — the
+           {status,...} envelope (invalid / not_found / no_in_scope_servers) passes through as 200, an unexpected
+           tool error becomes 500. A POST (application/json required); born gated like the mutations. */
+        app.MapPost("/api/alerts/test", async (HttpContext context) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            var (ruleId, definitionJson, bodyError) = await ParseAlertTestBodyAsync(context);
+            if (bodyError is not null)
+            {
+                return ErrorResult(bodyError, StatusCodes.Status400BadRequest);
+            }
+
+            return ToHttpResult(await Mcp.DarlingMcpCustomAlertTools.TestCustomAlertRule(postgres, ruleId, definitionJson));
+        });
+    }
+
+    /* ─────────────────────── #3450 mute rules: the dedicated write endpoints ─────────────────────── */
+
+    /// <summary>
+    /// The mute-rule WRITE surface (#3450): create / update / set-enabled / delete, the web twins of the four
+    /// MCP alert-tuning verbs. <see cref="ExcludedToolNames"/> was never a trust boundary — only the list of
+    /// tools with no <i>generic</i> <c>/api/read</c> mirror — so, exactly as the Custom Views tools got
+    /// <c>/api/views</c>, the mute verbs get dedicated routes here; the read half already ships as
+    /// <c>/api/read/get_mute_rules</c>.
+    ///
+    /// <para><b>Who may call these.</b> Nothing here names a seat, and that is the design: every unsafe method
+    /// is born gated by the host's group-level write gate (<see cref="Hosting.DarlingWebSeat.IsRequestAllowed"/>
+    /// refuses a read-only seat everything non-GET except <c>POST /api/compose/run</c>), so an OIDC viewer seat
+    /// gets 403 on all four routes while the admin and shared-token seats — and the tokenless loopback operator —
+    /// pass, the same enforcement <c>/api/views</c> and <c>/api/alerts</c> ride. <c>application/json</c> is
+    /// required on every route (the CSRF defense — see <see cref="IsJsonContentType"/> for why a non-simple
+    /// Content-Type closes the simple-request forgery hole), the DELETE included, matching the views surface.</para>
+    ///
+    /// <para><b>Zero drift with MCP, by construction.</b> Each route is a thin HTTP mapping over the SAME core
+    /// the matching MCP verb runs — <see cref="Mcp.DarlingMcpAlertTools.CreateMuteRuleCore"/> /
+    /// <see cref="Mcp.DarlingMcpAlertTools.UpdateMuteRuleCore"/> /
+    /// <see cref="Mcp.DarlingMcpAlertTools.SetMuteRuleEnabledCore"/> /
+    /// <see cref="Mcp.DarlingMcpAlertTools.DeleteMuteRuleCore"/> — over the host's least-privilege VIEWER pool
+    /// (whose narrow floor — <c>config_mute_rules</c> plus the two <c>config_service</c> beacon columns the
+    /// SECURITY-INVOKER bump trigger writes as the caller — is provisioned beside the mcp role's in
+    /// <c>DarlingManagedRoles</c>). The response BODY is the verb's own <c>{status, ...}</c> envelope, verbatim;
+    /// only the HTTP status is added (<see cref="MuteRuleEnvelopeStatus"/>), so a web client and an MCP client
+    /// read one truth. That buys the cores' invariants unduplicated: PARTIAL update with explicit-null clears
+    /// through the store's own full-row <c>UpdateAsync</c>, an <c>unchanged</c> answer for a write that would
+    /// change nothing, a re-read after every write so the reported rule is the STORED one, and
+    /// <c>created_at_utc</c> never moving through any path — the #3306 clock the whole verb family exists to
+    /// preserve. One cosmetic consequence is accepted with it: a refusal's prose speaks the MCP verbs' names
+    /// ("use set_mute_rule_enabled"), which is the shared parser's vocabulary and maps 1:1 onto these routes.</para>
+    ///
+    /// <para><b>The operational caveat these endpoints inherit.</b> Alert rows spell <c>server_name</c> two ways
+    /// — the monitor's own self-alert family uses the display-short name, engine alerts use the registry name —
+    /// so a rule created or edited from ANY surface can go inert by matching the wrong spelling while looking
+    /// scoped. Copy the spelling off the alert rows being muted (<c>/api/read/get_alert_history</c>) rather than
+    /// retyping it; the update core's own description carries the same warning on the MCP side.</para>
+    ///
+    /// <para><b>Route shapes.</b> Create is a POST returning 201 with the stored rule — no <c>Location</c>
+    /// header, deliberately: there is no per-rule GET (the read is the list, <c>/api/read/get_mute_rules</c>),
+    /// and a Location that 404s is worse than none. Update is a PATCH — not the views surface's PUT — because
+    /// the body is a partial document (send only the fields to change; an explicit null clears one) and calling
+    /// that a full replace would misstate the one semantic the verb exists for. Set-enabled is a PUT of the tiny
+    /// <c>{"enabled": bool}</c> sub-resource, the reversible flag flip that never touches another field. The id
+    /// is the rule's GUID string from <c>get_mute_rules</c> / create's response.</para>
+    /// </summary>
+    private static void MapMuteRules(WebApplication app, NpgsqlDataSource postgres)
+    {
+        var store = new PgMuteRuleStore(postgres);
+
+        /* Create — 201 with the STORED rule (re-read after the insert); 400 on a bad body/field/expiry. The
+           body is one JSON object of the get_mute_rules field shape; {} is legal and creates a rule that mutes
+           EVERY alert (the same whole-fleet silence an argument-less create_mute_rule builds — scope fields
+           narrow, they are not required). application/json required. */
+        app.MapPost("/api/mute-rules", async (HttpContext context) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            return MuteRuleToolResult(
+                await Mcp.DarlingMcpAlertTools.CreateMuteRuleCore(store, await ReadBodyAsync(context)),
+                StatusCodes.Status201Created);
+        });
+
+        /* Update — PARTIAL, the merged update_mute_rule semantics verbatim: the body carries ONLY the fields to
+           change, an explicit JSON null clears one, a field not sent does not move, 'enabled' is refused toward
+           the flag route, and created_at_utc is structurally out of reach. 200 updated/unchanged, 404 unknown
+           id, 400 bad field/value with nothing written. The raw body text IS the core's changes_json — no
+           web-side re-parse to drift. application/json required. */
+        app.MapPatch("/api/mute-rules/{id}", async (HttpContext context, string id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            return MuteRuleToolResult(
+                await Mcp.DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, await ReadBodyAsync(context)));
+        });
+
+        /* Set-enabled — the reversible flag flip that keeps the rule's id, scope, reason and creation date (the
+           reason it exists; delete-and-recreate resets the #3306 clock and delivers the suppressed alerts in
+           between). 200 updated/unchanged, 404 unknown id. The body is exactly {"enabled": true|false}: strict,
+           because the ONE field this route may move is the one field the update route refuses — a stray sibling
+           key here is a caller who wanted PATCH. application/json required. */
+        app.MapPut("/api/mute-rules/{id}/enabled", async (HttpContext context, string id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            JsonNode? root;
+            try
+            {
+                root = await JsonNode.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
+            }
+            catch (JsonException)
+            {
+                return ErrorResult("Request body is not valid JSON.", StatusCodes.Status400BadRequest);
+            }
+
+            if (root is not JsonObject body || body["enabled"] is not JsonValue enabledValue
+                || !enabledValue.TryGetValue<bool>(out var enabled) || body.Count != 1)
+            {
+                return ErrorResult(
+                    "Request body must be exactly {\"enabled\": true|false}; any other field belongs to PATCH /api/mute-rules/{id}.",
+                    StatusCodes.Status400BadRequest);
+            }
+
+            return MuteRuleToolResult(
+                await Mcp.DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, id, enabled));
+        });
+
+        /* Delete — 200 with the verb's {status:"deleted", rule_id} envelope rather than the views surface's
+           204, deliberately: the envelope is the ONE shape both surfaces answer with, and it names the id the
+           caller should stop citing. 404 unknown id. Permanent — prefer the enabled route for anything
+           reversible. application/json required (the same CSRF discipline as the bodyless views DELETE). */
+        app.MapDelete("/api/mute-rules/{id}", async (HttpContext context, string id) =>
+        {
+            if (!IsJsonContentType(context.Request.ContentType))
+            {
+                return UnsupportedMediaTypeResult();
+            }
+
+            return MuteRuleToolResult(
+                await Mcp.DarlingMcpAlertTools.DeleteMuteRuleCore(store, id));
+        });
+    }
+
+    /// <summary>Reads the raw request body text — what the mute-rule cores parse themselves, so the web layer
+    /// adds no parse of its own to drift from theirs.</summary>
+    private static async Task<string> ReadBodyAsync(HttpContext context)
+    {
+        using var reader = new StreamReader(context.Request.Body);
+        return await reader.ReadToEndAsync(context.RequestAborted);
+    }
+
+    /// <summary>
+    /// Maps a mute-rule verb's returned string onto the HTTP status the web surface answers with, leaving the
+    /// body untouched: <c>invalid</c> → 400, <c>not_found</c> → 404, any other envelope (created / updated /
+    /// unchanged / deleted) → <paramref name="successStatus"/>; the cores' caught-exception
+    /// <c>"Error during ..."</c> string → 500 (classified by <see cref="ClassifyToolResponse"/>, like the read
+    /// surface); any other bare string is a shape the cores do not produce and maps to the client-correctable
+    /// 400 for the reason the read surface's mapping does. <c>unchanged</c> deliberately shares the success
+    /// code: it is the retry-safe "already so" answer, and the envelope's own <c>status</c> field carries the
+    /// distinction a caller might act on. Pure, so the whole table pins without a server.
+    /// </summary>
+    internal static int MuteRuleEnvelopeStatus(string result, int successStatus = StatusCodes.Status200OK)
+    {
+        switch (ClassifyToolResponse(result))
+        {
+            case ToolResponseKind.ServerError:
+                return StatusCodes.Status500InternalServerError;
+            case ToolResponseKind.ClientError:
+                return StatusCodes.Status400BadRequest;
+        }
+
+        try
+        {
+            var status = JsonNode.Parse(result) is JsonObject envelope ? TryGetString(envelope, "status") : null;
+            return status switch
+            {
+                "invalid" => StatusCodes.Status400BadRequest,
+                "not_found" => StatusCodes.Status404NotFound,
+                _ => successStatus,
+            };
+        }
+        catch (JsonException)
+        {
+            /* A '{'-leading string that does not parse is not a shape the cores produce — refuse to claim
+               success over a body nobody can read. */
+            return StatusCodes.Status500InternalServerError;
+        }
+    }
+
+    /// <summary>The envelope pass-through the mute-rule routes share: the verb's own body, verbatim, under the
+    /// status <see cref="MuteRuleEnvelopeStatus"/> assigns — except a bare (non-JSON) string, which is wrapped
+    /// as <c>{"error": ...}</c> exactly as <see cref="ToHttpResult"/> wraps the read surface's.</summary>
+    private static IResult MuteRuleToolResult(string result, int successStatus = StatusCodes.Status200OK)
+    {
+        var httpStatus = MuteRuleEnvelopeStatus(result, successStatus);
+        return ClassifyToolResponse(result) == ToolResponseKind.JsonPassthrough
+            ? Results.Text(result, "application/json", statusCode: httpStatus)
+            : ErrorResult(result, httpStatus);
     }
 
     /// <summary>The discriminated outcome of <see cref="RunComposedPanelAsync"/>: the <c>{sql, rows,
@@ -1401,6 +1832,17 @@ public static class DarlingWebEndpoints
     private static CatalogParam PBool(string name, bool def) => new(name, TypeBool, false, def);
     private static CatalogParam PDouble(string name, double def) => new(name, TypeDouble, false, def);
 
+    /// <summary>
+    /// A numeric FILTER, which carries no default — the <see cref="PText"/> shape rather than
+    /// <see cref="PDouble(string, double)"/>'s.
+    ///
+    /// <para>The distinction is load-bearing for <c>min_duration_ms</c>: <c>0</c> is a real value there (it
+    /// admits every row AND ranks the page by duration), so advertising <c>0</c> as the default would tell a
+    /// catalog consumer that sending nothing and sending zero are the same request. Absent means no filter,
+    /// which is a third state and not a number.</para>
+    /// </summary>
+    private static CatalogParam PDouble(string name) => new(name, TypeDouble, false, null);
+
     private static CatalogRead R(string category, string description, params CatalogParam[] parameters) =>
         new(category, description, parameters);
 
@@ -1455,7 +1897,7 @@ public static class DarlingWebEndpoints
 
             /* ── core data reads (DarlingMcpDataTools + long-query / fleet tools) ── */
             ["get_collection_health"] = R(CatData, "Per-collector collection health for a server.", PServer()),
-            ["get_collection_log"] = R(CatData, "Raw per-run collector log for a server, newest first.", PServer(), PHours(24), PLimit(200), PAsOf()),
+            ["get_collection_log"] = R(CatData, "Raw per-run collector log for a server, newest first — or slowest first when min_duration_ms is supplied.", PServer(), PHours(24), PLimit(200), PAsOf(), PText("collector_name"), PDouble("min_duration_ms")),
             ["get_current_waits_trend"] = R(CatData, "Waiting-task and blocked-session series over time.", PServer(), PHours(4), PText("database_name"), PAsOf()),
             ["get_blocking_stats"] = R(CatData, "Blocking duration and deadlock severity per minute.", PServer(), PHours(24), PAsOf()),
             ["get_cpu_utilization"] = R(CatData, "CPU utilization over time.", PServer(), PHours(4), PAsOf()),
@@ -1484,10 +1926,10 @@ public static class DarlingWebEndpoints
             ["get_pg_wait_sampling"] = R(CatData, "Sampled PostgreSQL waits by query shape, from pg_wait_sampling - the stock-PostgreSQL counterpart of get_pg_wait_stats. Sample counts, not measured durations; event_type CPU means running rather than waiting.", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_pg_kernel_stats"] = R(CatData, "Per-query OS CPU (user and system), device bytes and major faults, from pg_stat_kcache. The CPU half of the elapsed time get_pg_top_queries reports.", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_pg_predicate_stats"] = R(CatData, "Which columns queries actually filter on and how selectively, from pg_qualstats. SAMPLED counts - the evidence behind an index recommendation.", PServer(), PHours(24), PLimit(25), PAsOf()),
-            ["get_pg_index_bloat"] = R(CatData, "MEASURED PostgreSQL index bloat from pgstattuple: leaf density, fragmentation and reclaimable bytes. Rows carrying a skipped_reason were not measured — a rotation-cursor or work-budget reason is deferred to a later cycle, a measurement-ceiling reason is permanent. The complete btree census, no size floor, so it counts MORE indexes than get_pg_index_usage (which floors at 64 kB).", PServer(), PHours(168), PLimit(25), PAsOf()),
+            ["get_pg_index_bloat"] = R(CatData, "ESTIMATED PostgreSQL index bloat from catalog statistics: reclaimable bytes, the modelled inputs behind them, and a reason instead of an answer where the statistics cannot support one. Answerless rows sort FIRST by design, so pass answered_only for the ranking on a server whose answerless population exceeds the row cap — read the reach field, which says whether raising the limit would help at all. The complete btree census, no size floor, so it counts MORE indexes than get_pg_index_usage (which floors at 64 kB).", PServer(), PHours(168), PLimit(25), PBool("answered_only", false), PAsOf()),
             ["get_pg_column_stats"] = R(CatData, "Per-column distribution statistics the PLANNER uses: n_distinct, null fraction, correlation and top-value frequency.", PServer(), PHours(168), PLimit(25), PAsOf()),
             ["get_pg_buffer_usage"] = R(CatData, "What is resident in the shared buffer pool per relation, from pg_buffercache. Residency, not read volume.", PServer(), PHours(24), PLimit(25), PAsOf()),
-            ["get_pg_extensions"] = R(CatData, "Which PostgreSQL extensions are installed, outdated, available or absent, per database. Usually the reason another read is empty.", PServer(), PHours(168), PLimit(50), PAsOf()),
+            ["get_pg_extensions"] = R(CatData, "Which PostgreSQL extensions are installed, outdated, available or absent, per database. Usually the reason another read is empty. Rows are databases x extension names, so a multi-database host outgrows any row cap: read install_census for what is installed where (aggregated, limit-independent), or pass database_name to complete one database at a time.", PServer(), PHours(168), PLimit(50), PText("database_name"), PAsOf()),
             ["get_pg_lock_stats"] = R(CatData, "Sampled PostgreSQL lock activity by type, mode and relation. A sample of pg_locks, not an event log; for who blocks whom use get_pg_blocking.", PServer(), PHours(24), PLimit(25), PAsOf()),
             ["get_pg_write_stats"] = R(CatData, "Checkpoint and WAL write activity across the window: timed versus requested checkpoints, buffers written by whom, and WAL volume.", PServer(), PHours(24), PAsOf()),
             ["get_pg_server_config"] = R(CatData, "The PostgreSQL server's configuration from pg_settings, non-default first, saying where each value came from and whether changing it needs a restart. Reports pending_restart, where the file and the running server disagree.", PServer(), PLimit(100), PBool("include_defaults", false)),
@@ -1523,11 +1965,13 @@ public static class DarlingWebEndpoints
             ["get_daily_summary"] = R(CatOverview, "The daily health summary (optionally for a specific date).", PServer(), PText("summary_date")),
             ["get_daily_summary_range"] = R(CatOverview, "One daily health summary per collected day over a span of days - the Performance Calendar's month grid.", PServer(), PInt("days_back", 30), PAsOf()),
             ["get_fleet_overview"] = R(CatOverview, "The banded cross-server fleet roll-up.", PHours(DefaultFleetHours)),
+            ["get_sweep_reports"] = R(CatOverview, "The scheduled Fleet Sweep Reports: the sweep timeline for the window, the newest sweep in full, and the watch-item worklist - or one sweep by sweep_id (a string; the ids do not survive a JSON number round trip).", PHours(1), PAsOf(), PText("sweep_id"), PText("watch_state")),
             ["get_ag_health"] = R(CatOverview, "Availability Group topology: replicas and per-database secondary state.", PServer()),
             ["get_store_metrics"] = R(CatOverview, "The monitoring store's own size/compression/growth series (self-metrics).", PInt("days_back", 30)),
             ["get_store_log"] = R(CatOverview, "What the monitoring store's OWN PostgreSQL server log recorded - a per-class census with the capture denominator beside it, not the lines. Deliberately unbanded.", PHours(24), PLimit(DarlingMcpStoreLogTools.DefaultRetainedLimit), PAsOf()),
             ["get_collector_cost"] = R(CatOverview, "The monitoring tool's OWN per-collector cost on the monitored servers (self-monitoring) - which of our collectors is the most expensive to run. Pass collector_name for that one collector's daily trend instead of the ranked list.", PInt("days_back", 7), PText("collector_name")),
             ["get_collector_stall_probes"] = R(CatOverview, "The out-of-band server-wide wait samples taken while one of OUR collectors was stalled mid-read - what the monitored instance was doing inside the window the sequential sweep records nothing in. Carries the outcome census beside the samples, deliberately unbanded.", PServer(), PInt("days_back", 7), PLimit(DarlingMcpStallProbeTools.DefaultLimit)),
+            ["get_oversized_plan_backlog"] = R(CatOverview, "The cached plans this tool measured as too large to capture inline, and what the out-of-band sweep has done about each one: per server the three verdict buckets (pending/captured/expired, a strict partition), the attempt figures on still-pending rows, the newest capture and expiry instants, and observed_bytes min/median/max, with the per-collector census beside them. Takes no window - a worklist updated in place, not a series. Pass server_name with include_rows for the claim keys.", PServer(), PBool("include_rows", false), PLimit(DarlingMcpOversizedPlanBacklogTools.DefaultLimit)),
 
             /* ── latch / spinlock (DarlingMcpLatchSpinlockTools) ── */
             ["get_latch_stats"] = R(CatLatch, "Top latch waits in the window.", PServer(), PHours(24), PTop(10), PAsOf()),
@@ -1737,12 +2181,27 @@ public static class DarlingWebEndpoints
     private static readonly CollectorTargetInfo s_azureMiTarget = new() { IsAzureManagedInstance = true, SqlMajorVersion = 16, HasMsdbAccess = true };
     private static readonly CollectorTargetInfo s_awsRdsTarget = new() { IsAwsRds = true, SqlMajorVersion = 16, HasMsdbAccess = true };
 
+    /* PostgreSQL target profiles (#3285). Engine = PostgreSql so the dispatch gate's engine half
+       (CollectorCatalog.EngineMatches) selects the PostgreSQL collectors and excludes every SQL Server one -
+       and excludes these PG collectors from the four SQL profiles above. The major/version are pinned modern
+       so the version-gated PG collectors (pg_stat_io PG16+, pg_write_stats PG14+) read as available, and
+       IsInRecovery defaults false so the writer-only collectors (autovacuum, index/table stats) do too.
+       s_postgresTarget is stock PostgreSQL: IsAurora is false, so the Aurora-only collectors (pg_wait_stats,
+       pg_cpu_utilization) correctly read unavailable there; s_auroraTarget flips IsAurora on. */
+    private static readonly CollectorTargetInfo s_postgresTarget =
+        new() { Engine = CollectorTargetEngine.PostgreSql, PostgresMajorVersion = 17, PostgresVersionNum = 170_005 };
+    private static readonly CollectorTargetInfo s_auroraTarget =
+        new() { Engine = CollectorTargetEngine.PostgreSql, IsAurora = true, PostgresMajorVersion = 17, PostgresVersionNum = 170_005 };
+
     /// <summary>The per-server-type availability of a measure (design D4), derived from its owning collector's
-    /// <see cref="ICollectorSchemaInfo.AppliesTo"/> gate — the single authoritative target gate — so the composer
-    /// can label/grey a measure a given server type can't collect. <c>needsMsdb</c> is the SQL-Agent dependency
-    /// (job/agent measures), taken from the named SQL-Agent set rather than probed from the gate - see the
-    /// note there on why #2559 made probing impossible and why the badge still earns its place.
-    /// Returns null only if a measure's source has no collector (impossible — pinned by test).</summary>
+    /// target gate so the composer can label/grey a measure a given server type can't collect. Each flag is
+    /// the FULL dispatch gate <see cref="CollectorCatalog.AppliesTo(ICollectorSchemaInfo, CollectorTargetInfo)"/>
+    /// (<c>EngineMatches AND definition.AppliesTo</c>), NOT the raw <see cref="ICollectorDefinition{TRow}.AppliesTo"/>
+    /// override: the engine half is what makes a PostgreSQL measure read unavailable on the SQL Server profiles
+    /// and a SQL Server measure unavailable on the PostgreSQL profiles. <c>postgres</c>/<c>aurora</c> were added
+    /// with the #3285 PostgreSQL measures; <c>needsMsdb</c> is the SQL-Agent dependency (job/agent measures),
+    /// taken from the named SQL-Agent set rather than probed from the gate - see the note there on why #2559
+    /// made probing impossible. Returns null only if a measure's source has no collector (impossible, pinned by test).</summary>
     private static JsonObject? BuildAppliesToNode(string sourceTable)
     {
         if (!s_collectorByTable.TryGetValue(sourceTable, out var collector))
@@ -1752,10 +2211,17 @@ public static class DarlingWebEndpoints
 
         return new JsonObject
         {
-            ["onPrem"] = collector.AppliesTo(s_onPremTarget),
-            ["azureSqlDb"] = collector.AppliesTo(s_azureSqlDbTarget),
-            ["azureMi"] = collector.AppliesTo(s_azureMiTarget),
-            ["awsRds"] = collector.AppliesTo(s_awsRdsTarget),
+            /* CollectorCatalog.AppliesTo, NOT the raw collector.AppliesTo: the former is
+               EngineMatches && definition.AppliesTo, so a PostgreSQL collector (including one gated `=> true`)
+               correctly reads FALSE on the SQL Server profiles and a SQL Server collector reads FALSE on the
+               PostgreSQL profiles. The raw override skips the engine half and reported a `=> true` PG collector
+               as available on every SQL Server target (#3285). */
+            ["onPrem"] = CollectorCatalog.AppliesTo(collector, s_onPremTarget),
+            ["azureSqlDb"] = CollectorCatalog.AppliesTo(collector, s_azureSqlDbTarget),
+            ["azureMi"] = CollectorCatalog.AppliesTo(collector, s_azureMiTarget),
+            ["awsRds"] = CollectorCatalog.AppliesTo(collector, s_awsRdsTarget),
+            ["postgres"] = CollectorCatalog.AppliesTo(collector, s_postgresTarget),
+            ["aurora"] = CollectorCatalog.AppliesTo(collector, s_auroraTarget),
             ["needsMsdb"] = s_msdbBackedTables.Contains(sourceTable),
         };
     }
@@ -1868,6 +2334,168 @@ public static class DarlingWebEndpoints
         return array;
     }
 
+    /* ── custom-alert-rule body parsing + response building (#3285) ── */
+
+    /// <summary>A parsed alert create/update body: name (required, trimmed), description (optional), the
+    /// definition as raw JSON text (re-serialized from the parsed node), <c>enabled</c> (defaults true when the
+    /// key is absent, matching create's default and a full-replace PUT), and version (present only on updates).
+    /// The definition's STRUCTURE is validated separately by <see cref="CustomAlertRuleDefinition.TryParse"/>.</summary>
+    private sealed record AlertWriteRequest(string Name, string? Description, string DefinitionJson, bool Enabled, int? Version);
+
+    /// <summary>Parses an alert create/update body into an <see cref="AlertWriteRequest"/>, or a caller-facing
+    /// error. Mirrors <see cref="ParseViewBodyAsync"/>, adding the <c>enabled</c> field alert rules carry.</summary>
+    private static async Task<(AlertWriteRequest? Request, string? Error)> ParseAlertBodyAsync(HttpContext context)
+    {
+        JsonNode? root;
+        try
+        {
+            root = await JsonNode.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
+        }
+        catch (JsonException)
+        {
+            return (null, "Request body is not valid JSON.");
+        }
+
+        if (root is not JsonObject obj)
+        {
+            return (null, "Request body must be a JSON object.");
+        }
+
+        var name = TryGetString(obj, "name");
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return (null, "'name' is required.");
+        }
+
+        var description = TryGetString(obj, "description");
+
+        var definitionNode = obj["definition"];
+        if (definitionNode is null)
+        {
+            return (null, "'definition' is required.");
+        }
+
+        var definitionJson = definitionNode.ToJsonString();
+
+        /* Absent 'enabled' defaults true: create's default, and a full-replace PUT of a rule that names no
+           enabled state is an enabled rule (the real full-document editor always sends the field). */
+        var enabled = true;
+        if (obj["enabled"] is JsonValue enabledValue && enabledValue.TryGetValue<bool>(out var e))
+        {
+            enabled = e;
+        }
+
+        int? version = null;
+        if (obj["version"] is JsonValue versionValue && versionValue.TryGetValue<int>(out var v))
+        {
+            version = v;
+        }
+
+        return (new AlertWriteRequest(name.Trim(), description, definitionJson, enabled, version), null);
+    }
+
+    /// <summary>Extracts just the embedded <c>definition</c> object from a body as raw JSON text — the
+    /// <c>POST /api/alerts/validate</c> shape — or a caller-facing error. The definition rides as a JSON object
+    /// (not an escaped string), the same way the create/update bodies carry it.</summary>
+    private static async Task<(string? DefinitionJson, string? Error)> ParseDefinitionBodyAsync(HttpContext context)
+    {
+        JsonNode? root;
+        try
+        {
+            root = await JsonNode.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
+        }
+        catch (JsonException)
+        {
+            return (null, "Request body is not valid JSON.");
+        }
+
+        if (root is not JsonObject obj)
+        {
+            return (null, "Request body must be a JSON object.");
+        }
+
+        var definitionNode = obj["definition"];
+        return definitionNode is null
+            ? (null, "'definition' is required.")
+            : (definitionNode.ToJsonString(), null);
+    }
+
+    /// <summary>Parses a <c>POST /api/alerts/test</c> body into <c>(rule_id, definition)</c> — both optional here
+    /// (the wrapped <see cref="Mcp.DarlingMcpCustomAlertTools.TestCustomAlertRule"/> enforces the rule_id XOR
+    /// definition rule and reports a violation in its envelope). Errors only on a body that is not a JSON object.
+    /// The definition rides as an embedded JSON object, re-serialized to the text the tool parses.</summary>
+    private static async Task<(long? RuleId, string? DefinitionJson, string? Error)> ParseAlertTestBodyAsync(HttpContext context)
+    {
+        JsonNode? root;
+        try
+        {
+            root = await JsonNode.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
+        }
+        catch (JsonException)
+        {
+            return (null, null, "Request body is not valid JSON.");
+        }
+
+        if (root is not JsonObject obj)
+        {
+            return (null, null, "Request body must be a JSON object.");
+        }
+
+        long? ruleId = null;
+        if (obj["rule_id"] is JsonValue ruleIdValue && ruleIdValue.TryGetValue<long>(out var r))
+        {
+            ruleId = r;
+        }
+
+        var definitionNode = obj["definition"];
+        var definitionJson = definitionNode?.ToJsonString();
+
+        return (ruleId, definitionJson, null);
+    }
+
+    /// <summary>The full single-rule wire shape — IDENTICAL to
+    /// <see cref="Mcp.DarlingMcpCustomAlertTools"/>'s (definition embedded as JSON, plus the <c>enabled</c>
+    /// column alert rules carry), so the web GET/POST/PUT and the MCP get/create/update return the same rule
+    /// shape.</summary>
+    internal static JsonObject BuildFullRuleNode(CustomAlertRule rule) => new()
+    {
+        ["id"] = rule.Id,
+        ["name"] = rule.Name,
+        ["description"] = rule.Description,
+        ["definition"] = JsonNode.Parse(rule.DefinitionJson),
+        ["enabled"] = rule.Enabled,
+        ["version"] = rule.Version,
+        ["created_at"] = rule.CreatedAt,
+        ["updated_at"] = rule.UpdatedAt,
+        ["updated_by"] = rule.UpdatedBy,
+    };
+
+    /// <summary>The bare-array list wire shape (no definition body), carrying <c>enabled</c> so the list can
+    /// badge a paused rule without fetching each full definition — plus <c>last_fired</c> (#3360), the naive-UTC
+    /// ISO-8601 instant the rule most recently fired (JSON <c>null</c> when it never has) so a card can show
+    /// "last fired …" / "never fired" without a per-rule read. Mirrors the MCP list surface (they share this
+    /// builder AND <see cref="CustomAlertRuleSummary"/>, so the field reaches both surfaces identically).</summary>
+    internal static JsonArray BuildRuleSummariesNode(IReadOnlyList<CustomAlertRuleSummary> rules)
+    {
+        var array = new JsonArray();
+        foreach (var rule in rules)
+        {
+            array.Add(new JsonObject
+            {
+                ["id"] = rule.Id,
+                ["name"] = rule.Name,
+                ["description"] = rule.Description,
+                ["enabled"] = rule.Enabled,
+                ["version"] = rule.Version,
+                ["updated_at"] = rule.UpdatedAt,
+                ["updated_by"] = rule.UpdatedBy,
+                ["last_fired"] = rule.LastFired,
+            });
+        }
+
+        return array;
+    }
+
     /* ── result helpers (JSON body written verbatim, bypassing any serializer naming policy) ── */
 
     private static IResult JsonNodeResult(JsonNode node, int statusCode = StatusCodes.Status200OK) =>
@@ -1885,6 +2513,9 @@ public static class DarlingWebEndpoints
     private static IResult NotFoundResult() =>
         ErrorResult("View not found.", StatusCodes.Status404NotFound);
 
+    private static IResult AlertNotFoundResult() =>
+        ErrorResult("Alert rule not found.", StatusCodes.Status404NotFound);
+
     private static IResult UnsupportedMediaTypeResult() =>
         ErrorResult("Content-Type must be application/json.", StatusCodes.Status415UnsupportedMediaType);
 
@@ -1896,8 +2527,15 @@ public static class DarlingWebEndpoints
     /// tool, binding its parameters from the query string and calling the matching public static tool method. The
     /// keys ARE the <c>/api/read/*</c> surface — the parity test asserts they equal the <c>[McpServerTool]</c>
     /// catalog minus <see cref="ExcludedToolNames"/>.
+    ///
+    /// <para><paramref name="logger"/> rides by CLOSURE into the one entry whose tool takes a logger seat
+    /// (<c>get_sweep_reports</c>) — the <see cref="ReadToolHandler"/> delegate stays three-seat, because a
+    /// fourth parameter would touch every entry for the one tool that logs. <see cref="MapAll"/> builds the
+    /// dispatch WITH the host service's logger; callers with no host behind them (the parity tests, the triage
+    /// section runner — neither maps that entry) build it bare, and there the null is the honest value: no
+    /// service log is wired to receive anything.</para>
     /// </summary>
-    internal static IReadOnlyDictionary<string, ReadToolHandler> BuildReadDispatch()
+    internal static IReadOnlyDictionary<string, ReadToolHandler> BuildReadDispatch(ILogger? logger = null)
     {
         return new Dictionary<string, ReadToolHandler>(StringComparer.Ordinal)
         {
@@ -1916,6 +2554,18 @@ public static class DarlingWebEndpoints
             ["get_alert_history"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertHistory(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
             ["get_alert_settings"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertSettings(pg),
             ["get_mute_rules"] = (c, pg, an) => DarlingMcpAlertTools.GetMuteRules(pg, QueryBool(c, "enabled_only", true)),
+
+            /* ── fleet sweep reports (#3466 lane 4) ── the tool mirror beside the dedicated /api/sweeps
+               routes, the /api/fleet + /api/read/get_fleet_overview coexistence: the page reads its own
+               routes, and the 1:1 read surface carries the tool like every other read. The captured
+               logger is the tool's logger seat — the web host's SERVICE logger when MapAll built this
+               dispatch, the same instance the MCP host injects with AddSingleton<ILogger> (#3473
+               review) — so the mirror's child reads log-and-degrade into the same service log both
+               hosts' other paths use, instead of the hardcoded null this entry carried while the
+               dashboard app's provider-less factory was the only alternative. Closure, not a fourth
+               ReadToolHandler seat: widening the shared delegate would touch every entry in this
+               table for the one tool that logs. */
+            ["get_sweep_reports"] = (c, pg, an) => DarlingMcpFleetSweepTools.GetSweepReports(pg, logger, Hours(c, 1), AsOf(c), Str(c, "sweep_id"), Str(c, "watch_state")),
 
             /* ── blocking / deadlocks ── */
             ["get_blocked_process_xml"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), as_of: AsOf(c)),
@@ -1941,7 +2591,9 @@ public static class DarlingWebEndpoints
 
             /* ── core data reads ── */
             ["get_collection_health"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionHealth(pg, Server(c)),
-            ["get_collection_log"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionLog(pg, Server(c), Hours(c, 24), Rows(c, "limit", 200), as_of: AsOf(c)),
+            ["get_collection_log"] = (c, pg, an) => OptionalDouble(c, "min_duration_ms", out var minDurationMs)
+                ? DarlingMcpDataTools.GetCollectionLog(pg, Server(c), Hours(c, 24), Rows(c, "limit", 200), AsOf(c), Str(c, "collector_name"), minDurationMs)
+                : UnparseableParam("min_duration_ms"),
             ["get_current_waits_trend"] = (c, pg, an) => DarlingMcpDataTools.GetCurrentWaitsTrend(pg, Server(c), Hours(c, 4), Str(c, "database_name"), as_of: AsOf(c)),
             ["get_blocking_stats"] = (c, pg, an) => DarlingMcpDataTools.GetBlockingStats(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
             ["get_cpu_utilization"] = (c, pg, an) => DarlingMcpDataTools.GetCpuUtilization(pg, Server(c), Hours(c, 4), as_of: AsOf(c)),
@@ -1973,10 +2625,10 @@ public static class DarlingWebEndpoints
             ["get_pg_wait_sampling"] = (c, pg, an) => DarlingMcpPgWaitSamplingTools.GetPgWaitSampling(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             ["get_pg_kernel_stats"] = (c, pg, an) => DarlingMcpPgKernelStatsTools.GetPgKernelStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             ["get_pg_predicate_stats"] = (c, pg, an) => DarlingMcpPgPredicateTools.GetPgPredicateStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 25), as_of: AsOf(c)),
-            ["get_pg_index_bloat"] = (c, pg, an) => DarlingMcpPgIndexTools.GetPgIndexBloat(pg, Server(c), Hours(c, 168), Rows(c, "limit", 25), as_of: AsOf(c)),
+            ["get_pg_index_bloat"] = (c, pg, an) => DarlingMcpPgIndexTools.GetPgIndexBloat(pg, Server(c), Hours(c, 168), Rows(c, "limit", 25), QueryBool(c, "answered_only", false), as_of: AsOf(c)),
             ["get_pg_column_stats"] = (c, pg, an) => DarlingMcpPgIndexTools.GetPgColumnStats(pg, Server(c), Hours(c, 168), Rows(c, "limit", 25), as_of: AsOf(c)),
             ["get_pg_buffer_usage"] = (c, pg, an) => DarlingMcpPgServerStateTools.GetPgBufferUsage(pg, Server(c), Hours(c, 24), Rows(c, "limit", 25), as_of: AsOf(c)),
-            ["get_pg_extensions"] = (c, pg, an) => DarlingMcpPgServerStateTools.GetPgExtensions(pg, Server(c), Hours(c, 168), Rows(c, "limit", 50), as_of: AsOf(c)),
+            ["get_pg_extensions"] = (c, pg, an) => DarlingMcpPgServerStateTools.GetPgExtensions(pg, Server(c), Hours(c, 168), Rows(c, "limit", 50), Str(c, "database_name"), as_of: AsOf(c)),
             ["get_pg_lock_stats"] = (c, pg, an) => DarlingMcpPgServerStateTools.GetPgLockStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 25), as_of: AsOf(c)),
             ["get_pg_write_stats"] = (c, pg, an) => DarlingMcpPgServerStateTools.GetPgWriteStats(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
             ["get_pg_server_config"] = (c, pg, an) => DarlingMcpPgServerStateTools.GetPgServerConfig(pg, Server(c), Rows(c, "limit", 100), QueryBool(c, "include_defaults", false)),
@@ -2025,6 +2677,7 @@ public static class DarlingWebEndpoints
             ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c)),
             ["get_collector_cost"] = (c, pg, an) => DarlingMcpCollectorCostTools.GetCollectorCost(pg, QueryInt(c, "days_back", null, 7), Str(c, "collector_name")),
             ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit)),
+            ["get_oversized_plan_backlog"] = (c, pg, an) => DarlingMcpOversizedPlanBacklogTools.GetOversizedPlanBacklog(pg, Server(c), QueryBool(c, "include_rows", false), Rows(c, "limit", DarlingMcpOversizedPlanBacklogTools.DefaultLimit)),
 
             /* ── latch / spinlock ── */
             ["get_latch_stats"] = (c, pg, an) => DarlingMcpLatchSpinlockTools.GetLatchStats(pg, Server(c), Hours(c, 24), Rows(c, "top", 10), as_of: AsOf(c)),
@@ -2142,6 +2795,38 @@ public static class DarlingWebEndpoints
     }
 
     private static Task<string> MissingParam(string key) => Task.FromResult($"Missing required parameter '{key}'.");
+
+    /// <summary>
+    /// An OPTIONAL numeric parameter: true with null when the key is absent, true with the value when it
+    /// parses, and FALSE when it is present and cannot be read as a number.
+    ///
+    /// <para>The false arm is the whole reason this is not <see cref="QueryDouble"/>. Every other optional
+    /// knob on this dispatch falls back to its default on a value it cannot parse, so <c>?hours=abc</c>
+    /// quietly means 24 — and for a FILTER that same fallback means the filter does not apply and the caller
+    /// receives a complete-looking UNFILTERED page. That is exactly the silently-dropped-parameter failure
+    /// the filter was added to remove (#3287), so an unreadable filter is refused rather than ignored.</para>
+    /// </summary>
+    private static bool OptionalDouble(HttpContext context, string key, out double? value) =>
+        TryParseOptionalDouble(First(context, key), out value);
+
+    /// <summary>PURE optional-number binding — what <see cref="OptionalDouble"/> is without an HttpContext,
+    /// so the three outcomes are pinnable the way <see cref="ParseDouble"/> and <see cref="ClampRows"/>
+    /// are.</summary>
+    internal static bool TryParseOptionalDouble(string? raw, out double? value)
+    {
+        if (raw is null)
+        {
+            value = null;
+            return true;
+        }
+
+        var parsed = double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var number);
+        value = parsed ? number : null;
+        return parsed;
+    }
+
+    private static Task<string> UnparseableParam(string key) =>
+        Task.FromResult($"Invalid value for parameter '{key}'. Expected a number.");
 
     private static int QueryInt(HttpContext context, string key, string? aliasKey, int def) =>
         ParseInt(First(context, key) ?? (aliasKey is null ? null : First(context, aliasKey)), def);

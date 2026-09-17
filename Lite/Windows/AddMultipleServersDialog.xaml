@@ -58,8 +58,11 @@
                            Text="No credential profiles exist yet. Create one under Manage Servers → Credential Profiles."/>
             </StackPanel>
 
-            <!-- Inline shared auth radios (hidden when a profile is chosen). NO Entra MFA — an interactive
-                 popup per server is a popup storm; single-add remains the MFA path. -->
+            <!-- Inline shared auth radios (hidden when a profile is chosen). NO interactive mode — one
+                 sign-in per server is a prompt storm, and a device code per server is worse still
+                 (each expires in about three minutes and they cannot be entered in parallel).
+                 Single-add remains the path for both. BuildServerConnection's belt enforces this
+                 for a mode that arrives through a hand-edited profile rather than these radios. -->
             <StackPanel x:Name="InlineAuthRadios" Margin="0,4,0,0">
                 <RadioButton x:Name="WindowsAuthRadio" Content="_Windows Authentication" Foreground="{DynamicResource ForegroundBrush}"
                              IsChecked="True" Checked="AuthMode_Changed" Margin="0,0,0,4"/>

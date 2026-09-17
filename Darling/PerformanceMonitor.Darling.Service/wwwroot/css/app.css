@@ -1023,3 +1023,56 @@ pre.code {
 .server-reason.band-Offline { color: var(--err); }
 .server-reason.band-Healthy { color: var(--ok); }
 .server-why .metric-bands { max-width: 900px; }
+
+/* ─────────────────────────── Fleet Sweeps (#3466 lane 3) ─────────────────────────── */
+
+/* The sweep document card. instruments-dead recolours the whole document's edge: a sweep that could not
+   prove its instruments must LOOK different everywhere it renders — quiet-is-not-clean applies to CSS too. */
+.sweep-doc { padding: 1rem 1.2rem; margin-bottom: 1.25rem; border-left: 4px solid var(--border); }
+.sweep-doc.instruments-dead { border-left-color: var(--err); }
+.sweep-doc-head { display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap; }
+.sweep-doc-head h3 { margin: 0; }
+.sweep-section { margin: 1.1rem 0 0.4rem; font-size: 0.85rem; letter-spacing: 0.3px; color: var(--muted); text-transform: uppercase; }
+.sweep-line { font-size: 0.85rem; margin: 0.35rem 0; }
+
+/* The two honesty banners. The mute banner is a status (amber — an operator decision being restated);
+   the instruments banner is an alert (red — a judged failure of the sweep's own evidence). */
+.sweep-banner { display: flex; align-items: baseline; gap: 0.5rem; padding: 0.55rem 0.8rem; border-radius: 6px; margin: 0.65rem 0; font-size: 0.88rem; }
+.sweep-banner .glyph { font-weight: 700; }
+.sweep-banner.muted-sweep { background: rgba(255, 213, 79, 0.12); border: 1px solid var(--warn); color: var(--warn); }
+.sweep-banner.instruments-dead { background: rgba(229, 115, 115, 0.12); border: 1px solid var(--err); color: var(--err); }
+
+/* The header tiles reuse the rollup tile look at a smaller scale. */
+.sweep-tiles { display: flex; gap: 0.6rem; flex-wrap: wrap; margin: 0.75rem 0; }
+.sweep-tiles .tile { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 0.45rem 0.8rem; min-width: 88px; }
+.sweep-tiles .tile .num { font-size: 1.15rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.sweep-tiles .tile .lbl { font-size: 0.7rem; color: var(--muted); letter-spacing: 0.3px; }
+.sweep-tiles .tile.sweep-tile-band-Critical .num { color: var(--err); }
+.sweep-tiles .tile.sweep-tile-band-Warning .num { color: var(--warn); }
+.sweep-tiles .tile.sweep-tile-band-Healthy .num { color: var(--ok); }
+
+/* The timeline: one activatable row per sweep, newest first. A dead-instrument sweep carries a red edge in
+   the LIST too, so the timeline cannot read as an unbroken run of clean documents. */
+.sweep-timeline { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 1.25rem; }
+.sweep-row {
+  display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap;
+  background: var(--card); border: 1px solid var(--border); border-left: 4px solid var(--band-healthy);
+  border-radius: 6px; padding: 0.45rem 0.8rem; cursor: pointer; font-size: 0.85rem;
+}
+.sweep-row:hover, .sweep-row:focus-visible { border-color: var(--accent, var(--fg)); }
+.sweep-row.active { outline: 2px solid var(--accent, var(--fg)); }
+.sweep-row.instruments-dead { border-left-color: var(--err); }
+.sweep-time { font-variant-numeric: tabular-nums; font-weight: 600; }
+.sweep-cell { color: var(--muted); }
+.sweep-band-chip { margin-right: 0.4rem; font-size: 0.78rem; }
+.sweep-band-chip.band-Critical { color: var(--err); }
+.sweep-band-chip.band-Warning { color: var(--warn); }
+.sweep-band-chip.band-Healthy { color: var(--ok); }
+
+/* Watch items + liveness detail. */
+.sweep-watch-head { display: flex; align-items: center; gap: 0.6rem; margin: 0.4rem 0; }
+.sweep-evidence { font-size: 0.75rem; white-space: pre-wrap; word-break: break-word; margin: 0.25rem 0 0; }
+.sweep-changed { font-size: 0.72rem; color: var(--muted); }
+.liveness-block { max-width: 720px; }
+.liveness-notes { margin: 0.5rem 0 0; padding-left: 1.2rem; font-size: 0.82rem; color: var(--muted); }
+.liveness-notes li { margin: 0.2rem 0; }

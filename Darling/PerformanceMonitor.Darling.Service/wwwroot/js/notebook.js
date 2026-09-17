@@ -34,6 +34,7 @@ import {
   composedBlocker,
   field,
 } from "./editor.js";
+import { buildCreateAlertAction } from "./alert-seed.js";
 import * as api from "./views-api.js";
 
 /** The definition discriminator: a notebook definition carries kind:"notebook"; a dashboard omits it. */
@@ -415,6 +416,8 @@ function buildPanelCellEditor(cell, index, ctx) {
     previewScope: ctx.previewScope,
     onChange: () => ctx.refreshSaveState(),
     showWidth: false,
+    /* #3285: a scalar panel cell can seed a new alert rule from its metric (a copy, not a live binding). */
+    panelExtraAction: (pm) => buildCreateAlertAction(pm, composedPanelToDesc),
   });
   return el("div", { class: "notebook-cell panel-cell card" }, [cellHead(index, ctx, "Panel"), pinnedWindowStrip(cell, ctx), body]);
 }

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
 namespace Darling.Tests;
@@ -208,6 +209,40 @@ public sealed class DarlingTriageEndpointTests
         Assert.False(DarlingTriageEndpoint.IsFleetLevelStoreServer("   "));
         /* A real server that merely CONTAINS the label must not be swallowed by the fleet-level path. */
         Assert.False(DarlingTriageEndpoint.IsFleetLevelStoreServer("Monitor Store Replica"));
+    }
+
+    /// <summary>An opted-in <c>peers.storeName</c> (#3500) is a second spelling of the same fleet-level
+    /// fact: without recognising it, an opted-in store's every self-alert triage link regresses to the three
+    /// resolver errors #2768 fixed — the label is by design not in the registry. BOTH spellings must keep
+    /// answering on an opted-in store, because channels still hold links minted before the opt-in. Published
+    /// through the ambient directory (the endpoint's one config channel) and Reset in a finally, the
+    /// suite's established discipline for that snapshot.</summary>
+    [Fact]
+    public void IsFleetLevelStoreServer_RecognisesTheOptedInStoreName_AndKeepsTheConstant()
+    {
+        try
+        {
+            var publish = DarlingPeerDirectory.Publish(
+                new PeersConfig { StoreName = "use1-monitor-01" });
+            Assert.False(publish.Refused);
+
+            Assert.True(DarlingTriageEndpoint.IsFleetLevelStoreServer("use1-monitor-01"));
+            /* Trimmed and case-insensitive like the constant: this spelling round-trips a URL too. */
+            Assert.True(DarlingTriageEndpoint.IsFleetLevelStoreServer("  USE1-Monitor-01  "));
+            Assert.True(DarlingTriageEndpoint.IsFleetLevelStoreServer(DarlingSelfAlertEvaluator.StoreServerLabel));
+
+            /* Containment is still not a match, in either direction. */
+            Assert.False(DarlingTriageEndpoint.IsFleetLevelStoreServer("use1-monitor-01-replica"));
+            Assert.False(DarlingTriageEndpoint.IsFleetLevelStoreServer("use1"));
+        }
+        finally
+        {
+            DarlingPeerDirectory.Reset();
+        }
+
+        /* And with nothing published — every store that never opted in — only the constant answers. */
+        Assert.False(DarlingTriageEndpoint.IsFleetLevelStoreServer("use1-monitor-01"));
+        Assert.True(DarlingTriageEndpoint.IsFleetLevelStoreServer(DarlingSelfAlertEvaluator.StoreServerLabel));
     }
 
     /// <summary>Every store self-alert must land on its own mapping, not the per-server fallback — the

@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Generic;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -98,6 +100,61 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /// operator-facing knob's bound is not something to move as a side effect of correcting the sentence
     /// that justified it.</para></summary>
     public int StoreJobCadenceWarnPercent => Math.Clamp(_config.Alerts.StoreJobCadenceWarnPercent, 5, 100);
+
+    /// <summary>#3297 (V119): the Retention Held WARNING tier, clamped like its siblings so a hand-edited
+    /// store value cannot drive a nonsense threshold. Both bounds are named constants shared with the MCP
+    /// write bound, because a wider bound there would let <c>update_alert_settings</c> ACCEPT a value this
+    /// clamp then rewrites — the "setting did not stick" failure the write-bound parity pins exist for. The
+    /// floor's reasoning (it is the shipped default, so the knob raises and cannot lower) and the ceiling's
+    /// live on the constants.</summary>
+    public double RetentionHoldWarnRatio => Math.Clamp(
+        _config.Alerts.RetentionHoldWarnRatio,
+        TimescaleSupport.RetentionHoldRatioFloor,
+        TimescaleSupport.RetentionHoldRatioCeiling);
+
+    /// <summary>#3297 (V119): the Retention Held CRITICAL tier, clamped to the same bounds as its warning
+    /// sibling and INDEPENDENTLY of it. Not floored at the warning ratio: a critical tier below the warning
+    /// tier means every fire is Critical and the Warning tier is empty, which is a coherent reading of what
+    /// an operator who set it there asked for — where a <c>Math.Max</c> here would silently use a number
+    /// other than the one <c>get_alert_settings</c> reports back.</summary>
+    public double RetentionHoldCriticalRatio => Math.Clamp(
+        _config.Alerts.RetentionHoldCriticalRatio,
+        TimescaleSupport.RetentionHoldRatioFloor,
+        TimescaleSupport.RetentionHoldRatioCeiling);
+
+    /// <summary>#3444 (V122): the PostgreSQL Deadlocks alert's rolling-window count threshold.
+    ///
+    /// <para><b>Floored, where its SQL Server twin is not.</b> <see cref="DeadlockCountThreshold"/> passes
+    /// <c>_config.Alerts</c> through raw, so a store row hand-edited to 0 makes the gate's
+    /// <c>count &gt;= threshold</c> test true for a count of zero and fires on a server with no deadlocks.
+    /// That is a pre-existing gap on the twin rather than a shape to copy: the floor here matches
+    /// <see cref="BlockingWaitSecondsThreshold"/> two screens up, which floors for the identical reason.
+    /// The floor is also the <c>update_alert_settings</c> lower write bound, so no value the write path
+    /// accepts is a value this clamp then rewrites — the "setting did not stick" failure the write-bound
+    /// parity pins exist for.</para></summary>
+    public int PgDeadlockCountThreshold => Math.Max(
+        PostgresAlertEvaluator.CountThresholdFloor,
+        _config.Alerts.PgDeadlockCountThreshold);
+
+    /// <summary>#3444 (V122): the PostgreSQL Blocking alert's rolling-window distinct-root-blocker count
+    /// threshold, floored on read for the same reason as its deadlock sibling above.</summary>
+    public int PgBlockingCountThreshold => Math.Max(
+        PostgresAlertEvaluator.CountThresholdFloor,
+        _config.Alerts.PgBlockingCountThreshold);
+
+    /// <summary>#3368 (V120): the deadlock health band's tiers as ONE value, because they are only ever read
+    /// together and a caller handed two doubles can drop one.
+    ///
+    /// <para>The clamp lives on <see cref="PerformanceMonitor.Common.DeadlockRateThresholds"/> rather than
+    /// here, unlike every neighbour on this class, and that is deliberate: the band is in
+    /// <c>PerformanceMonitor.Common</c> and both cards construct the value — so a clamp here would leave the
+    /// viewer's card reading raw store values while the service's read clamped ones. The MCP write bound
+    /// names the same two constants, so <c>update_alert_settings</c> cannot ACCEPT a value the clamp then
+    /// rewrites.</para></summary>
+    public DeadlockRateThresholds DeadlockRateThresholds => new(
+        _config.Alerts.DeadlockWarnPerHour,
+        _config.Alerts.DeadlockCriticalPerHour);
+
     public int CollectionFailureThreshold => Math.Clamp(_config.Alerts.CollectionFailureThreshold, 1, 1000);
 
     /* #1984: percent clamped like low-disk's (0 = off); the GB floor merely floored at 0 — unlike

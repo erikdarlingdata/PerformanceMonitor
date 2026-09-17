@@ -262,6 +262,10 @@ public partial class MainWindow : Window
                 new LiteAlertDeliverer(_emailAlertService, _muteRuleService, _serverManager, () => _trayService, Dispatcher),
                 _muteRuleService.IsAlertMuted,
                 failedJobsFetcher: FetchFailedJobsForAlertAsync,
+                /* #3497: the Long-Running Query card's Agent-job name lookup — the failed-jobs
+                   fetcher's seam shape, and the same degrade: every failure is an empty map, so a
+                   denied or broken msdb read costs a card its job NAME and never the card. */
+                agentJobStepResolver: FetchAgentJobStepNamesForAlertAsync,
                 resolutionCallback: ShowAlertResolutionToastAsync,
                 logger: new AppLoggerAdapter<AlertEngine>(),
                 /* #3013: the process counter every swallowed condition read is tallied on, which
@@ -272,8 +276,38 @@ public partial class MainWindow : Window
                    constructs its own and cannot pollute this one. */
                 readFailures: AlertReadFailureCounter.Shared);
 
-            // Load mute rules from database
-            await _muteRuleService.LoadAsync();
+            /* Load mute rules from the local store. A failed read THROWS — the store reports a fault as a
+               fault rather than as an empty rule set — and it is swallowed here for the reason Darling
+               swallows it: the rules already in force stay in force inside MuteRuleService whatever
+               happens out here, and an unhandled throw would abandon the rest of this startup sequence
+               over a transient DuckDB read.
+
+               Logged AND counted on #3013's surface, the same two artefacts Darling's
+               LoadMuteRulesAsync leaves, because a cache that is correct and STALE is indistinguishable
+               from one that is correct and current without them. This is the ONE member of
+               AlertReadFailureCounter.FleetScopedReads that both SKUs can actually record — the others
+               are Darling store self-alerts — and that constant is concatenated into both SKUs'
+               get_collection_health description, so a Lite process that named this read and could never
+               increment it would describe a failure mode it cannot surface.
+
+               The elapsed is a plain duration here rather than a deadline comparison: DuckDbMuteRuleStore
+               sets no CommandTimeout, which is the gap the counter's own remarks already state for every
+               Lite alerting read. */
+            var muteReadClock = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                await _muteRuleService.LoadAsync();
+            }
+            catch (Exception muteEx)
+            {
+                AppLogger.Warn(
+                    "MuteRules",
+                    $"Could not load mute rules after {muteReadClock.ElapsedMilliseconds} ms — the "
+                    + $"{_muteRuleService.GetRules().Count} rule(s) already in force stay in force until a "
+                    + $"read succeeds: {muteEx.Message}");
+                AlertReadFailureCounter.Shared.RecordReadFailure(
+                    null, "mute-rule reload", muteReadClock.ElapsedMilliseconds);
+            }
 
             // Initialize alerts history tab
             AlertsHistoryContent.Initialize(_dataService);
@@ -937,13 +971,15 @@ public partial class MainWindow : Window
             return;
         }
 
-        // Clear MFA cancellation flag when user explicitly connects
-        // This gives them a fresh attempt at authentication
+        /* Clear a previously declined interactive sign-in when the user explicitly connects: opening
+           a server IS the fresh attempt. Asked about the mode rather than tested against EntraMFA,
+           so a new interactive mode is not stuck declined for the session because this line did not
+           know about it. */
         var currentStatus = _serverManager.GetConnectionStatus(server.Id);
-        if (server.AuthenticationType == AuthenticationTypes.EntraMFA && currentStatus.UserCancelledMfa)
+        if (AuthenticationTypes.RequiresInteractiveSignIn(server.AuthenticationType) && currentStatus.UserCancelledMfa)
         {
             currentStatus.UserCancelledMfa = false;
-            StatusText.Text = "Retrying MFA authentication...";
+            StatusText.Text = "Retrying authentication...";
         }
 
         // Ensure connection status is populated with UTC offset before opening tab

@@ -98,7 +98,8 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
                     await SendAndRecordAsync(
                         outcome, message.CurrentValue, message.Context,
                         AlertContextBuilders.ContextToDetailText(message.Context),
-                        numericCurrentValue: message.NumericValue, numericThresholdValue: outcome.NumericThresholdValue);
+                        numericCurrentValue: message.NumericValue, numericThresholdValue: outcome.NumericThresholdValue,
+                        deliveryMode: mode);
                 }
 
                 return;
@@ -107,7 +108,8 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
             /* Summary mode, or an alert with no incidents (CPU/low-disk/jobs): one combined send+row, unchanged. */
             await SendAndRecordAsync(
                 outcome, outcome.CurrentValue, outcome.Context, outcome.DetailText,
-                outcome.NumericCurrentValue, outcome.NumericThresholdValue);
+                outcome.NumericCurrentValue, outcome.NumericThresholdValue,
+                deliveryMode: mode);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -127,9 +129,15 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
     /// structured context persists as JSON alongside the flat detail_text). Muted alerts skip both channels but
     /// still record (flagged muted).
     /// </summary>
+    /// <param name="deliveryMode">
+    /// The mode <see cref="DeliverAsync"/> resolved for this server, forwarded to the shared send core for
+    /// #3430's per-metric repeat ceiling. Passed rather than re-resolved so one alert's two channels and its
+    /// history row all describe the same decision, and passed FAITHFULLY on the Per-event split — those
+    /// messages must not be aggregated, which is that mode's own contract.
+    /// </param>
     private async Task SendAndRecordAsync(
         AlertOutcome outcome, string currentValue, AlertContext? context, string? detailText,
-        double? numericCurrentValue, double? numericThresholdValue)
+        double? numericCurrentValue, double? numericThresholdValue, AlertNotificationMode deliveryMode)
     {
         /* #2090: the fire site's severity rode AlertOutcome.Severity but the channel builders read
            only Context.SeverityOverride — so every self-alert (fired with Context: null) rendered
@@ -143,10 +151,15 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
             context.SeverityOverride ??= outcome.Severity;
         }
 
-        /* Lite's EmailAlertService.cs:65-66 — muted alerts skip both channels but still record below. */
+        /* Lite's EmailAlertService.cs:65-66 — muted alerts skip both channels but still record below.
+           outcome.DisplayName (a custom rule's human name, or null for built-ins) renders in the
+           subject/body/webhook titles in place of the "Custom:<id>" metric name; the metric name stays the
+           cooldown/history/mute key. detailText is the same prose this method records as the history row's
+           detail_text (#3297) — the channels get the alert's remedy, not only its number. */
         var result = await _core.TrySendAsync(
             outcome.MetricName, outcome.ServerName, currentValue, outcome.ThresholdValue,
-            outcome.ServerKey, context, attemptChannels: !outcome.Muted);
+            outcome.ServerKey, context, attemptChannels: !outcome.Muted, detailText: detailText,
+            displayName: outcome.DisplayName, deliveryMode: deliveryMode);
 
         /* trayChannelPresent: false — this is the HEADLESS service. It has no tray icon and no toast
            code, so the taxonomy's "tray" fallback (which is Lite's, and truthful there) would assert a UI

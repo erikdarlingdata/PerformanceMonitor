@@ -45,10 +45,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para><b>add_servers</b> processes its JSON array SEQUENTIALLY (mirroring #1549's Darling bulk probe, which is
 /// serial to avoid a probe storm): for each server it validates the fields, skips an exact/case-variant DUPLICATE
 /// of an existing or earlier-in-batch server (<c>status:"duplicate"</c>), probes the connection (a failure is
-/// <c>status:"connection_failed"</c> and does NOT abort the batch), DPAPI-encrypts the SQL password, and INSERTs
-/// the row (<c>status:"added"</c>). Windows/integrated auth stores no secret; Entra/MFA/Service-Principal/Managed-
-/// Identity auth is rejected (<c>status:"invalid"</c>) — interactive MFA is nonsensical headless, the same belt the
-/// bulk dialog applies. The whole call returns <c>{added, skipped, failed, results:[...]}</c>. <b>remove_server</b>
+/// <c>status:"connection_failed"</c> and does NOT abort the batch), DPAPI-encrypts the SQL password or the service-
+/// principal client secret, and INSERTs the row (<c>status:"added"</c>). Windows/integrated and managed-identity
+/// auth store no secret; a service principal stores its client secret exactly like a SQL password; the INTERACTIVE
+/// Entra modes (MFA / device-code / default-credential) are rejected (<c>status:"invalid"</c>) — they need a broker
+/// or a signed-in user and cannot run headless, whereas ServicePrincipal and ManagedIdentity are non-interactive
+/// and supported (#3484). The whole call returns <c>{added, skipped, failed, results:[...]}</c>. <b>remove_server</b>
 /// resolves a name through the SAME <see cref="DarlingServerResolver"/> the read tools use and DELETEs the
 /// <c>config.config_monitored_servers</c> row.</para>
 ///
@@ -79,9 +81,12 @@ public sealed class DarlingMcpServerAdminTools
         "central monitoring store, which the running service picks up within one collection sweep (no restart). " +
         "Each object: host (REQUIRED); display_name (optional, defaults to host); database (optional — set it only " +
         "to monitor a single database, e.g. one Azure SQL Database); engine (\"sqlserver\" default, or \"postgres\" " +
-        "for PostgreSQL / Amazon Aurora PostgreSQL); auth (\"Windows\" for integrated security or " +
-        "\"SQL\" for a SQL login — default \"Windows\"; a PostgreSQL target REQUIRES \"SQL\"); username + password " +
-        "(REQUIRED for \"SQL\" auth, ignored for " +
+        "for PostgreSQL / Amazon Aurora PostgreSQL); auth (\"Windows\" for integrated security, \"SQL\" for a SQL " +
+        "login, or the non-interactive Microsoft Entra modes \"ServicePrincipal\" (Entra app/client id + secret) " +
+        "and \"ManagedIdentity\" for Entra-authenticated Azure SQL — default \"Windows\"; a PostgreSQL target " +
+        "REQUIRES \"SQL\"); username + password (REQUIRED for \"SQL\" auth — and for \"ServicePrincipal\", where " +
+        "username is the application/client id and password is the client secret; for \"ManagedIdentity\" both are " +
+        "optional — set username to a user-assigned identity's client id, omit it for system-assigned; ignored for " +
         "\"Windows\"); port (optional, PostgreSQL only — omit for 5432); " +
         "encrypt_mode (\"Optional\"|\"Mandatory\"|\"Strict\", default \"Mandatory\"); " +
         "trust_server_certificate (bool, default false — set true to accept a self-signed server cert, and " +
@@ -89,9 +94,11 @@ public sealed class DarlingMcpServerAdminTools
         "read_only_intent (bool, default false); multi_subnet_failover (bool, default false). Servers are processed " +
         "IN ORDER, one at a time. A case-variant or exact duplicate of an already-monitored server (or an earlier " +
         "entry in the same array) is skipped as status \"duplicate\". A server that fails to connect is recorded as " +
-        "status \"connection_failed\" and does NOT stop the rest of the batch. Microsoft Entra / MFA / Service " +
-        "Principal / Managed Identity auth is rejected (status \"invalid\") — the service connects with Windows or " +
-        "SQL authentication only. A SQL password is encrypted at rest (DPAPI, the service identity) and is never " +
+        "status \"connection_failed\" and does NOT stop the rest of the batch. The INTERACTIVE Microsoft Entra modes " +
+        "(MFA / device-code / default-credential) are rejected (status \"invalid\") — they need a broker or a " +
+        "signed-in user and cannot run headless; ServicePrincipal and ManagedIdentity are non-interactive and are " +
+        "supported. A SQL password or service-principal client secret is encrypted at rest (DPAPI, the service " +
+        "identity) and is never " +
         "returned. Returns {added:N, skipped:N, failed:N, results:[{server, status:\"added\"|\"duplicate\"|" +
         "\"connection_failed\"|\"invalid\", detail}]}, where an added server's detail reports what the probe found " +
         "— for a PostgreSQL target that includes writer-vs-reader, Aurora-vs-not, and how many of the PostgreSQL " +
@@ -297,8 +304,9 @@ public sealed class DarlingMcpServerAdminTools
     }
 
     /// <summary>Parses + validates ONE array element into a ready entry, or an <c>invalid</c> result naming the
-    /// problem. Windows/SQL are the only auth modes the service can honor; every other value (including the
-    /// Entra/MFA/Service-Principal/Managed-Identity modes) is rejected — interactive MFA is nonsensical headless.</summary>
+    /// problem. The service honors Windows, SQL, and the two non-interactive Entra modes (ServicePrincipal,
+    /// ManagedIdentity); the interactive Entra modes (MFA/device-code/default-credential) are rejected — they
+    /// cannot run headless (#3484).</summary>
     private static (ParsedServerEntry? Entry, ServerResult? Result) ParseEntry(int index, JsonNode? node)
     {
         if (node is not JsonObject obj)
@@ -321,43 +329,68 @@ public sealed class DarlingMcpServerAdminTools
         var databaseRaw = TryGetString(obj, "database");
         var database = string.IsNullOrWhiteSpace(databaseRaw) ? null : databaseRaw!.Trim();
 
-        /* Auth: Windows (integrated) or SQL only. Absent defaults to Windows (the MonitoredServer default). Any
-           other value — Entra / MFA / ServicePrincipal / ManagedIdentity, or a typo — is refused with the SAME
-           message, so a headless caller learns the service's two supported modes. */
+        /* Auth: Windows (integrated), SQL, or the two NON-INTERACTIVE Microsoft Entra modes — ServicePrincipal
+           and ManagedIdentity (#3484). Absent defaults to Windows. The interactive Entra modes (MFA,
+           device-code, default-credential) are refused: they need a broker or a signed-in user and cannot run
+           unattended. */
         var authRaw = TryGetString(obj, "auth");
+        var authTrim = authRaw?.Trim();
         string storeAuth;
-        if (string.IsNullOrWhiteSpace(authRaw) || authRaw.Trim().Equals("Windows", StringComparison.OrdinalIgnoreCase))
+        if (string.IsNullOrWhiteSpace(authTrim) || authTrim.Equals("Windows", StringComparison.OrdinalIgnoreCase))
         {
             storeAuth = ServerStoreAuth.Integrated;
         }
-        else if (authRaw.Trim().Equals("SQL", StringComparison.OrdinalIgnoreCase))
+        else if (authTrim.Equals("SQL", StringComparison.OrdinalIgnoreCase))
         {
             storeAuth = ServerStoreAuth.Sql;
+        }
+        else if (authTrim.Equals("ServicePrincipal", StringComparison.OrdinalIgnoreCase))
+        {
+            storeAuth = ServerStoreAuth.ServicePrincipal;
+        }
+        else if (authTrim.Equals("ManagedIdentity", StringComparison.OrdinalIgnoreCase))
+        {
+            storeAuth = ServerStoreAuth.ManagedIdentity;
         }
         else
         {
             return (null, Invalid(
-                "auth must be \"Windows\" or \"SQL\". Microsoft Entra / MFA / Service Principal / Managed Identity " +
-                "are not supported for headless onboarding — the Darling service connects with Windows (integrated) " +
-                "or SQL authentication only."));
+                "auth must be \"Windows\", \"SQL\", \"ServicePrincipal\", or \"ManagedIdentity\". The interactive " +
+                "Microsoft Entra modes (MFA, device-code, default-credential) are not supported for a headless " +
+                "collector — they need a broker or a signed-in user. Use ServicePrincipal (client id + secret) or " +
+                "ManagedIdentity, both non-interactive, for Entra-authenticated Azure SQL targets."));
         }
 
         string? username = null;
         string? plaintextPassword = null;
-        if (storeAuth == ServerStoreAuth.Sql)
+        if (storeAuth == ServerStoreAuth.Sql || storeAuth == ServerStoreAuth.ServicePrincipal)
         {
+            /* Service principal takes the same two fields as SQL auth — the application/client id as username,
+               the client secret as the password (DPAPI-encrypted after a successful probe, exactly like a SQL
+               password) — so the requirement and the storage are identical; only the wording differs. */
+            var isSp = storeAuth == ServerStoreAuth.ServicePrincipal;
             username = TryGetString(obj, "username");
             if (string.IsNullOrWhiteSpace(username))
             {
-                return (null, Invalid("username is required for SQL authentication."));
+                return (null, Invalid(isSp
+                    ? "username is required for ServicePrincipal authentication (the Entra application/client id)."
+                    : "username is required for SQL authentication."));
             }
 
             username = username!.Trim();
             plaintextPassword = TryGetString(obj, "password");
             if (string.IsNullOrEmpty(plaintextPassword))
             {
-                return (null, Invalid("password is required for SQL authentication."));
+                return (null, Invalid(isSp
+                    ? "password is required for ServicePrincipal authentication (the client secret)."
+                    : "password is required for SQL authentication."));
             }
+        }
+        else if (storeAuth == ServerStoreAuth.ManagedIdentity)
+        {
+            /* Managed identity carries no secret. A user-assigned identity may name its client id in username;
+               a system-assigned identity omits it. Nothing is required and nothing is stored as a secret. */
+            username = TryGetString(obj, "username") is { Length: > 0 } miClientId ? miClientId.Trim() : null;
         }
 
         /* encrypt_mode + trust_server_certificate are deliberately EXPOSED (per Erik) — a headless caller sets the
@@ -773,5 +806,13 @@ ON CONFLICT (server_id) DO NOTHING";
     {
         public const string Integrated = "integrated";
         public const string Sql = "sql";
+
+        /// <summary>Microsoft Entra service principal — client id in username, client secret in the DPAPI blob;
+        /// non-interactive, so it is honored headless (#3484). Pinned equal to <see cref="MonitoredServer.UsesServicePrincipal"/>.</summary>
+        public const string ServicePrincipal = "serviceprincipal";
+
+        /// <summary>Azure managed identity — non-interactive and secret-less (#3484). Pinned equal to
+        /// <see cref="MonitoredServer.UsesManagedIdentity"/>.</summary>
+        public const string ManagedIdentity = "managedidentity";
     }
 }

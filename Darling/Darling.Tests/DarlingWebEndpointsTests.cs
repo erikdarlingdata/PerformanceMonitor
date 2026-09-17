@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Text.Json.Nodes;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -84,16 +85,23 @@ public sealed class DarlingWebEndpointsTests
     {
         /* The six original non-read tools (analyze_server, the mute write, the four analyze_*_plan), the eight
            Custom Views tools (#1599 + describe_custom_view_catalog) served by /api/views + /api/compose/run +
-           /api/catalog, the three alert-tuning WRITE tools, and the two server-onboarding WRITE tools
-           (add_servers / remove_server) — all writes with no read endpoint, like mute_analysis_finding; none is a
-           /api/read/{tool} 1:1 mirror. */
+           /api/catalog, the eight custom-alert-rule tools (#3285 — create/update/delete write, get/list/validate
+           read against the compose catalog, test_custom_alert_rule (#3299) evaluate-now, and
+           list_custom_alert_templates (#3285 Component 7) starter templates, none a
+           /api/read/{tool} mirror), the five alert-tuning WRITE tools — of which the four mute-rule verbs are
+           served by their OWN dedicated /api/mute-rules endpoints since #3450, the Custom Views disposition,
+           so they STAY excluded from the generic mirror for the same reason those do, while
+           update_alert_settings remains a write with no web surface at all — and the two server-onboarding
+           WRITE tools (add_servers / remove_server). All with no /api/read/{tool} 1:1 mirror, like
+           mute_analysis_finding. */
         Assert.Equal(
             new[]
             {
                 "add_servers", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
-                "analyze_server", "create_custom_view", "create_mute_rule", "delete_custom_view", "delete_mute_rule",
-                "describe_custom_view_catalog", "get_custom_view", "list_custom_views", "mute_analysis_finding", "remove_server",
-                "run_custom_view_panel", "update_alert_settings", "update_custom_view", "validate_custom_view",
+                "analyze_server", "create_custom_alert_rule", "create_custom_view", "create_mute_rule", "delete_custom_alert_rule",
+                "delete_custom_view", "delete_mute_rule", "describe_custom_view_catalog", "get_custom_alert_rule", "get_custom_view",
+                "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "mute_analysis_finding", "remove_server", "run_custom_view_panel",
+                "set_mute_rule_enabled", "test_custom_alert_rule", "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "update_mute_rule", "validate_custom_alert_rule", "validate_custom_view",
             },
             DarlingWebEndpoints.ExcludedToolNames.OrderBy(n => n, StringComparer.Ordinal).ToArray());
     }
@@ -166,6 +174,49 @@ public sealed class DarlingWebEndpointsTests
     public void ParseDouble_DefaultsOnMissOrGarbage(string? raw, double expected) =>
         Assert.Equal(expected, DarlingWebEndpoints.ParseDouble(raw, 0.0));
 
+    /// <summary>
+    /// #3287's optional numeric FILTER binding, which deliberately does NOT behave like
+    /// <see cref="DarlingWebEndpoints.ParseDouble"/> beside it.
+    ///
+    /// <para>Every other optional knob on this dispatch falls back to its default on a value it cannot read,
+    /// so <c>?hours=abc</c> quietly means 24. For a filter that same fallback means the filter does not
+    /// apply and the caller receives a complete-looking UNFILTERED page — the silently-dropped-parameter
+    /// failure <c>min_duration_ms</c> was added to remove, reintroduced one layer down. So an unreadable
+    /// filter is REFUSED: absent binds null, a number binds the number, and garbage returns false and reaches
+    /// the caller as a message.</para>
+    ///
+    /// <para>Zero and a negative both BIND rather than being rejected here. This layer only decides whether a
+    /// value was readable; the tool owns the range refusal, so the web and MCP surfaces cannot disagree about
+    /// what a bad floor means — the rule <c>AsOf</c> already follows for the same reason.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(null, true, null)]        // absent: no filter, and that is not an error
+    [InlineData("5000", true, 5000.0)]    // a plain number
+    [InlineData("0", true, 0.0)]          // zero is a real floor, not an absent one
+    [InlineData("-1", true, -1.0)]        // readable; the TOOL refuses the range, not this layer
+    [InlineData("2.5", true, 2.5)]
+    [InlineData("abc", false, null)]      // unreadable: refused, NOT defaulted to "no filter"
+    [InlineData("", true, null)]          // an empty value is an absent one (First() returns null)
+    public void TryParseOptionalDouble_RefusesGarbageRatherThanDroppingTheFilter(string? raw, bool expectedOk, double? expectedValue)
+    {
+        /* First() maps an empty query value to null, so the empty case arrives here as null. */
+        var ok = DarlingWebEndpoints.TryParseOptionalDouble(string.IsNullOrEmpty(raw) ? null : raw, out var value);
+
+        Assert.Equal(expectedOk, ok);
+        Assert.Equal(expectedValue, value);
+    }
+
+    /// <summary>
+    /// And the sibling this is NOT: <c>ParseDouble</c> really does swallow the same garbage, so the theory
+    /// above is pinning a difference rather than restating shared behaviour.
+    /// </summary>
+    [Fact]
+    public void TheFilterBinding_DiffersFromTheDefaultingOne_OnGarbage()
+    {
+        Assert.Equal(0.0, DarlingWebEndpoints.ParseDouble("abc", 0.0));
+        Assert.False(DarlingWebEndpoints.TryParseOptionalDouble("abc", out _));
+    }
+
     /* ── row-count clamp: the abuse bound on ?limit= / ?top= (security review M3) ── */
 
     [Theory]
@@ -176,4 +227,101 @@ public sealed class DarlingWebEndpointsTests
     [InlineData(-5, 1)]
     public void ClampRows_BoundsCallerSuppliedRowCounts(int requested, int expected) =>
         Assert.Equal(expected, DarlingWebEndpoints.ClampRows(requested));
+
+    /* ── the mute-rule envelope → HTTP status mapping (#3450): the dedicated /api/mute-rules write routes pass
+       the MCP verb's own {status, ...} envelope through verbatim and add ONLY the HTTP status, so a web client
+       and an MCP client read one truth. This table is that addition, whole. ── */
+
+    [Theory]
+    [InlineData("{\"status\":\"created\",\"mute_rule\":{}}", 201, 201)]      // create's success rides the route's own code
+    [InlineData("{\"status\":\"updated\",\"mute_rule\":{}}", 200, 200)]
+    [InlineData("{\"status\":\"unchanged\",\"mute_rule\":{}}", 200, 200)]    // retry-safe "already so" shares the success code; the envelope carries the distinction
+    [InlineData("{\"status\":\"deleted\",\"rule_id\":\"x\"}", 200, 200)]
+    [InlineData("{\"status\":\"invalid\",\"message\":\"bad field\"}", 201, 400)]   // a refusal outranks whatever success the route hoped for
+    [InlineData("{\"status\":\"not_found\",\"message\":\"no rule\"}", 200, 404)]
+    public void MuteRuleEnvelopeStatus_MapsTheVerbEnvelopeOntoHttp(string envelope, int successStatus, int expected) =>
+        Assert.Equal(expected, DarlingWebEndpoints.MuteRuleEnvelopeStatus(envelope, successStatus));
+
+    [Fact]
+    public void MuteRuleEnvelopeStatus_TheCoresCaughtException_IsAServerError() =>
+        /* The cores swallow their own exceptions into "Error during ..." — the same shape the read surface
+           maps to 500, classified by the same ClassifyToolResponse. */
+        Assert.Equal(500, DarlingWebEndpoints.MuteRuleEnvelopeStatus("Error during update_mute_rule: connection reset", 200));
+
+    [Fact]
+    public void MuteRuleEnvelopeStatus_ABareString_IsAClientError() =>
+        /* Not a shape the cores produce; mapped like the read surface's client-correctable arm rather than
+           claiming success over a body that is not an envelope. */
+        Assert.Equal(400, DarlingWebEndpoints.MuteRuleEnvelopeStatus("rule_id is required.", 200));
+
+    /* ── custom-alert-rule wire-shape builders (#3285): the ONE shape shared by the /api/alerts responses AND
+       the MCP alert tools (get/create/update/list), so the two surfaces cannot drift. ── */
+
+    [Fact]
+    public void BuildFullRuleNode_CarriesEnabled_AndEmbedsTheDefinitionAsAnObject()
+    {
+        var created = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        var updated = new DateTime(2026, 1, 2, 3, 5, 6, DateTimeKind.Utc);
+        var rule = new CustomAlertRule(
+            Id: 7, Name: "PG dead tuples", DefinitionJson: "{\"predicate\":{\"op\":\"gt\",\"warnThreshold\":1000}}",
+            Description: "desc", Enabled: false, Version: 3, CreatedAt: created, UpdatedAt: updated, UpdatedBy: "web");
+
+        var node = DarlingWebEndpoints.BuildFullRuleNode(rule);
+
+        foreach (var key in new[] { "id", "name", "description", "definition", "enabled", "version", "created_at", "updated_at", "updated_by" })
+        {
+            Assert.True(node.ContainsKey(key), "missing key: " + key);
+        }
+
+        Assert.Equal(7L, (long)node["id"]!);
+        Assert.Equal("PG dead tuples", (string)node["name"]!);
+        Assert.False((bool)node["enabled"]!);          // 'enabled' round-trips (the view shape carries no such field)
+        Assert.Equal(3, (int)node["version"]!);
+
+        // The definition is an embedded JSON object (NOT an escaped string), so a client reads its fields directly.
+        var definition = Assert.IsType<JsonObject>(node["definition"]);
+        Assert.Equal("gt", (string)definition["predicate"]!["op"]!);
+    }
+
+    [Fact]
+    public void BuildRuleSummariesNode_IsABareArray_WithEnabled_AndNoDefinitionBody()
+    {
+        var summaries = new List<CustomAlertRuleSummary>
+        {
+            new(Id: 11, Name: "blocking", Description: null, Enabled: true, Version: 2,
+                UpdatedAt: new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc), UpdatedBy: "mcp", LastFired: null),
+        };
+
+        var array = DarlingWebEndpoints.BuildRuleSummariesNode(summaries);
+
+        var only = Assert.IsType<JsonObject>(Assert.Single(array));
+        Assert.Equal(11L, (long)only["id"]!);
+        Assert.Equal("blocking", (string)only["name"]!);
+        Assert.True((bool)only["enabled"]!);
+        Assert.False(only.ContainsKey("definition"));  // the list projection never carries the definition body
+    }
+
+    [Fact]
+    public void BuildRuleSummariesNode_CarriesLastFired_OrNullWhenNeverFired()
+    {
+        var firedAt = new DateTime(2026, 3, 4, 5, 6, 7, DateTimeKind.Utc);
+        var summaries = new List<CustomAlertRuleSummary>
+        {
+            new(Id: 1, Name: "fired", Description: null, Enabled: true, Version: 1,
+                UpdatedAt: firedAt, UpdatedBy: null, LastFired: firedAt),
+            new(Id: 2, Name: "never", Description: null, Enabled: true, Version: 1,
+                UpdatedAt: firedAt, UpdatedBy: null, LastFired: null),
+        };
+
+        var array = DarlingWebEndpoints.BuildRuleSummariesNode(summaries);
+
+        var fired = Assert.IsType<JsonObject>(array[0]);
+        Assert.True(fired.ContainsKey("last_fired"));
+        Assert.Equal(firedAt, fired["last_fired"]!.GetValue<DateTime>());
+
+        // The key is ALWAYS present (a stable wire shape) — a never-fired rule carries JSON null, not an absent key.
+        var never = Assert.IsType<JsonObject>(array[1]);
+        Assert.True(never.ContainsKey("last_fired"));
+        Assert.Null(never["last_fired"]);
+    }
 }

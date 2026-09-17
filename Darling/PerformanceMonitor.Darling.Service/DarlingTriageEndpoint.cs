@@ -63,8 +63,9 @@ internal static class DarlingTriageEndpoint
 
     /// <summary>A FLEET-LEVEL section (#2768): a read that answers about the monitoring store or the whole
     /// fleet and therefore takes no <c>server</c>. Used by the store self-alert family, whose alerts fire
-    /// under the synthetic <see cref="DarlingSelfAlertEvaluator.StoreServerLabel"/> and have no per-server
-    /// scope to drill into.</summary>
+    /// under the synthetic <see cref="DarlingSelfAlertEvaluator.StoreServerLabel"/> (or the opted-in
+    /// <c>peers.storeName</c> — #3500; either way, not a registered target) and have no per-server scope to
+    /// drill into.</summary>
     private static TriageSection F(string title, string read, params (string Key, string Value)[] parameters) =>
         Section(title, read, fleetLevel: true, parameters);
 
@@ -112,6 +113,8 @@ internal static class DarlingTriageEndpoint
         (DarlingSelfAlertEvaluator.DiskPressureResolvedMetric, DarlingSelfAlertEvaluator.DiskPressureMetric),
         ("Store Job Cadence Recovered", DarlingSelfAlertEvaluator.JobCadenceMetric),
         ("Compression Job Recovered", DarlingSelfAlertEvaluator.CompressionJobMetric),
+        (DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, DarlingSelfAlertEvaluator.StaleMuteMetric),
+        (DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric),
     };
 
     /// <summary>
@@ -245,6 +248,28 @@ internal static class DarlingTriageEndpoint
             [DarlingSelfAlertEvaluator.JobCadenceMetric] = StoreSections(),
             [DarlingSelfAlertEvaluator.CompressionJobMetric] = StoreSections(),
 
+            /* #3306: the stale-mute alert is the one store-family member whose subject is the CONFIGURATION
+               rather than the store's volume, so get_store_metrics answers nothing about it. The rule list is
+               the drill-down, with enabled_only=false so a rule that lapsed or was disabled between the
+               firing and the click is still visible rather than looking deleted. The alert history is the
+               second half: what a stale mute costs is the alerts it suppressed, and a muted alert is still
+               RECORDED, so the history is where the suppressed signal actually is. */
+            [DarlingSelfAlertEvaluator.StaleMuteMetric] = new[]
+            {
+                F("Mute rules in force", "get_mute_rules", ("enabled_only", "false")),
+                /* 168 hours because that is StaleMuteAge, and it is also this read's own ceiling. */
+                F("Recent alerts (a muted alert is still recorded here)", "get_alert_history", ("hours", "168"), ("limit", "50")),
+            },
+
+            /* #3514: the web-dashboard TLS certificate expiry alert is config/host-shaped like the stale-mute
+               one — get_store_metrics answers nothing about it, and renewing the certificate is an out-of-band
+               step on the service host. The actionable facts (subject, thumbprint, expiry) are in the alert
+               detail; the history is the firing trail, so the operator can see when the warning began. */
+            [DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric] = new[]
+            {
+                F("Recent alerts (the certificate's subject, thumbprint and expiry are in the alert detail)", "get_alert_history", ("hours", "168"), ("limit", "50")),
+            },
+
             /* PostgreSQL alert family (PostgresAlertEvaluator). */
             ["PostgreSQL Wraparound Risk"] = new[]
             {
@@ -311,18 +336,39 @@ internal static class DarlingTriageEndpoint
             : DefaultSections;
 
     /// <summary>
-    /// PURE (#2768): is this link's <c>server</c> the synthetic label the fleet-level store self-alerts fire
-    /// under? Those alerts are ABOUT the monitoring store, which is not a monitored SQL Server and is not in
-    /// the registry, so resolving it is guaranteed to fail. Recognising it lets the page skip resolution
+    /// Is this link's <c>server</c> the label the fleet-level store self-alerts fire under (#2768)? Those
+    /// alerts are ABOUT the monitoring store, which is not a monitored SQL Server and is not in the
+    /// registry, so resolving it is guaranteed to fail. Recognising it lets the page skip resolution
     /// entirely — no page-level "Could not resolve server" warning for a server that was never supposed to
     /// resolve — and skip the standing per-server collection-log section, which needs a server to mean
     /// anything. Compared case-insensitively and trimmed, matching how the history filter and
     /// <see cref="SectionsFor"/> treat their inputs, because the label arrives back through a URL.
+    ///
+    /// <para>No longer strictly pure since #3500: an opted-in <c>peers.storeName</c> is a second spelling of
+    /// the same fleet-level fact, read from the ambient <see cref="DarlingPeerDirectory"/> snapshot the
+    /// worker and the MCP host both publish from the same file — the established channel for exactly this
+    /// block, rather than a second config load. BOTH spellings stay recognised on an opted-in store on
+    /// purpose: a channel still holds links minted before the opt-in, and a link is a promise. The
+    /// documented cost of the ambient read is the field's stated non-goal — a storeName that shadows a
+    /// monitored server's display name makes that server's links read fleet-level too, which is why the
+    /// config comment says not to reuse one.</para>
     /// </summary>
-    internal static bool IsFleetLevelStoreServer(string? server) =>
-        !string.IsNullOrWhiteSpace(server)
-        && string.Equals(
-            server.Trim(), DarlingSelfAlertEvaluator.StoreServerLabel, StringComparison.OrdinalIgnoreCase);
+    internal static bool IsFleetLevelStoreServer(string? server)
+    {
+        if (string.IsNullOrWhiteSpace(server))
+        {
+            return false;
+        }
+
+        var trimmed = server.Trim();
+        if (string.Equals(trimmed, DarlingSelfAlertEvaluator.StoreServerLabel, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var storeName = DarlingPeerDirectory.Current.StoreName;
+        return storeName.Length > 0 && string.Equals(trimmed, storeName, StringComparison.OrdinalIgnoreCase);
+    }
 
     /// <summary>How far past the firing instant each section's window END sits, so the firing itself — and
     /// its immediate aftermath — is inside the window rather than being its exclusive upper bound.</summary>
@@ -385,9 +431,10 @@ internal static class DarlingTriageEndpoint
 
             var notes = new JsonArray();
 
-            /* #2768: a store self-alert's server is the synthetic StoreServerLabel, which cannot resolve by
-               design. Recognise it up front and skip resolution rather than reporting a failure the operator
-               can do nothing about — the sections this page then runs are fleet-level and take no server. */
+            /* #2768: a store self-alert's server is the store's label — the synthetic StoreServerLabel, or
+               #3500's opted-in peers.storeName — which cannot resolve by design either way. Recognise it up
+               front and skip resolution rather than reporting a failure the operator can do nothing about —
+               the sections this page then runs are fleet-level and take no server. */
             var fleetLevelStore = IsFleetLevelStoreServer(serverQuery);
 
             /* Server resolution — a failure is a NOTE, not a 500: the page still renders the alert-history

@@ -129,20 +129,22 @@ public sealed class StoreIsOnThisMachineTests
     }
 
     /// <summary>
-    /// The dialog surfaces the hint only for SQL auth on a non-local store, and CLEARS its own message when the
-    /// mode changes away — the same self-clearing discipline the Azure arm uses, which is what stops a stale
-    /// hint sitting under an unrelated auth mode.
+    /// The dialog surfaces the machine-bound-secret hint for the two secret-bearing modes — SQL auth and (as of
+    /// #3484) a service principal — on a non-local store, and CLEARS its own message when the mode changes away,
+    /// the same self-clearing discipline the interactive-Entra arm uses, which stops a stale hint sitting under
+    /// an unrelated auth mode.
     ///
     /// <para>Pinned at the source: the alternative is standing up a WPF dialog with a live store.</para>
     /// </summary>
     [Fact]
-    public void TheDialogShowsTheHintOnlyForSqlAuthOnANonLocalStore()
+    public void TheDialogShowsTheHintForSecretBearingModesOnANonLocalStore()
     {
         var source = ReadDialogSource();
 
-        Assert.Contains("SqlAuthRadio.IsChecked == true && _dataService is { StoreIsOnThisMachine: false }", source, StringComparison.Ordinal);
+        Assert.Contains("SqlAuthRadio.IsChecked == true || ServicePrincipalAuthRadio.IsChecked == true", source, StringComparison.Ordinal);
+        Assert.Contains("_dataService is { StoreIsOnThisMachine: false }", source, StringComparison.Ordinal);
         Assert.Contains("StatusText.Text = SqlCredentialMachineBoundHint;", source, StringComparison.Ordinal);
-        /* Self-clearing, exactly like the Azure message above it. */
+        /* Self-clearing, exactly like the interactive-Entra message above it. */
         Assert.Contains("else if (StatusText.Text == SqlCredentialMachineBoundHint)", source, StringComparison.Ordinal);
     }
 

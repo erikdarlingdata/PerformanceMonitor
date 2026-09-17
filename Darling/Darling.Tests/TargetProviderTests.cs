@@ -206,13 +206,13 @@ public class TargetProviderTests
     public void DatabaseListPlan_EnumeratesFromTheRightPlacePerEngine()
     {
         var (sqlConnectionString, sqlQuery) = SqlServerTargetProvider.Instance.BuildDatabaseListPlan(
-            "Server=sql1;Initial Catalog=CustomerDb;User ID=mon;Password=p", null);
+            "Server=sql1;Initial Catalog=CustomerDb;User ID=mon;Password=p", null, null);
 
         Assert.Equal("master", new SqlConnectionStringBuilder(sqlConnectionString).InitialCatalog);
         Assert.Contains("sys.databases", sqlQuery.Text, StringComparison.Ordinal);
 
         const string pgConnectionString = "Host=aurora;Database=postgres;Username=mon;Password=p";
-        var (pgConnection, pgQuery) = PostgresTargetProvider.Instance.BuildDatabaseListPlan(pgConnectionString, null);
+        var (pgConnection, pgQuery) = PostgresTargetProvider.Instance.BuildDatabaseListPlan(pgConnectionString, null, null);
 
         Assert.Equal(pgConnectionString, pgConnection);
         Assert.Contains("pg_database", pgQuery.Text, StringComparison.Ordinal);
@@ -226,7 +226,7 @@ public class TargetProviderTests
     [Fact]
     public void PostgresDatabaseList_SkipsTemplatesAndClosedDatabases()
     {
-        var (_, query) = PostgresTargetProvider.Instance.BuildDatabaseListPlan("Host=aurora;Database=postgres", null);
+        var (_, query) = PostgresTargetProvider.Instance.BuildDatabaseListPlan("Host=aurora;Database=postgres", null, null);
 
         Assert.Contains("datallowconn", query.Text, StringComparison.Ordinal);
         Assert.Contains("NOT datistemplate", query.Text, StringComparison.Ordinal);
@@ -245,7 +245,7 @@ public class TargetProviderTests
     [Fact]
     public void PostgresDatabaseList_SkipsTheManagedMaintenanceDatabase()
     {
-        var (_, query) = PostgresTargetProvider.Instance.BuildDatabaseListPlan("Host=aurora;Database=postgres", null);
+        var (_, query) = PostgresTargetProvider.Instance.BuildDatabaseListPlan("Host=aurora;Database=postgres", null, null);
 
         Assert.Equal("rdsadmin", PostgresTargetProvider.ManagedMaintenanceDatabase);
         Assert.Contains(
@@ -265,7 +265,7 @@ public class TargetProviderTests
     [Fact]
     public void PostgresDatabaseList_ScreensExactlyOneNameAndNoLegitimateDatabase()
     {
-        var (_, query) = PostgresTargetProvider.Instance.BuildDatabaseListPlan("Host=aurora;Database=postgres", null);
+        var (_, query) = PostgresTargetProvider.Instance.BuildDatabaseListPlan("Host=aurora;Database=postgres", null, null);
 
         /* One quoted literal in the whole enumeration: the managed maintenance database and nothing else.
            Counts quotes rather than listing names, so a name added here without field evidence fails this
@@ -297,11 +297,11 @@ public class TargetProviderTests
     {
         var excluded = new[] { "tempdb_clone", "scratch" };
 
-        var (_, sqlQuery) = SqlServerTargetProvider.Instance.BuildDatabaseListPlan("Server=sql1", excluded);
+        var (_, sqlQuery) = SqlServerTargetProvider.Instance.BuildDatabaseListPlan("Server=sql1", excluded, null);
         Assert.Contains("name NOT IN (@excl_db_0, @excl_db_1)", sqlQuery.Text, StringComparison.Ordinal);
         Assert.Equal(2, sqlQuery.Parameters.Count);
 
-        var (_, pgQuery) = PostgresTargetProvider.Instance.BuildDatabaseListPlan("Host=aurora", excluded);
+        var (_, pgQuery) = PostgresTargetProvider.Instance.BuildDatabaseListPlan("Host=aurora", excluded, null);
         Assert.Contains("datname NOT IN (@excl_db_0, @excl_db_1)", pgQuery.Text, StringComparison.Ordinal);
         Assert.Equal(2, pgQuery.Parameters.Count);
 
@@ -323,7 +323,7 @@ public class TargetProviderTests
     [InlineData(CollectorTargetEngine.PostgreSql, "Host=pg1;Database=postgres;Username=monitor")]
     public void DatabaseListPlan_WithNoExclusionsIsClean(CollectorTargetEngine engine, string connectionString)
     {
-        var (_, query) = TargetProviders.For(engine).BuildDatabaseListPlan(connectionString, Array.Empty<string>());
+        var (_, query) = TargetProviders.For(engine).BuildDatabaseListPlan(connectionString, Array.Empty<string>(), Array.Empty<string>());
 
         Assert.Empty(query.Parameters);
         Assert.DoesNotContain("NOT IN", query.Text, StringComparison.Ordinal);
@@ -354,12 +354,12 @@ public class TargetProviderTests
     {
         var excluded = new[] { "scratch" };
 
-        var (_, sqlQuery) = SqlServerTargetProvider.Instance.BuildDatabaseListPlan("Server=sql1", excluded);
+        var (_, sqlQuery) = SqlServerTargetProvider.Instance.BuildDatabaseListPlan("Server=sql1", excluded, null);
         using var sqlConnection = new SqlConnection("Server=nowhere");
         using var sqlCommand = SqlServerTargetProvider.Instance.CreateCommand(sqlQuery, sqlConnection, 60);
         Assert.Single(sqlCommand.Parameters);
 
-        var (_, pgQuery) = PostgresTargetProvider.Instance.BuildDatabaseListPlan("Host=aurora", excluded);
+        var (_, pgQuery) = PostgresTargetProvider.Instance.BuildDatabaseListPlan("Host=aurora", excluded, null);
         using var pgConnection = new NpgsqlConnection("Host=nowhere");
         using var pgCommand = PostgresTargetProvider.Instance.CreateCommand(pgQuery, pgConnection, 60);
         Assert.Single(pgCommand.Parameters);

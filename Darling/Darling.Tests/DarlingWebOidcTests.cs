@@ -510,6 +510,37 @@ public sealed class DarlingWebOidcTests
     [InlineData(false, "DELETE", "/api/views/3", false)]        // no delete
     [InlineData(false, "POST", "/api/anything/new", false)]     // a write endpoint added TOMORROW is born gated
     [InlineData(false, "PATCH", "/api/compose/run", false)]     // the compose exception is POST-only
+    // The custom-alert-rule web API (#3285) shadows /api/views: reads open to any seat, writes born gated.
+    [InlineData(true, "POST", "/api/alerts", true)]             // edit seat: create
+    [InlineData(true, "PUT", "/api/alerts/3", true)]            // edit seat: update
+    [InlineData(true, "DELETE", "/api/alerts/3", true)]         // edit seat: delete
+    [InlineData(false, "GET", "/api/alerts", true)]             // viewer: list
+    [InlineData(false, "GET", "/api/alerts/3", true)]           // viewer: get one
+    [InlineData(false, "GET", "/api/alert-templates", true)]    // viewer: browse starter templates
+    [InlineData(false, "POST", "/api/alerts", false)]           // viewer: no create
+    [InlineData(false, "PUT", "/api/alerts/3", false)]          // no update
+    [InlineData(false, "DELETE", "/api/alerts/3", false)]       // no delete
+    [InlineData(false, "POST", "/api/alerts/validate", false)]  // validate is a POST, born gated (NOT compose/run-exempt)
+    [InlineData(false, "POST", "/api/alerts/test", false)]      // evaluate-now is a POST, born gated too
+    // The mute-rule write endpoints (#3450) shadow /api/alerts: dedicated writes, born gated on the method —
+    // including PATCH, which no earlier surface used and which must NOT ride the compose-run POST exemption.
+    [InlineData(true, "POST", "/api/mute-rules", true)]                // edit seat: create
+    [InlineData(true, "PATCH", "/api/mute-rules/abc-123", true)]       // edit seat: partial update
+    [InlineData(true, "PUT", "/api/mute-rules/abc-123/enabled", true)] // edit seat: enable/disable
+    [InlineData(true, "DELETE", "/api/mute-rules/abc-123", true)]      // edit seat: delete
+    // The fleet sweep feed (#3466 lane 3) is a READ surface: every route is a GET, so both seats reach
+    // all of it — a sweep report is exactly what the viewer seat exists to grant — and any unsafe method
+    // against the prefix is born gated like every other write that does not exist yet.
+    [InlineData(true, "GET", "/api/sweeps", true)]                     // edit seat: the timeline
+    [InlineData(false, "GET", "/api/sweeps", true)]                    // viewer: the timeline
+    [InlineData(false, "GET", "/api/sweeps/latest", true)]             // viewer: the landing document
+    [InlineData(false, "GET", "/api/sweeps/638600000000000000", true)] // viewer: one sweep by id
+    [InlineData(false, "GET", "/api/sweeps/watch-items", true)]        // viewer: the watch worklist
+    [InlineData(false, "POST", "/api/sweeps", false)]                  // no sweep write exists; born gated anyway
+    [InlineData(false, "POST", "/api/mute-rules", false)]              // viewer: no create
+    [InlineData(false, "PATCH", "/api/mute-rules/abc-123", false)]     // no edit
+    [InlineData(false, "PUT", "/api/mute-rules/abc-123/enabled", false)] // no flag flip
+    [InlineData(false, "DELETE", "/api/mute-rules/abc-123", false)]    // no delete
     public void IsRequestAllowed_Matrix(bool canEdit, string method, string path, bool expected)
         => Assert.Equal(expected, DarlingWebSeat.IsRequestAllowed(new DarlingWebSeat("who", canEdit), method, path));
 

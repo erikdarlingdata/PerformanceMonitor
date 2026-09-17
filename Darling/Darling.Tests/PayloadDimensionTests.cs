@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
@@ -763,8 +764,11 @@ public sealed class PayloadDimensionTests
         /* V51 (#2012 stage 2) re-defines the view after appending host_object_name — and it caught
            exactly this tripwire's regression in review: its first cut was a SELECT * passthrough.
            The shipped V51 DROPs the view (the new column lands mid-list, which CREATE OR REPLACE
-           refuses) and re-emits the generator's resolving definition. */
-        Assert.Equal(54, definers[^1].Version);
+           refuses) and re-emits the generator's resolving definition. V121 re-defines it again for
+           query_plan_xml_bytes, by the same DROP-then-re-emit route and for the same reason.
+           The literal is deliberate: a rung that redefines this view has to change this line, which
+           is what brings a human to the paragraph above. */
+        Assert.Equal(121, definers[^1].Version);
         Assert.Contains(
             "COALESCE(f.query_text, qtd.query_text) AS query_text",
             definers[^1].Sql,
@@ -878,9 +882,7 @@ public sealed class PayloadDimensionTests
         {
             /* Build output, and the test project itself: tests legitimately seed inline payloads (that is
                how the pre-#1767 transition rows get written) and legitimately assert on raw column names. */
-            if (file.Contains(@"\bin\", StringComparison.OrdinalIgnoreCase)
-                || file.Contains(@"\obj\", StringComparison.OrdinalIgnoreCase)
-                || file.Contains(@"\Darling.Tests\", StringComparison.OrdinalIgnoreCase))
+            if (IsSkippedPath(Path.GetRelativePath(darling, file)))
             {
                 continue;
             }
@@ -1026,6 +1028,69 @@ public sealed class PayloadDimensionTests
 
         return count;
     }
+
+    /// <summary>
+    /// The sweep routes its skip through <see cref="IsSkippedPath"/> rather than testing the path inline,
+    /// so the behaviour the theory below pins is the behaviour the sweep actually gets.
+    ///
+    /// <para>This pin carries more weight here than in the sibling guard: this file references the WPF
+    /// Viewer project, so it compiles only on Windows and a local harness cannot execute the theory at all.
+    /// A revert of the call site to the inline substring form would therefore show up nowhere until CI.</para>
+    /// </summary>
+    [Fact]
+    public void TheSweep_SkipsPathsThroughTheSeparatorAwareHelper()
+    {
+        var source = File.ReadAllText(ThisSourceFile());
+
+        /* Built by concatenation on purpose: spelled as one literal, this assertion's OWN text
+           satisfies it, so the pin passes with the call site deleted. Measured on the sibling guard. */
+        Assert.Contains("IsSkippedPath(" + "Path.GetRelativePath(", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(@"file.Contains(@""\bin\""", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(@"file.Contains(@""\obj\""", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(@"file.Contains(@""\Darling.Tests\""", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>This file's own path, for the source pin above.</summary>
+    private static string ThisSourceFile([CallerFilePath] string? path = null) => path!;
+
+    /// <summary>
+    /// The skip is a property of the PATH, not of the host. <c>Darling.Tests</c> matters most: its files
+    /// deliberately seed inline payloads and name raw columns, so a skip that silently stops working off
+    /// Windows turns this guard into a generator of false offenders against its own suite.
+    /// </summary>
+    [Theory]
+    [InlineData(@"bin\Debug\net10.0\Foo.g.cs", true)]
+    [InlineData("bin/Debug/net10.0/Foo.g.cs", true)]
+    [InlineData(@"obj\Debug\Foo.g.cs", true)]
+    [InlineData("obj/Debug/Foo.g.cs", true)]
+    [InlineData(@"Darling.Tests\PayloadDimensionTests.cs", true)]
+    [InlineData("Darling.Tests/PayloadDimensionTests.cs", true)]
+    [InlineData("PerformanceMonitor.Darling.Storage/PayloadDimensions.cs", false)]
+    [InlineData("mybin/Thing.cs", false)]
+    [InlineData("obj-cache/Thing.cs", false)]
+    [InlineData("Objects/Thing.cs", false)]
+    public void TheGuardsSkip_ReadsBothSeparators_AndWholeSegmentsOnly(string relativePath, bool skipped)
+    {
+        Assert.Equal(skipped, IsSkippedPath(relativePath));
+    }
+
+    /// <summary>
+    /// True when any whole SEGMENT of <paramref name="relativePath"/> is build output or this test
+    /// project, reading both separator characters on every platform.
+    ///
+    /// <para>The reasoning is <c>DocCommentHygieneTests.HasBuildOutputSegment</c>'s, which records it at
+    /// length: a substring test for a backslash-delimited segment matches nothing where the separator is
+    /// <c>/</c>, so a guard whose scope depends on the host is two guards. Here the stakes are higher than
+    /// for build output alone — the skip also covers <c>Darling.Tests</c>, whose files legitimately seed
+    /// inline payloads and assert on raw column names, so off Windows this sweep would report its own
+    /// suite's deliberate fixtures as offenders. Whole segments rather than a substring, because
+    /// <c>Objects</c>, <c>obj-cache</c> and <c>mybin</c> are source directory names.</para>
+    /// </summary>
+    private static bool IsSkippedPath(string relativePath) =>
+        relativePath.Split('/', '\\')
+            .Any(segment => string.Equals(segment, "bin", StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(segment, "obj", StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(segment, "Darling.Tests", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Whether <paramref name="text"/> contains <paramref name="word"/> on both-side word
     /// boundaries — so <c>query_text_digest</c> does not count as a reference to <c>query_text</c>.</summary>

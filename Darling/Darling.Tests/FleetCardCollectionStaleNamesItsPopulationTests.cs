@@ -243,7 +243,11 @@ public sealed class FleetCardCollectionStaleNamesItsPopulationTests
     /// scan that matches its own needle reports the search itself.</para>
     ///
     /// <para><c>CHANGELOG.md</c> is out of scope by construction — it is a record of what changed, so it
-    /// names the old field on purpose, and it is not a surface anyone reads a live payload against.</para>
+    /// names the old field on purpose, and it is not a surface anyone reads a live payload against. The same
+    /// reasoning covers <c>docs/changelog/</c>, which is that same record: the prose for released versions
+    /// moved there when the single file outgrew what GitHub will render, and 3.7.0's entry for this very
+    /// rename names both spellings in order to describe it. Scoped to that one directory rather than to
+    /// markdown under <c>docs/</c>, so a real document cannot fall out of the sweep by being markdown.</para>
     /// </summary>
     [Fact]
     public void TheErrorsSpelling_IsGoneFromEveryDarlingSurface()
@@ -338,6 +342,12 @@ public sealed class FleetCardCollectionStaleNamesItsPopulationTests
             Path.Combine(Root, "docs"),
         };
 
+        /* The archived changelog prose, which is CHANGELOG.md's own text under docs/ and carries the old
+           name for the same reason CHANGELOG.md does. One exact directory, not a markdown-wide carve-out. */
+        var archivedChangelog =
+            $"{Path.DirectorySeparatorChar}docs{Path.DirectorySeparatorChar}changelog{Path.DirectorySeparatorChar}";
+
+        var excluded = 0;
         foreach (var root in roots)
         {
             Assert.True(Directory.Exists(root), $"{root} is gone — this scan is walking nothing");
@@ -350,9 +360,20 @@ public sealed class FleetCardCollectionStaleNamesItsPopulationTests
                     continue;
                 }
 
+                if (file.Contains(archivedChangelog, StringComparison.Ordinal))
+                {
+                    excluded++;
+                    continue;
+                }
+
                 yield return new KeyValuePair<string, byte[]>(file, File.ReadAllBytes(file));
             }
         }
+
+        /* The carve-out is live and is only the changelog archives. Zero would mean the directory moved and
+           the exclusion had quietly become dead text; a number far above the release count would mean it had
+           grown to cover something else. */
+        Assert.InRange(excluded, 1, 100);
 
         foreach (var name in new[] { "llms.txt", "README.md" })
         {

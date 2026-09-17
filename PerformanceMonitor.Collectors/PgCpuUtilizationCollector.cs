@@ -30,10 +30,27 @@ namespace PerformanceMonitor.Collectors;
 /// DDL from the same column metadata every other collector uses.</para>
 ///
 /// <para><b>Why Performance Insights over CloudWatch's <c>AWS/RDS</c>/<c>CPUUtilization</c>.</b> Measured
-/// live against the same instance and window: CloudWatch's figure reads capacity-relative and runs roomy on
-/// a Serverless v2 target (~6.8%), while PI's <c>os.cpuUtilization.total.avg</c> reads true OS-level
-/// utilization on the identical window (~16.8%). PI is the honest signal for this fleet, and it is
-/// universally available — every monitored Aurora Postgres instance already has it enabled.</para>
+/// live against the same instance and window the two disagree: CloudWatch read ~6.8% where PI's
+/// <c>os.cpuUtilization.total.avg</c> read ~16.8%. PI is the one kept, because it is the counter the
+/// instance's own OS reports rather than a figure CloudWatch derives, and because it is universally
+/// available — every monitored Aurora Postgres instance already has it enabled.</para>
+///
+/// <para><b>That reading is percent of the capacity CURRENTLY ALLOCATED, not of a fixed ceiling</b>
+/// (#3281), so it is not "true OS-level utilization" in contrast to CloudWatch's capacity-relative
+/// figure: both denominators move on a serverless instance class, just differently. On Aurora Serverless
+/// v2 the allocation is re-sized
+/// continuously, so a one-vCPU instance reads exactly <c>100.0</c> with <c>idle</c> exactly <c>0.0</c>
+/// whenever one core stays busy for a whole minute, which is the routine trigger for scaling UP rather than
+/// a saturation incident. Measured at one such minute: 4 of 12 configured ACUs in use — 33% of the
+/// configured ceiling, two thirds of it unused.</para>
+///
+/// <para><b>So both are collected, and they answer different questions.</b> <c>cpu_percent</c> stays
+/// because "was a core pinned, and by what" is a real question it answers.
+/// <c>acu_utilization_percent</c> — Performance Insights'
+/// <c>os.general.acuUtilization.avg</c> — is the one a saturation BAND may read, because 100% of it means
+/// the CONFIGURED ceiling is reached, which is an incident. See
+/// <c>ServerHealthClassifier.CpuSeverity</c> for the banding rule and
+/// <c>RdsCpuIngestor</c> for why all four metrics arrive on one API call.</para>
 /// </summary>
 public sealed class PgCpuUtilizationCollector : PostgresCollectorDefinitionBase<PgCpuUtilizationCollector.Row>
 {
@@ -48,9 +65,28 @@ public sealed class PgCpuUtilizationCollector : PostgresCollectorDefinitionBase<
     /// <see cref="CpuUtilizationCollector.Row.SampleTime"/>. PI returns one point per minute regardless of
     /// how often the ingestor asks, so requesting a short lookback window and dedupping client-side against
     /// this column survives a missed cycle the same way the ring-buffer route does.</param>
-    /// <param name="CpuPercent"><c>os.cpuUtilization.total.avg</c>, 0-100. Nullable because PI can return a
-    /// data point with a null value for a period it has no sample for.</param>
-    public readonly record struct Row(System.DateTime SampleTime, double? CpuPercent);
+    /// <param name="CpuPercent"><c>os.cpuUtilization.total.avg</c>, 0-100 — percent of the capacity
+    /// CURRENTLY ALLOCATED to the instance, which on Aurora Serverless v2 moves (see the class doc
+    /// comment). Nullable because PI can return a data point with a null value for a period it has no
+    /// sample for.</param>
+    /// <param name="AcuUtilizationPercent"><c>os.general.acuUtilization.avg</c>, 0-100 — percent of the
+    /// CONFIGURED ACU ceiling in use (#3281), the figure a saturation band reads. Nullable for
+    /// <paramref name="CpuPercent"/>'s reason, and a null here bands Unknown rather than Healthy: it means
+    /// the headroom was never measured for this minute, not that there was headroom.</param>
+    /// <param name="ServerlessCapacityAcu"><c>os.general.serverlessDatabaseCapacity.avg</c> — the ACU
+    /// actually allocated at this minute, the numerator behind
+    /// <paramref name="AcuUtilizationPercent"/>. Stored so a reader can state "4 of 12" rather than only a
+    /// percentage.</param>
+    /// <param name="MaxConfiguredAcu"><c>os.general.maxConfiguredAcu.avg</c> — the cluster's configured ACU
+    /// ceiling, the denominator. Recorded per sample rather than looked up when read, because it is a
+    /// setting someone can change and a ratio taken against today's ceiling would misdescribe last week's
+    /// samples.</param>
+    public readonly record struct Row(
+        System.DateTime SampleTime,
+        double? CpuPercent,
+        double? AcuUtilizationPercent,
+        double? ServerlessCapacityAcu,
+        double? MaxConfiguredAcu);
 
     public override string Name => "pg_cpu_utilization";
 
@@ -73,6 +109,9 @@ public sealed class PgCpuUtilizationCollector : PostgresCollectorDefinitionBase<
     {
         new CollectorColumn("sample_time", CollectorColumnType.Timestamp),
         new CollectorColumn("cpu_percent", CollectorColumnType.Double),
+        new CollectorColumn("acu_utilization_percent", CollectorColumnType.Double),
+        new CollectorColumn("serverless_capacity_acu", CollectorColumnType.Double),
+        new CollectorColumn("max_configured_acu", CollectorColumnType.Double),
     };
 
     public override CollectorQuery BuildQuery(CollectorContext context) =>
@@ -91,6 +130,12 @@ public sealed class PgCpuUtilizationCollector : PostgresCollectorDefinitionBase<
             /* Naive UTC, per the store contract: PI returns Kind=Utc DateTime and Npgsql refuses one
                against a `timestamp` column. */
             .Value(System.DateTime.SpecifyKind(row.SampleTime, System.DateTimeKind.Unspecified))
-            .Value(row.CpuPercent);
+            .Value(row.CpuPercent)
+            /* Each of the three independently nullable, written in PayloadColumns order. A metric PI had no
+               sample for this minute stays NULL rather than becoming 0 — a 0 here would read as "no
+               capacity in use" / "no ceiling configured", which are measurements nobody took. */
+            .Value(row.AcuUtilizationPercent)
+            .Value(row.ServerlessCapacityAcu)
+            .Value(row.MaxConfiguredAcu);
     }
 }

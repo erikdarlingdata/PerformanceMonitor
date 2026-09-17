@@ -1,6 +1,8 @@
 using System.ComponentModel;
+using System.Reflection;
 using System.Text.Json;
 using ModelContextProtocol.Server;
+using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using AlertReadFailureCounter = PerformanceMonitor.Alerting.AlertReadFailureCounter;
 using PerformanceMonitor.Common;
@@ -203,7 +205,7 @@ public sealed class McpHealthTools
         }
     }
 
-    [McpServerTool(Name = "get_collection_health"), Description("Shows the health status of all data collectors for a server — whether they're running successfully, failing, or stale. A collector reads STOPPED rather than FAILING when it has attempted nothing at all — no success, no error, nothing — for longer than the FAILING cutoff, despite a history of runs: that is a collector whose gate (AppliesTo) flipped off for this target rather than one that keeps running and erroring, and it does not count toward a server's failing-collector total. A collector reads EXTENSION_MISSING when every attempt in the window was skipped because a PostgreSQL extension it declares is not installed on the target - last_error names the extension, CREATE EXTENSION (plus shared_preload_libraries and a restart where the message says so) is the remedy, never a grant, and an optional extension left uninstalled is a legitimate resting state rather than a fault. Check this before investigating data to ensure collectors are working properly. Each row also carries last_note/note_count: what a NON-failing run reported, e.g. an enumeration that came back with 0 items. note_count equal to total_runs means the collector has been collecting nothing all window — not a fault (the target may be legitimately empty), but the reason a HEALTHY collector can still have no data. target_has_user_databases tells those two apart: true means the target DID have user databases in the same window, so an all-window empty enumeration is worth investigating (a login that cannot enter them, an exclusion filter that matched everything); false means either no user databases or no inventory to go on. Each row also carries abandoned and abandon_rate_pct: cycles the 120-second whole-server wall-clock budget gave up on, which stored nothing and advanced no watermark. Unlike a yield, which retries, an abandoned cycle is collected data you do not have. A rate above 0.5% bands the collector WARNING, so a WARNING here may have nothing to do with errors - read abandoned beside errors to attribute it. CRITICAL for reading last_error: it is a single slot carrying the newest ERROR, PERMISSIONS, or EXTENSION_MISSING message in the whole window, and a message in it is NOT evidence that the condition is current. Read last_error_at for when it happened, last_denied_at for when the newest DENIAL specifically happened, and denied_since_last_success for the derived answer - true means a denial is the collector's current state, false means every denial in the window predates a later success and the collector is reading fine now. A fault recorded before a code path changed will sit in last_error for the rest of the window while every cycle since succeeds: pg_deadlocks moved from an in-database route to an AWS API route, and six days later this tool still showed HEALTHY, errors 0, a reassuring note and a stale permission denial together - a combination that describes a state which cannot occur, and which produced a bug report claiming a fleet-wide denial when the collector had been succeeding on all 50 targets. Do not infer a live condition from last_error alone. Total abandonment still reads FAILING through staleness; the rate exists for the partial case, where a collector abandons some cycles and succeeds often enough to stay fresh, which otherwise read HEALTHY with errors 0 indefinitely. The sweep_pressure block is the server-level roll-up: it compares the collectors' combined execution demand (average duration amortized by cadence) against the minute the fastest cadence holds. SATURATED means the collection body cannot fit inside its cadence, so relaunches are skipped and the server collects at a multiple of its configured interval while every collector still reads healthy — heaviest_collectors names where that budget goes. That verdict is the SUSTAINED answer only. peak_cycle_risk is the separate single-sweep answer: peak_cycle_ms is what the body costs on the cycle where every scheduled cadence comes due together, and BODY_OVERRUN means that one body cannot fit the budget even when the verdict reads OK — the signature of one infrequent heavy collector, which amortization hides and heaviest_collectors therefore ranks out of sight. peak_collector names it, and peak_cycle_note explains it. Read both fields: a server can be OK/BODY_OVERRUN (a schedule-shape problem, fix by moving or splitting that collector) or SATURATED/BODY_OVERRUN (a capacity problem). Every collector row carries avg_duration_ms, p95_duration_ms and max_duration_ms, because a collector's runs are not always one population: query_store on one dogfood server averaged 13,834 ms over 1,155 runs of which 958 yielded nothing and cost about 36 ms, which puts the other 197 at roughly 80,900 ms EACH - each one, on its own, larger than the whole sweep budget. Read the three together: avg close to p95 close to max is one population, avg far below p95 is two, and p95 far below max is one pathological run. peak_cycle_ms is built from p95 (floored at the mean, so it can never read lower than a mean-based figure) for exactly that reason, and peak_collector carries peak_run_ms beside avg_duration_ms so the gap is visible. Those three still describe RUNS, and a collector that runs once per DATABASE writes one blended row, so no run-level statistic can say which database cost what. Five fan out from an enumeration on any SQL Server target (query_store, plan_correction, query_store_health, index_object_stats, database_scoped_config); separately, eight more fan out over a per-database connection loop when the target is Azure SQL DB, and pg_autovacuum_stats always does on PostgreSQL. The per-collector `fanout` block is that answer, null for a collector that does not fan out: `items` is how wide the fan-out was, `slowest`/`slowest_ms` name the dearest database and its cost on the window's worst run, `run_ms` is that whole run, and `dominance` is slowest_ms * items / run_ms — 1.0 for a perfectly even fan-out, rising with concentration. It matters because the remedies diverge there: near 1.0 the cost is the fan-out's WIDTH and bounded parallelism is the lever, while around 2.0 or above one database dominates and a per-database schedule override or a stagger is what helps. Do not try to infer this from p95 versus avg — on a per-database collector that ratio is usually saturated by empty-versus-productive runs and says nothing about databases. Every field named so far describes what a collector SPENT; rows_stored, runs_with_rows and productive_run_pct are what it BOUGHT, counted over the same window as total_runs and the durations, so cost and output on a row always describe the same runs. Read them together for the three readings that need different actions: rows_stored above zero is expensive AND productive; rows_stored zero with denied_since_last_success false is a collector that read and found nothing, which for one that stores a row only when an event occurs (e.g. deadlocks, blocked_process_report, pg_blocking, pg_xmin_horizon) is the correct resting state and needs no action; rows_stored zero with denied_since_last_success true is a collector that could not read and needs a grant. output_finding says which zero reading applies and is null whenever rows_stored is positive. There are three: a current denial is the grant case; zero runs carrying a note is the event-collector-at-rest case just described; and note_count above zero means the runs themselves recorded what they found, so the finding defers to last_note instead of assuming a category - which is what keeps a DELIBERATE zero distinguishable from a collector that quietly stopped storing rows. query_store on a read-replica target is the deliberate case: it is not an event collector, and every run notes an empty enumeration because Query Store on a readable secondary is excluded by design. This is deliberately NOT a band: pg_deadlocks was the single most expensive collector on one managed store, 49,258,335 ms over 79,333 runs in seven days, and stored zero rows - and that zero was CORRECT, because the reader was working on all 50 targets and there were no deadlocks to find. A verdict keyed on cost-plus-zero-rows would fire on the healthy quiet install rather than the blind one. These are NOT the hourly per-collector series Darling's get_collector_cost reports as total_rows - a separate series over that caller's own days_back and across every server at once, and Darling-only, so Lite has no twin of it; the top-level output_note names both windows and disclaims that one. rows_stored is also what a run STORED, never what the monitored engine counted, so a zero cannot tell a genuinely quiet source apart from a reader capturing nothing off a busy one - nothing on this surface measures that. One block on this response is deliberately NOT on the seven-day window: alert_read_health, which counts the alerting layer's OWN store reads that failed and were swallowed. A condition check that cannot read the store logs one line and skips - correctly, because firing on absent evidence would fabricate an alert and resolving on it would fabricate a recovery - and that skip is not a collector run, so it writes no collection_log row and reaches no other health surface: only a grep of the service log found the class. It matters out of proportion to the count because the alert pass runs on a much shorter store deadline than the collection sweep, so as store latency rises the alerting layer is the FIRST thing to fail and collection is the last - during one measured episode of store lock contention the service log's error rate rose 41 to 61 per hour, every line an alerting-side read, while collector failures over the same hours FELL from 23 to 2. Read server_read_failures beside server_alert_passes for this server (a pass is one alert evaluation pass containing many reads, so more failures than passes is ordinary and the pair is NOT a ratio; a Darling sweep runs two passes for a SQL Server target, three for a PostgreSQL one, and Lite runs one, so the denominator is comparable within a host and engine but not across them), instance_read_failures for the whole service (which also covers the fleet-scoped conditions that belong to no server and so appear in no per-server count: " + AlertReadFailureCounter.FleetScopedReads + "), last_failure_read for which condition went blind most recently, last_failure_elapsed_ms for how long that read ran before it faulted - which is the term that says whose deadline ended it ONLY WHERE THE ALERT PASS SETS ONE. The Darling service does, on every store read; Lite's alerting reads go into its local store with no command deadline at all, so on Lite this is a plain duration that says a read became slow and nothing about who ended it. Where there is a deadline: an elapsed at or about it means this process stopped waiting while the statement was still running on the store, one well below that bound means the store returned a fault, and the exception text cannot make that distinction because a client-side deadline renders as a torn stream with no SQLSTATE exactly like a dropped connection. A figure well ABOVE the bound is a third reading: the failure was not a single bounded read, which each site's clock restart between consecutive awaits makes rare and which is expected only on the shared engine sweep entry, whose awaited operation is a whole alert pass - and last_failure_at to tell a healed episode from a live one: this count never ages out of a window, so a nonzero value with a stamp from days ago is history. counting_since is when this process began counting, early in its own startup - these are in-memory counts and a restart takes them to zero, so a zero means \"none since counting_since\" and NOT \"none in seven days\"; check the stamp before reading the zero as reassurance. Deliberately not persisted, because what it counts is a failure to READ the store. It does NOT count alerts that failed to DELIVER and makes no claim about them - that is get_alert_history's question. And deliberately not a band, for the same reason the output figures are not: any threshold over it would have to guess how many blind reads make alerting unhealthy, and a wrong guess on this particular surface fails by saying nothing is wrong.")]
+    [McpServerTool(Name = "get_collection_health"), Description("Shows the health status of all data collectors for a server — whether they're running successfully, failing, or stale. A collector reads STOPPED rather than FAILING when it has attempted nothing at all — no success, no error, nothing — for longer than the FAILING cutoff, despite a history of runs: that is a collector whose gate (AppliesTo) flipped off for this target rather than one that keeps running and erroring, and it does not count toward a server's failing-collector total. A collector reads EXTENSION_MISSING when every attempt in the window was skipped because a PostgreSQL extension it declares is not installed on the target - last_error names the extension, CREATE EXTENSION (plus shared_preload_libraries and a restart where the message says so) is the remedy, never a grant, and an optional extension left uninstalled is a legitimate resting state rather than a fault. Check this before investigating data to ensure collectors are working properly. Each row also carries last_note/note_count: what a NON-failing run reported, e.g. an enumeration that came back with 0 items. note_count equal to total_runs means the collector has been collecting nothing all window — not a fault (the target may be legitimately empty), but the reason a HEALTHY collector can still have no data. target_has_user_databases tells those two apart: true means the target DID have user databases in the same window, so an all-window empty enumeration is worth investigating (a login that cannot enter them, an exclusion filter that matched everything, a databases scope on the collector's schedule row that admits nothing - the last a Darling-only schedule knob); false means either no user databases or no inventory to go on. Each row also carries abandoned and abandon_rate_pct: cycles the 120-second whole-server wall-clock budget gave up on, which stored nothing and advanced no watermark. Unlike a yield, which retries, an abandoned cycle is collected data you do not have. A rate above 0.5% bands the collector WARNING, so a WARNING here may have nothing to do with errors - read abandoned beside errors to attribute it. CRITICAL for reading last_error: it is a single slot carrying the newest ERROR, PERMISSIONS, or EXTENSION_MISSING message in the whole window, and a message in it is NOT evidence that the condition is current. Read last_error_at for when it happened, last_denied_at for when the newest DENIAL specifically happened, and denied_since_last_success for the derived answer - true means a denial is the collector's current state, false means every denial in the window predates a later success and the collector is reading fine now. A fault recorded before a code path changed will sit in last_error for the rest of the window while every cycle since succeeds: pg_deadlocks moved from an in-database route to an AWS API route, and six days later this tool still showed HEALTHY, errors 0, a reassuring note and a stale permission denial together - a combination that describes a state which cannot occur, and which produced a bug report claiming a fleet-wide denial when the collector had been succeeding on all 50 targets. Do not infer a live condition from last_error alone. Total abandonment still reads FAILING through staleness; the rate exists for the partial case, where a collector abandons some cycles and succeeds often enough to stay fresh, which otherwise read HEALTHY with errors 0 indefinitely. The sweep_pressure block is the server-level roll-up: it compares the collectors' combined execution demand (average duration amortized by cadence) against the minute the fastest cadence holds. SATURATED means the collection body cannot fit inside its cadence, so relaunches are skipped and the server collects at a multiple of its configured interval while every collector still reads healthy — heaviest_collectors names where that budget goes. That verdict is the SUSTAINED answer only. peak_cycle_risk is the separate single-sweep answer: peak_cycle_ms is what the body costs on the cycle where every scheduled cadence comes due together, and BODY_OVERRUN means that one body cannot fit the budget even when the verdict reads OK — the signature of one infrequent heavy collector, which amortization hides and heaviest_collectors therefore ranks out of sight. peak_collector names it, and peak_cycle_note explains it. Read both fields: a server can be OK/BODY_OVERRUN (a schedule-shape problem, fix by moving or splitting that collector) or SATURATED/BODY_OVERRUN (a capacity problem). Every collector row carries avg_duration_ms, p95_duration_ms and max_duration_ms, because a collector's runs are not always one population: query_store on one dogfood server averaged 13,834 ms over 1,155 runs of which 958 yielded nothing and cost about 36 ms, which puts the other 197 at roughly 80,900 ms EACH - each one, on its own, larger than the whole sweep budget. Read the three together: avg close to p95 close to max is one population, avg far below p95 is two, and p95 far below max is one pathological run. peak_cycle_ms is built from p95 (floored at the mean, so it can never read lower than a mean-based figure) for exactly that reason, and peak_collector carries peak_run_ms beside avg_duration_ms so the gap is visible. Those three still describe RUNS, and a collector that runs once per DATABASE writes one blended row, so no run-level statistic can say which database cost what. Five fan out from an enumeration on any SQL Server target (query_store, plan_correction, query_store_health, index_object_stats, database_scoped_config); separately, eight more fan out over a per-database connection loop when the target is Azure SQL DB, and pg_autovacuum_stats always does on PostgreSQL. The per-collector `fanout` block is that answer, null for a collector that does not fan out: `items` is how wide the fan-out was, `slowest`/`slowest_ms` name the dearest database and its cost on the window's worst run, `run_ms` is that whole run, `slowest_share_pct` is slowest_ms / run_ms as a percentage — the slowest item's share of the whole pass — and `dominance` is slowest_ms * items / run_ms, the slowest item against the MEAN item: 1.0 for a perfectly even fan-out, rising with concentration. The remediation decision routes through the SHARE, not through dominance: a low share means the cost is the fan-out's WIDTH — no single database is worth chasing, and bounded parallelism is the lever — while a high share means one database dominates the pass and a per-database schedule override or a stagger is what helps. Dominance is NOT that verdict, because its ceiling is items: measured on two real instances, dominance 3.58 over 72 items is a 4.97% share (pure width) while the near-neighbour 4.20 over 15 items is 27.98% (one database owning over a quarter of the pass) — two scores that read as the same shape carrying shares 5.6x apart that want opposite remedies, and at 72 items even a dominance of 10 would be one database holding 14% of a pass. A fixed threshold on dominance misreads exactly the widest fan-outs, where the cost lives. Dominance only reads as dominance when it approaches a meaningful fraction of items (share = dominance / items); it stays published as the evenness ratio, for continuity. Do not try to infer any of this from p95 versus avg — on a per-database collector that ratio is usually saturated by empty-versus-productive runs and says nothing about databases. Every field named so far describes what a collector SPENT; rows_stored, runs_with_rows and productive_run_pct are what it BOUGHT, counted over the same window as total_runs and the durations, so cost and output on a row always describe the same runs. Read them together for the three readings that need different actions: rows_stored above zero is expensive AND productive; rows_stored zero with denied_since_last_success false is a collector that read and found nothing, which for one that stores a row only when an event occurs (e.g. deadlocks, blocked_process_report, pg_blocking, pg_xmin_horizon) is the correct resting state and needs no action; rows_stored zero with denied_since_last_success true is a collector that could not read and needs a grant. output_finding says which zero reading applies and is null whenever rows_stored is positive. There are three: a current denial is the grant case; zero runs carrying a note is the event-collector-at-rest case just described; and note_count above zero means the runs themselves recorded what they found, so the finding defers to last_note instead of assuming a category - which is what keeps a DELIBERATE zero distinguishable from a collector that quietly stopped storing rows. query_store on a read-replica target is the deliberate case: it is not an event collector, and every run notes an empty enumeration because Query Store on a readable secondary is excluded by design. This is deliberately NOT a band: pg_deadlocks was the single most expensive collector on one managed store, 49,258,335 ms over 79,333 runs in seven days, and stored zero rows - and that zero was CORRECT, because the reader was working on all 50 targets and there were no deadlocks to find. A verdict keyed on cost-plus-zero-rows would fire on the healthy quiet install rather than the blind one. These are NOT the hourly per-collector series Darling's get_collector_cost reports as total_rows - a separate series over that caller's own days_back and across every server at once, and Darling-only, so Lite has no twin of it; the top-level output_note names both windows and disclaims that one. rows_stored is also what a run STORED, never what the monitored engine counted, so a zero cannot tell a genuinely quiet source apart from a reader capturing nothing off a busy one - nothing on this surface measures that. One block on this response is deliberately NOT on the seven-day window: alert_read_health, which counts the alerting layer's OWN store reads that failed and were swallowed. A condition check that cannot read the store logs one line and skips - correctly, because firing on absent evidence would fabricate an alert and resolving on it would fabricate a recovery - and that skip is not a collector run, so it writes no collection_log row and reaches no other health surface: only a grep of the service log found the class. It matters out of proportion to the count because the alert pass runs on a much shorter store deadline than the collection sweep, so as store latency rises the alerting layer is the FIRST thing to fail and collection is the last - during one measured episode of store lock contention the service log's error rate rose 41 to 61 per hour, every line an alerting-side read, while collector failures over the same hours FELL from 23 to 2. Read server_read_failures beside server_alert_passes for this server (a pass is one alert evaluation pass containing many reads, so more failures than passes is ordinary and the pair is NOT a ratio; a Darling sweep runs two passes for a SQL Server target, three for a PostgreSQL one, and Lite runs one, so the denominator is comparable within a host and engine but not across them), instance_read_failures for the whole service (which also covers the fleet-scoped conditions that belong to no server and so appear in no per-server count: " + AlertReadFailureCounter.FleetScopedReads + "), fleet_read_failures for how many of that service total belong to no server at all - the figure that makes a nonzero service count readable from a server whose own count is zero, because those two populations take opposite actions: a blind fleet-scoped read means the store's own self-alerts went quiet and two of them are the reads whose alerts would say the store is in trouble, while one on another server is answered by reading this same block there, last_failure_read for which condition went blind most recently, last_failure_elapsed_ms for how long that read ran before it faulted - which is the term that says whose deadline ended it ONLY WHERE THE ALERT PASS SETS ONE. The Darling service does, on every store read; Lite's alerting reads go into its local store with no command deadline at all, so on Lite this is a plain duration that says a read became slow and nothing about who ended it. Where there is a deadline: an elapsed at or about it means this process stopped waiting while the statement was still running on the store, one well below that bound means the store returned a fault, and the exception text cannot make that distinction because a client-side deadline renders as a torn stream with no SQLSTATE exactly like a dropped connection. A figure well ABOVE the bound is a third reading: the failure was not a single bounded read, which each site's clock restart between consecutive awaits makes rare and which is expected only on the shared engine sweep entry, whose awaited operation is a whole alert pass - and last_failure_at to tell a healed episode from a live one: this count never ages out of a window, so a nonzero value with a stamp from days ago is history. Every count on this block carries its own newest-failure stamp, read name and elapsed, so none of them sits undated: last_failure_* are THIS server's, fleet_last_failure_* are the fleet-scoped conditions' and are attributable by construction, and instance_last_failure_* are the newest failure anywhere in this service whatever its scope - that last trio may therefore name a read on a server you did not ask about and makes no claim about which, which is why the fleet trio is reported separately rather than inferred from it. The third population is a subtraction: instance_read_failures minus server_read_failures minus fleet_read_failures is how many failed on OTHER servers, and that one has no stamp here by design - nothing holds a newest failure for it, and a count with nothing to date or name it is the gap the three trios close, so read this block on those servers to attribute it. counting_since is when this process began counting, early in its own startup - these are in-memory counts and a restart takes them to zero, so a zero means \"none since counting_since\" and NOT \"none in seven days\"; check the stamp before reading the zero as reassurance. Deliberately not persisted, because what it counts is a failure to READ the store. It does NOT count alerts that failed to DELIVER and makes no claim about them - that is get_alert_history's question. And deliberately not a band, for the same reason the output figures are not: any threshold over it would have to guess how many blind reads make alerting unhealthy, and a wrong guess on this particular surface fails by saying nothing is wrong. The service block beside alert_read_health is the build-attribution read: nothing else on this surface says WHAT build is answering, so the question an operator watching an install actually asks - \"is the running service the build that carries fix X\" - is answered by version directly instead of by restart inference plus a merge-list lookup the watcher has no way to perform. version is the running build's informational version - the same read the Darling service's --version verb prints, with any SemVer build-metadata suffix stripped and the prerelease suffix KEPT, because the nightly stamp lives in the prerelease and one nightly differs from the next in nothing else; Lite has no version verb and reads the same attribute off its own app assembly, stamped from the same single declaration. counting_since remains the restart detector, and a restart is NOT a build: a crash-restart moves counting_since exactly the way an install does, which is why inferring a build from it misattributes. started_at is the SAME instant counting_since carries, deliberately - both mean \"when this process came up\", and a second clock for one fact would put two near-identical stamps on one payload whose skew a reader would have to explain away. compiled_schema_version is the schema rung this BUILD expects - the compiled constant, not a read of the store's migrated rung - so beside version it says what this build requires of the store it serves, whether or not that store has caught up.")]
     public static async Task<string> GetCollectionHealth(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -317,15 +319,18 @@ public sealed class McpHealthTools
                 note_summary = CollectorHealthClassifier.FormatCollectionNote(
                     r.LastNote, r.NoteCount, r.TotalRuns, r.CollectorName, r.TargetHasUserDatabases),
                 /* #2472: the per-database breakdown of a collector that fans out, null for one that does
-                   not. A nested object rather than four sibling fields so a consumer cannot read a
-                   slowest item without the width it has to be judged against — the parts only mean
-                   something together, and `dominance` is that meaning. Field-for-field Darling's. */
+                   not. A nested object rather than sibling fields so a consumer cannot read a slowest item
+                   without the width it has to be judged against — the parts only mean something together.
+                   #3502: `slowest_share_pct` is the verdict (the slowest item's share of the whole pass);
+                   `dominance` stays as the evenness ratio, whose ceiling is `items` and which therefore
+                   reads high at width with no concentration behind it. Field-for-field Darling's. */
                 fanout = r.FanoutDominance is null ? null : new
                 {
                     items = r.FanoutItems,
                     slowest = r.SlowestItem,
                     slowest_ms = r.SlowestItemMs,
                     run_ms = r.SlowestRunDurationMs,
+                    slowest_share_pct = Math.Round(r.FanoutSlowestSharePercent!.Value, 2),
                     dominance = Math.Round(r.FanoutDominance.Value, 2)
                 }
             });
@@ -401,6 +406,26 @@ public sealed class McpHealthTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                /* #3453: the build-attribution read, and deliberately the same block Darling's twin
+                   carries - the two SKUs' descriptions are pinned byte-identical, so a block the shared
+                   text documents has to exist on both or the text lies to one SKU's callers. On this SKU
+                   the version is the app assembly's informational version through the same mechanics as
+                   Darling's --version read (Lite has no version verb; ProductVersion below is that read's
+                   twin), stamped from the same one declaration every project in the tree inherits. */
+                service = new
+                {
+                    version = ProductVersion(),
+                    /* The SAME instant alert_read_health.counting_since carries below, deliberately: both
+                       mean "when this process came up", and a second clock for one fact would put two
+                       near-identical stamps on one payload whose skew a reader would have to explain
+                       away. Round-trip "o", matching every other stamp on this response. */
+                    started_at = alertReads.CountingSinceUtc.ToString("o"),
+                    /* This SKU's compiled expectation - the DuckDB initializer's rung, Lite's spelling of
+                       the fact StorageVersion.SchemaVersion is on Darling. The constant, never a literal,
+                       so the field moves with every future migration by construction; the initializer's
+                       own startup migration pass is what makes the store agree with it. */
+                    compiled_schema_version = DuckDbInitializer.CurrentSchemaVersion
+                },
                 /* #3013: a BLOCK rather than flat fields, unlike #3017's row-level output figures. There the
                    denominator (total_runs) was already on the row, so nesting the numerator away from it
                    would have split a ratio; here neither number exists on the response yet, so the block is
@@ -446,6 +471,26 @@ public sealed class McpHealthTools
                        than a matching test, so this response can never carry a duration belonging to no
                        event. */
                     last_failure_elapsed_ms = alertReads.LastFailureElapsedMs,
+                    /* The fleet scope, reported here for the same reason the counts are - one payload shape
+                       across both SKUs - and it reads differently on this one. Lite records exactly one
+                       fleet-scoped read, the mute-rule reload, whose failure leaves the rules already in
+                       force still in force and a rule written during the outage not yet honoured; the other
+                       members of the set are Darling store self-alerts Lite has no twin of. So a nonzero
+                       count here names that read rather than spanning a group, and the subtraction against
+                       instance_read_failures gives Lite's own other-server population the same way. */
+                    fleet_read_failures = alertReads.FleetReadFailures,
+                    fleet_last_failure_at = alertReads.FleetLastFailureAtUtc?.ToString("o"),
+                    fleet_last_failure_read = alertReads.FleetLastFailureRead,
+                    /* A plain duration on this SKU, like its per-server sibling above: Lite's alerting reads
+                       carry no command deadline, so it says a read became slow and nothing about who ended
+                       it. */
+                    fleet_last_failure_elapsed_ms = alertReads.FleetLastFailureElapsedMs,
+                    /* The instance count's currency term - the newest failure anywhere in this app whatever
+                       its scope, and the only one that covers the failures on OTHER servers, which have no
+                       count of their own here. It makes no claim about scope. */
+                    instance_last_failure_at = alertReads.InstanceLastFailureAtUtc?.ToString("o"),
+                    instance_last_failure_read = alertReads.InstanceLastFailureRead,
+                    instance_last_failure_elapsed_ms = alertReads.InstanceLastFailureElapsedMs,
                     /* The floor under the zero. A restart resets these counts, so counting_since is what
                        says whether a zero covers weeks or ninety seconds. */
                     counting_since = alertReads.CountingSinceUtc.ToString("o"),
@@ -498,14 +543,23 @@ public sealed class McpHealthTools
         }
     }
 
-    [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, newest first: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the local store, rows collected, status and any error. get_collection_health rolls these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window. One precision on sql_duration_ms, which Darling's twin of this tool states at length (#3192): on the collectors that enumerate databases it is the driver's per-item stopwatch, which also wraps the per-database watermark refresh - a read against the LOCAL store, so a small part of it is not the monitored server. What does NOT apply here is the large part: this SKU never enables the deferred plan-XML or statement-text fetches, so none of the store probe or write-back that dominates Darling's figure for query_store is in this one, and there is nothing here to attribute.")]
+    [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, NEWEST FIRST by default and SLOWEST FIRST whenever min_duration_ms is supplied: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the local store, rows collected, status and any error. get_collection_health rolls these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window. READ THE PAGE-SPAN FIELDS BEFORE CONCLUDING ANYTHING FROM THE ROWS. hours_back is the span you ASKED for; oldest_returned_collection_time and newest_returned_collection_time bound the page you GOT, and the row cap can make those wildly different — enough collectors writing often enough will satisfy a 24-hour request out of the last few seconds of activity. truncated says the cap bit; the two timestamps say what the page holds. THE TWO FIELDS MEAN DIFFERENT THINGS UNDER THE TWO ORDERINGS and the difference matters: under the default newest-first ordering the page is a contiguous slice of the window's tail, so oldest_returned_collection_time IS how far back this read reached; under a min_duration_ms floor the page is a cost-RANKED sample drawn from the whole window, so it tells you how old the slowest matching runs are and NOTHING about reach. Read order to know which you have. Neither field is a window floor: nothing here probes for the oldest row the window could have held. A read whose newest and oldest are seconds apart has told you nothing about the window you named, and raising limit does NOT fix it under the default ordering because the slow runs are not the recent ones — min_duration_ms is the knob for that, because supplying it ranks by duration instead of by time. Both filters are applied in SQL, BEFORE the cap, so truncated and run_count describe the MATCHING rows rather than the unfiltered window. order names which ordering you got, so a caller never has to infer it from the filters it sent. One precision on sql_duration_ms, which Darling's twin of this tool states at length (#3192): on the collectors that enumerate databases it is the driver's per-item stopwatch, which also wraps the per-database watermark refresh - a read against the LOCAL store, so a small part of it is not the monitored server. What does NOT apply here is the large part: this SKU never enables the deferred plan-XML or statement-text fetches, so none of the store probe or write-back that dominates Darling's figure for query_store is in this one, and there is nothing here to attribute.")]
     public static async Task<string> GetCollectionLog(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows to return, newest first. Default 200.")] int limit = 200,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description("Maximum rows to return. Default 200. Applied AFTER the two filters, so it caps the matching rows rather than the window.")] int limit = 200,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        /*
+            APPENDED after as_of rather than grouped beside `limit`, matching Darling's twin and for the same
+            reason it gives: as_of and collector_name are both `string?`, so a C# call site passing the anchor
+            POSITIONALLY would silently rebind it to the collector filter and compile without a word. MCP
+            invokes by name, so the position costs a client nothing; a positional C# caller is the only
+            observer, and appending keeps every existing one meaning what it already meant.
+        */
+        [Description("Limit to one collector, matched EXACTLY (query_store, plan_correction, wait_stats — the names get_collection_health lists). Omit for every collector. A name this server has never run returns the no-matches status rather than a quiet-window one.")] string? collector_name = null,
+        [Description("Return only runs whose total duration_ms is at or above this floor, AND rank the page SLOWEST FIRST rather than newest first — a floor under newest-first ordering still cannot reach the tail. Applied in SQL before the cap. 0 is a real value: it admits every run and is how you ask for the whole window ranked by cost. A negative is refused. Omit for no floor and newest-first order.")] double? min_duration_ms = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -513,6 +567,12 @@ public sealed class McpHealthTools
         /* Same shared row-cap contract as Darling's twin: reject out of range, do not silently clamp. */
         var invalidLimit = McpHelpers.ValidateTop(limit);
         if (invalidLimit != null) return invalidLimit;
+
+        /* And the same contract for the floor, one step further on: supplying it also switches the ORDERING,
+           so a negative quietly read as "no floor" would hand back a duration-ranked full page with nothing
+           to say the filter was ignored. Darling's twin refuses the same value with the same words. */
+        var invalidFloor = McpHelpers.ValidateMinMs(min_duration_ms, "min_duration_ms");
+        if (invalidFloor != null) return invalidFloor;
 
         /* ResolveAsOf here, deliberately NOT ValidateWindow. These three reads have never capped
            hours_back -- they Math.Abs() it and window on the result -- so routing them through the
@@ -526,29 +586,61 @@ public sealed class McpHealthTools
         {
             var hours = Math.Abs(hours_back);
 
-            /* Over-fetch by one so truncation is observed, not inferred -- see Darling's twin. */
-            var rows = await dataService.GetRecentCollectionLogAsync(resolved.ServerId, hours, maxRows: limit + 1, asOfUtc: windowEnd);
+            /* Over-fetch by one so truncation is observed, not inferred -- see Darling's twin. The filters go
+               INTO the read for the same reason they do there: the over-fetch is then of the FILTERED set, so
+               `truncated` keeps meaning "more rows match than you were given" rather than "more rows were in
+               the window", which is a different sentence under the same field name. */
+            var rows = await dataService.GetRecentCollectionLogAsync(
+                resolved.ServerId, hours, maxRows: limit + 1, asOfUtc: windowEnd,
+                collectorName: collector_name, minDurationMs: min_duration_ms);
             var truncated = rows.Count > limit;
             if (truncated) rows = rows.Take(limit).ToList();
+
+            var filtered = !string.IsNullOrWhiteSpace(collector_name) || min_duration_ms is not null;
 
             if (rows.Count == 0)
             {
                 /*
-                    Zero rows is two different facts wanting opposite responses. A server that collected
+                    Zero rows is THREE different facts wanting different responses. A server that collected
                     and was simply quiet in THIS window is a true negative and the move is to widen it; a
                     server with no log rows at all has never collected, which is a fault, and telling that
                     caller "nothing in the last 24 hours" sends them off widening a window that will never
                     fill. Darling's twin makes the same distinction with the same words -- a user moving
                     between the SKUs must not be told a different story about the same state.
+
+                    The third is a filter that matched nothing. A misspelled collector_name or a floor above
+                    every run in the window reaches the same zero, and the quiet-window sentence would then
+                    assert the window is quiet on a read that never looked at the whole window. Same words as
+                    Darling's twin, and the filters are named back because the caller cannot otherwise tell a
+                    rejected value from an honestly empty match.
+
+                    THE NEVER-COLLECTED CHECK COMES FIRST, ahead of the filter branch, and the order is the
+                    whole correctness of this block. A fault outranks a miss: on a server that has never
+                    collected, "unfiltered runs may well exist -- drop them to see what the window holds" is
+                    FALSE and sends the caller to unfilter a window that will never fill. That is the same
+                    defect the two original branches exist to prevent, reintroduced by the branch added to
+                    prevent it -- so the filters can only ever narrow the answer given to a server that HAS
+                    collected. Same order as Darling's twin.
                 */
                 var everCollected = await dataService.HasAnyCollectionLogAsync(resolved.ServerId);
-                return everCollected
-                    ? McpHelpers.Status(
-                        "empty",
-                        $"No collector runs recorded for {resolved.ServerName} in the last {hours} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.")
-                    : McpHelpers.Status(
+
+                if (!everCollected)
+                {
+                    return McpHelpers.Status(
                         "unavailable",
                         $"No collector runs have EVER been recorded for {resolved.ServerName}. This is not an empty window — collection has not run at all for this server. Check that collection is running and that the server is enabled; get_collection_health will be equally empty until it does.");
+                }
+
+                if (filtered)
+                {
+                    return McpHelpers.Status(
+                        "empty",
+                        $"No collector runs on {resolved.ServerName} in the last {hours} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.");
+                }
+
+                return McpHelpers.Status(
+                    "empty",
+                    $"No collector runs recorded for {resolved.ServerName} in the last {hours} hour(s). This server HAS collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.");
             }
 
             var result = rows.Select(r => new
@@ -573,9 +665,40 @@ public sealed class McpHealthTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                /* The span REQUESTED, and no longer the only span reported -- see the two timestamps. */
                 hours_back = hours,
                 run_count = rows.Count,
                 truncated,
+                /*
+                    #3287, field-identical to Darling's twin: the span this PAGE covers, beside the span
+                    requested. `hours_back = 24` next to `truncated = true` said the cap bit and then showed
+                    the 24 hours as if that were the window -- an instrument reporting a span it did not
+                    measure.
+
+                    The _returned_ in these names is load-bearing (and the unqualified spellings are not
+                    written out anywhere here, because a pin forbids them across this file and a correction
+                    naming what it corrected would be the occurrence that defeats it). Under the DEFAULT
+                    ordering the page is a contiguous slice of the window's tail, so its oldest row IS how
+                    far back the read reached. Under a duration floor it is a cost-RANKED sample drawn from
+                    the whole window, so its oldest row says how old the slowest runs happen to be and says
+                    NOTHING about reach. The field names what it is and the description says which case is
+                    which, rather than one number quietly meaning two things.
+
+                    MIN and MAX over the rows, deliberately not rows[0] and rows[^1]: those are the same
+                    thing only under time ordering, and the ranked page would report the wrong ends while
+                    the time-ordered test kept passing.
+                */
+                oldest_returned_collection_time = rows.Min(r => r.CollectionTime).ToString("o"),
+                newest_returned_collection_time = rows.Max(r => r.CollectionTime).ToString("o"),
+                /* Which ordering this page came back in, stated rather than left to be inferred from the
+                   filters sent. Same two tokens as Darling's twin, from the shared constants. */
+                order = min_duration_ms is null
+                    ? McpHelpers.CollectionLogOrderNewestFirst
+                    : McpHelpers.CollectionLogOrderSlowestFirst,
+                /* Echoed back so the filters that produced this page are on the page: run_count and
+                   truncated describe the MATCHING rows, and that sentence is unreadable without them. */
+                collector_name = string.IsNullOrWhiteSpace(collector_name) ? null : collector_name.Trim(),
+                min_duration_ms,
                 runs = result,
             }, McpHelpers.JsonOptions);
         }
@@ -735,5 +858,29 @@ public sealed class McpHealthTools
         {
             return McpHelpers.FormatError("get_blocking_stats", ex);
         }
+    }
+
+    /// <summary>
+    /// The product version string for <c>get_collection_health</c>'s <c>service</c> block — this assembly's
+    /// informational version (the one <c>Directory.Build.props</c> declaration every project inherits), with
+    /// any SemVer <c>+build</c> metadata suffix stripped and the prerelease suffix KEPT, falling back to the
+    /// assembly version. The twin of Darling's <c>DarlingCliCommands.ProductVersion</c>, which lives in the
+    /// Darling service assembly this SKU does not reference — and it must stay these mechanics rather than
+    /// the nearest local helper, because <c>VersionText.Normalize</c> (the display form the server list
+    /// uses) collapses to Major.Minor.Build and would strip the nightly's prerelease stamp, which is exactly
+    /// the part that distinguishes one nightly from the next. Pure (reads this assembly's own attributes),
+    /// and internal so the pin reads the value rather than trusting this sentence.
+    /// </summary>
+    internal static string ProductVersion()
+    {
+        var assembly = typeof(McpHealthTools).Assembly;
+        var informational = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (!string.IsNullOrWhiteSpace(informational))
+        {
+            var plus = informational.IndexOf('+', StringComparison.Ordinal);
+            return plus >= 0 ? informational[..plus] : informational;
+        }
+
+        return assembly.GetName().Version?.ToString() ?? "unknown";
     }
 }

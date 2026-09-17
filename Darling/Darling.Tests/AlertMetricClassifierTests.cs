@@ -41,6 +41,7 @@ public class AlertMetricClassifierTests
     [InlineData("AG Replica Reconnected")]
     [InlineData("AG Sync Recovered")]
     [InlineData("AG Data Movement Resumed")]
+    [InlineData("Web TLS Certificate Renewed")]   // #3514
     public void IsResolution_True_ForEveryResolutionNotice(string metric)
     {
         Assert.True(AlertMetricClassifier.IsResolution(metric));
@@ -67,6 +68,9 @@ public class AlertMetricClassifierTests
     [InlineData("AG Replica Disconnected")]
     [InlineData("AG Sync Fell Behind")]
     [InlineData("AG Database Suspended")]
+    /* #3514: the active web-TLS-certificate alert stays actionable — its "Expiring" name carries none of the
+       resolution words, and adding "Renewed" to the vocabulary must not drag it green. */
+    [InlineData("Web TLS Certificate Expiring")]
     public void IsResolution_False_ForActionableAlerts(string metric)
     {
         Assert.False(AlertMetricClassifier.IsResolution(metric));
@@ -91,6 +95,25 @@ public class AlertMetricClassifierTests
         Assert.False(AlertMetricClassifier.IsResolution(metric));
     }
 
+    /// <summary>The deliberate INFO reports (#3443's collector-cost digest, #3466's fleet sweep
+    /// rollup) must not classify as warnings: both Alert History grids (Lite's <c>AlertsHistoryTab</c>
+    /// and the Darling Viewer's) derive their row's <c>IsWarning</c> from this classifier and amber-fill
+    /// on it, so without the carve-out the rows <c>AlertSeverity.ForMetric</c> deliberately pins
+    /// INFO/blue for email and webhooks reach the desktop grids styled as live actionable alerts — the
+    /// design undone through a second, untouched classifier (#3448 review). No predicate is true for
+    /// them, so no row trigger fires and they render in the default chrome, which is the grids' only
+    /// non-actionable rendering.</summary>
+    [Theory]
+    [InlineData("Collector Cost Digest")]
+    [InlineData("Fleet Sweep Rollup")]
+    public void IsWarning_False_ForTheDeliberateInfoReports(string metric)
+    {
+        Assert.True(AlertMetricClassifier.IsInformational(metric));
+        Assert.False(AlertMetricClassifier.IsWarning(metric));
+        Assert.False(AlertMetricClassifier.IsCritical(metric));
+        Assert.False(AlertMetricClassifier.IsResolution(metric));
+    }
+
     [Fact]
     public void Classifiers_AreFalse_ForNullOrEmpty()
     {
@@ -98,7 +121,9 @@ public class AlertMetricClassifierTests
         Assert.False(AlertMetricClassifier.IsResolution(""));
         Assert.False(AlertMetricClassifier.IsCritical(null));
         Assert.False(AlertMetricClassifier.IsCritical(""));
-        // IsWarning is the complement of the two signals, so an absent name defaults to warning —
+        Assert.False(AlertMetricClassifier.IsInformational(null));
+        Assert.False(AlertMetricClassifier.IsInformational(""));
+        // IsWarning is the complement of the three signals, so an absent name defaults to warning —
         // matching the long-standing display behavior this classifier replaced.
         Assert.True(AlertMetricClassifier.IsWarning(null));
         Assert.True(AlertMetricClassifier.IsWarning(""));

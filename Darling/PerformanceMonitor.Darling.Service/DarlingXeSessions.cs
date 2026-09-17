@@ -105,7 +105,13 @@ public static class DarlingXeSessions
         List<string> databases;
         try
         {
-            databases = await runner.GetAzureDatabaseListAsync(server, cancellationToken);
+            /* No #3477 scope here, deliberately: this list provisions SESSIONS for three collectors
+               (deadlocks, blocked_process_report, long_query_completions), each of which may carry a
+               DIFFERENT scope — the scope is a COLLECTION predicate on each collector's own read
+               fan-out, while the session inventory stays server-shaped. An unread session's ring
+               buffer is bounded server-side; a session dropped because ONE collector was scoped
+               would blind the other two. */
+            databases = await runner.GetAzureDatabaseListAsync(server, databaseScope: null, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -421,7 +427,9 @@ SELECT @threshold;", connection);
         }
         catch (SqlException ex)
         {
-            logger?.LogInformation("[{Server}] Cannot set blocked process threshold via sp_configure (may require platform config): {Message}",
+            /* Threshold could not be set: the login lacks ALTER SETTINGS, or sp_configure
+               is unavailable on the platform (AWS RDS / Azure SQL DB). Tolerated either way. */
+            logger?.LogInformation("[{Server}] Could not auto-configure 'blocked process threshold (s)' to 5 seconds. This is expected when the monitoring login lacks ALTER SETTINGS, or on AWS RDS / Azure SQL DB where it is set via platform config. It is benign: blocking is still captured by the always-on DMV blocking snapshot; only the richer blocked-process-report XE stays off until the threshold is set. Detail: {Message}",
                 server.Config.DisplayName, ex.Message);
         }
 
@@ -613,7 +621,10 @@ WHERE ses.name = @session_name;", connection))
         List<string> databases;
         try
         {
-            databases = await runner.GetAzureDatabaseListAsync(server, cancellationToken);
+            /* No #3477 scope, same reasoning as EnsureDatabaseScopedAsync: session lifecycle is
+               inventory-driven; the scope narrows the collector's READ loop, not where the trace
+               exists. */
+            databases = await runner.GetAzureDatabaseListAsync(server, databaseScope: null, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -847,10 +847,15 @@ public sealed class DarlingObservabilityTests
         Assert.Equal(80_800, queryStore.SlowestRunDurationMs);
         Assert.Equal(6.13, queryStore.FanoutDominance!.Value, 2);
 
+        /* #3502: and the share — the slowest item's fraction of the whole pass, the number the
+           width-versus-concentration decision turns on — derives from the same stored columns. */
+        Assert.Equal(76.61, queryStore.FanoutSlowestSharePercent!.Value, 2);
+
         /* A collector with no fan-out reports nothing rather than zero. */
         Assert.Null(waitStats.FanoutItems);
         Assert.Null(waitStats.SlowestItem);
         Assert.Null(waitStats.FanoutDominance);
+        Assert.Null(waitStats.FanoutSlowestSharePercent);
 
         await DeleteTestRowsAsync(connection);
     }

@@ -13,6 +13,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -367,21 +368,34 @@ public sealed class DarlingConfig
                 problems.Add($"{label}: host is required.");
             }
 
-            if (server.UsesSqlAuth)
+            if (server.UsesSqlAuth || server.UsesServicePrincipal)
             {
+                /* Service principal carries the SAME two fields as SQL auth — the client id in username, the
+                   client secret in encryptedPassword — so the requirement is identical; only the wording
+                   changes so the error names what the operator actually has to supply. */
                 if (string.IsNullOrWhiteSpace(server.Username))
                 {
-                    problems.Add($"{label}: sql auth requires username.");
+                    problems.Add(server.UsesServicePrincipal
+                        ? $"{label}: service principal auth requires username (the Entra application/client id)."
+                        : $"{label}: sql auth requires username.");
                 }
 
                 if (string.IsNullOrWhiteSpace(server.EncryptedPassword) && string.IsNullOrWhiteSpace(server.Password))
                 {
-                    problems.Add($"{label}: sql auth requires encryptedPassword (preferred; see --encrypt-password) or password.");
+                    problems.Add(server.UsesServicePrincipal
+                        ? $"{label}: service principal auth requires encryptedPassword (the client secret; preferred, see --encrypt-password) or password."
+                        : $"{label}: sql auth requires encryptedPassword (preferred; see --encrypt-password) or password.");
                 }
+            }
+            else if (server.UsesManagedIdentity)
+            {
+                /* Managed identity has no mandatory field: a system-assigned identity needs nothing, a
+                   user-assigned one puts its client id in username. No secret is ever stored. */
             }
             else if (!string.Equals(server.Auth, "integrated", StringComparison.OrdinalIgnoreCase))
             {
-                problems.Add($"{label}: auth must be 'integrated' or 'sql' (got '{server.Auth}').");
+                problems.Add($"{label}: auth must be 'integrated', 'sql', 'serviceprincipal', or 'managedidentity' " +
+                    $"(got '{server.Auth}'). The interactive Microsoft Entra modes are not supported for a headless collector.");
             }
 
             /* Caught here, in the pre-flight, rather than only where the connection string is built.
@@ -644,6 +658,83 @@ public sealed class AlertsConfig
     /// window.</para></summary>
     [JsonPropertyName("storeJobCadenceWarnPercent")]
     public int StoreJobCadenceWarnPercent { get; set; } = TimescaleSupport.RefreshSlotPercentOfHourlyCadence;
+
+    /// <summary>#3297 (V119): the Retention Held WARNING tier — how many times its own configured horizon a
+    /// retention policy held by the rollup-coverage gate must be holding before the hold is reported. Was a
+    /// compile-time constant, which made this the one alert an operator could not tune (#3296).
+    ///
+    /// <para>The seed is <see cref="TimescaleSupport.RetentionHoldWarnRatioDefault"/>, named rather than
+    /// restated, so this and the V119 column default cannot disagree — the #3060 discipline the cadence knob
+    /// above already follows. <c>DarlingAlertSettings</c> clamps it on read.</para></summary>
+    [JsonPropertyName("retentionHoldWarnRatio")]
+    public double RetentionHoldWarnRatio { get; set; } = TimescaleSupport.RetentionHoldWarnRatioDefault;
+
+    /// <summary>#3297 (V119): the Retention Held CRITICAL tier, seeded from
+    /// <see cref="TimescaleSupport.RetentionHoldCriticalRatioDefault"/> for the reason its warning sibling
+    /// above is. A value below the warning tier is not invalid — it means every fire is Critical, which is
+    /// what setting it there asks for.</summary>
+    [JsonPropertyName("retentionHoldCriticalRatio")]
+    public double RetentionHoldCriticalRatio { get; set; } = TimescaleSupport.RetentionHoldCriticalRatioDefault;
+
+    /// <summary>#3444 (V122): how many distinct deadlocks inside the rolling window fire the PostgreSQL
+    /// Deadlocks alert. Was a compile-time constant in <c>DarlingWorker</c> with no settings path at all,
+    /// while SQL Server's <see cref="DeadlockCountThreshold"/> has been settable since V1.
+    ///
+    /// <para>The seed is <see cref="PostgresAlertEvaluator.DeadlockCountThresholdDefault"/>, named rather
+    /// than restated, so this and the V122 column default cannot disagree — the #3060 discipline the
+    /// retention and deadlock-band knobs above already follow. <c>DarlingAlertSettings</c> clamps it on
+    /// read.</para>
+    ///
+    /// <para><b>Separate from <see cref="DeadlockCountThreshold"/> deliberately</b> — see the V122 rung and
+    /// the default constant for why the SQL Server figure's justification does not travel to an engine with
+    /// no deadlock band. The <c>enabled</c> switch IS shared: <see cref="DeadlockEnabled"/> governs both
+    /// engines.</para></summary>
+    [JsonPropertyName("pgDeadlockCountThreshold")]
+    public int PgDeadlockCountThreshold { get; set; } = PostgresAlertEvaluator.DeadlockCountThresholdDefault;
+
+    /// <summary>#3444 (V122): how many distinct ROOT BLOCKERS inside the rolling window fire the PostgreSQL
+    /// Blocking alert, seeded from <see cref="PostgresAlertEvaluator.BlockingCountThresholdDefault"/> for
+    /// the reason its deadlock sibling above is.
+    ///
+    /// <para>Separate from <see cref="BlockingCountThreshold"/> because the two count different things: that
+    /// one counts engine-recorded blocked-process reports, this one counts roots found in a periodic SAMPLE
+    /// of <c>pg_stat_activity</c>. <see cref="BlockingEnabled"/> is shared.</para></summary>
+    [JsonPropertyName("pgBlockingCountThreshold")]
+    public int PgBlockingCountThreshold { get; set; } = PostgresAlertEvaluator.BlockingCountThresholdDefault;
+
+    /// <summary>#3466 (V124): whether the scheduled fleet sweep runs at all. NOT the alert master
+    /// switch's business, deliberately: sweeps under <c>alerts.enabled: false</c> are the muted-mode
+    /// contract's whole point (the sweep keeps publishing and carries the would-have-paged ledger),
+    /// so this is the sweep's OWN switch, the way <c>analysis.enabled</c> is the analysis pipeline's.
+    /// Default true — see the V124 rung for why the feature does not ship dark.</summary>
+    [JsonPropertyName("fleetSweepEnabled")]
+    public bool FleetSweepEnabled { get; set; } = true;
+
+    /// <summary>#3466 (V124): how often the fleet sweep runs, in minutes. Seeded from
+    /// <see cref="FleetSweepCadence.DefaultIntervalMinutes"/>, named rather than restated, so this and
+    /// the V124 column default cannot disagree — the #3060 discipline the knobs above follow. The
+    /// worker clamps it on read to <see cref="FleetSweepCadence.IntervalMinutesFloor"/>–
+    /// <see cref="FleetSweepCadence.IntervalMinutesCeiling"/>, the same bounds
+    /// <c>update_alert_settings</c> and the Viewer's save gate enforce on the way in.</summary>
+    [JsonPropertyName("fleetSweepIntervalMinutes")]
+    public int FleetSweepIntervalMinutes { get; set; } = FleetSweepCadence.DefaultIntervalMinutes;
+
+    /// <summary>#3368 (V120): the deadlock health band's WARNING tier, in deadlocks per hour normalised over
+    /// the window a card counted them in. The band was <c>count &gt; 0</c>, so one resolved deadlock made a
+    /// server Critical; the right rate differs per workload, which is #3297's argument for the control plane.
+    ///
+    /// <para>The seed is <see cref="ServerHealthThresholds.DeadlockWarnPerHourDefault"/>, named rather than
+    /// restated, so this and the V120 column default cannot disagree — the #3060 discipline the retention
+    /// knobs above already follow. <c>DeadlockRateThresholds</c> clamps it on read.</para></summary>
+    [JsonPropertyName("deadlockWarnPerHour")]
+    public double DeadlockWarnPerHour { get; set; } = ServerHealthThresholds.DeadlockWarnPerHourDefault;
+
+    /// <summary>#3368 (V120): the deadlock health band's CRITICAL tier, seeded from
+    /// <see cref="ServerHealthThresholds.DeadlockCriticalPerHourDefault"/> for the reason its warning sibling
+    /// above is. A value below the warning tier is not invalid — it means every banded rate is Critical,
+    /// which is what setting it there asks for.</summary>
+    [JsonPropertyName("deadlockCriticalPerHour")]
+    public double DeadlockCriticalPerHour { get; set; } = ServerHealthThresholds.DeadlockCriticalPerHourDefault;
 
     [JsonPropertyName("longRunningJobEnabled")]
     public bool LongRunningJobEnabled { get; set; } = true;
@@ -1705,6 +1796,31 @@ public sealed class MonitoredServer
     [JsonIgnore]
     public bool UsesSqlAuth => string.Equals(Auth, "sql", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>Microsoft Entra service principal (application/client id + client secret) — non-interactive,
+    /// so it fits a headless collector. The client id is carried in <see cref="Username"/> and the secret in
+    /// <see cref="EncryptedPassword"/> (same DPAPI shape as a SQL password), so it needs no new config field.
+    /// #3484.</summary>
+    [JsonIgnore]
+    public bool UsesServicePrincipal => string.Equals(Auth, "serviceprincipal", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Azure managed identity (system- or user-assigned) — non-interactive and secret-less. A
+    /// user-assigned identity names its client id in <see cref="Username"/>; a system-assigned one leaves it
+    /// blank. #3484.</summary>
+    [JsonIgnore]
+    public bool UsesManagedIdentity => string.Equals(Auth, "managedidentity", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Either of the two non-interactive Microsoft Entra modes. The INTERACTIVE Entra modes (MFA,
+    /// device-code, default-credential) are deliberately not supported for an unattended service — they need a
+    /// broker or a signed-in user; Lite offers them, the headless collector does not.</summary>
+    [JsonIgnore]
+    public bool UsesEntra => UsesServicePrincipal || UsesManagedIdentity;
+
+    /// <summary>True when the connect path must have a resolved secret in hand. SQL auth (password) and
+    /// service principal (client secret) both carry one in <see cref="EncryptedPassword"/>/<see cref="Password"/>;
+    /// integrated and managed identity carry none.</summary>
+    [JsonIgnore]
+    public bool RequiresResolvedSecret => UsesSqlAuth || UsesServicePrincipal;
+
     /// <summary>
     /// <see cref="Engine"/> parsed. Anything unrecognized resolves to
     /// <see cref="CollectorTargetEngine.SqlServer"/> rather than throwing: a typo in one server entry
@@ -1865,6 +1981,35 @@ public sealed class PeersConfig
     [JsonPropertyName("thisStoreCovers")]
     public string ThisStoreCovers { get; set; } = "";
 
+    /// <summary>
+    /// A short LABEL naming this store itself (#3500) — the box name, "the use1 store" — where
+    /// <see cref="ThisStoreCovers"/> stays the sentence it is. When set, every fleet-level store self-alert
+    /// (Store Disk Pressure, Retention Held, the cost digest, the sweep rollup, all twelve families and their
+    /// resolution edges) fires under this label instead of the constant "Monitor Store", so on a multi-store
+    /// estate two stores' identical self-alerts stop being indistinguishable: the Teams card names the host,
+    /// and the delivery fingerprint downstream automation dedups on becomes distinct per store instead of
+    /// colliding two hosts into one work item.
+    ///
+    /// <para><b>OPT-IN, and setting it IS accepting a re-key.</b> The label is part of the self-alerts'
+    /// delivery fingerprint, so changing it orphans every open downstream work item keyed on the old one and
+    /// starts fresh ones beside them. Unset (the default), every self-alert is byte-identical to before this
+    /// field existed. The reporter's suggested machine-hostname fallback is deliberately NOT taken for
+    /// exactly that reason: it would re-key every existing install's self-alert fingerprints on upgrade,
+    /// silently — the precise harm the opt-in exists to prevent. Only setting this field opts in.</para>
+    ///
+    /// <para><b>Mute rules match the alert row's spelling.</b> A rule scoped to server "Monitor Store" stops
+    /// matching this store's self-alerts the moment this is set; re-scope such rules to the label (copy the
+    /// spelling off the new alert rows, the same advice the mute tools already give). And a label that
+    /// equals a monitored server's display name is NOT policed — the registry is store-authoritative after
+    /// seeding, so config validation cannot see it — but it would make the two indistinguishable on every
+    /// shared surface, including the triage page, which treats the label as fleet-level. Do not reuse one.</para>
+    ///
+    /// <para>File-only like its siblings (deployment identity, not a peer's Viewer's to edit); trimmed;
+    /// blank/whitespace means unset; an edit takes effect on the next service restart.</para>
+    /// </summary>
+    [JsonPropertyName("storeName")]
+    public string StoreName { get; set; } = "";
+
     /// <summary>The sibling Darling stores. Empty (the default) = nothing declared, and every surface behaves as before.</summary>
     [JsonPropertyName("stores")]
     public List<PeerStoreConfig> Stores { get; set; } = new();
@@ -1911,6 +2056,21 @@ public sealed class PeersConfig
                 $"peers.thisStoreCovers contains '{selfOffending}'. The peers block is DISCLOSURE ONLY — its text " +
                 "is sent verbatim to every connected MCP client — so it must carry no connection string and no " +
                 "credential.");
+        }
+
+        /* storeName gets the same unconditional guard, in the same pre-early-return position, for a stronger
+           version of the same reason: it is not only disclosed to MCP clients, it rides OUT on every
+           self-alert delivery channel (#3500) — Teams, Slack, PagerDuty, the generic webhook, email. */
+        var storeNameText = peers.StoreName ?? "";
+        var storeNameOffending = CredentialShapedTokens.FirstOrDefault(
+            t => storeNameText.Contains(t, StringComparison.OrdinalIgnoreCase));
+
+        if (storeNameOffending is not null)
+        {
+            problems.Add(
+                $"peers.storeName contains '{storeNameOffending}'. The store label is sent verbatim on every " +
+                "self-alert delivery channel and to every connected MCP client, so it must carry no connection " +
+                "string and no credential. Name the box, not how to reach it.");
         }
 
         if (peers.Stores is null)

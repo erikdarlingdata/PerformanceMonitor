@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Alerting;
 
@@ -25,7 +26,31 @@ public class AnomalousJobInfo
     public long AvgDurationSeconds { get; set; }
     public long P95DurationSeconds { get; set; }
     public decimal? PercentOfAverage { get; set; }
+
+    /// <summary>
+    /// When the run started, on the MONITORED SERVER's own clock. <c>running_jobs.start_time</c> is
+    /// <c>ja.start_execution_date</c>, which <c>RunningJobsCollector</c> confirms local by taking the
+    /// running duration as <c>DATEDIFF(SECOND, ja.start_execution_date, GETDATE())</c> — a local-vs-local
+    /// subtraction — and which the collector stores unconverted.
+    /// </summary>
     public DateTime StartTime { get; set; }
+
+    /// <summary>
+    /// The monitored server's collected UTC offset in minutes (negative west of UTC), carried on the row
+    /// so <see cref="StartTimeUtc"/> can state <see cref="StartTime"/> in the frame the alert body and
+    /// <c>alert_time</c> share. Null when the store holds no offset for the server, which leaves the
+    /// instant unconvertible rather than assumed.
+    /// <para>Carried rather than de-skewed in the read's own SQL, which is what the MCP and grid reads do:
+    /// those take <c>COALESCE(utc_offset_minutes, 0)</c> and so hand back an unknown offset as UTC, and a
+    /// notification has no neighbouring column for a reader to catch that against. Keeping both the raw
+    /// instant and the offset is what lets the body say "server clock, offset not collected" instead.</para>
+    /// </summary>
+    public int? UtcOffsetMinutes { get; set; }
+
+    /// <summary>
+    /// <see cref="StartTime"/> in naive UTC, or null when <see cref="UtcOffsetMinutes"/> is absent.
+    /// </summary>
+    public DateTime? StartTimeUtc => AlertTimestamp.ToUtc(StartTime, UtcOffsetMinutes);
 }
 
 /// <summary>

@@ -372,6 +372,13 @@ public sealed class DarlingCollectorRunner
        all, so it is unaffected either way. */
     private readonly Func<int> _procedureStatsPlanCycleInterval;
 
+    /* Resolves the per-collector database scope (#3477) for one (collector, server) pair — the worker
+       passes StoreConfigProvider.ResolveDatabaseScope over its live schedule overrides, so a store
+       write to config_collector_schedules.databases is honored on the collector's NEXT run through the
+       same reload beacon every other schedule column rides. Provider-shaped like its knob siblings:
+       resolved ONCE per run, at dispatch, so one run cannot see two different scopes. Empty = unscoped. */
+    private readonly Func<string, int, IReadOnlyList<string>> _databaseScope;
+
     /// <summary>
     /// Per-(server, collector) cycle counter for the #2862 plan-capture cadence. In-memory, and lost on a
     /// service restart — deliberately, and harmlessly, which is the whole reason this needs no stored
@@ -456,6 +463,27 @@ public sealed class DarlingCollectorRunner
 
     /// <summary>Text twin of <see cref="_planFetchCarryover"/> — same deferral contract, keyed by query_id.</summary>
     private readonly ConcurrentDictionary<(int ServerId, string Database, string Collector), long[]> _textFetchCarryover = new();
+
+    /// <summary>
+    /// Memoizes <see cref="QueryStoreFetchProbe.TouchAndProbePlansAsync"/>'s verdict so a plan id
+    /// already confirmed resolved-and-current recently skips the store round trip entirely (#3189,
+    /// #3216 — see <see cref="QueryStoreProbeCache"/> for the measurement and why this differs from
+    /// the carryover dictionaries' collector-scoped key). Not per-collector, on purpose.
+    /// </summary>
+    private readonly QueryStoreProbeCache _planProbeCache = new();
+
+    /// <summary>Text twin of <see cref="_planProbeCache"/> — same memoization, keyed by query_id.</summary>
+    private readonly QueryStoreProbeCache _textProbeCache = new();
+
+    /// <summary>
+    /// How long <see cref="_planProbeCache"/> / <see cref="_textProbeCache"/> trust a confirmed verdict.
+    /// Deliberately the SAME width as <see cref="QueryStoreLivenessTouchGuard.GuardHours"/> rather than
+    /// an independently chosen number: that is the staleness the store's own touch guard already
+    /// accepts for these rows ("a row that stays referenced is re-stamped at least once per guard
+    /// window"), so reusing it means this cache changes the CADENCE a live reference pays the round trip
+    /// at, not the liveness contract itself.
+    /// </summary>
+    private static readonly TimeSpan s_probeCacheTtl = TimeSpan.FromHours(QueryStoreLivenessTouchGuard.GuardHours);
 
     /// <summary>
     /// Consecutive-failure count for the TEXT fetch (#2776), the backoff input its
@@ -603,7 +631,7 @@ public sealed class DarlingCollectorRunner
     /// every cycle and therefore the pre-#2862 collector. Every existing caller and test keeps the
     /// collector it already had without naming the knob.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _deltas = deltas ?? throw new ArgumentNullException(nameof(deltas));
@@ -618,6 +646,9 @@ public sealed class DarlingCollectorRunner
         _compressPlanContent = compressPlanContent ?? (() => true);
         /* Null provider = 1 = capture a plan on every cycle, i.e. the pre-#2862 behaviour. */
         _procedureStatsPlanCycleInterval = procedureStatsPlanCycleInterval ?? (() => 1);
+        /* Null provider = no scope for any collector = every database the server enumerates, which is
+           what Lite's twin and every pre-#3477 test constructs. */
+        _databaseScope = databaseScope ?? ((_, _) => Array.Empty<string>());
     }
 
     /* One ingestor for the process, so the resume marker survives between cycles - it is per-file and
@@ -878,6 +909,12 @@ public sealed class DarlingCollectorRunner
 
         var excludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>();
 
+        /* #3477: this collector's database scope on this server, resolved ONCE at dispatch (per-server
+           row > fleet row > unscoped, the schedule table's own layering) so the enumeration, the
+           per-database loop and the dispatch probe all see the same list within one run. Empty =
+           unscoped = every database the server enumerates — the shipped state of every install. */
+        var databaseScope = _databaseScope(definition.Name, server.ServerId);
+
         /* #2797: on the two FAN-OUT paths the answer to this read is thrown away — both of them overwrite
            context.Watermark with a per-database value before any query is built — so skip the round trip
            there, and only there. ServerWatermarkIsDiscarded holds the predicate and the argument for why it
@@ -903,6 +940,10 @@ public sealed class DarlingCollectorRunner
             Deltas = _deltas,
             Target = server.Target,
             ExcludedDatabases = excludedDatabases,
+            /* #3477: BuildEnumerationQuery now reads the scope too, so the probe carries it for the
+               same reason it carries the exclusions — the contract is "everything the enumeration
+               builders actually read", not "everything that changes the probe's answer". */
+            DatabaseScope = databaseScope,
         };
         var serverWatermarkDiscarded = ServerWatermarkIsDiscarded(definition, dispatchProbe);
 
@@ -1035,6 +1076,8 @@ public sealed class DarlingCollectorRunner
                re-derived: the probe's answer is only sound if it saw the exclusions this cycle will actually
                use, and two independent reads of server.Config could disagree. */
             ExcludedDatabases = excludedDatabases,
+            /* #3477: same shared-not-re-derived rule for the scope — one resolution per run, above. */
+            DatabaseScope = databaseScope,
             PerfmonCounterOverride = null,
             /* #2862: plan capture is additionally cadence-gated for procedure_stats — see
                ShouldCapturePlanForCollector. Every other collector reads exactly _capturePlans().
@@ -1131,8 +1174,8 @@ public sealed class DarlingCollectorRunner
                cannot read pg_database cannot monitor the server at all, so inventing a fallback would
                turn a permissions problem into a silent one-database collection. */
             var databases = server.Target.Engine == CollectorTargetEngine.PostgreSql
-                ? await GetPostgresDatabaseListAsync(server, cancellationToken)
-                : await GetAzureDatabaseListAsync(server, cancellationToken);
+                ? await GetPostgresDatabaseListAsync(server, databaseScope, cancellationToken)
+                : await GetAzureDatabaseListAsync(server, databaseScope, cancellationToken);
 
             var attempted = 0;
             var failed = 0;
@@ -2564,7 +2607,53 @@ public sealed class DarlingCollectorRunner
             context.StoreWriteReattempts++;
         }
 
+        /* #3392: record the over-cap plans this batch saw. AFTER the rows are stored, deliberately — a write
+           that threw never reaches here, so the backlog cannot end up claiming a sighting for a cycle whose
+           rows were lost. */
+        await RecordOversizedPlanSightingsAsync(definition, rows, server, collectionTime, cancellationToken);
+
         return outcome.RowsWritten;
+    }
+
+    /// <summary>
+    /// Records this batch's over-cap cached plans in <c>collect.oversized_plan_backlog</c> so the
+    /// low-frequency sweep can go back for their content (#3392).
+    ///
+    /// <para><b>The definition decides, not this method.</b> <c>DescribeOversizedPlan</c> is what knows the
+    /// plan fetch's own arguments — statement offsets for <c>query_stats</c>, module-grain literals for
+    /// <c>procedure_stats</c> — and the deferred fetch is only the same call if it passes the same ones.
+    /// Every other collector returns null here and the loop costs one virtual call per row.</para>
+    ///
+    /// <para><b>Nothing over the cap means no connection at all.</b> The list is not even allocated until a
+    /// row describes an observation, so the overwhelmingly common batch pays a null check. The store write
+    /// itself is failure-isolated inside <see cref="OversizedPlanBacklog.RecordSightingsAsync"/>: a backlog
+    /// that cannot be written is a plan we will not go back for, never a reason to fail a cycle that stored
+    /// every row it read.</para>
+    /// </summary>
+    private async Task RecordOversizedPlanSightingsAsync<TRow>(
+        ICollectorDefinition<TRow> definition,
+        List<TRow> rows,
+        ServerRuntime server,
+        DateTime collectionTime,
+        CancellationToken cancellationToken)
+    {
+        List<OversizedPlanObservation>? observations = null;
+
+        foreach (var row in rows)
+        {
+            if (definition.DescribeOversizedPlan(row) is { } observation)
+            {
+                (observations ??= new List<OversizedPlanObservation>()).Add(observation);
+            }
+        }
+
+        if (observations is null)
+        {
+            return;
+        }
+
+        await OversizedPlanBacklog.RecordSightingsAsync(
+            _postgres, server.ServerId, definition.Name, observations, collectionTime, _logger, cancellationToken);
     }
 
     /// <summary>
@@ -3343,24 +3432,62 @@ public sealed class DarlingCollectorRunner
 
             if (references.Count > 0)
             {
-                /* #2823: the probe's INPUT size, stamped where the input is known. probe: scales with
-                   this (~0.61ms/reference), not with PerItemPlanIdsAttempted, which counts only what came
-                   back missing — so a pass probing hundreds of references and owing nothing logs 0 ids
-                   while doing real store work. Logging one and dividing by the other produced a phantom
-                   140x gap twice (#2819, #2822). */
-                context.PerItemPlanProbeIds = references.Count;
-                var verdicts = await QueryStoreFetchProbe.TouchAndProbePlansAsync(
-                    storeConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
-                foreach (var verdict in verdicts)
+                /* #3189/#3216: skip the store round trip entirely for references a recent probe already
+                   confirmed resolved-and-current — see QueryStoreProbeCache for the measurement (77-80%
+                   fleet recurrence) and why the TTL is the same GuardHours the touch guard already treats
+                   as an acceptable staleness bound for these rows. Cache hits are implicitly resolved and
+                   current; only misses reach the probe below. */
+                var toProbe = _planProbeCache.SelectNeedingProbe(
+                    server.ServerId, databaseName, references, context.CollectionTime, s_probeCacheTtl);
+                if (toProbe.Count < references.Count)
                 {
-                    if (!verdict.Resolved || verdict.HashStale)
+                    var toProbeIds = new HashSet<long>(toProbe.Count);
+                    foreach (var reference in toProbe)
                     {
-                        missing.Add(verdict.Id);
+                        toProbeIds.Add(reference.Id);
                     }
-                    else
+
+                    foreach (var reference in references)
                     {
-                        /* Resolved and current: if it was carried debt, it is paid. */
-                        missing.Remove(verdict.Id);
+                        if (!toProbeIds.Contains(reference.PlanId))
+                        {
+                            /* Cache-confirmed resolved and current: if it was carried debt, it is paid. */
+                            missing.Remove(reference.PlanId);
+                        }
+                    }
+                }
+
+                /* #2823: the probe's INPUT size, stamped where the input is known — now the size of what
+                   actually reaches the store, which is the figure that determines the round trip's cost
+                   post-cache. probe: scales with this (~0.61ms/reference), not with PerItemPlanIdsAttempted,
+                   which counts only what came back missing — so a pass probing hundreds of references and
+                   owing nothing logs 0 ids while doing real store work. Logging one and dividing by the
+                   other produced a phantom 140x gap twice (#2819, #2822). */
+                context.PerItemPlanProbeIds = toProbe.Count;
+                if (toProbe.Count > 0)
+                {
+                    var verdicts = await QueryStoreFetchProbe.TouchAndProbePlansAsync(
+                        storeConnection, server.ServerId, databaseName, toProbe, context.CollectionTime, itemTimeout, cancellationToken);
+                    var hashById = new Dictionary<long, string?>(toProbe.Count);
+                    foreach (var reference in toProbe)
+                    {
+                        hashById[reference.Id] = reference.Hash;
+                    }
+
+                    foreach (var verdict in verdicts)
+                    {
+                        if (!verdict.Resolved || verdict.HashStale)
+                        {
+                            missing.Add(verdict.Id);
+                        }
+                        else
+                        {
+                            /* Resolved and current: if it was carried debt, it is paid, and the cache
+                               remembers this exact (id, hash) so the NEXT cycle that still references it
+                               can skip the round trip too. */
+                            missing.Remove(verdict.Id);
+                            _planProbeCache.Confirm(server.ServerId, databaseName, verdict.Id, hashById[verdict.Id], context.CollectionTime);
+                        }
                     }
                 }
             }
@@ -3712,19 +3839,50 @@ public sealed class DarlingCollectorRunner
 
             if (references.Count > 0)
             {
-                /* #2823: probe input size — see the plan-side comment. */
-                context.PerItemTextProbeIds = references.Count;
-                var verdicts = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
-                    storeConnection, server.ServerId, databaseName, references, context.CollectionTime, itemTimeout, cancellationToken);
-                foreach (var verdict in verdicts)
+                /* #3189/#3216: same cache-before-probe shape as the plan side — see QueryStoreProbeCache
+                   and _planProbeCache's call site for the measurement and the correctness argument. */
+                var toProbe = _textProbeCache.SelectNeedingProbe(
+                    server.ServerId, databaseName, references, context.CollectionTime, s_probeCacheTtl);
+                if (toProbe.Count < references.Count)
                 {
-                    if (!verdict.Resolved || verdict.HashStale)
+                    var toProbeIds = new HashSet<long>(toProbe.Count);
+                    foreach (var reference in toProbe)
                     {
-                        missing.Add(verdict.Id);
+                        toProbeIds.Add(reference.Id);
                     }
-                    else
+
+                    foreach (var reference in references)
                     {
-                        missing.Remove(verdict.Id);
+                        if (!toProbeIds.Contains(reference.QueryId))
+                        {
+                            missing.Remove(reference.QueryId);
+                        }
+                    }
+                }
+
+                /* #2823: probe input size — see the plan-side comment. Now the post-cache size. */
+                context.PerItemTextProbeIds = toProbe.Count;
+                if (toProbe.Count > 0)
+                {
+                    var verdicts = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
+                        storeConnection, server.ServerId, databaseName, toProbe, context.CollectionTime, itemTimeout, cancellationToken);
+                    var hashById = new Dictionary<long, string?>(toProbe.Count);
+                    foreach (var reference in toProbe)
+                    {
+                        hashById[reference.Id] = reference.Hash;
+                    }
+
+                    foreach (var verdict in verdicts)
+                    {
+                        if (!verdict.Resolved || verdict.HashStale)
+                        {
+                            missing.Add(verdict.Id);
+                        }
+                        else
+                        {
+                            missing.Remove(verdict.Id);
+                            _textProbeCache.Confirm(server.ServerId, databaseName, verdict.Id, hashById[verdict.Id], context.CollectionTime);
+                        }
                     }
                 }
             }
@@ -4497,7 +4655,7 @@ RETURNING s.state_key";
     /// server into whichever registration ran the sweep — N registrations of N databases meant N² collection
     /// with every registration's history contaminated by its siblings'.</para>
     /// </summary>
-    internal async Task<List<string>> GetAzureDatabaseListAsync(ServerRuntime server, CancellationToken cancellationToken)
+    internal async Task<List<string>> GetAzureDatabaseListAsync(ServerRuntime server, IReadOnlyList<string>? databaseScope, CancellationToken cancellationToken)
     {
         var targetDb = new SqlConnectionStringBuilder(server.ConnectionString).InitialCatalog;
 
@@ -4512,6 +4670,11 @@ RETURNING s.state_key";
            probing master at all, rather than probing, failing, forming a verdict and falling back. Master is
            reached only by a registration that names no database — the logical-server registration, which has
            nothing else to enumerate from. */
+        /* #3477: the database scope deliberately does NOT filter this named-database return, for the
+           parity reason that governs the whole feature — ExcludedDatabases has never filtered it
+           either. A registration that names a database IS that database; the way to stop collecting
+           it is the collector's enabled flag for that server, not a scope that would have to be
+           matched client-side with a comparer the engine never sees. */
         var ownDatabase = AzureSweepScope.OwnDatabaseOrEmpty(targetDb);
         if (ownDatabase.Count > 0)
         {
@@ -4535,7 +4698,7 @@ RETURNING s.state_key";
            in exactly one place per engine. What stays here is the failure policy below, which is the
            part that is genuinely Azure-specific. */
         var (masterConnectionString, enumerationQuery) = SqlServerTargetProvider.Instance.BuildDatabaseListPlan(
-            server.ConnectionString, server.Config.ExcludedDatabases);
+            server.ConnectionString, server.Config.ExcludedDatabases, databaseScope);
 
         var databases = new List<string>();
         try
@@ -4677,11 +4840,11 @@ RETURNING s.state_key";
     /// out of reach. Falling back to the connected database would convert a permissions problem into a
     /// quiet partial collection, which is the failure mode that fallback exists to avoid elsewhere.</para>
     /// </summary>
-    internal async Task<List<string>> GetPostgresDatabaseListAsync(ServerRuntime server, CancellationToken cancellationToken)
+    internal async Task<List<string>> GetPostgresDatabaseListAsync(ServerRuntime server, IReadOnlyList<string>? databaseScope, CancellationToken cancellationToken)
     {
         var provider = TargetProviders.For(server.Target);
         var (connectionString, query) = provider.BuildDatabaseListPlan(
-            server.ConnectionString, server.Config.ExcludedDatabases);
+            server.ConnectionString, server.Config.ExcludedDatabases, databaseScope);
 
         var databases = new List<string>();
 

@@ -151,6 +151,157 @@ public class IncidentCooldownTests
         Assert.True((await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("A"), Window)).ShouldSend);
     }
 
+    /* ─────────────── #3313: the per-fingerprint verdicts, not only their reduction ─────────────── */
+
+    /// <summary>
+    /// #3313: the decision reports WHICH fingerprints were outside their own window, not only that one of
+    /// them was. The "send if ANY is fresh" reduction above is the right answer to "does this post" and was
+    /// the only answer available, so the channel builders rendered the whole incident set — including the
+    /// ones still inside their own window, already delivered minutes earlier.
+    ///
+    /// <para>Reported as a member of the same decision rather than left to a second call: the cooldown
+    /// evicts, seeds from history and stamps, so a render evaluating freshness for itself would not be
+    /// asking the same question the send decision answered. Consumed by
+    /// <c>IncidentDeliveryFilter.ForDelivery</c>; the render side is pinned in
+    /// <c>Darling.Tests.IncidentDeliveryFilterTests</c>.</para>
+    /// </summary>
+    [Fact]
+    public async Task Decision_NamesOnlyTheFingerprintsOutsideTheirOwnWindow()
+    {
+        var cd = NoSeed();
+
+        var a = await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("A"), Window);
+        cd.Stamp(a);
+        Assert.Equal(new[] { "A" }, a.DeliverableDedupKeys);
+
+        // Summary {A (in cooldown), B (fresh)}: posts because B is fresh, but only B is deliverable.
+        var summary = await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("A", "B"), Window);
+        Assert.True(summary.ShouldSend);
+        Assert.Equal(2, summary.Keys.Count);           // both keys are still stamped on success (#1154)
+        Assert.Equal(new[] { "B" }, summary.DeliverableDedupKeys);
+
+        /* And with the fresh one FIRST. Both members are reductions over an ordered key list, so a
+           last-one-wins or first-one-wins reduction is right on exactly one of the two orders — measured,
+           not theoretical: writing this assertion is what caught a mutation of the ShouldSend reduction
+           that the single-order form above passed. */
+        var reversed = await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("B", "A"), Window);
+        Assert.True(reversed.ShouldSend);
+        Assert.Equal(new[] { "B" }, reversed.DeliverableDedupKeys);
+    }
+
+    /// <summary>
+    /// The metric-level fallback reports null, not an empty list. Empty would read as "no incident is
+    /// deliverable" and blank every CPU / memory / poison-wait / tempdb / failed-job card, plus the #2109 AG
+    /// database alerts — none of which carries a fingerprint at all.
+    /// </summary>
+    [Fact]
+    public async Task Decision_ReportsNoDeliverableSet_WhenThereAreNoFingerprints()
+    {
+        var cd = NoSeed();
+
+        Assert.Null((await cd.EvaluateAsync("1", "High CPU", null, Window)).DeliverableDedupKeys);
+        Assert.Null((await cd.EvaluateAsync("1", "High CPU", new List<AlertIncident>(), Window)).DeliverableDedupKeys);
+    }
+
+    /// <summary>
+    /// A stamped-and-suppressed alert reports an EMPTY deliverable set, which is the state the null above
+    /// has to stay distinguishable from. Unreachable through a send (ShouldSend is false, so nothing
+    /// renders), and pinned for exactly that reason: it is the only pairing of the two members a renderer
+    /// must never see, so nothing else would notice the two collapsing into one value.
+    /// </summary>
+    [Fact]
+    public async Task Decision_ReportsAnEmptyDeliverableSet_WhenEveryFingerprintIsSuppressed()
+    {
+        var cd = NoSeed();
+
+        var first = await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("A", "B"), Window);
+        cd.Stamp(first);
+
+        var again = await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("A", "B"), Window);
+        Assert.False(again.ShouldSend);
+        Assert.NotNull(again.DeliverableDedupKeys);
+        Assert.Empty(again.DeliverableDedupKeys!);
+    }
+
+    /* ─────────────── #3430: first notice versus repeat ─────────────── */
+
+    /// <summary>
+    /// #3430: the decision reports whether any candidate key had NO prior successful send on this channel.
+    /// That is the only place in the pipeline where "never delivered" is distinguishable from "delivered,
+    /// and the window has elapsed" — the freshness test the send decision is made on collapses the two, and
+    /// both arrive as <c>ShouldSend</c> true.
+    ///
+    /// <para>It is load-bearing because <c>RepeatDeliveryBudget</c> exempts a first notice from its
+    /// per-metric ceiling: a bit that read "repeat" for a never-delivered incident would let that incident
+    /// be folded into another server's card, which is the loss #1154 removed. A seed that returns a STALE
+    /// time is the shape that has to read as a repeat, and it is the shape the measured case produces — the
+    /// three-day blanket mute left every fingerprint's last delivery days old.</para>
+    /// </summary>
+    [Fact]
+    public async Task Decision_SeparatesANeverDeliveredFingerprintFromAStaleOne()
+    {
+        var cd = new IncidentCooldown("", (_, _, dedupKey) => Task.FromResult<DateTime?>(
+            dedupKey == "STALE" ? DateTime.UtcNow - TimeSpan.FromDays(3) : null));
+
+        var stale = await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("STALE"), Window);
+        Assert.True(stale.ShouldSend);
+        Assert.False(stale.AnyFirstNotice);
+
+        var unseen = await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("NEW"), Window);
+        Assert.True(unseen.ShouldSend);
+        Assert.True(unseen.AnyFirstNotice);
+
+        /* A batch carrying one of each is a first notice: it names an incident nobody has been told about,
+           so the whole delivery has to go out. A reduction that asked "are ALL of them first notices" reads
+           false here and would fold a card carrying a never-delivered incident. Both orders, because the
+           reduction is over an ordered key list. */
+        Assert.True((await cd.EvaluateAsync("2", "Deadlocks Detected", Incidents("STALE", "NEW"), Window)).AnyFirstNotice);
+        Assert.True((await cd.EvaluateAsync("3", "Deadlocks Detected", Incidents("NEW", "STALE"), Window)).AnyFirstNotice);
+    }
+
+    /// <summary>
+    /// A key this process has already stamped is a repeat on the next evaluation, with no history read
+    /// involved. The in-memory map and the history seed are two routes to the same fact and only one of them
+    /// is exercised after the first touch, so a bit derived from the seed's answer alone would read "first
+    /// notice" forever on a deployment whose alerts all pre-date its last restart.
+    /// <para>The stale-SEED route — a repeat that is ALSO <c>ShouldSend</c>, which is the pairing the
+    /// aggregate acts on — is pinned in
+    /// <see cref="Decision_SeparatesANeverDeliveredFingerprintFromAStaleOne"/>. Splitting them keeps both
+    /// deterministic: reaching that pairing through the map would need the evaluation to sit between one and
+    /// two windows after the stamp, and a test that sleeps into a window is a test that fails on a busy
+    /// build agent.</para>
+    /// </summary>
+    [Fact]
+    public async Task Decision_ReportsARepeat_OnceTheKeyHasBeenStamped()
+    {
+        var cd = NoSeed();
+
+        var first = await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("A"), Window);
+        Assert.True(first.AnyFirstNotice);
+        cd.Stamp(first);
+
+        var again = await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("A"), Window);
+        Assert.False(again.AnyFirstNotice);
+
+        /* And the map route does not bleed across keys: a sibling fingerprint on the same server and metric
+           has its own key and is still a first notice. */
+        Assert.True((await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("B"), Window)).AnyFirstNotice);
+    }
+
+    /// <summary>
+    /// With no history store the seed delegate is null, so nothing can be seeded and every cold key reads
+    /// as a first notice. That is the honest answer — this channel has no way to know — and it means the
+    /// #3430 ceiling simply never engages on that deployment rather than folding on a guess.
+    /// </summary>
+    [Fact]
+    public async Task Decision_ReportsAFirstNotice_WhenThereIsNoHistoryStoreToAsk()
+    {
+        var cd = new IncidentCooldown("webhook:", seedLastSentUtc: null);
+
+        Assert.True((await cd.EvaluateAsync("1", "Deadlocks Detected", Incidents("A"), Window)).AnyFirstNotice);
+        Assert.True((await cd.EvaluateAsync("1", "High CPU", null, Window)).AnyFirstNotice);
+    }
+
     [Fact]
     public async Task Eviction_DropsKeysPastTwiceWindow_KeepsDictBounded()
     {

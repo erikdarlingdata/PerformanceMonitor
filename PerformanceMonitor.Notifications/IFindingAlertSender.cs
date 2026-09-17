@@ -49,7 +49,23 @@ public interface IFindingAlertSender
 /// A composed analysis-finding alert, ready to dispatch. Carries both the display strings
 /// and the numeric severity/threshold so each app's <see cref="IFindingAlertSender"/>
 /// implementation can persist its native row shape without loss.
+/// <para>
+/// <b>The prose has two destinations, and they are not the same value.</b> <c>DetailText</c> is what
+/// the alert-history row PERSISTS — <c>config_alert_log.detail_text</c>, read by the MCP alert reader,
+/// the triage endpoint, the Viewer's detail pane and the Dashboard's no-channel tray row, and PARSED by
+/// <c>AlertMuteContext.PopulateFromDetailText</c> for the mute pre-fill. <see cref="DeliveredProse"/> is
+/// what a delivery CHANNEL renders. Separating them is what lets a producer whose prose merely restates
+/// its own structured context stop delivering the same facts twice without changing a persisted column
+/// that every one of those surfaces depends on.
+/// </para>
 /// </summary>
+/// <param name="DeliverDetailText">
+/// Whether a delivery channel renders <c>DetailText</c> as its own prose section. False when the prose
+/// restates <c>Context</c> under different labels: the channels all render the structured context, so
+/// both together print every fact twice. The PRODUCER answers this, because only the producer knows how
+/// it built the pair — <c>AlertDetailText.ProseForDelivery</c> compares the two texts and cannot see it
+/// when the labels and separators differ.
+/// </param>
 public sealed record FindingAlert(
     string MetricName,
     string ServerName,
@@ -59,4 +75,14 @@ public sealed record FindingAlert(
     AlertContext Context,
     double Severity,
     double NotifyThreshold,
-    string DetailText);
+    string DetailText,
+    bool DeliverDetailText)
+{
+    /// <summary>
+    /// The prose a delivery channel should render for this alert, or null when the structured
+    /// <c>Context</c> already carries every fact it states.
+    /// <para>Resolved once here rather than at each <see cref="IFindingAlertSender"/>, so both SKUs read
+    /// one answer instead of deriving it twice from the same flag.</para>
+    /// </summary>
+    public string? DeliveredProse => DeliverDetailText ? DetailText : null;
+}

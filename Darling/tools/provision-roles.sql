@@ -11,11 +11,14 @@
 --   admin   -- reads both schemas + writes the operator-config tables (mute rules, alert
 --              dismissals, analysis mutes). The Viewer's default identity (darling.json
 --              postgres.connectAs = "admin").
---   viewer  -- reads both schemas; the ONLY write it gets is INSERT/UPDATE/DELETE on config.custom_views
---              (the web dashboard's user-authored view definitions, #1563 -- non-secret JSON; edited by any
---              authenticated seat, gated server-side by the host's token+CIDR auth -- not loopback-only). All
---              other write actions degrade gracefully. Point a locked-down Viewer at this with
---              postgres.connectAs = "viewer".
+--   viewer  -- reads both schemas; its writes are the narrow, enumerated web-surface set: INSERT/UPDATE/DELETE
+--              on config.custom_views (the user-authored view definitions, #1563), on
+--              config.database_state_expected (the per-database override editor, #1986), and on
+--              config.config_mute_rules (the web dashboard's dedicated mute-rule endpoints, #3450 -- plus the
+--              two config_service beacon columns their bump trigger writes as the caller). All non-secret
+--              tables; over the web every write is gated server-side by the host's auth + seat model -- these
+--              grants are only the floor beneath that gate. All other write actions degrade gracefully. Point
+--              a locked-down Viewer at this with postgres.connectAs = "viewer".
 --
 -- PREREQUISITE: the V8 migration (which the service applies on startup) must already have created
 -- the collect and config schemas and moved the tables into them. Run this AFTER the service has
@@ -23,9 +26,11 @@
 -- idempotent: the GRANT ... ON ALL TABLES statements below re-cover every table that now exists
 -- (including the V17 control-plane tables config_monitored_servers / config_alert_settings /
 -- config_notification / config_collector_schedules / config_service / config_command), and the
--- ALTER DEFAULT PRIVILEGES already auto-grant any config table the owner creates after this runs. The one
--- write that is NOT covered by re-running blindly is the V31 config.custom_views viewer grant in step 3b:
--- that table only exists once the service has migrated your store to V31, so re-run this script after upgrading.
+-- ALTER DEFAULT PRIVILEGES already auto-grant any config table the owner creates after this runs. The
+-- writes that are NOT covered by re-running blindly are the single-table viewer grants in steps 3b-3d:
+-- each names a table (or, for 3d's beacon columns, a trigger dependency) a specific migration creates —
+-- custom_views is V31, database_state_expected is V49, and the mute-rule reload-beacon trigger is V117 —
+-- so re-run this script after upgrading past each.
 --
 -- BEFORE RUNNING:
 --   1. Replace CHANGE_ME_ADMIN_PASSWORD and CHANGE_ME_VIEWER_PASSWORD with strong passwords.
@@ -138,6 +143,18 @@ GRANT INSERT, UPDATE, DELETE ON config.custom_views TO viewer;
 --     PRIVILEGES, which would broaden viewer to ALL of config). config.database_state_expected is created by
 --     the V49 migration, so re-run this script AFTER the service has migrated your store to V49.
 GRANT INSERT, UPDATE, DELETE ON config.database_state_expected TO viewer;
+
+-- 3d. Mute rules (#3450): the web dashboard's dedicated mute-rule endpoints (create / update / set-enabled /
+--     delete under /api/mute-rules) run as this role, so it gets the same single-table write shape as 3b/3c.
+--     The table exists from V3, but its reload-beacon trigger (trg_bump_mute_rules, V117) is SECURITY INVOKER
+--     and UPDATEs config_service.config_version AS viewer on every mute-rule write -- so the COLUMN-level
+--     config_service grant below is load-bearing, not optional: without it every web mute-rule write fails
+--     42501 at the trigger. Column-level on exactly the two beacon columns, so viewer can bump the reload
+--     beacon but never flip a service flag like paused. Re-run this script after upgrading to V117+.
+--     (The WPF Viewer's read-only probe discriminates on config_alert_log UPDATE -- a write viewer never
+--     gets -- so a connectAs = "viewer" Viewer stays read-only in its UI despite this grant.)
+GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO viewer;
+GRANT UPDATE (config_version, updated_at) ON config.config_service TO viewer;
 
 -- 4. Default privileges so NEW tables/views (future collectors, created bare into collect via
 --    search_path) auto-inherit SELECT. FOR ROLE <owner> must name the role that creates them.

@@ -398,14 +398,22 @@ public sealed partial class ViewerDataService : IAsyncDisposable
         "SELECT server_id, server_name, display_name, is_enabled, sql_major_version, COALESCE(monthly_cost_usd, 0), engine_kind, COALESCE(sql_engine_edition, 0), postgres_major_version FROM servers ORDER BY display_name";
 
     /// <summary>
-    /// The authoritative read-only probe (V8 security hardening): does the connected role hold INSERT
-    /// on a <c>config</c> table? True → the admin role (or an owner) — the mute / alert-dismiss /
-    /// analysis-mute writes are available. False → the read-only viewer role — those surfaces degrade.
-    /// This is the source of truth over <c>connectAs</c> (which only picks a credential and doesn't
-    /// apply in BYO mode), because it reflects the connection's ACTUAL privileges. The bare table name
-    /// resolves through search_path to <c>config.config_mute_rules</c>.
+    /// The authoritative read-only probe (V8 security hardening): does the connected role hold UPDATE on
+    /// <c>config_alert_log</c> — the alert-dismiss write itself? True → the admin role (or an owner) — the
+    /// mute / alert-dismiss / analysis-mute writes are available. False → the read-only viewer role — those
+    /// surfaces degrade. This is the source of truth over <c>connectAs</c> (which only picks a credential and
+    /// doesn't apply in BYO mode), because it reflects the connection's ACTUAL privileges. The bare table name
+    /// resolves through search_path to <c>config.config_alert_log</c>.
+    ///
+    /// <para>It probed <c>config_mute_rules</c> INSERT until #3450 granted the viewer ROLE exactly that
+    /// privilege (the web dashboard's dedicated mute-rule endpoints run as viewer), which would have flipped
+    /// every <c>connectAs = "viewer"</c> Viewer to "writable" while its alert-dismiss writes still 42501'd —
+    /// buttons offered, writes refused. <c>config_alert_log</c> UPDATE is one of the writes this probe actually
+    /// gates and stays with admin/owner (never in the viewer role's enumerated web-surface set), so the probe
+    /// keeps discriminating the two roles it exists to tell apart — and the locked-down Viewer's read-only UX,
+    /// mute-rule buttons included, is unchanged by the web grant.</para>
     /// </summary>
-    public const string ReadOnlyProbeSql = "SELECT has_table_privilege('config_mute_rules', 'INSERT')";
+    public const string ReadOnlyProbeSql = "SELECT has_table_privilege('config_alert_log', 'UPDATE')";
 
     private readonly NpgsqlDataSource _dataSource;
 
@@ -741,7 +749,64 @@ SELECT
        other seven added columns because it is the one the read ranks on - if it is absent the panel has
        nothing to order by, which is the failure this probe exists to prevent. */
     EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_index_bloat'
-                                                     AND   column_name = 'est_reclaimable_bytes')";
+                                                     AND   column_name = 'est_reclaimable_bytes'),
+    /* V115 probes a COLUMN for V114's reason: the table has existed since V106, so table existence cannot
+       separate the rungs. acu_utilization_percent is the sentinel rather than one of the other two added
+       columns because it is the one every CPU band reads — without it a card and the High CPU alert both
+       fall to Unknown, which is the failure this probe exists to prevent. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'pg_cpu_utilization'
+                                                     AND   column_name = 'acu_utilization_percent'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'custom_alert_rules'),
+    /* V117 probes a TRIGGER, the only object the rung creates. Read from pg_trigger rather than
+       information_schema.triggers, which lists only triggers on relations the CURRENT role owns or holds a
+       non-SELECT privilege on — the read-only viewer role holds neither on this table, so that view would
+       report the rung absent on a fully-migrated store and the connect gate would refuse it. pg_trigger is
+       world-readable, the same reasoning the pg_indexes and pg_inherits sentinels above rest on. */
+    EXISTS (SELECT 1 FROM pg_trigger t
+            JOIN pg_class c ON c.oid = t.tgrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE t.tgname = 'trg_bump_mute_rules' AND n.nspname = 'config'),
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'alert_persistence_state'),
+    /* V119 probes a COLUMN for V57's reason: config_alert_settings has existed since V17, so table
+       existence cannot separate the rungs. The warn ratio is the sentinel rather than its critical sibling
+       because it is the one that decides whether the alert fires at all — the critical column only grades a
+       fire that already happened. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings'
+                                                     AND   column_name = 'retention_hold_warn_ratio'),
+    /* V120 probes a COLUMN for V57's reason: config_alert_settings has existed since V17, so table
+       existence cannot separate the rungs. The warn tier is the sentinel rather than its critical sibling
+       because it is the one that decides whether the band leaves Healthy at all — the critical column only
+       grades a server the warn tier already moved. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings'
+                                                     AND   column_name = 'deadlock_warn_per_hour'),
+    /* V121 probes a TABLE, which separates the rungs cleanly because this one is new in it. Its column
+       sibling on the two plan-capturing fact tables would serve as well; the table is the simpler question
+       to ask of information_schema. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'oversized_plan_backlog'),
+    /* V122 probes a COLUMN for V57's reason: config_alert_settings has existed since V17, so table
+       existence cannot separate the rungs. Either column would answer for the pair — both land in this one
+       rung's transaction — so there is no warn/critical asymmetry to prefer one by, unlike the V119 and
+       V120 sentinels above; the deadlock threshold is chosen simply because it is the rung's first ALTER,
+       and that choice is stated so nobody goes looking for a significance it does not have. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings'
+                                                     AND   column_name = 'pg_deadlock_count_threshold'),
+    /* V123 probes a TABLE, which separates the rungs cleanly because all four of the rung's objects
+       are new in it. The run table is the sentinel rather than one of its three siblings because it is
+       the parent every read of this feature starts from — a store with the children but not the runs
+       has nothing to hang them on, so its absence is the honest answer that the store predates the
+       rung. Named only in this probe line, never in prose, per the V71 finding. */
+    EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'fleet_sweep_runs'),
+    /* V124 probes a COLUMN for V57's reason: config_alert_settings has existed since V17, so table
+       existence cannot separate the rungs. Either column would answer for the pair — both land in this
+       one rung's transaction — so the enabled switch is chosen simply because it is the rung's first
+       ALTER, and that choice is stated so nobody goes looking for a significance it does not have. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_alert_settings'
+                                                     AND   column_name = 'fleet_sweep_enabled'),
+    /* V125 probes a COLUMN for V57's reason: config_collector_schedules has existed since V17, so
+       table existence cannot separate the rungs, and the rung adds exactly one column — there is no
+       sibling to prefer or to explain not preferring. */
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'config_collector_schedules'
+                                                     AND   column_name = 'databases')";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>
@@ -763,7 +828,7 @@ SELECT
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
-                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54), reader.GetBoolean(55), reader.GetBoolean(56), reader.GetBoolean(57), reader.GetBoolean(58), reader.GetBoolean(59), reader.GetBoolean(60), reader.GetBoolean(61), reader.GetBoolean(62), reader.GetBoolean(63), reader.GetBoolean(64), reader.GetBoolean(65), reader.GetBoolean(66), reader.GetBoolean(67), reader.GetBoolean(68), reader.GetBoolean(69), reader.GetBoolean(70), reader.GetBoolean(71), reader.GetBoolean(72), reader.GetBoolean(73), reader.GetBoolean(74), reader.GetBoolean(75), reader.GetBoolean(76), reader.GetBoolean(77), reader.GetBoolean(78), reader.GetBoolean(79), reader.GetBoolean(80), reader.GetBoolean(81), reader.GetBoolean(82), reader.GetBoolean(83), reader.GetBoolean(84), reader.GetBoolean(85), reader.GetBoolean(86), reader.GetBoolean(87), reader.GetBoolean(88), reader.GetBoolean(89));
+                return MapProbedSchemaVersion(reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2), reader.GetBoolean(3), reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7), reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10), reader.GetBoolean(11), reader.GetBoolean(12), reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15), reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18), reader.GetBoolean(19), reader.GetBoolean(20), reader.GetBoolean(21), reader.GetBoolean(22), reader.GetBoolean(23), reader.GetBoolean(24), reader.GetBoolean(25), reader.GetBoolean(26), reader.GetBoolean(27), reader.GetBoolean(28), reader.GetBoolean(29), reader.GetBoolean(30), reader.GetBoolean(31), reader.GetBoolean(32), reader.GetBoolean(33), reader.GetBoolean(34), reader.GetBoolean(35), reader.GetBoolean(36), reader.GetBoolean(37), reader.GetBoolean(38), reader.GetBoolean(39), reader.GetBoolean(40), reader.GetBoolean(41), reader.GetBoolean(42), reader.GetBoolean(43), reader.GetBoolean(44), reader.GetBoolean(45), reader.GetBoolean(46), reader.GetBoolean(47), reader.GetBoolean(48), reader.GetBoolean(49), reader.GetBoolean(50), reader.GetBoolean(51), reader.GetBoolean(52), reader.GetBoolean(53), reader.GetBoolean(54), reader.GetBoolean(55), reader.GetBoolean(56), reader.GetBoolean(57), reader.GetBoolean(58), reader.GetBoolean(59), reader.GetBoolean(60), reader.GetBoolean(61), reader.GetBoolean(62), reader.GetBoolean(63), reader.GetBoolean(64), reader.GetBoolean(65), reader.GetBoolean(66), reader.GetBoolean(67), reader.GetBoolean(68), reader.GetBoolean(69), reader.GetBoolean(70), reader.GetBoolean(71), reader.GetBoolean(72), reader.GetBoolean(73), reader.GetBoolean(74), reader.GetBoolean(75), reader.GetBoolean(76), reader.GetBoolean(77), reader.GetBoolean(78), reader.GetBoolean(79), reader.GetBoolean(80), reader.GetBoolean(81), reader.GetBoolean(82), reader.GetBoolean(83), reader.GetBoolean(84), reader.GetBoolean(85), reader.GetBoolean(86), reader.GetBoolean(87), reader.GetBoolean(88), reader.GetBoolean(89), reader.GetBoolean(90), reader.GetBoolean(91), reader.GetBoolean(92), reader.GetBoolean(93), reader.GetBoolean(94), reader.GetBoolean(95), reader.GetBoolean(96), reader.GetBoolean(97), reader.GetBoolean(98), reader.GetBoolean(99), reader.GetBoolean(100));
             }
 
             return null;
@@ -788,7 +853,7 @@ SELECT
     /// is unit-tested without a live store; any schema bump past the newest arm trips the pinning test that keeps
     /// this in step with <see cref="StorageVersion.SchemaVersion"/>.
     /// </summary>
-    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false, bool hasCollectionLogFanoutRollup = false, bool hasTempDbMaxSize = false, bool hasServerEngineKind = false, bool hasPgDatabaseStats = false, bool hasPgIndexUsageStats = false, bool hasPgTableBloatStats = false, bool hasPgSessionStates = false, bool hasPgPlanCaptureReadiness = false, bool hasPgWriteStats = false, bool hasPgExtensionAvailability = false, bool hasPgLockStats = false, bool hasPgColumnStats = false, bool hasPgReplicationStats = false, bool hasPgBufferUsage = false, bool hasPgIndexBloat = false, bool hasPgPerDatabaseAttribution = false, bool hasPgWaitSampling = false, bool hasPgKernelStats = false, bool hasPgPredicateStats = false, bool hasPgPlanCapture = false, bool hasPgMajorVersion = false, bool hasPg18IoBytes = false, bool hasPgServerConfig = false, bool hasPgDeadlocks = false, bool hasPgDeadlockIdentity = false, bool hasCollectorCost = false, bool hasPgCpuUtilization = false, bool hasPlanForceActions = false, bool hasCollectionLogPhaseSplit = false, bool hasCollectionLogDrainForensics = false, bool hasCollectionLogFetchPhaseSums = false, bool hasStoreLogSelfMonitoring = false, bool hasCollectorStallProbes = false, bool hasRemediationCredentialAndActor = false, bool hasPgIndexBloatEstimate = false)
+    internal static int MapProbedSchemaVersion(bool hasConfigControlPlane, bool hasAlertDeliveryOverride, bool hasAnalysisState, bool hasAlertTuningKnobs, bool hasDefaultTraceEvents, bool hasIndexObjectStatsLatestIndex, bool hasCollectionLogHypertableOrPlainPg, bool hasJobHistory, bool hasAgentStatus, bool hasGenericWebhook, bool hasDeadlocksDatabaseName, bool hasQueryStoreReplicaRole, bool hasLongQueryCompletions, bool hasWebDashboardConfig, bool hasCustomViews, bool hasServerTags, bool hasConnectionRefireKnobs = false, bool hasAgCollectors = false, bool hasAgAlertKnobs = false, bool hasAgLatencyColumns = false, bool hasAgDisconnectRefire = false, bool hasPayloadDimensions = false, bool hasDimFloorIndexes = false, bool hasBlockingWaitThreshold = false, bool hasQueryStoreIntervalIdentity = false, bool hasPagerDutyWebhook = false, bool hasPagerDutyProxy = false, bool hasCollectorState = false, bool hasPlanCorrection = false, bool hasPvsStats = false, bool hasPvsPressureKnobs = false, bool hasDatabaseStateAlert = false, bool hasServerTagColour = false, bool hasQueryStatsHostObject = false, bool hasFindingDrillDown = false, bool hasStoreMetrics = false, bool hasPlanDimGzip = false, bool hasSelfAlertKnobs = false, bool hasJobMetricsColumns = false, bool hasJobCadenceKnob = false, bool hasBackfillSwitch = false, bool hasCollectorMemoryKnobs = false, bool hasDatabaseStateEdgeMemory = false, bool hasIncidentOccurrences = false, bool hasPlanXmlCompressionKnob = false, bool hasMonitoredServerEngine = false, bool hasPgBlockingEdges = false, bool hasQueryStorePlanMap = false, bool hasPgStatementText = false, bool hasQueryStoreText = false, bool hasPlanContentRetentionKnob = false, bool hasQueryStoreHealth = false, bool hasQueryStoreTextHash = false, bool hasComposeTimeoutKnob = false, bool hasFileGrowthAlert = false, bool hasCollectionLogFanoutRollup = false, bool hasTempDbMaxSize = false, bool hasServerEngineKind = false, bool hasPgDatabaseStats = false, bool hasPgIndexUsageStats = false, bool hasPgTableBloatStats = false, bool hasPgSessionStates = false, bool hasPgPlanCaptureReadiness = false, bool hasPgWriteStats = false, bool hasPgExtensionAvailability = false, bool hasPgLockStats = false, bool hasPgColumnStats = false, bool hasPgReplicationStats = false, bool hasPgBufferUsage = false, bool hasPgIndexBloat = false, bool hasPgPerDatabaseAttribution = false, bool hasPgWaitSampling = false, bool hasPgKernelStats = false, bool hasPgPredicateStats = false, bool hasPgPlanCapture = false, bool hasPgMajorVersion = false, bool hasPg18IoBytes = false, bool hasPgServerConfig = false, bool hasPgDeadlocks = false, bool hasPgDeadlockIdentity = false, bool hasCollectorCost = false, bool hasPgCpuUtilization = false, bool hasPlanForceActions = false, bool hasCollectionLogPhaseSplit = false, bool hasCollectionLogDrainForensics = false, bool hasCollectionLogFetchPhaseSums = false, bool hasStoreLogSelfMonitoring = false, bool hasCollectorStallProbes = false, bool hasRemediationCredentialAndActor = false, bool hasPgIndexBloatEstimate = false, bool hasPgCpuCapacityHeadroom = false, bool hasCustomAlertCore = false, bool hasMuteRuleReloadBeacon = false, bool hasBuiltinAlertPersistence = false, bool hasRetentionHoldRatioKnobs = false, bool hasDeadlockRateBandKnobs = false, bool hasOversizedPlanBacklog = false, bool hasPgAlertCountKnobs = false, bool hasFleetSweepState = false, bool hasFleetSweepCadenceKnobs = false, bool hasCollectorScheduleDatabases = false)
     {
         /* V71 (the PostgreSQL blocking-edges rung): a table-existence sentinel and now the newest-first arm.
            A collector table would ordinarily get no arm at all — see the V63-V69 note below — but the TOP
@@ -925,6 +990,192 @@ SELECT
            connect-time gate refuses a store that is perfectly current. Nothing in the viewer reads the
            actor column yet - the own-forces-only filter is service-side - so this arm is the
            don't-under-report guard, the V44/V53 reasoning that V108 through V112 all restated. */
+        /* V115 (#3281): collect.pg_cpu_utilization gains the Aurora Serverless v2 capacity-headroom
+           columns, because the CPU column it already had is percent of the capacity CURRENTLY ALLOCATED
+           and so reads 100% on a routine scale-up. COLUMN-existence sentinel — the table has existed since
+           V106, so table existence cannot separate the rungs. The TOP rung now, so it must map EXACTLY or
+           the connect-time gate refuses a store that is perfectly current. The column is named only in the
+           probe line above and NOT in this prose, per the V71 finding: the coverage ratchet strips
+           information_schema lines but cannot strip a comment. */
+        /* V116 (#3285): config.custom_alert_rules — the user-authored custom-alert rules. Table-existence
+           sentinel, newest-first, and now the TOP rung, so a fully-migrated store maps to EXACTLY
+           StorageVersion.SchemaVersion (116) rather than falling through to 115 and showing a spurious upgrade
+           banner on a store that is current. The table is named only in the probe line, not this prose, per the
+           V71 finding (the coverage ratchet strips information_schema lines but cannot strip a comment). */
+        /* V125 (#3477): the per-collector database scope on config_collector_schedules — the
+           allow-list that lets an expensive per-database collector run against a representative
+           sample instead of being turned off for the whole server. COLUMN-existence sentinel (the
+           table has existed since V17, so table existence cannot separate the rungs), newest-first,
+           and the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion
+           rather than falling through to 124 and showing a spurious upgrade banner on a store that
+           is current.
+
+           The gate earns its place beyond that standing invariant: the schedule editor's select now
+           names the column, so a viewer pointed below this rung would throw a raw 42703 on OPENING
+           the Collector Schedules window — the banner has to fire before that window does. The
+           column is named only in the probe line, not this prose, per the V71 finding: the coverage
+           ratchet strips information_schema lines but cannot strip a comment. */
+        if (hasCollectorScheduleDatabases)
+        {
+            return 125;
+        }
+
+        /* V124 (#3466): the fleet sweep's cadence knobs on config_alert_settings — lane 2's control
+           plane, beside the analysis cadence they are modeled on. COLUMN-existence sentinel (the table
+           has existed since V17, so table existence cannot separate the rungs), newest-first, one rung
+           behind the top — a store carrying this and not V125 above maps to 124, which is the honest
+           answer for it and also what makes the upgrade banner correct in both directions.
+
+           The gate earns its place beyond that standing invariant: below this rung the Settings
+           window's Fleet Sweep boxes have nowhere to save to and the worker's cadence falls back to
+           the shipped default, so an operator who slows the sweep sees no change and is told nothing —
+           the "setting did not stick" reading V119/V120/V122 below exist to remove. The column is
+           named only in the probe line, not this prose, per the V71 finding: the coverage ratchet
+           strips information_schema lines but cannot strip a comment. */
+        if (hasFleetSweepCadenceKnobs)
+        {
+            return 124;
+        }
+
+        /* V123 (#3466): the fleet sweep's state store — the sweep-run tables and the watch-item
+           worklist, lane 1 of the approved four-lane sequence. TABLE-existence sentinel — all four
+           objects are new in this rung, and the run table is the parent every read starts from —
+           newest-first, one rung behind the top: a store carrying this and not V124 above maps to 123,
+           which is the honest answer for it and also what makes the upgrade banner correct in both
+           directions.
+
+           Nothing in the viewer reads these tables yet — the web feed is lane 3 and the MCP surface
+           is lane 4 — so this arm is the don't-under-report guard, the V44/V53 reasoning that V108
+           through V113 all restated. The table is named only in the probe line above and NOT in this
+           prose, per the V71 finding: the coverage ratchet strips information_schema lines but cannot
+           strip a comment. */
+        if (hasFleetSweepState)
+        {
+            return 123;
+        }
+
+        /* V122 (#3444): config.config_alert_settings gains the PostgreSQL Deadlocks/Blocking count
+           thresholds, which were compile-time constants in the worker with no settings path while their SQL
+           Server twins have been settable since V1. COLUMN-existence sentinel (the table has existed since
+           V17, so table existence cannot separate the rungs), newest-first, one rung behind the top — a
+           store carrying this and not V123 above maps to 122, which is the honest answer for it and also
+           what makes the upgrade banner correct in both directions.
+
+           The gate earns its place beyond that standing invariant. Below this rung the Settings window's two
+           new boxes have nowhere to save to and the worker's gates fall back to their shipped defaults, so
+           an operator who raises a threshold for a retry-heavy PostgreSQL workload sees no change and is
+           told nothing — the same "the setting did not stick" reading V119 and V120 below exist to remove.
+
+           The column is named only in the probe line, not this prose, per the V71 finding: the coverage
+           ratchet strips information_schema lines but cannot strip a comment. */
+        if (hasPgAlertCountKnobs)
+        {
+            return 122;
+        }
+
+        /* V121 (#3392): the backlog of cached plans the per-row capture cap declined, plus the measured
+           plan size on the two fact tables that feed it. TABLE-existence sentinel — the table is new in this
+           rung, so existence separates it cleanly — newest-first, one rung behind the top — a store carrying
+           this and not V122 above maps to 121, which is the honest answer for it and also what makes the
+           upgrade banner correct in both directions.
+
+           The gate earns its place beyond that standing invariant. Below this rung the viewer's two
+           stored-plan reads have no backlog to fall back to, and the grids' plan-presence flags read a column
+           that does not exist — so the Query Plan button would offer a plan the store cannot produce for
+           exactly the rows this rung exists to serve.
+
+           The table is named only in the probe line, not this prose, per the V71 finding: the coverage
+           ratchet strips information_schema lines but cannot strip a comment. */
+        if (hasOversizedPlanBacklog)
+        {
+            return 121;
+        }
+
+        /* V120 (#3368): config.config_alert_settings gains the deadlock health band's warn/critical tiers in
+           deadlocks per hour. The band was count > 0 ? Critical : Healthy, so one resolved deadlock made a
+           server Critical and Critical stopped discriminating on any OLTP fleet. COLUMN-existence sentinel
+           (the table has existed since V17, so table existence cannot separate the rungs), newest-first, one
+           rung behind the top — a store carrying this and not V121 above maps to 120, which is the honest
+           answer for it and also what makes the upgrade banner correct in both directions.
+
+           The gate earns its place beyond that standing invariant. Below this rung the Settings window's two
+           new boxes have nowhere to save to and both cards fall back to the shipped tiers, so an operator who
+           raises a tier for a retry-on-deadlock workload sees no change and is told nothing — the same "the
+           setting did not stick" reading V119 above exists to remove.
+
+           The column is named only in the probe line, not this prose, per the V71 finding: the coverage
+           ratchet strips information_schema lines but cannot strip a comment. */
+        if (hasDeadlockRateBandKnobs)
+        {
+            return 120;
+        }
+
+        /* V119 (#3297): config.config_alert_settings gains the Retention Held warn/critical ratios, which
+           were compile-time constants — so the alert an operator most needs to tune was the one alert that
+           could not be. COLUMN-existence sentinel (the table has existed since V17, so table existence
+           cannot separate the rungs), newest-first, and one below the top rung: a V120 store also carries
+           this column, so it must be tested AFTER V120's or every V120 store would report as 119 and show
+           an upgrade banner against a store that is current.
+
+           The gate earns its place beyond that standing invariant. On a store below this rung the Settings
+           window's two new boxes have nowhere to save to and the service's seams fall back to their shipped
+           defaults, so an operator who lowers or raises a tier is told nothing and sees no change — the same
+           "the setting did not stick" reading #3296 already produced once from the other direction.
+
+           The column is named only in the probe line, not this prose, per the V71 finding: the coverage
+           ratchet strips information_schema lines but cannot strip a comment. */
+        if (hasRetentionHoldRatioKnobs)
+        {
+            return 119;
+        }
+
+        /* V118 (#3282): config.alert_persistence_state — the BUILT-IN alert catalog's persistence-gate
+           state. Table-existence sentinel, sitting one below the top rung: a V119 store also carries this
+           table, so it must be tested AFTER V119's column or every V119 store would report as 118 and show
+           an upgrade banner against a store that is current.
+
+           The reason to gate is that standing invariant rather than a viewer read that would throw: nothing
+           in the viewer reads this table — the SERVICE's alert pass is its only consumer. What the banner
+           buys on the way is worth having anyway. On a store still at 117 the CPU alert has no memory of
+           an open incident across a service restart, so every High CPU row in that history was produced by
+           the pre-#3282 single-sample rule, and an operator comparing alert volume before and after should
+           know which rule wrote which rows before drawing a conclusion from the drop.
+
+           The table is named only in the probe line, not this prose, per the V71 finding: the coverage
+           ratchet strips information_schema lines but cannot strip a comment, so a prose mention would
+           exempt it. */
+        if (hasBuiltinAlertPersistence)
+        {
+            return 118;
+        }
+
+        /* V117 (#3315): config.config_mute_rules joins the config_version reload beacon, so a mute write of
+           any kind makes the service re-load its in-memory mute cache on the next sweep. Trigger-existence
+           sentinel — the trigger is the only object the rung creates — and newest-first, so it sits above
+           the V116 arm: a V117 store also carries V116's table, and testing V116 first would report every
+           V117 store as 116 and show an upgrade banner against a store that is current.
+
+           The gate earns its place beyond the standing invariant. On a store below this rung a mute created
+           anywhere but the Viewer takes effect at an unbounded later time, and the surfaces that would
+           reassure the operator — the rule list, the tool's own success reply — read the table rather than
+           the cache, so they agree the mute is in place while alerts keep being delivered. An operator
+           reading Manage Mute Rules against such a store should be told the store is behind before they
+           trust what it shows them. */
+        if (hasMuteRuleReloadBeacon)
+        {
+            return 117;
+        }
+
+        if (hasCustomAlertCore)
+        {
+            return 116;
+        }
+
+        if (hasPgCpuCapacityHeadroom)
+        {
+            return 115;
+        }
+
         if (hasPgIndexBloatEstimate)
         {
             return 114;

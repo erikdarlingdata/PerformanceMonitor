@@ -111,16 +111,21 @@ public sealed class AlertReadFailureSurfaceTests
             .Where(n => n != "EqualityContract")
             .ToList();
 
-        Assert.Equal(7, readingMembers.Count);
+        Assert.Equal(14, readingMembers.Count);
 
-        /* Seven from the record plus the two composed values. */
-        Assert.Equal(9, rendered.Count);
+        /* Fourteen from the record plus the two composed values. The record's members are three counts and
+           three newest-failure trios plus the pass denominator and counting_since, so the set below reads
+           as four groups: this server's, the fleet-scoped conditions', the instance-wide newest, and the
+           two figures that frame them. */
+        Assert.Equal(16, rendered.Count);
         Assert.Equal(
             new[]
             {
-                "counting_since", "finding", "instance_read_failures", "last_failure_at",
-                "last_failure_elapsed_ms", "last_failure_read", "note", "server_alert_passes",
-                "server_read_failures",
+                "counting_since", "finding", "fleet_last_failure_at", "fleet_last_failure_elapsed_ms",
+                "fleet_last_failure_read", "fleet_read_failures", "instance_last_failure_at",
+                "instance_last_failure_elapsed_ms", "instance_last_failure_read",
+                "instance_read_failures", "last_failure_at", "last_failure_elapsed_ms",
+                "last_failure_read", "note", "server_alert_passes", "server_read_failures",
             },
             rendered.OrderBy(f => f, StringComparer.Ordinal).ToArray());
     }
@@ -202,8 +207,14 @@ public sealed class AlertReadFailureSurfaceTests
     ///
     /// <para>So the set is derived from SOURCE (every <c>RecordReadFailure(null, ...)</c> call, matched
     /// across line breaks because those calls are wrapped) and each one must be represented in the single
-    /// constant every surface now concatenates. A sixth fleet-scoped site fails here until the constant
-    /// names it.</para>
+    /// constant every surface now concatenates. A site beyond the count asserted below fails here until
+    /// the constant names it — stated that way rather than as its own numeral, because the numeral here
+    /// was wrong from the day it was written (it said "a sixth" beside an asserted count of two) and a
+    /// second copy of a pinned number has nothing keeping it honest.</para>
+    ///
+    /// <para>Derived from the LITERAL, which is why the call sites spell the read name inline rather than
+    /// through a constant: a named constant at the site would leave this regex finding nothing there, and
+    /// the pin would report the set complete while an un-inventoried fleet-scoped read shipped.</para>
     /// </summary>
     [Fact]
     public void TheFleetScopedInventory_MatchesWhatTheCounterActuallyRecords()
@@ -216,6 +227,11 @@ public sealed class AlertReadFailureSurfaceTests
             Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"),
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"),
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"),
+            /* Lite's own recording site. The constant is concatenated into BOTH SKUs' descriptions, so a
+               derivation that read only Darling's files could not see a Lite fleet-scoped read at all — and
+               the reverse gap is the one that bites: a read named here that the reading SKU cannot
+               increment is this counter's own defect, a confident zero, written into its documentation. */
+            Path.Combine("Lite", "MainWindow.xaml.cs"),
         })
         {
             var src = File.ReadAllText(Path.Combine(root, relative));
@@ -228,16 +244,38 @@ public sealed class AlertReadFailureSurfaceTests
             }
         }
 
-        Assert.Equal(2, nullKeyReads.Count);
+        /* Seventh since #3466: the fleet-sweep rollup read, Darling-only like the store self-alerts. */
+        Assert.Equal(7, nullKeyReads.Count);
 
         var inventory = AlertReadFailureCounter.FleetScopedReads;
 
         /* Each recorded site is represented. Keyed on the distinguishing word rather than the whole read
            name, because the constant is prose for an operator and the read name is a label for a log. */
-        Assert.Contains(nullKeyReads, r => r.Contains("collector-cost", StringComparison.Ordinal));
+        Assert.Contains(nullKeyReads, r => r.Contains("collector-cost regression", StringComparison.Ordinal));
+        /* #3443: the regression read grew two fleet-scoped companions in the same evaluator pass — the
+           census read that supplies the paging-versus-digest routing denominator, and the digest's movers
+           read. Asserted as three DISTINCT reads rather than one "collector-cost" match, because they blind
+           different stages of the same condition and a shared name would make last_failure_read ambiguous
+           exactly when one of the three is the one that went quiet. */
+        Assert.Contains(nullKeyReads, r => r.Contains("collector-cost census", StringComparison.Ordinal));
+        Assert.Contains(nullKeyReads, r => r.Contains("collector-cost digest", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("background-job health", StringComparison.Ordinal));
+        Assert.Contains(nullKeyReads, r => r.Contains("fleet-sweep rollup", StringComparison.Ordinal));
+        /* #3354: config_mute_rules belongs to the store, not to any monitored server, so its failed read
+           lands in the instance total and in no server's count — exactly the case a per-server-only
+           surface would have given no home. Recorded TWICE across the tree, once per SKU, and that is the
+           point rather than a duplicate: both SKUs perform this read, the counters are per-process, and a
+           SKU that named it without recording it would promise a reading it cannot produce. The other four
+           entries are Darling store self-alerts with no Lite equivalent. */
+        Assert.Equal(
+            2,
+            nullKeyReads.Count(r => r.Contains("mute-rule reload", StringComparison.Ordinal)));
         Assert.Contains("collector-cost regression", inventory, StringComparison.Ordinal);
+        Assert.Contains("collector-cost census", inventory, StringComparison.Ordinal);
+        Assert.Contains("collector-cost digest", inventory, StringComparison.Ordinal);
         Assert.Contains("background-job health", inventory, StringComparison.Ordinal);
+        Assert.Contains("mute-rule reload", inventory, StringComparison.Ordinal);
+        Assert.Contains("fleet-sweep rollup", inventory, StringComparison.Ordinal);
 
         /* And the phantom stays gone. Disk pressure's feed reads are exempt — a local filesystem read and a
            recorded-store-size lookup that is context for the alert text — so naming it here would send an

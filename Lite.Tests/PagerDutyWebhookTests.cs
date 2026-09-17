@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Services;
@@ -241,6 +244,85 @@ public class PagerDutyWebhookTests
         Assert.NotNull(payload);
     }
 
+    /* ---------------- #3297: the alert's prose detail ---------------- */
+
+    /// <summary>
+    /// #3297: <c>BuildPagerDutyCustomDetails</c> already flattened <see cref="AlertContext.Details"/> — the
+    /// STRUCTURED collection — which is why this channel looked like it might already carry the detail. It
+    /// did not: an alert's <c>DetailText</c> is a separate field, and a prose-only self-alert took the
+    /// empty-Details branch that reduces custom_details to <c>{"Sent by": ...}</c>.
+    /// <para>custom_details rather than <c>summary</c>: PD-CEF caps summary at 1024 characters and it is the
+    /// one-line headline PD pages on, while custom_details is the table view and what most downstream
+    /// integrations read — the placement #2710 already chose for the triage link.</para>
+    /// </summary>
+    [Fact]
+    public void BuildPagerDutyPayload_ProseDetail_RidesInCustomDetails()
+    {
+        const string prose =
+            "Store query_stats retention [1072] is HELD PAUSED by the rollup-coverage gate. Run the " +
+            "--backfill-rollups operator action, then RESTART the service.";
+
+        var payload = WebhookAlertService.BuildPagerDutyPayload(
+            "Retention Held", "Monitor Store", "9.6x its 4 days horizon", "2.0x", Branding, "rk",
+            detailText: prose);
+
+        var customDetails = JsonDocument.Parse(payload).RootElement
+            .GetProperty("payload").GetProperty("custom_details");
+
+        Assert.Equal(prose, customDetails.GetProperty("Details").GetString());
+    }
+
+    /// <summary>A prose-free alert keeps the pre-#3297 custom_details shape — no empty key is ever sent.</summary>
+    [Fact]
+    public void BuildPagerDutyPayload_OmitsTheDetailsKey_WhenTheAlertCarriesNoProse()
+    {
+        var payload = WebhookAlertService.BuildPagerDutyPayload(
+            "High CPU", "SRV1", "95%", "90%", Branding, "rk");
+
+        var customDetails = JsonDocument.Parse(payload).RootElement
+            .GetProperty("payload").GetProperty("custom_details");
+
+        Assert.False(customDetails.TryGetProperty("Details", out _));
+    }
+
+    /* ---------------- #3355: the payload stamp's clock ---------------- */
+
+    /// <summary>
+    /// The stamp renders the injected instant, and moves when that instant moves.
+    /// <para>This channel needs its own pin because a delivery capture cannot reach it: PagerDuty's endpoint
+    /// is the hardcoded Events v2 URL, so a fan-out capture that redirects the other three channels to a
+    /// loopback leaves this one unconfigured and never observes its payload. A census over captured bodies
+    /// is green whether or not this builder is wired to the clock seam, which would leave its one call site
+    /// unheld.</para>
+    /// <para>Both arms carry weight. A builder that ignored its argument and read the wall clock renders
+    /// neither the fixed instant nor the advanced one, so asserting the stamp EQUALS the injected instant is
+    /// what catches an unwired seam; asserting it MOVES is what stops a hardcoded constant passing for one.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void BuildPagerDutyPayload_StampsTheInjectedClock_AndMovesWhenItDoes()
+    {
+        var fixedUtc = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        var fixedStamp = fixedUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+        var timestamps = new Regex(@"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}Z?");
+
+        var atFixed = WebhookAlertService.BuildPagerDutyPayload(
+            "High CPU", "SRV1", "95%", "90%", Branding, "rk", nowUtc: fixedUtc);
+
+        /* Every timestamp-shaped token rather than the one field it happens to stamp today, so a stamp added
+           to this payload later is covered without anyone remembering to extend this test. */
+        var stamps = timestamps.Matches(atFixed).Select(m => m.Value).ToList();
+
+        /* A payload carrying no stamp at all would satisfy the loop below vacuously. */
+        Assert.NotEmpty(stamps);
+        Assert.All(stamps, stamp => Assert.Equal(fixedStamp, stamp));
+
+        var aSecondLater = WebhookAlertService.BuildPagerDutyPayload(
+            "High CPU", "SRV1", "95%", "90%", Branding, "rk", nowUtc: fixedUtc.AddSeconds(1));
+
+        Assert.DoesNotContain(fixedStamp, aSecondLater, StringComparison.Ordinal);
+    }
+
     /* ---------------- Fan-out (TrySendWebhookAlertsAsync) ---------------- */
 
     [Fact]
@@ -258,10 +340,16 @@ public class PagerDutyWebhookTests
             settings, Branding, new AppLoggerAdapter<WebhookAlertService>(), historyStore: null);
 
         /* The send will fail (no real endpoint), but we verify it was attempted via the failure counter. */
-        var sent = await service.TrySendWebhookAlertsAsync("High CPU", "SRV1", "95%", "90%", "server-1");
+        var result = await service.TrySendWebhookAlertsAsync("High CPU", "SRV1", "95%", "90%", "server-1");
 
-        Assert.False(sent); /* Failed send */
+        Assert.False(result.Sent); /* Failed send */
         Assert.Equal(1, service.GetPagerDutyHealth().ConsecutiveFailures);
+
+        /* #3427: an attempted-and-failed fan-out is Failed, not one of the suppressions, and it names the
+           channel in its error so the alert log's send_error points at an endpoint. */
+        Assert.Equal(AlertChannelOutcome.Failed, result.Outcome);
+        Assert.NotNull(result.SendError);
+        Assert.StartsWith("PagerDuty: ", result.SendError);
     }
 
     [Fact]
@@ -277,10 +365,16 @@ public class PagerDutyWebhookTests
         var service = new WebhookAlertService(
             settings, Branding, new AppLoggerAdapter<WebhookAlertService>(), historyStore: null);
 
-        var sent = await service.TrySendWebhookAlertsAsync("High CPU", "SRV1", "95%", "90%", "server-1");
+        var result = await service.TrySendWebhookAlertsAsync("High CPU", "SRV1", "95%", "90%", "server-1");
 
-        Assert.False(sent);
+        Assert.False(result.Sent);
         Assert.Equal(0, service.GetPagerDutyHealth().ConsecutiveFailures); /* Not attempted */
+
+        /* #3427: no webhook channel is configured, so the fan-out reports NotAttempted rather than a
+           suppression — a channel that does not exist cannot be throttled or folded, and reporting one
+           would put a mechanism on the alert-log row for a store that has no webhook. */
+        Assert.Equal(AlertChannelOutcome.NotAttempted, result.Outcome);
+        Assert.Null(result.SendError);
     }
 
     private sealed class FakePagerDutySettings : IAlertSettings

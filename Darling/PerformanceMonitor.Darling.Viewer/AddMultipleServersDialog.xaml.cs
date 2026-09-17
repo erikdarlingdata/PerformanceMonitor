@@ -25,11 +25,23 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <c>config.config_monitored_servers</c> via the existing <see cref="ViewerDataService.UpsertMonitoredServerAsync"/>.
 /// The shared credential is resolved ONCE (one <see cref="ViewerServerSecret.Protect"/> call) and the same DPAPI
 /// blob is stamped onto every row — the Darling service has no store-side profile concept, so a picked profile
-/// is resolved to concrete creds here (the asymmetry vs Lite, which mints one shared profile). Only the two auth
-/// modes the service honors are offered (Windows / SQL / a SQL profile); Test All runs SEQUENTIALLY through the
+/// is resolved to concrete creds here (the asymmetry vs Lite, which mints one shared profile). The four auth
+/// modes the service honors are offered (Windows / SQL / Service Principal / Managed Identity, or a profile of
+/// one of them); Test All runs SEQUENTIALLY through the
 /// service's <c>test_connect</c> command (the service drains commands serially, so viewer-side parallelism would
 /// be theater). Duplicates are skipped via the shared <see cref="ServerIdHelper"/> identity, case-folded. The
 /// single AddServerDialog is not edited.
+///
+/// <para><b>Deliberately SQL Server-only (#3499).</b> The single Add dialog grew the engine dimension; this one
+/// did not, because its paste grammar already spends the numeric field on the SQL Server port convention — "a
+/// non-default port rides the server name SQL Server style — sql01,2433" — while a PostgreSQL port is a separate
+/// registry column and identity discriminator, so grafting an engine onto the shared block would leave one
+/// number meaning two different things per engine, silently. Bulk PostgreSQL onboarding stays with MCP
+/// <c>add_servers</c>, which is a bulk tool by construction and takes port per entry. What this dialog DID
+/// inherit from #3499 is the dedupe gate keying on the FULL #2218 identity (engine + port, via
+/// <see cref="GateKey"/>), because the store it seeds from now carries PostgreSQL rows: without that, a
+/// PostgreSQL registration on a host would read as "duplicate" against a pasted SQL Server add of the same
+/// host — a valid pair refused because the gate compared a narrower identity than the product keys on.</para>
 /// </summary>
 public partial class AddMultipleServersDialog : Window
 {
@@ -111,7 +123,7 @@ public partial class AddMultipleServersDialog : Window
         }
     }
 
-    // ── Credential source + auth mode (copied idiom from AddServerDialog, trimmed to Windows / SQL / profile) ──
+    // ── Credential source + auth mode (copied idiom from AddServerDialog: Windows / SQL / Service Principal / Managed Identity / profile) ──
 
     private void CredentialSource_Changed(object sender, RoutedEventArgs e)
     {
@@ -124,6 +136,8 @@ public partial class AddMultipleServersDialog : Window
         if (useProfile)
         {
             if (SqlCredentialsPanel is not null) SqlCredentialsPanel.Visibility = Visibility.Collapsed;
+            if (ServicePrincipalPanel is not null) ServicePrincipalPanel.Visibility = Visibility.Collapsed;
+            if (ManagedIdentityPanel is not null) ManagedIdentityPanel.Visibility = Visibility.Collapsed;
         }
         else
         {
@@ -133,8 +147,10 @@ public partial class AddMultipleServersDialog : Window
 
     private void AuthMode_Changed(object sender, RoutedEventArgs e)
     {
-        if (SqlCredentialsPanel is null) return;
+        if (SqlCredentialsPanel is null || ServicePrincipalPanel is null || ManagedIdentityPanel is null) return;
         SqlCredentialsPanel.Visibility = SqlAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        ServicePrincipalPanel.Visibility = ServicePrincipalAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        ManagedIdentityPanel.Visibility = ManagedIdentityAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
     }
 
     // ── Preview ─────────────────────────────────────────────────────────────────────────────────────────
@@ -442,6 +458,24 @@ public partial class AddMultipleServersDialog : Window
                 return false;
             }
 
+            /* A managed-identity profile carries no secret (#3485 review): build the shared settings from its
+               optional user-assigned client id in ManagedIdentityClientId (a profile's Username is populated
+               for SQL only, never for MI — reading it here would silently downgrade a user-assigned identity
+               to system-assigned) with no blob. Integrated profiles fall here too and carry neither, so the
+               id stays null. Demanding a secret would make an MI profile unusable in bulk too, since one is
+               never stored. */
+            if (!ServerStoreCredential.RequiresSecret(profile.AuthType))
+            {
+                shared = new BulkSharedSettings
+                {
+                    AuthType = profile.AuthType,
+                    Username = string.IsNullOrWhiteSpace(profile.ManagedIdentityClientId) ? null : profile.ManagedIdentityClientId,
+                    EncryptMode = encryptMode,
+                    TrustServerCertificate = trustCert,
+                };
+                return true;
+            }
+
             var secret = _profileStore.GetSecret(profile.Id);
             if (secret is null || string.IsNullOrEmpty(secret.Value.Password))
             {
@@ -463,6 +497,40 @@ public partial class AddMultipleServersDialog : Window
         if (WindowsAuthRadio.IsChecked == true)
         {
             shared = new BulkSharedSettings { AuthType = AuthenticationTypes.Windows, EncryptMode = encryptMode, TrustServerCertificate = trustCert };
+            return true;
+        }
+
+        if (ServicePrincipalAuthRadio.IsChecked == true)
+        {
+            /* #3484: one Entra service principal (client id + secret) stamped on every pasted row — the tenant is
+               resolved per target by the driver. The secret is stored in the same DPAPI blob shape as SQL. */
+            var clientId = AzureClientIdBox.Text.Trim();
+            if (string.IsNullOrEmpty(clientId)) { error = "The Application (client) ID is required for service-principal authentication."; return false; }
+            var secret = AzureClientSecretBox.Password;
+            if (string.IsNullOrEmpty(secret)) { error = "The client secret is required for service-principal authentication."; return false; }
+            shared = new BulkSharedSettings
+            {
+                AuthType = AuthenticationTypes.ServicePrincipal,
+                Username = clientId,
+                EncryptedPassword = ViewerServerSecret.Protect(secret),
+                EncryptMode = encryptMode,
+                TrustServerCertificate = trustCert,
+            };
+            return true;
+        }
+
+        if (ManagedIdentityAuthRadio.IsChecked == true)
+        {
+            /* #3484: one shared managed identity — no secret. A user-assigned identity names its client id;
+               a system-assigned identity leaves it blank. */
+            var miClientId = ManagedIdentityClientIdBox.Text.Trim();
+            shared = new BulkSharedSettings
+            {
+                AuthType = AuthenticationTypes.ManagedIdentity,
+                Username = string.IsNullOrEmpty(miClientId) ? null : miClientId,
+                EncryptMode = encryptMode,
+                TrustServerCertificate = trustCert,
+            };
             return true;
         }
 
@@ -544,8 +612,12 @@ public partial class AddMultipleServersDialog : Window
     }
 
     /// <summary>The dedupe gate key for a built row — the shared storage-name identity (case-folded by the
-    /// gate's comparer). One composition feeds both the gate and the stored server_id.</summary>
-    internal static string GateKey(MonitoredServerRow row) => ServerIdHelper.BuildStorageName(row.Host, row.Database, row.ReadOnlyIntent);
+    /// gate's comparer). One composition feeds both the gate and the stored server_id. #3499: engine and port
+    /// joined the key — the full #2218 identity — because the SEED side now reads them from the store, where
+    /// PostgreSQL rows live; both are inert for the rows this dialog builds (SQL Server, port 0), so every
+    /// candidate key is byte-identical to what it was.</summary>
+    internal static string GateKey(MonitoredServerRow row) =>
+        ServerIdHelper.BuildStorageName(row.Host, row.Database, row.ReadOnlyIntent, row.Engine, row.Port);
 
     /// <summary>Seeds the OrdinalIgnoreCase dedupe gate from the existing servers' REAL (host, db, read-only) keys.</summary>
     internal static HashSet<string> SeedGate(IEnumerable<MonitoredServerRow> existing)

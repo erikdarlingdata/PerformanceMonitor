@@ -65,11 +65,47 @@ jobs:
     timeout-minutes: 10
     outputs:
       has_changes: ${{ steps.check.outputs.has_changes }}
+      stamp: ${{ steps.stamp.outputs.stamp }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
           fetch-depth: 0
+
+      # The nightly prerelease stamp, derived ONCE for the whole run and consumed by every job
+      # that names an artifact (#3390). Two properties matter and a per-job `date` has neither.
+      #
+      # Stable across jobs: `linux` needs `build`, which takes ~8.5 minutes, so the two jobs read
+      # their clocks ~8.5 minutes apart. Each deriving its own date means a run whose two stamp
+      # steps straddle midnight UTC ships a Windows zip dated one day and a Linux tarball dated
+      # the next, from one commit.
+      #
+      # Unique per build: the date alone is not. Multiple dispatches a day are normal here - over
+      # 2026-08-24..09-12, 13 of 20 days published two or more distinct source trees under one
+      # version string, peaking at five - and nothing in the artifact then distinguishes them.
+      # `InformationalVersion` — and the Win32 ProductVersion built from it — and the asset names
+      # all carry this string (#3455 is what actually threads it into the binaries; FileVersion
+      # stays the numeric prefix), and the apphost exe is byte-identical across builds, so with a
+      # colliding stamp there is no read that answers "which nightly is this".
+      #
+      # run_number is monotonic and numeric, so SemVer 2.0 compares these prereleases in build
+      # order; the date stays leftmost and human-readable. A short sha would identify the tree
+      # but sorts as an alphanumeric identifier, which outranks every numeric one.
+      - name: Derive the nightly stamp
+        id: stamp
+        shell: bash
+        run: |
+          set -euo pipefail
+          stamp="$(date -u +%Y%m%d).${{ github.run_number }}"
+          # Shape, not emptiness. A `date` that exited 0 having printed nothing yields
+          # ".<run_number>" - non-empty, so it passes every downstream `-n` /
+          # IsNullOrWhiteSpace guard and stamps both artifacts with a malformed version instead
+          # of failing here. Asserting the shape at the one place the stamp is produced makes
+          # those guards a backstop against broken output wiring rather than the only check.
+          shape='^[0-9]{8}\.[0-9]+$'
+          [[ "${stamp}" =~ ${shape} ]] || { echo "::error::Derived a malformed nightly stamp: '${stamp}'"; exit 1; }
+          echo "stamp=${stamp}" >> "$GITHUB_OUTPUT"
+          echo "Nightly stamp: ${stamp}"
 
       - name: Check for new commits in last 24 hours
         id: check
@@ -107,14 +143,37 @@ jobs:
           cache: true
           cache-dependency-path: '**/packages.lock.json'
 
+      # The stamp must reach the BINARIES, not just the names around them. This step's output feeds
+      # every artifact name and the vpk pack below, but a name is not a stamp: each assembly records
+      # whatever the msbuild version property resolves to at build time, and that is the clean
+      # release string Directory.Build.props declares unless the build overrides it. Until #3455
+      # nothing did, so a zip named 3.7.0-nightly.20260915.438 shipped a service whose informational
+      # version read bare 3.7.0 — and the informational version is the one surface a RUNNING service
+      # answers build questions from: DarlingCliCommands.ProductVersion() reads that attribute for
+      # --version, and #3453's get_collection_health service block deliberately serves the same
+      # method's result. The night #3453 shipped, its first live reading came back bare on a .438
+      # nightly — the question "which nightly is this" answered with silence at the read built to
+      # answer it.
+      #
+      # So every dotnet publish below passes -p:Version with this value. The SDK derives the
+      # informational version from it verbatim, while AssemblyVersion and FileVersion derive as the
+      # numeric prefix (3.7.0.0) — identical to a release build, so nothing assembly-identity-shaped
+      # differs between the two. No +sha metadata rides along: Directory.Build.props suppresses the
+      # source-revision append tree-wide (#3222), the stamp's run_number already names the build
+      # uniquely, and ProductVersion() strips any +suffix from display regardless. Release builds
+      # keep their clean string by CONSTRUCTION rather than by restraint — build.yml passes no
+      # version property — and NightlyVersionInjectionTests pins both halves, so the next copied-in
+      # publish step cannot quietly ship a bare-versioned nightly again.
       - name: Set nightly version
         id: version
         shell: pwsh
+        env:
+          NIGHTLY_STAMP: ${{ needs.check.outputs.stamp }}
         run: |
           $base = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version | Where-Object { $_ }
           if ([string]::IsNullOrWhiteSpace($base)) { throw "Read no version from Directory.Build.props." }
-          $date = Get-Date -Format "yyyyMMdd"
-          $nightly = "$base-nightly.$date"
+          if ([string]::IsNullOrWhiteSpace($env:NIGHTLY_STAMP)) { throw "Read no stamp from the check job." }
+          $nightly = "$base-nightly.$env:NIGHTLY_STAMP"
           echo "VERSION=$nightly" >> $env:GITHUB_OUTPUT
           echo "Nightly version: $nightly"
 
@@ -153,20 +212,20 @@ jobs:
       # Lite/PerformanceMonitorLite.csproj declares RuntimeIdentifiers so the committed lock
       # file covers this RID; see the comment there before removing either half.
       - name: Publish Lite
-        run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-x64 --self-contained -o publish/Lite
+        run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-x64 --self-contained -o publish/Lite -p:Version=${{ steps.version.outputs.VERSION }}
 
       - name: Publish Darling Service
-        run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o publish/DarlingService
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o publish/DarlingService -p:Version=${{ steps.version.outputs.VERSION }}
 
       - name: Publish Darling Viewer
-        run: dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -o publish/DarlingViewer
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -o publish/DarlingViewer -p:Version=${{ steps.version.outputs.VERSION }}
 
       # Self-contained viewer publish that feeds the remote-seat Velopack Setup.exe (#1555), the same
       # publish shape build.yml uses for the Dashboard/Lite Velopack packs. This is IN ADDITION to the
       # framework-dependent "Publish Darling Viewer" above, which still feeds the co-located viewer\
       # folder inside PerformanceMonitorDarling-*.zip — that zip is unchanged.
       - name: Publish Darling Viewer (self-contained for Velopack)
-        run: dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -r win-x64 --self-contained -o publish/DarlingViewer-velopack
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -r win-x64 --self-contained -o publish/DarlingViewer-velopack -p:Version=${{ steps.version.outputs.VERSION }}
 
       # Same cache key as build.yml's release path: the fetch script's content hash (the SHA256
       # pins live inside it). The ~340MB EDB/TimescaleDB fetch runs at most once per pin-set per
@@ -450,7 +509,9 @@ jobs:
   # The bundled pg-runtime is deliberately absent from the linux artifact — the compose distribution
   # pairs the service with the official timescale/timescaledb image, and managed mode stays Windows.
   linux:
-    needs: build
+    # check as well as build: build already depends on check, so this adds no ordering, only
+    # access to the one stamp both jobs name their artifacts with (#3390).
+    needs: [check, build]
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -469,16 +530,21 @@ jobs:
       - name: Set nightly version
         id: version
         shell: bash
+        env:
+          NIGHTLY_STAMP: ${{ needs.check.outputs.stamp }}
         run: |
           set -euo pipefail
           base=$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)
           [ -n "${base}" ] || { echo "::error::Read no version from Directory.Build.props."; exit 1; }
-          date=$(date +%Y%m%d)
-          echo "VERSION=${base}-nightly.${date}" >> "$GITHUB_OUTPUT"
-          echo "Nightly version: ${base}-nightly.${date}"
+          [ -n "${NIGHTLY_STAMP}" ] || { echo "::error::Read no stamp from the check job."; exit 1; }
+          echo "VERSION=${base}-nightly.${NIGHTLY_STAMP}" >> "$GITHUB_OUTPUT"
+          echo "Nightly version: ${base}-nightly.${NIGHTLY_STAMP}"
 
+      # -p:Version for the reason the windows build job's version step documents (#3455): the name
+      # on the tarball is not the stamp in the service, and the informational version is what
+      # --version prints and what the get_collection_health service block serves.
       - name: Publish service (linux-x64)
-        run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r linux-x64 --self-contained false -o publish/DarlingService-linux
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r linux-x64 --self-contained false -o publish/DarlingService-linux -p:Version=${{ steps.version.outputs.VERSION }}
 
       - name: Package linux artifact + checksum
         shell: bash
@@ -503,7 +569,12 @@ jobs:
           version="${{ steps.version.outputs.VERSION }}"
           image="ghcr.io/${{ github.repository_owner }}/performancemonitor-darling"
           echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker build -f Darling/Dockerfile -t "${image}:nightly" -t "${image}:${version}" .
+          # VERSION reaches the publish that runs INSIDE the image build (#3455): an image tagged
+          # with the nightly string whose service answers the clean release string is the zip
+          # defect again, one artifact over. The Dockerfile defaults the arg to empty, so
+          # build.yml's release image and any hand-run docker build keep publishing against the
+          # clean declared version.
+          docker build -f Darling/Dockerfile --build-arg VERSION="${version}" -t "${image}:nightly" -t "${image}:${version}" .
           docker push "${image}:nightly"
           docker push "${image}:${version}"
 

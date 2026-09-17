@@ -11,9 +11,13 @@
  * refresh loop. Routes:
  *   #/fleet             — Fleet Overview (default)
  *   #/ag                — Availability Group topology (#991; nav entry revealed only when the store has AG data)
+ *   #/sweeps            — Fleet Sweep reports: the sweep-with-memory timeline (#3466)
  *   #/server/{name}     — one server's detail (Overview)
  *   #/server/{name}/{tab} — one server's detail, opened on a named sub-tab (pages/server-tabs.js)
  *   #/alerts            — fleet-wide Alert History
+ *   #/alert-rules       — Custom Alert Rules list (#3285)
+ *   #/alert-rule/new    — the alert-rule editor creating a new rule (optionally /new/{template})
+ *   #/alert-rule/{id}   — the alert-rule editor editing a saved rule (#3285)
  *   #/views             — Custom Views list (#1563)
  *   #/view/{id}         — a saved custom view, rendered (#1563)
  *   #/view/{id}/edit    — the composer editing a saved view (#1563)
@@ -31,12 +35,15 @@ import { el, mount, apiGet, bandClass, localTime } from "./util.js";
 import { navigateServer } from "./panels.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
+import { renderSweeps } from "./pages/sweeps.js";
 import { renderServer } from "./pages/server.js";
 import { renderAlerts } from "./pages/alerts.js";
+import { renderAlertRuleList } from "./pages/alert-rules.js";
 import { renderViewList, renderView } from "./pages/views.js";
 import { renderTriage } from "./pages/triage.js";
 import { renderEditor } from "./editor.js";
 import { renderNotebookEditor } from "./notebook.js";
+import { renderAlertEditor } from "./alert-editor.js";
 import { getSession, listViews } from "./views-api.js";
 
 const POLL_MS = 60000;
@@ -52,6 +59,7 @@ function currentRoute() {
   const h = location.hash || "#/fleet";
   if (h.startsWith("#/server/")) return serverRoute(h.slice("#/server/".length));
   if (h === "#/ag" || h === "#/ag/") return { name: "ag" };
+  if (h === "#/sweeps" || h === "#/sweeps/") return { name: "sweeps" };
   /* #/triage?server=...&metric=...&at=...&dedup=... (#2710) — the deep-link every alert webhook carries.
      The query rides INSIDE the hash (a static SPA route), so it is split off here and parsed by the page.
      Checked before #/alerts only for symmetry; the two prefixes cannot collide. */
@@ -60,6 +68,14 @@ function currentRoute() {
     return { name: "triage", query: q >= 0 ? h.slice(q + 1) : "" };
   }
   if (h.startsWith("#/alerts")) return { name: "alerts" };
+  /* Alert-rule routes (#3285): the list, the new form (optionally /new/{template}), then the bare /{id} edit form,
+     tested most-specific first. Distinct from #/alerts above (which cannot collide: #/alert- never starts #/alerts). */
+  if (h === "#/alert-rules" || h === "#/alert-rules/") return { name: "alertRules" };
+  if (h === "#/alert-rule/new") return { name: "alertEditor", id: "new" };
+  if (h.startsWith("#/alert-rule/new/")) {
+    return { name: "alertEditor", id: "new", template: decodeURIComponent(h.slice("#/alert-rule/new/".length)) };
+  }
+  if (h.startsWith("#/alert-rule/")) return { name: "alertEditor", id: decodeURIComponent(h.slice("#/alert-rule/".length)) };
   /* #/views (list) is checked before the #/view/ forms; and the /edit form is tested before the bare /view/. */
   if (h === "#/views" || h === "#/views/") return { name: "views" };
   if (h === "#/view/new") return { name: "editor", id: "new" };
@@ -99,7 +115,10 @@ function route() {
   setActiveNav(r);
   if (r.name === "server") renderServer(main, r.param, r.tab);
   else if (r.name === "ag") renderAg(main);
+  else if (r.name === "sweeps") renderSweeps(main);
   else if (r.name === "alerts") renderAlerts(main);
+  else if (r.name === "alertRules") renderAlertRuleList(main);
+  else if (r.name === "alertEditor") renderAlertEditor(main, r.id, r.template);
   else if (r.name === "triage") renderTriage(main, r.query);
   else if (r.name === "views") renderViewList(main);
   else if (r.name === "view") renderView(main, r.id);
@@ -115,9 +134,12 @@ function isViewItemRoute(name) {
   return name === "view" || name === "editor" || name === "notebook" || name === "notebookEditor";
 }
 
-/* The sidebar's "Custom Views" nav stays lit across the list, both renderers, and both composers. */
+/* The sidebar's "Custom Views" nav stays lit across the list, both renderers, and both composers; the "Alert Rules"
+   nav stays lit across its list + editor. */
 function navKeyFor(r) {
-  return r.name === "views" || isViewItemRoute(r.name) ? "views" : r.name;
+  if (r.name === "views" || isViewItemRoute(r.name)) return "views";
+  if (r.name === "alertRules" || r.name === "alertEditor") return "alert-rules";
+  return r.name;
 }
 
 function setActiveNav(r) {
@@ -267,11 +289,11 @@ function refresh() {
   refreshSidebar();
   refreshViewList();
   refreshAgNav();
-  /* Poll-clobber guard (#1563): never re-render a composer (dashboard OR notebook, #1563 D7) from the background
-     poll — a rebuild would discard an in-progress edit. hashchange still routes to it normally; only this periodic
-     refresh skips it. */
+  /* Poll-clobber guard (#1563, extended #3285): never re-render an editor (dashboard/notebook composer OR the
+     alert-rule editor) from the background poll — a rebuild would discard an in-progress edit. hashchange still
+     routes to it normally; only this periodic refresh skips it. */
   const routeName = currentRoute().name;
-  if (routeName === "editor" || routeName === "notebookEditor") return;
+  if (routeName === "editor" || routeName === "notebookEditor" || routeName === "alertEditor") return;
   route();
 }
 

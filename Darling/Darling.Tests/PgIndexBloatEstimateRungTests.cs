@@ -18,12 +18,11 @@ namespace Darling.Tests;
 /// V114 (#3234): the statistics-estimate columns on <c>collect.pg_index_bloat</c>, and the retirement of
 /// the rotation cursor the <c>pgstatindex</c> census needed.
 ///
-/// <para>This suite carries the TOP-RUNG guard, which moved here from
-/// <see cref="RemediationCredentialRungTests"/> when V114 dethroned V113. That guard has to live with
-/// whichever rung is actually top: it asserts that a store with every sentinel true maps to exactly the
-/// head of the ladder, and its whole point is to catch a later rung that appends a sentinel without adding
-/// its own arm — which would leave the viewer refusing a store that is perfectly current, permanently,
-/// because no further upgrade changes the answer. When a later rung lands, move it on.</para>
+/// <para>The TOP-RUNG guard has moved on to <c>PgCpuCapacityHeadroomTests</c> (V115), as this suite's own
+/// note said it must: it has to live with whichever rung is actually top, because its whole point is to
+/// catch a later rung that appends a sentinel without adding its own arm — which would leave the viewer
+/// refusing a store that is perfectly current, permanently, because no further upgrade changes the
+/// answer.</para>
 /// </summary>
 public class PgIndexBloatEstimateRungTests
 {
@@ -31,6 +30,9 @@ public class PgIndexBloatEstimateRungTests
 
     /// <summary>The version a store one rung behind this one reports.</summary>
     private const int PreviousVersion = 113;
+
+    /* The top-rung guard moved to PgCpuCapacityHeadroomTests when V115 dethroned this rung — see that
+       suite's own note. What stays here is this rung's OWN arm and its ordering fact. */
 
     /// <summary>This rung's sentinel ordinal in the viewer probe. Its OWN ordinal, which never moves.</summary>
     internal const int ProbeOrdinal = 89;
@@ -46,7 +48,13 @@ public class PgIndexBloatEstimateRungTests
 
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+
+        /* No longer the head of the ladder — V115 landed above it. The equality that used to sit here
+           asserted this rung was top, which is the clause that has to move with the head. */
+        Assert.True(
+            versions.Max() > RungVersion,
+            "a rung above this one must exist; if this is the head again then the top-rung guard has been "
+            + "lost rather than moved.");
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
         var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
@@ -119,13 +127,13 @@ public class PgIndexBloatEstimateRungTests
     /// <c>est_reclaimable_bytes</c> is the one chosen because it is what the read ranks on: if it is
     /// absent the panel has nothing to order by, which is the failure this probe exists to prevent.
     ///
-    /// <para><b>The top-rung guard.</b> Every sentinel true must map to exactly this version, or the
-    /// viewer refuses a fully-migrated store forever. The all-true argument list is built by reflection so
-    /// the arity tracks the signature: the literal-true form silently defaults a newly added sentinel to
-    /// false and maps one version low, which is the failure this guard exists for.</para>
+    /// <para><b>The top-rung guard lives with V115 now</b> (#3281). What is asserted here is this rung's
+    /// own arm, reached by switching off every sentinel above it — and the argument list is still built by
+    /// reflection so the arity tracks the signature, because the literal-true form silently defaults a
+    /// newly added sentinel to false and maps one version low.</para>
     /// </summary>
     [Fact]
-    public void TheProbeAsksForTheEstimateColumn_AndMapsAFullyMigratedStoreToThisRung()
+    public void TheProbeAsksForTheEstimateColumn_AndThisRungsOwnArmAnswers()
     {
         Assert.Contains(
             "table_name = 'pg_index_bloat'",
@@ -145,18 +153,29 @@ public class PgIndexBloatEstimateRungTests
             .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* As the TOP rung, this sentinel is the last one — and that equality is what catches a later rung
-           appending a sentinel without adding its own arm. When a later rung lands, this clause moves to
-           it and becomes ProbeOrdinal < arity - 1 here. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* No longer the last sentinel — V115 appended one. This is the form the previous comment here
+           predicted: the equality moved to the new top rung and what remains is the ordering fact. */
+        Assert.True(
+            ProbeOrdinal < arity - 1,
+            "a rung above this one must own a later sentinel; if this is the last one again then the "
+            + "top-rung guard has been lost rather than moved.");
 
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
+        /* This rung's OWN arm, isolated by switching off every sentinel above it. The all-true case
+           belongs to whichever rung is top and is asserted there; testing it here would assert that V114
+           is still the head of the ladder. */
+        var throughMine = Enumerable.Repeat((object)true, arity).ToArray();
 
-        /* One rung behind: every sentinel EXCEPT this one must report 113. Without this the arm above
-           could be satisfied by an unconditional return and nothing would notice. */
-        var allButMine = Enumerable.Repeat((object)true, arity).ToArray();
-        allButMine[ProbeOrdinal] = false;
-        Assert.Equal(PreviousVersion, (int)method.Invoke(null, allButMine)!);
+        for (var i = ProbeOrdinal + 1; i < arity; i++)
+        {
+            throughMine[i] = false;
+        }
+
+        Assert.Equal(RungVersion, (int)method.Invoke(null, throughMine)!);
+
+        /* One rung behind: the same store minus this rung's sentinel must report 113. Without this the arm
+           above could be satisfied by an unconditional return and nothing would notice. */
+        var belowMine = (object[])throughMine.Clone();
+        belowMine[ProbeOrdinal] = false;
+        Assert.Equal(PreviousVersion, (int)method.Invoke(null, belowMine)!);
     }
 }

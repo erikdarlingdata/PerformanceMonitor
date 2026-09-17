@@ -943,6 +943,25 @@ public partial class ViewerServerTab
     /// measures near 90 rather than 100, so the first person to read that column would otherwise conclude
     /// every index in the fleet is 10% bloated. Since #3234 those are the older exact rows still inside
     /// retention, which is why the note distinguishes them rather than describing one kind of row.</para>
+    ///
+    /// <para><b>What the grid shows is not what the server has, and the note says so with figures (#3278).</b>
+    /// Rows with no answer sort FIRST — deliberately, since the index nobody can model is the likeliest big
+    /// win — and counting the visible ones cannot say what share of the server that is.
+    /// <see cref="PgIndexBloatCoverage"/> answers it from a separate population query no row cap touches,
+    /// and this panel prints the verdict, the same one <c>get_pg_index_bloat</c> prints.</para>
+    ///
+    /// <para><b>The grid is composed from TWO reads, so the answers are REACHED (#3434).</b> The default
+    /// page supplies the answerless block and an <c>answered_only</c> page (#3431) supplies the ranking
+    /// behind it, with a quarter of <see cref="PgGridRowLimit"/> reserved for the second —
+    /// <see cref="PgIndexBloatGridBudget"/> owns that arithmetic and the sentence describing it. One page in
+    /// the read's own order reaches no answer at ANY cap while the answerless population is larger than the
+    /// cap, which is the state of the fleet's two largest censuses; reserving a share shortens the lead
+    /// rather than reordering it, so the gaps still lead. Every figure the note prints about the grid comes
+    /// off the composed page, so the prose and the rows cannot describe two populations.</para>
+    ///
+    /// <para><b>Printed on the POPULATED path as well.</b> A partial view is the same defect one degree
+    /// weaker — the grid ranks what it was given and cannot show what was withheld — so the coverage
+    /// sentence rides both branches rather than being an empty-state message.</para>
     /// </summary>
     private async Task LoadPgIndexBloatAsync(DateTime startUtc, DateTime endUtc)
     {
@@ -953,47 +972,95 @@ public partial class ViewerServerTab
             return;
         }
 
-        var rows = await _dataService.GetPgIndexBloatAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
+        /* TWO READS, and the second one is the entire fix (#3434). The default page is #3278's
+           answerless-first order, unchanged, and it is where the answerless block comes from. The
+           answered_only page is the answered population ranked by reclaimable bytes with nothing ahead of
+           it, which is the only route to those rows: they sort behind every answerless row, so a single
+           capped page reaches none of them at any cap while that leading block is larger than the cap.
+
+           BOTH at PgGridRowLimit rather than the second at its reserve, because the reserve is a FLOOR
+           under the answers and not a ceiling - a server whose answerless population is small still shows
+           the same long ranking it always did, and that only works if the second read fetched it.
+
+           CONCURRENT, under a DECLARED fan-out width, because the scope is what prices the reads rather
+           than what permits them: ViewerCommandDeadlines hands each command a deadline computed from the
+           width the context declares, so two reads issued together without a scope are priced as if each
+           were alone and share a deadline neither can meet under the other's contention. LoadPgStorageAsync
+           releases its own width before calling this, so the enclosing count here is one and Of(2) is the
+           real concurrency. */
+        using var readFanOut = ViewerReadFanOut.Of(2);
+
+        var leadingPageTask = _dataService.GetPgIndexBloatAsync(
+            _server.ServerId, startUtc, endUtc, PgGridRowLimit);
+
+        var answeredPageTask = _dataService.GetPgIndexBloatAsync(
+            _server.ServerId, startUtc, endUtc, PgGridRowLimit, answeredOnly: true);
+
+        await Task.WhenAll(leadingPageTask, answeredPageTask);
+
+        /* Released at the JOIN, not at the closing brace: the coverage census below does not contend with
+           two reads that have already finished, and leaving the width declared would price it as if it
+           did. Same reason the caller releases before reaching this method. */
+        readFanOut.Release();
+
+        /* The composition, its figures and the sentence stating them, as ONE value - so this panel counts
+           nothing itself. Whatever the grid shows changes what the row count MEANS, and that count feeds
+           both the census below and the prose beside it; a figure derived here from either read rather
+           than from the composed page is how a note comes to describe a population the grid is not
+           showing, which is the defect this panel is being fixed for arriving one layer in. */
+        var page = PgIndexBloatGridBudget.Compose(
+            leadingPageTask.Result,
+            answeredPageTask.Result,
+            r => r.SkippedReason is not null,
+            r => r.EstimatedReclaimableBytes ?? 0L,
+            PgGridRowLimit);
+
+        var rows = page.Rows;
 
         PgIndexBloatGrid.ItemsSource = rows;
 
-        var reclaimable = 0L;
-        foreach (var r in rows)
-        {
-            reclaimable += r.EstimatedReclaimableBytes ?? 0L;
-        }
+        /* The SAME classifier the MCP tool calls, deliberately (#3278). The panel and the tool answering
+           the same question differently is how a defect gets fixed in one surface and left in the other,
+           and every figure that makes this answer a POPULATION figure rather than a page one is in there -
+           so neither surface authors it.
 
-        var skipped = rows.Count(r => r.SkippedReason is not null);
+           Handed the COMPOSED row count, which is what the grid displays: the census prints that figure
+           as "rows returned", and the number beside that label has to be the number of rows on screen. */
+        var coverage = await _dataService.GetPgIndexBloatCoverageAsync(
+            _server.ServerId, endUtc, rows.Count);
 
-        var estimated = rows.Count(r => r.SkippedReason is null && r.IsEstimate);
         var exactly = rows.Count(r => r.SkippedReason is null && !r.IsEstimate);
 
         PgIndexBloatNote.Text = rows.Count == 0
-            ? "Nothing recorded. This panel needs the pg_stats column widths, which pg_monitor alone does "
-              + "not confer - see the runbook step under \u201cThe one grant pg_monitor does not cover\u201d. "
-              + "Only B-TREE indexes are covered. When it does record, it records EVERY btree at any size, "
-              + "which is why its index count exceeds the usage panel's."
-            : $"ESTIMATED from catalog statistics - no index page is read. About {reclaimable:N0} bytes "
-              + $"look reclaimable across {rows.Count:N0} index(es), and that is what the grid is ranked "
-              + "by: a percentage ranks the wrong thing, since a tiny index at 20% is worth kilobytes next "
-              + "to a large one at 70%. Measured against pgstatindex ground truth, median absolute error "
-              + "is 2.79 percentage points and p90 is 6.63 - close enough to choose WHICH index to act on, "
-              + "not close enough to justify a REINDEX on its own. The Exact Measurement column carries the "
-              + "pgstatindex call for that; it walks every page, so run it on the one index concerned "
-              + "rather than on a schedule."
+            /* The verdict rather than a guess at the cause. This note used to assert the missing pg_stats
+               grant outright, which is a diagnosis the panel had no evidence for and is wrong wherever the
+               collector simply has not run - measured on a live target, 3 of its 7 runs in a week errored,
+               one on a 300-second command deadline that stored nothing. */
+            ? "Nothing recorded in this window. That is NOT the same as no bloat. Only B-TREE indexes are "
+              + "covered, and when this does record it records EVERY btree at any size, which is why its "
+              + "index count exceeds the usage panel's. " + coverage.Message
+            : $"ESTIMATED from catalog statistics - no index page is read. About "
+              + $"{page.ReclaimableBytesShown:N0} bytes look reclaimable across {rows.Count:N0} index(es), "
+              + "and the answered rows are ranked by that figure: a percentage ranks the wrong thing, "
+              + "since a tiny index at 20% is worth kilobytes next to a large one at 70%. Measured against "
+              + "pgstatindex ground truth, median absolute error is 2.79 percentage points and p90 is 6.63 "
+              + "- close enough to choose WHICH index to act on, not close enough to justify a REINDEX on "
+              + "its own. The Exact Measurement column carries the pgstatindex call for that; it walks "
+              + "every page, so run it on the one index concerned rather than on a schedule."
               + (exactly > 0
                   ? $"  {exactly:N0} row(s) are older EXACT measurements still inside retention rather "
                     + "than estimates - the Kind column says which, and Leaf Density is populated only on "
                     + "those. A blank density on an estimated row means the index was never walked, which "
                     + "is not the same as a walk that found no leaf pages."
                   : string.Empty)
-              + (skipped > 0
-                  ? $"  {skipped:N0} index(es) have NO answer in this window and are listed FIRST with "
-                    + "their reason: their bloat is unknown rather than zero. Read the reason - a "
-                    + "never-analyzed parent needs an ANALYZE and invisible column widths need the "
-                    + "pg_read_all_data grant, while a PARTIAL or DEDUPLICATED index cannot be modelled at "
-                    + "any grant or statistics freshness and needs the exact command instead."
-                  : string.Empty);
+              /* WHAT THIS GRID IS, in figures off the composed page (#3434) - how many of its rows have no
+                 answer, how many do, and what the reservation cost the lead. Ahead of the census so the
+                 reader meets the grid's own counts before the server's, and never instead of them. */
+              + "  " + page.Composition
+              /* On the POPULATED path too, and last. A grid ranking four answered indexes while six
+                 thousand are withheld reads as a ranking of the server, and the rows themselves show no
+                 difference - which is how three independent readers got this surface wrong in one night. */
+              + "  " + coverage.Message;
     }
 
     /// <summary>

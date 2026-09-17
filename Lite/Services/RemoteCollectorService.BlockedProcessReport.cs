@@ -129,8 +129,9 @@ SELECT @threshold;", connection);
         }
         catch (SqlException ex)
         {
-            /* sp_configure not available (e.g. AWS RDS) — threshold must be set via platform config */
-            AppLogger.Info("XeSession", $"[{server.DisplayName}] Cannot set blocked process threshold via sp_configure (may require platform config): {ex.Message}");
+            /* Threshold could not be set: the login lacks ALTER SETTINGS, or sp_configure
+               is unavailable on the platform (AWS RDS / Azure SQL DB). Tolerated either way. */
+            AppLogger.Info("XeSession", $"[{server.DisplayName}] Could not auto-configure 'blocked process threshold (s)' to 5 seconds. This is expected when the monitoring login lacks ALTER SETTINGS, or on AWS RDS / Azure SQL DB where it is set via platform config. It is benign: blocking is still captured by the always-on DMV blocking snapshot; only the richer blocked-process-report XE stays off until the threshold is set. Detail: {ex.Message}");
         }
 
         /* Check if our XE session already exists */

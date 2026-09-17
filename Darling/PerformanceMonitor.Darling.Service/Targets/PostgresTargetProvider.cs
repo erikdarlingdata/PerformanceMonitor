@@ -155,9 +155,16 @@ public sealed class PostgresTargetProvider : ITargetProvider
     /// leaves an empty exclusion list producing no parameters at all.</para>
     /// </summary>
     public (string ConnectionString, CollectorQuery Query) BuildDatabaseListPlan(
-        string connectionString, IReadOnlyList<string>? excludedDatabases)
+        string connectionString, IReadOnlyList<string>? excludedDatabases, IReadOnlyList<string>? databaseScope)
     {
+        /* #3477: the scope's allow-list rides the same statement as the exclusion, so both are the
+           engine's own name comparison (datname byte for byte here — the NormalizeExcludedDatabases
+           reasoning) and the composed predicate is scoped-in AND NOT excluded. The maintenance-
+           database screen stays OUTSIDE both instruments: naming rdsadmin in a scope must not
+           un-screen it. */
+        var (scopeClause, parameters) = DatabaseScopeFilter.Build(databaseScope, "datname");
         var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(excludedDatabases, "datname");
+        parameters.AddRange(exclusionParameters);
 
         return (connectionString, new CollectorQuery(
             $@"
@@ -166,9 +173,10 @@ FROM pg_database
 WHERE datallowconn
 AND   NOT datistemplate
 AND   datname <> '{ManagedMaintenanceDatabase}'
+{scopeClause}
 {exclusionClause}
 ORDER BY datname",
-            exclusionParameters));
+            parameters));
     }
 
     /// <summary>

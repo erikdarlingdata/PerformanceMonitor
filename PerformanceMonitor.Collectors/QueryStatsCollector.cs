@@ -76,6 +76,15 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
         public string? PlanHandle { get; set; }
         public string? QueryText { get; set; }
         public string? QueryPlanXml { get; set; }
+
+        /// <summary>
+        /// <c>DATALENGTH</c> of this statement's plan XML as measured on the monitored server, or null when
+        /// the host captures no plans or the handle aged out before the plan apply ran (#3392). Carries the
+        /// SIZE whether or not <see cref="QueryPlanXml"/> carries the CONTENT, which is what lets a reader
+        /// tell a plan omitted for size from a plan that was never there.
+        /// </summary>
+        public long? QueryPlanXmlBytes { get; set; }
+
         public long PlanGenerationNum { get; set; }
         public int StatementStartOffset { get; set; }
         public int StatementEndOffset { get; set; }
@@ -240,9 +249,24 @@ OPTION(RECOMPILE);";
        no-plan form. Mirrors the full Dashboard's @collect_plan path in
        install/08_collect_query_stats.sql: the STATEMENT-level plan from sys.dm_exec_text_query_plan
        keyed on the same plan_handle + statement offsets (the text DMV, not dm_exec_query_plan, so
-       large/deep plans that overflow the xml type still return), with no size guard. */
-    private const string PlanSelectFragment = @",
-    query_plan_xml = tqp.query_plan";
+       large/deep plans that overflow the xml type still return).
+
+       The DATALENGTH guard is the size bound this comment used to say did not exist: see
+       QueryPlanXmlCaptureLimits for why 200 rows still let one oversized plan dominate the cycle's
+       drain time, and why the answer is a per-row cap rather than the running-budget shape
+       QueryStoreCollector uses. tqp.query_plan is read twice (DATALENGTH, then the value) — that is
+       one materialized OUTER APPLY column read twice, not a second invocation of the TVF.
+
+       query_plan_xml_bytes selects that same DATALENGTH a THIRD time, and it is free for the same reason the
+       second read is: one materialized OUTER APPLY column, read again. It is never gated by the cap — a row
+       over the cap reports its size and a NULL plan, which is the only pairing that distinguishes "omitted
+       for size" from "the handle aged out". #3392's backlog is keyed on that distinction.
+
+       Both plan columns sit INSIDE this fragment, so a host with CapturePlanXml off (Lite) emits neither and
+       its SQL stays byte-identical to the no-plan form. */
+    private static readonly string PlanSelectFragment = @",
+    query_plan_xml = CASE WHEN DATALENGTH(tqp.query_plan) > " + QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes + @" THEN NULL ELSE tqp.query_plan END,
+    query_plan_xml_bytes = DATALENGTH(tqp.query_plan)";
 
     private const string PlanApplyFragment = @"
 OUTER APPLY
@@ -355,6 +379,10 @@ OUTER APPLY
         /* #2012 stage 2 — appended LAST so every existing store column keeps its position; the
            store-side ALTER ADDs land at the end to match. NULL for ad-hoc/prepared statements. */
         new CollectorColumn("host_object_name", CollectorColumnType.Varchar),
+        /* #3392, appended after it for the same reason. BigInt because DATALENGTH over an nvarchar(max)
+           expression returns bigint, and a plan XML document is measured in megabytes on the tail this
+           exists to describe. */
+        new CollectorColumn("query_plan_xml_bytes", CollectorColumnType.BigInt),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -417,6 +445,13 @@ OUTER APPLY
                 /* query_plan_xml is the trailing column present only when CapturePlanXml spliced it
                    into the SELECT (ordinal 44); the short-circuit skips it entirely when off. */
                 QueryPlanXml = context.CapturePlanXml && !reader.IsDBNull(44) ? reader.GetString(44) : null,
+                /* #3392: the plan's measured size rides the same splice at ordinal 45, so the same
+                   short-circuit covers it. Convert rather than GetInt64: DATALENGTH's return type widens to
+                   bigint only for the max types, and a provider that hands back an Int32 here would throw
+                   on a strict accessor — the min_dop/max_dop idiom above, for the same reason. */
+                QueryPlanXmlBytes = context.CapturePlanXml && !reader.IsDBNull(45)
+                    ? Convert.ToInt64(reader.GetValue(45), CultureInfo.InvariantCulture)
+                    : null,
             });
         }
 
@@ -504,6 +539,33 @@ OUTER APPLY
             .Value(deltaSpills)
             .Value(row.PlanGenerationNum)
             .Value(sampleIntervalSeconds)      /* sample_interval_seconds INTEGER */
-            .Value(row.HostObjectName);        /* #2012 stage 2: NULL for ad-hoc text */
+            .Value(row.HostObjectName)         /* #2012 stage 2: NULL for ad-hoc text */
+            .Value(row.QueryPlanXmlBytes);     /* #3392: measured size, never gated by the cap */
+    }
+
+    /// <summary>
+    /// #3392: this row is a backlog candidate when its plan measured over the cap and both cache handles are
+    /// present. The offsets handed back are the SAME ones <see cref="PlanApplyFragment"/> passes, so the
+    /// deferred fetch re-issues the identical statement-grain call rather than a plausible-looking variant of
+    /// it — a plan_handle with the wrong offsets is a different statement's plan, which is the exact
+    /// cross-contamination the delta key's own comment records.
+    /// </summary>
+    public override OversizedPlanObservation? DescribeOversizedPlan(Row row)
+    {
+        if (!QueryPlanXmlCaptureLimits.ExceedsCaptureCap(row.QueryPlanXmlBytes)
+            || row.PlanHandle is null
+            || row.SqlHandle is null)
+        {
+            return null;
+        }
+
+        return new OversizedPlanObservation(
+            row.PlanHandle,
+            row.SqlHandle,
+            row.StatementStartOffset,
+            row.StatementEndOffset,
+            row.DatabaseName,
+            row.QueryHash,
+            row.QueryPlanXmlBytes!.Value);
     }
 }

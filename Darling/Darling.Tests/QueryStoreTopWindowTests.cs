@@ -57,6 +57,15 @@ public class QueryStoreTopWindowTests
     /// COST, so its timestamps say nothing about how far back the read reached — the most expensive query in a
     /// month may have run this morning. Deriving the window from the rows would produce a confident, wrong
     /// answer, which is worse than the silence it replaces.
+    ///
+    /// <para>The two negatives are scoped to <c>get_query_store_top</c>'s own method rather than swept over
+    /// the whole file, and the narrowing is a correction rather than a relaxation. The claim is about a read
+    /// whose rows are ALWAYS cost-ranked; <c>get_collection_log</c> (#3287) bounds its returned PAGE from its
+    /// rows, which is legitimate there because that page is a contiguous slice of the window under its default
+    /// ordering — and it says so in the field name (<c>oldest_returned_collection_time</c>) rather than
+    /// claiming a window. A file-scoped sweep cannot tell those apart, so it would have to be either deleted
+    /// or worked around with a differently-named helper, and a pin dodged by renaming an expression is a pin
+    /// that has stopped guarding anything.</para>
     /// </summary>
     [Fact]
     public void TheEffectiveWindow_ComesFromTheProbe_NotTheRows()
@@ -70,8 +79,39 @@ public class QueryStoreTopWindowTests
         Assert.Contains("floor", line, StringComparison.Ordinal);
 
         /* Not from the projection: rows are ordered by cost, and LastExecutionTime is a per-query fact. */
-        Assert.DoesNotContain("rows.Min(", ToolSource, StringComparison.Ordinal);
-        Assert.DoesNotContain("rows.Max(", ToolSource, StringComparison.Ordinal);
+        var method = QueryStoreTopMethod();
+        Assert.DoesNotContain("rows.Min(", method, StringComparison.Ordinal);
+        Assert.DoesNotContain("rows.Max(", method, StringComparison.Ordinal);
+
+        /*
+            Positive control on the slice, because the two negatives above are now satisfied by ANY slicing
+            bug that returns the wrong span -- including an empty one. The slice really is this tool's body:
+            it carries the probe call the first assertion found and the payload field the next test pins, and
+            it does NOT reach the sibling read that legitimately does bound its page from its rows.
+        */
+        Assert.Contains("GetQueryStoreWindowFloorAsync", method, StringComparison.Ordinal);
+        Assert.Contains("effective_start", method, StringComparison.Ordinal);
+        Assert.DoesNotContain("oldest_returned_collection_time", method, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <c>get_query_store_top</c>'s method body, from its signature to the signature that follows it — the
+    /// scope the row-derivation ban above belongs to.
+    /// </summary>
+    private static string QueryStoreTopMethod()
+    {
+        var source = ToolSource;
+
+        var start = source.IndexOf("public static async Task<string> GetQueryStoreTop(", StringComparison.Ordinal);
+        Assert.True(start > 0, "get_query_store_top's declaration moved — this pin needs re-anchoring");
+
+        /* Bounded at the NEXT tool attribute, so the slice is one tool's body and cannot absorb a sibling's.
+           Every tool in this file carries one, so there is always a terminator except for the last tool —
+           and this one is not last, which the length assertion below is what actually checks. */
+        var end = source.IndexOf("[McpServerTool(", start, StringComparison.Ordinal);
+        Assert.True(end > start, "no tool follows get_query_store_top — this pin needs re-anchoring");
+
+        return source[start..end];
     }
 
     /// <summary>The payload describes the data, not just the request.</summary>

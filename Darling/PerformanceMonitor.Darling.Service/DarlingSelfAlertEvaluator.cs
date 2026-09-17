@@ -12,6 +12,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -26,11 +28,14 @@ namespace PerformanceMonitor.Darling.Service;
 /// <summary>
 /// Stage 4 of the Darling control plane — the SERVICE's self-alerts: the "is my collection actually
 /// working" conditions that matter most for an unattended 24/7 headless service where nobody is
-/// watching a dashboard. Four conditions — the first three reframe a Dashboard health check onto Darling's
-/// own signals; the fourth (Store Disk Pressure) is net-new and guards the service's OWN store — all routed
-/// through the SAME <see cref="IAlertDeliverer"/> the shared alert engine uses (so they inherit its
-/// email/webhook delivery, per-fingerprint delivery cooldown, and restart replay) and the SAME
-/// <c>config_alert_log</c> history store:
+/// watching a dashboard. The FOUNDING conditions are listed below — the first three reframe a Dashboard
+/// health check onto Darling's own signals; Store Disk Pressure was net-new and guards the service's OWN
+/// store — and every condition added since is sectioned in the body under its own issue number. The list is
+/// not a census and deliberately carries no count, because a numeral here goes stale silently every time a
+/// condition is added and nothing checks it. All of them route through the SAME
+/// <see cref="IAlertDeliverer"/> the shared alert engine uses (so they inherit its email/webhook delivery,
+/// per-fingerprint delivery cooldown, and restart replay) and the SAME <c>config_alert_log</c> history
+/// store:
 /// <list type="number">
 /// <item><b>Collection Stopped / collector failure</b> — the server's <c>collection_log</c> shows no
 ///   SUCCESS within a staleness window OR the last N runs all failed (reframes the Dashboard's
@@ -173,8 +178,28 @@ internal sealed class DarlingSelfAlertEvaluator
        CostRegressionFactor, before it alerts — so a cheap collector, or a new one, cannot trip it.
        #2846: the comparison is per RUN, not per day. Daily totals are runs x cost-per-run, so a cadence
        recovery — more of the same work, each unit cheaper — used to read as a regression. It fired 3,259 times
-       over 612 pairs in one day, 53% of them on collectors whose per-run cost had FALLEN. The floor stays on
-       the daily TOTAL so a cheap-but-frequent collector still cannot trip on a per-run doubling. */
+       over 612 pairs in one day, 53% of them on collectors whose per-run cost had FALLEN.
+       #3316: the two gates measure DIFFERENT UNITS, so the daily-total floor does not constrain the per-run
+       ratio — a total-cost floor is cleared by VOLUME, so a collector averaging 3 ms per run clears
+       CostRegressionBaselineFloorMs on run count alone and is then judged by a ratio on that 3 ms. Such a
+       firing is TRUTHFUL (both sides are means over many runs, so this is not rounding) and useless: the
+       measured case doubled 3.0 -> 6.1 ms per run over 50 runs, which costs 0.16 s a day. So a third gate
+       asks what the regression COSTS — the per-run rise times the volume it is paid on — and requires
+       CostRegressionAddedMsFloor of it. That is unit-consistent with the ratio, and unlike a minimum
+       per-run baseline it still reports a 3 ms collector that runs often enough for the rise to matter.
+       #3462: that floor is recalibrated from the fleet's own per-collector daily-cost distribution (see
+       its declaration) after an 8.7 s/day card broke #3316's empty-band assumption, and the digest's
+       movers read now shares it — evaluated in the reads themselves, so both delivery surfaces inherit
+       one definition of material.
+       #3440: the ratio is measured against the baseline's UPPER EDGE as well as its mean. A heavy
+       collector's own spread exceeds CostRegressionFactor on natural variation — per-run p95/avg measured
+       at 2.03x to 5.04x across index_object_stats, procedure_stats and query_store on one fleet — so
+       against a mean baseline a normal upper-mode day cleared the factor by construction, and the
+       CostRegressionAddedMsFloor cannot screen those because the expense that makes a collector bimodal
+       makes its upper mode's excess large. The reader now also returns the p95 of the PRIOR days' per-run
+       cost and requires the factor on that too. The two are an AND, so this alert can only fire on a
+       subset of what it fired on before, and CostRegression.ThresholdMsPerRun is the bound the fired alert
+       reports so the threshold a reader falsifies against is the one that selected the row. */
     private readonly ConcurrentDictionary<string, string> _activeCostRegression = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastCostRegressionAlert = new();
 
@@ -203,7 +228,173 @@ internal sealed class DarlingSelfAlertEvaluator
 
     private const double CostRegressionFactor = 2.0;
     private const long CostRegressionBaselineFloorMs = 1000;
+
+    /// <summary>#3316/#3462: the minimum ADDED cost per day, in ms, before a per-run regression is worth
+    /// reporting on EITHER delivery surface — the page and the digest movers list both gate on it, taken
+    /// from this one constant so the two cannot disagree about what material means.
+    ///
+    /// <para><b>The #3316 calibration this replaces claimed a band the fleet has since disproved.</b> Its
+    /// 41-hour sample put real regressions at 21.8-22.6 s/day and truthful-unactionable ones at
+    /// 0.16-3.6 s/day, and set 5 s in the gap claiming "more than 4x headroom on both sides". On
+    /// 2026-09-15 a production server paged hourly on a 5.5x <c>database_size_stats</c> regression whose
+    /// whole-day total was 8.7 seconds and whose ADDED cost — this floor's own unit — was 7.1 s/day,
+    /// 1.42x the floor: truthful, unactionable, and comfortably selected — while the same day's genuine
+    /// exhibits added 224 and 377 s/day. The unactionable mass reaches at least 7.1 s/day of added cost,
+    /// so the empty band is (7.1, 21.8) and 5 s sits below it, not inside it.</para>
+    ///
+    /// <para><b>15 s/day is derived from the fleet distribution of per-collector daily cost, not from that
+    /// one card (#3462).</b> Measured over 7 days on two stores — 42 and 43 servers of one production
+    /// store class — the MEDIAN (server, collector) pair costs 13.7 and 13.1 s/day to exist at all, and
+    /// the cheapest 17 of 39 collectors each cost under 4 s/day. A regression whose entire added footprint
+    /// is less than the median collector's whole daily bill is lost in the fleet's own operating mass; at
+    /// 15 s the floor sits just above both medians and inside the measured empty band — 2.1x above its
+    /// noise edge and 1.45x under the smallest real catch. The headroom is honestly thinner than #3316
+    /// claimed for 5 s, because the band itself is thinner than #3316 believed: both of its edges are now
+    /// measured rather than extrapolated.</para>
+    ///
+    /// <para>Internal so <c>CollectorCostMaterialityFloorTests</c> can run the SHIPPED value against the
+    /// shipped query: the 2026-09-15 exhibits and #3316's smallest catch bracket this constant, so a retune
+    /// outside the measured band turns a fixture red rather than silently re-admitting the noise or
+    /// dropping the catches.</para></summary>
+    internal const long CostRegressionAddedMsFloor = 15000;
     private static readonly TimeSpan CostRegressionBaselineWindow = TimeSpan.FromDays(14);
+
+    /// <summary>
+    /// #3443: the fan-out that separates the one cost shape worth interrupting somebody for from the ones
+    /// worth reading in the morning. A collector reaches the paging channel only when the regression is a
+    /// property of the COLLECTOR rather than of a server: it was selected on at least this many servers AND
+    /// on more than half the servers that collector actually ran on in the window
+    /// (<see cref="CollectorCostDenominatorWindow"/>). Everything else is reported by
+    /// <see cref="CollectorCostDigestMetric"/> instead, with the comparison context an alert card cannot
+    /// carry.
+    ///
+    /// <para><b>The majority half is a comparison, not a threshold.</b> The collector's code and the
+    /// monitoring store are shared across the fleet, so a deployment or store-side cause raises the cost
+    /// everywhere the collector runs; one server's slow day raises it on one server. "More than half"
+    /// is the weakest statement that says the rise is the common case rather than the exception, and there
+    /// is no number in it to tune — 22 of 43 servers and 2 of 3 are the same rule.</para>
+    ///
+    /// <para><b>The floor of 2 exists because a majority of one is one.</b> A collector that ran on a single
+    /// server would otherwise satisfy the majority rule on that server alone, which is exactly the shape
+    /// being demoted.</para>
+    ///
+    /// <para><b>Measured, and the measurement is uncomfortable enough to state.</b> Over 8 days on a
+    /// 43-server production store this condition produced 937 firings across 143 (collector, day)
+    /// combinations; the widest fan-out any collector reached was 10 servers of 43, so NONE of the 937
+    /// would have paged under this rule and all 937 would have been digest lines. That is the intended
+    /// outcome rather than a coincidence — the shape this page is for is a build or a store change reaching
+    /// the whole fleet (#2133/#2150), which is rare by construction — but it does mean the paging half has
+    /// no live firing to validate against, and its fixtures are the only demonstration that it still
+    /// fires.</para>
+    /// </summary>
+    private const int CostRegressionFleetWideMinServers = 2;
+
+    /// <summary>
+    /// The window the fan-out DENOMINATOR is measured over — how many servers each collector ran on. A
+    /// trailing 24 hours rather than the current UTC day, because a day-aligned denominator is a partial
+    /// count for the whole first hour after midnight and the majority rule would read a smaller fleet than
+    /// the collector has. Named in the fired alert text, because a ratio whose denominator the reader cannot
+    /// see is not falsifiable.
+    ///
+    /// <para>It is a DIFFERENT window from the regression read's own <c>latest_day</c> numerator, and that
+    /// asymmetry is deliberate: the numerator has to stay the predicate's own grain (this evaluator does not
+    /// own that predicate), and the denominator has to be a full count. For a collector that runs many times
+    /// an hour the two populations are the same 43 servers either way; for a once-daily collector the
+    /// denominator is the servers it ran on in the last day, which is the same set.</para>
+    /// </summary>
+    private static readonly TimeSpan CollectorCostDenominatorWindow = TimeSpan.FromHours(24);
+
+    /// <summary>
+    /// The metric name the collector-cost DIGEST fires under (#3443). A WEBHOOK AUTOMATION KEY like its
+    /// siblings — the alert-history grids, the severity map and any downstream consumer key on it — so it is
+    /// a const and must stay stable across releases.
+    /// </summary>
+    internal const string CollectorCostDigestMetric = "Collector Cost Digest";
+
+    /// <summary>Fleet-level key, non-numeric so it never collides with a real server_id (the
+    /// <see cref="DiskKey"/> shape).</summary>
+    private const string CollectorCostDigestKey = "costdigest";
+
+    /// <summary>
+    /// How often the digest is sent. Daily, and for <see cref="StaleMuteRefire"/>'s reason rather than a new
+    /// one: the shared alert cooldown is clamped to at most two hours, and the fact this reports is a day's
+    /// per-run cost against a multi-day baseline, which does not change twelve times a day.
+    ///
+    /// <para><b>Not the same argument as #3306's, though, and the difference is the point of #3443.</b>
+    /// <see cref="StaleMuteRefire"/> makes a standing fact livable by re-stating it less often on the same
+    /// channel; a stale mute has one actionable step and an alert card holds it. This interval is doing
+    /// something else: it is the period over which findings are COLLECTED INTO ONE DOCUMENT, because the
+    /// action a cost movement invites is "look at a distribution and decide", which does not fit on a card
+    /// and cannot be taken from a phone at 3am. A longer interval alone would have produced the same
+    /// unactionable card less often.</para>
+    ///
+    /// <para><b>In-memory, like every sibling's interval, and a restart costs one extra digest.</b> That is
+    /// the failure class <see cref="StaleMuteRefire"/> and #3430's <c>RepeatDeliveryBudget</c> both already
+    /// accept, and it is what keeps this change free of a migration rung. An extra copy of a report is the
+    /// cheapest possible failure; nothing is lost either way, because the digest is recomputed from the
+    /// store every time rather than accumulated in process.</para>
+    /// </summary>
+    internal static readonly TimeSpan CollectorCostDigestInterval = TimeSpan.FromDays(1);
+
+    /// <summary>How many movers the digest spells out, on <see cref="MaxListedStaleMuteRules"/>' reasoning —
+    /// one bounded message, not a wall of text. Measured: 177 pairs on one 43-server store and 103 on
+    /// another were eligible on the same day, so the cap is doing real work and the digest states the
+    /// population it selected from rather than implying it showed everything.</summary>
+    private const int MaxListedCostMovers = 20;
+
+    /// <summary>How many collectors the digest's heaviest-first census spells out.</summary>
+    private const int MaxListedCostHeaviest = 10;
+
+    /// <summary>When the digest was last sent — the <see cref="_lastStaleMuteAlert"/> idiom, one fixed key.
+    /// A digest has no active flag and no resolution edge: it is a report of a measurement, not a condition
+    /// that can be entered and left, so there is nothing to clear.</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _lastCostDigest = new();
+
+    /// <summary>
+    /// The metric name the fleet sweep's DAILY ROLLUP fires under (#3466 lane 4). A WEBHOOK AUTOMATION KEY
+    /// like its siblings — the alert-history grids, the severity map's declared INFO arm and any downstream
+    /// consumer key on it — so it is a const and must stay stable across releases.
+    /// </summary>
+    internal const string FleetSweepRollupMetric = "Fleet Sweep Rollup";
+
+    /// <summary>Fleet-level key, non-numeric so it never collides with a real server_id (the
+    /// <see cref="DiskKey"/> shape).</summary>
+    private const string FleetSweepRollupKey = "sweeprollup";
+
+    /// <summary>
+    /// How often the sweep rollup is sent — and unlike every sibling interval, this one is a RULING rather
+    /// than a tuning choice: the #3466 delivery contract bounds the sweep feature's channel presence at ONE
+    /// post per day, a CEILING and not a default ("a daily digest channel notification is fine, but not an
+    /// hourly one"). The web feed is the workhorse at full sweep cadence; report-class content any finer than
+    /// daily in a paging channel trains operators to ignore the channel, which is the failure mode half the
+    /// alerting issues exist to undo. The interval is also the rollup's COVERED SPAN: each post summarizes
+    /// the trailing day and only the trailing day, so what a post claims to cover and how often one can
+    /// arrive are the same number and cannot drift apart.
+    ///
+    /// <para><b>In-memory, like <see cref="CollectorCostDigestInterval"/>, and a restart costs one extra
+    /// rollup.</b> The same accepted failure class: an extra copy of a report is the cheapest possible
+    /// failure, and the rollup is recomputed from the sweep store every time rather than accumulated in
+    /// process, so nothing is lost in either direction.</para>
+    /// </summary>
+    internal static readonly TimeSpan FleetSweepRollupInterval = TimeSpan.FromDays(1);
+
+    /// <summary>How many band transitions the rollup spells out — the <see cref="MaxListedCostMovers"/>
+    /// reasoning: one bounded message. A churning fleet at hourly cadence can move bands dozens of times a
+    /// day, and the web timeline is where that day is READ; the rollup states the total beside the cap so
+    /// it never implies it showed everything.</summary>
+    private const int MaxListedRollupTransitions = 20;
+
+    /// <summary>How many watch-item events (per direction) the rollup spells out.</summary>
+    private const int MaxListedRollupWatchEvents = 10;
+
+    /// <summary>How many servers a would-have-paged family names before eliding — the ledger block must
+    /// stay readable on the fleet-wide day it exists for.</summary>
+    private const int MaxListedRollupLedgerServers = 10;
+
+    /// <summary>When the rollup was last sent — the <see cref="_lastCostDigest"/> idiom, one fixed key. A
+    /// rollup is a report of a period, not a condition: no active flag, no resolution edge, nothing to
+    /// clear.</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _lastSweepRollup = new();
 
     /// <summary>The fixed key for the fleet-level Store Disk Pressure edge (not a real server).</summary>
     private const string DiskKey = "store";
@@ -219,9 +410,11 @@ internal sealed class DarlingSelfAlertEvaluator
     internal const string DiskPressureResolvedMetric = "Store Disk Pressure Resolved";
 
     /// <summary>
-    /// The synthetic server label every FLEET-LEVEL store self-alert fires under — Store Disk Pressure,
-    /// Store Runtime Upgrade, Store Job Over Cadence and Compression Job Stuck, plus each one's resolution
-    /// edge. The monitoring store is not a SQL Server instance and is not in the monitored-server registry,
+    /// The synthetic server label every FLEET-LEVEL store self-alert fires under — each condition in this
+    /// class whose subject is the store or its configuration rather than one monitored server, plus each
+    /// one's resolution edge. Described rather than listed, because a list here goes stale silently every
+    /// time a condition is added and nothing checks it.
+    /// The monitoring store is not a SQL Server instance and is not in the monitored-server registry,
     /// so this string deliberately resolves to NOTHING: <c>DarlingServerResolver</c> cannot match it, and the
     /// deliverer's #1236 int.TryParse override no-ops on it exactly like the non-numeric <see cref="DiskKey"/>.
     ///
@@ -231,8 +424,194 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <c>get_collection_log</c> against an unresolvable server and rendered three resolver errors on every
     /// store alert. Renaming it must stay in step with <c>DarlingTriageEndpoint.IsFleetLevelStoreServer</c>,
     /// which is why both sides now read one symbol.</para>
+    ///
+    /// <para>Since #3500 this is the DEFAULT rather than the only spelling: an operator running several
+    /// stores can set <c>peers.storeName</c> and every fleet-level self-alert fires under that label instead,
+    /// through <see cref="EffectiveStoreLabel"/> and the <see cref="_storeLabel"/> field — the ONE seam every
+    /// fire site reads, pinned from source by the tests, so a thirteenth family cannot quietly hardcode this
+    /// constant back in. Unset stays byte-identical to before the field existed.</para>
     /// </summary>
     internal const string StoreServerLabel = "Monitor Store";
+
+    /// <summary>
+    /// Resolves the configured <c>peers.storeName</c> into the label the fleet-level self-alerts fire under
+    /// (#3500): the trimmed name when one is set, else <see cref="StoreServerLabel"/>. PURE and the ONLY
+    /// place the fallback decision lives, so the evaluator and any other consumer cannot answer it two ways.
+    /// A storeName spelled exactly as the constant resolves TO the constant — same bytes, same fingerprints,
+    /// no re-key — rather than being treated as an opt-in that changes nothing but the key shape.
+    /// </summary>
+    internal static string EffectiveStoreLabel(string? configuredStoreName)
+    {
+        var trimmed = (configuredStoreName ?? "").Trim();
+        return trimmed.Length == 0 || string.Equals(trimmed, StoreServerLabel, StringComparison.Ordinal)
+            ? StoreServerLabel
+            : trimmed;
+    }
+
+    /// <summary>
+    /// The label every fleet-level self-alert fires under — <see cref="StoreServerLabel"/> unless the
+    /// operator opted into <c>peers.storeName</c> (#3500). Resolved ONCE at construction because the peers
+    /// block is file-only and restart-only (unlike the hot-reloading store-backed knobs, whose seams are
+    /// <c>Func</c>s for that reason): a <c>Func</c> here would claim a liveness the config cannot deliver.
+    /// </summary>
+    private readonly string _storeLabel;
+
+    /// <summary>
+    /// The delivery identity key for one fleet-level self-alert family (#3500): the family key itself when
+    /// the label is the shipped constant, else the label prefixed on — <c>"dc1-monitor-01:store"</c>. The
+    /// serverKey is what the delivery fingerprint's no-incident fallback concatenates with the metric
+    /// (<c>WebhookAlertService.DerivePagerDutyDedupKey</c>: <c>{serverKey}:{metric}</c>), so WITHOUT this the
+    /// opted-in label would change every card while two stores' work items kept colliding on the identical
+    /// key — the exact half of #3500 that bites. The family key stays inside the qualified form because the
+    /// per-object families (retention, compression, job cadence) rely on it to keep per-object cooldowns and
+    /// history identities apart; only the LABEL is new. History storage is unaffected either way: every
+    /// non-numeric key already collapses into the write-only server_id 0 bucket (#3456), and the cooldown
+    /// seed already refuses to read it, so qualifying the key re-keys nothing but the fingerprint — which is
+    /// the re-key the operator accepted by setting the field.
+    /// </summary>
+    private string StoreKey(string familyKey) =>
+        _storeLabel == StoreServerLabel ? familyKey : _storeLabel + ":" + familyKey;
+
+    /* Custom-alert-rule health edge state (#3304). FLEET-level like disk pressure (the rules are a fleet
+       concept, not per-server), so a single fixed sentinel key. Standing condition (the AG-Sync-Fell-Behind /
+       Collection-Stopped idiom): active flag + cooldown re-fire while ANY custom rule is broken or never-firing,
+       one resolution when all rules are healthy again. The report itself is rebuilt each check by the
+       CustomAlertEvaluator; this evaluator only decides fire/hold/resolve and renders the (already-sanitized)
+       rule list. */
+    private readonly ConcurrentDictionary<string, bool> _activeCustomRuleHealth = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastCustomRuleHealthAlert = new();
+
+    /// <summary>The fixed key for the fleet-level custom-alert-rule-health edge (not a real server); non-numeric
+    /// so the deliverer's #1236 int.TryParse override no-ops on it exactly like <see cref="DiskKey"/>.</summary>
+    private const string CustomRuleHealthKey = "customalerts";
+
+    /// <summary>The alert metric name the custom-alert-rule-health self-alert fires under (#3304). A WEBHOOK
+    /// AUTOMATION KEY like its siblings, so it is a const and must stay stable across releases. Classified as a
+    /// count metric by <c>AlertMetricClassifier</c> (the value is the number of unhealthy rules).</summary>
+    internal const string CustomRuleHealthMetric = "Custom Alert Rules Unhealthy";
+
+    /// <summary>The resolution title recorded when every custom rule is healthy again. Carries a recognized
+    /// resolution suffix ("Recovered") so the shared <c>AlertMetricClassifier.IsResolution</c> styles it green.</summary>
+    internal const string CustomRuleHealthResolvedMetric = "Custom Alert Rules Recovered";
+
+    /// <summary>How many unhealthy rules the aggregated alert lists by name before eliding the rest — a pg_*
+    /// rename can break many rules at once, and the whole point is ONE bounded alert, not a wall of text.</summary>
+    private const int MaxListedUnhealthyRules = 20;
+
+    /* Stale mute-rule edge state (#3306). FLEET-level like custom-rule health (mute rules are a store-wide
+       concept, not per-server), so a single fixed sentinel key, and a STANDING condition: active flag +
+       cooldown re-fire while any mute rule is still suppressing without a bound, one resolution when none
+       is. The rule set is handed in by the worker from the live MuteRuleService cache — this evaluator only
+       decides fire/hold/resolve and renders the (sanitized) list. */
+    private readonly ConcurrentDictionary<string, bool> _activeStaleMute = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastStaleMuteAlert = new();
+
+    /// <summary>The fixed key for the fleet-level stale-mute edge (not a real server); non-numeric so the
+    /// deliverer's #1236 int.TryParse override no-ops on it exactly like <see cref="DiskKey"/>.</summary>
+    private const string StaleMuteKey = "mutestale";
+
+    /// <summary>The alert metric name the stale-mute self-alert fires under (#3306). A WEBHOOK AUTOMATION
+    /// KEY like its siblings, so it is a const and must stay stable across releases. Classified as a count
+    /// metric by <c>AlertMetricClassifier</c> (the value is the number of unbounded rules past the age).</summary>
+    internal const string StaleMuteMetric = "Stale Mute Rules";
+
+    /// <summary>The resolution title recorded when no unbounded mute rule is old enough to report any more —
+    /// every one of them was deleted, disabled, or given an expiry. Carries a recognized resolution suffix
+    /// ("Cleared") so the shared <c>AlertMetricClassifier.IsResolution</c> styles it green.</summary>
+    internal const string StaleMuteResolvedMetric = "Stale Mute Rules Cleared";
+
+    /// <summary>
+    /// How long a mute rule with NO expiry may be in force before this reports it (#3306).
+    ///
+    /// <para><b>Derived from the product's own expiry options, not picked.</b> The mute dialog offers
+    /// "1 hour", "24 hours", "7 days" and "Never" (<c>ViewerAppSettings.MuteRuleDefaultExpiration</c>), so
+    /// the last of those is the longest BOUND an operator could have chosen. A rule that has outlived it, with no
+    /// bound at all, has by the product's own standard outlasted every expiry it offered — which is a
+    /// different statement from a threshold someone liked the sound of. It also sits clear of the case this
+    /// must not report: a mute made deliberately this morning to stop a flood while a fix ships, whose
+    /// author is still watching it.</para>
+    ///
+    /// <para><b>Why not read <c>MuteRuleDefaultExpiration</c> itself.</b> It is a VIEWER app setting — a
+    /// per-install UI preference that prefills a dialog — and it is not in <c>config_alert_settings</c>, so
+    /// the headless service does not have it and could not honor a change to it. A compile-time constant
+    /// rather than a store-backed knob because a knob needs a migration rung, and it belongs in the control
+    /// plane the next time one is going in anyway. The Retention Held tiers are the worked example of that
+    /// step being taken (#3297, V119); this one is still outstanding.</para>
+    /// </summary>
+    internal static readonly TimeSpan StaleMuteAge = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// How long this condition waits before re-stating itself while a stale rule is still there — its OWN
+    /// interval, and the only condition in this class that does not re-fire on the shared alert cooldown.
+    ///
+    /// <para><b>Because the fact changes on a scale of DAYS.</b> Every sibling re-fires on
+    /// <c>IAlertEngineSettings.CooldownMinutes</c> (shipped default 5, clamped to at most 120), which is a
+    /// reasonable standing reminder for an episodic condition. This one's subject is a rule's CREATION DATE
+    /// measured against a seven-day bound: it is identical on every sweep and changes only when an operator
+    /// edits a rule. On the shipped defaults the shared cooldown gives a history row every five minutes and
+    /// a notification every fifteen, forever, about that — which is the channel flood a permanent mute rule
+    /// is usually created to prevent, arriving from the thing that reports the mute.</para>
+    ///
+    /// <para><b>It stayed daily when the mute arrived (#3348), on reasoning that never rested on being
+    /// unsuppressible.</b> The interval was first chosen while this alert could not be silenced at all, so
+    /// the obvious reading is that an off switch makes the shared cooldown safe again. It does not, for two
+    /// reasons independent of suppressibility. The timescale argument above is one. The other is that a
+    /// five-minute cadence would make the explicit mute the only survivable configuration: the single way to
+    /// quiet it would be to mute it permanently, so the cadence would manufacture exactly the blind spot the
+    /// condition exists to report. Daily keeps the alert livable WITHOUT the mute, which is what leaves the
+    /// mute a real choice rather than a forced one.</para>
+    ///
+    /// <para>Daily: unmistakable as a standing reminder, and bounded at one a day. It cannot be configured
+    /// for the <see cref="StaleMuteAge"/> reason — a knob needs a migration rung this change is not taking.
+    /// The alert cooldown's own ceiling is two hours, so this dominates it under every setting rather than
+    /// only under the default, and there is no configuration in which the two disagree about which wins.</para>
+    /// </summary>
+    internal static readonly TimeSpan StaleMuteRefire = TimeSpan.FromDays(1);
+
+    /// <summary>How many stale rules the aggregated alert lists before eliding the rest, on
+    /// <see cref="MaxListedUnhealthyRules"/>' reasoning — one bounded alert, not a wall of text.</summary>
+    private const int MaxListedStaleMuteRules = 20;
+
+    /* -------- web dashboard TLS certificate expiry (#3514) -------- */
+
+    /// <summary>The fixed fleet-level key for the web-dashboard TLS certificate expiry edge (not a real
+    /// server); non-numeric so the deliverer's #1236 int.TryParse no-ops on it, like <see cref="StaleMuteKey"/>.</summary>
+    private const string WebTlsCertKey = "webtlscert";
+
+    private readonly ConcurrentDictionary<string, bool> _activeWebTlsCert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastWebTlsCertAlert = new();
+
+    /// <summary>The metric the web-dashboard TLS certificate expiry self-alert fires under (#3514). A WEBHOOK
+    /// AUTOMATION KEY like its siblings — a const, stable across releases. State-only in the numeric columns:
+    /// an expiry is a DATE, an identity rather than a quantity (the <see cref="StoreUpgradeMetric"/> precedent),
+    /// so the human-readable expiry rides the text and no measurement column turns negative the day it matters.</summary>
+    internal const string WebTlsCertExpiryMetric = "Web TLS Certificate Expiring";
+
+    /// <summary>The resolution title recorded when the served certificate is healthy again — renewed past the
+    /// warning window, or TLS no longer configured. Carries a recognized resolution suffix ("Renewed") so
+    /// <c>AlertMetricClassifier.IsResolution</c> styles it green.</summary>
+    internal const string WebTlsCertRenewedMetric = "Web TLS Certificate Renewed";
+
+    /// <summary>How long before expiry this begins to warn — the SAME window the web host's startup log uses
+    /// (<see cref="Hosting.DarlingWebTls.ExpiryWarningDays"/>), so the two surfaces agree to the day and a
+    /// reader who saw the startup line sees the same threshold here.</summary>
+    internal static readonly TimeSpan WebTlsCertWarnWindow = TimeSpan.FromDays(Hosting.DarlingWebTls.ExpiryWarningDays);
+
+    /// <summary>How long this condition waits before re-stating itself while the certificate is still inside
+    /// the warning window — its OWN daily interval, for the <see cref="StaleMuteRefire"/> reason: the fact is a
+    /// fixed expiry date measured against the clock, identical every sweep, so the shared 5-to-120-minute
+    /// cooldown would flood the channel about a date that changes only when the operator renews. Daily
+    /// dominates the cooldown's two-hour ceiling under every setting.</summary>
+    internal static readonly TimeSpan WebTlsCertRefire = TimeSpan.FromDays(1);
+
+    /// <summary>Length cap for one stale rule's operator-authored reason in the alert detail. Generous
+    /// enough to carry a real sentence, bounded so <see cref="MaxListedStaleMuteRules"/> lines cannot grow
+    /// the body without limit.</summary>
+    private const int MaxStaleMuteReasonLength = 160;
+
+    /// <summary>Length cap for one stale rule's rendered <c>MuteRule.Summary</c>. Also operator-authored in
+    /// part — its pattern fields are free text — so it is sanitized and capped like the reason.</summary>
+    private const int MaxStaleMuteSummaryLength = 160;
 
     /* Compression-job self-heal edge state (#1581). FLEET-level like disk pressure (one shared store), but
        MULTI-keyed by job_id (a store has many compression policy jobs). The state is the re-arm-once/escalate
@@ -282,26 +661,34 @@ internal sealed class DarlingSelfAlertEvaluator
     private const string RetentionHoldKeyPrefix = "retentionhold:";
 
     /// <summary>
-    /// #2813 WARNING tier: how many times its own configured horizon a HELD tier must be holding before the
-    /// hold has cost enough to say so.
+    /// #2813 WARNING tier, SHIPPED DEFAULT — how many times its own configured horizon a HELD tier must be
+    /// holding before the hold has cost enough to say so.
     ///
-    /// <para>Bounded on BOTH sides rather than picked. <b>Below</b>, retention drops whole CHUNKS, so a
-    /// 4-day policy with 1-day chunks legitimately holds ~5 days (1.25x) while working perfectly; 2.0x sits
-    /// clear of that floor with margin, so normal chunk granularity can never reach it. <b>Above</b>, the
-    /// production incident this comes from sat at 4.5x (18 days under a 4-day policy) after 16 days — 2.0x
-    /// on that tier is ~8 days, so the alert arrives about a week in, while the cost is still recoverable
-    /// and long before the 16 days it actually went unnoticed.</para>
+    /// <para>#3297 moved the live value into <c>config_alert_settings.retention_hold_warn_ratio</c> (V119),
+    /// so this is the seed and the unsupplied-seam fallback, not what the check reads: the decision reads
+    /// <see cref="_retentionHoldWarnRatio"/>. Field-reported on #3296 — the operator received an hourly
+    /// CRITICAL and found nothing in Settings matching "Retention Held" or "Monitor Store".</para>
     ///
-    /// <para>A compile-time constant rather than a store-backed knob like its #2136 sibling
-    /// (<c>config_alert_settings</c>, V57) only because that would need a migration rung this change is
-    /// deliberately not taking. It belongs in the control plane the next time a rung is going in anyway.</para>
+    /// <para>Taken from <see cref="TimescaleSupport.RetentionHoldWarnRatioDefault"/> rather than restated,
+    /// where the measurement that bounds it on both sides lives — including the correction that healthy
+    /// chunk granularity reaches <b>1.4x</b> in production, not the ~1.25x the arithmetic predicts.</para>
     /// </summary>
-    internal const double RetentionHoldWarnRatio = 2.0;
+    internal const double RetentionHoldWarnRatio = TimescaleSupport.RetentionHoldWarnRatioDefault;
 
-    /// <summary>#2813 CRITICAL tier: double the warning ratio. A tier at four times its intended depth is
-    /// no longer drifting, it is the dominant and still-compounding contributor to store size — the
-    /// motivating incident (4.5x) reads CRITICAL, which is the point.</summary>
-    internal const double RetentionHoldCriticalRatio = 4.0;
+    /// <summary>#2813 CRITICAL tier, SHIPPED DEFAULT: double the warning ratio, and store-backed since V119
+    /// for its sibling's reason. The live value is <see cref="_retentionHoldCriticalRatio"/>.</summary>
+    internal const double RetentionHoldCriticalRatio = TimescaleSupport.RetentionHoldCriticalRatioDefault;
+
+    /// <summary>#3297: the Retention Held WARNING tier, read live through the same by-reference settings seam
+    /// as the AG thresholds and the #2136 cadence knob (the clamp lives on <c>DarlingAlertSettings</c>).
+    /// Every retention-hold decision AND every threshold this check states back to the operator goes through
+    /// these two seams — a bare <see cref="RetentionHoldWarnRatio"/> in the fire path would judge on the
+    /// shipped default while <c>get_alert_settings</c> reported the store's, and a bare one in the message
+    /// would name a threshold the engine is not using.</summary>
+    private readonly Func<double> _retentionHoldWarnRatio;
+
+    /// <summary>#3297: the Retention Held CRITICAL tier, read live like its warning sibling.</summary>
+    private readonly Func<double> _retentionHoldCriticalRatio;
 
     /// <summary>#2136: the Warning tier's percent-of-cadence threshold, read live through the same
     /// by-reference settings seam as the AG thresholds (the clamp lives on DarlingAlertSettings).
@@ -376,7 +763,10 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<long>? agRedoQueueAlertKb = null,
         Func<int>? agDisconnectRefireMinutes = null,
         Func<int>? storeJobCadenceWarnPercent = null,
-        AlertReadFailureCounter? readFailures = null)
+        Func<double>? retentionHoldWarnRatio = null,
+        Func<double>? retentionHoldCriticalRatio = null,
+        AlertReadFailureCounter? readFailures = null,
+        string? storeName = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
@@ -399,7 +789,18 @@ internal sealed class DarlingSelfAlertEvaluator
            grid would leave behind, and this one would fire past the slot silently. */
         _storeJobCadenceWarnPercent =
             storeJobCadenceWarnPercent ?? (() => TimescaleSupport.RefreshSlotPercentOfHourlyCadence);
+        /* #3297: unsupplied falls back to the V119 column defaults, so an evaluator built without the seams
+           behaves like a store at its shipped defaults — the AG-seam discipline, and taken from the shared
+           constants rather than restated for the #3060 reason the cadence fallback above gives. */
+        _retentionHoldWarnRatio =
+            retentionHoldWarnRatio ?? (() => TimescaleSupport.RetentionHoldWarnRatioDefault);
+        _retentionHoldCriticalRatio =
+            retentionHoldCriticalRatio ?? (() => TimescaleSupport.RetentionHoldCriticalRatioDefault);
         _readFailures = readFailures;
+        /* #3500: unsupplied (or blank) falls back to the shipped constant, so an evaluator built without the
+           seam behaves like a store that never opted in — the AG-seam discipline, and the byte-identical
+           promise the opt-in stands on. */
+        _storeLabel = EffectiveStoreLabel(storeName);
     }
 
     /// <summary>
@@ -721,17 +1122,33 @@ internal sealed class DarlingSelfAlertEvaluator
     /// slower rather than the target, and the fired alert says so — see
     /// <see cref="CostIsNotAllTargetSide"/>, which exists because this doc and that text have to agree.</para>
     /// Called once per cycle from the worker's hourly store-metrics tick, AFTER the flush that writes the
-    /// latest hour. Testable directly with a recording deliverer + a controllable clock.
+    /// latest hour. Gated on the master alerts switch before the first store read (#3464). Testable
+    /// directly with a recording deliverer + a controllable clock.
     /// </summary>
     public async Task EvaluateCollectorCostAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
+        /* #3464: the master-switch gate, up front and before the first store read — the shape
+           EvaluateStoreAlertsAsync established ("mirrors the engine's early return"). This method had NO
+           consult ahead of the paging apply: the only AlertsEnabled on this path guarded the digest branch
+           below, which runs AFTER ApplyCostRegressionsAsync, so the one self-alert family that pages
+           fleet-wide was also the one that delivered 60 minutes into a fleet-wide mute while the engine
+           sweep's server_alert_passes counters sat frozen. Master-off here means what it means for the
+           engine: nothing is read, nothing is evaluated, nothing is recorded, and the fire/resolve state
+           freezes where it stands — the regressions are a property of stored rows, so re-enabling resumes
+           from the same answer the store would have given all along. */
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
         List<Mcp.DarlingCollectorCostReader.CostRegression> regressions;
         var readClock = Stopwatch.StartNew();
         try
         {
             regressions = await Mcp.DarlingCollectorCostReader.GetCostRegressionsAsync(
                 postgres, _utcNow() - CostRegressionBaselineWindow,
-                CostRegressionBaselineFloorMs, CostRegressionFactor, cancellationToken);
+                CostRegressionBaselineFloorMs, CostRegressionFactor, CostRegressionAddedMsFloor,
+                cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -741,15 +1158,80 @@ internal sealed class DarlingSelfAlertEvaluator
             return;
         }
 
-        await ApplyCostRegressionsAsync(regressions, cancellationToken);
+        /* #3443: the fan-out denominator — how many servers each collector actually ran on. This is
+           get_collector_cost's OWN ranked read (GetTopAsync), not a private query, so the digest's census
+           and the routing denominator are the same numbers the MCP surface serves and cannot disagree with
+           it. One aggregate over 24 hours of an hourly table. */
+        List<Mcp.DarlingCollectorCostReader.CollectorCostSummaryRow> census;
+        var censusClock = Stopwatch.StartNew();
+        try
+        {
+            census = await Mcp.DarlingCollectorCostReader.GetTopAsync(
+                postgres, _utcNow() - CollectorCostDenominatorWindow, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Without the denominator there is no routing decision to make, so this tick does NOTHING
+               rather than guessing. Falling back to "route everything to the page" would reinstate the
+               delivery this change exists to end; falling back to "route nothing" would fire a spurious
+               resolution for every pair that was paging. Skipping keeps _activeCostRegression and every
+               interval untouched, and the regressions are a property of stored rows rather than of this
+               moment — the next tick reads the same answer. */
+            _logger?.LogDebug(ex, "collector-cost census read failed after {ElapsedMs} ms", censusClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "collector-cost census self-alert", censusClock.ElapsedMilliseconds);
+            return;
+        }
+
+        var routing = RouteCostRegressions(regressions, census);
+        await ApplyCostRegressionsAsync(routing.Paging, cancellationToken);
+
+        /* The digest's own interval, checked here so 23 of every 24 hourly ticks do no extra store work.
+           The master switch already returned above, before the first store read (#3464); AlertsEnabled is
+           ALSO checked inside the apply, like every sibling, so a direct caller cannot skip it. */
+        if (_lastCostDigest.TryGetValue(CollectorCostDigestKey, out var lastDigest)
+            && _utcNow() - lastDigest < CollectorCostDigestInterval)
+        {
+            return;
+        }
+
+        List<Mcp.DarlingCollectorCostReader.CostMover> movers;
+        var moverClock = Stopwatch.StartNew();
+        try
+        {
+            movers = await Mcp.DarlingCollectorCostReader.GetCostMoversAsync(
+                postgres, _utcNow() - CostRegressionBaselineWindow, CostRegressionAddedMsFloor,
+                MaxListedCostMovers, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "collector-cost digest read failed after {ElapsedMs} ms", moverClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "collector-cost digest self-alert", moverClock.ElapsedMilliseconds);
+            return;
+        }
+
+        await ApplyCollectorCostDigestAsync(movers, census, cancellationToken);
     }
 
     /// <summary>The apply half of <see cref="EvaluateCollectorCostAsync"/>, split out so the fire-once /
     /// re-fire / resolve lifecycle is unit-testable with a recording deliverer and a controllable clock,
-    /// with the regression set fabricated rather than read from a store.</summary>
+    /// with the regression set fabricated rather than read from a store. Gated on the master alerts
+    /// switch, like every sibling apply (#3464 — this was the one that was not).</summary>
     internal async Task ApplyCostRegressionsAsync(
         IReadOnlyList<Mcp.DarlingCollectorCostReader.CostRegression> regressions, CancellationToken cancellationToken)
     {
+        /* #3464: the consult this apply never had, and the measured half of that issue: with
+           alerts_enabled read back false on both SQL Server stores, a Collector Cost Regression reached
+           the live paging channel an hour into the mute, because every sibling apply gates here and this
+           one delivered through FireAsync with no master consult anywhere between the hourly tick and the
+           channel. The gate is the sibling shape — no evaluation, no history rows, cooldown and
+           active-edge state frozen — rather than the connection edge's track-always split, because unlike
+           a connection edge there is no cross-sweep state machine here to corrupt: the fire/resolve edge
+           is rebuilt from stored rows the moment the switch comes back on. */
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
         var now = _utcNow();
         var current = new HashSet<string>(StringComparer.Ordinal);
 
@@ -773,21 +1255,35 @@ internal sealed class DarlingSelfAlertEvaluator
                 var ratio = regression.BaselineMsPerRun > 0
                     ? regression.LatestMsPerRun / regression.BaselineMsPerRun
                     : 0;
+                var threshold = regression.ThresholdMsPerRun(CostRegressionFactor);
                 await FireAsync(
                     key, regression.ServerName, "Collector Cost Regression",
                     currentValue: $"{regression.LatestMsPerRun:N1} ms/run",
-                    thresholdValue: $"{regression.BaselineMsPerRun:N1} ms/run baseline x {CostRegressionFactor:N1}",
+                    /* #3441's rule extended by #3462: the reported threshold is the one that actually selected
+                       the row, and since #3462 that is a conjunction in two units — the per-run bound AND the
+                       added-cost-per-day floor — so both are stated, or a reader falsifying the arithmetic
+                       would reconstruct a looser predicate than the one that fired. */
+                    thresholdValue: $"{threshold:N1} ms/run (the greater of its {regression.BaselineMsPerRun:N1} ms/run mean " +
+                        $"and its {regression.BaselineP95MsPerRun:N1} ms/run daily p95, x {CostRegressionFactor:N1}), " +
+                        $"worth at least {CostRegressionAddedMsFloor / 1000.0:N0} s/day of added collection time",
                     detail: $"The '{regression.CollectorName}' collector's OWN query time on {regression.ServerName} rose to " +
                         $"{regression.LatestMsPerRun:N1} ms per run, {ratio:N1}x its {CostRegressionBaselineWindow.TotalDays:N0}-day " +
                         $"baseline of {regression.BaselineMsPerRun:N1} ms per run ({regression.LatestRuns:N0} runs totalling " +
-                        $"{regression.LatestMs:N0} ms so far today). This is the MONITORING TOOL's own cost, not the " +
+                        $"{regression.LatestMs:N0} ms so far today, adding {regression.AddedMsPerDay / 1000.0:N1} s of collection " +
+                        $"time a day at that volume - a regression is reported only when that added cost reaches " +
+                        $"{CostRegressionAddedMsFloor / 1000.0:N0} s/day, the materiality floor both delivery surfaces share, so this " +
+                        $"is not a few hundred milliseconds of nothing (#3462)). It also cleared {threshold:N1} ms per run, the factor on the HIGHER of " +
+                        $"that mean and the p95 of its OWN daily per-run cost over the window " +
+                        $"({regression.BaselineP95MsPerRun:N1} ms) - so this is not the collector's own upper mode on a " +
+                        $"normal slow day (#3440). " +
+                        $"This is the MONITORING TOOL's own cost, not the " +
                         $"server's workload - each individual run is costing more than it used to. Measured PER RUN (#2846) so " +
                         $"a cadence change cannot read as a cost change. get_collector_cost with " +
                         $"collector_name={regression.CollectorName} shows the trend. {CostIsNotAllTargetSide}",
                     severity: AlertSeverityLevel.Warning,
                     shortMessage: $"{regression.CollectorName} collection cost on {regression.ServerName} is {ratio:N1}x its per-run baseline",
                     numericCurrentValue: regression.LatestMsPerRun,
-                    numericThresholdValue: regression.BaselineMsPerRun * CostRegressionFactor,
+                    numericThresholdValue: threshold,
                     cancellationToken);
             }
         }
@@ -803,10 +1299,854 @@ internal sealed class DarlingSelfAlertEvaluator
                 var collector = parts.Length == 3 ? parts[2] : key;
                 await RecordResolutionAsync(new AlertResolution(
                     key, serverName, "Collector Cost Regression",
-                    "Cost Regression Cleared", $"{serverName}: {collector} collection cost is back within its baseline"), cancellationToken);
+                    "Cost Regression Cleared",
+                    $"{serverName}: {collector} collection cost is no longer rising on a majority of the servers it runs on"),
+                    cancellationToken);
             }
         }
     }
+
+    /// <summary>
+    /// #3443: which of the regressions the predicate selected reach the PAGING channel, and which are
+    /// reported by <see cref="CollectorCostDigestMetric"/> instead. PURE — no clock, no I/O — so the routing
+    /// is pinnable without a host, and it decides nothing about detection: every row in
+    /// <paramref name="regressions"/> appears in one of the two lists.
+    ///
+    /// <para><b>Why the channel and not the threshold.</b> This condition has needed two successive gates to
+    /// stop it reporting things nobody can act on — #3316's materiality floor and #3440's dispersion bound —
+    /// and both are correct fixes to real defects. Neither changes what the surviving message asks a reader
+    /// to do. Take the firing that produced #3440 at its best, with #3440 shipped and the ratio genuinely
+    /// meaningful: a once-daily collector cost 11.1 extra seconds today, on the monitoring tool's own
+    /// overhead, against a 60,000 ms sweep budget. (#3462's recalibrated floor now screens that particular
+    /// magnitude before routing ever sees it; the argument stands at any magnitude the floor admits —
+    /// 21.8 s/day, the smallest real catch #3316 measured, clears it and still needs nothing before
+    /// morning.) Nothing is degraded, no data is lost, no monitored server
+    /// is affected, and nothing needs doing before morning. That is a report. The one cost shape that is
+    /// both real and urgent is a different quantity — the same collector rising across the fleet at once,
+    /// which is a deployment or a store-side change rather than one server's slow day — and that is what
+    /// <see cref="CostRegressionFleetWideMinServers"/> and the majority rule select.</para>
+    ///
+    /// <para><b>The demotion fails toward the REPORT, deliberately, which is the opposite of this
+    /// product's usual direction.</b> Delivery decisions elsewhere (#3430's budget) resolve every
+    /// uncertainty to "post", because the cost of failing that way is one extra message and the cost of
+    /// failing the other way is an unannounced incident. Here an unannounced finding is impossible: a
+    /// collector missing from <paramref name="census"/> — so its denominator is unknown — still appears in
+    /// the digest, in full, with more context than the alert card carried. #3462's floor on the digest does
+    /// not narrow that guarantee: the movers read gates on the SAME constant this predicate does, and the
+    /// regression's added cost IS the mover's magnitude, so every row this routing ever receives is material
+    /// by construction and stays digest-visible. So the safe direction is the
+    /// quiet one, and it is safe only BECAUSE the report exists. If the digest were ever removed this rule
+    /// would have to invert.</para>
+    ///
+    /// <para><b>Nothing is aggregated away on the paging side.</b> A fleet-wide regression still fires
+    /// per (server, collector), carrying every figure the predicate computed for that pair, because #1154's
+    /// rule is that a never-announced incident must not be swallowed by a key shared with another server and
+    /// #3430's budget already folds the RE-tellings into one carrier plus a roster. A page that named the
+    /// collector once and summarised the servers would have had to decide which pair's numbers to show.</para>
+    /// </summary>
+    /// <param name="regressions">Everything the regression predicate selected this tick.</param>
+    /// <param name="census">
+    /// The fan-out denominator: <c>get_collector_cost</c>'s own ranked read over
+    /// <see cref="CollectorCostDenominatorWindow"/>, whose <c>ServerCount</c> is how many servers each
+    /// collector ran on. A collector absent from it has no denominator and is report-only.
+    /// </param>
+    internal static CostRegressionRouting RouteCostRegressions(
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CostRegression> regressions,
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CollectorCostSummaryRow> census)
+    {
+        var paging = new List<Mcp.DarlingCollectorCostReader.CostRegression>();
+        var reportOnly = new List<Mcp.DarlingCollectorCostReader.CostRegression>();
+
+        /* Distinct SERVERS per collector, not row count: the predicate returns one row per
+           (server, collector), but counting rows would let a duplicated row inflate a fan-out. */
+        var regressedServers = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
+        foreach (var regression in regressions)
+        {
+            if (!regressedServers.TryGetValue(regression.CollectorName, out var servers))
+            {
+                servers = new HashSet<int>();
+                regressedServers[regression.CollectorName] = servers;
+            }
+
+            servers.Add(regression.ServerId);
+        }
+
+        var collectedServers = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var row in census)
+        {
+            /* Highest wins on a duplicated collector name, so a duplicate cannot shrink a denominator and
+               make the majority rule easier to satisfy. */
+            if (!collectedServers.TryGetValue(row.CollectorName, out var existing) || row.ServerCount > existing)
+            {
+                collectedServers[row.CollectorName] = row.ServerCount;
+            }
+        }
+
+        foreach (var regression in regressions)
+        {
+            var regressed = regressedServers[regression.CollectorName].Count;
+
+            /* A collector absent from the census has no denominator, and "unknown" must not read as a
+               fleet of ZERO: zero satisfies the majority comparison for any numerator at all, so folding
+               the miss into a default of 0 pages exactly the pair with the least evidence behind it. The
+               TryGetValue is therefore part of the condition — no denominator, no majority claim, and the
+               pair goes to the digest in full (the fail-toward-the-report direction the remarks argue). */
+            if (collectedServers.TryGetValue(regression.CollectorName, out var collected)
+                && regressed >= CostRegressionFleetWideMinServers
+                && regressed * 2 > collected)
+            {
+                paging.Add(regression);
+            }
+            else
+            {
+                reportOnly.Add(regression);
+            }
+        }
+
+        return new CostRegressionRouting(paging, reportOnly);
+    }
+
+    /// <summary>
+    /// Where each selected regression goes (#3443). One value carrying the whole answer so a caller cannot
+    /// read one list and silently drop the other, and so the invariant that matters — every input row is in
+    /// exactly one of the two — is assertable on a single return.
+    /// </summary>
+    internal readonly record struct CostRegressionRouting(
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CostRegression> Paging,
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CostRegression> ReportOnly);
+
+    /// <summary>
+    /// FLEET-level (#3443): the collector-cost DIGEST — one message, once per
+    /// <see cref="CollectorCostDigestInterval"/>, carrying every (server, collector) pair whose per-run cost
+    /// moved MATERIALLY against its own baseline in either direction (#3462 — the movers read shares
+    /// <see cref="CostRegressionAddedMsFloor"/> with the paging predicate, on the move's magnitude), ranked
+    /// by the collection time the move adds or removes per day, plus the heaviest collectors over the same
+    /// window, which carry no floor at all — expensive-without-moving is that section's whole catch (#2862).
+    ///
+    /// <para><b>It is a report, and the product says so in the only tier it has for saying it.</b> Fired
+    /// with no severity, which routes <see cref="AlertSeverity.ForMetric"/> to the per-metric map, where
+    /// this metric has an explicit INFO arm: badge INFO, blue, in email and in all four webhook shapes. That
+    /// arm is DECLARED rather than a fall-through on purpose — an unmapped metric renders INFO-blue too, and
+    /// the #1136/#2090 work was a sweep to eliminate exactly that accident, so a digest relying on the
+    /// accident would be "fixed" into a WARNING by the next such sweep.</para>
+    ///
+    /// <para><b>No resolution edge, unlike every sibling.</b> Retention Held, Store Disk Pressure, Stale
+    /// Mute Rules and the rest are CONDITIONS: they are entered and left, so a recovery row closes the audit
+    /// loop. A digest is a measurement of a period. There is no state to leave and nothing to announce the
+    /// clearing of, so it has no active flag and writes no "Cleared" row — which is also why the 302
+    /// <c>Cost Regression Cleared</c> rows the demoted half produced over 8 days on one store simply stop
+    /// existing rather than moving somewhere.</para>
+    ///
+    /// <para><b>Empty sends nothing.</b> A digest whose two sections are both empty is a message that says a
+    /// read returned no rows, which is the channel noise this issue is about. The store had no eligible
+    /// pairs and no collector cost at all in the window, and that is <c>get_collection_health</c>'s
+    /// question, not this one's.</para>
+    ///
+    /// <para>Muted through the shared seam like its siblings — <see cref="StaleMuteMetric"/> is the one
+    /// condition that decides its own mute, and for a reason (it reports mutes) that does not apply
+    /// here. Internal so it pins directly with a recording deliverer and a controllable clock.</para>
+    /// </summary>
+    internal async Task ApplyCollectorCostDigestAsync(
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CostMover> movers,
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CollectorCostSummaryRow> census,
+        CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (_lastCostDigest.TryGetValue(CollectorCostDigestKey, out var lastSent)
+            && now - lastSent < CollectorCostDigestInterval)
+        {
+            return;
+        }
+
+        if (movers.Count == 0 && census.Count == 0)
+        {
+            return;
+        }
+
+        _lastCostDigest[CollectorCostDigestKey] = now;
+        var (shortMessage, detail) = RenderCollectorCostDigest(movers, census);
+
+        await FireAsync(
+            StoreKey(CollectorCostDigestKey), _storeLabel, CollectorCostDigestMetric,
+            currentValue: movers.Count.ToString(CultureInfo.InvariantCulture),
+            /* There is no threshold. Saying so in the string is the point of the string: this surface
+               exists because the same figures under a threshold could not be judged from a card. The
+               numeric below is the 0 the NOT NULL column demands. */
+            thresholdValue: "no threshold (report)",
+            detail: detail,
+            /* No override: the per-metric map's declared INFO arm decides. See the remarks. */
+            severity: null,
+            shortMessage: shortMessage,
+            /* A genuine whole number — the count of movers listed (AlertMetricClassifier renders it as a
+               count, the Stale Mute Rules shape). */
+            numericCurrentValue: movers.Count,
+            numericThresholdValue: 0,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Renders the digest (#3443). PURE and static, so the DOCUMENT a human reads is assertable — a pin over
+    /// this output can check that the figures on one line reconcile with each other, which a pin over the
+    /// producer's fields one at a time cannot see.
+    ///
+    /// <para><b>Every figure a reader needs to judge the move is on the line, and the product judges
+    /// one thing only: that the move was worth listing at all (#3462).</b> Latest cost per run, the run-weighted baseline, the ratio between them, the p95 and
+    /// the worst single day of the baseline's own per-run costs, how many runs the latest figure averages,
+    /// the worst single run in it, and the signed seconds per day the move is worth. The dispersion pair is
+    /// what makes the ratio judgeable: a collector whose own worst prior day was 17,935 ms/run is not
+    /// remarkable at 17,548 today, and nothing but those two numbers side by side says so.</para>
+    ///
+    /// <para><b>The heaviest-first census is load-bearing, not decoration.</b> A ranking by MOVEMENT cannot
+    /// surface a collector that is expensive without being newly expensive, and that is how the most
+    /// expensive collector this product has ever had was actually found (#2862: <c>procedure_stats</c> at
+    /// 98.1M ms/day over 17,869 runs, 5,490 ms/run, which was noticed by reading a cost ranking rather than
+    /// by any alert). A digest that could not surface it would have lost the better of this metric's two
+    /// real catches.</para>
+    ///
+    /// <para><b>Summary statistics over the window rather than a per-day series.</b> Twenty movers times a
+    /// week of daily figures is a wall of numbers in a channel message; the p95, the worst day and the
+    /// baseline day count are that week, compressed, and the closing line names
+    /// <c>get_collector_cost</c> as where the series itself lives.</para>
+    /// </summary>
+    private static (string ShortMessage, string Detail) RenderCollectorCostDigest(
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CostMover> movers,
+        IReadOnlyList<Mcp.DarlingCollectorCostReader.CollectorCostSummaryRow> census)
+    {
+        /* Read off the rows rather than recomputed: every row of one read carries the same denominator, and
+           a digest that states "N of M" has to take the M from the answer the N came out of. */
+        var eligible = movers.Count == 0 ? 0 : movers[0].EligiblePairs;
+        var shortMessage = string.Create(CultureInfo.InvariantCulture,
+            $"Collector cost digest: {movers.Count} of {eligible} (server, collector) pairs moved materially against their own baseline");
+
+        var sb = new StringBuilder();
+        sb.Append(shortMessage).Append('.');
+        sb.Append(string.Create(CultureInfo.InvariantCulture,
+            $" This is a REPORT, not an incident: it is the monitoring tool's own query time on the monitored"
+            + $" servers, nothing here is degraded, no data is lost and nothing needs doing before morning."
+            + $" Ranked by the collection time each move adds or removes per day, so a stable heavy collector"
+            + $" sorts low and a cheap one that moved on high volume sorts high. Only moves worth at least"
+            + $" {CostRegressionAddedMsFloor / 1000.0:N0} s/day in either direction are listed - the same materiality floor the paging"
+            + $" condition applies, inherited from the metric so a few hundred milliseconds of movement is not"
+            + $" restated here as news (#3462) - but there is no ratio factor and no dispersion bound: the"
+            + $" baseline's own p95 and worst day are on every line for the reader to judge. A NEGATIVE figure"
+            + $" is a collector that got CHEAPER, which the paging condition cannot report at all."));
+
+        if (movers.Count > 0)
+        {
+            sb.Append("\nMoved most (per-run cost against its own ")
+              .Append(movers[0].BaselineDays.ToString(CultureInfo.InvariantCulture))
+              .Append("-day baseline where stated):");
+        }
+
+        foreach (var mover in movers)
+        {
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n- {mover.CollectorName} on {mover.ServerName}: {mover.LatestMsPerRun:N1} ms/run vs a"
+                + $" {mover.BaselineMsPerRun:N1} ms/run baseline ({mover.Ratio:N2}x) over {mover.BaselineDays:N0} prior days"
+                + $" whose own p95 was {mover.BaselineP95MsPerRun:N1} ms/run and worst day {mover.BaselineWorstDayMsPerRun:N1} ms/run;"
+                + $" {mover.LatestRuns:N0} runs, worst single run {mover.LatestWorstMs:N0} ms"
+                + $" -> {mover.AddedMsPerDay / 1000.0:+0.0;-0.0;0.0} s/day"));
+        }
+
+        if (census.Count > 0)
+        {
+            /* The census is the routing denominator's read reused (GetTopAsync over
+               CollectorCostDenominatorWindow), NOT the movers' 14-day baseline — so the header names the
+               trailing 24 hours rather than claiming "the same window" as the section above it, which
+               told the reader the two rankings shared a baseline they do not (#3448 review). The figure
+               is spelled from the constant so the words cannot drift from the read. */
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\nHeaviest collectors over the trailing {CollectorCostDenominatorWindow.TotalHours:N0} hours,"
+                + $" every server together - a collector can be expensive without having moved, and a movement"
+                + $" ranking cannot see that (#2862):"));
+        }
+
+        var listed = 0;
+        foreach (var row in census)
+        {
+            if (listed >= MaxListedCostHeaviest)
+            {
+                break;
+            }
+
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n= {row.CollectorName}: {row.TotalSqlMs:N0} ms over {row.RunCount:N0} runs on {row.ServerCount:N0} servers"
+                + $" ({row.AvgSqlMs:N0} ms/run, worst single run {row.MaxSqlMs:N0} ms)"));
+            listed++;
+        }
+
+        var remaining = census.Count - listed;
+        if (remaining > 0)
+        {
+            sb.Append("\n+ ").Append(remaining.ToString(CultureInfo.InvariantCulture))
+              .Append(" more collectors (see get_collector_cost).");
+        }
+
+        sb.Append(
+            "\nThe figures are summary statistics over the window, not a per-day series - get_collector_cost"
+            + " with a collector_name is where the series lives, and get_collection_health is where a"
+            + " collector's runs, failures and abandonment rate live. ");
+        sb.Append(CostIsNotAllTargetSide);
+
+        return (shortMessage, sb.ToString());
+    }
+
+    /* ------------------------- #3466 lane 4: the fleet sweep's daily rollup ------------------------- */
+
+    /// <summary>
+    /// FLEET-level (#3466 lane 4): the fleet sweep's DAILY CHANNEL ROLLUP - one message, at most once per
+    /// <see cref="FleetSweepRollupInterval"/>, summarizing the trailing day of sweeps: the band transitions,
+    /// the watch items that opened and closed, the sweeps that could not prove their instruments, and -
+    /// whenever any covered sweep ran under the alert master switch - the would-have-paged ledger those
+    /// sweeps carried, rendered explicitly so the operator sees what the silence cost. The digest machinery
+    /// reused whole (#3448's publish leg, per the spec): the same daily-interval dedup, the same
+    /// empty-sends-nothing gate, the same declared INFO arm, the same shared mute seam, the same funnel.
+    ///
+    /// <para><b>Gated on the master switch up front, before the first store read (#3464)</b> - and here the
+    /// gate IS the delivery contract rather than merely joining it: the sweep ENGINE deliberately keeps
+    /// running under master-off (the muted-mode contract - the report surface is never blinded), so this
+    /// method is the one and only place the sweep feature touches a channel, and master-off means it
+    /// touches nothing. The gate does not consume the interval, so re-enabling does not leave a day of
+    /// silence behind it: the first tick after re-enable delivers a rollup covering ITS trailing day,
+    /// muted sweeps included.</para>
+    ///
+    /// <para><b>The catch-up semantics are deliberately narrow, and stated so nobody widens them by
+    /// accident.</b> A rollup only ever covers the trailing day. A mute longer than a day therefore has
+    /// muted days that never get a channel post of their own - by design: a post recapping an unbounded
+    /// backlog would be either unbounded or silently truncated, and the flood it delivers on re-enable is
+    /// the exact thing an operator's mute usually exists to prevent. The sweep documents are the PERMANENT
+    /// record - every muted sweep stands in the web feed and <c>get_sweep_reports</c> with its mute header
+    /// and its ledger, for as long as retention holds it - and the first post-re-enable rollup states how
+    /// many of ITS covered sweeps ran muted, so the operator is told there is history to read rather than
+    /// left to discover it.</para>
+    ///
+    /// <para>Called from the worker's hourly store-metrics tick beside the collector-cost evaluation; 23 of
+    /// every 24 ticks cost one dictionary lookup. Testable through
+    /// <see cref="ApplyFleetSweepRollupAsync"/> with a recording deliverer and a controllable clock.</para>
+    /// </summary>
+    public async Task EvaluateFleetSweepRollupAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        /* #3464: the master gate before the first store read - the EvaluateCollectorCostAsync shape.
+           ALSO consulted inside the apply, like every sibling, so a direct caller cannot skip it. */
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (_lastSweepRollup.TryGetValue(FleetSweepRollupKey, out var lastSent)
+            && now - lastSent < FleetSweepRollupInterval)
+        {
+            return;
+        }
+
+        var spanStartUtc = now - FleetSweepRollupInterval;
+
+        List<FleetSweepRun> runs;
+        List<FleetSweepLedgerSpanEntry> ledger;
+        Dictionary<int, string> serverNames;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            /* One clock, restarted per read: the failure surface census requires the elapsed a fault
+               records to belong to the operation that faulted, not to everything the try ran first. */
+            runs = await FleetSweepStore.GetSweepsBySpanForRollupAsync(postgres, spanStartUtc, now, cancellationToken);
+            readClock.Restart();
+            ledger = await FleetSweepStore.GetWouldHavePagedBySpanAsync(postgres, spanStartUtc, now, cancellationToken);
+            readClock.Restart();
+            serverNames = await FleetSweepStore.GetSweepServerNamesBySpanAsync(postgres, spanStartUtc, now, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A failed read skips the tick WITHOUT consuming the interval, and it is counted: the rollup
+               posts nothing on an empty day by design, so a fault folded into "empty" would convert an
+               unreadable store into a permanently quiet channel - the quiet-is-not-clean misreading at the
+               delivery end. The next hourly tick asks again. */
+            _logger?.LogDebug(ex, "fleet-sweep rollup read failed after {ElapsedMs} ms", readClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "fleet-sweep rollup self-alert", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        await ApplyFleetSweepRollupAsync(runs, ledger, serverNames, spanStartUtc, now, cancellationToken);
+    }
+
+    /// <summary>
+    /// The apply half of <see cref="EvaluateFleetSweepRollupAsync"/>, split out so the fire/dedup lifecycle
+    /// is unit-testable with a recording deliverer, a controllable clock and fixture rows - the
+    /// <see cref="ApplyCollectorCostDigestAsync"/> shape, seam for seam.
+    ///
+    /// <para><b>A day with nothing to say posts NOTHING - not a one-line all-clear.</b> Argued rather than
+    /// assumed, because the alternative is defensible and was considered: the digest precedent is exact
+    /// ("empty sends nothing" - a message that says a read returned no rows is the channel noise #3443
+    /// exists to end), and the owner's cadence ruling names the failure mode (report-class content in a
+    /// paging channel trains operators to ignore the channel). The clincher is quiet-is-not-clean: an
+    /// honest all-clear would have to carry the instrument-liveness proof behind it, and a daily post
+    /// carrying proof-of-quiet is a report card - the exact thing the ruling bounds. The affirmative
+    /// all-clear already exists where it can afford its evidence: the web feed, every sweep, at full
+    /// cadence, each document proving its own instruments. Channel silence is therefore backed by
+    /// instrument-proved quiet on the record surface, never by absence. And a quiet day does not consume
+    /// the interval, so the first day with something to say is not delayed by the quiet day evaluated
+    /// before it.</para>
+    ///
+    /// <para><b>What counts as something to say</b> is <see cref="FleetSweepRollupFacts.HasReportableContent"/>:
+    /// a band transition, a watch item opening or closing, a sweep that could not prove its instruments, a
+    /// sweep document that did not parse (an unreadable day must not read as a quiet one), or any covered
+    /// sweep having run under master-off - the last one reportable even with an EMPTY ledger, because
+    /// "muted, and nothing would have paged" is a statement the operator is owed where silence would read
+    /// as "nothing was checked".</para>
+    ///
+    /// <para><b>No resolution edge, no severity override</b> - the digest's reasoning verbatim: a rollup is
+    /// a measurement of a period, not a condition, and it fires with <c>severity: null</c> so the
+    /// per-metric map's DECLARED INFO arm decides (#3443's precedent - declared rather than left to the
+    /// identical fall-through, so the next #1136/#2090-style sweep cannot "fix" it into a WARNING). Muted
+    /// through the shared seam like every sibling.</para>
+    /// </summary>
+    internal async Task ApplyFleetSweepRollupAsync(
+        IReadOnlyList<FleetSweepRun> runs,
+        IReadOnlyList<FleetSweepLedgerSpanEntry> ledger,
+        IReadOnlyDictionary<int, string> serverNames,
+        DateTime spanStartUtc,
+        DateTime spanEndUtc,
+        CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (_lastSweepRollup.TryGetValue(FleetSweepRollupKey, out var lastSent)
+            && now - lastSent < FleetSweepRollupInterval)
+        {
+            return;
+        }
+
+        var facts = ExtractRollupFacts(runs, ledger, serverNames);
+        if (!facts.HasReportableContent)
+        {
+            return;
+        }
+
+        _lastSweepRollup[FleetSweepRollupKey] = now;
+        var (shortMessage, detail) = RenderFleetSweepRollup(facts, spanStartUtc, spanEndUtc);
+
+        await FireAsync(
+            StoreKey(FleetSweepRollupKey), _storeLabel, FleetSweepRollupMetric,
+            currentValue: facts.Sweeps.ToString(CultureInfo.InvariantCulture),
+            /* There is no threshold - the digest's exact posture, stated in the string because the NOT NULL
+               column demands a value and "report" is the honest one. */
+            thresholdValue: "no threshold (report)",
+            detail: detail,
+            /* No override: the per-metric map's declared INFO arm decides. See the remarks. */
+            severity: null,
+            shortMessage: shortMessage,
+            /* The count of sweeps the rollup covers - a genuine whole number (AlertMetricClassifier renders
+               it as a count, the digest's shape). */
+            numericCurrentValue: facts.Sweeps,
+            numericThresholdValue: 0,
+            cancellationToken);
+    }
+
+    /// <summary>One band transition a covered sweep reported: the server by name (the documents carry names
+    /// on transitions), the two bands, and the stated reason when the new band needed defending.</summary>
+    internal sealed record RollupTransition(string Server, string From, string To, string? Reason);
+
+    /// <summary>One watch-item event (opened or closed) a covered sweep reported, with the subject already
+    /// resolved for a channel render: the server name from the span's verdicts, "the fleet" for the
+    /// fleet-scope sentinel, or the bare id stated as such when no verdict named it.</summary>
+    internal sealed record RollupWatchEvent(string Subject, string ItemKey, string Condition);
+
+    /// <summary>One would-have-paged family aggregated across the span's muted sweeps: how many ledger rows
+    /// it produced and which servers (resolved names, sorted) produced them.</summary>
+    internal sealed record RollupLedgerFamily(string Family, int Rows, IReadOnlyList<string> Servers);
+
+    /// <summary>
+    /// Everything one rollup says, extracted pure from the day's run rows, the span's ledger rows and the
+    /// span's names map - so the reportable-content decision and the render read one value and the tests
+    /// drive both with fixtures. The counts are TOTALS; the render caps what it lists and states the
+    /// remainder, so a figure here and a line count there can legitimately differ only by a stated
+    /// "+ N more".
+    /// </summary>
+    internal sealed record FleetSweepRollupFacts(
+        int Sweeps,
+        int MutedSweeps,
+        int LivenessIncidents,
+        int UnreadableItems,
+        IReadOnlyList<RollupTransition> Transitions,
+        IReadOnlyList<RollupWatchEvent> Opened,
+        IReadOnlyList<RollupWatchEvent> Closed,
+        IReadOnlyList<RollupLedgerFamily> Ledger,
+        int LedgerRows,
+        int LedgerServers,
+        IReadOnlyList<KeyValuePair<string, int>> NewestBands)
+    {
+        /// <summary>Whether the day earned a channel post - see <see cref="ApplyFleetSweepRollupAsync"/>'s
+        /// remarks for why each member of this disjunction is reportable and why their absence is NOT an
+        /// all-clear post. An empty day (zero sweeps) is vacuously false through every term.</summary>
+        public bool HasReportableContent =>
+            Transitions.Count > 0 || Opened.Count > 0 || Closed.Count > 0
+            || LivenessIncidents > 0 || MutedSweeps > 0 || UnreadableItems > 0;
+    }
+
+    /// <summary>
+    /// Extracts the rollup's facts from the day's rows - PURE (no clock, no I/O), so
+    /// <c>FleetSweepRollupTests</c> drives every branch with fixtures. The run columns carry the mute header
+    /// and the liveness verdict directly; the transitions and watch events are parsed out of each run's own
+    /// document (<c>changes.band_transitions</c>, <c>watch.opened</c>, <c>watch.closed</c>) - the engine's
+    /// persisted report is the authority on what each sweep SAID, and re-deriving transitions from verdict
+    /// rows here would be a second opinion that could disagree with it. Anything unreadable is COUNTED
+    /// (<see cref="FleetSweepRollupFacts.UnreadableItems"/>) rather than skipped silently - a document that
+    /// does not parse, a band census carrying a count no int holds, a watch entry missing its item or a
+    /// usable server id - and the count is itself reportable: an unreadable day must not render as a quiet
+    /// one. One counter for every shape, stated as such in the render, because the operator's next move is
+    /// the same whichever piece was unreadable: read the sweep documents on the record surface. Runs are
+    /// processed oldest-first whatever order the read served, so the transition list reads chronologically
+    /// and the band census standing at the end is the newest READABLE sweep's.
+    /// </summary>
+    internal static FleetSweepRollupFacts ExtractRollupFacts(
+        IReadOnlyList<FleetSweepRun> runs,
+        IReadOnlyList<FleetSweepLedgerSpanEntry> ledger,
+        IReadOnlyDictionary<int, string> serverNames)
+    {
+        var ordered = runs.OrderBy(r => r.SweptAtUtc).ThenBy(r => r.SweepId).ToList();
+
+        var muted = 0;
+        var liveness = 0;
+        var unreadable = 0;
+        var transitions = new List<RollupTransition>();
+        var opened = new List<RollupWatchEvent>();
+        var closed = new List<RollupWatchEvent>();
+        IReadOnlyList<KeyValuePair<string, int>> newestBands = Array.Empty<KeyValuePair<string, int>>();
+
+        foreach (var run in ordered)
+        {
+            if (!run.AlertsEnabled)
+            {
+                muted++;
+            }
+
+            if (!run.InstrumentsAlive)
+            {
+                liveness++;
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(run.ReportJson);
+                var root = document.RootElement;
+
+                if (root.ValueKind != JsonValueKind.Object)
+                {
+                    unreadable++;
+                    continue;
+                }
+
+                if (root.TryGetProperty("changes", out var changes)
+                    && changes.ValueKind == JsonValueKind.Object
+                    && changes.TryGetProperty("band_transitions", out var bandTransitions)
+                    && bandTransitions.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var transition in bandTransitions.EnumerateArray())
+                    {
+                        var server = StringProperty(transition, "server");
+                        var from = StringProperty(transition, "from");
+                        var to = StringProperty(transition, "to");
+                        if (server is not null && from is not null && to is not null)
+                        {
+                            transitions.Add(new RollupTransition(server, from, to, StringProperty(transition, "reason")));
+                        }
+                    }
+                }
+
+                if (root.TryGetProperty("watch", out var watch) && watch.ValueKind == JsonValueKind.Object)
+                {
+                    unreadable += AppendWatchEvents(watch, "opened", serverNames, opened);
+                    unreadable += AppendWatchEvents(watch, "closed", serverNames, closed);
+                }
+
+                /* Ordered oldest-first, so the last readable band census standing is the newest one - the
+                   "where the fleet ended the day" line. */
+                if (root.TryGetProperty("fleet", out var fleet)
+                    && fleet.ValueKind == JsonValueKind.Object
+                    && fleet.TryGetProperty("bands", out var bands)
+                    && bands.ValueKind == JsonValueKind.Object)
+                {
+                    var census = new List<KeyValuePair<string, int>>();
+                    var censusReadable = true;
+                    foreach (var band in bands.EnumerateObject())
+                    {
+                        if (band.Value.ValueKind != JsonValueKind.Number)
+                        {
+                            continue;
+                        }
+
+                        /* TryGetInt32, not GetInt32: a band count is engine-written and int-sized, so a
+                           JSON number an int cannot hold is a corrupt census - and GetInt32 answers it
+                           with FormatException/OverflowException, which the JsonException-only catch
+                           below would NOT swallow. An escape here kills the whole rollup tick for up to
+                           a day, the exact silent outage the unreadable counter exists to prevent. The
+                           corrupt census is counted unreadable like a corrupt document, and the
+                           fleet-as-of line keeps the newest sweep whose census WAS readable. */
+                        if (!band.Value.TryGetInt32(out var count))
+                        {
+                            censusReadable = false;
+                            break;
+                        }
+
+                        census.Add(new KeyValuePair<string, int>(band.Name, count));
+                    }
+
+                    if (censusReadable)
+                    {
+                        newestBands = census.OrderBy(b => b.Key, StringComparer.Ordinal).ToList();
+                    }
+                    else
+                    {
+                        unreadable++;
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+                /* A sweep document that did not parse becomes the rollup's own evidence: the store read
+                   above is the counted site, and this arm CONVERTS the fault into the unreadable count
+                   the rollup reports (an unreadable day must not read as a quiet one) rather than
+                   swallowing it. Counting it as a read failure would double-book the one read. */
+                unreadable++;
+            }
+        }
+
+        var families = ledger
+            .GroupBy(entry => entry.AlertFamily, StringComparer.Ordinal)
+            .OrderBy(g => g.Key, StringComparer.Ordinal)
+            .Select(g => new RollupLedgerFamily(
+                g.Key,
+                g.Count(),
+                g.Select(entry => SubjectName(entry.ServerId, serverNames))
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(name => name, StringComparer.Ordinal)
+                    .ToList()))
+            .ToList();
+
+        return new FleetSweepRollupFacts(
+            ordered.Count, muted, liveness, unreadable,
+            transitions, opened, closed,
+            families, ledger.Count,
+            ledger.Select(entry => entry.ServerId).Distinct().Count(),
+            newestBands);
+    }
+
+    /// <summary>
+    /// Renders the rollup - PURE and static like <see cref="RenderCollectorCostDigest"/>, so the DOCUMENT a
+    /// human reads is assertable: <c>FleetSweepRollupTests</c> parses this output and holds its printed
+    /// figures to each other (the header's counts against the lines rendered, the ledger's total against
+    /// its family lines, the mute sentence against the sweep count it claims). Every section renders only
+    /// when it has something to say; the frame states the covered window explicitly (the #2506 echo
+    /// discipline - a report that does not say what window it covers invites the reader to assume a
+    /// different one) and names the web feed as the record surface, because the rollup is the day's
+    /// CEILING, not the day.
+    /// </summary>
+    internal static (string ShortMessage, string Detail) RenderFleetSweepRollup(
+        FleetSweepRollupFacts facts, DateTime spanStartUtc, DateTime spanEndUtc)
+    {
+        var shortMessage = string.Create(CultureInfo.InvariantCulture,
+            $"Fleet sweep rollup: {facts.Sweeps} sweeps - {facts.Transitions.Count} band transitions,"
+            + $" {facts.Opened.Count} watch items opened, {facts.Closed.Count} closed,"
+            + $" {facts.LivenessIncidents} liveness incidents, {facts.MutedSweeps} muted sweeps");
+
+        var sb = new StringBuilder();
+        sb.Append(shortMessage).Append('.');
+        sb.Append(string.Create(CultureInfo.InvariantCulture,
+            $" This is a REPORT, not an incident - the fleet sweep's one channel post for the day (#3466's"
+            + $" delivery ruling: the web feed's Fleet Sweeps timeline is the workhorse at full cadence, and"
+            + $" channel delivery is bounded at one daily rollup). It covers {spanStartUtc:o} to"
+            + $" {spanEndUtc:o} - the trailing day only, never a recap of older history, because the sweep"
+            + $" documents are the permanent record and this is their ceiling."));
+
+        if (facts.NewestBands.Count > 0)
+        {
+            sb.Append("\nThe fleet as of the newest readable covered sweep: ");
+            sb.Append(string.Join(", ", facts.NewestBands.Select(b =>
+                string.Create(CultureInfo.InvariantCulture, $"{b.Key} {b.Value}"))));
+            sb.Append('.');
+        }
+
+        if (facts.MutedSweeps > 0)
+        {
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n{facts.MutedSweeps} of the {facts.Sweeps} covered sweeps ran with the alert master"
+                + $" switch OFF. Delivery was off while they ran; the sweeps kept publishing to the web feed"
+                + $" with the mute stated on every document - the muted-mode contract."));
+
+            if (facts.LedgerRows > 0)
+            {
+                sb.Append(string.Create(CultureInfo.InvariantCulture,
+                    $"\nThe would-have-paged ledger those sweeps carried - what the silence cost:"
+                    + $" {facts.LedgerRows} rows across {facts.LedgerServers} servers and"
+                    + $" {facts.Ledger.Count} families:"));
+
+                foreach (var family in facts.Ledger)
+                {
+                    sb.Append(string.Create(CultureInfo.InvariantCulture,
+                        $"\n- {family.Family}: {family.Rows} rows on "));
+                    sb.Append(string.Join(", ", family.Servers.Take(MaxListedRollupLedgerServers)));
+                    if (family.Servers.Count > MaxListedRollupLedgerServers)
+                    {
+                        sb.Append(string.Create(CultureInfo.InvariantCulture,
+                            $" + {family.Servers.Count - MaxListedRollupLedgerServers} more servers"));
+                    }
+                }
+
+                sb.Append("\nEach row carries its evidence on the sweep document it rode in on - the figures"
+                    + " and the thresholds they crossed live there, not here.");
+            }
+            else
+            {
+                sb.Append("\nThose sweeps carried an EMPTY would-have-paged ledger - muted, and nothing the"
+                    + " sweep's scoring banded Critical. That is a statement, not an absence: the check was"
+                    + " made on every muted sweep.");
+            }
+        }
+
+        if (facts.LivenessIncidents > 0)
+        {
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n{facts.LivenessIncidents} covered sweeps could NOT prove their instruments were alive."
+                + $" Quiet is not clean - read those sweeps' liveness blocks before believing any quiet card"
+                + $" they carry."));
+        }
+
+        if (facts.UnreadableItems > 0)
+        {
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n{facts.UnreadableItems} unreadable items across the covered sweeps' documents - whole"
+                + $" documents or single entries that did not parse - counted here so an unreadable day"
+                + $" cannot read as a quiet one."));
+        }
+
+        if (facts.Transitions.Count > 0)
+        {
+            sb.Append("\nBand transitions, chronological:");
+            var listed = 0;
+            foreach (var transition in facts.Transitions)
+            {
+                if (listed >= MaxListedRollupTransitions)
+                {
+                    break;
+                }
+
+                sb.Append(string.Create(CultureInfo.InvariantCulture,
+                    $"\n- {transition.Server}: {transition.From} -> {transition.To}"));
+                if (transition.Reason is not null)
+                {
+                    sb.Append(" (").Append(transition.Reason).Append(')');
+                }
+
+                listed++;
+            }
+
+            if (facts.Transitions.Count > listed)
+            {
+                sb.Append(string.Create(CultureInfo.InvariantCulture,
+                    $"\n+ {facts.Transitions.Count - listed} more band transitions (see the web timeline)."));
+            }
+        }
+
+        AppendWatchSection(sb, "opened", facts.Opened);
+        AppendWatchSection(sb, "closed", facts.Closed);
+
+        sb.Append("\nEvery sweep in full - verdicts, evidence, liveness blocks and the ledger rows' own"
+            + " figures - lives on the Fleet Sweeps web page and get_sweep_reports. This rollup is the"
+            + " day's ceiling, not the record.");
+
+        return (shortMessage, sb.ToString());
+    }
+
+    /// <summary>One watch-event section ("opened" or "closed"), rendered only when it has rows, capped with
+    /// a stated remainder like every list in this document.</summary>
+    private static void AppendWatchSection(StringBuilder sb, string verb, IReadOnlyList<RollupWatchEvent> events)
+    {
+        if (events.Count == 0)
+        {
+            return;
+        }
+
+        sb.Append("\nWatch items ").Append(verb).Append(':');
+        var listed = 0;
+        foreach (var item in events)
+        {
+            if (listed >= MaxListedRollupWatchEvents)
+            {
+                break;
+            }
+
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n- {item.ItemKey} on {item.Subject}: {item.Condition}"));
+            listed++;
+        }
+
+        if (events.Count > listed)
+        {
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"\n+ {events.Count - listed} more (see the watch-item worklist)."));
+        }
+    }
+
+    /// <summary>The watch arrays' entries, resolved to render-ready events. The documents carry watch
+    /// subjects by bare id (the engine's vocabulary); the span's verdict names resolve them, the fleet
+    /// sentinel is named as the fleet, and a server no verdict named degrades to its id stated as such -
+    /// honest, never invented. Returns how many entries were UNREADABLE - missing their item, or carrying
+    /// a server id no int holds - so the caller counts them on the one unreadable counter rather than this
+    /// helper dropping them silently: a watch event the rollup cannot render is still a watch event the
+    /// operator was owed.</summary>
+    private static int AppendWatchEvents(
+        JsonElement watch, string property, IReadOnlyDictionary<int, string> serverNames, List<RollupWatchEvent> events)
+    {
+        if (!watch.TryGetProperty(property, out var array) || array.ValueKind != JsonValueKind.Array)
+        {
+            return 0;
+        }
+
+        var unreadable = 0;
+        foreach (var entry in array.EnumerateArray())
+        {
+            var itemKey = StringProperty(entry, "item");
+            if (itemKey is null
+                || !entry.TryGetProperty("server_id", out var serverId)
+                || serverId.ValueKind != JsonValueKind.Number
+                || !serverId.TryGetInt32(out var serverIdValue))
+            {
+                unreadable++;
+                continue;
+            }
+
+            events.Add(new RollupWatchEvent(
+                SubjectName(serverIdValue, serverNames),
+                itemKey,
+                StringProperty(entry, "condition") ?? string.Empty));
+        }
+
+        return unreadable;
+    }
+
+    private static string SubjectName(int serverId, IReadOnlyDictionary<int, string> serverNames) =>
+        serverId == FleetSweepStore.FleetScopeServerId
+            ? "the fleet"
+            : serverNames.TryGetValue(serverId, out var name)
+                ? name
+                : string.Create(CultureInfo.InvariantCulture, $"server id {serverId}");
+
+    private static string? StringProperty(JsonElement element, string property) =>
+        element.ValueKind == JsonValueKind.Object
+        && element.TryGetProperty(property, out var value)
+        && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
 
     /// <summary>
     /// Edge-applies "Agent Not Running" (#1433 Phase 2) from the target's latest FRESH agent_status snapshot
@@ -1486,7 +2826,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     ? $" The store measured {FormatGb(size)} at its last self-metrics sample."
                     : "";
                 await FireAsync(
-                    DiskKey, StoreServerLabel, DiskPressureMetric, reason,
+                    StoreKey(DiskKey), _storeLabel, DiskPressureMetric, reason,
                     $"{warnPercent.ToString("0.#", CultureInfo.InvariantCulture)}% free",
                     detail: reason + storeText + " When the store volume fills, collection and every write stop " +
                         "for the WHOLE fleet, and a headless service has no dashboard to warn you. Free space on the " +
@@ -1509,9 +2849,406 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             _lastAlertedDiskPressurePercent.TryRemove(DiskKey, out _);
             await RecordResolutionAsync(new AlertResolution(
-                DiskKey, StoreServerLabel, DiskPressureMetric,
+                StoreKey(DiskKey), _storeLabel, DiskPressureMetric,
                 DiskPressureResolvedMetric, "Monitor store volume free space recovered"), cancellationToken);
         }
+    }
+
+    /* ---------------- custom-alert-rule health (fleet-level, polled — #3304) ---------------- */
+
+    /// <summary>
+    /// Isolating wrapper for the fleet-level custom-alert-rule-health self-alert (#3304), mirroring
+    /// <see cref="EvaluateDiskPressureAsync"/>: a throwing seam (e.g. a mute rule's <c>Matches()</c>) is
+    /// contained here so it can never stop the worker's fleet-global maintenance pass. The worker calls THIS;
+    /// tests call the isolated <see cref="ApplyCustomRuleHealthAsync"/> directly.
+    /// </summary>
+    public async Task EvaluateCustomRuleHealthAsync(CustomAlertHealthReport report, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyCustomRuleHealthAsync(report, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: this method is handed its evidence (the report)
+               as a parameter and performs no store read — the catch covers the apply/deliver half, exactly
+               like the sibling store self-alert wrappers. The read that BUILDS the report lives in
+               CustomAlertEvaluator, outside this alert-pass census. */
+            _logger?.LogError("Custom-alert rule-health self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Edge-applies the fleet-level "some custom alert rules are broken or never firing" condition from the
+    /// <see cref="CustomAlertHealthReport"/> the <see cref="CustomAlertEvaluator"/> builds: fire once on entry,
+    /// re-fire only after the alert cooldown while any rule stays unhealthy, and write ONE resolution row when
+    /// every rule is healthy again (the Collection-Stopped standing-condition edge shape). ONE alert aggregates
+    /// ALL unhealthy rules — a <c>pg_*</c> rename can break many at once, and one-alert-per-rule would be an
+    /// alert storm. Gated on the master alerts switch. The rule names/errors in the report are ALREADY
+    /// newline-stripped + length-capped by the evaluator, and the detail NEVER contains the compiled SQL — only
+    /// the rule id/name and the catalog parse error. Internal (tested directly, like the sibling Apply methods)
+    /// with a recording deliverer + a controllable clock.
+    /// </summary>
+    internal async Task ApplyCustomRuleHealthAsync(CustomAlertHealthReport report, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled || report is null)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (report.HasIssues)
+        {
+            _activeCustomRuleHealth[CustomRuleHealthKey] = true;
+
+            /* Standing condition: fire on entry, re-fire only per cooldown while unhealthy. The CURRENT report
+               is rendered each time, so a rule that breaks later shows up on the next re-fire. */
+            if (CooldownElapsed(_lastCustomRuleHealthAlert, CustomRuleHealthKey, now))
+            {
+                _lastCustomRuleHealthAlert[CustomRuleHealthKey] = now;
+                var (shortMessage, detail) = RenderCustomRuleHealth(report);
+                await FireAsync(
+                    StoreKey(CustomRuleHealthKey), _storeLabel, CustomRuleHealthMetric,
+                    currentValue: report.TotalIssues.ToString(CultureInfo.InvariantCulture),
+                    thresholdValue: "0",
+                    detail: detail,
+                    severity: AlertSeverityLevel.Warning,
+                    shortMessage: shortMessage,
+                    /* The count of unhealthy rules is a genuine whole number (AlertMetricClassifier renders it
+                       as a count); the healthy bound is 0. */
+                    numericCurrentValue: report.TotalIssues,
+                    numericThresholdValue: 0,
+                    cancellationToken);
+            }
+        }
+        else if (_activeCustomRuleHealth.TryRemove(CustomRuleHealthKey, out var was) && was)
+        {
+            _lastCustomRuleHealthAlert.TryRemove(CustomRuleHealthKey, out _);
+            await RecordResolutionAsync(new AlertResolution(
+                StoreKey(CustomRuleHealthKey), _storeLabel, CustomRuleHealthMetric,
+                CustomRuleHealthResolvedMetric,
+                "All custom alert rules compile and are firing-eligible again"), cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Renders the aggregated health alert's one-line summary and its multi-line <c>detail_text</c> from an
+    /// (already-sanitized) report. Each rule occupies its own line led by <c>"- Rule &lt;id&gt;"</c>, which
+    /// cannot be read as a mute-context label by <see cref="AlertMuteContext.PopulateFromDetailText"/>; the list
+    /// is capped at <see cref="MaxListedUnhealthyRules"/> with a "+N more" tail so one <c>pg_*</c> rename cannot
+    /// produce an unbounded body. The compiled SQL is never included — only the rule id/name and the reason.
+    /// </summary>
+    private static (string ShortMessage, string Detail) RenderCustomRuleHealth(CustomAlertHealthReport report)
+    {
+        var shortMessage = string.Create(CultureInfo.InvariantCulture,
+            $"{report.TotalIssues} custom alert rule(s) need attention: {report.BrokenRules.Count} no longer compile, {report.NeverFiringRules.Count} armed but never fire");
+
+        var sb = new StringBuilder();
+        sb.Append(shortMessage).Append('.');
+
+        var listed = 0;
+        void AppendSection(string heading, IReadOnlyList<CustomAlertRuleHealthIssue> issues)
+        {
+            if (issues.Count == 0 || listed >= MaxListedUnhealthyRules)
+            {
+                return;
+            }
+
+            sb.Append('\n').Append(heading).Append(':');
+            foreach (var issue in issues)
+            {
+                if (listed >= MaxListedUnhealthyRules)
+                {
+                    break;
+                }
+
+                /* Leading "- Rule <id>" never matches a PopulateFromDetailText label; name/reason are pre-sanitized. */
+                sb.Append("\n- Rule ").Append(issue.RuleId.ToString(CultureInfo.InvariantCulture))
+                  .Append(" \"").Append(issue.RuleName).Append("\": ").Append(issue.Reason);
+                listed++;
+            }
+        }
+
+        AppendSection("Broken (will not fire)", report.BrokenRules);
+        AppendSection("Armed but never fires", report.NeverFiringRules);
+
+        var remaining = report.TotalIssues - listed;
+        if (remaining > 0)
+        {
+            sb.Append("\n+ ").Append(remaining.ToString(CultureInfo.InvariantCulture)).Append(" more (see the service log).");
+        }
+
+        return (shortMessage, sb.ToString());
+    }
+
+    /* ---------------- stale mute rules (fleet-level, polled — #3306) ---------------- */
+
+    /// <summary>
+    /// Isolating wrapper for the fleet-level stale-mute self-alert (#3306), mirroring
+    /// <see cref="EvaluateCustomRuleHealthAsync"/>. The worker calls THIS; tests call the isolated
+    /// <see cref="ApplyStaleMuteRulesAsync"/> directly.
+    /// </summary>
+    public async Task EvaluateStaleMuteRulesAsync(
+        IReadOnlyList<MuteRule> rules, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyStaleMuteRulesAsync(rules, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the rules arrive as a parameter from the live
+               MuteRuleService cache and this method performs no store read. */
+            _logger?.LogError("Stale-mute self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Edge-applies the fleet-level "a mute rule has outlived its reason" condition (#3306): a rule that is
+    /// ENABLED, has NO expiry, and was created longer than <see cref="StaleMuteAge"/> ago.
+    ///
+    /// <para><b>Why this condition exists at all.</b> A mute is a deliberate blind spot in a monitoring
+    /// tool, and nothing else in this product reports that one is there. The only way to discover a mute is
+    /// to ask <c>get_mute_rules</c>, which requires already suspecting it — so a mute whose justification
+    /// has expired keeps suppressing a now-correct alert, and the symptom is silence. It is #2813's Retention
+    /// Held shape one surface over: a correct, deliberate pause that reads as health once made.</para>
+    ///
+    /// <para><b>All three halves are required.</b> Unbounded alone is not a finding — an operator may mean it,
+    /// and the product's own dialog offers "Never". Old alone is not either: a rule with an expiry has a
+    /// reviewer built in, namely the expiry. And a disabled rule suppresses nothing, so it is not a blind
+    /// spot however old and however unbounded. It is the conjunction — still suppressing, no bound, and past
+    /// every bound the product offers — that says the justification was never revisited.</para>
+    ///
+    /// <para><b>This never deletes or expires a rule.</b> Silent un-muting is its own incident: the channel
+    /// this was protecting floods unannounced, which is exactly the outcome a permanent rule was chosen to
+    /// avoid. Permanence plus visibility, so the operator decides.</para>
+    ///
+    /// <para>Severity follows BLAST RADIUS, not age. A rule that constrains nothing
+    /// (<see cref="MuteRule.MatchesEveryAlert"/>) suppresses every alert on the store, so the fleet reads
+    /// healthy for want of anything being reported — CRITICAL. A rule scoped to a metric, a server or a
+    /// pattern hides one signal — WARNING.</para>
+    ///
+    /// <para>A STANDING condition like Custom Alert Rules Unhealthy: fire once on entry, re-state it while
+    /// any rule qualifies, and ONE resolution row when none does. Unlike those siblings it re-states on its
+    /// own <see cref="StaleMuteRefire"/> rather than the shared alert cooldown — see there for why a
+    /// days-scale fact needs its own, longer interval. Gated on the master alerts switch. Internal
+    /// so it pins directly with a recording deliverer and a controllable clock.</para>
+    /// </summary>
+    internal async Task ApplyStaleMuteRulesAsync(
+        IReadOnlyList<MuteRule> rules, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+
+        /* Unbounded, in force, and older than every expiry the product offers. Ordered oldest-first so the
+           elided tail is the least interesting end.
+
+           "In force" reduces to Enabled here: a rule with no expiry cannot have lapsed, so the expiry test
+           that belongs in the general predicate would be dead code in this one — and it reads MuteRule's
+           IsExpired, which consults DateTime.UtcNow rather than this evaluator's injected clock. Dropping it
+           leaves the whole condition judged on ONE clock, which is what makes the age assertions mean what
+           they say. A rule carrying ANY expiry is excluded either way, past or future: a bound is a bound,
+           and a rule that has one reviews itself. */
+        var stale = new List<MuteRule>();
+        foreach (var rule in rules)
+        {
+            if (rule is null || !rule.Enabled || rule.ExpiresAtUtc.HasValue)
+            {
+                continue;
+            }
+
+            if (now - rule.CreatedAtUtc >= StaleMuteAge)
+            {
+                stale.Add(rule);
+            }
+        }
+
+        stale.Sort(static (a, b) => a.CreatedAtUtc.CompareTo(b.CreatedAtUtc));
+
+        if (stale.Count == 0)
+        {
+            if (_activeStaleMute.TryRemove(StaleMuteKey, out var was) && was)
+            {
+                _lastStaleMuteAlert.TryRemove(StaleMuteKey, out _);
+                await RecordResolutionAsync(new AlertResolution(
+                    StoreKey(StaleMuteKey), _storeLabel, StaleMuteMetric, StaleMuteResolvedMetric,
+                    "No mute rule is suppressing alerts without an expiry any more"), cancellationToken);
+            }
+
+            return;
+        }
+
+        _activeStaleMute[StaleMuteKey] = true;
+
+        /* Standing condition: fire on entry, re-fire only per StaleMuteRefire while any rule qualifies. The
+           CURRENT set is rendered each time, so a rule that ages past the bound later shows up on the next
+           re-fire. Its OWN interval rather than the shared CooldownElapsed the siblings use, because the
+           fact it reports changes on a scale of days — see StaleMuteRefire. */
+        if (_lastStaleMuteAlert.TryGetValue(StaleMuteKey, out var lastFired)
+            && now - lastFired < StaleMuteRefire)
+        {
+            return;
+        }
+
+        _lastStaleMuteAlert[StaleMuteKey] = now;
+        bool blanket = stale.Exists(static r => r.MatchesEveryAlert);
+        var (shortMessage, detail) = RenderStaleMuteRules(stale, now, blanket);
+
+        await FireAsync(
+            StoreKey(StaleMuteKey), _storeLabel, StaleMuteMetric,
+            currentValue: stale.Count.ToString(CultureInfo.InvariantCulture),
+            thresholdValue: "0",
+            detail: detail,
+            severity: blanket ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+            shortMessage: shortMessage,
+            /* The count of stale rules is a genuine whole number (AlertMetricClassifier renders it as a
+               count); the healthy bound is 0. */
+            numericCurrentValue: stale.Count,
+            numericThresholdValue: 0,
+            cancellationToken,
+            context: null,
+            /* The ONE condition that decides its own mute rather than asking the shared seam, because the
+               seam returns a single boolean over every rule and cannot say which rule answered — see
+               FindExplicitMute. Always non-null, so the seam is never consulted for this metric. */
+            muted: FindExplicitMute(rules, now) is not null);
+    }
+
+    /// <summary>
+    /// The one mute rule that deliberately silences this alert, or null — the EXPLICIT/incidental split that
+    /// gives the condition an off switch without letting it switch itself off (#3348).
+    ///
+    /// <para><b>Why it cannot just ask the shared seam.</b> <c>_isAlertMuted</c> answers one boolean over
+    /// every rule, so it cannot say WHICH rule answered. A rule that constrains nothing matches every alert
+    /// on the store, this one included, and it is also the shape with the largest blast radius — so an
+    /// affirmative seam answer is as easily a fleet-wide silence as a decision about this condition, and
+    /// honoring it would lose the report precisely where it matters most. The surviving history row is the
+    /// surface nobody reads without already suspecting the mute, which is the blind spot rather than a fix
+    /// for it.</para>
+    ///
+    /// <para><b>What "explicit" means, and why it is the matcher's own answer rather than an assertion.</b>
+    /// The metric dimension is EXACT full-string equality (<see cref="MuteRule.NamesMetric"/>, the same
+    /// comparison <see cref="MuteRule.MatchesAt"/> applies) — unlike the four <c>*Pattern</c> dimensions
+    /// there is no substring, glob or regex form of a metric constraint. So a rule either spells
+    /// <see cref="StaleMuteMetric"/> out or does not constrain metrics at all, and no rule can match this
+    /// alert incidentally while looking deliberate. A pattern that happened to cover the name would NOT
+    /// count and cannot arise: there is no such shape to write.</para>
+    ///
+    /// <para><b>Self-suppression stays impossible by construction, not by care.</b> The only input to the
+    /// decision is a rule that names this metric, and a blanket rule names nothing — so a blanket mute
+    /// cannot reach this decision at all, whatever else it silences. The narrowing is also strictly
+    /// one-directional: an explicitly-naming rule still has to pass the FULL matcher against this alert's
+    /// real context, so a rule naming the metric but scoped to some monitored server does not suppress a
+    /// fleet-level condition whose server is the store's label (<see cref="StoreServerLabel"/>, or the
+    /// opted-in <c>peers.storeName</c> — #3500's mute-rule coupling: the context below carries the SAME label
+    /// the fired row does, so a rule scoped to either spelling matches exactly the rows that spelling names),
+    /// and one carrying a database or wait pattern does not either — this alert has no such dimension to
+    /// match.</para>
+    ///
+    /// <para>Judged on the evaluator's injected clock via <see cref="MuteRule.MatchesAt"/>, so the rule's
+    /// expiry is read on the same instant the staleness ages are, and an operator's explicit mute lapses
+    /// exactly when its bound says. A muted alert is still RECORDED — the history row lands every re-fire,
+    /// naming the very rule that silenced the channels, and <c>get_mute_rules</c> lists it with its reason.
+    /// That is the audit trail an operator gets for this decision, and it is what makes the decision
+    /// answerable rather than invisible.</para>
+    /// </summary>
+    private MuteRule? FindExplicitMute(IReadOnlyList<MuteRule> rules, DateTime now)
+    {
+        var context = new AlertMuteContext
+        {
+            ServerName = _storeLabel,
+            MetricName = StaleMuteMetric
+        };
+
+        foreach (var rule in rules)
+        {
+            if (rule is null || !rule.NamesMetric(StaleMuteMetric))
+            {
+                continue;
+            }
+
+            if (rule.MatchesAt(context, now))
+            {
+                return rule;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Renders the stale-mute alert's one-line summary and its multi-line <c>detail_text</c>. Each rule
+    /// occupies its own line led by <c>"- Rule &lt;id&gt;"</c>, which cannot be read as a mute-context label
+    /// by <see cref="AlertMuteContext.PopulateFromDetailText"/>; the operator-authored reason and the
+    /// rendered match summary are newline-stripped and capped through
+    /// <see cref="CustomAlertEvaluator.SanitizeDisplayText"/> — the SAME sanitizer #3304 uses — because
+    /// either one could otherwise carry a forged label line. The list is capped at
+    /// <see cref="MaxListedStaleMuteRules"/> with a "+N more" tail.
+    /// </summary>
+    private static (string ShortMessage, string Detail) RenderStaleMuteRules(
+        List<MuteRule> stale, DateTime nowUtc, bool blanket)
+    {
+        var oldestDays = (nowUtc - stale[0].CreatedAtUtc).TotalDays;
+        var shortMessage = string.Create(CultureInfo.InvariantCulture,
+            $"{stale.Count} mute rule(s) have been suppressing alerts with no expiry for over {StaleMuteAge.TotalDays:F0} days (oldest {oldestDays:F0} days)");
+
+        var sb = new StringBuilder();
+        sb.Append(shortMessage).Append('.');
+        sb.Append(
+            blanket
+                ? " At least one of them constrains nothing, so it suppresses EVERY alert on this store -"
+                  + " this store reads healthy because nothing is being reported, not because nothing is wrong."
+                : " Each one hides a specific alert.");
+        sb.Append(
+            " A mute is a deliberate blind spot and nothing else in this product reports that one exists, so"
+            + " the question this alert asks is whether the reason each rule was created for is still true."
+            + " Nothing has been un-muted: a silent expiry would flood the delivery channel unannounced,"
+            + " which is usually why the rule was made permanent in the first place. Review them with"
+            + " get_mute_rules and delete or re-scope the ones whose reason has passed.");
+
+        var listed = 0;
+        foreach (var rule in stale)
+        {
+            if (listed >= MaxListedStaleMuteRules)
+            {
+                break;
+            }
+
+            var ageDays = (nowUtc - rule.CreatedAtUtc).TotalDays;
+            var summary = CustomAlertEvaluator.SanitizeDisplayText(rule.Summary, MaxStaleMuteSummaryLength);
+            var reason = CustomAlertEvaluator.SanitizeDisplayText(rule.Reason, MaxStaleMuteReasonLength);
+
+            /* Leading "- Rule <id>" never matches a PopulateFromDetailText label; the two operator-authored
+               values on the line are sanitized above. */
+            sb.Append("\n- Rule ").Append(CustomAlertEvaluator.SanitizeDisplayText(rule.Id, 64))
+              .Append(string.Create(CultureInfo.InvariantCulture, $": {ageDays:F0} days old, never expires, matches "))
+              .Append(summary.Length == 0 ? "(matches all alerts)" : summary);
+            if (reason.Length > 0)
+            {
+                sb.Append(" [reason: ").Append(reason).Append(']');
+            }
+
+            listed++;
+        }
+
+        var remaining = stale.Count - listed;
+        if (remaining > 0)
+        {
+            sb.Append("\n+ ").Append(remaining.ToString(CultureInfo.InvariantCulture)).Append(" more (see get_mute_rules).");
+        }
+
+        return (shortMessage, sb.ToString());
     }
 
     /* ---------------- compression-job self-heal (fleet-level, polled — #1581) ---------------- */
@@ -1585,7 +3322,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         : " The pre-upgrade data directory is kept as a rollback copy for the next couple of service starts, then deleted automatically.";
 
                 await FireAsync(
-                    StoreUpgradeKey, StoreServerLabel, StoreUpgradeMetric,
+                    StoreKey(StoreUpgradeKey), _storeLabel, StoreUpgradeMetric,
                     degraded ? $"PostgreSQL {report.ToMajor} (cleanup incomplete)" : $"PostgreSQL {report.ToMajor}",
                     $"PostgreSQL {report.FromMajor}",
                     detail: $"The monitor's own store was upgraded in place from PostgreSQL {report.FromMajor} to {report.ToMajor}.{timescale} " +
@@ -1610,7 +3347,7 @@ internal sealed class DarlingSelfAlertEvaluator
             }
 
             await FireAsync(
-                StoreUpgradeKey, StoreServerLabel, StoreUpgradeMetric,
+                StoreKey(StoreUpgradeKey), _storeLabel, StoreUpgradeMetric,
                 $"PostgreSQL {report.FromMajor} (upgrade failed)", $"PostgreSQL {report.ToMajor}",
                 detail: $"The monitor's own store FAILED to upgrade from PostgreSQL {report.FromMajor} to {report.ToMajor}, at step '{report.FailedStep}': {report.FailureMessage} " +
                     $"The store reverted to PostgreSQL {report.FromMajor} and is collecting normally — no data was lost, because the pre-upgrade data directory is never modified until the upgrade succeeds. " +
@@ -1631,6 +3368,155 @@ internal sealed class DarlingSelfAlertEvaluator
             /* NOT counted by #3013's swallowed-read counter: the report is a parameter; no store read happens here. */
             _logger?.LogError("Store runtime upgrade self-alert failed: {Message}", ex.Message);
         }
+    }
+
+    /* ---------------- web dashboard TLS certificate expiry (#3514) ---------------- */
+
+    /// <summary>
+    /// What the web host knows about its served TLS certificate, carried out to the worker's alert sweep — a
+    /// platform-neutral copy of the loaded certificate's facts so the alert path never touches an X.509 type.
+    /// <paramref name="Configured"/> is false when there is no LAN TLS certificate to watch (loopback-only, no
+    /// <c>tls</c> block, or an unusable one); the other fields are meaningful only when it is true.
+    /// </summary>
+    internal sealed record WebTlsCertReport(bool Configured, DateTimeOffset NotAfterUtc, string Subject, string Thumbprint);
+
+    /// <summary>
+    /// The isolating entry point the worker's sweep calls for the web-dashboard TLS certificate expiry
+    /// self-alert (#3514) — the fleet-level twin of <see cref="EvaluateStaleMuteRulesAsync"/>. Wraps
+    /// <see cref="ApplyWebTlsCertificateAsync"/> in the same failure isolation the sibling store-alerts use, so
+    /// a throwing pre-deliver mute check can never propagate out of the collection sweep. Cancellation still
+    /// propagates.
+    /// </summary>
+    public async Task EvaluateWebTlsCertificateAsync(WebTlsCertReport report, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyWebTlsCertificateAsync(report, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the report is a parameter from the web host's
+               in-memory WebTlsCertificateState publish, and this method performs no store read. */
+            _logger?.LogError("Web TLS certificate self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Edge-applies the "the web dashboard's served TLS certificate is expiring" condition (#3514).
+    ///
+    /// <para><b>Why this exists.</b> When the dashboard is LAN-exposed with a certificate, its expiry was
+    /// surfaced only two ways — a startup-log warning inside <see cref="WebTlsCertWarnWindow"/> and the
+    /// <c>--status</c> line — both of which require someone to look, on a HEADLESS service that can run for
+    /// months without a restart. The certificate is loaded ONCE at start, so as the clock crosses the window
+    /// nothing re-fires and the symptom is the dashboard silently dropping to loopback-only the day it lapses.
+    /// This re-reads the served certificate's fixed expiry against the evaluator's clock every sweep, so it
+    /// warns 30 days out and escalates to Critical once lapsed WITHOUT a restart — the Retention Held /
+    /// stale-mute shape: a correct, deliberate posture whose failure reads as silence.</para>
+    ///
+    /// <para><b>Severity follows what has already happened.</b> Inside the window but not yet lapsed is a
+    /// WARNING — the dashboard still serves and there is time to renew. Lapsed is CRITICAL: an expired
+    /// certificate fails every TLS handshake, so the LAN dashboard is already unreachable and binds
+    /// loopback-only on the next restart.</para>
+    ///
+    /// <para>A STANDING condition like its siblings: fire on entry, re-state per <see cref="WebTlsCertRefire"/>
+    /// while it holds, and ONE resolution when the served certificate is healthy again (renewed past the
+    /// window) or TLS is no longer configured. Gated on the master alerts switch. Internal so it pins directly
+    /// with a recording deliverer and a controllable clock.</para>
+    /// </summary>
+    internal async Task ApplyWebTlsCertificateAsync(WebTlsCertReport report, CancellationToken cancellationToken)
+    {
+        if (report is null || !_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+
+        /* Healthy is either "no certificate to watch" or "more than the warning window still to run". The
+           subtraction is DateTime-on-DateTime so it is a pure TimeSpan and never trips the DateTimeOffset(...)
+           Kind guard on a test-injected clock. */
+        var healthy =
+            !report.Configured
+            || report.NotAfterUtc.UtcDateTime - now > WebTlsCertWarnWindow;
+
+        if (healthy)
+        {
+            if (_activeWebTlsCert.TryRemove(WebTlsCertKey, out var was) && was)
+            {
+                _lastWebTlsCertAlert.TryRemove(WebTlsCertKey, out _);
+                await RecordResolutionAsync(new AlertResolution(
+                    StoreKey(WebTlsCertKey), _storeLabel, WebTlsCertExpiryMetric, WebTlsCertRenewedMetric,
+                    report.Configured
+                        ? "The web dashboard's TLS certificate is no longer within the expiry window"
+                        : "The web dashboard is no longer serving a TLS certificate to watch"), cancellationToken);
+            }
+
+            return;
+        }
+
+        _activeWebTlsCert[WebTlsCertKey] = true;
+
+        /* Standing condition: fire on entry, re-state only per WebTlsCertRefire while it holds — its OWN
+           interval rather than the shared cooldown, for the StaleMuteRefire reason (a fixed date measured
+           against the clock, identical every sweep). */
+        if (_lastWebTlsCertAlert.TryGetValue(WebTlsCertKey, out var lastFired)
+            && now - lastFired < WebTlsCertRefire)
+        {
+            return;
+        }
+
+        _lastWebTlsCertAlert[WebTlsCertKey] = now;
+
+        var expired = report.NotAfterUtc.UtcDateTime <= now;
+        var (shortMessage, detail, currentValue) = RenderWebTlsCert(report, now, expired);
+
+        await FireAsync(
+            StoreKey(WebTlsCertKey), _storeLabel, WebTlsCertExpiryMetric,
+            currentValue: currentValue,
+            thresholdValue: $"{Hosting.DarlingWebTls.ExpiryWarningDays} days",
+            detail: detail,
+            severity: expired ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+            shortMessage: shortMessage,
+            /* State-only: an expiry is a date, not a quantity — see WebTlsCertExpiryMetric. */
+            numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+            cancellationToken);
+    }
+
+    /// <summary>Renders the (shortMessage, detail, currentValue) for the web TLS certificate expiry alert. The
+    /// subject and thumbprint match the web host's own startup log line, so an operator can tie the alert to
+    /// the certificate it named. Pure but for the caller's clock; pinned by tests.</summary>
+    private static (string ShortMessage, string Detail, string CurrentValue) RenderWebTlsCert(
+        WebTlsCertReport report, DateTime now, bool expired)
+    {
+        var notAfter = report.NotAfterUtc.UtcDateTime;
+        var certRef = $"Certificate: subject {report.Subject}, thumbprint {report.Thumbprint}.";
+
+        if (expired)
+        {
+            var agoDays = Math.Max(0, (int)Math.Floor((now - notAfter).TotalDays));
+            var currentValue = $"expired {notAfter:u}";
+            var shortMessage =
+                $"web dashboard TLS certificate EXPIRED {notAfter:u} ({agoDays} day{(agoDays == 1 ? string.Empty : "s")} ago)";
+            var detail =
+                $"The web dashboard's TLS certificate expired on {notAfter:u}. An expired certificate fails every TLS "
+                + "handshake, so the LAN dashboard is unreachable now and binds loopback-only on the next service restart. "
+                + $"Install a renewed certificate and restart the service. {certRef}";
+            return (shortMessage, detail, currentValue);
+        }
+
+        var days = Math.Max(0, (int)Math.Ceiling((notAfter - now).TotalDays));
+        var plural = days == 1 ? string.Empty : "s";
+        var current = $"expires {notAfter:u} (in {days} day{plural})";
+        var shortMsg = $"web dashboard TLS certificate expires in {days} day{plural} ({notAfter:u})";
+        var det =
+            $"The web dashboard's TLS certificate expires on {notAfter:u}, in {days} day{plural}. When it lapses the LAN "
+            + "dashboard stops serving (it fails closed to loopback-only, never plain HTTP), so renew it and restart the "
+            + $"service before then. {certRef}";
+        return (shortMsg, det, current);
     }
 
     /// <summary>
@@ -1738,7 +3624,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     _lastJobOverCadenceAlert[key] = now;
                     bool critical = percent >= 100.0;
                     await FireAsync(
-                        JobCadenceKeyPrefix + key, StoreServerLabel, JobCadenceMetric,
+                        StoreKey(JobCadenceKeyPrefix + key), _storeLabel, JobCadenceMetric,
                         $"{percent:F0}% of schedule interval", $"{warnPercent}%",
                         detail: $"Store background {label} last ran for {durationMs / 1000.0:F0}s against a " +
                             $"{job.ScheduleIntervalMs / 1000.0:F0}s schedule interval ({percent:F0}%). " +
@@ -1769,9 +3655,11 @@ internal sealed class DarlingSelfAlertEvaluator
             else if (_activeJobOverCadence.TryRemove(key, out var was) && was)
             {
                 await RecordResolutionAsync(new AlertResolution(
-                    JobCadenceKeyPrefix + key, StoreServerLabel, JobCadenceMetric,
+                    StoreKey(JobCadenceKeyPrefix + key), _storeLabel, JobCadenceMetric,
                     "Store Job Cadence Recovered",
-                    $"Monitor Store: {label} is back under {warnPercent}% of its schedule interval"), cancellationToken);
+                    /* The message names the store through the label too (#3500): an opted-in store's
+                       resolution prose must not call it by the constant its own rows no longer carry. */
+                    $"{_storeLabel}: {label} is back under {warnPercent}% of its schedule interval"), cancellationToken);
             }
         }
     }
@@ -1803,7 +3691,7 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>
     /// Applies the fleet-level Retention Held condition (#2813): a retention policy the #1680/#1877 coverage
     /// gate has PAUSED, whose tier has as a result grown past its own configured horizon by
-    /// <see cref="RetentionHoldWarnRatio"/> or more.
+    /// the store's configured warning ratio or more.
     ///
     /// <para><b>Both halves are required, and that is the whole design.</b> Paused alone is normal —
     /// <see cref="TimescaleSupport.EnsureRetentionPoliciesAsync"/> deliberately creates every policy paused
@@ -1819,9 +3707,15 @@ internal sealed class DarlingSelfAlertEvaluator
     /// makes the cost legible, and it self-scales with the horizon so one threshold serves a 4-day raw tier
     /// and a 35-day baseline tier alike.</para>
     ///
-    /// <para>Tiers: WARNING at <see cref="RetentionHoldWarnRatio"/>, CRITICAL at
-    /// <see cref="RetentionHoldCriticalRatio"/> — the production incident that motivated this sat at 4.5x
-    /// (18 days held under a 4-day policy for 16 days) and would have read CRITICAL. A STANDING condition
+    /// <para>Tiers: WARNING at the store's <c>retention_hold_warn_ratio</c>, CRITICAL at its
+    /// <c>retention_hold_critical_ratio</c> (#3297, V119), read live through
+    /// <see cref="_retentionHoldWarnRatio"/> / <see cref="_retentionHoldCriticalRatio"/> and defaulting to
+    /// <see cref="RetentionHoldWarnRatio"/> / <see cref="RetentionHoldCriticalRatio"/> — the production
+    /// incident that motivated this sat at 4.5x (18 days held under a 4-day policy for 16 days) and would
+    /// have read CRITICAL on the shipped pair. Both are read ONCE per pass, so one pass cannot judge some
+    /// policies on the old pair and the rest on a reloaded one. A critical tier set BELOW the warning tier
+    /// is not corrected: every fire is then Critical and the Warning tier is empty, which is what setting it
+    /// there asks for. A STANDING condition
     /// like Store Job Over Cadence: fire once on breach, re-fire only on the alert cooldown while it
     /// persists, one "Retention Hold Cleared" resolution when the policy arms or the tier comes back under
     /// the warning ratio. A policy with no chunks, no measurable horizon, or an unreadable span has no
@@ -1844,6 +3738,12 @@ internal sealed class DarlingSelfAlertEvaluator
 
         var now = _utcNow();
 
+        /* #3297: read BOTH tiers ONCE per pass, not per policy. A store reload can hot-swap the settings row
+           mid-pass, and re-reading per policy would let one pass judge some policies on the old pair and the
+           rest on the new one — a mixed reading no configuration ever held. */
+        var warnRatio = _retentionHoldWarnRatio();
+        var criticalRatio = _retentionHoldCriticalRatio();
+
         foreach (var policy in policies)
         {
             var key = policy.JobId.ToString(CultureInfo.InvariantCulture);
@@ -1855,7 +3755,7 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 if (policy.Armed)
                 {
-                    await ClearRetentionHoldAsync(key, policy, cancellationToken);
+                    await ClearRetentionHoldAsync(key, policy, warnRatio, cancellationToken);
                 }
 
                 continue;
@@ -1865,17 +3765,17 @@ internal sealed class DarlingSelfAlertEvaluator
                 ? $"retention job {key}"
                 : $"{policy.HypertableName} retention [{key}]";
 
-            if (!policy.Armed && ratio >= RetentionHoldWarnRatio)
+            if (!policy.Armed && ratio >= warnRatio)
             {
                 _activeRetentionHold[key] = true;
                 if (CooldownElapsed(_lastRetentionHoldAlert, key, now))
                 {
                     _lastRetentionHoldAlert[key] = now;
-                    bool critical = ratio >= RetentionHoldCriticalRatio;
+                    bool critical = ratio >= criticalRatio;
                     double spanDays = (policy.SpanSeconds ?? 0) / 86400.0;
                     await FireAsync(
-                        RetentionHoldKeyPrefix + key, StoreServerLabel, RetentionHoldMetric,
-                        $"{ratio:F1}x its {policy.DropAfter} horizon", $"{RetentionHoldWarnRatio:F1}x",
+                        StoreKey(RetentionHoldKeyPrefix + key), _storeLabel, RetentionHoldMetric,
+                        $"{ratio:F1}x its {policy.DropAfter} horizon", $"{warnRatio:F1}x",
                         detail: $"Store {label} is HELD PAUSED by the rollup-coverage gate, and the tier now " +
                             $"holds {spanDays:F1} days across {policy.ChunkCount} chunk(s) against a configured " +
                             $"{policy.DropAfter} horizon ({ratio:F1}x). " +
@@ -1885,29 +3785,38 @@ internal sealed class DarlingSelfAlertEvaluator
                                 : "The gate is working as designed - it will not let retention drop history a " +
                                   "rollup has never materialized - but the hold has lasted long enough to cost " +
                                   "real disk. ") +
-                            "The policy arms ITSELF once its consumer covers everything raw holds; what is " +
-                            "missing is the backfill, which is the --backfill-rollups operator action. Do NOT " +
-                            "arm the policy by hand: the history it holds exists nowhere else, so arming drops " +
-                            "the only copy, which is precisely what the gate prevents. Check the service log at " +
-                            "startup for the 'HELD PAUSED' line naming which consumer is short.",
+                            "The policy arms ITSELF once its consumer covers everything raw holds, but it " +
+                            "arms at STARTUP rather than the moment coverage catches up - EnsureRetentionPoliciesAsync " +
+                            "runs on the service start path and nowhere else. So the remedy is two steps, and the " +
+                            "second is not optional: run the --backfill-rollups operator action, then RESTART the " +
+                            "service. Skip the restart and the backfill will have worked while this alert keeps " +
+                            "firing, which reads like the backfill failed. Do NOT arm the policy by hand: the " +
+                            "history it holds exists nowhere else, so arming drops the only copy, which is " +
+                            "precisely what the gate prevents. Check the service log at startup for the " +
+                            "'HELD PAUSED' line naming which consumer is short.",
                         severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
                         shortMessage: $"{label} held at {ratio:F1}x its {policy.DropAfter} horizon",
                         numericCurrentValue: Math.Round(ratio, 2),
-                        numericThresholdValue: critical ? RetentionHoldCriticalRatio : RetentionHoldWarnRatio,
+                        numericThresholdValue: critical ? criticalRatio : warnRatio,
                         cancellationToken);
                 }
             }
             else
             {
-                await ClearRetentionHoldAsync(key, policy, cancellationToken);
+                await ClearRetentionHoldAsync(key, policy, warnRatio, cancellationToken);
             }
         }
     }
 
     /// <summary>Drops one retention hold's standing state and records the resolution, but only if it was
-    /// actually standing — so a store where nothing is held writes no resolution rows at all.</summary>
+    /// actually standing — so a store where nothing is held writes no resolution rows at all.
+    ///
+    /// <para><paramref name="warnRatio"/> is handed in rather than read here, and that is the point: the
+    /// resolution names the threshold the tier came back under, so reading the seam a second time could
+    /// report a ratio that never judged this policy if a store reload landed mid-pass — and a bare constant
+    /// would name the shipped default on a store that had tuned it.</para></summary>
     private async Task ClearRetentionHoldAsync(
-        string key, RetentionHoldReading policy, CancellationToken cancellationToken)
+        string key, RetentionHoldReading policy, double warnRatio, CancellationToken cancellationToken)
     {
         if (!_activeRetentionHold.TryRemove(key, out var was) || !was)
         {
@@ -1919,12 +3828,13 @@ internal sealed class DarlingSelfAlertEvaluator
             : $"{policy.HypertableName} retention [{key}]";
         var why = policy.Armed
             ? "is armed again - its consumer now covers everything the tier holds"
-            : $"is back under {RetentionHoldWarnRatio:F1}x its {policy.DropAfter} horizon";
+            : $"is back under {warnRatio:F1}x its {policy.DropAfter} horizon";
 
         await RecordResolutionAsync(new AlertResolution(
-            RetentionHoldKeyPrefix + key, StoreServerLabel, RetentionHoldMetric,
+            StoreKey(RetentionHoldKeyPrefix + key), _storeLabel, RetentionHoldMetric,
             "Retention Hold Cleared",
-            $"Monitor Store: {label} {why}"), cancellationToken);
+            /* Label rather than the constant for the #3500 reason the cadence recovery gives. */
+            $"{_storeLabel}: {label} {why}"), cancellationToken);
     }
 
     /// <summary>
@@ -1976,7 +3886,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 {
                     _compressionJobState[key] = CompressionJobHealth.ReArmed;
                     await FireAsync(
-                        CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
+                        StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} was stuck ({job.Reason}) and has been automatically re-armed " +
                             "(alter_job next_start => now). A stuck compression policy halts the store's archival tier, so " +
@@ -1998,7 +3908,7 @@ internal sealed class DarlingSelfAlertEvaluator
                        never loop alter_job on it, and page: a human must re-arm it (or grant ownership). */
                     _compressionJobState[key] = CompressionJobHealth.Escalated;
                     await FireAsync(
-                        CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
+                        StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} is stuck ({job.Reason}) and the service could NOT re-arm it — " +
                             "alter_job failed, usually because the store login does not own the job. Compression is halted, " +
@@ -2017,7 +3927,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 _compressionJobState[key] = CompressionJobHealth.Escalated;
                 _lastCompressionJobAlert[key] = now;
                 await FireAsync(
-                    CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
+                    StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
                     job.Reason, "running on schedule",
                     detail: $"TimescaleDB {label} is STILL stuck ({job.Reason}) after an automatic re-arm last cycle — it " +
                         "re-hung, so the service has STOPPED auto-re-arming it. This is a product-bug signal: the compression " +
@@ -2035,7 +3945,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 {
                     _lastCompressionJobAlert[key] = now;
                     await FireAsync(
-                        CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
+                        StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} remains stuck ({job.Reason}) after escalation — still not compressing. " +
                             "Manual intervention is required; the service will not auto-re-arm it.",
@@ -2060,7 +3970,7 @@ internal sealed class DarlingSelfAlertEvaluator
             _compressionJobState.TryRemove(key, out _);
             _lastCompressionJobAlert.TryRemove(key, out _);
             await RecordResolutionAsync(new AlertResolution(
-                CompressionKeyPrefix + key, StoreServerLabel, CompressionJobMetric,
+                StoreKey(CompressionKeyPrefix + key), _storeLabel, CompressionJobMetric,
                 "Compression Job Recovered",
                 $"TimescaleDB compression job {key} is running on schedule again"), cancellationToken);
         }
@@ -2106,6 +4016,30 @@ internal sealed class DarlingSelfAlertEvaluator
     /// plus — over the most recent <paramref name="recentWindow"/> logged runs — the run count and the
     /// success count (feeding the consecutive-failure fast path). Static + parameterized so the gated live
     /// test can seed rows and assert the raw signals directly.
+    ///
+    /// <para><b>#3496: the recent-N subqueries order by <c>collection_time DESC, log_id DESC</c>, and the
+    /// time column must stay FIRST.</b> <c>collection_log</c> is a TimescaleDB hypertable partitioned on
+    /// <c>collection_time</c> and carries no index on <c>log_id</c>, so <c>ORDER BY log_id DESC</c> had
+    /// exactly one legal plan: append EVERY chunk — decompressing the columnar history — into a top-N sort.
+    /// Measured live once the retention horizon filled: ~389,000 rows decompressed and heapsorted across
+    /// all 32 chunks to return ten, twice per statement (the status twin repeats the shape), every alert
+    /// pass, every 30 seconds, per server. The statement carried its own control: the
+    /// <c>MAX(collection_time)</c> arm below — same table, same <c>server_id</c> predicate — resolved in
+    /// 0.097 ms, because its sort key is chunk-orderable: ChunkAppend stopped at the newest chunk and 30 of
+    /// 32 chunks reported "never executed". Ordering the recent-N arms by the partition column buys the
+    /// same early stop, and the property is HORIZON-INDEPENDENT — ChunkAppend stops at the newest chunks no
+    /// matter how many chunks the retention horizon accumulates, so a future horizon extension cannot
+    /// regress this read back over its deadline. The semantics are identical: a server's <c>log_id</c>
+    /// order and its <c>collection_time</c> order agree (<c>CollectionIdGenerator</c> is a
+    /// process-monotonic counter re-seeded FORWARD from the clock across restarts), and <c>log_id</c>
+    /// stays in the ORDER BY as the deterministic tiebreak within one collection instant. The MAX arm is
+    /// deliberately untouched — it is the measured control, and its one residual (a server whose newest
+    /// qualifying row is ancient walks deeper before stopping) is the rare case and the right cost to pay
+    /// exactly then. This read's growth toward the 90-day retention steady state is what ate the alert
+    /// pass's 10 s command deadline margin — a deadline derived from a 1,744.9 ms measured worst case
+    /// (<see cref="DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds"/>): the warm mean sat near
+    /// 221 ms while the cold/contended excursions clocked 12.0–12.1 s and were swallowed as
+    /// <c>instance_read_failures</c>.</para>
     /// </summary>
     internal static async Task<(DateTime? LastSuccessUtc, int RecentRunCount, int RecentSuccessCount)> ReadCollectionSignalsAsync(
         NpgsqlDataSource postgres, int serverId, int recentWindow, CancellationToken cancellationToken)
@@ -2118,9 +4052,9 @@ SELECT
      WHERE server_id = $1
      AND   status IN ('SUCCESS', 'SKIPPED'))                                        AS last_success,
     (SELECT COUNT(*)
-     FROM (SELECT log_id FROM collection_log WHERE server_id = $1 ORDER BY log_id DESC LIMIT $2) r) AS recent_runs,
+     FROM (SELECT log_id FROM collection_log WHERE server_id = $1 ORDER BY collection_time DESC, log_id DESC LIMIT $2) r) AS recent_runs,
     (SELECT COUNT(*)
-     FROM (SELECT status FROM collection_log WHERE server_id = $1 ORDER BY log_id DESC LIMIT $2) r
+     FROM (SELECT status FROM collection_log WHERE server_id = $1 ORDER BY collection_time DESC, log_id DESC LIMIT $2) r
      WHERE r.status IN ('SUCCESS', 'SKIPPED'))                                       AS recent_success", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(recentWindow);
@@ -2400,18 +4334,31 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
     /// <param name="numericThresholdValue">The bound behind <paramref name="thresholdValue"/>, on the same
     /// terms. Almost every self-alert's threshold is an English phrase ("collecting", "Online", "running
     /// on schedule"), not a bound.</param>
+    /// <param name="muted">The mute decision, when the caller has ALREADY made it; null (the default, and
+    /// every condition but one) asks the shared <c>_isAlertMuted</c> seam for this server and metric, which
+    /// is what every sibling wants.
+    ///
+    /// <para>Only "Stale Mute Rules" decides for itself, and it must, because the seam returns ONE boolean
+    /// over every rule and so cannot say WHICH rule answered. A rule that constrains nothing matches every
+    /// alert on the store, this one included, so a seam answer of true is as easily a blanket mute as a
+    /// decision about this alert — and honoring it would let the condition suppress the only report of its
+    /// own subject. That condition scans the rules it already holds for one that NAMES it and passes the
+    /// verdict in here instead (#3348). Nothing else may pass this: a caller that hands in a decision it did
+    /// not derive from an explicit naming has re-introduced the self-suppression the seam cannot see.</para></param>
     /* The optional context TRAILS the cancellation token so the dozens of existing positional call
        sites stay untouched — only the callers that have discrete facts to carry (#2109: the AG
-       database alerts) name it. */
+       database alerts) name it. Same for muted, which defaults to asking the seam like its siblings. */
     private async Task FireAsync(
         string serverKey, string serverName, string metricName, string currentValue, string thresholdValue,
         string detail, AlertSeverityLevel? severity, string shortMessage,
         double? numericCurrentValue, double? numericThresholdValue, CancellationToken cancellationToken,
-        AlertContext? context = null)
+        AlertContext? context = null, bool? muted = null)
     {
         /* Same mute treatment as the engine: a muted self-alert is still recorded (flagged muted) but its
-           channels are skipped — the deliverer honors AlertOutcome.Muted. */
-        bool muted = _isAlertMuted(new AlertMuteContext { ServerName = serverName, MetricName = metricName });
+           channels are skipped — the deliverer honors AlertOutcome.Muted. A caller that brought its own
+           decision does not even ASK, so a throwing Matches() cannot reach it either. */
+        bool isMuted = muted
+            ?? _isAlertMuted(new AlertMuteContext { ServerName = serverName, MetricName = metricName });
 
         /* #1681: log the FIRING, not just the recovery. RecordResolutionAsync has always logged at Information,
            so the service log showed "… Recovered" with nothing before it — which reads as a spontaneous
@@ -2424,13 +4371,13 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
         _logger?.LogWarning(
             "{Line}",
             AlertFiringLog.Fired(
-                serverName, metricName, severity?.ToString() ?? "Warning", shortMessage, muted));
+                serverName, metricName, severity?.ToString() ?? "Warning", shortMessage, isMuted));
 
         await _deliverer.DeliverAsync(new AlertOutcome(
             serverKey, serverName, metricName, currentValue, thresholdValue,
             Context: context, DetailText: detail,
             NumericCurrentValue: numericCurrentValue, NumericThresholdValue: numericThresholdValue,
-            Muted: muted, Severity: severity, ShortMessage: shortMessage), cancellationToken);
+            Muted: isMuted, Severity: severity, ShortMessage: shortMessage), cancellationToken);
     }
 
     private async Task RecordResolutionAsync(AlertResolution resolution, CancellationToken cancellationToken)

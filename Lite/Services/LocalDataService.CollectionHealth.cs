@@ -339,13 +339,34 @@ LIMIT 1";
     /// <c>collection_time</c> on BOTH sides EXACTLY via <see cref="GetTimeRange"/> — mirroring how
     /// <see cref="GetWaitStatsAsync"/> windows its read. The old single now-relative lower bound ignored
     /// the custom To, rounding a custom range to a hours-back-from-now span.
+    ///
+    /// <para><paramref name="collectorName"/> and <paramref name="minDurationMs"/> are #3287's two filters,
+    /// and they are applied HERE, in SQL, ahead of <paramref name="maxRows"/>. Filtering the returned page
+    /// instead would leave the cap describing the unfiltered window, so a caller who asked for the slow runs
+    /// and hit the cap would be told a truncation of something they did not ask about. Both are NULL-tolerant
+    /// predicates against always-bound parameters, which keeps every parameter at a fixed position — the same
+    /// shape Darling's twin uses, and the same shape <c>ThrowIfDuplicateNameAsync</c> already uses here.</para>
+    ///
+    /// <para>Supplying <paramref name="minDurationMs"/> also switches the ordering to SLOWEST FIRST. A floor
+    /// under newest-first ordering cannot reach the tail — the cap keeps the most recent matches, and the slow
+    /// runs being hunted are the ones that are not recent. The two are one decision, so the ordering is
+    /// derived here rather than offered as a separate argument a caller could set the wrong way.</para>
+    ///
+    /// <para>The desktop Collection Log tab passes neither and is unaffected: no filter, newest first.</para>
     /// </summary>
-    public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, int maxRows = 500, DateTime? asOfUtc = null)
+    public async Task<List<CollectionLogRow>> GetRecentCollectionLogAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, int maxRows = 500, DateTime? asOfUtc = null, string? collectorName = null, double? minDurationMs = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+
+        /* NULLS LAST is belt-and-braces on the ranked arm: a NULL duration_ms cannot satisfy the floor, so no
+           unmeasured run reaches it. Written anyway because DESC sorts NULLs first, so decoupling the filter
+           from the ordering later would otherwise lead the page with the runs that have no duration at all. */
+        var ordering = minDurationMs is null
+            ? "ORDER BY collection_time DESC, duration_ms DESC NULLS LAST"
+            : "ORDER BY duration_ms DESC NULLS LAST, collection_time DESC";
 
         command.CommandText = @"
 SELECT
@@ -362,13 +383,17 @@ FROM v_collection_log
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-ORDER BY collection_time DESC
+AND   ($5 IS NULL OR collector_name = $5)
+AND   ($6 IS NULL OR duration_ms >= $6)
+" + ordering + @"
 LIMIT $4";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         command.Parameters.Add(new DuckDBParameter { Value = maxRows });
+        command.Parameters.Add(new DuckDBParameter { Value = string.IsNullOrWhiteSpace(collectorName) ? DBNull.Value : collectorName.Trim() });
+        command.Parameters.Add(new DuckDBParameter { Value = (object?)minDurationMs ?? DBNull.Value });
 
         var items = new List<CollectionLogRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -557,15 +582,22 @@ public class CollectorHealthRow
     /// <summary>The whole run that item came from.</summary>
     public int? SlowestRunDurationMs { get; set; }
 
-    /// <summary>The answer, as one number: 1.0 is a perfectly even fan-out and it rises with
-    /// concentration. Near 1.0 the cost is the fan-out's WIDTH; around 2.0 or above one database
-    /// dominates and a per-database override or a stagger is the lever (#2468). Null when the collector
-    /// does not fan out, or when the run's duration is zero — a ratio against nothing is a wrong
-    /// answer rather than a smaller one.</summary>
+    /// <summary>The slowest item against the MEAN item: 1.0 is a perfectly even fan-out and it rises with
+    /// concentration. NOT a concentration verdict (#3502): its ceiling is <see cref="FanoutItems"/>, so at
+    /// width it reads high with nothing behind it — the width-versus-concentration decision belongs to
+    /// <see cref="FanoutSlowestSharePercent"/>. Null when the collector does not fan out, or when the run's
+    /// duration is zero — a ratio against nothing is a wrong answer rather than a smaller one.</summary>
     public double? FanoutDominance =>
         FanoutItems is > 0 && SlowestItemMs.HasValue && SlowestRunDurationMs is > 0
             ? (double)SlowestItemMs.Value * FanoutItems.Value / SlowestRunDurationMs.Value
             : null;
+
+    /// <summary>The slowest item's share of its whole pass, as a percentage: slowest_ms / run_ms, the one
+    /// division the remediation decision turns on (#3502). Derived from <see cref="FanoutDominance"/> —
+    /// share = dominance / items — rather than recomputed from the columns, so the two figures can never
+    /// describe different runs: null exactly when dominance is null, by construction. Expression-for-
+    /// expression Darling's.</summary>
+    public double? FanoutSlowestSharePercent => FanoutDominance / FanoutItems * 100;
 
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
 

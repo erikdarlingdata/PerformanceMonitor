@@ -55,7 +55,11 @@ public sealed class PgAlertHistoryStore : IAlertHistoryStore
             record.NumericCurrentValue, record.CurrentValueText);
         var thresholdValue = AlertValueParser.ResolveStoredValue(
             record.NumericThresholdValue, record.ThresholdValueText);
-        var serverId = int.TryParse(record.ServerId, out var sid) ? sid : 0;
+
+        /* Unparseable keys (the self-alert family) collapse to the server_id 0 bucket — a write-only
+           bucket the cooldown seed below refuses to read (#3456). One shared mapping with that read, so
+           the two halves cannot drift back into answering the identity question differently. */
+        var serverId = AlertHistoryServerIdentity.StorageId(record.ServerId);
 
         try
         {
@@ -99,6 +103,33 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", connection) { Comma
         }
     }
 
+    /// <summary>
+    /// Writes ONE custom-alert teardown resolution row (#3334) through the <c>SECURITY DEFINER</c>
+    /// <c>config.record_custom_alert_resolution</c> function instead of a direct <c>INSERT INTO config_alert_log</c>.
+    /// A caller-initiated rule delete runs on the least-privilege viewer/mcp pool, which may not INSERT the
+    /// history table; the function (owned by the store owner, EXECUTE-granted to viewer/mcp) performs the
+    /// privileged write while confining it to exactly a no-channel resolution row -- the fixed delivery-shape
+    /// columns live in the function, so this passes only the four that vary. Maps the same way
+    /// <see cref="RecordAlertAsync"/> writes a <c>BuildResolutionRecord</c> (title -> metric_name, message ->
+    /// detail_text, zeroed/unmuted), but pinned to a no-channel row (<c>alert_sent</c> false,
+    /// <c>notification_type</c> 'none') rather than a natural clear's 'tray'. NOT failure-isolated here: the sole caller
+    /// (<c>CustomAlertEvaluator.WriteTeardownResolutionAsync</c>) already wraps it best-effort, and swallowing
+    /// here would hide a missing grant/function behind a silent no-op -- exactly the class of bug #3334 is.
+    /// </summary>
+    public async Task RecordCustomAlertResolutionAsync(
+        int serverId, string serverName, string metricName, string detailText, System.Threading.CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        using var command = new NpgsqlCommand(
+            "SELECT config.record_custom_alert_resolution($1, $2, $3, $4)", connection)
+            { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = serverName });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = metricName });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = detailText });
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     public Task<DateTime?> GetLastEmailSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
         /* A successful email send is logged with notification_type 'email'/'email+webhook' and a
            null send_error — exactly when Lite stamps the email cooldown (#981). */
@@ -120,7 +151,18 @@ AND   notification_type IN ('webhook', 'email+webhook')", "WebhookAlert");
     private async Task<DateTime?> ReadMaxAlertTimeAsync(
         string serverId, string metricName, string? dedupKey, string extraFilter, string logScope)
     {
-        var sid = int.TryParse(serverId, out var s) ? s : 0;
+        /* #3456: a key that is not an integer has no per-key rows to read — the write side collapses
+           every such key into the server_id 0 bucket, so the old parse-to-0 fallback answered this key's
+           question with MAX(alert_time) over EVERY collapsed key's rows: the fleet-wide last send of the
+           metric, which is how one server's delivery came to throttle its siblings' first notices. No
+           answer (null = no seed = first notice) is the correct one, and it fails toward posting. The
+           invariant and the literal-0 exclusion live on AlertHistoryServerIdentity.SeedScope. */
+        var sid = AlertHistoryServerIdentity.SeedScope(serverId);
+        if (sid is null)
+        {
+            return null;
+        }
+
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync();
@@ -136,7 +178,7 @@ AND   metric_name = $2" + extraFilter
                    rather than hand-concatenated here — see its doc comment for why. NULL context_json
                    rows fail the match either way. */
                 + (dedupKey is null ? "" : "\nAND   context_json LIKE $3 ESCAPE '\\'"), connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
-            command.Parameters.AddWithValue(sid);
+            command.Parameters.AddWithValue(sid.Value);
             command.Parameters.AddWithValue(metricName);
             if (dedupKey is not null)
             {

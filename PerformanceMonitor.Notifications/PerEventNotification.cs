@@ -68,8 +68,9 @@ public static class PerEventNotification
 
         foreach (var incident in incidents.Take(cap))
         {
-            var ctx = NewContext(source);
-            ctx.Incidents = new List<AlertIncident> { incident };
+            var carried = new List<AlertIncident> { incident };
+            var ctx = NewContext(source, carried);
+            ctx.Incidents = carried;
             // includeDetailFields: true — the per-event card has room for this one incident's full
             // forensic detail (Victim SQL / Processes / queries), which Summary's batched card splits
             // across the builder's own items.
@@ -80,7 +81,7 @@ public static class PerEventNotification
         var overflow = incidents.Skip(cap).ToList();
         if (overflow.Count > 0)
         {
-            var ctx = NewContext(source);
+            var ctx = NewContext(source, overflow);
             ctx.Incidents = new List<AlertIncident>(overflow);
             for (int n = 0; n < overflow.Count; n++)
                 ctx.Details.Add(AlertIncidentRenderer.BuildItem(overflow[n], $"Incident {n + 1} of {overflow.Count}", includeDetailFields: true));
@@ -90,14 +91,24 @@ public static class PerEventNotification
         return messages;
     }
 
-    // A fresh per-incident context that carries over the source's severity override AND the attachment
-    // (deadlock_graph.xml / blocked_process_report.xml) so per-event email keeps the forensic file.
-    private static AlertContext NewContext(AlertContext source) => new()
+    /* A fresh context for the incidents ONE message carries: the source's severity override, plus the
+       forensic attachment (deadlock_graph.xml / blocked_process_report.xml) belonging to those incidents so
+       per-event email keeps the file #1146 put there.
+
+       #3330: the attachment comes from the incidents, not from the source. Copying the source's put the
+       FIRST graph in the window on all N messages, so an alert carrying five fingerprints sent five emails
+       whose attachments described one of them — the other four documented a deadlock their own card did not
+       mention. The overflow message resolves against its own batch for the same reason. */
+    private static AlertContext NewContext(AlertContext source, IReadOnlyList<AlertIncident> carried)
     {
-        SeverityOverride = source.SeverityOverride,
-        AttachmentXml = source.AttachmentXml,
-        AttachmentFileName = source.AttachmentFileName
-    };
+        var attachment = AlertIncidentAttachment.ForIncidents(carried);
+        return new AlertContext
+        {
+            SeverityOverride = source.SeverityOverride,
+            AttachmentXml = attachment?.Xml,
+            AttachmentFileName = attachment?.FileName
+        };
+    }
 
     // The alert's "current value" for a single-incident card: the occurrence count (a number, matching
     // the Summary card's count), not the involved-objects string (which already shows as its own fact).

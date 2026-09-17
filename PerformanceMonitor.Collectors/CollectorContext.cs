@@ -197,6 +197,17 @@ public sealed class CollectorContext
     public IReadOnlyList<string> ExcludedDatabases { get; init; } = System.Array.Empty<string>();
 
     /// <summary>
+    /// The per-collector database ALLOW-LIST (#3477), already resolved through the schedule row's
+    /// layering (per-server &gt; fleet-wide &gt; unscoped) by the host — empty means UNSCOPED: every
+    /// database the server enumerates, exactly today's behavior. Non-empty means only the named
+    /// databases, spliced into the same enumerations <see cref="ExcludedDatabases"/> rides via
+    /// <see cref="DatabaseScopeFilter"/>, so the exclusion still wins and the effective set is
+    /// scoped-in minus excluded. Lite never sets this (its schedule store carries no scope column),
+    /// so every Lite query stays byte-identical to the unscoped form.
+    /// </summary>
+    public IReadOnlyList<string> DatabaseScope { get; init; } = System.Array.Empty<string>();
+
+    /// <summary>
     /// When true, the query_stats and query_store collectors capture the execution plan text into
     /// their plan column (query_stats.query_plan_xml / query_store_stats.query_plan_text); when
     /// false they leave it NULL and the generated SQL is byte-identical to the no-plan form.
@@ -301,6 +312,24 @@ public sealed class CollectorContext
     /// from <c>ReadAsync</c> (#1836). False in the common case — only budgeted collectors touch it.
     /// </summary>
     public bool PerItemTextBudgetExceeded { get; set; }
+
+    /// <summary>
+    /// <c>Proc [Database Id = N Object Id = M]</c> pairs this cycle's events turned out to need resolved
+    /// (#3307), filled by a definition's read method and read back by its
+    /// <see cref="ICollectorDefinition{TRow}.BuildSupplementalQuery"/>. Those two run against THIS object,
+    /// in that order, on the single-connection path — which is what lets one batched lookup serve every
+    /// event a cycle produced without the definition holding state of its own.
+    ///
+    /// <para>Empty in the common case: only <c>deadlocks</c> and <c>blocked_process_report</c> fill it, and
+    /// only when a captured statement actually came from a procedure invoked as an RPC. An empty list means
+    /// <c>BuildSupplementalQuery</c> returns null and the cycle costs no extra round trip.</para>
+    ///
+    /// <para>The Azure SQL DB per-database path fills it and never drains it — the host runs no
+    /// supplemental there — so those rows keep the raw placeholder. That is the documented degradation
+    /// rather than a separate outcome: <c>OBJECT_NAME</c> cannot read another database's metadata on Azure
+    /// SQL DB anyway, so the lookup would return NULL for exactly the rows the placeholder survives on.</para>
+    /// </summary>
+    public List<ProcPlaceholderId> ProcPlaceholderIds { get; } = new();
 
     /// <summary>
     /// Milliseconds spent waiting for <c>ExecuteReaderAsync</c> to return for the item just read (#2164),

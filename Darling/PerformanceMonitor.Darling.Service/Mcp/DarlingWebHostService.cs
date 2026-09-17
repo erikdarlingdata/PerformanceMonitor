@@ -76,6 +76,11 @@ public sealed class DarlingWebHostService : BackgroundService
     private readonly ILogger<DarlingWebHostService> _logger;
     private readonly WebRuntimeState _state;
 
+    /// <summary>#3514: the served TLS certificate's expiry facts, published here on load so the worker's alert
+    /// sweep can raise a self-alert as it approaches (the certificate is loaded once and only a log line ever
+    /// reported its expiry). Null-by-default when there is no LAN TLS certificate.</summary>
+    private readonly WebTlsCertificateState _certState;
+
     /// <summary>#2953: the collector's startup verdict, published by the worker and reported by
     /// <c>/api/ping</c>. Held rather than resolved per request so the route stays a field read — the whole
     /// point of that endpoint is that it answers without depending on anything that can be down.</summary>
@@ -109,11 +114,12 @@ public sealed class DarlingWebHostService : BackgroundService
     internal static readonly TimeSpan SessionLifetime = TimeSpan.FromHours(12);
     private const int SigningKeyBytes = 32;
 
-    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState)
+    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState)
     {
         _logger = logger;
         _state = state;
         _collectorState = collectorState;
+        _certState = certState;
     }
 
     /// <summary>The supervisor's per-tick verdict — pure over (running, runningPort, enabled, desiredPort) so a
@@ -274,6 +280,13 @@ public sealed class DarlingWebHostService : BackgroundService
         _serverCertificate?.Dispose();
         _serverCertificate = null;
 
+        /* #3514 follow-up: the served certificate is gone, so stop advertising its expiry to the worker's
+           alert sweep. A runtime disable of the dashboard (a no-restart op) reaches here; without the clear
+           the worker keeps firing the expiry alert about a dashboard the operator turned off. A port-change
+           rebind runs Stop→Start in the same supervisor tick, so the next start re-publishes before the
+           hourly sweep can observe this null. */
+        _certState.Clear();
+
         _oidcClient?.Dispose();
         _oidcClient = null;
 
@@ -297,6 +310,10 @@ public sealed class DarlingWebHostService : BackgroundService
 
         try { _serverCertificate?.Dispose(); } catch { /* best-effort */ }
         _serverCertificate = null;
+
+        /* #3514 follow-up: a start that published its certificate (before the port-in-use / credential
+           bail below it) but never served TLS must not leave the worker alerting on a non-served cert. */
+        _certState.Clear();
 
         try { _oidcClient?.Dispose(); } catch { /* best-effort */ }
         _oidcClient = null;
@@ -490,6 +507,15 @@ public sealed class DarlingWebHostService : BackgroundService
                             var loaded = DarlingWebTls.Load(network.Tls!, plan.Shape);
                             var certificate = loaded.Leaf;
 
+                            /* #3514: publish the served certificate's expiry to the worker's alert sweep BEFORE
+                               the lifetime gate below, so an already-expired certificate the host is about to
+                               refuse still reaches the operator as a Critical self-alert, not only a log line.
+                               NotAfter is a LOCAL time (see the lifetime check below) — normalize to UTC. */
+                            _certState.Publish(
+                                new DateTimeOffset(certificate.NotAfter.ToUniversalTime()),
+                                certificate.Subject,
+                                certificate.Thumbprint);
+
                             if (plan.Warning is not null)
                             {
                                 _logger.LogWarning("Web dashboard TLS: {Warning}", plan.Warning);
@@ -578,6 +604,9 @@ public sealed class DarlingWebHostService : BackgroundService
                             _serverCertificate?.Dispose();
                             _serverCertificate = null;
                             serverCertificate = null;
+                            /* #3514 follow-up: this degrade published the certificate at load but is about to
+                               serve loopback-only, so retract the expiry advertisement too. */
+                            _certState.Clear();
 
                             _logger.LogCritical(
                                 "Web dashboard TLS certificate could not be loaded ({Message}) — refusing to expose; binding loopback-only.",
@@ -703,7 +732,15 @@ public sealed class DarlingWebHostService : BackgroundService
                 }
             });
 
-            /* Suppress ASP.NET Core console logging — the service's own logger reports lifecycle. */
+            /* The logging split, both halves decided here: ASP.NET framework/request noise is deliberately
+               SILENCED (ClearProviders — the service's own logger narrates lifecycle, and Kestrel's
+               per-request chatter has no seat in the service log), and the APP-LEVEL log-and-degrade lines
+               are deliberately ROUTED to the service's real logger, by handing _logger to MapAll's endpoint
+               seats below. The two are one design: clearing providers makes app.Logger a logger with nowhere
+               to write, so an endpoint that logged through it would degrade with no trace — the exact gap
+               the MCP host closed for its tools with AddSingleton<ILogger>(_logger) (#3473 review), closed
+               here at the wiring seam instead because this host maps routes directly rather than resolving
+               tool parameters through DI. */
             builder.Logging.ClearProviders();
             builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
@@ -881,7 +918,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 });
             }
 
-            DarlingWebEndpoints.MapAll(_app, postgres, _collectorState);
+            DarlingWebEndpoints.MapAll(_app, postgres, _collectorState, _logger);
             _app.UseDefaultFiles();
             _app.UseStaticFiles();
 

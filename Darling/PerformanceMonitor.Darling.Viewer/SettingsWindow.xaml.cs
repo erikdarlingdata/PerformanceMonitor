@@ -17,6 +17,8 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Navigation;
+using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitor.Ui;
@@ -721,8 +723,14 @@ public partial class SettingsWindow : Window
         AlertBlockingCheckBox.IsChecked = r.BlockingEnabled;
         AlertBlockingThresholdBox.Text = r.BlockingCountThreshold.ToString(CultureInfo.InvariantCulture);
         AlertBlockingWaitSecondsBox.Text = r.BlockingWaitSecondsThreshold.ToString(CultureInfo.InvariantCulture);
+        /* #3444 (V122): the PostgreSQL count gates, prefilled beside their SQL Server twins. Separate
+           boxes because they are separate columns — see the V122 rung for why one number cannot serve
+           both engines. Both follow AlertBlockingCheckBox/AlertDeadlockCheckBox, which govern the
+           condition on either engine. */
+        AlertPgBlockingThresholdBox.Text = r.PgBlockingCountThreshold.ToString(CultureInfo.InvariantCulture);
         AlertDeadlockCheckBox.IsChecked = r.DeadlockEnabled;
         AlertDeadlockThresholdBox.Text = r.DeadlockCountThreshold.ToString(CultureInfo.InvariantCulture);
+        AlertPgDeadlockThresholdBox.Text = r.PgDeadlockCountThreshold.ToString(CultureInfo.InvariantCulture);
         AlertPoisonWaitCheckBox.IsChecked = r.PoisonWaitEnabled;
         AlertPoisonWaitThresholdBox.Text = r.PoisonWaitThresholdMs.ToString(CultureInfo.InvariantCulture);
         AlertLongRunningQueryCheckBox.IsChecked = r.LongRunningQueryEnabled;
@@ -746,6 +754,14 @@ public partial class SettingsWindow : Window
         AlertCollectionStaleMinutesBox.Text = r.CollectionStaleMinutes.ToString(CultureInfo.InvariantCulture);
         AlertCollectionFailureThresholdBox.Text = r.CollectionFailureThreshold.ToString(CultureInfo.InvariantCulture);
         AlertStoreJobCadenceWarnPercentBox.Text = r.StoreJobCadenceWarnPercent.ToString(CultureInfo.InvariantCulture);
+        /* #3297: one decimal, matching how the alert itself renders the ratio ("held at 4.5x"), so the box
+           and the alert text agree about what the number looks like. */
+        AlertRetentionHoldWarnRatioBox.Text = r.RetentionHoldWarnRatio.ToString("0.0", CultureInfo.InvariantCulture);
+        AlertRetentionHoldCriticalRatioBox.Text = r.RetentionHoldCriticalRatio.ToString("0.0", CultureInfo.InvariantCulture);
+        /* #3368: one decimal, matching how both cards render the rate beside the count, so the box and the
+           card agree about what the number looks like. */
+        BandDeadlockWarnPerHourBox.Text = r.DeadlockWarnPerHour.ToString("0.0", CultureInfo.InvariantCulture);
+        BandDeadlockCriticalPerHourBox.Text = r.DeadlockCriticalPerHour.ToString("0.0", CultureInfo.InvariantCulture);
         AlertPvsCheckBox.IsChecked = r.PvsEnabled;
         AlertPvsThresholdPercentBox.Text = r.PvsThresholdPercent.ToString(CultureInfo.InvariantCulture);
         AlertPvsFloorGbBox.Text = r.PvsFloorGb.ToString(CultureInfo.InvariantCulture);
@@ -764,6 +780,11 @@ public partial class SettingsWindow : Window
         AnalysisNotificationsCheckBox.IsChecked = r.AnalysisNotificationsEnabled;
         AnalysisNotifySeverityBox.Text = r.AnalysisNotifySeverity.ToString("0.0", CultureInfo.InvariantCulture);
         AnalysisNotifyCooldownBox.Text = r.AnalysisNotifyCooldownMinutes.ToString(CultureInfo.InvariantCulture);
+        /* #3466 (V124): the fleet sweep's own switch and cadence, prefilled beside Automated Analysis —
+           the other scheduled whole-fleet evaluation — and deliberately OUTSIDE the master-toggle
+           enable/disable group: sweeps keep running under a fleet-wide mute by contract. */
+        FleetSweepEnabledCheckBox.IsChecked = r.FleetSweepEnabled;
+        FleetSweepIntervalBox.Text = r.FleetSweepIntervalMinutes.ToString(CultureInfo.InvariantCulture);
         /* #1141/#1236: the delivery mode + per-event cap are now STORE-backed (the service honors them),
            seeded from the row like every other alert-engine control. */
         AlertDeliveryModeBox.SelectedIndex = r.DeliveryMode == "PerEvent" ? 1 : 0;
@@ -813,6 +834,7 @@ public partial class SettingsWindow : Window
             DatabaseStateEnabled = AlertDatabaseStateCheckBox.IsChecked == true,
             AnalysisEnabled = AnalysisEnabledCheckBox.IsChecked == true,
             AnalysisNotificationsEnabled = AnalysisNotificationsCheckBox.IsChecked == true,
+            FleetSweepEnabled = FleetSweepEnabledCheckBox.IsChecked == true,
             ExcludedDatabases = AlertExcludedDatabasesBox.Text
                 .Split(',')
                 .Select(s => s.Trim())
@@ -830,6 +852,16 @@ public partial class SettingsWindow : Window
             row.BlockingWaitSecondsThreshold = blockingWait;
         if (int.TryParse(AlertDeadlockThresholdBox.Text, out var deadlock) && deadlock > 0)
             row.DeadlockCountThreshold = deadlock;
+        /* #3444 (V122): the floor is the same named constant update_alert_settings enforces and
+           DarlingAlertSettings clamps to, so the three writers into this column cannot disagree about
+           what is acceptable. Out-of-range input leaves the row's prefilled value, matching every
+           sibling above. */
+        if (int.TryParse(AlertPgDeadlockThresholdBox.Text, out var pgDeadlock)
+            && pgDeadlock >= PostgresAlertEvaluator.CountThresholdFloor)
+            row.PgDeadlockCountThreshold = pgDeadlock;
+        if (int.TryParse(AlertPgBlockingThresholdBox.Text, out var pgBlocking)
+            && pgBlocking >= PostgresAlertEvaluator.CountThresholdFloor)
+            row.PgBlockingCountThreshold = pgBlocking;
         if (int.TryParse(AlertPoisonWaitThresholdBox.Text, out var poisonWait) && poisonWait > 0)
             row.PoisonWaitThresholdMs = poisonWait;
         if (int.TryParse(AlertLongRunningQueryThresholdBox.Text, out var lrq) && lrq > 0)
@@ -857,6 +889,32 @@ public partial class SettingsWindow : Window
         /* #2136: validated to the same range DarlingAlertSettings clamps ([5, 100]). */
         if (int.TryParse(AlertStoreJobCadenceWarnPercentBox.Text, out var cadencePct) && cadencePct is >= 5 and <= 100)
             row.StoreJobCadenceWarnPercent = cadencePct;
+        /* #3297: validated against the SAME named bounds DarlingAlertSettings clamps to and the MCP writer
+           accepts, so the three surfaces cannot disagree about what is settable. InvariantCulture on the
+           parse deliberately: this writes a double precision column read by the service and by
+           get_alert_settings, so a comma decimal separator from the operator's locale must be rejected
+           rather than silently parsed as a different number on one machine and not another. The two are
+           validated INDEPENDENTLY — critical below warn is a legitimate setting (every fire is Critical),
+           not a pair to reject. */
+        if (double.TryParse(AlertRetentionHoldWarnRatioBox.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var holdWarn)
+            && holdWarn >= TimescaleSupport.RetentionHoldRatioFloor
+            && holdWarn <= TimescaleSupport.RetentionHoldRatioCeiling)
+            row.RetentionHoldWarnRatio = holdWarn;
+        if (double.TryParse(AlertRetentionHoldCriticalRatioBox.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var holdCritical)
+            && holdCritical >= TimescaleSupport.RetentionHoldRatioFloor
+            && holdCritical <= TimescaleSupport.RetentionHoldRatioCeiling)
+            row.RetentionHoldCriticalRatio = holdCritical;
+        /* #3368: validated against the SAME named bounds DeadlockRateThresholds clamps to and the MCP
+           writer accepts, InvariantCulture on the parse, and the two validated INDEPENDENTLY — all three
+           for the reasons the pair above gives. */
+        if (double.TryParse(BandDeadlockWarnPerHourBox.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var dlWarn)
+            && dlWarn >= ServerHealthThresholds.DeadlockRatePerHourFloor
+            && dlWarn <= ServerHealthThresholds.DeadlockRatePerHourCeiling)
+            row.DeadlockWarnPerHour = dlWarn;
+        if (double.TryParse(BandDeadlockCriticalPerHourBox.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var dlCritical)
+            && dlCritical >= ServerHealthThresholds.DeadlockRatePerHourFloor
+            && dlCritical <= ServerHealthThresholds.DeadlockRatePerHourCeiling)
+            row.DeadlockCriticalPerHour = dlCritical;
         if (int.TryParse(AlertPvsThresholdPercentBox.Text, out var pvsPct) && pvsPct is >= 0 and <= 100)
             row.PvsThresholdPercent = pvsPct;
         if (int.TryParse(AlertPvsFloorGbBox.Text, out var pvsFloor) && pvsFloor >= 0)
@@ -894,6 +952,16 @@ public partial class SettingsWindow : Window
         else
             errors.Add("Analysis re-notify cooldown must be between 30 and 10080 minutes.");
 
+        /* #3466 (V124): the bounds are the same named constants update_alert_settings enforces and the
+           worker clamps to, so the three writers into this column cannot disagree about what is
+           acceptable — the #3444 discipline, restated for a cadence. */
+        if (int.TryParse(FleetSweepIntervalBox.Text, out var fleetSweepInterval)
+            && fleetSweepInterval >= FleetSweepCadence.IntervalMinutesFloor
+            && fleetSweepInterval <= FleetSweepCadence.IntervalMinutesCeiling)
+            row.FleetSweepIntervalMinutes = fleetSweepInterval;
+        else
+            errors.Add($"Fleet sweep interval must be between {FleetSweepCadence.IntervalMinutesFloor} and {FleetSweepCadence.IntervalMinutesCeiling} minutes.");
+
         /* #1141/#1236: delivery mode + per-event cap (store-backed). */
         row.DeliveryMode = AlertDeliveryModeBox.SelectedIndex == 1 ? "PerEvent" : "Summary";
         if (int.TryParse(AlertPerEventMaxBox.Text, out var perEventMax) && perEventMax is >= 1 and <= 100)
@@ -923,6 +991,12 @@ public partial class SettingsWindow : Window
         AlertBlockingThresholdBox.Text = "1";
         AlertBlockingWaitSecondsBox.Text = "0";
         AlertDeadlockThresholdBox.Text = "1";
+        /* #3444 (V122): from the shared constants rather than a literal "1", so a moved default cannot
+           leave this button writing a threshold nobody chose. */
+        AlertPgDeadlockThresholdBox.Text =
+            PostgresAlertEvaluator.DeadlockCountThresholdDefault.ToString(CultureInfo.InvariantCulture);
+        AlertPgBlockingThresholdBox.Text =
+            PostgresAlertEvaluator.BlockingCountThresholdDefault.ToString(CultureInfo.InvariantCulture);
         AlertPoisonWaitThresholdBox.Text = "500";
         AlertLongRunningQueryThresholdBox.Text = "30";
         /* V20: the long-running-query read shape resets to Lite's App defaults (5 rows, every filter on). */
@@ -946,6 +1020,18 @@ public partial class SettingsWindow : Window
            the grid moved would arm the alert past the point it exists to precede. */
         AlertStoreJobCadenceWarnPercentBox.Text =
             TimescaleSupport.RefreshSlotPercentOfHourlyCadence.ToString(CultureInfo.InvariantCulture);
+        /* #3297: derived for the reason one line up — this button writes the row when the boxes do not
+           parse, so a frozen literal here is the value an operator would be handed back. */
+        AlertRetentionHoldWarnRatioBox.Text =
+            TimescaleSupport.RetentionHoldWarnRatioDefault.ToString("0.0", CultureInfo.InvariantCulture);
+        AlertRetentionHoldCriticalRatioBox.Text =
+            TimescaleSupport.RetentionHoldCriticalRatioDefault.ToString("0.0", CultureInfo.InvariantCulture);
+        /* #3368: derived for the reason one line up — this button writes the row when the boxes do not
+           parse, so a frozen literal here is the value an operator would be handed back. */
+        BandDeadlockWarnPerHourBox.Text =
+            ServerHealthThresholds.DeadlockWarnPerHourDefault.ToString("0.0", CultureInfo.InvariantCulture);
+        BandDeadlockCriticalPerHourBox.Text =
+            ServerHealthThresholds.DeadlockCriticalPerHourDefault.ToString("0.0", CultureInfo.InvariantCulture);
         AnalysisNotifyCooldownBox.Text = "360";
         AlertPvsThresholdPercentBox.Text = "40";
         AlertPvsFloorGbBox.Text = "1";
@@ -960,6 +1046,10 @@ public partial class SettingsWindow : Window
         AlertPerEventMaxBox.Text = "5";
         AnalysisIntervalBox.Text = "30";
         AnalysisNotifySeverityBox.Text = "1.5";
+        /* #3466 (V124): from the shared constant rather than a literal, so a moved default cannot
+           leave this button writing a cadence nobody chose. The checkbox resets to the shipped ON. */
+        FleetSweepEnabledCheckBox.IsChecked = true;
+        FleetSweepIntervalBox.Text = FleetSweepCadence.DefaultIntervalMinutes.ToString(CultureInfo.InvariantCulture);
         AlertExcludedDatabasesBox.Text = "";
         MuteRuleDefaultExpirationCombo.SelectedIndex = 1; // 24 hours
         UpdateAlertPreviewText();
@@ -994,6 +1084,15 @@ public partial class SettingsWindow : Window
         }
         if (AlertDeadlockCheckBox.IsChecked == true)
             parts.Add($"deadlocks >= {AlertDeadlockThresholdBox.Text}");
+        /* #3444: only summarize the PostgreSQL gates when they differ from their SQL Server twin — on the
+           common single-engine install the two agree and a second identical clause would read as a
+           duplicate rather than as information. */
+        if (AlertDeadlockCheckBox.IsChecked == true
+            && !string.Equals(AlertPgDeadlockThresholdBox.Text, AlertDeadlockThresholdBox.Text, StringComparison.Ordinal))
+            parts.Add($"pg deadlocks >= {AlertPgDeadlockThresholdBox.Text}");
+        if (AlertBlockingCheckBox.IsChecked == true
+            && !string.Equals(AlertPgBlockingThresholdBox.Text, AlertBlockingThresholdBox.Text, StringComparison.Ordinal))
+            parts.Add($"pg blocking >= {AlertPgBlockingThresholdBox.Text}");
         if (AlertPoisonWaitCheckBox.IsChecked == true)
             parts.Add($"poison waits >= {AlertPoisonWaitThresholdBox.Text}ms avg");
         if (AlertLongRunningQueryCheckBox.IsChecked == true)
@@ -1034,6 +1133,8 @@ public partial class SettingsWindow : Window
         AlertBlockingWaitSecondsBox.IsEnabled = enabled;
         AlertDeadlockCheckBox.IsEnabled = enabled;
         AlertDeadlockThresholdBox.IsEnabled = enabled;
+        AlertPgDeadlockThresholdBox.IsEnabled = enabled;
+        AlertPgBlockingThresholdBox.IsEnabled = enabled;
         AlertPoisonWaitCheckBox.IsEnabled = enabled;
         AlertPoisonWaitThresholdBox.IsEnabled = enabled;
         AlertLongRunningQueryCheckBox.IsEnabled = enabled;
@@ -1060,6 +1161,12 @@ public partial class SettingsWindow : Window
         AlertCollectionStaleMinutesBox.IsEnabled = enabled;
         AlertCollectionFailureThresholdBox.IsEnabled = enabled;
         AlertStoreJobCadenceWarnPercentBox.IsEnabled = enabled;
+        AlertRetentionHoldWarnRatioBox.IsEnabled = enabled;
+        AlertRetentionHoldCriticalRatioBox.IsEnabled = enabled;
+        /* #3368's BandDeadlockWarnPerHourBox / BandDeadlockCriticalPerHourBox are ABSENT from this list on
+           purpose. They are health-BAND tiers, not alert thresholds: a card's colour and the fleet
+           roll-up's band counts are rendered whether or not the alert engine is switched on, so greying
+           them here would make the one setting that still has an effect look inert. */
         AlertFileGrowthCheckBox.IsEnabled = enabled;
         AlertFileGrowthRiseMbBox.IsEnabled = enabled;
         AlertFileGrowthVolumePercentBox.IsEnabled = enabled;

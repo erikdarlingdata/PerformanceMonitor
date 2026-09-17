@@ -44,6 +44,21 @@ If a week of parallel PRs left duplicate section headers in `[Unreleased]` (two 
 
 If the previous version's changelog entry is missing, add that too.
 
+### 2a. Archive and compact the cut version
+
+`CHANGELOG.md` is an **index**: from 3.0.0 on, each released entry is reduced to its bold title and the issues it references, and the prose lives in `docs/changelog/<major>.<minor>.md`. The single file had reached 2,160,009 bytes, which GitHub refuses to render. `[Unreleased]` keeps its full prose because that is where entries are written, so once the heading is renamed to the new version its prose has to move:
+
+```
+python3 tools/changelog/changelog_archive.py split     # rewrites the index and the archives
+python3 tools/changelog/changelog_archive.py census    # the counts and hashes the CI pin reads
+python3 tools/changelog/changelog_archive.py verify    # counts, reference resolution, size ceilings
+python3 tools/changelog/changelog_archive.py roundtrip # byte identity against the pre-split revision
+```
+
+`split` is idempotent — run it on an already-split tree and only the newly-released version moves. **Regenerating the census is the step to remember**: `ChangelogIndexAndArchiveTests` reads `tools/changelog/archive-census.txt`, so a new archive with no row there fails CI, and so does a row that no longer matches its archive.
+
+Pre-3.0 versions are deliberately **not** archived: those entries carry no prose to move, and an empty file beside them would be one more thing to maintain that says nothing.
+
 ### 2b. README Sync
 
 Cross-reference `README.md` against the changelog and ensure all user-facing changes are reflected:
@@ -171,7 +186,7 @@ gh release create v{version} --title "v{version}" --notes "See CHANGELOG.md for 
 
 The build workflow will then run, compile all artifacts, sign them (if SignPath is configured), and attach them to the release. Monitor at https://github.com/erikdarlingdata/PerformanceMonitor/actions
 
-SignPath blocks on **four** approval requests as of v3.3.0: **Lite** (zip), **Darling** (service + viewer apphost exes), **Lite (Velopack)**, and **Darling Viewer (Velopack)** — the Dashboard/Installer signing steps left with their artifacts. The `Darling` artifact-configuration slug on signpath.io signs the two apphost exes (`PerformanceMonitor.Darling.Service.exe` at the root and `viewer/PerformanceMonitor.Darling.Viewer.exe`) and leaves the `PerformanceMonitor.*` / third-party dlls and `pg-runtime.zip` alone; if it ever goes missing the single `Sign Darling` step fails the release. The Darling zip (`PerformanceMonitorDarling-{version}.zip` — service at root with `pg-runtime.zip` beside the exe, viewer in `viewer\`) joins the release assets; the pg-runtime build downloads ~340MB on a cold cache (cached across re-releases on the fetch script's content hash). Verify the Darling zip is attached and listed in `SHA256SUMS.txt`, alongside the Lite zip/Setup.exe and the Viewer Setup.exe.
+SignPath blocks on **five** approval requests: **Lite** (zip), **Darling** (service + viewer apphost exes), **Lite (Velopack)**, **Darling Viewer (Velopack)**, and **the executables Velopack generates** — the Dashboard/Installer signing steps left with their artifacts. The fifth (#3288) comes after `vpk pack` and carries both products in one request: each `Setup.exe`, and the root launcher and `Update.exe` inside each `Portable.zip`. It uses the `SignTemplate` artifact configuration, whose `**/*.exe` and `**/*.dll` includes both need `min-matches="0"` because the batch contains no dll. Two executables per product stay unsigned by design and only inside the `.nupkg` — `lib/app/<App>_ExecutionStub.exe` and `lib/app/Squirrel.exe` — because `releases.<channel>.json` records that package's SHA256 and the delta patches against those bytes; the release guard allowlists exactly those, keyed on the container as well as the path. The `Darling` artifact-configuration slug on signpath.io signs the two apphost exes (`PerformanceMonitor.Darling.Service.exe` at the root and `viewer/PerformanceMonitor.Darling.Viewer.exe`) and leaves the `PerformanceMonitor.*` / third-party dlls and `pg-runtime.zip` alone; if it ever goes missing the single `Sign Darling` step fails the release. The Darling zip (`PerformanceMonitorDarling-{version}.zip` — service at root with `pg-runtime.zip` beside the exe, viewer in `viewer\`) joins the release assets; the pg-runtime build downloads ~340MB on a cold cache (cached across re-releases on the fetch script's content hash). Verify the Darling zip is attached and listed in `SHA256SUMS.txt`, alongside the Lite zip/Setup.exe and the Viewer Setup.exe.
 
 ## Notes
 

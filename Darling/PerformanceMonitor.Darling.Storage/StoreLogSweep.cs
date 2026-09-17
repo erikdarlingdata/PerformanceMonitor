@@ -104,8 +104,8 @@ ORDER BY l.modification, l.name";
     /// <see cref="StoreLogSlab.TrimToLastNewline"/> cut at a newline — the one byte that cannot be part of a
     /// multi-byte character — before anything decodes.</para>
     ///
-    /// <para>The path comes from <c>current_setting('log_directory')</c> rather than the literal
-    /// <c>'log/'</c> the collectors hardcode. Darling's own v6 block sets it to <c>'log'</c>, so the two
+    /// <para>The path comes from <c>current_setting('log_directory')</c>, which is how the two log
+    /// collectors build theirs too. Darling's own v6 block sets it to <c>'log'</c>, so the two
     /// agree on a managed store; asking is what keeps this correct on a store whose owner moved it, and the
     /// absolute-path case is readable because the managed store's <c>darling</c> role is the cluster's
     /// bootstrap superuser.</para>

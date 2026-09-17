@@ -27,6 +27,14 @@ namespace PerformanceMonitor.Notifications;
 public static class AlertIncidentRenderer
 {
     /// <summary>
+    /// The fact name carrying an incident's fingerprint. Named here because it is the only thing tying a
+    /// rendered <see cref="AlertDetailItem"/> back to the incident it came from: #3313's delivery filter
+    /// drops a stale incident's item by matching on it, and a second copy of the string would be free to
+    /// drift from the one <see cref="BuildItem"/> actually emits.
+    /// </summary>
+    public const string DedupKeyFactName = "Dedup Key";
+
+    /// <summary>
     /// Sets <paramref name="context"/>.Incidents and appends one detail item per incident. No-op when
     /// there are no incidents. Call once from each alert builder after computing the incidents.
     /// </summary>
@@ -60,7 +68,7 @@ public static class AlertIncidentRenderer
             foreach (var f in incident.DetailFields)
                 item.Fields.Add((f.Label, f.Value));
         }
-        item.Fields.Add(("Dedup Key", incident.DedupKey));
+        item.Fields.Add((DedupKeyFactName, incident.DedupKey));
         item.Fields.Add(("Involved Objects",
             incident.InvolvedObjects.Count > 0 ? string.Join(", ", incident.InvolvedObjects) : "(unresolved)"));
         if (incident.OccurrenceCount > 1)
@@ -73,8 +81,10 @@ public static class AlertIncidentRenderer
            for a total must not have the field vanish on the incident's first delivery. */
         if (incident.TotalOccurrences is long total)
             item.Fields.Add(("Total Occurrences", total.ToString(CultureInfo.InvariantCulture)));
+        /* Through AlertTimestamp rather than an inline format so the UTC marker every alert-body stamp
+           carries has one producer. Byte-identical to the format literal it replaces. */
         if (incident.IncidentStartedUtc is DateTime started)
-            item.Fields.Add(("Incident Since", started.ToString("yyyy-MM-dd HH:mm:ss'Z'", CultureInfo.InvariantCulture)));
+            item.Fields.Add(("Incident Since", AlertTimestamp.Utc(started)));
         if (!string.IsNullOrEmpty(incident.WaitRange))
             item.Fields.Add(("Wait Range", incident.WaitRange));
         return item;

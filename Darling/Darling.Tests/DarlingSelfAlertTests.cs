@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Globalization;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -17,6 +18,7 @@ using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using Xunit;
@@ -184,6 +186,21 @@ public sealed class DarlingSelfAlertTests
         /// ever reaches — the shape a stale literal survives in.</summary>
         public bool WireCadenceKnob { get; set; } = true;
 
+        /// <summary>#3297 (V119): the Retention Held tiers. Defaults are the shipped pair, taken from the
+        /// product rather than restated for the reason the cadence knob above is.</summary>
+        public double RetentionHoldWarnRatio { get; set; } = TimescaleSupport.RetentionHoldWarnRatioDefault;
+        public double RetentionHoldCriticalRatio { get; set; } = TimescaleSupport.RetentionHoldCriticalRatioDefault;
+
+        /// <summary>#3297: set false to build the evaluator with BOTH retention-hold seams unsupplied, so
+        /// the constructor's own fallbacks are what judge — the #3060 reasoning, applied to the seams this
+        /// issue added.</summary>
+        public bool WireRetentionHoldKnobs { get; set; } = true;
+
+        /// <summary>#3500: the opt-in <c>peers.storeName</c>. Null (the default) builds the evaluator with
+        /// the seam UNSUPPLIED — the shape of every install that never wrote the field — so the default
+        /// harness IS the byte-identical arm every pre-#3500 pin in this suite runs on.</summary>
+        public string? StoreName { get; set; }
+
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
         /// <summary>#1681: captures what the evaluator writes to the service log, so the firing/recovery pair
@@ -201,7 +218,10 @@ public sealed class DarlingSelfAlertTests
             agLagAlertSeconds: () => AgLagAlertSeconds,
             agRedoQueueAlertKb: () => AgRedoQueueAlertKb,
             agDisconnectRefireMinutes: () => AgDisconnectRefireMinutes,
-            storeJobCadenceWarnPercent: WireCadenceKnob ? () => StoreJobCadenceWarnPercent : null);
+            storeJobCadenceWarnPercent: WireCadenceKnob ? () => StoreJobCadenceWarnPercent : null,
+            retentionHoldWarnRatio: WireRetentionHoldKnobs ? () => RetentionHoldWarnRatio : null,
+            retentionHoldCriticalRatio: WireRetentionHoldKnobs ? () => RetentionHoldCriticalRatio : null,
+            storeName: StoreName);
     }
 
     /* ---------------- #991 Availability Group fixtures ---------------- */
@@ -870,6 +890,1218 @@ public sealed class DarlingSelfAlertTests
         h.Now = h.Now.AddMinutes(5);
         await e.ApplyDiskPressureAsync(35 * Gib, 1000 * Gib, null, Ct);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    /* ---------------- custom-alert-rule health edge (#3304) ---------------- */
+
+    private static CustomAlertHealthReport HealthReport(int broken, int neverFiring)
+    {
+        var b = Enumerable.Range(1, broken)
+            .Select(i => new CustomAlertRuleHealthIssue(i, $"broken {i}", "invalid metric: unknown measure 'x'"))
+            .ToList();
+        var n = Enumerable.Range(100, neverFiring)
+            .Select(i => new CustomAlertRuleHealthIssue(i, $"nofire {i}", "armed but scoped only to servers that are not currently monitored, so it never evaluates"))
+            .ToList();
+        return new CustomAlertHealthReport(b, n);
+    }
+
+    [Fact]
+    public async Task CustomRuleHealth_ManyBroken_AggregatesToOneAlert_AndNeverEmitsTheCompiledSql()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCustomRuleHealthAsync(HealthReport(broken: 3, neverFiring: 0), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);   // ONE alert for all three, not one-per-rule
+        Assert.Equal(DarlingSelfAlertEvaluator.CustomRuleHealthMetric, fired.MetricName);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.Equal("customalerts", fired.ServerKey);      // fleet sentinel key, not a real server_id
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, fired.ServerName);
+        Assert.Equal("3", fired.CurrentValue);              // the count of unhealthy rules
+        Assert.Contains("Rule 1", fired.DetailText);
+        Assert.Contains("Rule 3", fired.DetailText);
+        // The detail carries the rule id/name + reason, NEVER the compiled SQL.
+        Assert.DoesNotContain("SELECT", fired.DetailText!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CustomRuleHealth_ListsNeverFiringRules_UnderTheirOwnHeading()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCustomRuleHealthAsync(HealthReport(broken: 0, neverFiring: 2), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("Armed but never fires", fired.DetailText);
+        Assert.Contains("not currently monitored", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task CustomRuleHealth_Resolves_WhenEveryRuleHealthyAgain()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCustomRuleHealthAsync(HealthReport(2, 0), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);          // the fire routes through the (recording) deliverer, not history
+
+        // All healthy now: ONE resolution row, no additional fire.
+        await e.ApplyCustomRuleHealthAsync(CustomAlertHealthReport.Empty, Ct);
+        Assert.Single(h.Deliverer.Outcomes);      // unchanged
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.CustomRuleHealthResolvedMetric, resolution.MetricName);
+
+        // A second all-healthy sweep is idempotent — the edge already cleared.
+        await e.ApplyCustomRuleHealthAsync(CustomAlertHealthReport.Empty, Ct);
+        Assert.Single(h.History.Records);
+    }
+
+    [Fact]
+    public async Task CustomRuleHealth_Disabled_DoesNothing()
+    {
+        var h = new Harness();
+        h.Settings.AlertsEnabled = false;
+        var e = h.Build();
+
+        await e.ApplyCustomRuleHealthAsync(HealthReport(3, 1), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task CustomRuleHealth_StandingCondition_ReFiresOnlyAfterCooldown()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCustomRuleHealthAsync(HealthReport(1, 0), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        // Inside the 5-minute cooldown: no re-fire (fire once on entry, not every sweep).
+        h.Now = h.Now.AddMinutes(1);
+        await e.ApplyCustomRuleHealthAsync(HealthReport(1, 0), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        // Cooldown elapsed, still unhealthy: re-fires the standing reminder.
+        h.Now = h.Now.AddMinutes(5);
+        await e.ApplyCustomRuleHealthAsync(HealthReport(2, 0), Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task CustomRuleHealth_CapsTheListedRules_ButTheCountReflectsAll()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCustomRuleHealthAsync(HealthReport(broken: 30, neverFiring: 0), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("more", fired.DetailText!, StringComparison.OrdinalIgnoreCase);  // "+N more" tail
+        Assert.Equal("30", fired.CurrentValue);   // the count is not truncated by the list cap
+    }
+
+    /* ---------------- stale mute rules (#3306) ---------------- */
+
+    /// <summary>
+    /// A mute rule at a chosen age. <paramref name="ageDays"/> is measured back from the harness clock's
+    /// default instant; the age is what the condition judges, so every fixture states it explicitly rather
+    /// than relying on <see cref="MuteRule"/>'s <c>DateTime.UtcNow</c> default.
+    /// </summary>
+    private static MuteRule Mute(
+        double ageDays,
+        string? metric = "High CPU",
+        DateTime? expiresAtUtc = null,
+        bool enabled = true,
+        string? reason = "seeded fixture reason",
+        string id = "rule-a") =>
+        new()
+        {
+            Id = id,
+            Enabled = enabled,
+            CreatedAtUtc = MuteClock.AddDays(-ageDays),
+            ExpiresAtUtc = expiresAtUtc,
+            Reason = reason,
+            MetricName = metric,
+        };
+
+    /// <summary>The harness's default clock instant, TAKEN FROM THE HARNESS rather than restated, so a
+    /// fixture's age is measured against the same "now" the evaluator will read. A literal here would
+    /// drift the instant a test changed <see cref="Harness.Now"/>'s default, and every age assertion
+    /// below would shift with it silently.</summary>
+    private static readonly DateTime MuteClock = new Harness().Now;
+
+    private static double StaleDays => DarlingSelfAlertEvaluator.StaleMuteAge.TotalDays;
+
+    [Fact]
+    public async Task StaleMute_UnboundedRulePastTheAge_FiresOnce_WithTheCountAndTheFleetKey()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteMetric, fired.MetricName);
+        Assert.Equal("mutestale", fired.ServerKey);       // fleet sentinel key, not a real server_id
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, fired.ServerName);
+        Assert.Equal("1", fired.CurrentValue);
+        Assert.Equal(1d, fired.NumericCurrentValue);
+        Assert.Equal(0d, fired.NumericThresholdValue);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);   // scoped rule: one signal hidden
+        Assert.Contains("Rule rule-a", fired.DetailText);
+        Assert.Contains("never expires", fired.DetailText);
+    }
+
+    /* ---------------- web dashboard TLS certificate expiry (#3514) ---------------- */
+
+    private static readonly DateTime CertClock = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+
+    private static DarlingSelfAlertEvaluator.WebTlsCertReport Cert(
+        DateTime notAfterUtc, string subject = "CN=Darling Web", string thumbprint = "ABC123DEF456") =>
+        new(Configured: true, NotAfterUtc: new DateTimeOffset(notAfterUtc, TimeSpan.Zero), Subject: subject, Thumbprint: thumbprint);
+
+    private static readonly DarlingSelfAlertEvaluator.WebTlsCertReport NoWebTlsCert =
+        new(Configured: false, NotAfterUtc: default, Subject: string.Empty, Thumbprint: string.Empty);
+
+    private static double WebTlsWarnDays => DarlingSelfAlertEvaluator.WebTlsCertWarnWindow.TotalDays;
+
+    [Fact]
+    public async Task WebTlsCert_WithinTheWindow_FiresWarning_WithTheFleetKeyAndTheCertRef()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(10)), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric, fired.MetricName);
+        Assert.Equal("webtlscert", fired.ServerKey);   // fleet sentinel key, not a real server_id
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, fired.ServerName);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.Contains("10 day", fired.ShortMessage);
+        Assert.Contains("ABC123DEF456", fired.DetailText);   // the thumbprint ties it to the host's own log line
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task WebTlsCert_Expired_FiresCritical_NamingTheLoopbackConsequence()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(-2)), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Contains("EXPIRED", fired.ShortMessage);
+        Assert.Contains("loopback-only", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task WebTlsCert_ComfortablyBeyondTheWindow_StaysSilent()
+    {
+        var h = new Harness { Now = CertClock };
+
+        await h.Build().ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(WebTlsWarnDays + 60)), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>The warning window is inclusive at its far edge (the web host's own <c>ExpiryWarning</c> begins
+    /// AT 30 days), so a certificate exactly that far out warns and one a minute further stays silent.</summary>
+    [Fact]
+    public async Task WebTlsCert_ExactlyAtTheWindow_Warns_AMinutePastIt_StaysSilent()
+    {
+        var atEdge = new Harness { Now = CertClock };
+        await atEdge.Build().ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(WebTlsWarnDays)), Ct);
+        Assert.Single(atEdge.Deliverer.Outcomes);
+
+        var pastEdge = new Harness { Now = CertClock };
+        await pastEdge.Build().ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(WebTlsWarnDays).AddMinutes(1)), Ct);
+        Assert.Empty(pastEdge.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task WebTlsCert_NoCertificateConfigured_StaysSilent()
+    {
+        var h = new Harness { Now = CertClock };
+
+        await h.Build().ApplyWebTlsCertificateAsync(NoWebTlsCert, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task WebTlsCert_MasterSwitchOff_StaysSilentEvenWhenExpired()
+    {
+        var h = new Harness { Now = CertClock };
+        h.Settings.AlertsEnabled = false;
+
+        await h.Build().ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(-5)), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    /// <summary>A standing condition: fire on entry, hold within the daily refire even across sweeps, re-state
+    /// once past it — the <see cref="DarlingSelfAlertEvaluator.WebTlsCertRefire"/> contract.</summary>
+    [Fact]
+    public async Task WebTlsCert_FiresOnceThenHolds_ReStatesAfterTheDailyRefire()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(10)), Ct);
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(10)), Ct);   // same sweep instant
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = CertClock.Add(DarlingSelfAlertEvaluator.WebTlsCertRefire).AddMinutes(1);
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(10)), Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    /// <summary>
+    /// The REACHABLE resolution path: the dashboard stops serving TLS (a runtime disable, or a
+    /// failed/degraded start) → the web host's <c>WebTlsCertificateState.Clear()</c> nulls the snapshot →
+    /// the worker builds a <c>Configured=false</c> report → this resolves the active alert exactly once,
+    /// titled with the recognized "Renewed" suffix so the history styles it green.
+    ///
+    /// <para>The #3514 adversarial review established that this is the ONLY in-process resolution. An
+    /// in-place renewal (a fresh certificate past the window on the SAME running process) cannot happen: the
+    /// served certificate is fixed for the process's life (network/TLS is restart-only), and renewal is a
+    /// restart, which starts a fresh evaluator with an empty active-state map and so writes no resolution
+    /// row. An earlier test fed a "renewed past the window" report the seam can never produce and was
+    /// removed; the <c>Configured=false</c> arm the follow-up <c>Clear()</c> makes real is what this pins.</para>
+    /// </summary>
+    [Fact]
+    public async Task WebTlsCert_DashboardStopsServingTls_ResolvesTheActiveAlert()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(5)), Ct);   // fires
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await e.ApplyWebTlsCertificateAsync(NoWebTlsCert, Ct);   // host Clear()ed the snapshot on stop/degrade
+
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, resolution.MetricName);
+    }
+
+    /// <summary>The seam the review said was untested end-to-end: the worker's report builder maps a null
+    /// <c>WebTlsCertificateState</c> snapshot (nothing served, or cleared on stop) to <c>Configured=false</c>
+    /// and a live snapshot to <c>Configured=true</c> with its fields — so the Clear-on-stop actually reaches
+    /// the evaluator's resolve arm. Pure static builder, the <c>BuildStoreUpgradeReport</c> precedent.</summary>
+    [Fact]
+    public void BuildWebTlsCertReport_MapsNullToUnconfigured_AndASnapshotToItsFields()
+    {
+        var none = DarlingWorker.BuildWebTlsCertReport(null);
+        Assert.False(none.Configured);
+
+        var whenUtc = new DateTimeOffset(2027, 1, 2, 3, 4, 5, TimeSpan.Zero);
+        var snap = new WebTlsCertificateState.Snapshot(whenUtc, "CN=x", "THUMB");
+        var report = DarlingWorker.BuildWebTlsCertReport(snap);
+        Assert.True(report.Configured);
+        Assert.Equal(whenUtc, report.NotAfterUtc);
+        Assert.Equal("CN=x", report.Subject);
+        Assert.Equal("THUMB", report.Thumbprint);
+    }
+
+    /// <summary><c>WebTlsCertificateState</c> is the host→worker seam: Publish sets, Clear (the #3514 follow-up)
+    /// resets to null so a stopped dashboard stops advertising a cert it no longer serves.</summary>
+    [Fact]
+    public void WebTlsCertificateState_PublishThenClear_ReadsBackNull()
+    {
+        var state = new WebTlsCertificateState();
+        Assert.Null(state.Read());
+
+        state.Publish(new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero), "CN=x", "THUMB");
+        Assert.NotNull(state.Read());
+
+        state.Clear();
+        Assert.Null(state.Read());
+    }
+
+    [Fact]
+    public async Task StaleMute_AFreshUnboundedRule_StaysSilent()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Permanence alone is not the finding — the dialog offers "Never" on purpose, and a mute made
+           this morning to hold a flood while a fix ships has an author still watching it. */
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays - 0.5) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>A rule with an expiry has a reviewer built in — the expiry — so age alone is not a finding.
+    /// Both directions of bound are covered in one case because the mechanism is the SAME for both: what
+    /// excludes them is having a bound at all, not whether the bound has passed.</summary>
+    [Fact]
+    public async Task StaleMute_ABoundedRule_StaysSilentHoweverOldItIs()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(
+            new[]
+            {
+                Mute(3650, expiresAtUtc: MuteClock.AddDays(30), id: "rule-future-bound"),
+                Mute(3650, expiresAtUtc: MuteClock.AddDays(-1), id: "rule-lapsed-bound"),
+            },
+            Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task StaleMute_ADisabledRule_StaysSilentHoweverOldAndUnboundedItIs()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* Matches() rejects a disabled rule, so it suppresses nothing and is not a blind spot. */
+        await e.ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 100, enabled: false, id: "rule-disabled") }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    /// <summary>
+    /// #3432: a rule taken out of force through <c>set_mute_rule_enabled</c> and put back is stale to THIS
+    /// condition on the age it actually has. The claim is driven through the real evaluator rather than
+    /// asserted about a timestamp, because what a reset costs is measured in what this alert does and does
+    /// not say.
+    ///
+    /// <para>Each transition is visible in the outcome. While disabled the rule is not a blind spot and
+    /// nothing fires — the arm the sibling test above pins. Re-enabled, it fires, and the rendered age is
+    /// the authored one. A verb that stamped <c>created_at_utc</c> on either transition would leave the rule
+    /// a moment old, inside <see cref="DarlingSelfAlertEvaluator.StaleMuteAge"/>, so the final
+    /// <c>Assert.Single</c> would find NOTHING: the reset shows up as a missing alert rather than as a
+    /// different number, which is exactly how the delete-and-re-create workaround disarms this alert
+    /// today.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_ARuleDisabledAndReEnabledThroughTheMcpVerb_IsStaleOnItsRealAge()
+    {
+        const string ruleId = "rule-held";
+        const double authoredDaysAgo = 30d;
+        var authored = MuteClock.AddDays(-authoredDaysAgo);
+
+        var store = new FakeMuteRuleStore().Seed(
+            Mute(authoredDaysAgo, id: ruleId));
+        Assert.Equal(authored, store.Row(ruleId)!.CreatedAtUtc);
+
+        Assert.Equal("updated", StatusOf(
+            await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, ruleId, enabled: false)));
+
+        var whileDisabled = new Harness();
+        await whileDisabled.Build().ApplyStaleMuteRulesAsync(await store.LoadAllAsync(), Ct);
+        Assert.Empty(whileDisabled.Deliverer.Outcomes);
+
+        Assert.Equal("updated", StatusOf(
+            await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, ruleId, enabled: true)));
+
+        var h = new Harness();
+        await h.Build().ApplyStaleMuteRulesAsync(await store.LoadAllAsync(), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteMetric, fired.MetricName);
+        Assert.Equal(1d, fired.NumericCurrentValue);
+        Assert.Contains($"oldest {authoredDaysAgo:F0} days", fired.DetailText, StringComparison.Ordinal);
+        Assert.Equal(authored, store.Row(ruleId)!.CreatedAtUtc);
+    }
+
+    /// <summary>
+    /// The counterfactual the test above rests on, stated as its own assertion: a rule authored NOW is not
+    /// stale, so "the alert still fires" is a claim about the preserved date and not about the rule merely
+    /// being enabled and unbounded. Without this, a reset that somehow still fired would be indistinguishable
+    /// from a preserved date.
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_ARuleAuthoredAtTheHarnessInstant_IsNotStale_WhichIsWhatAResetWouldCost()
+    {
+        const string ruleId = "rule-fresh";
+        var store = new FakeMuteRuleStore().Seed(Mute(ageDays: 0, id: ruleId));
+
+        Assert.Equal("updated", StatusOf(
+            await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, ruleId, enabled: false)));
+        Assert.Equal("updated", StatusOf(
+            await DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, ruleId, enabled: true)));
+
+        var h = new Harness();
+        await h.Build().ApplyStaleMuteRulesAsync(await store.LoadAllAsync(), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    /// <summary>
+    /// #3450: a rule edited in place through <c>update_mute_rule</c> is stale to THIS condition on the age it
+    /// actually has — the enable verb's claim, restated for the verb that moves every OTHER field. The claim
+    /// is driven through the real evaluator for the same reason as its sibling: what a reset costs is
+    /// measured in what this alert does and does not say, and an edit that stamped <c>created_at_utc</c>
+    /// would leave the rule a moment old, so the <c>Assert.Single</c> would find NOTHING — the reset shows up
+    /// as a missing alert, which is exactly how delete-and-re-create disarms this alert for every field edit
+    /// today.
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_ARuleEditedInPlaceThroughTheMcpVerb_IsStaleOnItsRealAge()
+    {
+        const string ruleId = "rule-edited";
+        const double authoredDaysAgo = 30d;
+        var authored = MuteClock.AddDays(-authoredDaysAgo);
+
+        var store = new FakeMuteRuleStore().Seed(Mute(authoredDaysAgo, id: ruleId));
+        Assert.Equal(authored, store.Row(ruleId)!.CreatedAtUtc);
+
+        Assert.Equal("updated", StatusOf(await DarlingMcpAlertTools.UpdateMuteRuleCore(
+            store, ruleId, "{\"reason\":\"root cause found\",\"job_name_pattern\":\"nightly\"}")));
+
+        var h = new Harness();
+        await h.Build().ApplyStaleMuteRulesAsync(await store.LoadAllAsync(), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteMetric, fired.MetricName);
+        Assert.Contains($"oldest {authoredDaysAgo:F0} days", fired.DetailText, StringComparison.Ordinal);
+        Assert.Equal(authored, store.Row(ruleId)!.CreatedAtUtc);
+
+        /* The counterfactual, on the same terms as the enable verb's: a FRESH rule put through the same edit
+           is not stale, so the fire above is a claim about the preserved date and not about the rule merely
+           being enabled and unbounded. */
+        const string freshId = "rule-edited-fresh";
+        var freshStore = new FakeMuteRuleStore().Seed(Mute(ageDays: 0, id: freshId));
+        Assert.Equal("updated", StatusOf(await DarlingMcpAlertTools.UpdateMuteRuleCore(
+            freshStore, freshId, "{\"reason\":\"root cause found\"}")));
+
+        var fresh = new Harness();
+        await fresh.Build().ApplyStaleMuteRulesAsync(await freshStore.LoadAllAsync(), Ct);
+        Assert.Empty(fresh.Deliverer.Outcomes);
+    }
+
+    /// <summary>
+    /// #3450, the expiry arm in BOTH directions through the real evaluator. Adding an <c>expires_at_utc</c>
+    /// by edit gives the rule a built-in reviewer, so the condition goes silent (the bounded-rule exclusion
+    /// above) — the issue's own example, "adding an expires_at to a rule that should stop being permanent",
+    /// done without the delete/recreate that used to be the only headless path. Clearing it with an explicit
+    /// null makes the rule permanent again AND stale on its REAL age immediately — which is only true because
+    /// neither edit moved <c>created_at_utc</c>; a stamped date would buy the cleared rule a fresh
+    /// <c>StaleMuteAge</c> of invisibility.
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_AnExpiryAddedByEdit_SilencesTheCondition_AndClearingItRestoresTheRealAge()
+    {
+        const string ruleId = "rule-bounded-by-edit";
+        var authored = MuteClock.AddDays(-(StaleDays + 5));
+
+        var store = new FakeMuteRuleStore().Seed(Mute(StaleDays + 5, id: ruleId));
+
+        Assert.Equal("updated", StatusOf(await DarlingMcpAlertTools.UpdateMuteRuleCore(
+            store, ruleId, $"{{\"expires_at_utc\":\"{MuteClock.AddDays(30):O}\"}}")));
+
+        var whileBounded = new Harness();
+        await whileBounded.Build().ApplyStaleMuteRulesAsync(await store.LoadAllAsync(), Ct);
+        Assert.Empty(whileBounded.Deliverer.Outcomes);
+
+        Assert.Equal("updated", StatusOf(await DarlingMcpAlertTools.UpdateMuteRuleCore(
+            store, ruleId, "{\"expires_at_utc\":null}")));
+
+        var h = new Harness();
+        await h.Build().ApplyStaleMuteRulesAsync(await store.LoadAllAsync(), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteMetric, fired.MetricName);
+        Assert.Equal(authored, store.Row(ruleId)!.CreatedAtUtc);
+    }
+
+    private static string StatusOf(string json) => DarlingMcpTestData.StatusOf(json);
+
+    [Fact]
+    public async Task StaleMute_ARuleMatchingEveryAlert_ReadsCritical_AndSaysTheStoreLooksHealthyForNoReason()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* No metric, no server, no pattern: Matches() accepts everything, so the whole store goes quiet.
+           That is a different blast radius from hiding one signal, and severity is what carries it. */
+        await e.ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 2, metric: null, id: "rule-blanket") }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Contains("EVERY alert", fired.DetailText);
+        Assert.Contains("(matches all alerts)", fired.DetailText);
+    }
+
+    /// <summary>
+    /// THE load-bearing pin: the shared mute seam's ANSWER never suppresses this alert, however affirmative.
+    /// The seam returns one boolean over every rule and cannot say which rule answered, and a rule that
+    /// constrains nothing matches every alert on the store — this one included — so trusting it would let
+    /// the condition suppress the only report of its own subject. The muted-and-recorded compromise every
+    /// sibling accepts is not enough here, because a row in alert history is exactly the surface you cannot
+    /// find without already suspecting the mute.
+    ///
+    /// <para>Suppression is available (#3348) but only through an EXPLICIT naming, decided from the rule
+    /// list rather than from this seam — see the explicit-mute pins below.</para>
+    ///
+    /// <para>The sibling fire in the SAME harness, under the SAME <c>Muted = true</c>, is the control. Without
+    /// it this test would pass just as happily if the harness's mute seam were never wired to anything, which
+    /// is the shape a pin that cannot fail takes.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_IsNotSuppressibleByTheSharedMuteSeam_WhileItsSiblingStillIs()
+    {
+        var h = new Harness { Muted = true };
+        var e = h.Build();
+
+        await e.ApplyCustomRuleHealthAsync(HealthReport(1, 0), Ct);
+        var sibling = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(sibling.Muted, "the harness's mute seam must be live, or the assertion below proves nothing");
+
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.False(h.Deliverer.Outcomes[1].Muted);
+    }
+
+    /// <summary>
+    /// And it does not merely ignore the ANSWER — it never asks the question, on EITHER outcome.
+    /// <c>ApplyStaleMuteRulesAsync</c> is the un-isolated entry point, so a mute seam that throws would
+    /// propagate out of it; that it does not is what distinguishes "never consulted" from "consulted and the
+    /// result discarded".
+    ///
+    /// <para>Both the unsuppressed and the explicitly-suppressed paths are walked against the throwing seam,
+    /// because #3348 made the mute decision a <c>bool?</c> that only DEFAULTS to asking. A fire site passing
+    /// its own verdict short-circuits the seam on the value it passes — so covering one value would leave
+    /// the other free to start consulting it, and the blanket-mute self-suppression would come back through
+    /// a path this pin was watching the wrong half of.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_NeverConsultsTheMuteSeamAtAll_OnEitherVerdict()
+    {
+        var h = new Harness { MuteThrows = true };
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The explicitly-muted verdict, on a SECOND harness so the daily re-fire gate does not swallow it. */
+        var explicitlyMuted = new Harness { MuteThrows = true };
+        var e2 = explicitlyMuted.Build();
+
+        await e2.ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 1), ExplicitMute() }, Ct);
+
+        var fired = Assert.Single(explicitlyMuted.Deliverer.Outcomes);
+        Assert.True(fired.Muted);
+    }
+
+    /* ---------------- the explicit/incidental mute split (#3348) ---------------- */
+
+    /// <summary>
+    /// A mute rule whose <c>MetricName</c> NAMES this condition, and nothing else — the escape hatch. An
+    /// operator who writes this has decided about THIS alert, which is a different act from one whose rule
+    /// happens to cover it.
+    /// </summary>
+    private static MuteRule ExplicitMute(
+        double ageDays = 0,
+        string? metric = DarlingSelfAlertEvaluator.StaleMuteMetric,
+        string? serverName = null,
+        DateTime? expiresAtUtc = null,
+        bool enabled = true,
+        string id = "rule-explicit") =>
+        new()
+        {
+            Id = id,
+            Enabled = enabled,
+            CreatedAtUtc = MuteClock.AddDays(-ageDays),
+            ExpiresAtUtc = expiresAtUtc,
+            Reason = "seeded fixture reason",
+            MetricName = metric,
+            ServerName = serverName,
+        };
+
+    /// <summary>
+    /// The escape hatch itself: a rule that NAMES this metric silences its channels, on the same surface
+    /// every other alert uses. Before #3348 this was the one alert in the product an operator could not
+    /// answer by any route except deleting the rule it was reporting.
+    ///
+    /// <para>The alert is still DELIVERED-AND-FLAGGED rather than dropped, which is the whole audit trail
+    /// for the decision: the history row lands every re-fire and still names the stale rules, so "why did
+    /// this stop paging me" is answerable from the record. The asserted <c>Muted</c> flag is what the
+    /// deliverer keys its channel skip on.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_ARuleNamingThisMetric_SuppressesIt_AndIsStillRecorded()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 1), ExplicitMute() }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(fired.Muted);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteMetric, fired.MetricName);
+        Assert.Contains("Rule rule-a", fired.DetailText);   // the report itself is unchanged
+    }
+
+    /// <summary>
+    /// THE self-suppression pin, stated on its own subject: the blanket mute cannot hide the report OF THAT
+    /// BLANKET MUTE. One rule, in the list twice over — it is the thing being reported and the thing that
+    /// would do the suppressing — and it is exactly the shape with the largest blast radius, so a version
+    /// that honoured it would lose the report precisely where it matters most.
+    ///
+    /// <para>This holds by construction rather than by care, because a blanket rule constrains no metric and
+    /// so cannot pass the explicit-naming filter that is the decision's only input. The severity assertion
+    /// is the control that the fixture really is the blanket shape: a rule that had quietly acquired a
+    /// constraint would read Warning, and this test would then be pinning the wrong rule shape while still
+    /// passing.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_ABlanketMute_CannotSuppressTheReportOfThatSameBlanketMute()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 2, metric: null, id: "rule-blanket") }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.False(fired.Muted);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Contains("(matches all alerts)", fired.DetailText);
+    }
+
+    /// <summary>
+    /// An explicit rule is found among incidental ones IN BOTH ARRIVAL ORDERS. <c>FindExplicitMute</c>
+    /// returns the first rule that names the metric, so a list holding both a blanket rule and an explicit
+    /// one must reach the same verdict either way round.
+    ///
+    /// <para>Both orders on purpose: the #3306 lane's first ordering mutation survived because arrival order
+    /// happened to equal the sorted order, so <c>Reverse()</c> was a no-op. A single-order fixture here
+    /// could not tell a scan of the whole list from one that stops at the first rule.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task StaleMute_FindsTheExplicitRuleAmongBlanketOnes_InEitherArrivalOrder(bool explicitFirst)
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var blanket = Mute(StaleDays + 2, metric: null, id: "rule-blanket");
+        var named = ExplicitMute();
+        var rules = explicitFirst
+            ? new[] { named, blanket }
+            : new[] { blanket, named };
+
+        await e.ApplyStaleMuteRulesAsync(rules, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(fired.Muted);
+    }
+
+    /// <summary>
+    /// Naming the metric is necessary but not sufficient: an explicit rule still has to pass the FULL matcher
+    /// against this alert's real context, so the narrowing is strictly one-directional and honouring an
+    /// explicit mute can never suppress MORE than the ordinary seam would.
+    ///
+    /// <para>Each case is a rule that names the metric and is turned away by a different arm of
+    /// <c>MuteRule.MatchesAt</c> — the wrong server, a disabled rule, a lapsed bound, and a dimension this
+    /// fleet-level condition does not have. Without these, "explicit" would mean "names the metric" alone,
+    /// and a rule aimed at one monitored server would silence a fleet-wide condition.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_AnExplicitRuleMustStillMatch_OrItDoesNotSuppress()
+    {
+        /* Scoped to a monitored server: this condition's server is the synthetic "Monitor Store" sentinel,
+           so a rule aimed at a real server is not about it. */
+        await AssertNotSuppressed(ExplicitMute(serverName: "some-monitored-server"));
+
+        // Disabled: it suppresses nothing at all, so it cannot be suppressing this.
+        await AssertNotSuppressed(ExplicitMute(enabled: false));
+
+        /* A bound that has passed, judged on the INJECTED clock — the reason MuteRule grew MatchesAt. Read
+           against the ambient clock instead, this case's verdict would depend on the wall-clock date the
+           suite happened to run on. */
+        await AssertNotSuppressed(ExplicitMute(ageDays: 30, expiresAtUtc: MuteClock.AddDays(-1)));
+
+        /* A database pattern: this alert has no database dimension, so the rule cannot match it — the same
+           answer the ordinary seam gives every alert without one. */
+        var withPattern = ExplicitMute();
+        withPattern.DatabasePattern = "anything";
+        await AssertNotSuppressed(withPattern);
+
+        // A different metric's name is not this metric's name.
+        await AssertNotSuppressed(ExplicitMute(metric: "High CPU"));
+
+        /* Empty string is not a naming. It is also not "unconstrained" to the matcher, which tests for null
+           — so a rule written this way matches NOTHING, and reading it as explicit would hand the alert an
+           off switch whose own rule could never suppress anything else. */
+        await AssertNotSuppressed(ExplicitMute(metric: ""));
+
+        static async Task AssertNotSuppressed(MuteRule rule)
+        {
+            var h = new Harness();
+            var e = h.Build();
+
+            await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1), rule }, Ct);
+
+            var fired = Assert.Single(h.Deliverer.Outcomes);
+            Assert.False(fired.Muted,
+                $"a rule that does not match this alert must not suppress it: {rule.Summary}");
+        }
+    }
+
+    /// <summary>
+    /// The fleet sentinel IS matchable, which is what makes the negative case above a real constraint rather
+    /// than an artefact of fleet-level alerts being unmutable by any server-scoped rule. An operator reading
+    /// "Monitor Store" out of the alert history and scoping a rule to it gets the suppression they asked for.
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_AnExplicitRuleScopedToTheFleetSentinel_DoesSuppress()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(
+            new[]
+            {
+                Mute(StaleDays + 1),
+                ExplicitMute(serverName: DarlingSelfAlertEvaluator.StoreServerLabel),
+            },
+            Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(fired.Muted);
+    }
+
+    /// <summary>
+    /// The expiry is read on the EVALUATOR'S clock, which is the whole reason
+    /// <see cref="MuteRule.MatchesAt"/> exists — <c>MuteRule.IsExpired</c> consults
+    /// <c>DateTime.UtcNow</c>, and this condition judges everything else on an injected instant.
+    ///
+    /// <para>THE discriminating fixture: a bound that is in the future relative to the harness clock and in
+    /// the PAST relative to the wall clock. Against the ambient clock the rule reads lapsed and this reds —
+    /// so it is the one case that can tell the two clocks apart. Its sibling, a bound already passed on both
+    /// clocks, agrees either way and proves nothing about which was consulted.</para>
+    ///
+    /// <para>The wall-clock version of this defect would not have failed consistently, which is worse than
+    /// failing: it would have passed until the fixture's bound went by, then started reddening on a date
+    /// nobody changed anything on.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_AnExplicitRuleBoundInTheHarnessFuture_StillSuppresses()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var bound = MuteClock.AddDays(30);
+        Assert.True(bound < DateTime.UtcNow,
+            "the fixture must sit in the harness's future and the wall clock's past, or it cannot tell the two apart");
+
+        await e.ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 1), ExplicitMute(expiresAtUtc: bound) }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(fired.Muted);
+    }
+
+    /// <summary>
+    /// "Explicit" is the MATCHER's own answer about the metric dimension, not a second opinion this condition
+    /// formed. <see cref="MuteRule.NamesMetric"/> and <see cref="MuteRule.MatchesAt"/> must agree for a rule
+    /// constrained by the metric alone, in both directions, or the split would be an assertion about the
+    /// matcher rather than a reading of it — and a rule could be called deliberate while matching nothing,
+    /// or incidental while matching.
+    ///
+    /// <para>Case is part of the claim: the metric arm is <c>OrdinalIgnoreCase</c>, so a differently-cased
+    /// spelling of the name is still a naming. A <c>NamesMetric</c> that compared ordinally would let a
+    /// lower-cased rule suppress nothing while <c>get_mute_rules</c> showed the operator a rule that reads
+    /// exactly right.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("Stale Mute Rules", true)]
+    [InlineData("stale mute rules", true)]
+    [InlineData("STALE MUTE RULES", true)]
+    [InlineData("Stale Mute Rule", false)]
+    [InlineData("Stale", false)]
+    [InlineData("Stale Mute Rules Cleared", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void MuteRule_NamesMetric_AgreesWithTheMatcherItself(string? ruleMetric, bool names)
+    {
+        var rule = new MuteRule { MetricName = ruleMetric };
+        var context = new AlertMuteContext
+        {
+            ServerName = DarlingSelfAlertEvaluator.StoreServerLabel,
+            MetricName = DarlingSelfAlertEvaluator.StaleMuteMetric,
+        };
+
+        Assert.Equal(names, rule.NamesMetric(DarlingSelfAlertEvaluator.StaleMuteMetric));
+
+        /* Constrained by the metric alone, so the matcher's verdict IS its metric arm's verdict — except for
+           the null spelling, which constrains nothing and therefore matches while naming nothing. That
+           asymmetry is the whole point of the split: matching is not deciding. */
+        Assert.Equal(names || ruleMetric is null, rule.MatchesAt(context, MuteClock));
+    }
+
+    /// <summary>
+    /// A standing condition on its OWN re-fire interval, not the shared alert cooldown. The middle step is
+    /// the discriminating one: it sits well past the alert cooldown's own CEILING, so a version that used
+    /// <c>CooldownElapsed</c> like every sibling reds here under any configured value rather than only under
+    /// the shipped default.
+    ///
+    /// <para>It stayed daily after #3348 gave the alert an off switch, on reasoning that never depended on
+    /// being unsuppressible: the subject is a creation date against a seven-day bound, identical on every
+    /// sweep, and a five-minute cadence would make a permanent mute the only survivable configuration —
+    /// manufacturing the blind spot the condition exists to report.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_StandingCondition_ReFiresOnItsOwnDailyInterval_NotTheAlertCooldown()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rules = new[] { Mute(StaleDays + 1) };
+
+        await e.ApplyStaleMuteRulesAsync(rules, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Past the alert cooldown's clamp ceiling (120 minutes) and still well inside the daily interval. */
+        h.Now = h.Now.AddHours(6);
+        await e.ApplyStaleMuteRulesAsync(rules, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        // A day on, still unbounded and still old: re-states the standing reminder, once.
+        h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StaleMuteRefire);
+        await e.ApplyStaleMuteRulesAsync(rules, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task StaleMute_Resolves_WhenTheRuleIsGone_AndIsIdempotentAfterwards()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);           // the fire routes through the (recording) deliverer
+
+        // Deleted: ONE resolution row, no additional fire.
+        await e.ApplyStaleMuteRulesAsync(Array.Empty<MuteRule>(), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, resolution.MetricName);
+
+        // A second clear sweep is idempotent — the edge already cleared.
+        await e.ApplyStaleMuteRulesAsync(Array.Empty<MuteRule>(), Ct);
+        Assert.Single(h.History.Records);
+    }
+
+    [Fact]
+    public async Task StaleMute_Resolves_WhenTheRuleIsGivenAnExpiry_RatherThanDeleted()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Giving the rule a bound is the OTHER remedy, and the cheaper one — the mute keeps working and
+           now reviews itself. It must clear the alert exactly like a delete. The rule is the SAME rule:
+           same id, same age, same enabled state, so the bound is the only thing that changed. */
+        await e.ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 1, expiresAtUtc: MuteClock.AddDays(7)) }, Ct);
+
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, resolution.MetricName);
+    }
+
+    /// <summary>
+    /// #3354, the second-order half. This condition reads the LIVE <c>MuteRuleService</c> cache, which is
+    /// exactly why it is the surface a wrongly-emptied cache damages most: with the cache empty it finds
+    /// nothing stale, clears the edge and writes a RESOLUTION — the surface built to make an invisible mute
+    /// visible asserting that nothing is being suppressed, at the moment everything has been un-suppressed.
+    ///
+    /// <para>So the fixture is a real service over a scripted store rather than a hand-built rule list: the
+    /// claim is about what this condition sees AFTER a failed reload, and a list handed in directly cannot
+    /// express a failed reload at all.</para>
+    ///
+    /// <para>Three steps, because the middle one alone would be satisfied by a condition that never
+    /// resolves anything. A failed read must not clear it; a SUCCESSFUL empty read — the operator deleting
+    /// the rule, which is the whole point of the resolution — still must.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_AFailedMuteReload_CannotReportAllClear_ButAnEmptyOneStillDoes()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var store = new ScriptedMuteRuleStore()
+            .Returning(Mute(StaleDays + 1))
+            .Failing()
+            .Returning();
+        var service = new MuteRuleService(
+            store, Microsoft.Extensions.Logging.Abstractions.NullLogger<MuteRuleService>.Instance);
+
+        await service.LoadAsync();
+        await e.ApplyStaleMuteRulesAsync(service.GetRules(), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteMetric, fired.MetricName);
+        Assert.Empty(h.History.Records);
+
+        /* The reload faults. The rules stay in force inside the service, so this condition still sees the
+           rule it reported — and writes nothing, because the standing condition has not changed. */
+        await Assert.ThrowsAsync<InvalidOperationException>(service.LoadAsync);
+        await e.ApplyStaleMuteRulesAsync(service.GetRules(), Ct);
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        /* The operator deletes it for real. Same evaluator, same edge, and the only thing that differs is
+           the store's answer — so the resolution this condition exists to write still gets written. */
+        await service.LoadAsync();
+        await e.ApplyStaleMuteRulesAsync(service.GetRules(), Ct);
+
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, resolution.MetricName);
+    }
+
+    [Fact]
+    public async Task StaleMute_QuietStore_WritesNothingAtAll()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* A store that never had a stale mute must not accumulate resolution rows on every tick. */
+        await e.ApplyStaleMuteRulesAsync(Array.Empty<MuteRule>(), Ct);
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(1) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task StaleMute_Disabled_DoesNothing()
+    {
+        var h = new Harness();
+        h.Settings.AlertsEnabled = false;
+        var e = h.Build();
+
+        await e.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 100) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>
+    /// The list is capped but the count is not, and the lines that survive the cap are the OLDEST — the ones
+    /// most worth reading.
+    ///
+    /// <para>The ages are a scrambled permutation on purpose. With arrival order equal to age order (or its
+    /// reverse) the fixture cannot tell a real sort from an accident: a mutation replacing the sort with
+    /// <c>Reverse()</c> survived exactly that way, because arrival happened to be youngest-first.</para>
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_CapsTheListedRules_AndKeepsTheOldest_ButTheCountReflectsAll()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* 7 is coprime with 31, so (i * 7) % 31 over i = 1..30 is a permutation of 1..30 in scrambled
+           order — 30 distinct ages, none of them in arrival sequence. */
+        var many = Enumerable.Range(1, 30)
+            .Select(i => Mute(StaleDays + ((i * 7) % 31), id: $"rule-{i}"))
+            .ToArray();
+        var oldest = many.OrderBy(r => r.CreatedAtUtc).First();
+        var youngest = many.OrderByDescending(r => r.CreatedAtUtc).First();
+
+        await e.ApplyStaleMuteRulesAsync(many, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("30", fired.CurrentValue);      // the count is not truncated by the list cap
+        Assert.Contains("more", fired.DetailText!, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains($"Rule {oldest.Id}:", fired.DetailText);
+        Assert.DoesNotContain($"Rule {youngest.Id}:", fired.DetailText);
+        Assert.Contains(
+            $"oldest {(MuteClock - oldest.CreatedAtUtc).TotalDays:F0} days", fired.DetailText);
+    }
+
+    /// <summary>
+    /// The reason and the pattern fields are operator-authored free text, and the alert's
+    /// <c>detail_text</c> is later re-parsed by <see cref="AlertMuteContext.PopulateFromDetailText"/> for the
+    /// viewer's mute-from-history pre-fill. A crafted value carrying a newline plus a label could otherwise
+    /// forge a mute-context field — the #3304 spoof, one surface over.
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_SanitizesTheOperatorText_DefeatingTheMuteSpoof()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var rule = Mute(StaleDays + 1, reason: "Innocent\nDatabase: master", id: "rule-spoof");
+        rule.DatabasePattern = "also\nWait Type: PAGEIOLATCH_SH";
+
+        await e.ApplyStaleMuteRulesAsync(new[] { rule }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        var ctx = new AlertMuteContext();
+        ctx.PopulateFromDetailText(fired.DetailText);
+        Assert.Null(ctx.DatabaseName);
+        Assert.Null(ctx.WaitType);
+    }
+
+    /// <summary>
+    /// Every condition this evaluator exposes has a call site in the worker — the #2213 lesson applied to
+    /// this class. A self-alert whose logic is perfect and whose <c>Evaluate*</c> nothing calls is
+    /// indistinguishable from a store where the condition never occurs: every behavioural pin above passes,
+    /// the build is clean, and the feature collects nothing. Nothing else in the suite asks the question.
+    ///
+    /// <para>The subject list is DERIVED from the type rather than written here, so a condition added later
+    /// is covered without anyone remembering to add it — which is the same drift that let this go unpinned
+    /// through eight conditions. Naming the method is a weaker claim than reaching it (a call inside a dead
+    /// branch would pass), so the specific gate is asserted separately below.</para>
+    /// </summary>
+    [Fact]
+    public void EverySelfAlertCondition_HasACallSiteInTheWorker()
+    {
+        var worker = RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+
+        var conditions = typeof(DarlingSelfAlertEvaluator)
+            .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Select(m => m.Name)
+            .Where(n => n.StartsWith("Evaluate", StringComparison.Ordinal))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.NotEmpty(conditions);
+        var uncalled = conditions
+            .Where(n => !worker.Contains(n, StringComparison.Ordinal))
+            .ToList();
+
+        Assert.True(uncalled.Count == 0,
+            "these self-alert conditions are never invoked by the worker, so they can never fire: "
+            + string.Join(", ", uncalled));
+    }
+
+    /// <summary>
+    /// And the stale-mute condition is reached on EVERY deployment, not only the ones that can run custom
+    /// alerts. Its call sits next to #3304's on the fleet-global maintenance pass, and #3304's is gated on
+    /// <c>_customAlertEvaluator is not null</c> — which is false on any non-Windows or unmanaged store. Pasted
+    /// inside that gate the condition would be dead for most of the fleet, the build would be clean, and the
+    /// pin above would still pass because the method is named.
+    /// </summary>
+    [Fact]
+    public void StaleMute_IsEvaluatedOnItsOwnGate_NotTheCustomAlertEvaluatorsGate()
+    {
+        var lines = RepoFile
+            .ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs")
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n');
+
+        var callSites = Enumerable.Range(0, lines.Length)
+            .Where(i => lines[i].Contains("EvaluateStaleMuteRulesAsync(", StringComparison.Ordinal))
+            .ToList();
+        var call = Assert.Single(callSites);
+
+        var guard = Enumerable.Range(0, call)
+            .Reverse()
+            .Select(i => lines[i])
+            .First(l => l.Contains("if (", StringComparison.Ordinal));
+
+        Assert.Contains("_nextStaleMuteCheckUtc", guard);
+        Assert.DoesNotContain("_customAlertEvaluator", guard);
+    }
+
+    /// <summary>
+    /// The severity tier rests on <see cref="MuteRule.MatchesEveryAlert"/> meaning what it says, so pin the
+    /// claim itself: a rule that reports matching every alert really does accept an arbitrary one.
+    ///
+    /// <para>The per-dimension half is DERIVED FROM THE TYPE rather than listing the fields, because the
+    /// failure this guards is a SEVENTH match dimension added to <c>Matches</c> and missed by the description
+    /// list — and a test that enumerates the same set the code does cannot see that. Every existing dimension
+    /// is a writable <c>string?</c>, so walking those (bar the two that are not dimensions) covers a new one
+    /// for free: constrained by it alone, the rule would still claim to match everything, and this reds.</para>
+    /// </summary>
+    [Fact]
+    public void MuteRule_MatchesEveryAlert_AgreesWithSummary_AndWithMatchesItself()
+    {
+        var anyAlert = new AlertMuteContext
+        {
+            ServerName = "ANY-SERVER",
+            MetricName = "High CPU",
+            DatabaseName = "AnyDb",
+            QueryText = "SELECT 1",
+            WaitType = "PAGEIOLATCH_SH",
+            JobName = "AnyJob",
+        };
+
+        var unconstrained = new MuteRule();
+        Assert.True(unconstrained.MatchesEveryAlert);
+        Assert.Equal("(matches all alerts)", unconstrained.Summary);
+        Assert.True(unconstrained.Matches(anyAlert));
+
+        /* Not a match dimension: the rule's identity and the operator's note. Everything else that is a
+           writable string IS one, which is what makes this loop cover a dimension added later. */
+        var notDimensions = new[] { nameof(MuteRule.Id), nameof(MuteRule.Reason) };
+        var dimensions = typeof(MuteRule).GetProperties()
+            .Where(p => p.PropertyType == typeof(string) && p.CanWrite && p.CanRead)
+            .Where(p => !notDimensions.Contains(p.Name, StringComparer.Ordinal))
+            .ToList();
+
+        Assert.NotEmpty(dimensions);
+        foreach (var dimension in dimensions)
+        {
+            var rule = new MuteRule();
+            dimension.SetValue(rule, "constrained");
+
+            Assert.False(rule.MatchesEveryAlert,
+                $"a rule constrained by {dimension.Name} alone still claims to match every alert — "
+                + "MuteRule.MatchDescriptions does not know about that dimension");
+            Assert.NotEqual("(matches all alerts)", rule.Summary);
+        }
+    }
+
+    /// <summary>The history grids style and render by metric NAME, so the two names must classify the way the
+    /// fire site assumes: the firing one is an actionable warning whose value is a whole count, and the
+    /// resolution one is recognized as a resolution (otherwise it renders as a live alert).</summary>
+    [Fact]
+    public void StaleMute_MetricNames_ClassifyAsACountAlertAndAResolution()
+    {
+        Assert.False(AlertMetricClassifier.IsResolution(DarlingSelfAlertEvaluator.StaleMuteMetric));
+        Assert.True(AlertMetricClassifier.IsWarning(DarlingSelfAlertEvaluator.StaleMuteMetric));
+        Assert.False(AlertMetricClassifier.IsCritical(DarlingSelfAlertEvaluator.StaleMuteMetric));
+        Assert.Equal("3", AlertMetricClassifier.FormatHistoryValue(DarlingSelfAlertEvaluator.StaleMuteMetric, 3));
+        /* Not state-only: a stored 0 on this metric would be a real count of zero, not a missing value. */
+        Assert.False(AlertMetricClassifier.IsStateOnly(DarlingSelfAlertEvaluator.StaleMuteMetric));
+
+        Assert.True(AlertMetricClassifier.IsResolution(DarlingSelfAlertEvaluator.StaleMuteResolvedMetric));
+    }
+
+    /// <summary>Both names must reach a real triage mapping rather than the thin fallback — the drill-down
+    /// IS the remedy here (the rule list), so a rename that silently downgraded it would leave the alert
+    /// telling an operator to go and look with no link to look through.</summary>
+    [Fact]
+    public void StaleMute_TriagePage_DrillsIntoTheRuleList_ForBothTheFiringAndTheResolution()
+    {
+        var firing = DarlingTriageEndpoint.SectionsFor(DarlingSelfAlertEvaluator.StaleMuteMetric);
+        Assert.NotSame(DarlingTriageEndpoint.DefaultSections, firing);
+        Assert.Contains(firing, s => s.Read == "get_mute_rules");
+        /* Fleet-level: these alerts fire under the synthetic store label, which resolves to no server. */
+        Assert.All(firing, s => Assert.True(s.FleetLevel));
+
+        Assert.Same(firing, DarlingTriageEndpoint.SectionsFor(DarlingSelfAlertEvaluator.StaleMuteResolvedMetric));
     }
 
     [Fact]
@@ -2016,14 +3248,26 @@ public sealed class DarlingSelfAlertTests
             logger: null,
             utcNow: () => now);
 
-        /* Fire: total CPU 90 >= 80. */
-        await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 90, 90, false, false), Ct);
+        /* Fire: total CPU 90 >= 80, held for AlertEngine.CpuBreachSamples distinct samples (#3282 — one
+           sample over the bar is no longer an incident). */
+        var sampleAt = new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
+        for (var i = 0; i < AlertEngine.CpuBreachSamples; i++)
+        {
+            sampleAt = sampleAt.AddMinutes(1);
+            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 90, 90, false, false, sampleAt), Ct);
+        }
+
         Assert.Single(deliverer.Outcomes);
         Assert.Empty(history.Records); /* no resolution yet */
 
-        /* Clear: CPU back below threshold => the engine emits a resolution => a history row is written. */
+        /* Clear: CPU back below threshold for AlertEngine.CpuClearSamples distinct samples => the engine
+           emits a resolution => a history row is written. */
         now = now.AddMinutes(1);
-        await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 10, 10, false, false), Ct);
+        for (var i = 0; i < AlertEngine.CpuClearSamples; i++)
+        {
+            sampleAt = sampleAt.AddMinutes(1);
+            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 10, 10, false, false, sampleAt), Ct);
+        }
         var resolved = Assert.Single(history.Records);
         Assert.Equal("CPU Resolved", resolved.MetricName);
         Assert.Equal(AlertDelivery.ChannelNotApplicable, resolved.NotificationType);
@@ -2081,6 +3325,21 @@ public sealed class DarlingSelfAlertTests
                 new Dictionary<string, IncidentOccurrenceState>(StringComparer.Ordinal));
 
         public Task SaveIncidentOccurrencesAsync(string serverKey, string metricName, IReadOnlyDictionary<string, IncidentOccurrenceState> states) => Task.CompletedTask;
+
+        /* #3282: real, for the same reason the other two fakes are. These tests drive the SELF-alert paths
+           and never the CPU check, so nothing here reads it back — but a stub that answered "no memory" to
+           a load and swallowed every save is indistinguishable from the seam being wired wrong, and this
+           class already has one stub-shaped no-op above that had to be justified in a comment. */
+        public Dictionary<(string Key, string Metric), AlertPersistenceRecord> Persistence { get; } = new();
+
+        public Task<AlertPersistenceRecord?> LoadAlertPersistenceAsync(string serverKey, string metricName) =>
+            Task.FromResult(Persistence.TryGetValue((serverKey, metricName), out var r) ? (AlertPersistenceRecord?)r : null);
+
+        public Task SaveAlertPersistenceAsync(string serverKey, string metricName, AlertPersistenceRecord record)
+        {
+            Persistence[(serverKey, metricName)] = record;
+            return Task.CompletedTask;
+        }
     }
 
     /* ---------------- live collection_log reads (gated on DARLING_TEST_PG) ---------------- */
@@ -2154,6 +3413,91 @@ public sealed class DarlingSelfAlertTests
             /* Fresh connection + body-aware masking (#1794): this class showed the "Connection is not
                open" signature on a reused local store, and cleanup on the body's connection is exactly
                how that masks the real failure and strands the seeded rows. */
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteLiveRowsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #3496: the recent-N window reads newest-by-<c>collection_time</c> with <c>log_id</c> as the
+    /// deterministic tiebreak within one collection instant — the ordering that lets TimescaleDB's
+    /// ChunkAppend stop at the newest chunks instead of top-N-sorting a server's whole retention history
+    /// (~389K rows to return ten, measured live). The order swap is semantics-identical because a server's
+    /// id order and time order agree, and this arm pins BOTH halves of that claim against a real Postgres:
+    /// the window is filled newest-instant-first (an older instant's rows never displace a newer one's),
+    /// and within a tied instant the HIGHEST ids win. A revert to id-first ordering passes this test on any
+    /// store small enough to test against — that quietness is exactly how the defect shipped — so the
+    /// ordering itself is additionally pinned at the source by <see cref="CollectionSignalsChunkOrderTests"/>;
+    /// this arm is the behavioral floor that makes a WRONG reordering (time-first without the tiebreak,
+    /// or a descending/ascending mix-up) fail loudly.
+    /// </summary>
+    [Fact]
+    public async Task LiveStoreReads_RecentWindow_IsNewestByTimeFirst_WithLogIdBreakingTies()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live self-alert store reads.");
+
+        var ct = Ct;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteLiveRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var older = utcNow.AddMinutes(-10);
+            var newest = utcNow.AddMinutes(-1);
+
+            /* An older instant of four SUCCESSes under a newer instant of six rows sharing ONE
+               collection_time: three ERRORs on the LOW ids, three SUCCESSes on the HIGH ids. The id/time
+               agreement invariant holds (ids rise with time), and the tie group is wider than the small
+               window so the tiebreak decides which statuses are counted. */
+            long logId = 9_100_000;
+            for (int i = 0; i < 4; i++)
+            {
+                await InsertLogAsync(connection, ct, logId++, "wait_stats", older, "SUCCESS");
+            }
+
+            for (int i = 0; i < 3; i++)
+            {
+                await InsertLogAsync(connection, ct, logId++, "wait_stats", newest, "ERROR");
+            }
+
+            for (int i = 0; i < 3; i++)
+            {
+                await InsertLogAsync(connection, ct, logId++, "wait_stats", newest, "SUCCESS");
+            }
+
+            /* Window 3, inside the tied instant: log_id DESC must pick the three HIGHEST ids — all
+               SUCCESS. A missing or ascending tiebreak lets the tied instant's ERRORs leak in. */
+            var (_, tieRuns, tieSuccess) = await DarlingSelfAlertEvaluator.ReadCollectionSignalsAsync(
+                postgres, LiveServerId, 3, ct);
+            Assert.Equal(3, tieRuns);
+            Assert.Equal(3, tieSuccess);
+
+            /* Window 8, across both instants: all six newest-instant rows (3 ERROR + 3 SUCCESS) fill the
+               window before ANY older row — time-first — leaving room for exactly two of the older
+               SUCCESSes. 5 = 3 + 2 is only reachable by that fill order. */
+            var (lastSuccess, spanRuns, spanSuccess) = await DarlingSelfAlertEvaluator.ReadCollectionSignalsAsync(
+                postgres, LiveServerId, 8, ct);
+            Assert.Equal(8, spanRuns);
+            Assert.Equal(5, spanSuccess);
+
+            /* The MAX arm — the statement's measured 0.097 ms control, deliberately untouched by #3496 —
+               still answers the newest qualifying instant. */
+            Assert.NotNull(lastSuccess);
+            Assert.Equal(newest, DateTime.SpecifyKind(lastSuccess!.Value, DateTimeKind.Unspecified), TimeSpan.FromSeconds(1));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
             {
                 await DeleteLiveRowsAsync(cleanup, cleanupCt);
@@ -2391,6 +3735,34 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         Assert.Contains("held at 4.5x", fired.ShortMessage, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3297: the detail names WHEN the policy arms. It said the policy "arms ITSELF once its consumer covers
+    /// everything raw holds" and stopped there, which is true and one step short:
+    /// <c>TimescaleSupport.EnsureRetentionPoliciesAsync</c> is the only thing that arms a held policy and it
+    /// has exactly one call site, the service startup path. So arming happens on the next service START, not
+    /// when coverage catches up. An operator following the old wording runs the backfill, watches the hourly
+    /// Critical keep firing, and concludes the backfill failed — which is what happened on #3296, where the
+    /// reporter's own sequence included the restart and ours did not. Pinned here rather than only in
+    /// <c>docs/retention-hold-runbook.md</c> because the alert is what an operator sees first, and now that
+    /// every channel delivers the detail (#3297) it is what most of them will see at all.
+    /// </summary>
+    [Fact]
+    public async Task RetentionHeld_TheDetail_NamesTheRestartAsPartOfTheRemedy()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+
+        var detail = Assert.Single(h.Deliverer.Outcomes).DetailText!;
+        Assert.Contains("--backfill-rollups", detail, StringComparison.Ordinal);
+        Assert.Contains("RESTART", detail, StringComparison.Ordinal);
+        /* The reason the restart is not optional, so a future edit cannot drop it to a bare instruction. */
+        Assert.Contains("STARTUP", detail, StringComparison.Ordinal);
+        /* And the do-not-arm warning it must never displace. */
+        Assert.Contains("Do NOT", detail, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task RetentionHeld_TheProductionIncident_ReadsCritical()
     {
@@ -2493,12 +3865,136 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
     [Fact]
     public void RetentionHeld_TheWarnRatioClearsChunkGranularityAndCatchesTheIncident()
     {
-        /* Both bounds asserted, not just described. Below: whole-chunk granularity on the shipped raw tier
-           (4-day horizon, 1-day chunks) tops out at 1.25x, which must stay under the warn ratio. Above: the
-           motivating incident sat at 4.52x and must reach CRITICAL. */
-        Assert.True(DarlingSelfAlertEvaluator.RetentionHoldWarnRatio > 1.25);
+        /* Both bounds asserted, not just described. Below: whole-chunk granularity plus the retention job's
+           own schedule lag reaches 1.4x MEASURED on a healthy production store under 4-day horizons — two
+           relations holding 5.7 days against 4. The bound is that MEASUREMENT and not the ~1.25x the
+           horizon-plus-one-chunk arithmetic predicts, which understates the margin the shipped ratio has
+           to clear (#3297). Above: the motivating incident sat at 4.52x and must reach CRITICAL. */
+        Assert.True(DarlingSelfAlertEvaluator.RetentionHoldWarnRatio > 1.4);
         Assert.True(DarlingSelfAlertEvaluator.RetentionHoldCriticalRatio > DarlingSelfAlertEvaluator.RetentionHoldWarnRatio);
         Assert.True(4.52 >= DarlingSelfAlertEvaluator.RetentionHoldCriticalRatio);
+    }
+
+    /// <summary>
+    /// #3297: the tiers come from the STORE, so a tuned pair changes what fires — which is the whole rung,
+    /// and the one property that a store-backed knob can lack while looking complete. A bare constant left
+    /// in the decision would keep firing at the shipped 2.0x while <c>get_alert_settings</c> reported the
+    /// store's value, and no test over an UNTUNED store could tell the two apart, because there the shipped
+    /// default and the stored value agree.
+    ///
+    /// <para>So this drives the seam to a value the shipped constant would judge differently, in both
+    /// directions: a raised warn ratio must SILENCE a reading the default fires on, and a lowered one must
+    /// not be reachable at all (the clamp's floor is the default) — so the second case is the critical tier
+    /// instead, raised past a reading the default grades Critical.</para>
+    /// </summary>
+    [Fact]
+    public async Task RetentionHeld_TheTiersComeFromTheStore_NotTheShippedConstants()
+    {
+        /* The motivating reading, 4.52x: Critical on the shipped pair. */
+        var shipped = new Harness();
+        await shipped.Build().ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+        Assert.Equal(AlertSeverityLevel.Critical, Assert.Single(shipped.Deliverer.Outcomes).Severity);
+
+        /* Same reading, warn raised past it: nothing fires, and nothing is standing to resolve either. */
+        var quiet = new Harness { RetentionHoldWarnRatio = 5.0, RetentionHoldCriticalRatio = 10.0 };
+        await quiet.Build().ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+        Assert.Empty(quiet.Deliverer.Outcomes);
+        Assert.Empty(quiet.History.Records);
+
+        /* Same reading, critical raised past it but warn left under: it fires as a WARNING. The severity is
+           the assertion — a fire proves the warn seam is read, and the grade proves the critical one is. */
+        var graded = new Harness { RetentionHoldCriticalRatio = 9.0 };
+        await graded.Build().ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+        var warned = Assert.Single(graded.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Warning, warned.Severity);
+    }
+
+    /// <summary>
+    /// #3297: the threshold the alert STATES is the configured one, in both the fire and the resolution.
+    ///
+    /// <para>Separate from the decision test above because it fails differently and would be the last thing
+    /// caught: a decision reading the seam while the message read the constant produces an alert that fires
+    /// correctly and tells the operator a threshold nobody set. On the resolution side it is worse —
+    /// "back under 2.0x" on a store configured at 3.0x asserts a recovery against a line the tier has not
+    /// crossed.</para>
+    /// </summary>
+    [Fact]
+    public async Task RetentionHeld_StatesTheConfiguredThreshold_InTheFireAndTheResolution()
+    {
+        var h = new Harness { RetentionHoldWarnRatio = 3.0, RetentionHoldCriticalRatio = 9.0 };
+        var e = h.Build();
+
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        /* Equality rather than an absence check: "the text is 3.0x" already forbids the shipped 2.0x, where
+           a DoesNotContain beside it could not fail without this line failing first. */
+        Assert.Equal("3.0x", fired.ThresholdValue);
+        Assert.Equal(3.0, fired.NumericThresholdValue);
+
+        /* Now the tier comes back under the CONFIGURED ratio — 2.5x, which is over the shipped 2.0x, so a
+           constant in the decision would refuse to resolve at all and a constant in the MESSAGE would name
+           the wrong line. 2.5x of a 4-day horizon is 864,000 seconds. */
+        h.Deliverer.Outcomes.Clear();
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy(spanSeconds: 864_000) }, Ct);
+
+        var resolved = Assert.Single(h.History.Records, r => r.MetricName == "Retention Hold Cleared");
+        Assert.Contains("back under 3.0x", resolved.DetailText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("back under 2.0x", resolved.DetailText!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3297: a critical tier set BELOW the warning tier makes every fire Critical, with no Warning tier —
+    /// and that is the behaviour rather than a state to correct.
+    ///
+    /// <para>Pinned because the obvious "fix" is a <c>GREATEST</c> or a <c>Math.Max</c> on read, and that
+    /// would accept the operator's value and then use a different one, which is the failure the MCP
+    /// bound-equals-clamp parity exists to prevent — the setting reads back as what they set and behaves as
+    /// something else. Firing is gated on warn and severity on critical, so the degenerate pair already has
+    /// one coherent reading, which is also what setting it that way asks for.</para>
+    /// </summary>
+    [Fact]
+    public async Task RetentionHeld_ACriticalTierBelowTheWarningTier_MakesEveryFireCritical()
+    {
+        var h = new Harness { RetentionHoldWarnRatio = 4.0, RetentionHoldCriticalRatio = 2.0 };
+        var e = h.Build();
+
+        /* Under the WARNING tier despite being over the critical one: nothing fires, because warn is what
+           gates firing. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy(spanSeconds: 1_036_800) }, Ct);   /* 3.0x */
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* Over the warning tier: fires, and Critical rather than Warning. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);                          /* 4.52x */
+        Assert.Equal(AlertSeverityLevel.Critical, Assert.Single(h.Deliverer.Outcomes).Severity);
+    }
+
+    /// <summary>
+    /// #3297: an evaluator built with the seams UNSUPPLIED behaves like a store at the shipped defaults.
+    /// Otherwise the constructor fallbacks are a code path no test reaches, which is the shape a stale
+    /// literal survives in (#3060's finding, applied to the seams this issue added).
+    /// </summary>
+    [Fact]
+    public async Task RetentionHeld_UnwiredSeams_JudgeOnTheShippedDefaults()
+    {
+        var h = new Harness { WireRetentionHoldKnobs = false, RetentionHoldWarnRatio = 99.0 };
+        var e = h.Build();
+
+        /* The harness value would silence this reading; the fallback must fire it, and grade it Critical on
+           the shipped 4.0x. */
+        await e.ApplyRetentionHoldsAsync(new[] { HeldPolicy() }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+
+        /* Both thresholds the fire reports, derived from the shipped constants rather than written as
+           "2.0x"/"4.0x" — a literal here would agree with the old value after a moved default, which is the
+           one thing this pin exists to catch. The numeric slot carries the tier that GRADED it (critical,
+           at 4.52x) and the text slot always carries the warn line, so the two together cover both seams. */
+        Assert.Equal(TimescaleSupport.RetentionHoldCriticalRatioDefault, fired.NumericThresholdValue);
+        Assert.Equal(
+            TimescaleSupport.RetentionHoldWarnRatioDefault.ToString("0.0", CultureInfo.InvariantCulture) + "x",
+            fired.ThresholdValue);
     }
 
     [Fact]
@@ -2840,9 +4336,11 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
     private static PerformanceMonitor.Darling.Service.Mcp.DarlingCollectorCostReader.CostRegression Regression(
         long latestMs = 8000, double baselineMs = 2000.0, int serverId = 7, string collector = "query_store",
         DateTime? latestMetricTime = null, long latestRuns = 100,
-        double latestMsPerRun = 80.0, double baselineMsPerRun = 20.0) =>
+        double latestMsPerRun = 80.0, double baselineMsPerRun = 20.0,
+        double baselineP95MsPerRun = 20.0) =>
         new(serverId, "prod-multi-19", collector, latestMs, baselineMs,
-            latestMetricTime ?? DefaultRegressionMetricTime, latestRuns, latestMsPerRun, baselineMsPerRun);
+            latestMetricTime ?? DefaultRegressionMetricTime, latestRuns, latestMsPerRun, baselineMsPerRun,
+            baselineP95MsPerRun);
 
     [Fact]
     public async Task CollectorCostRegression_FiresOnEntry_SuppressedWithinCooldown_ResolvesWhenGone()
@@ -2865,6 +4363,38 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         var cleared = Assert.Single(h.History.Records);
         Assert.Equal("Cost Regression Cleared", cleared.MetricName);
         Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    /// <summary>#3464 (measured): with alerts_enabled read back false on both SQL Server stores, a
+    /// Collector Cost Regression reached the live paging channel 60 minutes into the fleet-wide mute,
+    /// while the engine sweep's server_alert_passes counters sat frozen — the master switch honored by
+    /// the sweep and bypassed by this sibling, whose only AlertsEnabled consult guarded the digest branch
+    /// that runs AFTER the paging apply. The gate is the sibling shape: master-off means no evaluation,
+    /// no history rows, state frozen where it stands.</summary>
+    [Fact]
+    public async Task CollectorCostRegression_AlertsDisabled_DoesNotFire_DoesNotRecord_AndResumesCleanly()
+    {
+        var h = new Harness();
+        h.Settings.AlertsEnabled = false;
+        var e = h.Build();
+
+        /* Master off: the regression that fires on entry when the switch is on delivers nothing and writes
+           nothing — including no resolution row for a pair that clears mid-mute (frozen means frozen; the
+           sweep's own counters proved the engine records nothing under master-off, and the sibling applies
+           all early-return the same way). */
+        await e.ApplyCostRegressionsAsync(new[] { Regression() }, Ct);
+        await e.ApplyCostRegressionsAsync(
+            System.Array.Empty<PerformanceMonitor.Darling.Service.Mcp.DarlingCollectorCostReader.CostRegression>(), Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        /* Master back on: nothing half-advanced under the mute, so the identical regression fires as a
+           clean first entry — no cooldown consumed, no phantom "Cleared" row owed. */
+        h.Settings.AlertsEnabled = true;
+        await e.ApplyCostRegressionsAsync(new[] { Regression() }, Ct);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Collector Cost Regression", fired.MetricName);
+        Assert.Empty(h.History.Records);
     }
 
     [Fact]
@@ -2907,5 +4437,327 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         await e.ApplyCostRegressionsAsync(
             new[] { Regression(latestMetricTime: DefaultRegressionMetricTime.AddHours(1)) }, Ct);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    /// <summary>#3440: the fired alert must report the bound that actually SELECTED it. The query gates on the
+    /// factor applied to the mean AND to the p95 of the collector's own daily per-run cost, so the binding
+    /// bound is the factor on the higher of the two. Reporting the mean-derived figure would hand a reader a
+    /// threshold the row did not have to clear — with a p95 baseline of 50 ms/run the real bound is 100, and
+    /// the mean-derived one is 40, so a reader checking the arithmetic would compute a 4x that is not the test
+    /// the alert applied.
+    ///
+    /// <para>#3462 extends the same rule across units: since the predicate is now a conjunction of a per-run
+    /// bound and an added-cost-per-day floor, the threshold text must state BOTH, or the reader falsifying
+    /// the arithmetic reconstructs a looser predicate than the one that fired. The floor is pinned as the
+    /// literal "15 s/day" deliberately (the metric-name pin's reasoning): a retune of the constant must land
+    /// here and re-justify the calibration, not ride through on string interpolation. The fixture's 200 runs
+    /// put its added cost at 20,000 ms/day — a row the shipped query could actually return, since the floor
+    /// would have excluded the old 100-run shape at 10,000.</para></summary>
+    [Fact]
+    public async Task CollectorCostRegression_ReportsTheBoundThatSelectedIt_NotTheMeanRatio()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCostRegressionsAsync(
+            new[] { Regression(latestMsPerRun: 120.0, baselineMsPerRun: 20.0, baselineP95MsPerRun: 50.0,
+                latestRuns: 200) }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(100.0, fired.NumericThresholdValue);
+        Assert.Contains("100.0 ms/run", fired.ThresholdValue, StringComparison.Ordinal);
+
+        /* Both baselines stay legible on the alert, because the reader's next question is which one bound. */
+        Assert.Contains("20.0 ms/run mean", fired.ThresholdValue, StringComparison.Ordinal);
+        Assert.Contains("50.0 ms/run daily p95", fired.ThresholdValue, StringComparison.Ordinal);
+        Assert.Contains("p95 of its OWN daily per-run cost", fired.DetailText, StringComparison.Ordinal);
+
+        /* #3462: the floor is the other conjunct that selected the row, stated in its own unit beside the
+           ratio bound, on the threshold and in the detail's explanation of the added-cost figure. */
+        Assert.Contains("worth at least 15 s/day of added collection time", fired.ThresholdValue, StringComparison.Ordinal);
+        Assert.Contains("reported only when that added cost reaches 15 s/day", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>#3440: the reported bound is derived through <see cref="System.Math.Max"/>, so no construction
+    /// of the record can produce a bound BELOW the pre-#3440 mean-ratio one. That is what makes the added
+    /// conjunct narrowing-only rather than a retune: a p95 baseline that is absent, zero, or incoherently
+    /// under the mean degrades to exactly the old bound instead of to a looser one, and there is no settable
+    /// member holding a bound for a <c>with</c> expression to overwrite.</summary>
+    [Fact]
+    public void CollectorCostRegressionThreshold_NeverFallsBelowTheMeanBound()
+    {
+        const double factor = 2.0;
+        const double mean = 20.0;
+        var p95s = new[] { 0.0, 0.1, 19.999, mean, 20.001, 50.0, 1_000_000.0 };
+
+        /* The loop bound is asserted rather than assumed: a grid mutated to zero rows would leave every
+           assertion below unreached and this test would pass having checked nothing. */
+        Assert.Equal(7, p95s.Length);
+        var checked_ = 0;
+
+        foreach (var p95 in p95s)
+        {
+            var r = Regression(baselineMsPerRun: mean, baselineP95MsPerRun: p95);
+            Assert.True(r.ThresholdMsPerRun(factor) >= mean * factor,
+                $"p95 {p95} produced a bound below the mean bound");
+            Assert.Equal(System.Math.Max(mean, p95) * factor, r.ThresholdMsPerRun(factor), 6);
+            checked_++;
+        }
+
+        Assert.Equal(p95s.Length, checked_);
+
+        /* And the degenerate case is exactly the old bound, not merely "not below" it. */
+        Assert.Equal(mean * factor,
+            Regression(baselineMsPerRun: mean, baselineP95MsPerRun: 0.0).ThresholdMsPerRun(factor), 6);
+    }
+
+    /* ---------------- #3500: the opt-in store self-alert label (peers.storeName) ---------------- */
+
+    /// <summary>The one fallback decision, pinned at its edges: blank spellings are NOT an opt-in, a real
+    /// label is trimmed, and a label spelled exactly as the constant IS the constant — same bytes, same
+    /// fingerprints, no re-key — because an "opt-in" that changes nothing but the key shape would orphan
+    /// downstream work items for no visible difference at all.</summary>
+    [Theory]
+    [InlineData(null, "Monitor Store")]
+    [InlineData("", "Monitor Store")]
+    [InlineData("   ", "Monitor Store")]
+    [InlineData("Monitor Store", "Monitor Store")]
+    [InlineData("  use1-monitor-01  ", "use1-monitor-01")]
+    public void StoreLabel_EffectiveStoreLabel_BlankIsNotAnOptIn_AndTheConstantIsItself(
+        string? configured, string expected)
+    {
+        Assert.Equal(expected, DarlingSelfAlertEvaluator.EffectiveStoreLabel(configured));
+    }
+
+    /// <summary>
+    /// THE REGRESSION PIN THE OPT-IN PROMISE STANDS ON: an evaluator built without the seam and one built
+    /// with a blank spelling of it fire outcomes that are EQUAL AS RECORDS — server key, server name,
+    /// metric, values, severity, prose, everything the deliverer and the fingerprint read — so every
+    /// existing install's self-alert fingerprints are stable across the upgrade that ships the field.
+    /// <see cref="AlertOutcome"/> being a record is what lets one equality say "byte-identical" instead of
+    /// a field list that goes stale when the outcome grows a member.
+    /// </summary>
+    [Fact]
+    public async Task StoreLabel_Unset_FiresByteIdenticalToTheConstantLabel()
+    {
+        var unsupplied = new Harness();
+        var blank = new Harness { StoreName = "   " };
+
+        await unsupplied.Build().ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+        await blank.Build().ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+
+        var a = Assert.Single(unsupplied.Deliverer.Outcomes);
+        var b = Assert.Single(blank.Deliverer.Outcomes);
+
+        Assert.Equal(a, b);
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, a.ServerName);
+        Assert.Equal("mutestale", a.ServerKey);   // the raw family key: no label qualification when unset
+    }
+
+    /// <summary>
+    /// The opted-in arm, on two families so "every family flows through the one seam" is shown behaving and
+    /// not only pinned from source below: the label becomes the server NAME (what the card, the history row
+    /// and a mute rule see) and PREFIX-QUALIFIES the server KEY — derived from the unset arm's own key
+    /// rather than restated, so this test cannot drift apart from the family's real key shape. The key is
+    /// the half that makes fingerprints distinct: the delivery dedup identity for a no-incident alert is
+    /// <c>{serverKey}:{metric}</c> (<c>WebhookAlertService.DerivePagerDutyDedupKey</c>'s fallback), and the
+    /// server name is not in it.
+    /// </summary>
+    [Fact]
+    public async Task StoreLabel_OptedIn_NamesTheStore_AndQualifiesTheDeliveryKey()
+    {
+        var unset = new Harness();
+        var opted = new Harness { StoreName = "  use1-monitor-01  " };   // trimmed on the way in
+
+        var report = new DarlingSelfAlertEvaluator.StoreUpgradeReport(
+            Succeeded: true, FromMajor: 17, ToMajor: 18,
+            FromTimescale: "2.17.2", ToTimescale: "2.28.1",
+            FailedStep: null, FailureMessage: null, WithoutRollbackCopy: false);
+
+        var eUnset = unset.Build();
+        var eOpted = opted.Build();
+        await eUnset.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+        await eOpted.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+        await eUnset.EvaluateStoreUpgradeAsync(report, Ct);
+        await eOpted.EvaluateStoreUpgradeAsync(report, Ct);
+
+        Assert.Equal(2, unset.Deliverer.Outcomes.Count);
+        Assert.Equal(2, opted.Deliverer.Outcomes.Count);
+
+        for (int i = 0; i < unset.Deliverer.Outcomes.Count; i++)
+        {
+            var baseline = unset.Deliverer.Outcomes[i];
+            var labeled = opted.Deliverer.Outcomes[i];
+
+            Assert.Equal("use1-monitor-01", labeled.ServerName);
+            Assert.Equal("use1-monitor-01:" + baseline.ServerKey, labeled.ServerKey);
+            /* The metric is the stable automation key (#2768's triage map and the webhook contract both
+               key on it) and must not move with the label. */
+            Assert.Equal(baseline.MetricName, labeled.MetricName);
+        }
+
+        /* And the RESOLUTION rows carry the label too — the paired "Cleared" entry an operator correlates
+           by server must name the same store its firing did. */
+        await eOpted.ApplyStaleMuteRulesAsync(Array.Empty<MuteRule>(), Ct);
+        var resolution = Assert.Single(opted.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, resolution.MetricName);
+        Assert.Equal("use1-monitor-01", resolution.ServerName);
+        Assert.Equal("use1-monitor-01:mutestale", resolution.ServerId);
+    }
+
+    /// <summary>
+    /// The reporter's acceptance criterion (#3500): two stores with distinct storeNames produce DISTINCT
+    /// delivery fingerprints for the SAME self-alert family — the property whose absence silently folded
+    /// two hosts' incidents into one downstream work item. Asserted on the (serverKey, metric) pair the
+    /// no-incident fingerprint is a pure function of, and both must also differ from the unset arm's, or
+    /// one labeled store would collide with every unlabeled one.
+    /// </summary>
+    [Fact]
+    public async Task StoreLabel_TwoStores_SameFamily_DistinctDeliveryFingerprints()
+    {
+        var dc1 = new Harness { StoreName = "dc1-monitor" };
+        var dc2 = new Harness { StoreName = "dc2-monitor" };
+        var unset = new Harness();
+
+        await dc1.Build().ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+        await dc2.Build().ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+        await unset.Build().ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+
+        var a = Assert.Single(dc1.Deliverer.Outcomes);
+        var b = Assert.Single(dc2.Deliverer.Outcomes);
+        var c = Assert.Single(unset.Deliverer.Outcomes);
+
+        /* Same family, same metric — the collision the constant caused was never about the metric. */
+        Assert.Equal(a.MetricName, b.MetricName);
+
+        Assert.NotEqual(a.ServerKey, b.ServerKey);
+        Assert.NotEqual(a.ServerKey, c.ServerKey);
+        Assert.NotEqual(b.ServerKey, c.ServerKey);
+    }
+
+    /// <summary>
+    /// THE MUTE-RULE COUPLING, both directions (#3500): mute rules match the alert row's server spelling,
+    /// so on an opted-in store a rule scoped to the storeName suppresses — and one still scoped to the old
+    /// constant no longer does, which is exactly what the field's comment and the CHANGELOG warn an
+    /// operator to re-scope. Exercised on the stale-mute condition because its explicit-mute scan is the
+    /// one mute path that does NOT go through the shared seam, so it needs its own proof that it matches
+    /// against the label the row actually carries.
+    /// </summary>
+    [Fact]
+    public async Task StoreLabel_OptedIn_MuteRulesMatchTheLabel_NotTheRetiredConstant()
+    {
+        var suppressed = new Harness { StoreName = "use1-monitor-01" };
+        await suppressed.Build().ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 1), ExplicitMute(serverName: "use1-monitor-01") }, Ct);
+        var fired = Assert.Single(suppressed.Deliverer.Outcomes);
+        Assert.True(fired.Muted);
+
+        var notSuppressed = new Harness { StoreName = "use1-monitor-01" };
+        await notSuppressed.Build().ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 1), ExplicitMute(serverName: DarlingSelfAlertEvaluator.StoreServerLabel) }, Ct);
+        var stillFired = Assert.Single(notSuppressed.Deliverer.Outcomes);
+        Assert.False(stillFired.Muted,
+            "a rule scoped to the retired constant must not match an opted-in store's rows — the coupling the docs warn about");
+    }
+
+    /// <summary>
+    /// And the ELEVEN families that DO ask the shared seam ask it with the label: the seam's context is
+    /// what every ordinary mute rule matches against, so if a fire site handed it the constant while the
+    /// row carried the label, a rule copied off the row would suppress nothing — the silent half of the
+    /// coupling. Captured at the seam itself rather than inferred from a rule's verdict.
+    /// </summary>
+    [Fact]
+    public async Task StoreLabel_OptedIn_TheSharedMuteSeam_IsAskedWithTheLabel()
+    {
+        var h = new Harness();
+        var seen = new List<AlertMuteContext>();
+
+        var evaluator = new DarlingSelfAlertEvaluator(
+            h.Settings, h.Deliverer, h.History,
+            ctx => { seen.Add(ctx); return false; },
+            storeName: "use1-monitor-01");
+
+        await evaluator.EvaluateStoreUpgradeAsync(
+            new DarlingSelfAlertEvaluator.StoreUpgradeReport(
+                Succeeded: true, FromMajor: 17, ToMajor: 18,
+                FromTimescale: "2.17.2", ToTimescale: "2.28.1",
+                FailedStep: null, FailureMessage: null, WithoutRollbackCopy: false),
+            Ct);
+
+        var context = Assert.Single(seen);
+        Assert.Equal("use1-monitor-01", context.ServerName);
+        Assert.Equal("Store Runtime Upgrade", context.MetricName);
+    }
+
+    /// <summary>
+    /// THE CENSUS, from source (the #2213 discipline): every fleet-level fire site reads the ONE label seam,
+    /// so a thirteenth self-alert family added later cannot quietly hardcode the constant back in and
+    /// re-create the collision one family at a time. Three invariants over the comment-and-string-stripped
+    /// evaluator source:
+    ///
+    /// <para>1. The <c>StoreServerLabel</c> identifier survives as a VALUE only inside the seam itself — the
+    /// const declaration, <c>EffectiveStoreLabel</c>'s fallback, and <c>StoreKey</c>'s unset gate. Any other
+    /// line reaching for it is a fire site bypassing the seam.</para>
+    ///
+    /// <para>2. Everywhere the label travels as a FireAsync/AlertResolution server-name argument (the
+    /// <c>, _storeLabel,</c> shape), the server KEY beside it goes through <c>StoreKey(</c> — the two halves
+    /// of the identity move together, because a site passing the label with a raw family key would relabel
+    /// the card while its fingerprint kept colliding, the invisible half of the bug.</para>
+    ///
+    /// <para>3. The literal "Monitor Store" is spelled exactly once in the evaluator — the const — so no
+    /// message prose can re-hardcode the spelling an opted-in store no longer uses. And the worker actually
+    /// wires the seam from the peers block, because a perfect seam nobody constructs with is the config
+    /// field that does nothing.</para>
+    /// </summary>
+    [Fact]
+    public void StoreLabel_EveryFleetLevelFireSite_FlowsThroughTheOneSeam()
+    {
+        var raw = RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs");
+        var stripped = CSharpSourceWalker.StripCommentsAndStrings(raw);
+
+        var offenders = stripped
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n')
+            .Select((line, i) => (Line: line, Number: i + 1))
+            .Where(l => l.Line.Contains("StoreServerLabel", StringComparison.Ordinal))
+            .Where(l =>
+                !l.Line.Contains("internal const string StoreServerLabel", StringComparison.Ordinal)
+                && !l.Line.Contains("string.Equals(trimmed, StoreServerLabel", StringComparison.Ordinal)
+                && !l.Line.Contains("? StoreServerLabel", StringComparison.Ordinal)
+                && !l.Line.Contains("_storeLabel == StoreServerLabel", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.True(offenders.Count == 0,
+            "these evaluator lines reach for StoreServerLabel instead of the _storeLabel/StoreKey seam, "
+            + "so an opted-in store would fire them under the wrong identity: "
+            + string.Join("; ", offenders.Select(o => $"line {o.Number}: {o.Line.Trim()}")));
+
+        var unpairedLabelSites = stripped
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n')
+            .Select((line, i) => (Line: line, Number: i + 1))
+            .Where(l => l.Line.Contains(", _storeLabel,", StringComparison.Ordinal)
+                && !l.Line.Contains("StoreKey(", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.True(unpairedLabelSites.Count == 0,
+            "these fire sites pass the label without qualifying the key, so their cards would be relabeled "
+            + "while their fingerprints kept colliding across stores: "
+            + string.Join("; ", unpairedLabelSites.Select(o => $"line {o.Number}: {o.Line.Trim()}")));
+
+        /* The literal census reads the STRING LITERALS themselves — the stripper blanks them, and a literal
+           is exactly where a re-hardcoded spelling would hide. "Monitor Store" (the label's exact casing)
+           may appear inside precisely one literal body: the const's own definition. Contains rather than
+           equality, so prose that EMBEDS the constant's spelling (which an opted-in store no longer uses)
+           is caught too; the lowercase "Monitor store volume…" prose is deliberately not — that names the
+           volume, not the label. */
+        var literalCount = CSharpSourceWalker.StringLiteralBodies(raw)
+            .Count(b => b.Text.Contains("Monitor Store", StringComparison.Ordinal));
+        Assert.Equal(1, literalCount);
+
+        var worker = RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        Assert.Contains("storeName: config.Peers?.StoreName", worker, StringComparison.Ordinal);
     }
 }

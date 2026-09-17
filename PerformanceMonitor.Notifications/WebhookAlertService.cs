@@ -71,9 +71,22 @@ public class WebhookAlertService
        window is delivered; falls back to the metric-level key when an alert carries no
        fingerprintable incident. */
     private readonly IncidentCooldown _cooldown;
+
+    /* #3430: the per-metric ceiling on REPEAT posts, so one fault on N servers costs a bounded number of
+       cards rather than N per window. One instance per service, which is one per host — the aggregation axis
+       is the metric across the whole fleet, so it cannot live anywhere narrower. */
+    private readonly RepeatDeliveryBudget _repeatBudget = new();
+
     private readonly IAlertSettings _settings;
     private readonly AlertBranding _branding;
     private readonly ILogger<WebhookAlertService> _logger;
+
+    /* The clock every payload this service renders stamps itself from. Injectable because the stamp is
+       second-precision, and a caller comparing two independently-built payloads for byte-identity (#3330's
+       pin, via #3355) can only do so if both render the same instant by construction — on the wall clock,
+       a second boundary landing between the two builds is a diff in the value under test. A Func rather
+       than a settings member, matching DarlingSelfAlertEvaluator's clock seam. */
+    private readonly Func<DateTime> _utcNow;
 
     private int _consecutiveTeamsFailures;
     private string? _lastTeamsError;
@@ -89,15 +102,23 @@ public class WebhookAlertService
     /// restart (#1145, mirroring the email seed #981). When null the cooldown is purely in-memory
     /// (the pre-#1145 behavior, seeding disabled) — the test call sites pass null.
     /// </param>
+    /// <param name="utcNow">
+    /// The clock the rendered payload stamps come from; defaults to <see cref="DateTime.UtcNow"/>. A fixed
+    /// clock makes two fan-outs render the same stamp by construction, which is what lets a caller compare
+    /// two independently-built payloads byte-for-byte (#3355). It does NOT feed the cooldown: whether an
+    /// incident is inside its window is a gating decision on real elapsed time, not a rendered value.
+    /// </param>
     public WebhookAlertService(
         IAlertSettings settings,
         AlertBranding branding,
         ILogger<WebhookAlertService> logger,
-        IAlertHistoryStore? historyStore = null)
+        IAlertHistoryStore? historyStore = null,
+        Func<DateTime>? utcNow = null)
     {
         _settings = settings;
         _branding = branding;
         _logger = logger;
+        _utcNow = utcNow ?? (() => DateTime.UtcNow);
         _cooldown = new IncidentCooldown(
             keyPrefix: "webhook:",
             // Null store -> null seed delegate -> no restart seeding (preserves the pre-#1145 in-memory path).
@@ -135,73 +156,206 @@ public class WebhookAlertService
     /// Sends webhook alerts to all configured channels (Teams and/or Slack).
     /// Respects the email cooldown setting for throttling. Never throws.
     /// </summary>
-    public async Task<bool> TrySendWebhookAlertsAsync(
+    /// <param name="detailText">
+    /// #3297: the alert's flat prose detail. Resolved ONCE here, the same way <c>triageUrl</c> below is
+    /// and for the same reason — all four channels must carry the same text for the same firing, and a
+    /// per-channel resolution would be four places for one of them to drift or be forgotten. #3313 moved
+    /// that resolution INTO <see cref="IncidentDeliveryFilter.ForDelivery"/>, which is still this one
+    /// place: the prose and the rendered incident set are two halves of one answer, and the prose has to
+    /// be resolved against the alert's own context rather than the filtered copy.
+    /// </param>
+    /// <param name="displayName">
+    /// #3303: the human-facing name a custom rule carries, rendered in the Teams/Slack titles and the
+    /// PagerDuty summary in place of <paramref name="metricName"/>. Null/empty (every built-in alert)
+    /// renders the metric name unchanged. Never reaches the generic channel — see that branch below.
+    /// </param>
+    /// <param name="deliveryMode">
+    /// #3430: the effective <see cref="AlertNotificationMode"/> the caller resolved for this alert's server,
+    /// which decides whether the per-metric repeat ceiling applies. <see cref="AlertNotificationMode.Summary"/>
+    /// aggregates; <see cref="AlertNotificationMode.PerEvent"/> does not, because that mode exists so
+    /// downstream automation gets one message per distinct incident and can count recurrences on the #1140
+    /// fingerprint. <c>null</c> — the default, and what the deprecated Dashboard shell and the test call sites
+    /// pass — also does not aggregate: a mode nobody stated is not Summary, and the direction that costs a
+    /// post is preferable to the direction that costs an announcement.
+    /// </param>
+    public async Task<WebhookFanoutResult> TrySendWebhookAlertsAsync(
         string metricName,
         string serverName,
         string currentValue,
         string thresholdValue,
         string serverId = "",
-        AlertContext? context = null)
+        AlertContext? context = null,
+        string? detailText = null,
+        string? displayName = null,
+        AlertNotificationMode? deliveryMode = null)
     {
+        /* Answered before the cooldown and the budget, not after. A channel that does not exist cannot be
+           throttled or folded, and reporting a suppression for one would put a mechanism on the alert-log
+           row for a store that has no webhook at all — #3427's defect in the opposite direction. It also
+           spares an SMTP-only store the cooldown's seed query on every alert. */
+        if (!AnyWebhookConfigured)
+        {
+            return WebhookFanoutResult.NotAttempted;
+        }
+
         try
         {
             /* #1154: per-fingerprint cooldown. Post if any incident in this alert is outside its
                window (a distinct fingerprint is not throttled by an unrelated prior incident); stamp
                every candidate key only after a successful post. Seeds the webhook last-sent time from
                the alert log on first touch per key (#1145), unless the store is null (no seeding). No
-               incidents -> the metric-level fallback key (today's behavior). */
+               incidents -> the metric-level fallback key (today's behavior). WHETHER to post only;
+               #3313's filter below decides WHICH incidents the post contains. */
+            var window = TimeSpan.FromMinutes(_settings.EmailCooldownMinutes);
             var decision = await _cooldown.EvaluateAsync(
-                serverId, metricName, context?.Incidents,
-                TimeSpan.FromMinutes(_settings.EmailCooldownMinutes));
+                serverId, metricName, context?.Incidents, window);
 
             if (!decision.ShouldSend)
             {
-                return false;
+                return WebhookFanoutResult.Throttled;
+            }
+
+            /* #3430: the cooldown bounds posts per FINGERPRINT, and AlertFingerprint hashes the server name
+               into every fingerprint, so one fault on N servers is N fingerprints and N posts per window. The
+               budget bounds REPEATS per metric across the whole fleet instead. A first notice is exempt and
+               posts here unchanged; a repeat that finds the metric's window already spent is folded onto the
+               metric's roster and named by the next carrier's card, never dropped. Evaluated on the
+               cooldown's own instant so the two decisions cannot disagree about "now". */
+            var budget = _repeatBudget.Evaluate(
+                metricName, serverName, decision, window,
+                aggregateRepeats: deliveryMode == AlertNotificationMode.Summary,
+                incidents: context?.Incidents);
+
+            if (!budget.ShouldSend)
+            {
+                /* Debug, not Information: a fold happens on every sweep of every co-affected server, which is
+                   the volume this issue is about. The aggregate worth a log line is the carrier's roster size
+                   below, which happens once per window. */
+                _logger.LogDebug(
+                    "Webhook post for {Metric} on {Server} folded into the metric's roster ({Entries} entr(ies) pending)",
+                    metricName, serverName, budget.RosterEntryCount);
+                return WebhookFanoutResult.Folded;
             }
 
             bool sent = false;
+
+            /* Whether any channel was reached at all, and the first one that came back unsuccessful. The
+               four gates below are the same expressions AnyWebhookConfigured is built from, so the early
+               return above already guarantees at least one attempt — this is measured rather than inferred
+               from that equality, because a fifth channel added to one list and not the other would
+               otherwise make "attempted and failed" the answer for a channel that was never reached. */
+            bool attempted = false;
+            string? firstError = null;
+
+            /* The channel NAME is kept with its error. Four channels report into one string, so "500 Internal
+               Server Error" without it names no endpoint an operator could go and fix. */
+            void Record(string channel, string? error)
+            {
+                if (error is null)
+                {
+                    sent = true;
+                }
+                else
+                {
+                    firstError ??= $"{channel}: {error}";
+                }
+            }
+
+            /* #3313: the decision above says the alert posts; this says WHICH of its incidents the card
+               contains. Rendering all of them re-delivered fingerprints that were still inside their own
+               window and had gone out minutes earlier, riding along on whichever sibling was fresh. Applied
+               ONCE for the whole fan-out, like triageUrl below and for the same reason: four channels
+               describing the same firing must not disagree about what it covers. Resolves the prose too,
+               against the UNFILTERED context — see IncidentDeliveryFilter for why that basis is the only
+               correct one. #3297's null-when-redundant behaviour is unchanged. #3430's roster rides through
+               the same call for the same reason, and because that function owns the delivery-scoped copy. */
+            var render = IncidentDeliveryFilter.ForDelivery(
+                context, detailText, decision.DeliverableDedupKeys, budget.Roster);
+            var renderContext = render.Context;
+            var prose = render.Prose;
+
+            /* #3355: the firing's instant, read ONCE for the whole fan-out and threaded to every builder,
+               for the reason triageUrl below and the render above give — four channels describing the same
+               firing must not disagree about WHEN it fired, and a per-builder read makes that a race with
+               the second hand. It also feeds triageUrl, so the link's key and the cards' stamps name one
+               instant. Rendered stamps only: the cooldown decides on real elapsed time and reads its own
+               clock, because "is this fingerprint still inside its window" is not a display concern. */
+            var nowUtc = _utcNow();
 
             /* #2710: the triage-page link, computed ONCE for the whole fan-out so all four channels carry
                the SAME URL for the same firing. Keyed by (server, metric, now, dedup key) rather than an
                alert-history id, because the history row is written AFTER delivery — the page resolves the
                row on read. Null (base URL unset/invalid) means every channel omits the link; delivery is
                never gated on it. The dedup key uses the same serverId-else-serverName identity the generic
-               channel's {{dedup_key}} token uses, so link, token, and PagerDuty all correlate. */
+               channel's {{dedup_key}} token uses, so link, token, and PagerDuty all correlate — and it
+               reads the RENDERED incidents, so the anchor names an incident the card actually shows. */
             var triageUrl = TriageLink.Build(
-                _settings.TriageBaseUrl, serverName, metricName, DateTime.UtcNow,
-                DerivePagerDutyDedupKey(string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, context));
+                _settings.TriageBaseUrl, serverName, metricName, nowUtc,
+                DerivePagerDutyDedupKey(string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, renderContext));
 
             if (TeamsConfigured)
             {
-                sent |= await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl);
+                attempted = true;
+                Record("Teams", await TrySendTeamsAlertAsync(metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName));
             }
 
             if (SlackConfigured)
             {
-                sent |= await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, context, triageUrl);
+                attempted = true;
+                Record("Slack", await TrySendSlackAlertAsync(metricName, serverName, currentValue, thresholdValue, renderContext, triageUrl, prose, nowUtc, displayName));
             }
 
             if (GenericConfigured)
             {
-                sent |= await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl);
+                /* Generic webhook: the payload's "metric" field is a machine key an automation correlates on,
+                   so it stays the immutable metric name — the display name is a human-title concern only, and
+                   this channel has no title. The prose detail DOES go, because it is alert content. */
+                attempted = true;
+                Record("Generic", await TrySendGenericAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc));
             }
 
             if (PagerDutyConfigured)
             {
-                sent |= await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, context, triageUrl);
+                attempted = true;
+                Record("PagerDuty", await TrySendPagerDutyAlertAsync(metricName, serverName, currentValue, thresholdValue, serverId, renderContext, triageUrl, prose, nowUtc, displayName));
             }
 
             if (sent)
             {
                 _cooldown.Stamp(decision);
+
+                /* #3430: clear only the roster entries this card named, so anything folded while the four
+                   posts were in flight is named by the next carrier instead of being committed away by this
+                   one. Logged at Information because it is the once-per-window aggregate — it states how
+                   many servers this single post stood in for. */
+                _repeatBudget.Commit(budget);
+                if (budget.RosterEntryCount > 0)
+                {
+                    _logger.LogInformation(
+                        "Webhook post for {Metric} on {Server} carried {Entries} already-reported incident(s) from other servers",
+                        metricName, serverName, budget.RosterEntryCount);
+                }
+            }
+            else
+            {
+                /* Nothing was delivered, so this post never named the roster and never spent the metric's
+                   window — the same rule the cooldown applies by stamping only on success. Belt and braces
+                   with the reservation's own expiry: whichever of the two runs, the next repeat can post. */
+                _repeatBudget.Release(budget);
             }
 
-            return sent;
+            return sent ? WebhookFanoutResult.Delivered
+                : attempted ? WebhookFanoutResult.Failed(firstError)
+                : WebhookFanoutResult.NotAttempted;
         }
         catch (Exception ex)
         {
+            /* Reached by the cooldown's seed query, the roster build or the triage-link derivation — before
+               any post. It is still a failure of this alert's delivery and not a suppression, and it is the
+               one route to a `failed` row that no per-channel health counter records, so the message is the
+               only place the reason survives. */
             _logger.LogError($"TrySendWebhookAlertsAsync outer error: {ex.Message}");
-            return false;
+            return WebhookFanoutResult.Failed($"webhook fan-out: {ex.Message}");
         }
     }
 
@@ -294,17 +448,24 @@ public class WebhookAlertService
 
     #region Teams
 
-    private async Task<bool> TrySendTeamsAlertAsync(
+    /// <summary>Posts to Teams. Returns null when the post succeeded, or the error text when it did not —
+    /// a bool loses the reason, and the reason is what the alert log's <c>send_error</c> carries on a
+    /// <see cref="AlertDelivery.ChannelFailed"/> row.</summary>
+    private async Task<string?> TrySendTeamsAlertAsync(
         string metricName,
         string serverName,
         string currentValue,
         string thresholdValue,
         AlertContext? context,
-        string? triageUrl)
+        string? triageUrl,
+        string? detailText,
+        DateTime nowUtc,
+        string? displayName = null)
     {
         try
         {
-            var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl);
+            var payload = BuildTeamsPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
+                detailText: detailText, displayName: displayName, nowUtc: nowUtc);
             var error = await PostWebhookAsync(_settings.TeamsWebhookUrl, payload, _settings.TeamsProxyAddress);
 
             if (error != null)
@@ -317,7 +478,7 @@ public class WebhookAlertService
                 else if (_consecutiveTeamsFailures % 50 == 0)
                     _logger.LogError($"TEAMS WEBHOOK STILL FAILING: {_consecutiveTeamsFailures} failures. Last: {error}");
 
-                return false;
+                return error;
             }
 
             if (_consecutiveTeamsFailures > 0)
@@ -326,14 +487,14 @@ public class WebhookAlertService
             _consecutiveTeamsFailures = 0;
             _lastTeamsError = null;
             _logger.LogInformation($"Teams webhook sent for {metricName} on {serverName}");
-            return true;
+            return null;
         }
         catch (Exception ex)
         {
             _consecutiveTeamsFailures++;
             _lastTeamsError = ex.Message;
             _logger.LogError($"Teams webhook error: {ex.Message}");
-            return false;
+            return ex.Message;
         }
     }
 
@@ -382,6 +543,10 @@ public class WebhookAlertService
     /// <para>#2710: a non-null <paramref name="triageUrl"/> adds a <c>potentialAction</c> OpenUri button —
     /// the MessageCard-native link affordance — pointing at the computed triage page. Null (base URL unset,
     /// or a test send) renders exactly the pre-#2710 card.</para>
+    /// <para>#3297: <paramref name="detailText"/> is the alert's flat prose detail. It becomes its own
+    /// <c>Details</c> section ahead of the per-incident ones, because a multi-paragraph remedy in a
+    /// label/value fact renders as an unreadable column — <c>text</c> is the MessageCard-native place for
+    /// prose, and the snooze footer already uses it.</para>
     /// </summary>
     internal static string BuildTeamsPayload(
         string metricName,
@@ -391,12 +556,23 @@ public class WebhookAlertService
         AlertBranding branding,
         bool isTest = false,
         AlertContext? context = null,
-        string? triageUrl = null)
+        string? triageUrl = null,
+        string? detailText = null,
+        string? displayName = null,
+        DateTime? nowUtc = null)
     {
         var (hexColor, badgeText, emoji) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
+        var prose = AlertDetailText.ProseForDelivery(detailText, context);
+        /* Title/summary show the human name when present; ForMetric above stays on the immutable metric
+           name (the severity key), and a null/empty display name renders the metric name unchanged. */
+        var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
         var themeColor = hexColor.TrimStart('#');
-        var utcNow = DateTime.UtcNow;
-        var localNow = DateTime.Now;
+        /* One instant, with the local rendering DERIVED from it rather than read separately: two reads can
+           land either side of a second, which would have the card's own "Time (UTC)" and "Time (Local)"
+           facts naming two different seconds of one alert. SpecifyKind because an injected clock may hand
+           back an Unspecified DateTime, which ToLocalTime would otherwise treat as already local. */
+        var utcNow = nowUtc ?? DateTime.UtcNow;
+        var localNow = DateTime.SpecifyKind(utcNow, DateTimeKind.Utc).ToLocalTime();
 
         var facts = new List<object>();
 
@@ -426,6 +602,13 @@ public class WebhookAlertService
            remediation-T-SQL items stay folded into the lead section's facts — they are commentary
            on the whole alert, not incidents. */
         var itemSections = new List<object>();
+
+        /* #3297: ahead of the per-incident sections — it is the actionable half of the alert. */
+        if (prose is not null)
+        {
+            itemSections.Add(new { activityTitle = "Details", text = prose, markdown = true });
+        }
+
         if (context?.Details != null)
         {
             foreach (var detail in context.Details)
@@ -469,7 +652,7 @@ public class WebhookAlertService
 
         var title = isTest
             ? $"{emoji} TEST — {metricName}"
-            : $"{emoji} {badgeText} — {metricName}";
+            : $"{emoji} {badgeText} — {titleName}";
 
         var sections = new List<object>
         {
@@ -490,7 +673,7 @@ public class WebhookAlertService
 
         var summary = isTest
             ? "[SQL Monitor] Test Notification"
-            : $"[SQL Monitor] {badgeText}: {metricName} on {serverName}";
+            : $"[SQL Monitor] {badgeText}: {titleName} on {serverName}";
 
         /* #2710: the OpenUri action carries its schema keys as REAL "@type" (a Dictionary, because a C#
            @-identifier only escapes the keyword — the existing card's `@type` serializes as "type", a
@@ -531,17 +714,23 @@ public class WebhookAlertService
 
     #region Slack
 
-    private async Task<bool> TrySendSlackAlertAsync(
+    /// <summary>Posts to Slack. Null when the post succeeded, the error text when it did not — see
+    /// <see cref="TrySendTeamsAlertAsync"/>.</summary>
+    private async Task<string?> TrySendSlackAlertAsync(
         string metricName,
         string serverName,
         string currentValue,
         string thresholdValue,
         AlertContext? context,
-        string? triageUrl)
+        string? triageUrl,
+        string? detailText,
+        DateTime nowUtc,
+        string? displayName = null)
     {
         try
         {
-            var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl);
+            var payload = BuildSlackPayload(metricName, serverName, currentValue, thresholdValue, _branding, context: context, triageUrl: triageUrl,
+                detailText: detailText, displayName: displayName, nowUtc: nowUtc);
             var error = await PostWebhookAsync(_settings.SlackWebhookUrl, payload, _settings.SlackProxyAddress);
 
             if (error != null)
@@ -554,7 +743,7 @@ public class WebhookAlertService
                 else if (_consecutiveSlackFailures % 50 == 0)
                     _logger.LogError($"SLACK WEBHOOK STILL FAILING: {_consecutiveSlackFailures} failures. Last: {error}");
 
-                return false;
+                return error;
             }
 
             if (_consecutiveSlackFailures > 0)
@@ -563,15 +752,259 @@ public class WebhookAlertService
             _consecutiveSlackFailures = 0;
             _lastSlackError = null;
             _logger.LogInformation($"Slack webhook sent for {metricName} on {serverName}");
-            return true;
+            return null;
         }
         catch (Exception ex)
         {
             _consecutiveSlackFailures++;
             _lastSlackError = ex.Message;
             _logger.LogError($"Slack webhook error: {ex.Message}");
-            return false;
+            return ex.Message;
         }
+    }
+
+    /// <summary>
+    /// Slack's documented ceiling on the <c>fields</c> array of one <c>section</c> block. A section over it
+    /// is rejected as invalid_blocks, which fails the WHOLE message rather than degrading it — so a body
+    /// that grows past it loses the alert entirely, silently from the reader's side.
+    /// </summary>
+    private const int SlackSectionFieldLimit = 10;
+
+    /// <summary>
+    /// Appends <paramref name="fields"/> as however many <c>section</c> blocks it takes to keep each one
+    /// inside <see cref="SlackSectionFieldLimit"/>. Consecutive sections carry no divider between them, so
+    /// a split reads as one continued block.
+    ///
+    /// <para>The field count per item is not bounded by anything upstream: an incident item already emits
+    /// its forensic detail, its dedup metadata, occurrence counts and an incident start, and #3442's
+    /// per-party deadlock facts add up to five more. Splitting here rather than capping per producer means
+    /// no producer has to know what every other producer contributed to the same item.</para>
+    ///
+    /// <para>An empty list appends nothing: a section with neither <c>text</c> nor a non-empty
+    /// <c>fields</c> is itself invalid.</para>
+    /// </summary>
+    private static void AddSlackFieldSections(List<object> blocks, List<object> fields)
+    {
+        for (var i = 0; i < fields.Count; i += SlackSectionFieldLimit)
+        {
+            var take = Math.Min(SlackSectionFieldLimit, fields.Count - i);
+            blocks.Add(new { type = "section", fields = fields.GetRange(i, take) });
+        }
+    }
+
+    /// <summary>
+    /// Slack's documented ceiling on ONE text object's characters — per text object, not per message, so a
+    /// section block's mrkdwn text is bound by it however few blocks the message carries. Exceeding it
+    /// rejects the WHOLE message (HTTP 400, spelled <c>invalid_attachments</c> when the blocks ride inside
+    /// the colored attachment), not just the oversized block. Measured live (#3493), on the first two
+    /// nights of digest delivery: both big-fleet stores' 20-mover Collector Cost Digests failed exactly
+    /// this way while the small store's 1-mover digest delivered — and one store's Fleet Sweep Rollup
+    /// delivered through the SAME webhook 80 milliseconds after its digest failed, so the webhook was
+    /// never the suspect. The single <c>*Details*</c> section was over this ceiling.
+    /// </summary>
+    internal const int SlackTextObjectLimit = 3000;
+
+    /// <summary>
+    /// Slack's documented ceiling on blocks per message. The prose splitter
+    /// (<see cref="AddSlackProseSections"/>) spends only what the payload's OTHER blocks leave over,
+    /// because a fifty-first block fails the delivery as surely as an oversized text object does.
+    /// </summary>
+    internal const int SlackMessageBlockLimit = 50;
+
+    /// <summary>The prose sections' leading header — on the FIRST section only; see
+    /// <see cref="AddSlackProseSections"/> for why continuations carry nothing.</summary>
+    private const string SlackProseHeader = "*Details*\n";
+
+    /// <summary>Marks the continuation halves of a single line hard-split by
+    /// <see cref="SplitProseIntoSectionSafeLines"/>, so the reader sees one line that was cut rather
+    /// than two that were written.</summary>
+    private const string SlackProseContinuationMarker = "(cont.) ";
+
+    /// <summary>How much of the first omitted line the stated-omission line quotes. Enough to identify a
+    /// digest mover (collector, server and the headline figures all sit in the line's first stretch);
+    /// bounded so a pathological line cannot blow the omission line past the very ceiling it exists to
+    /// respect.</summary>
+    private const int SlackOmissionFragmentLimit = 120;
+
+    /// <summary>
+    /// The room the omission-path packing holds back in its final block for the stated-omission line:
+    /// the line's fixed text (~93 chars), a 13-digit separator-grouped line count, and the quoted
+    /// fragment at its cap plus its own truncation ellipsis — 231 worst case, rounded up.
+    /// </summary>
+    private const int SlackOmissionReserve = 256;
+
+    /// <summary>
+    /// Appends <paramref name="prose"/> as however many mrkdwn <c>section</c> blocks it takes to keep
+    /// every text object inside <see cref="SlackTextObjectLimit"/> — the
+    /// <see cref="AddSlackFieldSections"/> precedent one level up (#3493). The split lands on LINE
+    /// boundaries, because the long-prose producers are line-oriented documents (the Collector Cost
+    /// Digest is one mover per line) and a line cut mid-thought misstates a figure. Consecutive sections
+    /// carry no divider between them, so a split reads as one continued document; only the first section
+    /// leads with the <c>*Details*</c> header, and continuations carry nothing — a repeated header would
+    /// read as several detail sections rather than one that continued.
+    ///
+    /// <para><b>The block budget, and what yields to it.</b> <paramref name="blockBudget"/> is what the
+    /// payload's other blocks leave under <see cref="SlackMessageBlockLimit"/>, and the PROSE is what
+    /// degrades when it cannot fit — never the structured details. The precedence is decided by what the
+    /// real payload shapes carry: the producers with long prose (the digest, the self-alerts) fire with
+    /// no structured context at all, and the alerts with heavy per-incident details carry prose that is
+    /// short or suppressed as redundant (<see cref="AlertDetailText.ProseForDelivery"/>), so the yielding
+    /// branch never costs a real payload both halves at once.</para>
+    ///
+    /// <para><b>Degrading is stated, never silent.</b> A prose the budget cannot hold keeps as many whole
+    /// lines as fit and ends with one omission line naming HOW MANY lines were dropped and quoting the
+    /// first of them — the producers rank their lines most-significant-first (the digest orders movers by
+    /// magnitude), so the first dropped line is the headline of what the reader is not seeing, and an
+    /// omission note that is itself vague would recreate the silent-truncation problem one level up. The
+    /// full text has always lived in the alert row and the email body, so the omission line points there
+    /// the way <see cref="TsqlWebhookHint"/> already does.</para>
+    ///
+    /// <para>A budget of one matches the pre-#3493 block cost exactly (the old single section also cost
+    /// one block), so a payload whose OTHER blocks already crowd the message limit is no worse off than
+    /// it ever was — the prose does not decide that verdict.</para>
+    /// </summary>
+    private static void AddSlackProseSections(List<object> blocks, string prose, int blockBudget)
+    {
+        /* Uniform per-section line capacity, sized to the first section (the only one carrying the
+           header): continuations run a header's width under the ceiling, which keeps the packing
+           single-pass. */
+        var capacity = SlackTextObjectLimit - SlackProseHeader.Length;
+
+        /* The one-section fast path IS the pre-#3493 rendering, byte for byte — 1-mover digests and
+           every ordinary alert take it, so their payloads do not change shape at all. */
+        if (prose.Length <= capacity)
+        {
+            blocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*Details*\n{prose}" } });
+            return;
+        }
+
+        var lines = SplitProseIntoSectionSafeLines(prose, capacity);
+        var texts = PackProseLines(lines, capacity, blockBudget);
+
+        for (var i = 0; i < texts.Count; i++)
+        {
+            var text = i == 0 ? SlackProseHeader + texts[i] : texts[i];
+            blocks.Add(new { type = "section", text = new { type = "mrkdwn", text } });
+        }
+    }
+
+    /// <summary>
+    /// The prose, as lines that each fit a section on their own. A single line longer than
+    /// <paramref name="capacity"/> — pathological, but a delivery that fails over it would be this bug
+    /// again — hard-splits at character boundaries, every continuation piece marked with
+    /// <see cref="SlackProseContinuationMarker"/>.
+    /// </summary>
+    private static List<string> SplitProseIntoSectionSafeLines(string prose, int capacity)
+    {
+        var lines = new List<string>();
+        foreach (var raw in prose.Split('\n'))
+        {
+            if (raw.Length <= capacity)
+            {
+                lines.Add(raw);
+                continue;
+            }
+
+            var start = 0;
+            while (start < raw.Length)
+            {
+                var prefix = start == 0 ? string.Empty : SlackProseContinuationMarker;
+                var take = Math.Min(capacity - prefix.Length, raw.Length - start);
+                lines.Add(prefix + raw.Substring(start, take));
+                start += take;
+            }
+        }
+
+        return lines;
+    }
+
+    /// <summary>
+    /// Packs <paramref name="lines"/> greedily into section texts of at most <paramref name="capacity"/>
+    /// characters. When the packing fits <paramref name="blockBudget"/> that is the answer; when it does
+    /// not, the lines are repacked into exactly the budget with the final section reserving
+    /// <see cref="SlackOmissionReserve"/> for the stated-omission line, which then closes the document.
+    /// </summary>
+    private static List<string> PackProseLines(List<string> lines, int capacity, int blockBudget)
+    {
+        var texts = new List<string>();
+        var sb = new StringBuilder();
+        foreach (var line in lines)
+        {
+            if (sb.Length > 0 && sb.Length + 1 + line.Length > capacity)
+            {
+                texts.Add(sb.ToString());
+                sb.Clear();
+            }
+
+            if (sb.Length > 0)
+            {
+                sb.Append('\n');
+            }
+
+            sb.Append(line);
+        }
+
+        if (sb.Length > 0)
+        {
+            texts.Add(sb.ToString());
+        }
+
+        if (texts.Count <= blockBudget)
+        {
+            return texts;
+        }
+
+        /* Over budget: repack into exactly blockBudget sections, the last one holding room back for the
+           omission line. Blocks before the last pack identically to the pass above, so this can never
+           fit MORE lines than the pass that already overflowed — the omission line is always earned. */
+        texts.Clear();
+        sb.Clear();
+        var placed = 0;
+        while (placed < lines.Count)
+        {
+            var line = lines[placed];
+            var finalBlock = texts.Count == blockBudget - 1;
+            var reserve = finalBlock ? SlackOmissionReserve + 1 : 0;
+            var joiner = sb.Length > 0 ? 1 : 0;
+
+            if (sb.Length + joiner + line.Length + reserve > capacity)
+            {
+                if (finalBlock)
+                {
+                    break;
+                }
+
+                texts.Add(sb.ToString());
+                sb.Clear();
+                continue;
+            }
+
+            if (joiner == 1)
+            {
+                sb.Append('\n');
+            }
+
+            sb.Append(line);
+            placed++;
+        }
+
+        var dropped = lines.Count - placed;
+        var firstDropped = lines[placed];
+        var fragment = firstDropped.Length <= SlackOmissionFragmentLimit
+            ? firstDropped
+            : firstDropped[..SlackOmissionFragmentLimit] + "...";
+        var noun = dropped == 1 ? "line" : "lines";
+        var omission = string.Create(CultureInfo.InvariantCulture,
+            $"... and {dropped:N0} more {noun}, first omitted: \"{fragment}\" - see email or in-app Alert Details for the full text.");
+
+        if (sb.Length > 0)
+        {
+            sb.Append('\n');
+        }
+
+        sb.Append(omission);
+        texts.Add(sb.ToString());
+        return texts;
     }
 
     /// <summary>
@@ -580,6 +1013,11 @@ public class WebhookAlertService
     /// <para>#2710: a non-null <paramref name="triageUrl"/> adds an actions block with a LINK button (a url
     /// button needs no interactivity config on the webhook, unlike an action_id button) pointing at the
     /// computed triage page, placed above the "Sent by" context footer. Null renders the pre-#2710 payload.</para>
+    /// <para>#3297: <paramref name="detailText"/> is the alert's flat prose detail, rendered as mrkdwn
+    /// <c>section</c> blocks directly under the field block — Block Kit's home for prose, and above
+    /// the per-incident dividers so the remedy reads before the drill-down. #3493: as many section blocks
+    /// as its size needs rather than one, each inside Slack's per-text-object ceiling and all of them
+    /// inside the message's block budget — see <see cref="AddSlackProseSections"/>.</para>
     /// </summary>
     internal static string BuildSlackPayload(
         string metricName,
@@ -589,15 +1027,22 @@ public class WebhookAlertService
         AlertBranding branding,
         bool isTest = false,
         AlertContext? context = null,
-        string? triageUrl = null)
+        string? triageUrl = null,
+        string? detailText = null,
+        string? displayName = null,
+        DateTime? nowUtc = null)
     {
         var (hexColor, badgeText, emoji) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
-        var utcNow = DateTime.UtcNow;
-        var localNow = DateTime.Now;
+        var prose = AlertDetailText.ProseForDelivery(detailText, context);
+        /* Human name in the header when present; ForMetric above keeps the immutable metric-name key. */
+        var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
+        /* One instant, local derived from it — see the Teams builder's note. */
+        var utcNow = nowUtc ?? DateTime.UtcNow;
+        var localNow = DateTime.SpecifyKind(utcNow, DateTimeKind.Utc).ToLocalTime();
 
         var title = isTest
             ? $"{emoji} TEST — {metricName}"
-            : $"{emoji} {badgeText} — {metricName}";
+            : $"{emoji} {badgeText} — {titleName}";
 
         var blocks = new List<object>
         {
@@ -630,18 +1075,25 @@ public class WebhookAlertService
             fields.Add(new { type = "mrkdwn", text = $"*Time (Local):*\n{localNow:yyyy-MM-dd HH:mm:ss}" });
         }
 
-        blocks.Add(new { type = "section", fields });
+        AddSlackFieldSections(blocks, fields);
+
+        /* #3493: everything that renders BELOW the prose is composed first, into its own list, because
+           the prose splitter can only spend what the rest of the message leaves under the 50-block
+           budget — and "the rest" includes blocks that have not been appended yet. The visual order is
+           unchanged: the tail is appended after the prose sections, exactly where these blocks always
+           rendered. */
+        var tailBlocks = new List<object>();
 
         if (context?.Details != null)
         {
             foreach (var detail in context.Details)
             {
-                blocks.Add(new { type = "divider" });
+                tailBlocks.Add(new { type = "divider" });
 
                 if (detail.IsCodeBlock)
                 {
                     /* Remediation T-SQL: point at the email / in-app dialog, never inline it. */
-                    blocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*{detail.Heading}*\n{TsqlWebhookHint}" } });
+                    tailBlocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*{detail.Heading}*\n{TsqlWebhookHint}" } });
                     continue;
                 }
 
@@ -649,7 +1101,7 @@ public class WebhookAlertService
                 {
                     /* Advice prose flows as a single mrkdwn section; the synthesized Body is
                        "Investigation: ...\n\nRemediation: ..." which Slack renders verbatim. */
-                    blocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*{detail.Heading}*\n{detail.Body}" } });
+                    tailBlocks.Add(new { type = "section", text = new { type = "mrkdwn", text = $"*{detail.Heading}*\n{detail.Body}" } });
                     continue;
                 }
 
@@ -661,7 +1113,7 @@ public class WebhookAlertService
                     detailFields.Add(new { type = "mrkdwn", text = $"*{label}:*\n{value}" });
                 }
 
-                blocks.Add(new { type = "section", fields = detailFields });
+                AddSlackFieldSections(tailBlocks, detailFields);
             }
         }
 
@@ -669,7 +1121,7 @@ public class WebhookAlertService
            the boilerplate. A url button opens the link directly with no Slack app interactivity required. */
         if (triageUrl is not null)
         {
-            blocks.Add(new
+            tailBlocks.Add(new
             {
                 type = "actions",
                 elements = new object[]
@@ -693,11 +1145,21 @@ public class WebhookAlertService
             contextElements.Add(new { type = "mrkdwn", text = branding.SnoozeHint });
         }
 
-        blocks.Add(new
+        tailBlocks.Add(new
         {
             type = "context",
             elements = contextElements
         });
+
+        /* #3297: the prose detail, before the per-incident dividers; #3493: split across as many section
+           blocks as its size needs, inside the block budget the head and tail leave over. */
+        if (prose is not null)
+        {
+            AddSlackProseSections(blocks, prose,
+                blockBudget: Math.Max(1, SlackMessageBlockLimit - blocks.Count - tailBlocks.Count));
+        }
+
+        blocks.AddRange(tailBlocks);
 
         var payload = new
         {
@@ -714,14 +1176,20 @@ public class WebhookAlertService
 
     #region Generic
 
-    private async Task<bool> TrySendGenericAlertAsync(
+    /// <summary>Posts to the generic channel. Null when the post succeeded, the error text when it did not
+    /// — see <see cref="TrySendTeamsAlertAsync"/>. A malformed headers JSON or body template reports here
+    /// too: an operator config error still delivers nothing, and naming it is the difference between a
+    /// fixable row and a bare "failed".</summary>
+    private async Task<string?> TrySendGenericAlertAsync(
         string metricName,
         string serverName,
         string currentValue,
         string thresholdValue,
         string serverId,
         AlertContext? context,
-        string? triageUrl)
+        string? triageUrl,
+        string? detailText,
+        DateTime nowUtc)
     {
         try
         {
@@ -731,18 +1199,18 @@ public class WebhookAlertService
             if (!TryParseHeaders(_settings.GenericWebhookHeadersJson, out var headers, out var headerError))
             {
                 RecordGenericFailure(headerError!);
-                return false;
+                return headerError;
             }
 
             var payload = BuildGenericPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
                 context: context, bodyTemplate: _settings.GenericWebhookBodyTemplate, serverId: serverId,
-                triageUrl: triageUrl);
+                triageUrl: triageUrl, detailText: detailText, nowUtc: nowUtc);
 
             if (!IsWellFormedJson(payload, out var bodyError))
             {
                 RecordGenericFailure(bodyError!);
-                return false;
+                return bodyError;
             }
 
             var error = await PostWebhookAsync(
@@ -751,7 +1219,7 @@ public class WebhookAlertService
             if (error != null)
             {
                 RecordGenericFailure(error);
-                return false;
+                return error;
             }
 
             if (_consecutiveGenericFailures > 0)
@@ -760,14 +1228,14 @@ public class WebhookAlertService
             _consecutiveGenericFailures = 0;
             _lastGenericError = null;
             _logger.LogInformation($"Generic webhook sent for {metricName} on {serverName}");
-            return true;
+            return null;
         }
         catch (Exception ex)
         {
             _consecutiveGenericFailures++;
             _lastGenericError = ex.Message;
             _logger.LogError($"Generic webhook error: {ex.Message}");
-            return false;
+            return ex.Message;
         }
     }
 
@@ -816,6 +1284,16 @@ public class WebhookAlertService
     /// channels carry (<see cref="TriageLink.Build"/>), empty when no <see cref="IAlertSettings.TriageBaseUrl"/>
     /// is configured, so a template using it stays well-formed either way.
     /// </para>
+    /// <para>
+    /// #3297: <c>{{detail}}</c> is the alert's flat prose detail — what happened and the operator action
+    /// that clears it — as an ordinary escaped string, empty when the alert carries no prose over and above
+    /// its structured context. It ALSO leads <c>{{context}}</c>: the default template and every template an
+    /// operator already saved carry <c>{{context}}</c> and none of them can carry a token that did not
+    /// exist when they were written, so a token alone would have left every existing generic-channel
+    /// deployment still dropping the detail. <c>{{detail}}</c> exists on top of that for a template that
+    /// needs the prose on its own — mapped into a ticket body field, say — rather than mixed with the
+    /// flattened structure.
+    /// </para>
     /// </summary>
     internal static string BuildGenericPayload(
         string metricName,
@@ -827,14 +1305,18 @@ public class WebhookAlertService
         AlertContext? context = null,
         string? bodyTemplate = null,
         string serverId = "",
-        string? triageUrl = null)
+        string? triageUrl = null,
+        string? detailText = null,
+        DateTime? nowUtc = null)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var template = string.IsNullOrWhiteSpace(bodyTemplate) ? DefaultGenericBodyTemplate : bodyTemplate!;
 
+        var prose = AlertDetailText.ProseForDelivery(detailText, context);
+
         var contextText = isTest
             ? $"Webhook configuration is working correctly. Sent by {branding.EditionName}."
-            : RenderContextForTemplate(context, branding);
+            : RenderContextForTemplate(context, branding, prose);
 
         /* Keyed on the numeric serverId the fan-out passes — the same identity the LIVE PagerDuty path
            feeds DerivePagerDutyDedupKey — so the two channels' keys are equal for the same alert. The
@@ -852,7 +1334,7 @@ public class WebhookAlertService
             ["threshold"] = EscapeForJson(thresholdValue),
             ["severity"] = EscapeForJson(isTest ? "TEST" : badgeText),
             ["context"] = EscapeForJson(contextText),
-            ["timestamp"] = EscapeForJson(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)),
+            ["timestamp"] = EscapeForJson((nowUtc ?? DateTime.UtcNow).ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)),
             /* Raw JSON values — never EscapeForJson (see the doc comment). "{}" / "[]" rather than empty
                so a template's `"context": {{context_json}}` stays well-formed on a context-less alert.
                Serialized from a REDACTED copy: the copy-paste remediation T-SQL never leaves the process
@@ -863,6 +1345,10 @@ public class WebhookAlertService
             ["resource_name"] = EscapeForJson(DeriveResourceName(context) ?? ""),
             ["database"] = EscapeForJson(DeriveResourceDatabase(context) ?? ""),
             ["triage_url"] = EscapeForJson(triageUrl ?? ""),
+            /* The test send substitutes the same canned line {{context}} gets, so a template that maps
+               {{detail}} into a required field is exercised with a value rather than validating against an
+               empty string and only failing on the first real alert. */
+            ["detail"] = EscapeForJson(isTest ? $"Webhook configuration is working correctly. Sent by {branding.EditionName}." : prose ?? ""),
         };
 
         /* Single pass: a MatchEvaluator's output is NOT re-scanned, so a value that itself contains the
@@ -872,25 +1358,48 @@ public class WebhookAlertService
         return s_genericPlaceholders.Replace(template, m => values[m.Groups[1].Value]);
     }
 
-    /* context_json before context: alternation is ordered, and while the closing \}\} would force a
-       backtrack to the right answer anyway, longest-first means correctness never leans on it. */
+    /// <summary>
+    /// Every token <see cref="BuildGenericPayload"/> substitutes, in the order the matcher tries them.
+    /// <para>context_json before context: alternation is ordered, and while the closing <c>}}</c> would
+    /// force a backtrack to the right answer anyway, longest-first means correctness never leans on it.</para>
+    /// <para>A LIST, and the matcher is built from it, because both apps' Settings windows print the token
+    /// set as help text and an operator cannot use a token they never learn exists. That help text has now
+    /// drifted twice — #2710 added <c>triage_url</c> to Darling's list and not Lite's, and #3297 added
+    /// <c>detail</c> to neither — so <c>Lite.Tests.GenericWebhookTests</c> checks both windows against this
+    /// list rather than against a second copy of it that would be free to drift the same way.</para>
+    /// </summary>
+    internal static readonly string[] GenericBodyTokens =
+    {
+        "metric", "server", "value", "threshold", "severity",
+        "context_json", "incidents_json", "dedup_key", "resource_name", "database", "triage_url",
+        "context", "timestamp", "detail"
+    };
+
     private static readonly System.Text.RegularExpressions.Regex s_genericPlaceholders =
-        new(@"\{\{(metric|server|value|threshold|severity|context_json|incidents_json|dedup_key|resource_name|database|triage_url|context|timestamp)\}\}",
+        new(@"\{\{(" + string.Join("|", GenericBodyTokens) + @")\}\}",
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>
     /// Flattens the structured alert context into one plain-text line for <c>{{context}}</c> — the generic
     /// endpoint has no card schema to render into. Follows the Teams/Slack rule: remediation T-SQL is never
     /// inlined, it points at the email / in-app dialog.
+    /// <para>#3297: <paramref name="prose"/>, the alert's flat detail, leads the line when present. A
+    /// prose-only alert used to render this as the bare "Sent by ..." boilerplate — the whole alert body
+    /// reduced to a signature.</para>
     /// </summary>
-    private static string RenderContextForTemplate(AlertContext? context, AlertBranding branding)
+    private static string RenderContextForTemplate(AlertContext? context, AlertBranding branding, string? prose = null)
     {
-        if (context?.Details is not { Count: > 0 })
+        var parts = new List<string>();
+
+        if (prose is not null)
         {
-            return $"Sent by {branding.EditionName}";
+            parts.Add(prose.Replace("\r\n", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal));
         }
 
-        var parts = new List<string>();
+        if (context?.Details is not { Count: > 0 })
+        {
+            return parts.Count == 0 ? $"Sent by {branding.EditionName}" : string.Join(" | ", parts);
+        }
 
         foreach (var detail in context.Details)
         {
@@ -923,6 +1432,10 @@ public class WebhookAlertService
     /// can see a remediation EXISTS) but carry the hint as their body and no <c>Remediation</c> payload; the
     /// typed payload is likewise stripped from every item defensively. Returns a COPY — the same context
     /// instance flows on to the other channels, and mutating it here would redact their email too.
+    /// <para>#3297: this covers the STRUCTURED context, which is the whole of what it has ever protected —
+    /// generated <c>FactRemediation</c> payloads. An alert's flat prose detail is delivered verbatim and
+    /// deliberately; see <see cref="AlertDetailText"/> for why, and for the pin that keeps a generated
+    /// command out of it.</para>
     /// </summary>
     private static AlertContext RedactForWebhook(AlertContext context)
     {
@@ -1164,14 +1677,19 @@ public class WebhookAlertService
 
     #region PagerDuty
 
-    private async Task<bool> TrySendPagerDutyAlertAsync(
+    /// <summary>Posts to PagerDuty Events v2. Null when the post succeeded, the error text when it did not
+    /// — see <see cref="TrySendTeamsAlertAsync"/>.</summary>
+    private async Task<string?> TrySendPagerDutyAlertAsync(
         string metricName,
         string serverName,
         string currentValue,
         string thresholdValue,
         string serverId,
         AlertContext? context,
-        string? triageUrl)
+        string? triageUrl,
+        string? detailText,
+        DateTime nowUtc,
+        string? displayName = null)
     {
         try
         {
@@ -1182,7 +1700,8 @@ public class WebhookAlertService
 
             var payload = BuildPagerDutyPayload(
                 metricName, serverName, currentValue, thresholdValue, _branding,
-                _settings.PagerDutyRoutingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl);
+                _settings.PagerDutyRoutingKey, context: context, dedupKey: dedupKey, triageUrl: triageUrl,
+                detailText: detailText, displayName: displayName, nowUtc: nowUtc);
 
             var endpoint = PagerDutyEndpoint(_settings.PagerDutyUseEuRegion);
             var error = await PostWebhookAsync(endpoint, payload, _settings.PagerDutyProxyAddress);
@@ -1197,7 +1716,7 @@ public class WebhookAlertService
                 else if (_consecutivePagerDutyFailures % 50 == 0)
                     _logger.LogError($"PAGERDUTY WEBHOOK STILL FAILING: {_consecutivePagerDutyFailures} failures. Last: {error}");
 
-                return false;
+                return error;
             }
 
             if (_consecutivePagerDutyFailures > 0)
@@ -1206,14 +1725,14 @@ public class WebhookAlertService
             _consecutivePagerDutyFailures = 0;
             _lastPagerDutyError = null;
             _logger.LogInformation($"PagerDuty webhook sent for {metricName} on {serverName}");
-            return true;
+            return null;
         }
         catch (Exception ex)
         {
             _consecutivePagerDutyFailures++;
             _lastPagerDutyError = ex.Message;
             _logger.LogError($"PagerDuty webhook error: {ex.Message}");
-            return false;
+            return ex.Message;
         }
     }
 
@@ -1225,6 +1744,10 @@ public class WebhookAlertService
     /// (which PD renders as a first-class link on the alert) and <c>custom_details["Triage"]</c> (so an
     /// integration reading only the details table still gets it). Null renders the pre-#2710 payload — no
     /// empty <c>links</c> key is ever sent.</para>
+    /// <para>#3297: <paramref name="detailText"/>, the alert's flat prose detail, rides in
+    /// <c>custom_details["Details"]</c>. Not in <c>summary</c>: PD-CEF caps that at 1024 characters and it
+    /// is the one-line headline PD pages on, while custom_details is the table view and what most
+    /// downstream integrations read — the same reasoning that put the triage link there.</para>
     /// </summary>
     internal static string BuildPagerDutyPayload(
         string metricName,
@@ -1237,23 +1760,30 @@ public class WebhookAlertService
         AlertContext? context = null,
         string? dedupKey = null,
         string? serverId = null,
-        string? triageUrl = null)
+        string? triageUrl = null,
+        string? detailText = null,
+        string? displayName = null,
+        DateTime? nowUtc = null)
     {
         var (_, badgeText, _) = AlertSeverity.ForMetric(metricName, context?.SeverityOverride);
         var severity = MapToPagerDutySeverity(badgeText);
-        var utcNow = DateTime.UtcNow;
+        /* The PD summary (the incident title) shows the human name when present; severity above and the
+           dedup_key below stay on the immutable metric name so correlation/dedup are rename-safe. */
+        var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
+        var utcNow = nowUtc ?? DateTime.UtcNow;
 
         /* PD-CEF caps summary at 1024 chars — no truncation needed given the source strings, but document
            the constraint matching this codebase's habit of documenting limits even when unreachable. */
         var summary = isTest
             ? "Webhook configuration verified"
-            : $"{metricName} on {serverName}: {currentValue} (threshold {thresholdValue})";
+            : $"{titleName} on {serverName}: {currentValue} (threshold {thresholdValue})";
 
         var source = isTest
             ? branding.EditionName
             : serverName;
 
-        var customDetails = BuildPagerDutyCustomDetails(isTest, branding, context, triageUrl);
+        var customDetails = BuildPagerDutyCustomDetails(
+            isTest, branding, context, triageUrl, AlertDetailText.ProseForDelivery(detailText, context));
 
         /* Derive dedup_key from the incident fingerprint when not explicitly provided, falling back to a
            stable metric+server key. This ensures PagerDuty correlates repeated alerts for the same incident. */
@@ -1312,7 +1842,8 @@ public class WebhookAlertService
         bool isTest,
         AlertBranding branding,
         AlertContext? context,
-        string? triageUrl = null)
+        string? triageUrl = null,
+        string? prose = null)
     {
         var details = new Dictionary<string, object>();
 
@@ -1336,6 +1867,11 @@ public class WebhookAlertService
             details["Database"] = database;
         if (triageUrl is not null)
             details["Triage"] = triageUrl;
+
+        /* #3297: before the per-incident keys and before the empty-Details return, which is the branch a
+           prose-only self-alert takes — the branch that used to reduce the whole alert to "Sent by". */
+        if (prose is not null)
+            details["Details"] = prose;
 
         if (context?.Details is null || context.Details.Count == 0)
         {
@@ -1531,4 +2067,44 @@ public class WebhookAlertService
     }
 
     #endregion
+}
+
+/// <summary>
+/// What <see cref="WebhookAlertService.TrySendWebhookAlertsAsync"/> did, in the
+/// <see cref="AlertChannelOutcome"/> vocabulary, with the first failing channel's error text.
+///
+/// <para><b>Why not a bool.</b> One bool for four channels made a failed post indistinguishable from a
+/// working cooldown in the alert log: both arrived as false with no error, and
+/// <see cref="AlertDelivery.FromFanout"/> had nothing to label them apart with. The error is the FIRST
+/// failure only, prefixed with its channel name — four channels and one string, so the alternative is a
+/// concatenation nobody reads, and one named endpoint is more actionable than four unnamed ones. Each
+/// channel's full failure history stays on its own consecutive-failure counter and health getter.</para>
+/// </summary>
+/// <param name="Outcome">What happened, over the whole fan-out.</param>
+/// <param name="SendError">
+/// The first failing channel's error, prefixed with that channel's name. Non-null only on
+/// <see cref="AlertChannelOutcome.Failed"/>; a throttled or folded fan-out attempted nothing and so has
+/// nothing to report.
+/// </param>
+public readonly record struct WebhookFanoutResult(AlertChannelOutcome Outcome, string? SendError)
+{
+    /// <summary>Whether a channel delivered. At least one did; the rest may have failed, and each of those
+    /// is on its own health counter.</summary>
+    public bool Sent => Outcome == AlertChannelOutcome.Delivered;
+
+    /// <summary>No webhook channel was consulted: none is configured, or the caller suppressed the whole
+    /// fan-out.</summary>
+    public static WebhookFanoutResult NotAttempted { get; } = new(AlertChannelOutcome.NotAttempted, null);
+
+    /// <summary>A cooldown window was still open, so nothing was attempted.</summary>
+    public static WebhookFanoutResult Throttled { get; } = new(AlertChannelOutcome.Throttled, null);
+
+    /// <summary>The metric's per-fleet repeat budget folded this delivery onto another server's.</summary>
+    public static WebhookFanoutResult Folded { get; } = new(AlertChannelOutcome.Folded, null);
+
+    /// <summary>Delivered on at least one channel.</summary>
+    public static WebhookFanoutResult Delivered { get; } = new(AlertChannelOutcome.Delivered, null);
+
+    /// <summary>Attempted, and nothing delivered.</summary>
+    public static WebhookFanoutResult Failed(string? error) => new(AlertChannelOutcome.Failed, error);
 }

@@ -89,7 +89,75 @@ public sealed record AlertIncident(
        IncidentOccurrenceState.LastObservedUtc, which the accumulator already computes and persists as the
        value its staleness horizon compares against -- so this is a projection of something that existed, not
        a new measurement. Null on any alert the accumulator does not run for. */
-    DateTime? LastEventUtc = null);
+    DateTime? LastEventUtc = null,
+    /* #3330: the forensic XML file THIS incident's representative event produced -- the deadlock graph or
+       the blocked-process report. Transient, like DetailFields: absent from AlertIncidentDto, so the
+       history row and the {{incidents_json}} token are unchanged.
+
+       It rides on the incident because AlertContext.AttachmentXml is one string for a whole alert while the
+       cards that carry it are per-incident, and a bare string has no fingerprint beside it for a splitter or
+       a delivery filter to select on. Null is a normal outcome, not a gap: a blocking incident grouped
+       entirely from DMV-snapshot rows has no report to attach (see BlockedProcessAlertRow.HasReportXml), and
+       an unlabelled graph belonging to a different fingerprint is worse than none. */
+    AlertIncidentAttachment? Attachment = null);
+
+/// <summary>
+/// An incident's forensic XML file (#3330) — the deadlock graph or blocked-process report an email attaches.
+/// <para>One value carrying both halves rather than two members, because
+/// <see cref="AlertContext.AttachmentXml"/> and <see cref="AlertContext.AttachmentFileName"/> are read by
+/// two consumers with different rules — <c>EmailSendCore</c> attaches only when BOTH are non-empty, while
+/// <c>EmailTemplateBuilder</c> prints "Attached: &lt;name&gt;" on the FILENAME alone — so a half-populated
+/// pair is an email that advertises a file it does not carry. A record cannot be half-assigned.</para>
+/// </summary>
+/// <param name="Xml">The file's contents, as captured.</param>
+/// <param name="FileName">The attachment name, one of the two constants below.</param>
+public sealed record AlertIncidentAttachment(string Xml, string FileName)
+{
+    /// <summary>Attachment name for a deadlock graph. Spelled once for every producer of one.</summary>
+    public const string DeadlockGraphFileName = "deadlock_graph.xml";
+
+    /// <summary>Attachment name for a blocked-process report. Spelled once for every producer of one.</summary>
+    public const string BlockedProcessReportFileName = "blocked_process_report.xml";
+
+    /// <summary>
+    /// True when both halves are present, which is the condition <c>EmailSendCore</c> actually attaches on.
+    /// An incomplete pair is treated as absent everywhere rather than carried: with only a filename the
+    /// email prints "Attached: &lt;name&gt;" and carries nothing, and with only XML it carries nothing and
+    /// says nothing. A record cannot be half-ASSIGNED, but it can be constructed with an empty string, so
+    /// the producers' "did this row have one" test lives here rather than at each of them.
+    /// </summary>
+    public bool IsComplete => !string.IsNullOrEmpty(Xml) && !string.IsNullOrEmpty(FileName);
+
+    /// <summary>
+    /// The attachment a card rendering <paramref name="incidents"/> should carry: the first one of them that
+    /// has an attachment of its own, or <c>null</c> when none does.
+    /// <para>The one selection rule, shared by <see cref="PerEventNotification"/>'s splitter and
+    /// <see cref="IncidentDeliveryFilter"/>'s copy so the two cannot disagree about which graph belongs to a
+    /// card. It deliberately has NO fallback to the alert-level attachment: falling back is how every
+    /// per-event card came to carry the first graph in the window, and a card that describes one fingerprint
+    /// while attaching another's evidence misleads harder than one that attaches nothing.</para>
+    /// <para>Selects from the incident objects themselves, not by re-matching dedup keys against a key list —
+    /// an incident with a blank <see cref="AlertIncident.DedupKey"/> (legal; it simply never enters a
+    /// cooldown) would be unaddressable by key.</para>
+    /// </summary>
+    public static AlertIncidentAttachment? ForIncidents(IReadOnlyList<AlertIncident>? incidents)
+    {
+        if (incidents is null)
+        {
+            return null;
+        }
+
+        foreach (var incident in incidents)
+        {
+            if (incident.Attachment is { IsComplete: true } attachment)
+            {
+                return attachment;
+            }
+        }
+
+        return null;
+    }
+}
 
 /// <summary>
 /// A forensic label/value pair carried on an <see cref="AlertIncident"/> for #1141 Per-event delivery
@@ -154,7 +222,10 @@ public record FieldDto(string Label, string Value);
 /// <para>
 /// #2216's two members are trailing and nullable for the same reason: a history row written before
 /// they existed rehydrates them as null, which is exactly "this alert carried no total" rather than
-/// a fabricated zero. <see cref="AlertIncident.DetailFields"/> remains unpersisted.
+/// a fabricated zero. <see cref="AlertIncident.DetailFields"/> and <see cref="AlertIncident.Attachment"/>
+/// remain unpersisted — the latter for the same reason
+/// <see cref="AlertContext.AttachmentXml"/> is not (the dialog has no attachment surface), and because a
+/// deadlock graph per incident would put multiple megabytes of XML in every history row.
 /// </para>
 /// </summary>
 public record AlertIncidentDto(

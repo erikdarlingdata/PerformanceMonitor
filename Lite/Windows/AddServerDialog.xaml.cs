@@ -162,6 +162,12 @@ public partial class AddServerDialog : Window
             // credential lives outside this app.
             EntraDefaultAuthRadio.IsChecked = true;
         }
+        else if (existing.AuthenticationType == AuthenticationTypes.EntraDeviceCode)
+        {
+            // Nothing to load either, for a different reason: the credential does not exist between
+            // sign-ins. Each connection mints a new code.
+            EntraDeviceCodeAuthRadio.IsChecked = true;
+        }
         else
         {
             WindowsAuthRadio.IsChecked = true;
@@ -193,6 +199,7 @@ public partial class AddServerDialog : Window
             if (ServicePrincipalPanel != null) ServicePrincipalPanel.Visibility = Visibility.Collapsed;
             if (ManagedIdentityPanel != null) ManagedIdentityPanel.Visibility = Visibility.Collapsed;
             if (EntraDefaultPanel != null) EntraDefaultPanel.Visibility = Visibility.Collapsed;
+            if (EntraDeviceCodePanel != null) EntraDeviceCodePanel.Visibility = Visibility.Collapsed;
         }
         else
         {
@@ -205,7 +212,7 @@ public partial class AddServerDialog : Window
     {
         if (SqlCredentialsPanel != null && EntraMfaPanel != null &&
             ServicePrincipalPanel != null && ManagedIdentityPanel != null &&
-            EntraDefaultPanel != null)
+            EntraDefaultPanel != null && EntraDeviceCodePanel != null)
         {
             // Show credentials panel for SQL Server authentication
             SqlCredentialsPanel.Visibility = SqlAuthRadio.IsChecked == true
@@ -233,8 +240,28 @@ public partial class AddServerDialog : Window
             EntraDefaultPanel.Visibility = EntraDefaultAuthRadio.IsChecked == true
                 ? Visibility.Visible
                 : Visibility.Collapsed;
+
+            // Show the device-code notes. Also no input fields, and shown for what it says: pressing
+            // Test raises a window with a code and starts a clock, which is worth knowing first.
+            EntraDeviceCodePanel.Visibility = EntraDeviceCodeAuthRadio.IsChecked == true
+                ? Visibility.Visible
+                : Visibility.Collapsed;
         }
     }
+
+    /// <summary>
+    /// True when the selected inline mode is one the user can abandon part-way through a sign-in,
+    /// which is what <c>ServerConnectionStatus.UserCancelledMfa</c> records and what the background
+    /// sweep reads to stop retrying.
+    ///
+    /// <para>Both interactive modes, named once. Asked from the radios rather than through
+    /// <see cref="AuthenticationTypes.RequiresInteractiveSignIn"/> because the radio-to-mode mapping
+    /// already exists twice in this file (the Test-Connection builder and the save path) and a third
+    /// copy of it is the drift this file's other comments keep warning about — whereas this pair is
+    /// the two radios, directly.</para>
+    /// </summary>
+    private bool InteractiveModeSelected =>
+        EntraMfaAuthRadio.IsChecked == true || EntraDeviceCodeAuthRadio.IsChecked == true;
 
     private AlertNotificationMode? GetSelectedDeliveryOverride() => AlertDeliveryOverrideBox.SelectedIndex switch
     {
@@ -345,6 +372,12 @@ public partial class AddServerDialog : Window
                ServerConnection.ApplyAuthentication. */
             authType = AuthenticationTypes.EntraDefaultCredential;
         }
+        else if (EntraDeviceCodeAuthRadio.IsChecked == true)
+        {
+            /* No userId and no secret. The identity is chosen in the browser, and SqlClient's
+               device-code arm never reads UserId - see ServerConnection.ApplyAuthentication. */
+            authType = AuthenticationTypes.EntraDeviceCode;
+        }
         else
         {
             authType = AuthenticationTypes.SqlServer;
@@ -355,18 +388,21 @@ public partial class AddServerDialog : Window
         return builder;
     }
 
-    private async System.Threading.Tasks.Task<(bool Connected, string? ErrorMessage, bool MfaCancelled, string? ServerVersion, EntraBrokerFailureKind BrokerFailure, EntraAmbientCredentialFailureKind AmbientFailure)> RunConnectionTestAsync()
+    private async System.Threading.Tasks.Task<(bool Connected, string? ErrorMessage, bool SignInCancelled, string? ServerVersion, EntraBrokerFailureKind BrokerFailure, EntraAmbientCredentialFailureKind AmbientFailure)> RunConnectionTestAsync()
     {
         TestButton.IsEnabled = false;
         SaveButton.IsEnabled = false;
 
-        StatusText.Text = EntraMfaAuthRadio.IsChecked == true
-            ? "Testing connection — please complete authentication in the popup window..."
-            : "Testing connection...";
+        StatusText.Text =
+            EntraMfaAuthRadio.IsChecked == true
+                ? "Testing connection — please complete authentication in the popup window..."
+                : EntraDeviceCodeAuthRadio.IsChecked == true
+                    ? "Testing connection — a window with a sign-in code will appear; enter it in a browser..."
+                    : "Testing connection...";
 
         bool connected = false;
         string? errorMessage = null;
-        bool mfaCancelled = false;
+        bool signInCancelled = false;
         string? serverVersion = null;
         var brokerFailure = EntraBrokerFailureKind.None;
         var ambientFailure = EntraAmbientCredentialFailureKind.None;
@@ -387,11 +423,17 @@ public partial class AddServerDialog : Window
                user pressing Test because they suspect the wrong Azure identity is being used gets a
                failed open, and the selection has to survive it - which is also the only chance,
                since the driver caches the credential as soon as a token exists. */
+            /* The device-code rendezvous: the driver's callback publishes the code onto this
+               attempt, App's presenter shows it, and the prompt window's Cancel cancels the token
+               this open is waiting on - which is the only way to get the UI back without waiting out
+               the driver's three minutes. Null for every other mode, so the using disposes nothing
+               and the token is the default one. */
+            using (var deviceCode = EntraDeviceCodeAuth.Begin(builder))
             using (var credentialSelection = EntraCredentialSelectionLog.Begin(builder))
             {
                 try
                 {
-                    await connection.OpenAsync();
+                    await connection.OpenAsync(deviceCode?.Token ?? System.Threading.CancellationToken.None);
                 }
                 finally
                 {
@@ -409,7 +451,19 @@ public partial class AddServerDialog : Window
             errorMessage = ex.Message;
             if (EntraMfaAuthRadio.IsChecked == true && MfaAuthenticationHelper.IsMfaCancelledException(ex))
             {
-                mfaCancelled = true;
+                signInCancelled = true;
+            }
+            else if (ex is OperationCanceledException)
+            {
+                /* The device-code prompt's Cancel, reaching us as the cancellation of the token
+                   handed to OpenAsync above. Recognised by the exception TYPE rather than by its
+                   message, unlike the Entra MFA case beside it, and not gated on the radios: the
+                   device-code attempt's token is the ONLY cancellation token anything in this try
+                   block is given - CancellationToken.None cannot fire and the @@VERSION command is
+                   passed no token at all - so an OperationCanceledException from here has exactly
+                   one source. Gating it on the radio would additionally be wrong for a device-code
+                   server reached through a credential profile, if one is ever offered there. */
+                signInCancelled = true;
             }
             else
             {
@@ -430,7 +484,7 @@ public partial class AddServerDialog : Window
                not logged here is a failure whose detail the process never recorded anywhere.
                Cancellations are excluded: one is a decision the user made, its own dialog already
                reports it, and filing user intent as an error would bury real faults among them. */
-            if (!mfaCancelled)
+            if (!signInCancelled)
             {
                 AppLogger.Error(
                     "AddServer",
@@ -447,7 +501,7 @@ public partial class AddServerDialog : Window
             StatusText.Text = string.Empty;
         }
 
-        return (connected, errorMessage, mfaCancelled, serverVersion, brokerFailure, ambientFailure);
+        return (connected, errorMessage, signInCancelled, serverVersion, brokerFailure, ambientFailure);
     }
 
     /// <summary>
@@ -463,6 +517,7 @@ public partial class AddServerDialog : Window
         if (SqlAuthRadio.IsChecked == true) return "SQL Server";
         if (EntraMfaAuthRadio.IsChecked == true) return "Microsoft Entra MFA";
         if (EntraDefaultAuthRadio.IsChecked == true) return "Existing Azure sign-in";
+        if (EntraDeviceCodeAuthRadio.IsChecked == true) return "Device code";
         if (ServicePrincipalAuthRadio.IsChecked == true) return "Service principal";
         if (ManagedIdentityAuthRadio.IsChecked == true) return "Managed identity";
         return "unknown";
@@ -490,7 +545,7 @@ public partial class AddServerDialog : Window
             return;
         }
 
-        var (connected, errorMessage, mfaCancelled, serverVersion, brokerFailure, ambientFailure) = await RunConnectionTestAsync();
+        var (connected, errorMessage, signInCancelled, serverVersion, brokerFailure, ambientFailure) = await RunConnectionTestAsync();
 
         if (connected)
         {
@@ -499,13 +554,13 @@ public partial class AddServerDialog : Window
                 : $"Successfully connected to {ServerNameBox.Text.Trim()}!";
             MessageBox.Show(message, "Connection Successful", MessageBoxButton.OK, MessageBoxImage.Information);
 
-            if (AddedServer != null && EntraMfaAuthRadio.IsChecked == true)
+            if (AddedServer != null && InteractiveModeSelected)
             {
                 var status = _serverManager.GetConnectionStatus(AddedServer.Id);
                 status.UserCancelledMfa = false;
             }
         }
-        else if (mfaCancelled)
+        else if (signInCancelled)
         {
             if (AddedServer != null)
             {
@@ -583,6 +638,12 @@ public partial class AddServerDialog : Window
                missing, so demanding anything here would be a gate on a field that does not exist. */
             authenticationType = AuthenticationTypes.EntraDefaultCredential;
         }
+        else if (EntraDeviceCodeAuthRadio.IsChecked == true)
+        {
+            /* Nothing to validate here either, and no early return demanding anything: this mode has
+               no field at all, because the credential is created per sign-in in a browser. */
+            authenticationType = AuthenticationTypes.EntraDeviceCode;
+        }
         else if (ServicePrincipalAuthRadio.IsChecked == true)
         {
             authenticationType = AuthenticationTypes.ServicePrincipal;
@@ -622,11 +683,11 @@ public partial class AddServerDialog : Window
         // Test connection when data collection is enabled
         if (EnabledCheckBox.IsChecked == true)
         {
-            var (connected, errorMessage, mfaCancelled, _, brokerFailure, ambientFailure) = await RunConnectionTestAsync();
+            var (connected, errorMessage, signInCancelled, _, brokerFailure, ambientFailure) = await RunConnectionTestAsync();
 
             if (!connected)
             {
-                if (mfaCancelled)
+                if (signInCancelled)
                 {
                     if (AddedServer != null)
                     {

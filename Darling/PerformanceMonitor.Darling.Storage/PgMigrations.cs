@@ -107,10 +107,23 @@ public static class PgMigrations
            the standing hazard of generator-built rungs: any LATER column the generator learns must be
            pre-added in EVERY earlier rung that re-emits generated SQL over existing tables — pinned by
            MigrationLadderPins so the next collision fails in CI, not on an operator's store. */
-        new Migration(51, "query-stats-host-object", V51Sql + "\n" + V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
+        /* The pre-adds ride along for the same reason V54Sql already does: the generated resolving view is
+           compiled from TODAY's payload column list, so this rung's re-emission names every payload column
+           the current build knows — including ones a LATER rung adds. A store climbing from an older release
+           reaches this rung first, so without those columns the view references one that does not exist yet
+           and the ladder stops at 42703.
+
+           Generated from the collector definition rather than by threading a specific later rung's SQL in
+           here: one column was the symptom, and the next payload column would need this edited again. Every
+           statement is ADD COLUMN IF NOT EXISTS, so a store that already has them is unaffected. */
+        new Migration(51, "query-stats-host-object",
+            V51Sql + "\n" + V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsPayloadColumnPreAdds()
+            + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
         new Migration(52, "finding-drilldown-json", V52Sql),
         new Migration(53, "store-self-metrics", V53Sql),
-        new Migration(54, "plan-dim-gzip", V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
+        new Migration(54, "plan-dim-gzip",
+            V54Sql + "\n" + PgSchemaGenerator.GenerateQueryStatsPayloadColumnPreAdds()
+            + "\n" + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
         new Migration(55, "self-alert-knobs", V55Sql),
         new Migration(56, "store-metrics-background-jobs", V56Sql),
         new Migration(57, "store-job-cadence-knob", V57Sql),
@@ -171,6 +184,20 @@ public static class PgMigrations
         new Migration(112, "collector-stall-wait-probes", V112Sql),
         new Migration(113, "remediation-credential-and-actor", V113Sql),
         new Migration(114, "pg-index-bloat-estimate-columns", V114Sql),
+        new Migration(115, "pg-cpu-capacity-headroom", V115Sql),
+        new Migration(116, "custom-alert-core", V116Sql),
+        new Migration(117, "mute-rules-reload-beacon", V117Sql),
+        new Migration(118, "builtin-alert-persistence", V118Sql),
+        new Migration(119, "retention-hold-ratio-knobs", V119Sql),
+        new Migration(120, "deadlock-rate-band-knobs", V120Sql),
+        new Migration(121, "oversized-plan-backlog",
+            V121Sql + "\n" + OversizedPlanBacklog.CreateTableSql + "\n" + V54Sql + "\n"
+            + PgSchemaGenerator.GenerateQueryStatsPayloadColumnPreAdds() + "\n"
+            + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
+        new Migration(122, "pg-deadlock-blocking-count-knobs", V122Sql),
+        new Migration(123, "fleet-sweep-state", V123Sql),
+        new Migration(124, "fleet-sweep-cadence-knobs", V124Sql),
+        new Migration(125, "collector-database-scope", V125Sql),
     };
 
     /// <summary>
@@ -221,6 +248,408 @@ ALTER TABLE collect.pg_index_bloat
 DELETE FROM collect.collector_state
 WHERE collector_name = 'pg_index_bloat'
 AND   state_key LIKE 'rotate:%';";
+
+    /// <summary>
+    /// V115 — the capacity-headroom columns on <c>collect.pg_cpu_utilization</c> (#3281).
+    ///
+    /// <para><b>Why <c>cpu_percent</c> alone was not enough.</b> It holds Performance Insights'
+    /// <c>os.cpuUtilization.total.avg</c>, which is percent of the capacity CURRENTLY ALLOCATED. On Aurora
+    /// Serverless v2 that allocation is re-sized continuously, so a one-vCPU instance reads exactly 100%
+    /// whenever one core stays busy for a minute — the routine trigger for scaling up. Measured at one such
+    /// minute on a production instance: 4 of 12 configured ACUs in use, 33% of the ceiling. Both consumers
+    /// banded the 100% as an incident, and the fleet it was measured on is <b>153 of 153</b> serverless, so
+    /// there was no population the old reading was correct on.</para>
+    ///
+    /// <para>Nullable with no DEFAULT and no backfill, matching every column-adding rung here: PI holds no
+    /// history this store can reach for the minutes already recorded, and a 0 would claim measured headroom
+    /// for a window nobody measured. A NULL here bands Unknown, never Healthy — which is also what an
+    /// instance class with no ACU concept at all produces, and the reason the band refuses to guess.</para>
+    ///
+    /// <para>Column-for-column identical to what <see cref="PgSchemaGenerator"/> generates from
+    /// <see cref="PgCpuUtilizationCollector.PayloadColumns"/>, so V106's own text carries the same three
+    /// columns for a store created fresh — pinned by
+    /// <c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c>. The two texts are
+    /// not forced to agree by anything but that test, and a drift between them is a permanent invisible
+    /// split between stores created before and after this rung.</para>
+    /// </summary>
+    private const string V115Sql = @"
+ALTER TABLE collect.pg_cpu_utilization
+    ADD COLUMN IF NOT EXISTS acu_utilization_percent double precision,
+    ADD COLUMN IF NOT EXISTS serverless_capacity_acu double precision,
+    ADD COLUMN IF NOT EXISTS max_configured_acu double precision;";
+
+    /// <summary>
+    /// V116 — the custom-alerting core (#3285): two NEW config-plane tables, added additively exactly like
+    /// V31's <c>custom_views</c> and V32's fleet tags.
+    ///
+    /// <para><c>custom_alert_rules</c> is the user-authored rule: a jsonb <c>definition</c> (a Scalar compose
+    /// metric spec + predicate + hysteresis + scope, validated by the compose <c>TryParsePanel</c> authority
+    /// plus a thin rule validator), an <c>enabled</c> flag the evaluator filters on, and the same
+    /// optimistic-concurrency <c>version</c> + audit columns as <c>custom_views</c>. Qualified <c>config.</c>
+    /// because the migrate session's <c>search_path</c> puts <c>collect</c> first (mirrors V31); no secret
+    /// columns, so no <c>ViewerRestrictedConfigTables</c> carve.</para>
+    ///
+    /// <para><b>NO <c>config_bump_version</c> trigger</b>, deliberately and for the same reason as
+    /// <c>custom_views</c>: the config-version reload beacon re-reads only the fixed <c>DarlingConfig</c> view
+    /// and would NOT load this table anyway, and a bump would force a needless fleet-wide
+    /// <c>ReloadFromStoreAsync</c> on every threshold tweak. The <c>CustomAlertEvaluator</c> reads enabled
+    /// rules directly on its own sweep.</para>
+    ///
+    /// <para><c>custom_alert_state</c> is the per-<c>(rule_id, server_id)</c> evaluation state the shared
+    /// <c>AlertPersistenceGate</c> needs and that no existing state shape offers: a resettable
+    /// <c>consecutive_breaches</c>/<c>consecutive_clears</c> pair (the edge-trigger watermark is a single int
+    /// with no resettable counter; <c>incident_occurrences</c> is a replace-the-set accumulator).
+    /// <c>rule_version</c> is stamped so a threshold edit (which bumps the rule's version) resets the streak
+    /// rather than firing a stale count against a new bar; <c>firing</c>/<c>fired_severity</c> track the open
+    /// incident so a resolve can be emitted and a Warning→Critical transition detected; <c>next_due_at</c>
+    /// carries per-rule cadence. The FK to <c>custom_alert_rules</c> with <c>ON DELETE CASCADE</c> is the
+    /// teardown: deleting a rule drops its state rows (the evaluator force-resolves any open incident first).
+    /// Written by the evaluator on the owner pool; no viewer/mcp grant until the editor surfaces firing
+    /// status.</para>
+    /// </summary>
+    private const string V116Sql = @"
+CREATE TABLE IF NOT EXISTS config.custom_alert_rules (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name text NOT NULL UNIQUE,
+    definition jsonb NOT NULL,
+    description text,
+    enabled boolean NOT NULL DEFAULT TRUE,
+    version integer NOT NULL DEFAULT 1,
+    created_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    updated_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    updated_by text
+);
+
+CREATE TABLE IF NOT EXISTS config.custom_alert_state (
+    rule_id bigint NOT NULL REFERENCES config.custom_alert_rules (id) ON DELETE CASCADE,
+    server_id integer NOT NULL,
+    rule_version integer NOT NULL,
+    consecutive_breaches integer NOT NULL DEFAULT 0,
+    consecutive_clears integer NOT NULL DEFAULT 0,
+    firing boolean NOT NULL DEFAULT FALSE,
+    fired_severity text,
+    last_evaluated_at timestamp,
+    next_due_at timestamp,
+    updated_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    PRIMARY KEY (rule_id, server_id)
+);";
+
+    /// <summary>
+    /// V117 — <c>config.config_mute_rules</c> joins the <c>config_version</c> reload beacon (#3315).
+    ///
+    /// <para>The mute rules the alert engine honors live in the service's in-memory
+    /// <c>MuteRuleService</c> cache, and the only thing that re-<c>LoadAsync()</c>es that cache is a
+    /// <c>config_version</c> change. So a mute rule that lands in the table without bumping the beacon is
+    /// persisted and inert: the store agrees the rule exists, <c>get_mute_rules</c> lists it, and the
+    /// evaluator keeps delivering matching alerts until something unrelated happens to bump the beacon or
+    /// the service restarts. There is no upper bound on that window and nothing reports it — an operator
+    /// mutes a firing alert, is told it is muted, and the pages continue.</para>
+    ///
+    /// <para><b>A trigger rather than a bump at each write site</b>, which is what makes this cover the
+    /// writers nobody enumerated: the MCP tools (<c>create_mute_rule</c> / <c>delete_mute_rule</c>, which
+    /// construct their own <c>PgMuteRuleStore</c> and never touch the live service), the Viewer's Manage
+    /// Mute Rules surface, the tray Snooze, <c>PgMuteRuleStore.DeleteExpiredAsync</c>, and hand-written SQL
+    /// all reach the same table. <c>AFTER INSERT OR UPDATE OR DELETE</c> because DELETE is the direction
+    /// that costs most — an operator un-mutes, believes alerting is restored, and a stale cache keeps
+    /// suppressing.</para>
+    ///
+    /// <para>Statement-level, sharing V17's <c>config.config_bump_version()</c> function verbatim, so this
+    /// is the fifth instance of an established shape rather than a new mechanism: same SECURITY INVOKER
+    /// beacon UPDATE, and the <c>mcp</c> role's existing column-level
+    /// <c>UPDATE (config_version, updated_at) ON config.config_service</c> grant (provisioned for the
+    /// <c>config_alert_settings</c> trigger) is exactly what this one needs, so no grant moves.
+    /// <c>DROP TRIGGER IF EXISTS</c> first, matching V17's idiom, so a replay is a harmless no-op.</para>
+    /// </summary>
+    private const string V117Sql = @"
+DROP TRIGGER IF EXISTS trg_bump_mute_rules ON config.config_mute_rules;
+CREATE TRIGGER trg_bump_mute_rules
+    AFTER INSERT OR UPDATE OR DELETE ON config.config_mute_rules
+    FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
+
+    /// <summary>
+    /// V118 — the BUILT-IN alert catalog's persistence-gate state (#3282). One additive config-plane table,
+    /// the twin of V116's <c>custom_alert_state</c> for alerts nobody authored.
+    ///
+    /// <para><b>Why a separate table rather than the custom one.</b> <c>custom_alert_state</c> is keyed
+    /// <c>(rule_id, server_id)</c> with a foreign key to <c>custom_alert_rules</c> and
+    /// <c>ON DELETE CASCADE</c>; a built-in alert has no rule row to reference, so it has no key there and
+    /// nothing to cascade from. The built-in subject is <c>(server_id, metric_name)</c> — the key the
+    /// engine's other state already uses.</para>
+    ///
+    /// <para><b>And why not columns on <c>config_edge_trigger_watermarks</c></b>, which carries exactly that
+    /// key. Two reasons, each sufficient. That column is one monotonic integer documented as "the highest
+    /// already-alerted rolling-window count", and a resettable pair of counters is not that shape. And Lite's
+    /// twin of the row is written with <c>INSERT OR REPLACE</c> over a PARTIAL column list, which resets
+    /// every unlisted column to its default — a streak living there would zero itself on every fired
+    /// blocking or deadlock alert, i.e. while it was being counted. Same finding V61's
+    /// <c>incident_occurrences</c> was split out for.</para>
+    ///
+    /// <para><c>last_observed_sample_at</c> is the gate's observation identity, not display data. The gate
+    /// counts consecutive breaching SAMPLES and the alert sweep is twice as fast as a CPU sample arrives, so
+    /// without it a re-read of one sample would count as a second observation and "three consecutive
+    /// breaches" would be satisfied inside ninety seconds — shorter than every excursion #3282 measured.</para>
+    ///
+    /// <para>No <c>config_bump_version</c> trigger, like V116: this is evaluator state written every new
+    /// sample, and a reload beacon on it would force a fleet-wide <c>ReloadFromStoreAsync</c> once a minute
+    /// per server. No per-table GRANT either — provisioning re-runs
+    /// <c>GRANT … ON ALL TABLES IN SCHEMA config</c> after migration — and no viewer/mcp read yet: the
+    /// service's alert pass is the only consumer.</para>
+    /// </summary>
+    private const string V118Sql = @"
+CREATE TABLE IF NOT EXISTS config.alert_persistence_state (
+    server_id integer NOT NULL,
+    metric_name text NOT NULL,
+    consecutive_breaches integer NOT NULL DEFAULT 0,
+    consecutive_clears integer NOT NULL DEFAULT 0,
+    firing boolean NOT NULL DEFAULT FALSE,
+    last_observed_sample_at timestamp,
+    updated_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    PRIMARY KEY (server_id, metric_name)
+);";
+
+    /// <summary>
+    /// V119 — the Retention Held tiers on the singleton <c>config_alert_settings</c> row (#3297), which were
+    /// compile-time constants, making the one alert an operator most needs to tune the one alert that could
+    /// not be. Field-reported on #3296: an hourly CRITICAL arrived, and Settings held nothing matching
+    /// "Retention Held" or "Monitor Store".
+    ///
+    /// <para>Store-backed like its #2136 sibling <c>store_job_cadence_warn_percent</c> (V57), which is the
+    /// pattern the constants' own comment named as the destination. <c>double precision</c> because the
+    /// value is a ratio with a meaningful fractional part —
+    /// <c>analysis_notify_severity</c> is the same type on this table, so this is the established shape
+    /// rather than a new one. The column defaults ARE the constants they replace, taken from
+    /// <see cref="TimescaleSupport.RetentionHoldWarnRatioDefault"/> and its critical sibling rather than
+    /// restated here, so a store that upgrades and is never touched keeps firing exactly where it did.</para>
+    ///
+    /// <para><b>No ACL or provisioning change</b>: <c>config_alert_settings</c> carries table-level grants
+    /// with no column carve (the V33/V35/V55/V57 rungs all say so), and the V17 statement-level
+    /// <c>trg_bump_alert_settings</c> already bumps <c>config_service.config_version</c> on any write here,
+    /// so the running service picks a change up on its next sweep with no restart and no new trigger.</para>
+    ///
+    /// <para><b>No CHECK ordering the two tiers</b>, deliberately. A pair where critical sits below warn is
+    /// not a broken state needing a constraint or a read-time rewrite: firing is gated on warn and severity
+    /// on critical, so every fire is simply Critical and the Warning tier is empty — which is exactly what
+    /// an operator who put critical below warn asked for. A <c>GREATEST</c> on read would instead accept the
+    /// value and then use a different one, which is the "setting did not stick" failure the MCP
+    /// bound-equals-clamp parity exists to prevent.</para>
+    /// </summary>
+    private const string V119Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS retention_hold_warn_ratio double precision NOT NULL DEFAULT 2.0;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS retention_hold_critical_ratio double precision NOT NULL DEFAULT 4.0;";
+
+    /// <summary>
+    /// V120 — the deadlock health band's two tiers, in deadlocks per HOUR (#3368).
+    ///
+    /// <para>The band was <c>count &gt; 0 ? Critical : Healthy</c>, so a single resolved deadlock made a
+    /// server Critical and the band's most common cause was the one condition that had already resolved
+    /// itself. Banding on a rate instead needs numbers whose right value differs per workload, which is
+    /// #3297's argument for the control plane rather than a compile-time constant.</para>
+    ///
+    /// <para>Column defaults name the same figures
+    /// <c>ServerHealthThresholds.DeadlockWarnPerHourDefault</c> /
+    /// <c>DeadlockCriticalPerHourDefault</c> carry, where the measured distribution they come from is
+    /// documented; they are literals HERE because SQL text cannot reference a C# constant, and
+    /// <c>DeadlockRateBandRungTests</c> pins the two against each other so the pair cannot drift.</para>
+    /// </summary>
+    private const string V120Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS deadlock_warn_per_hour double precision NOT NULL DEFAULT 5.0;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS deadlock_critical_per_hour double precision NOT NULL DEFAULT 20.0;";
+
+    /// <summary>
+    /// V121 — the measured size of each row's cached-plan XML, and the backlog of the plans the size cap
+    /// declined to capture (#3392).
+    ///
+    /// <para><b>The columns.</b> <c>query_plan_xml_bytes</c> on <c>query_stats</c> and
+    /// <c>procedure_stats</c> is the <c>DATALENGTH</c> the collectors' cap already evaluates, now also
+    /// selected. It is never gated by the cap, so a row over it carries a size and a NULL plan — the only
+    /// pairing that distinguishes "omitted for size" from "the handle aged out", which is what
+    /// <c>collect.oversized_plan_backlog</c> is keyed on. Nullable with no DEFAULT and no backfill, matching
+    /// every column-adding rung here: no measurement exists for rows already collected, and a 0 would claim
+    /// a plan of zero bytes. TimescaleDB accepts a nullable ADD COLUMN on a compressed hypertable.</para>
+    ///
+    /// <para><b>The table's DDL comes from <see cref="OversizedPlanBacklog.CreateTableSql"/></b>, appended
+    /// to this constant rather than transcribed here — the V38 idiom. The statements that address the table
+    /// live beside that DDL, so the shape a store gets and the shape the code writes cannot drift.</para>
+    ///
+    /// <para><b><c>v_query_stats</c> is NOT a passthrough on a V38+ store</b> — it is the #1767
+    /// payload-RESOLVING view (<see cref="PgSchemaGenerator.GenerateQueryStatsResolvingView"/>), so it must
+    /// be rebuilt from the generator rather than re-expanded as <c>SELECT *</c>, which would silently return
+    /// NULL query_text and NULL plan XML for every digest-era row. And because the generator emits payload
+    /// columns BEFORE the trailing digest columns, the new column lands mid-list — an alteration
+    /// <c>CREATE OR REPLACE VIEW</c> refuses (append-at-end only) — hence DROP + recreate, exactly as V51
+    /// did for <c>host_object_name</c>. Plain DROP, no CASCADE: nothing persistent depends on the view;
+    /// readers reference it per-query. <c>V54Sql</c> is concatenated ahead of the regenerated view because
+    /// that view references the plan dim's compressed-content column, which a store upgrading from below V54
+    /// does not have yet (<c>MigrationLadderPins</c> pins the ordering).</para>
+    /// </summary>
+    private const string V121Sql = @"
+ALTER TABLE query_stats
+    ADD COLUMN IF NOT EXISTS query_plan_xml_bytes bigint;
+ALTER TABLE procedure_stats
+    ADD COLUMN IF NOT EXISTS query_plan_xml_bytes bigint;
+DROP VIEW IF EXISTS v_query_stats;";
+
+    /// <summary>
+    /// V122 — the PostgreSQL Deadlocks and Blocking alerts' count thresholds on the singleton
+    /// <c>config_alert_settings</c> row (#3444), which were <c>private const int … = 1</c> in
+    /// <c>DarlingWorker</c> with no settings, config or JSON path, while their SQL Server twins
+    /// (<c>blocking_count_threshold</c>, <c>deadlock_count_threshold</c>) have been settable since V1.
+    ///
+    /// <para><b>Their OWN columns rather than the twins'.</b> The two engines' figures are calibrated
+    /// against different evidence and, decisively, against different surfaces: the reason to move the SQL
+    /// Server deadlock figure is agreement with <c>deadlock_warn_per_hour</c> (V120), and a PostgreSQL
+    /// server has no deadlock band to agree with — <c>v_deadlocks</c> is the extended-event capture and is
+    /// structurally zero for a PostgreSQL server (#3017), and the reading is nulled again by
+    /// <c>ServerMetricSources.DmvSourced</c> before it reaches the band. On the blocking side the
+    /// denominators differ outright: the SQL Server count is engine-recorded blocked-process reports, the
+    /// PostgreSQL one is distinct root blockers in a periodic SAMPLE of <c>pg_stat_activity</c>. Reusing
+    /// the columns would also make the upgrade behaviour a function of store state — a store whose
+    /// operator had already raised the SQL Server threshold would have its PostgreSQL alerting silently
+    /// quieted by this rung, which is the one outcome #3444 names as worse than the gap.</para>
+    ///
+    /// <para><b>The column defaults ARE the constants they replace</b> (1 and 1, from
+    /// <c>PostgresAlertEvaluator.DeadlockCountThresholdDefault</c> and
+    /// <c>BlockingCountThresholdDefault</c> — restated as literals here only because a rung is a SQL
+    /// string, and pinned equal to those constants by <c>PgAlertCountKnobRungTests</c>). A store that
+    /// upgrades and is never touched fires exactly where it did, on every store, whatever its SQL Server
+    /// thresholds say.</para>
+    ///
+    /// <para><b><c>integer</c>, matching the twins</b> rather than the <c>double precision</c> the V119
+    /// and V120 rungs used: these are counts of discrete events with no meaningful fractional part, and
+    /// <c>blocking_count_threshold</c>/<c>deadlock_count_threshold</c> are <c>integer</c> on this same
+    /// table.</para>
+    ///
+    /// <para><b>No ACL or provisioning change</b>: <c>config_alert_settings</c> carries table-level grants
+    /// with no column carve (V33/V35/V55/V57/V119/V120 all say so), and V17's statement-level
+    /// <c>trg_bump_alert_settings</c> already bumps <c>config_service.config_version</c> on any write
+    /// here, so the running service picks a change up on its next sweep with no restart.</para>
+    ///
+    /// <para><b>No CHECK enforcing the floor</b>, deliberately, matching V119/V120. The floor is
+    /// <c>PostgresAlertEvaluator.CountThresholdFloor</c>, enforced as the <c>update_alert_settings</c>
+    /// write bound and as a read-side clamp on <c>DarlingAlertSettings</c> — the same raw-in/clamped-out
+    /// split every knob on this table uses, so <c>get_alert_settings</c> reports back what the operator
+    /// stored rather than a value a constraint rewrote.</para>
+    /// </summary>
+    private const string V122Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS pg_deadlock_count_threshold integer NOT NULL DEFAULT 1;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS pg_blocking_count_threshold integer NOT NULL DEFAULT 1;";
+
+    /// <summary>
+    /// V123 — the fleet sweep's state store (#3466, lane 1 of the approved four-lane sequence): the
+    /// sweep-run tables and the watch-item worklist that make sweep-over-sweep diffing data instead of
+    /// a report reading its own predecessor. Pinned by <c>FleetSweepStateRungTests</c>.
+    ///
+    /// <para><b>The DDL comes from <see cref="FleetSweepStore.CreateTablesSql"/></b>, referenced here
+    /// rather than transcribed — the V38/V121 idiom. The statements that address the four tables live
+    /// beside that DDL, so the shape a store gets and the shape the code writes cannot drift; every
+    /// design decision (normalized verdicts, the NOT NULL instrument-liveness pair, the ledger's key,
+    /// the worklist's hysteresis columns, plain-not-hypertable) is argued on that constant's docs
+    /// rather than restated here.</para>
+    ///
+    /// <para><b>Darling-only, structurally and deliberately.</b> A sweep is a statement about a FLEET
+    /// — what changed across the monitored population since the last sweep — and Lite monitors one
+    /// server from one desktop with no fleet to summarize, so there is no Lite twin of this rung and
+    /// none planned; the cross-SKU twinning discipline applies to surfaces both SKUs can mean, and
+    /// this one only means anything centralized. The tables therefore live only in this ladder, like
+    /// the oversized-plan backlog before them.</para>
+    ///
+    /// <para><b>No GRANT and no provisioning change.</b> The <c>collect</c> schema carries blanket
+    /// SELECT for admin/viewer/mcp plus the owner-scoped <c>ALTER DEFAULT PRIVILEGES</c>, both
+    /// re-asserted every managed start (<c>DarlingManagedRoles</c>) and re-run in BYO mode by
+    /// <c>tools/provision-roles.sql</c>'s ON ALL TABLES form — so the web feed's viewer role and the
+    /// MCP role read these tables with no new statement, and the engine writes as the service owner,
+    /// so no write grant exists to add.</para>
+    ///
+    /// <para><b>Retention arrives with the engine (lane 2)</b>, the way the backlog's arrived beside
+    /// its sweep: runs and children prune on <c>swept_at</c> at the base data horizon, watch items on
+    /// <c>last_seen_at</c>. Deferring it is safe at this rung because nothing writes these tables
+    /// until the engine lands in the same release line — an empty table needs no pruning.</para>
+    /// </summary>
+    private const string V123Sql = FleetSweepStore.CreateTablesSql;
+
+    /// <summary>
+    /// V124 — the fleet sweep's cadence knobs on the singleton <c>config_alert_settings</c> row
+    /// (#3466, lane 2): whether the scheduled fleet sweep runs, and how often. The spec's own words —
+    /// "at a user-configured cadence (hourly by default)" — make the cadence an operator knob from
+    /// birth, so it ships on the control plane rather than graduating to it later the way #3297 and
+    /// #3444's constants had to. Pinned by <c>FleetSweepCadenceKnobRungTests</c>.
+    ///
+    /// <para><b>This row is the precedent, not an approximation of one.</b> The scheduled-analysis
+    /// cadence — the product's one existing "run a whole-fleet evaluation every N minutes" knob —
+    /// lives here as <c>analysis_enabled</c>/<c>analysis_interval_minutes</c> (control-plane Stage 1),
+    /// reaches the service through <c>StoreConfigProvider</c>'s wholesale config swap, and is exposed
+    /// through <c>get_alert_settings</c>/<c>update_alert_settings</c> with write bounds that match the
+    /// read-side clamp. The sweep's pair takes exactly that path. It is NOT an alert and delivers
+    /// nothing — the master switch deliberately does not govern it, because sweeps under master-off
+    /// are the muted-mode contract's whole point — but "the alert-settings row" has been the home of
+    /// every operator-tunable evaluation cadence since V17, and a second config table for two columns
+    /// would split the surface <c>update_alert_settings</c> documents.</para>
+    ///
+    /// <para><b>The column defaults ARE the shared constants</b> (<c>TRUE</c>, and
+    /// <c>FleetSweepCadence.DefaultIntervalMinutes</c> — restated as literals here only because a rung
+    /// is a SQL string, and pinned equal by the rung tests). Enabled-by-default is deliberate: the
+    /// feature is dogfooded in a separate environment before any production install per the owner's
+    /// deployment note, and a report surface that ships dark is a report surface nobody evaluates.</para>
+    ///
+    /// <para><b>Darling-only, structurally</b> — the V123 reasoning continues: Lite has no fleet to
+    /// sweep, so there is no Lite twin of these knobs and <c>McpAlertSettingsKeyTests</c> records the
+    /// omitted <c>fleet_sweep</c> group as a decision with a paying test.</para>
+    ///
+    /// <para><b>No CHECK enforcing the bounds</b>, matching V119/V120/V122: the floor and ceiling are
+    /// <c>FleetSweepCadence</c>'s named constants, enforced as the <c>update_alert_settings</c> write
+    /// bound, the Viewer's save gate, and the worker's read-side clamp — the raw-in/clamped-out split
+    /// every knob on this table uses. No reload beacon of its own: V17's statement-level
+    /// <c>trg_bump_alert_settings</c> already bumps <c>config_service.config_version</c> on any write
+    /// here, so the running service picks a cadence change up on its next sweep with no restart. No
+    /// GRANT: this table carries table-level grants with no column carve.</para>
+    /// </summary>
+    private const string V124Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS fleet_sweep_enabled boolean NOT NULL DEFAULT TRUE;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS fleet_sweep_interval_minutes integer NOT NULL DEFAULT 60;";
+
+    /// <summary>
+    /// V125 — the optional per-collector database scope on <c>config_collector_schedules</c> (#3477):
+    /// an ALLOW-LIST of database names beside <c>enabled</c> and the cadence columns, so an expensive
+    /// per-database collector can be limited to a representative sample instead of turned off for the
+    /// whole server. The reporter's measured case is the sizing argument: a 72-database instance paid
+    /// a 43-minute <c>index_object_stats</c> pass whose slowest database carried 4.97% of it — pure
+    /// fan-out WIDTH — and the only alternatives were paying for all 72 or losing the collector (and
+    /// its growth trend) entirely. Pinned by <c>CollectorDatabaseScopeRungTests</c>.
+    ///
+    /// <para><b>An allow-list, deliberately, not a deny-list.</b> "Off everywhere except this one" on
+    /// a 72-database instance is one name as an allow-list and 71 as a deny-list — and under a
+    /// deny-list every newly created database silently REJOINS collection, which on a dev estate that
+    /// creates databases daily re-grows the pass day by day. Under the allow-list a new database
+    /// stays out until an operator names it, so the pass cost is independent of database-count
+    /// growth.</para>
+    ///
+    /// <para><b>Nullable, no default, no CHECK</b> — this table's own sparse convention (absent row /
+    /// NULL column = no override at this level), so every existing row and every untouched install
+    /// reads NULL and collects exactly what it collects today. NULL falls through the row's standard
+    /// per-column layering (per-server &gt; fleet-wide &gt; unscoped); an EMPTY array is DISTINCT from
+    /// NULL and is the explicit "no scope" — it stops the fall-through, which is what lets one server
+    /// opt back OUT of a fleet-wide scope without listing every database it has (the deny-list
+    /// failure again, one layer up). <c>excludedDatabases</c> on the server row still WINS: the scope
+    /// is an additional predicate on the same enumerations, so the effective set is scoped-in minus
+    /// excluded and the coarse instrument keeps its veto.</para>
+    ///
+    /// <para><b>No reload beacon of its own</b>: V17's statement-level
+    /// <c>trg_bump_collector_schedules</c> already bumps <c>config_service.config_version</c> on any
+    /// write here, so the running service re-resolves scopes on its next sweep with no restart. No
+    /// GRANT: this table carries table-level grants with no column carve, which is what every earlier
+    /// rung touching <c>config</c> tables says.</para>
+    /// </summary>
+    private const string V125Sql = @"
+ALTER TABLE config.config_collector_schedules
+    ADD COLUMN IF NOT EXISTS databases text[];";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
@@ -3007,6 +3436,10 @@ CREATE INDEX IF NOT EXISTS idx_pg_deadlocks_time
     /// rung above. See <see cref="PgCpuUtilizationCollector"/>'s own doc comment for why this collector has
     /// no SQL route at all: every row here arrives through the RDS/Performance Insights API, never a
     /// database connection.
+    ///
+    /// <para>The three capacity columns below arrived at V115 (#3281) and are written into this text as
+    /// well, so a store created fresh from this rung gets them without waiting for the ALTER — which is
+    /// what keeps the rung identical to the generated schema. V115 is what an existing store applies.</para>
     /// </summary>
     private const string V106Sql = @"
 CREATE TABLE IF NOT EXISTS collect.pg_cpu_utilization (
@@ -3015,7 +3448,10 @@ CREATE TABLE IF NOT EXISTS collect.pg_cpu_utilization (
     server_id integer NOT NULL,
     server_name text NOT NULL,
     sample_time timestamp,
-    cpu_percent double precision
+    cpu_percent double precision,
+    acu_utilization_percent double precision,
+    serverless_capacity_acu double precision,
+    max_configured_acu double precision
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_cpu_utilization_time

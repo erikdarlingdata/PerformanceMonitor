@@ -452,6 +452,78 @@ public static class MeasureCatalog
         new ComposeDimension("ag_database_replica_states", "replica_server_name", "replica_server_name", Likeable: true),
         new ComposeDimension("ag_database_replica_states", "synchronization_state_desc", "synchronization_state_desc", Likeable: true),
         new ComposeDimension("ag_database_replica_states", "suspend_reason_desc", "suspend_reason_desc", Likeable: true),
+
+        /* ── PostgreSQL dimensions (#3285). Every column is a real VARCHAR payload column of its collector,
+           pinned by EveryDimensionColumn_IsARealPayloadColumn. ── */
+        new ComposeDimension("pg_wait_stats", "wait_event", "wait_event", Likeable: true),
+        new ComposeDimension("pg_wait_stats", "wait_type", "wait_type", Likeable: true),
+
+        new ComposeDimension("pg_io_stats", "backend_type", "backend_type", Likeable: true),
+        new ComposeDimension("pg_io_stats", "object_type", "object_type", Likeable: true),
+        new ComposeDimension("pg_io_stats", "context", "context", Likeable: true),
+
+        new ComposeDimension("pg_database_stats", "database_name", "database_name", Likeable: true),
+
+        new ComposeDimension("pg_table_bloat_stats", "database_name", "database_name", Likeable: true),
+        new ComposeDimension("pg_table_bloat_stats", "schema_name", "schema_name", Likeable: true),
+        new ComposeDimension("pg_table_bloat_stats", "table_name", "table_name", Likeable: true),
+
+        new ComposeDimension("pg_index_bloat", "database_name", "database_name", Likeable: true),
+        new ComposeDimension("pg_index_bloat", "schema_name", "schema_name", Likeable: true),
+        new ComposeDimension("pg_index_bloat", "table_name", "table_name", Likeable: true),
+        new ComposeDimension("pg_index_bloat", "index_name", "index_name", Likeable: true),
+
+        new ComposeDimension("pg_index_usage_stats", "database_name", "database_name", Likeable: true),
+        new ComposeDimension("pg_index_usage_stats", "schema_name", "schema_name", Likeable: true),
+        new ComposeDimension("pg_index_usage_stats", "table_name", "table_name", Likeable: true),
+        new ComposeDimension("pg_index_usage_stats", "index_name", "index_name", Likeable: true),
+        new ComposeDimension("pg_index_usage_stats", "index_method", "index_method", Likeable: true),
+
+        new ComposeDimension("pg_replication_stats", "application_name", "application_name", Likeable: true),
+        new ComposeDimension("pg_replication_stats", "client_addr", "client_addr", Likeable: true),
+        new ComposeDimension("pg_replication_stats", "state", "state", Likeable: true),
+        new ComposeDimension("pg_replication_stats", "sync_state", "sync_state", Likeable: true),
+
+        new ComposeDimension("pg_replication_slot_stats", "slot_name", "slot_name", Likeable: true),
+        new ComposeDimension("pg_replication_slot_stats", "slot_type", "slot_type", Likeable: true),
+        new ComposeDimension("pg_replication_slot_stats", "database_name", "database_name", Likeable: true),
+        new ComposeDimension("pg_replication_slot_stats", "wal_status", "wal_status", Likeable: true),
+
+        new ComposeDimension("pg_autovacuum_stats", "database_name", "database_name", Likeable: true),
+        new ComposeDimension("pg_autovacuum_stats", "schema_name", "schema_name", Likeable: true),
+        new ComposeDimension("pg_autovacuum_stats", "table_name", "table_name", Likeable: true),
+
+        new ComposeDimension("pg_wraparound_stats", "database_name", "database_name", Likeable: true),
+
+        new ComposeDimension("pg_xmin_horizon", "source", "source", Likeable: true),
+
+        new ComposeDimension("pg_session_states", "database_name", "database_name", Likeable: true),
+        new ComposeDimension("pg_session_states", "username", "username", Likeable: true),
+        new ComposeDimension("pg_session_states", "application_name", "application_name", Likeable: true),
+        new ComposeDimension("pg_session_states", "state", "state", Likeable: true),
+        new ComposeDimension("pg_session_states", "wait_event_type", "wait_event_type", Likeable: true),
+        new ComposeDimension("pg_session_states", "wait_event", "wait_event", Likeable: true),
+        new ComposeDimension("pg_session_states", "backend_type", "backend_type", Likeable: true),
+
+        new ComposeDimension("pg_lock_stats", "database_name", "database_name", Likeable: true),
+        new ComposeDimension("pg_lock_stats", "lock_type", "lock_type", Likeable: true),
+        new ComposeDimension("pg_lock_stats", "mode", "mode", Likeable: true),
+        new ComposeDimension("pg_lock_stats", "relation_name", "relation_name", Likeable: true),
+
+        new ComposeDimension("pg_buffer_usage", "database_name", "database_name", Likeable: true),
+        new ComposeDimension("pg_buffer_usage", "relation_name", "relation_name", Likeable: true),
+        new ComposeDimension("pg_buffer_usage", "relation_kind", "relation_kind", Likeable: true),
+
+        new ComposeDimension("pg_kernel_stats", "database_name", "database_name", Likeable: true),
+
+        new ComposeDimension("pg_predicate_stats", "database_name", "database_name", Likeable: true),
+        new ComposeDimension("pg_predicate_stats", "schema_name", "schema_name", Likeable: true),
+        new ComposeDimension("pg_predicate_stats", "table_name", "table_name", Likeable: true),
+        new ComposeDimension("pg_predicate_stats", "column_name", "column_name", Likeable: true),
+        new ComposeDimension("pg_predicate_stats", "operator", "operator", Likeable: true),
+
+        new ComposeDimension("pg_wait_sampling", "event_type", "event_type", Likeable: true),
+        new ComposeDimension("pg_wait_sampling", "event", "event", Likeable: true),
     };
 
     private static readonly Dictionary<(string Source, string Name), ComposeDimension> s_dimByKey =
@@ -515,6 +587,24 @@ public static class MeasureCatalog
     private const string CatPerfmon = "Perfmon Counters";
     private const string CatQueryStore = "Query Store";
     private const string CatAvailabilityGroups = "Availability Groups";
+    /* ── PostgreSQL categories (#3285). PG-prefixed so the composer groups them apart from the SQL Server
+       categories above; every measure below names a real PostgreSQL collector table + payload column
+       (pinned by DarlingComposeTests), and its appliesTo rides the owning collector's PostgreSQL engine
+       gate. ── */
+    private const string CatPgWaits = "PostgreSQL Waits";
+    private const string CatPgCpu = "PostgreSQL CPU";
+    private const string CatPgStatements = "PostgreSQL Statements";
+    private const string CatPgIo = "PostgreSQL I/O";
+    private const string CatPgCheckpoints = "PostgreSQL Checkpoints & WAL";
+    private const string CatPgDatabases = "PostgreSQL Databases";
+    private const string CatPgBloat = "PostgreSQL Bloat";
+    private const string CatPgIndexes = "PostgreSQL Indexes";
+    private const string CatPgReplication = "PostgreSQL Replication";
+    private const string CatPgVacuum = "PostgreSQL Autovacuum";
+    private const string CatPgWraparound = "PostgreSQL Wraparound & XID";
+    private const string CatPgSessions = "PostgreSQL Sessions";
+    private const string CatPgLocks = "PostgreSQL Locks";
+    private const string CatPgBuffers = "PostgreSQL Buffer Cache";
 
     private static readonly string[] WaitDims = { "wait_type" };
     private static readonly string[] ProcDims = { "database_name", "schema_name", "object_name" };
@@ -546,6 +636,27 @@ public static class MeasureCatalog
     private static readonly string[] PerfmonDims = { "object_name", "counter_name", "instance_name" };
     private static readonly string[] QueryStoreDims = { "database_name", "module_name", "query_hash" };
     private static readonly string[] AgDatabaseDims = { "ag_name", "database_name", "replica_server_name", "synchronization_state_desc", "suspend_reason_desc" };
+
+    /* ── PostgreSQL per-table dimension allow-lists (#3285). Every entry is a real VARCHAR payload column of
+       the source (pinned by test); numeric/boolean columns are deliberately omitted because the compiler
+       binds filter values as text, which would not match them - the same reason is_suspended is not an AG
+       dimension. server is universal and added separately. ── */
+    private static readonly string[] PgWaitDims = { "wait_event", "wait_type" };
+    private static readonly string[] PgIoDims = { "backend_type", "object_type", "context" };
+    private static readonly string[] PgDatabaseDims = { "database_name" };
+    private static readonly string[] PgTableDims = { "database_name", "schema_name", "table_name" };
+    private static readonly string[] PgIndexBloatDims = { "database_name", "schema_name", "table_name", "index_name" };
+    private static readonly string[] PgIndexUsageDims = { "database_name", "schema_name", "table_name", "index_name", "index_method" };
+    private static readonly string[] PgReplicationDims = { "application_name", "client_addr", "state", "sync_state" };
+    private static readonly string[] PgSlotDims = { "slot_name", "slot_type", "database_name", "wal_status" };
+    private static readonly string[] PgWraparoundDims = { "database_name" };
+    private static readonly string[] PgXminDims = { "source" };
+    private static readonly string[] PgSessionDims = { "database_name", "username", "application_name", "state", "wait_event_type", "wait_event", "backend_type" };
+    private static readonly string[] PgLockDims = { "database_name", "lock_type", "mode", "relation_name" };
+    private static readonly string[] PgBufferDims = { "database_name", "relation_name", "relation_kind" };
+    private static readonly string[] PgKernelDims = { "database_name" };
+    private static readonly string[] PgPredicateDims = { "database_name", "schema_name", "table_name", "column_name", "operator" };
+    private static readonly string[] PgWaitSamplingDims = { "event_type", "event" };
 
     /// <summary>The catalog. Every measure's SourceTable is a real collector; every Column/DeltaColumn is a
     /// real payload column of that collector (pinned by test).</summary>
@@ -1334,6 +1445,674 @@ public static class MeasureCatalog
             Kind = MeasureKind.Ratio, RatioMode = MeasureRatioMode.Avg, NumeratorKey = "plan_cache_single_use_plans", DenominatorKey = "plan_cache_total_plans",
             NativeUnit = "ratio", DefaultUnit = "percent", UnitFamily = FamilyFraction,
             ValidAggs = NoAggs, AllowedDimensions = PlanCacheDims,
+        },
+
+        /* ═══════════════════ PostgreSQL measures (#3285 custom alerting / notebooks) ═══════════════════
+
+           These name PostgreSQL collector tables, so their appliesTo rides the owning collector's PostgreSQL
+           engine gate (CollectorCatalog.AppliesTo, which EngineMatches to PostgreSQL and never SQL Server) and
+           they surface only for PostgreSQL/Aurora targets. Two facts about the PG collectors shape the archetypes:
+
+             - Only pg_wait_stats and pg_statement_stats store paired delta_* columns, so those are the only
+               PostgreSQL Cumulative measures. Every other PG counter is stored raw (no per-interval delta), and
+               PG sources have no CAGG rollup (ComposeSourceRouter is SQL-only), so the raw route is all there is.
+
+             - A raw cumulative counter with no delta column is exposed as a Gauge with DefaultTimeAgg = Max and
+               a "(cumulative)" display name - the exact pattern index_object_stats' user_seeks/user_updates
+               already use above. Never SUM (Gauges_AreNeverSummable), so the grain-trap cannot fire; MAX over a
+               bucket reads the latest cumulative value. Genuine point-in-time readings (lag, queue depth, sizes,
+               bloat estimates, session counts, xid ages, saturation percentages) are ordinary Gauges. */
+
+        /* ── pg_wait_stats (Aurora; aurora_stat_system_waits) - Cumulative, delta-backed ── */
+        new ComposeMeasure
+        {
+            Key = "pg_wait_time_us", DisplayName = "Wait time", Category = CatPgWaits, SourceTable = "pg_wait_stats",
+            Archetype = MeasureArchetype.Cumulative, Column = "wait_time_us", DeltaColumn = "delta_wait_time_us",
+            NativeUnit = "us", DefaultUnit = "ms", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Sum, ValidAggs = CumulativeAggs, AllowedDimensions = PgWaitDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_waits", DisplayName = "Waits", Category = CatPgWaits, SourceTable = "pg_wait_stats",
+            Archetype = MeasureArchetype.Cumulative, Column = "waits", DeltaColumn = "delta_waits",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Sum, ValidAggs = CumulativeAggs, AllowedDimensions = PgWaitDims,
+        },
+
+        /* ── pg_statement_stats (pg_stat_statements / aurora_stat_statements) - Cumulative, delta-backed.
+             Server-grain: the natural per-statement grain is queryid, a bigint, and the compiler binds filter
+             values as text, so no dimension is offered rather than one that cannot match. ── */
+        new ComposeMeasure
+        {
+            Key = "pg_stmt_exec_time_ms", DisplayName = "Statement execution time", Category = CatPgStatements, SourceTable = "pg_statement_stats",
+            Archetype = MeasureArchetype.Cumulative, Column = "total_exec_time_ms", DeltaColumn = "delta_total_exec_time_ms",
+            NativeUnit = "ms", DefaultUnit = "ms", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Sum, ValidAggs = CumulativeAggs, AllowedDimensions = NoDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_stmt_calls", DisplayName = "Statement calls", Category = CatPgStatements, SourceTable = "pg_statement_stats",
+            Archetype = MeasureArchetype.Cumulative, Column = "calls", DeltaColumn = "delta_calls",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Sum, ValidAggs = CumulativeAggs, AllowedDimensions = NoDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_stmt_rows", DisplayName = "Statement rows", Category = CatPgStatements, SourceTable = "pg_statement_stats",
+            Archetype = MeasureArchetype.Cumulative, Column = "rows_returned", DeltaColumn = "delta_rows",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Sum, ValidAggs = CumulativeAggs, AllowedDimensions = NoDims,
+        },
+
+        /* ── pg_cpu_utilization (Aurora; RDS Performance Insights) - Gauge, server-grain. acu_utilization_percent
+             is the honest saturation measure (100% = the configured ACU ceiling is reached); cpu_percent is
+             percent of currently-allocated capacity and is attribution-only. Both are legitimately NULL on
+             non-serverless/self-hosted PG. ── */
+        new ComposeMeasure
+        {
+            Key = "pg_acu_utilization_pct", DisplayName = "ACU utilization %", Category = CatPgCpu, SourceTable = "pg_cpu_utilization",
+            Archetype = MeasureArchetype.Gauge, Column = "acu_utilization_percent",
+            NativeUnit = "percent", DefaultUnit = "percent", UnitFamily = FamilyPercent,
+            DefaultTimeAgg = ComposeAggregate.Avg, ValidAggs = GaugeAggs, AllowedDimensions = NoDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_cpu_pct", DisplayName = "CPU % of allocated capacity (attribution only)", Category = CatPgCpu, SourceTable = "pg_cpu_utilization",
+            Archetype = MeasureArchetype.Gauge, Column = "cpu_percent",
+            NativeUnit = "percent", DefaultUnit = "percent", UnitFamily = FamilyPercent,
+            DefaultTimeAgg = ComposeAggregate.Avg, ValidAggs = GaugeAggs, AllowedDimensions = NoDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_serverless_capacity_acu", DisplayName = "Serverless capacity (ACU)", Category = CatPgCpu, SourceTable = "pg_cpu_utilization",
+            Archetype = MeasureArchetype.Gauge, Column = "serverless_capacity_acu",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Avg, ValidAggs = GaugeAggs, AllowedDimensions = NoDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_max_configured_acu", DisplayName = "Max configured capacity (ACU)", Category = CatPgCpu, SourceTable = "pg_cpu_utilization",
+            Archetype = MeasureArchetype.Gauge, Column = "max_configured_acu",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = NoDims,
+        },
+
+        /* ── pg_io_stats (pg_stat_io, PG16+) - raw cumulative counters exposed as Max/(cumulative) gauges ── */
+        new ComposeMeasure
+        {
+            Key = "pg_io_reads", DisplayName = "I/O reads (cumulative)", Category = CatPgIo, SourceTable = "pg_io_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "reads",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgIoDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_io_writes", DisplayName = "I/O writes (cumulative)", Category = CatPgIo, SourceTable = "pg_io_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "writes",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgIoDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_io_read_bytes", DisplayName = "I/O bytes read (cumulative)", Category = CatPgIo, SourceTable = "pg_io_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "read_bytes",
+            NativeUnit = "bytes", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgIoDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_io_write_bytes", DisplayName = "I/O bytes written (cumulative)", Category = CatPgIo, SourceTable = "pg_io_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "write_bytes",
+            NativeUnit = "bytes", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgIoDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_io_hits", DisplayName = "Buffer hits (cumulative)", Category = CatPgIo, SourceTable = "pg_io_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "hits",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgIoDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_io_evictions", DisplayName = "Buffer evictions (cumulative)", Category = CatPgIo, SourceTable = "pg_io_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "evictions",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgIoDims,
+        },
+
+        /* ── pg_write_stats (pg_stat_checkpointer / pg_stat_bgwriter, PG14+) - server-grain cumulative counters ── */
+        new ComposeMeasure
+        {
+            Key = "pg_checkpoints_timed", DisplayName = "Timed checkpoints (cumulative)", Category = CatPgCheckpoints, SourceTable = "pg_write_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "num_timed",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = NoDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_checkpoints_requested", DisplayName = "Requested checkpoints (cumulative)", Category = CatPgCheckpoints, SourceTable = "pg_write_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "num_requested",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = NoDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_checkpoint_buffers_written", DisplayName = "Checkpoint buffers written (cumulative)", Category = CatPgCheckpoints, SourceTable = "pg_write_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "buffers_written_checkpoint",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = NoDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_bgwriter_buffers_clean", DisplayName = "Background-writer buffers cleaned (cumulative)", Category = CatPgCheckpoints, SourceTable = "pg_write_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "buffers_clean",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = NoDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_buffers_alloc", DisplayName = "Buffers allocated (cumulative)", Category = CatPgCheckpoints, SourceTable = "pg_write_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "buffers_alloc",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = NoDims,
+        },
+
+        /* ── pg_database_stats (pg_stat_database) - per-database cumulative counters ── */
+        new ComposeMeasure
+        {
+            Key = "pg_db_commits", DisplayName = "Transactions committed (cumulative)", Category = CatPgDatabases, SourceTable = "pg_database_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "xact_commit",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgDatabaseDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_db_rollbacks", DisplayName = "Transactions rolled back (cumulative)", Category = CatPgDatabases, SourceTable = "pg_database_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "xact_rollback",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgDatabaseDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_db_blocks_read", DisplayName = "Blocks read from disk (cumulative)", Category = CatPgDatabases, SourceTable = "pg_database_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "blks_read",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgDatabaseDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_db_blocks_hit", DisplayName = "Blocks found in cache (cumulative)", Category = CatPgDatabases, SourceTable = "pg_database_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "blks_hit",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgDatabaseDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_db_temp_bytes", DisplayName = "Temp-file bytes (cumulative)", Category = CatPgDatabases, SourceTable = "pg_database_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "temp_bytes",
+            NativeUnit = "bytes", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgDatabaseDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_db_deadlocks", DisplayName = "Deadlocks (cumulative)", Category = CatPgDatabases, SourceTable = "pg_database_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "deadlocks",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgDatabaseDims,
+        },
+
+        /* ── pg_table_bloat_stats (statistics-based estimate; !in-recovery) - point-in-time gauges ── */
+        new ComposeMeasure
+        {
+            Key = "pg_tbl_heap_bytes", DisplayName = "Table heap size", Category = CatPgBloat, SourceTable = "pg_table_bloat_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "heap_bytes",
+            NativeUnit = "bytes", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgTableDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_tbl_index_bytes", DisplayName = "Table index size", Category = CatPgBloat, SourceTable = "pg_table_bloat_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "index_bytes",
+            NativeUnit = "bytes", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgTableDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_tbl_dead_tuples", DisplayName = "Dead tuples", Category = CatPgBloat, SourceTable = "pg_table_bloat_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "dead_tuples",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgTableDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_tbl_live_tuples", DisplayName = "Live tuples", Category = CatPgBloat, SourceTable = "pg_table_bloat_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "live_tuples",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgTableDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_tbl_bloat_bytes", DisplayName = "Estimated table bloat", Category = CatPgBloat, SourceTable = "pg_table_bloat_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "bloat_bytes_estimate",
+            NativeUnit = "bytes", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgTableDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_tbl_bloat_pct", DisplayName = "Estimated table bloat %", Category = CatPgBloat, SourceTable = "pg_table_bloat_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "bloat_pct_estimate",
+            NativeUnit = "percent", DefaultUnit = "percent", UnitFamily = FamilyPercent,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgTableDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_tbl_mods_since_analyze", DisplayName = "Modifications since analyze", Category = CatPgBloat, SourceTable = "pg_table_bloat_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "mods_since_analyze",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgTableDims,
+        },
+
+        /* ── pg_index_bloat (pgstattuple measured; !in-recovery) - point-in-time gauges ── */
+        new ComposeMeasure
+        {
+            Key = "pg_idx_bloat_bytes", DisplayName = "Index size", Category = CatPgBloat, SourceTable = "pg_index_bloat",
+            Archetype = MeasureArchetype.Gauge, Column = "index_bytes",
+            NativeUnit = "bytes", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgIndexBloatDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_idx_leaf_density", DisplayName = "Index leaf density", Category = CatPgBloat, SourceTable = "pg_index_bloat",
+            Archetype = MeasureArchetype.Gauge, Column = "avg_leaf_density",
+            NativeUnit = "percent", DefaultUnit = "percent", UnitFamily = FamilyPercent,
+            DefaultTimeAgg = ComposeAggregate.Avg, ValidAggs = GaugeAggs, AllowedDimensions = PgIndexBloatDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_idx_leaf_fragmentation", DisplayName = "Index leaf fragmentation", Category = CatPgBloat, SourceTable = "pg_index_bloat",
+            Archetype = MeasureArchetype.Gauge, Column = "leaf_fragmentation",
+            NativeUnit = "percent", DefaultUnit = "percent", UnitFamily = FamilyPercent,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgIndexBloatDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_idx_est_bloat_pct", DisplayName = "Estimated index bloat %", Category = CatPgBloat, SourceTable = "pg_index_bloat",
+            Archetype = MeasureArchetype.Gauge, Column = "est_bloat_pct",
+            NativeUnit = "percent", DefaultUnit = "percent", UnitFamily = FamilyPercent,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgIndexBloatDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_idx_reclaimable_bytes", DisplayName = "Estimated reclaimable index bytes", Category = CatPgBloat, SourceTable = "pg_index_bloat",
+            Archetype = MeasureArchetype.Gauge, Column = "est_reclaimable_bytes",
+            NativeUnit = "bytes", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgIndexBloatDims,
+        },
+
+        /* ── pg_index_usage_stats (pg_stat_user_indexes; !in-recovery) - cumulative scan counters + sizes ── */
+        new ComposeMeasure
+        {
+            Key = "pg_idxusage_scans", DisplayName = "Index scans (cumulative)", Category = CatPgIndexes, SourceTable = "pg_index_usage_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "index_scans",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgIndexUsageDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_idxusage_tuples_read", DisplayName = "Index tuples read (cumulative)", Category = CatPgIndexes, SourceTable = "pg_index_usage_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "tuples_read",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgIndexUsageDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_idxusage_index_bytes", DisplayName = "Index size", Category = CatPgIndexes, SourceTable = "pg_index_usage_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "index_bytes",
+            NativeUnit = "bytes", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgIndexUsageDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_idxusage_table_bytes", DisplayName = "Table size", Category = CatPgIndexes, SourceTable = "pg_index_usage_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "table_bytes",
+            NativeUnit = "bytes", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgIndexUsageDims,
+        },
+
+        /* ── pg_replication_stats (pg_stat_replication) - point-in-time lag gauges. Max: the worst lag in the
+             bucket is the RPO signal, exactly like the AG secondary-lag gauge above. ── */
+        new ComposeMeasure
+        {
+            Key = "pg_repl_replay_bytes_behind", DisplayName = "Replica replay bytes behind", Category = CatPgReplication, SourceTable = "pg_replication_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "replay_bytes_behind",
+            NativeUnit = "bytes", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgReplicationDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_repl_sent_bytes_behind", DisplayName = "Replica sent bytes behind", Category = CatPgReplication, SourceTable = "pg_replication_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "sent_bytes_behind",
+            NativeUnit = "bytes", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgReplicationDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_repl_write_lag_ms", DisplayName = "Replica write lag", Category = CatPgReplication, SourceTable = "pg_replication_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "write_lag_ms",
+            NativeUnit = "ms", DefaultUnit = "ms", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgReplicationDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_repl_flush_lag_ms", DisplayName = "Replica flush lag", Category = CatPgReplication, SourceTable = "pg_replication_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "flush_lag_ms",
+            NativeUnit = "ms", DefaultUnit = "ms", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgReplicationDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_repl_replay_lag_ms", DisplayName = "Replica replay lag", Category = CatPgReplication, SourceTable = "pg_replication_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "replay_lag_ms",
+            NativeUnit = "ms", DefaultUnit = "ms", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgReplicationDims,
+        },
+
+        /* ── pg_replication_slot_stats (pg_replication_slots) - WAL-retention gauges. safe_wal_size defaults to
+             Min because the least remaining headroom before the slot is lost is the signal, like volume_free_mb. ── */
+        new ComposeMeasure
+        {
+            Key = "pg_slot_retained_wal_bytes", DisplayName = "Slot retained WAL", Category = CatPgReplication, SourceTable = "pg_replication_slot_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "retained_wal_bytes",
+            NativeUnit = "bytes", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgSlotDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_slot_safe_wal_size_bytes", DisplayName = "Slot safe WAL headroom", Category = CatPgReplication, SourceTable = "pg_replication_slot_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "safe_wal_size_bytes",
+            NativeUnit = "bytes", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Min, ValidAggs = GaugeAggs, AllowedDimensions = PgSlotDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_slot_xmin_age", DisplayName = "Slot xmin age", Category = CatPgReplication, SourceTable = "pg_replication_slot_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "xmin_age",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgSlotDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_slot_catalog_xmin_age", DisplayName = "Slot catalog xmin age", Category = CatPgReplication, SourceTable = "pg_replication_slot_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "catalog_xmin_age",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgSlotDims,
+        },
+
+        /* ── pg_autovacuum_stats (pg_stat_user_tables; !in-recovery) - vacuum backlog gauges ── */
+        new ComposeMeasure
+        {
+            Key = "pg_av_dead_tuples", DisplayName = "Dead tuples", Category = CatPgVacuum, SourceTable = "pg_autovacuum_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "dead_tuples",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgTableDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_av_live_tuples", DisplayName = "Live tuples", Category = CatPgVacuum, SourceTable = "pg_autovacuum_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "live_tuples",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgTableDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_av_mods_since_analyze", DisplayName = "Modifications since analyze", Category = CatPgVacuum, SourceTable = "pg_autovacuum_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "mods_since_analyze",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgTableDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_av_inserts_since_vacuum", DisplayName = "Inserts since vacuum", Category = CatPgVacuum, SourceTable = "pg_autovacuum_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "inserts_since_vacuum",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgTableDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_av_total_bytes", DisplayName = "Table total size", Category = CatPgVacuum, SourceTable = "pg_autovacuum_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "total_bytes",
+            NativeUnit = "bytes", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgTableDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_av_autovacuum_count", DisplayName = "Autovacuum runs (cumulative)", Category = CatPgVacuum, SourceTable = "pg_autovacuum_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "autovacuum_count",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgTableDims,
+        },
+
+        /* ── pg_wraparound_stats (pg_database freeze headroom) - LEVEL gauges (the collector stores no delta:
+             an age is a distance from a wall, not a counter). xids_remaining defaults to Min - the least
+             runway to a write outage is the signal. ── */
+        new ComposeMeasure
+        {
+            Key = "pg_frozen_xid_age", DisplayName = "Frozen XID age", Category = CatPgWraparound, SourceTable = "pg_wraparound_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "frozen_xid_age",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgWraparoundDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_min_multixid_age", DisplayName = "Min MultiXact ID age", Category = CatPgWraparound, SourceTable = "pg_wraparound_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "min_multixid_age",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgWraparoundDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_pct_toward_wraparound", DisplayName = "% toward XID wraparound", Category = CatPgWraparound, SourceTable = "pg_wraparound_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "pct_toward_wraparound",
+            NativeUnit = "percent", DefaultUnit = "percent", UnitFamily = FamilyPercent,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgWraparoundDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_pct_toward_emergency_vacuum", DisplayName = "% toward emergency vacuum", Category = CatPgWraparound, SourceTable = "pg_wraparound_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "pct_toward_emergency_vacuum",
+            NativeUnit = "percent", DefaultUnit = "percent", UnitFamily = FamilyPercent,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgWraparoundDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_pct_toward_multixact_wraparound", DisplayName = "% toward MultiXact wraparound", Category = CatPgWraparound, SourceTable = "pg_wraparound_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "pct_toward_multixact_wraparound",
+            NativeUnit = "percent", DefaultUnit = "percent", UnitFamily = FamilyPercent,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgWraparoundDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_xids_remaining", DisplayName = "XIDs remaining to write outage", Category = CatPgWraparound, SourceTable = "pg_wraparound_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "xids_remaining",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Min, ValidAggs = GaugeAggs, AllowedDimensions = PgWraparoundDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_multixids_remaining", DisplayName = "MultiXact IDs remaining to write outage", Category = CatPgWraparound, SourceTable = "pg_wraparound_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "multixids_remaining",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Min, ValidAggs = GaugeAggs, AllowedDimensions = PgWraparoundDims,
+        },
+
+        /* ── pg_xmin_horizon (what pins the xmin horizon; dim source) - LEVEL gauge (an age, like wraparound) ── */
+        new ComposeMeasure
+        {
+            Key = "pg_xmin_age", DisplayName = "Xmin horizon age", Category = CatPgWraparound, SourceTable = "pg_xmin_horizon",
+            Archetype = MeasureArchetype.Gauge, Column = "xmin_age",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgXminDims,
+        },
+
+        /* ── pg_session_states (pg_stat_activity) - point-in-time session gauges. total/active/idle-in-transaction
+             session counts are server-wide values repeated on every row; Max reads the snapshot value. ── */
+        new ComposeMeasure
+        {
+            Key = "pg_sess_state_duration_ms", DisplayName = "Session state duration", Category = CatPgSessions, SourceTable = "pg_session_states",
+            Archetype = MeasureArchetype.Gauge, Column = "state_duration_ms",
+            NativeUnit = "ms", DefaultUnit = "ms", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgSessionDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_sess_xact_duration_ms", DisplayName = "Session transaction duration", Category = CatPgSessions, SourceTable = "pg_session_states",
+            Archetype = MeasureArchetype.Gauge, Column = "xact_duration_ms",
+            NativeUnit = "ms", DefaultUnit = "ms", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgSessionDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_sess_query_duration_ms", DisplayName = "Session query duration", Category = CatPgSessions, SourceTable = "pg_session_states",
+            Archetype = MeasureArchetype.Gauge, Column = "query_duration_ms",
+            NativeUnit = "ms", DefaultUnit = "ms", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgSessionDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_sess_total_sessions", DisplayName = "Total sessions", Category = CatPgSessions, SourceTable = "pg_session_states",
+            Archetype = MeasureArchetype.Gauge, Column = "total_sessions",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgSessionDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_sess_active_sessions", DisplayName = "Active sessions", Category = CatPgSessions, SourceTable = "pg_session_states",
+            Archetype = MeasureArchetype.Gauge, Column = "active_sessions",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgSessionDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_sess_idle_in_transaction_sessions", DisplayName = "Idle-in-transaction sessions", Category = CatPgSessions, SourceTable = "pg_session_states",
+            Archetype = MeasureArchetype.Gauge, Column = "idle_in_transaction_sessions",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgSessionDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_sess_xmin_age", DisplayName = "Session xmin age", Category = CatPgSessions, SourceTable = "pg_session_states",
+            Archetype = MeasureArchetype.Gauge, Column = "xmin_age",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgSessionDims,
+        },
+
+        /* ── pg_lock_stats (sampled pg_locks) - point-in-time lock gauges ── */
+        new ComposeMeasure
+        {
+            Key = "pg_lock_backend_count", DisplayName = "Backends holding/waiting on lock", Category = CatPgLocks, SourceTable = "pg_lock_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "backend_count",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgLockDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_lock_oldest_wait_ms", DisplayName = "Oldest lock wait", Category = CatPgLocks, SourceTable = "pg_lock_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "oldest_wait_ms",
+            NativeUnit = "ms", DefaultUnit = "ms", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgLockDims,
+        },
+
+        /* ── pg_buffer_usage (pg_buffercache) - point-in-time buffer-pool gauges ── */
+        new ComposeMeasure
+        {
+            Key = "pg_buf_buffers", DisplayName = "Buffers held by relation", Category = CatPgBuffers, SourceTable = "pg_buffer_usage",
+            Archetype = MeasureArchetype.Gauge, Column = "buffers",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgBufferDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_buf_dirty_buffers", DisplayName = "Dirty buffers", Category = CatPgBuffers, SourceTable = "pg_buffer_usage",
+            Archetype = MeasureArchetype.Gauge, Column = "dirty_buffers",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgBufferDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_buf_pool_used", DisplayName = "Buffer pool used", Category = CatPgBuffers, SourceTable = "pg_buffer_usage",
+            Archetype = MeasureArchetype.Gauge, Column = "pool_buffers_used",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgBufferDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_buf_avg_usage_count", DisplayName = "Average buffer usage count", Category = CatPgBuffers, SourceTable = "pg_buffer_usage",
+            Archetype = MeasureArchetype.Gauge, Column = "avg_usage_count",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Avg, ValidAggs = GaugeAggs, AllowedDimensions = PgBufferDims,
+        },
+
+        /* ── pg_kernel_stats (pg_stat_kcache; per-query OS CPU + device I/O) - cumulative per-query counters ── */
+        new ComposeMeasure
+        {
+            Key = "pg_kernel_user_time_ms", DisplayName = "Kernel user CPU time (cumulative)", Category = CatPgCpu, SourceTable = "pg_kernel_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "exec_user_time_ms",
+            NativeUnit = "ms", DefaultUnit = "ms", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgKernelDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_kernel_system_time_ms", DisplayName = "Kernel system CPU time (cumulative)", Category = CatPgCpu, SourceTable = "pg_kernel_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "exec_system_time_ms",
+            NativeUnit = "ms", DefaultUnit = "ms", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgKernelDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_kernel_read_bytes", DisplayName = "Kernel device reads (cumulative)", Category = CatPgCpu, SourceTable = "pg_kernel_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "exec_read_bytes",
+            NativeUnit = "bytes", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgKernelDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_kernel_write_bytes", DisplayName = "Kernel device writes (cumulative)", Category = CatPgCpu, SourceTable = "pg_kernel_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "exec_write_bytes",
+            NativeUnit = "bytes", DefaultUnit = "mb", UnitFamily = FamilyBytes,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgKernelDims,
+        },
+
+        /* ── pg_predicate_stats (pg_qualstats sampled predicate selectivity) ── */
+        new ComposeMeasure
+        {
+            Key = "pg_pred_worst_estimate_error", DisplayName = "Worst estimate error ratio", Category = CatPgStatements, SourceTable = "pg_predicate_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "worst_estimate_error_ratio",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgPredicateDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_pred_sample_count", DisplayName = "Predicate samples (cumulative)", Category = CatPgStatements, SourceTable = "pg_predicate_stats",
+            Archetype = MeasureArchetype.Gauge, Column = "sample_count",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgPredicateDims,
+        },
+
+        /* ── pg_wait_sampling (pg_wait_sampling extension; stock-PostgreSQL wait profile) ── */
+        new ComposeMeasure
+        {
+            Key = "pg_waitsample_count", DisplayName = "Wait samples (cumulative)", Category = CatPgWaits, SourceTable = "pg_wait_sampling",
+            Archetype = MeasureArchetype.Gauge, Column = "sample_count",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgWaitSamplingDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "pg_waitsample_backend_count", DisplayName = "Backends sampled waiting", Category = CatPgWaits, SourceTable = "pg_wait_sampling",
+            Archetype = MeasureArchetype.Gauge, Column = "backend_count",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgWaitSamplingDims,
         },
     };
 

@@ -92,6 +92,23 @@ public partial class App : Application
     /// </summary>
     public static int DefaultTimeRangeHours { get; set; } = 4;
 
+    /// <summary>
+    /// Whether the server-tab auto-refresh timer starts running (#3479). One preference across every
+    /// tab, like <see cref="DefaultTimeRangeHours"/> above: the reporter's mental model is "the app's
+    /// refresh setting", so a tab opened after the change and a tab restored at the next launch must
+    /// both take it — per-tab rows would make the same toggle mean different things in different tabs.
+    /// </summary>
+    public static bool AutoRefreshEnabled { get; set; } = true;
+
+    /// <summary>
+    /// The server-tab auto-refresh interval in seconds (#3479). Stored in its unit rather than as the
+    /// toolbar combo's index for the same reason the time range stores hours: an index is a fact about
+    /// today's XAML, and reordering the combo would silently re-meaning every settings.json in the
+    /// field. <c>ServerTab.AutoRefreshIndexForSeconds</c> maps a value this combo does not offer back
+    /// to the XAML default, so a hand-edited 45 cannot pick a fourth interval into existence.
+    /// </summary>
+    public static int AutoRefreshIntervalSeconds { get; set; } = 60;
+
     /* Alert settings */
     public static bool AlertsEnabled { get; set; } = true;
     public static bool NotifyConnectionChanges { get; set; } = true;
@@ -481,6 +498,14 @@ public partial class App : Application
            itself is resolved lazily per prompt, so registering this early is safe. */
         Services.EntraInteractiveAuth.Register(ActiveWindowHandle);
 
+        /* Device code has a human step in the middle of the connection open: the driver calls back
+           with a code and a URL and then polls for the token. With no callback installed the driver
+           writes the code to a console this process does not have, so the sign-in waits three
+           minutes for something nobody was shown. Registered here for the same reason as the line
+           above - SqlAuthenticationProvider installs against the METHOD, so this covers Test
+           Connection and the Manage Servers connectivity check without per-site wiring. */
+        Services.EntraDeviceCodeAuth.Register(ShowDeviceCodePrompt);
+
         // Create and show main window (StartupUri removed for Velopack custom Main)
         _mainWindow = new MainWindow();
         _mainWindow.Show();
@@ -489,6 +514,68 @@ public partial class App : Application
            been sitting in AppLogger's buffer since; this is the visible half, and it is here rather than
            beside the loaders so that it has a window behind it and so that startup order is untouched. */
         ReportUnreadableSettingsToUser();
+    }
+
+    /// <summary>
+    /// Puts one device-code challenge in front of the user.
+    ///
+    /// <para>Marshaled with <c>BeginInvoke</c> rather than <c>Invoke</c>, and that is the difference
+    /// between this and <see cref="ActiveWindowHandle"/> beside it. The driver <b>awaits</b> its
+    /// device-code callback before it starts polling for the token, so anything this blocks on is
+    /// time taken off the user's own deadline; a fire-and-forget post returns to the driver at once
+    /// and the window appears on the next dispatcher turn. The UI thread is free to take it: every
+    /// connection open on these paths is awaited, never blocked on.</para>
+    ///
+    /// <para>Owned by whichever window is in front, for <see cref="ActiveWindowHandle"/>'s reason —
+    /// usually the Add/Edit Server dialog, which is modal, and a window it owns stays enabled while
+    /// it is. An unowned window would be disabled by that modality and the user could not dismiss
+    /// it.</para>
+    /// </summary>
+    private static void ShowDeviceCodePrompt(Services.EntraDeviceCodeAttempt attempt)
+    {
+        var app = Current;
+        var dispatcher = app?.Dispatcher;
+
+        if (app is null || dispatcher is null)
+        {
+            /* No dispatcher means no window is possible, and a device-code sign-in with nothing
+               displaying the code cannot succeed - so end it now rather than after three minutes of
+               polling for a code the user never saw. */
+            AppLogger.Warn("App", "No dispatcher to show the device-code prompt on; sign-in cancelled.");
+            attempt.Cancel();
+            return;
+        }
+
+        dispatcher.BeginInvoke(new Action(() =>
+        {
+            try
+            {
+                Window? active = null;
+                foreach (Window window in app.Windows)
+                {
+                    if (window.IsActive)
+                    {
+                        active = window;
+                        break;
+                    }
+                }
+
+                var prompt = new Windows.EntraDeviceCodeWindow(attempt)
+                {
+                    Owner = active ?? app.MainWindow,
+                };
+                prompt.Show();
+            }
+            catch (Exception ex)
+            {
+                /* This runs on the dispatcher, after the driver's callback has already returned, so
+                   there is nobody left to propagate to: an unhandled throw here would reach
+                   DispatcherUnhandledException. Cancelling turns a window that failed to open into a
+                   failed connection the user is told about, instead of a three-minute wait. */
+                AppLogger.Error("App", "Could not show the device-code prompt; sign-in cancelled.", ex);
+                attempt.Cancel();
+            }
+        }));
     }
 
     /// <summary>
@@ -816,6 +903,12 @@ public partial class App : Application
             "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
+    /// <summary>
+    /// Loads the per-tab UI defaults: the time range, and — since #3479 — the auto-refresh toggle and
+    /// interval, which ride here rather than in a fourth loader because they are the same class of
+    /// setting (a toolbar default every new <c>ServerTab</c> reads) and the comments around
+    /// <see cref="ReportBadSettingValues"/> count exactly three loaders.
+    /// </summary>
     private static void LoadDefaultTimeRange()
     {
         var settings = SettingsFileGuard.Read(Path.Combine(ConfigDirectory, "settings.json"));
@@ -847,9 +940,24 @@ public partial class App : Application
                 DefaultTimeRangeHours = val.WholeNumber(DefaultTimeRangeHours);
             }
 
-            /* #2444: this loader already named its one key, which is the behaviour LoadAlertSettings could
-               not manage across eighty-seven. It now says so through the shared reporter instead of its own
-               log line, so the startup dialog can name this key beside the others. */
+            /* #3479: written by ServerTab.PersistAutoRefresh when the toolbar controls change, read only
+               here. No range check on the seconds — legality is the restore switch's job (a value the
+               combo does not offer restores the XAML default), which is the same division of labor
+               default_time_range_hours has with the TimeRangeCombo restore switch. */
+            if (read.TryGetProperty("auto_refresh_enabled", out var refreshOn))
+            {
+                AutoRefreshEnabled = refreshOn.Bool(AutoRefreshEnabled);
+            }
+
+            if (read.TryGetProperty("auto_refresh_interval_seconds", out var refreshSeconds))
+            {
+                AutoRefreshIntervalSeconds = refreshSeconds.WholeNumber(AutoRefreshIntervalSeconds);
+            }
+
+            /* #2444: this loader named its keys even when it had only one, which is the behaviour
+               LoadAlertSettings could not manage across eighty-seven. It says so through the shared
+               reporter instead of its own log line, so the startup dialog can name these keys beside
+               the others. */
             ReportBadSettingValues(read.Problems);
         }
         catch (Exception ex)
@@ -857,8 +965,9 @@ public partial class App : Application
             /* The document parsed and every value read is shape-checked rather than caught, so nothing
                EXPECTED lands here any more. Kept because an unexpected throw must not take startup down. */
             AppLogger.Warn("Settings",
-                $"settings.json key 'default_time_range_hours' could not be read ({ex.Message}); the " +
-                $"default of {DefaultTimeRangeHours} hours is in use.");
+                $"settings.json tab-default keys could not be read ({ex.Message}); the defaults " +
+                $"({DefaultTimeRangeHours} hour range, auto-refresh {(AutoRefreshEnabled ? "on" : "off")} " +
+                $"at {AutoRefreshIntervalSeconds}s) are in use.");
         }
     }
 

@@ -25,12 +25,25 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <c>test_connect</c> command the SERVICE executes (it holds the network path + credentials); the dialog
 /// enqueues it and polls the result.
 ///
-/// <para><b>Auth + secrets.</b> The service connects with Windows (integrated) or SQL auth only, so those
-/// are the two modes written (Windows → <c>integrated</c>, SQL → <c>sql</c> + a DPAPI-LocalMachine password
-/// blob via <see cref="ViewerServerSecret"/>, never plaintext). A SQL credential PROFILE is resolved to its
-/// concrete username + secret at write time. The three Azure/Entra modes have no service connect path yet
-/// (<see cref="ServerStoreCredential"/>) and are blocked with a clear message rather than written
-/// un-honorable. Favorites stay viewer-local (<see cref="ViewerServerStore.SetFavorite"/>).</para>
+/// <para><b>Auth + secrets.</b> The service connects with Windows, SQL, and the two non-interactive Entra
+/// modes — service principal and managed identity (#3484) — so those are the modes written (Windows →
+/// <c>integrated</c>; SQL → <c>sql</c> + a DPAPI-LocalMachine password blob via <see cref="ViewerServerSecret"/>;
+/// service principal → <c>serviceprincipal</c> + the client secret in the same blob shape; managed identity →
+/// <c>managedidentity</c>, secret-less), never plaintext. A SQL credential PROFILE is resolved to its concrete
+/// username + secret at write time. The INTERACTIVE Entra modes (MFA / device-code / default-credential) have
+/// no headless connect path (<see cref="ServerStoreCredential"/>) and are blocked with a clear message rather
+/// than written un-honorable. Favorites stay viewer-local (<see cref="ViewerServerStore.SetFavorite"/>).</para>
+///
+/// <para><b>Engine (#3499).</b> The dialog authors both engines the service monitors: SQL Server (the checked
+/// default — an untouched dialog renders the exact pre-selector form) and PostgreSQL, which the service had
+/// carried end to end (registry row, probe, collectors) while this dialog could not say the word — the MCP
+/// <c>add_servers</c> tool and <c>--add-server</c> were the only onboarding routes. The PostgreSQL arm exposes
+/// the one PG-only field (port, blank = 5432) and reuses the shared Database/Encryption/Trust controls (the
+/// service maps the latter two onto sslmode); the SQL-Server-only controls (the Entra/Windows auth modes,
+/// read-only intent, multi-subnet failover) hide, and auth is pinned to SQL — the one mode the PostgreSQL
+/// connect path honors, enforced again at save with the same rule the backend applies. Engine and port ride
+/// through Test Connection and into the registry row, and the row shape matches <c>add_servers</c> exactly:
+/// one server, one identity, whichever door it came in through.</para>
 /// </summary>
 public partial class AddServerDialog : Window
 {
@@ -89,8 +102,22 @@ public partial class AddServerDialog : Window
 
         _existing = existing;
         _originalServerId = existing.ServerId;
-        Title = "Edit SQL Server";
-        HeaderText.Text = "Edit SQL Server Connection";
+
+        /* #3499: the engine radios REFLECT the row and are LOCKED on edit. The engine is part of what the
+           server IS — every collect.* row under this server_id was collected as that engine — and #2158 made
+           an edit keep its identity, so flipping the radio here would interleave two engines' histories under
+           one id. Recognition goes through IsPostgres (the TargetEngine parse) rather than a token compare,
+           because a darling.json-seeded row holds its raw spelling ("aurora-postgresql", "PostgreSQL", ...). */
+        if (existing.IsPostgres)
+        {
+            PostgresEngineRadio.IsChecked = true;
+            PortBox.Text = existing.Port > 0 ? existing.Port.ToString(CultureInfo.InvariantCulture) : "";
+        }
+        SqlServerEngineRadio.IsEnabled = false;
+        PostgresEngineRadio.IsEnabled = false;
+        SqlServerEngineRadio.ToolTip = EngineLockedOnEditTooltip;
+        PostgresEngineRadio.ToolTip = EngineLockedOnEditTooltip;
+        ApplyEngineTitle(existing.IsPostgres);
 
         ServerNameBox.Text = existing.Host;
         DisplayNameBox.Text = existing.Name;
@@ -129,6 +156,25 @@ public partial class AddServerDialog : Window
             {
                 StatusText.Text = "The stored password can't be read on this machine — leave it blank to keep it, or type a new one.";
             }
+        }
+        else if (string.Equals(existing.Auth, ServerStoreCredential.ServicePrincipal, StringComparison.OrdinalIgnoreCase))
+        {
+            /* #3484: prefill a service principal — client id in the app-id box, the secret decrypted from the
+               blob like a SQL password (blank on save keeps the existing blob). */
+            ServicePrincipalAuthRadio.IsChecked = true;
+            AzureClientIdBox.Text = existing.Username ?? "";
+            var decrypted = OperatingSystem.IsWindows() ? ViewerServerSecret.TryUnprotect(existing.EncryptedPassword) : null;
+            AzureClientSecretBox.Password = decrypted ?? "";
+            if (decrypted is null && !string.IsNullOrEmpty(existing.EncryptedPassword))
+            {
+                StatusText.Text = "The stored client secret can't be read on this machine — leave it blank to keep it, or type a new one.";
+            }
+        }
+        else if (string.Equals(existing.Auth, ServerStoreCredential.ManagedIdentity, StringComparison.OrdinalIgnoreCase))
+        {
+            /* #3484: managed identity carries no secret — just the optional user-assigned client id. */
+            ManagedIdentityAuthRadio.IsChecked = true;
+            ManagedIdentityClientIdBox.Text = existing.Username ?? "";
         }
         else
         {
@@ -208,12 +254,10 @@ public partial class AddServerDialog : Window
         ServicePrincipalPanel.Visibility = ServicePrincipalAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
         ManagedIdentityPanel.Visibility = ManagedIdentityAuthRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
 
-        /* Warn as soon as an Azure/Entra mode is picked — the service can't connect with it, and Save/Test
-           will block. (A profile-backed Azure identity is caught at resolve time.) */
-        var azureSelected = EntraMfaAuthRadio.IsChecked == true
-            || ServicePrincipalAuthRadio.IsChecked == true
-            || ManagedIdentityAuthRadio.IsChecked == true;
-        if (azureSelected)
+        /* Only the INTERACTIVE Entra mode is unsupported now (#3484): warn as soon as it is picked, since
+           Save/Test will block. Service principal and managed identity are supported and do not warn.
+           (A profile-backed interactive identity is caught at resolve time.) */
+        if (EntraMfaAuthRadio.IsChecked == true)
         {
             StatusText.Text = ServerStoreCredential.UnsupportedAuthMessage;
         }
@@ -221,17 +265,18 @@ public partial class AddServerDialog : Window
         {
             StatusText.Text = "";
         }
-        /* #2279: SQL auth means a password, and a password is stored as a DPAPI LocalMachine blob that ONLY the
-           machine writing it can decrypt. The service is what has to decrypt it, so a credential saved from a
-           viewer on another PC can never be used and the server fails to connect on every sweep afterwards —
-           the #2255 report. Said as soon as the mode is picked, in the same place and the same way the Azure
-           arm above says its piece, so it lands before the password is typed rather than after the save.
+        /* #2279: a stored secret — a SQL password OR a service-principal client secret (#3484) — is a DPAPI
+           LocalMachine blob ONLY the machine writing it can decrypt. The service is what has to decrypt it, so
+           a credential saved from a viewer on another PC than the service can never be used and the server
+           fails to connect on every sweep afterwards (the #2255 report). Said as soon as either secret-bearing
+           mode is picked, so it lands before the secret is typed rather than after the save.
 
            WARNED, not refused: a non-loopback store does not prove this viewer is remote (a BYO store on
            another host with the service local reads the same), and refusing would block a legitimate first-run
            Add. Silent for a loopback store, which is the managed single-box deploy and the overwhelmingly
            common case — a hint that fires for everyone is a hint nobody reads. */
-        else if (SqlAuthRadio.IsChecked == true && _dataService is { StoreIsOnThisMachine: false })
+        else if ((SqlAuthRadio.IsChecked == true || ServicePrincipalAuthRadio.IsChecked == true)
+            && _dataService is { StoreIsOnThisMachine: false })
         {
             StatusText.Text = SqlCredentialMachineBoundHint;
         }
@@ -251,6 +296,117 @@ public partial class AddServerDialog : Window
         "so if the Darling service runs elsewhere it will not be able to decrypt it and the server will fail " +
         "to connect. Add it from a viewer on the service's host, run --add-server there, or use an env:/file: " +
         "reference instead.";
+
+    /// <summary>
+    /// #3499: swaps the engine-specific parts of the form. The SQL Server arm is the XAML's default state —
+    /// this handler must restore EXACTLY that state on the way back, which is why it only ever toggles
+    /// Visibility (a hidden checkbox keeps its IsChecked, so an edited row's stored read-only-intent /
+    /// multi-subnet values survive the round trip untouched) and never resets a value.
+    ///
+    /// <para>The PostgreSQL arm hides the auth modes the backend refuses for a PG target — Windows/Kerberos
+    /// and all the Entra modes — and hides the SQL-auth radio too: username/password is the one inline mode
+    /// left, so rather than show a lone radio mislabeled "SQL Server Authentication" it collapses the picker
+    /// and force-checks SQL auth, whose username/password panel then renders directly under the Authentication
+    /// header. The credential-profile source stays offered (a SQL profile is a valid PG credential); a profile
+    /// resolving to a non-SQL mode is refused at build time with the same tailored message, the #3486
+    /// discipline of naming what IS supported instead of a bare no.</para>
+    /// </summary>
+    private void EngineMode_Changed(object sender, RoutedEventArgs e)
+    {
+        /* XAML parse order: this fires for the default-checked SQL Server radio while the later-declared
+           panels are still null. The XAML defaults already ARE the SQL Server arm, so returning is correct. */
+        if (PostgresOptionsPanel is null || InlineAuthRadios is null ||
+            ReadOnlyIntentCheckBox is null || MultiSubnetFailoverCheckBox is null)
+        {
+            return;
+        }
+
+        var postgres = PostgresEngineRadio.IsChecked == true;
+
+        PostgresOptionsPanel.Visibility = postgres ? Visibility.Visible : Visibility.Collapsed;
+
+        /* SQL-Server-only connection options: ApplicationIntent and MultiSubnetFailover are AG-listener/FCI
+           concepts the PostgreSQL connection builder never reads. Hidden, not unchecked — see the summary. */
+        ReadOnlyIntentCheckBox.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
+        MultiSubnetFailoverCheckBox.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
+
+        WindowsAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
+        EntraMfaAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
+        ServicePrincipalAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
+        ManagedIdentityAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
+
+        /* PostgreSQL has exactly one inline auth mode — username/password — so hide the SQL-auth radio too
+           rather than leave a lone radio mislabeled "SQL Server Authentication" on a PG target. Its
+           username/password panel keeps showing regardless: UpdateAuthPanels keys the SqlCredentialsPanel on
+           SqlAuthRadio.IsChecked, not its Visibility, and the force-check below keeps it checked. Force-checking
+           also means a hidden radio can never be the CHECKED one — a checked-but-invisible Windows radio would
+           build an integrated-auth PG row the save gate then refuses, an error the operator was given no control
+           to avoid. Going back to SQL Server restores the radio and leaves SQL auth checked: it is a valid SQL
+           Server mode, and un-picking a choice the operator made is worse. */
+        SqlAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
+        if (postgres && SqlAuthRadio.IsChecked != true)
+        {
+            SqlAuthRadio.IsChecked = true;
+        }
+
+        ApplyEngineTitle(postgres);
+    }
+
+    /// <summary>The window title + header for the current engine and Add/Edit mode. On the SQL Server arm the
+    /// strings are byte-identical to the pre-#3499 dialog — that is the regression pin, not a coincidence.</summary>
+    private void ApplyEngineTitle(bool postgres)
+    {
+        var noun = postgres ? "PostgreSQL Server" : "SQL Server";
+        var verb = _existing is null ? "Add" : "Edit";
+        Title = $"{verb} {noun}";
+        HeaderText.Text = $"{verb} {noun} Connection";
+    }
+
+    /// <summary>The engine radios are disabled on edit; the tooltip says why, so the lock reads as a rule
+    /// rather than a bug (#3499).</summary>
+    private const string EngineLockedOnEditTooltip =
+        "The engine is part of what this server IS — its collected history is keyed to it — so an edit can't " +
+        "change it. To move a host between engines, add it as a new server and remove this one.";
+
+    /// <summary>
+    /// The #3499 belt on the save/test path: the backend refuses every non-SQL auth mode for a PostgreSQL
+    /// target (the same rule in DarlingConfig.Validate and the MCP add_servers validation), so the dialog
+    /// refuses it too rather than writing a row the service will fail on every sweep. The hidden radios make
+    /// this unreachable from the inline modes; a credential PROFILE resolving to integrated / service
+    /// principal / managed identity is the live route here. Tailored like #3486's refusals: it names what IS
+    /// supported and how to proceed, not just what is not.
+    /// </summary>
+    internal const string PostgresRequiresSqlAuthMessage =
+        "A PostgreSQL target requires username/password (SQL) authentication — integrated/Kerberos and the " +
+        "Microsoft Entra modes are not supported for PostgreSQL targets, matching what the service accepts. " +
+        "Enter a username and password, or pick a credential profile that carries one.";
+
+    /// <summary>
+    /// Parses the PostgreSQL port box (#3499): blank (or an explicit 0) is 0, "use the driver's default"
+    /// (5432) — the same omitted-means-default contract as the MCP add_servers tool's <c>port</c> field, so a
+    /// default-port target added here derives the SAME identity as one onboarded over MCP with port omitted.
+    /// Otherwise an integer in [1, 65535], range-checked here to match that tool's validation rather than
+    /// failing later inside Npgsql. Pure — pinned by Darling.Tests.
+    /// </summary>
+    internal static (int Port, string? Error) ParsePortText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return (0, null);
+        }
+
+        if (!int.TryParse(text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var port))
+        {
+            return (0, "Port must be a number — leave it blank for the default (5432).");
+        }
+
+        if (port is not 0 && port is < 1 or > 65535)
+        {
+            return (0, $"Port must be between 1 and 65535 (got {port}), or blank for the default (5432).");
+        }
+
+        return (port, null);
+    }
 
     private string GetSelectedEncryptMode() => EncryptModeComboBox.SelectedIndex switch
     {
@@ -287,9 +443,23 @@ public partial class AddServerDialog : Window
                 return false;
             }
 
-            /* Profile auth is SqlServer here (the only profile type the service honors). Resolve its concrete
-               secret and write those onto the row — the store keeps concrete creds; profiles are a viewer
-               authoring convenience the store needs no table for. */
+            auth = mapped;
+
+            /* A managed-identity profile carries no secret (#3485 review): take its optional user-assigned
+               client id from ManagedIdentityClientId (a profile's Username is populated for SQL only, never
+               for MI — reading it here would silently downgrade a user-assigned identity to system-assigned)
+               and write no blob. Integrated profiles fall here too and carry neither, so username stays null.
+               Demanding a secret would make an MI profile unusable — one is never stored, so the secret check
+               below could never pass. */
+            if (!ServerStoreCredential.RequiresSecret(profile.AuthType))
+            {
+                username = string.IsNullOrWhiteSpace(profile.ManagedIdentityClientId) ? null : profile.ManagedIdentityClientId;
+                return true;
+            }
+
+            /* Secret-bearing profiles (SQL, service principal): resolve the concrete secret and write it onto
+               the row — the store keeps concrete creds; profiles are a viewer authoring convenience the store
+               needs no table for. */
             var secret = _profileStore.GetSecret(profile.Id);
             if (secret is null || string.IsNullOrEmpty(secret.Value.Password))
             {
@@ -297,7 +467,6 @@ public partial class AddServerDialog : Window
                 return false;
             }
 
-            auth = mapped;
             username = string.IsNullOrWhiteSpace(secret.Value.Username) ? profile.Username : secret.Value.Username;
             encryptedPassword = ViewerServerSecret.Protect(secret.Value.Password);
             return true;
@@ -326,8 +495,12 @@ public partial class AddServerDialog : Window
                 return true;
             }
 
-            /* Blank password on edit → keep the existing stored blob (Lite's "blank means leave it"). */
-            if (_existing is not null && !string.IsNullOrEmpty(_existing.EncryptedPassword))
+            /* Blank password on edit → keep the existing stored blob (Lite's "blank means leave it") — but ONLY
+               when the row was ALREADY SQL auth, so switching INTO SQL from another secret-bearing mode (service
+               principal) cannot silently reuse that mode's secret as a SQL password (#3485 review). */
+            if (_existing is not null
+                && string.Equals(_existing.Auth, ServerStoreCredential.Sql, StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrEmpty(_existing.EncryptedPassword))
             {
                 encryptedPassword = _existing.EncryptedPassword;
                 return true;
@@ -337,7 +510,52 @@ public partial class AddServerDialog : Window
             return false;
         }
 
-        /* EntraMFA / ServicePrincipal / ManagedIdentity — no Darling service connect path. */
+        if (ServicePrincipalAuthRadio.IsChecked == true)
+        {
+            /* #3484: Entra service principal — the application/client id in username, the client secret in the
+               DPAPI blob (same shape as a SQL password), so the resolve mirrors SQL auth exactly. The tenant is
+               auto-discovered from the target by the driver, so AzureTenantIdBox is reference-only, not stored. */
+            auth = ServerStoreCredential.ServicePrincipal;
+            username = AzureClientIdBox.Text.Trim();
+            if (string.IsNullOrEmpty(username))
+            {
+                error = "The Application (client) ID is required for service-principal authentication.";
+                return false;
+            }
+
+            var typedSecret = AzureClientSecretBox.Password;
+            if (!string.IsNullOrEmpty(typedSecret))
+            {
+                encryptedPassword = ViewerServerSecret.Protect(typedSecret);
+                return true;
+            }
+
+            /* Blank secret on edit keeps the existing blob — but ONLY when the row was ALREADY a service
+               principal, so switching INTO SP from SQL cannot silently reuse the old SQL password as the client
+               secret (#3485 review). */
+            if (_existing is not null
+                && string.Equals(_existing.Auth, ServerStoreCredential.ServicePrincipal, StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrEmpty(_existing.EncryptedPassword))
+            {
+                encryptedPassword = _existing.EncryptedPassword;
+                return true;
+            }
+
+            error = "The client secret is required for service-principal authentication.";
+            return false;
+        }
+
+        if (ManagedIdentityAuthRadio.IsChecked == true)
+        {
+            /* #3484: managed identity is secret-less. A user-assigned identity names its client id in username;
+               a system-assigned identity leaves it blank. No password blob is written. */
+            auth = ServerStoreCredential.ManagedIdentity;
+            var miClientId = ManagedIdentityClientIdBox.Text.Trim();
+            username = string.IsNullOrEmpty(miClientId) ? null : miClientId;
+            return true;
+        }
+
+        /* EntraMFA (and any other interactive Entra mode) — the headless service has no interactive connect path. */
         error = ServerStoreCredential.UnsupportedAuthMessage;
         return false;
     }
@@ -354,9 +572,43 @@ public partial class AddServerDialog : Window
             return null;
         }
 
+        var isPostgres = PostgresEngineRadio.IsChecked == true;
+
+        /* #3499: the engine string. An EDIT carries the row's stored spelling VERBATIM — the radios are
+           locked, and rewriting "aurora-postgresql" to "postgres" would be the dialog silently re-spelling a
+           value it did not author (harmless to TargetEngine, but an edit must not mangle what it was not asked
+           to change). An Add writes the canonical token the radio names — the same value add_servers stores. */
+        var engine = _existing?.Engine
+            ?? (isPostgres ? MonitoredServerRow.EnginePostgres : MonitoredServerRow.EngineSqlServer);
+
+        /* Port is PostgreSQL-only (a SQL Server target carries its port in the host string), so only the PG
+           arm reads the box; the SQL Server arm PRESERVES a stored value rather than zeroing it — only ever
+           non-zero for a row onboarded elsewhere, and an edit must not mangle it. */
+        var port = _existing?.Port ?? 0;
+        if (isPostgres)
+        {
+            var (parsedPort, portError) = ParsePortText(PortBox.Text);
+            if (portError is not null)
+            {
+                error = portError;
+                return null;
+            }
+
+            port = parsedPort;
+        }
+
         if (!TryResolveCredential(out var auth, out var username, out var encryptedPassword, out var credError))
         {
             error = credError;
+            return null;
+        }
+
+        /* The #3499 belt: the hidden radios keep the inline modes honest, so the live route here is a
+           credential profile resolving to a mode the PostgreSQL connect path refuses. Same rule, same place
+           in the flow, as the backend's own validation — the two onboarding paths cannot disagree. */
+        if (isPostgres && !string.Equals(auth, ServerStoreCredential.Sql, StringComparison.OrdinalIgnoreCase))
+        {
+            error = PostgresRequiresSqlAuthMessage;
             return null;
         }
 
@@ -382,11 +634,16 @@ public partial class AddServerDialog : Window
                row is keyed by this id, so re-deriving it abandons the whole of that server's history. The old
                shape wrote a row under the new hash and deleted the old one, which left the REGISTRY tidy and
                the history orphaned with nothing pointing at it: the failure looked like a server that had
-               never been monitored. Derivation now runs only where there is no history to lose. */
-            ServerId = _originalServerId ?? ViewerDataService.ComputeServerId(host, database, readOnlyIntent),
+               never been monitored. Derivation now runs only where there is no history to lose. #3499 feeds
+               engine and port into the derivation — the #2218 identity, and what makes a dialog-added
+               PostgreSQL target derive the SAME id add_servers would; both are inert on the SQL Server arm,
+               so every SQL Server Add derives the byte-identical id it always did. */
+            ServerId = _originalServerId ?? ViewerDataService.ComputeServerId(host, database, readOnlyIntent, engine, port),
             Name = displayName,
             Host = host,
             Database = database,
+            Engine = engine,
+            Port = port,
             Auth = auth,
             Username = username,
             EncryptedPassword = encryptedPassword,
@@ -441,8 +698,11 @@ public partial class AddServerDialog : Window
                its identity, a row's server_id no longer has to equal the hash of its own address, so the old
                id-based lookup would miss exactly the row it exists to protect. Comparing ids afterwards is
                what excludes "collided with myself" — an edit that leaves the address alone, or that only
-               renames or re-credentials the server. */
-            var occupant = await _dataService.GetMonitoredServerByAddressAsync(row.Host, row.Database, row.ReadOnlyIntent);
+               renames or re-credentials the server. #3499 widened the address to the full #2218 identity
+               (engine + port), so a PostgreSQL target no longer collides with a SQL Server registration that
+               merely shares its host — the guard was comparing a narrower identity than the product keys on. */
+            var occupant = await _dataService.GetMonitoredServerByAddressAsync(
+                row.Host, row.Database, row.ReadOnlyIntent, row.IsPostgres, row.Port);
             if (occupant is not null && occupant.ServerId != row.ServerId)
             {
                 StatusText.Text = "A server with this address (and database / read-only intent) is already monitored. Edit it from Manage Servers instead.";
@@ -505,6 +765,12 @@ public partial class AddServerDialog : Window
             {
                 Name = row.Name,
                 Host = row.Host,
+                /* #3499: engine + port ride to the probe exactly as they will ride to the registry, so Test
+                   Connection exercises the connection the save will store — a PostgreSQL target is probed as
+                   one (#3244's reply then answers in the right version vocabulary), not guessed at as SQL
+                   Server and failed against the wrong driver. */
+                Engine = row.Engine,
+                Port = row.Port,
                 Database = row.Database,
                 Auth = row.Auth,
                 Username = row.Username,

@@ -6117,6 +6117,67 @@ AND   js.last_run_status = 'Success'";
     /// </summary>
     public const int JobCatalogReadTimeoutSeconds = 30;
 
+    /// <summary>
+    /// #2813/#3297 WARNING tier, shipped default: how many times its own configured horizon a HELD tier must
+    /// be holding before the hold has cost enough to say so. The V119 column default, the
+    /// <c>AlertsConfig</c> seed, the viewer row's default, the Restore-Defaults button and the evaluator's
+    /// unsupplied-seam fallback all name this rather than restating 2.0, on #3060's finding: a number copied
+    /// into five places is four places that can be left behind.
+    ///
+    /// <para><b>Bounded on BOTH sides by measurement.</b> BELOW: retention drops whole CHUNKS and the
+    /// retention job runs on a schedule, so a tier legitimately holds its horizon plus up to a chunk plus up
+    /// to one job interval while working perfectly. Measured on a healthy production store under 4-day
+    /// horizons, that reaches <b>1.4x</b> (two relations holding 5.7 days against 4; a third at 1.2x) — NOT
+    /// the ~1.25x the naive horizon-plus-one-chunk arithmetic predicts, so the real margin here is 0.6x
+    /// rather than 0.75x. ABOVE: the production incident this comes from sat at 4.5x (18 days under a 4-day
+    /// policy) after 16 days, so 2.0x on that tier is ~8 days — the alert arrives about a week in, while the
+    /// cost is still recoverable and long before the 16 days it actually went unnoticed.</para>
+    /// </summary>
+    public const double RetentionHoldWarnRatioDefault = 2.0;
+
+    /// <summary>#2813/#3297 CRITICAL tier, shipped default: double the warning ratio. A tier at four times
+    /// its intended depth is no longer drifting, it is the dominant and still-compounding contributor to
+    /// store size — the motivating incident (4.5x) reads CRITICAL, which is the point.</summary>
+    public const double RetentionHoldCriticalRatioDefault = 4.0;
+
+    /// <summary>
+    /// #3297: the FLOOR both Retention Held ratio knobs clamp to, which is the shipped warning default —
+    /// so the knobs RAISE the tiers and cannot lower them. That asymmetry is deliberate.
+    ///
+    /// <para><b>A floor exists to refuse a setting that fires on a store that is working correctly</b>, the
+    /// same job <c>store_job_cadence_warn_percent</c>'s floor of 5 does. The healthy body of this
+    /// distribution reaches 1.4x measured (see <see cref="RetentionHoldWarnRatioDefault"/>), so anything at
+    /// or below ~1.5x fires on a healthy store outright, and the band between there and 2.0x is a margin
+    /// nobody has measured. 2.0x is the only figure with evidence behind it: every armed retention policy on
+    /// two production stores sits clear of it, and <c>Retention Held</c> has never fired on either.</para>
+    ///
+    /// <para><b>And the floor has to be safe for the COARSEST tier, not the average one</b>, because this is
+    /// one global ratio serving tiers whose chunk-to-horizon ratios differ by an order of magnitude — a
+    /// 35-day baseline tier with 7-day chunks tops out near 1.2x, while the 4-day raw tier with 1-day chunks
+    /// is the 1.4x reading. A floor safe for the former fires on the latter.</para>
+    ///
+    /// <para><b>What the field asked for is served by raising.</b> #3296's operator received an hourly
+    /// CRITICAL at 9.6x with nothing in Settings to adjust; raising either tier past it answers that. Nobody
+    /// has asked to warn EARLIER than 2.0x, and earlier is the one direction that manufactures alerts on
+    /// healthy stores. If that need appears, it is a measurement to take on a real store — moving an
+    /// operator-facing bound is not something to do as a side effect.</para>
+    /// </summary>
+    public const double RetentionHoldRatioFloor = RetentionHoldWarnRatioDefault;
+
+    /// <summary>
+    /// #3297: the CEILING both Retention Held ratio knobs clamp to. It exists so the knob stays a THRESHOLD
+    /// rather than becoming an undisclosed off switch — the #3314 reasoning about stretching a cooldown to
+    /// silence something: <c>create_mute_rule</c> silences an alert visibly, is scoped, expires, is listed by
+    /// <c>get_mute_rules</c> and still logs; a threshold parked out of reach reports nothing about what it
+    /// suppressed.
+    ///
+    /// <para>100x is where the ratio stops describing a condition this alert could be the first to report:
+    /// on every horizon the product ships, a tier two orders of magnitude past its depth has already taken
+    /// the store's free space, and the disk self-alerts own that. So above this the operator hears about it
+    /// from somewhere else regardless.</para>
+    /// </summary>
+    public const double RetentionHoldRatioCeiling = 100.0;
+
     /// <summary>The #2813 retention-hold catalog read, public so its two load-bearing predicates —
     /// <c>proc_name = 'policy_retention'</c> and the <c>collect</c> schema scope — are pinned in CI rather
     /// than only in a throwaway harness. Scoping matters for CORRECTNESS, not tidiness: the alert this

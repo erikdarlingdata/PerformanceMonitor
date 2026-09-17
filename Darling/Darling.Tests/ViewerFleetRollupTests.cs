@@ -132,8 +132,18 @@ public sealed class ViewerFleetRollupBuilderTests
     private static ServerSummaryItem Healthy(string name, int id) =>
         new() { DisplayName = name, ServerId = id, IsOnline = true };
 
-    private static ServerSummaryItem Critical(string name, int id, int deadlocks = 1) =>
-        new() { DisplayName = name, ServerId = id, IsOnline = true, DeadlockCount = deadlocks };
+    /// <summary>A card whose DEADLOCK band is Critical. #3368 made that a rate, so the helper declares the
+    /// window its count covers and defaults to a count that clears the 20/hr tier over it — one deadlock in
+    /// an hour is 1/hr and bands Healthy, which is the whole point of that issue.</summary>
+    private static ServerSummaryItem Critical(string name, int id, int deadlocks = 30) =>
+        new()
+        {
+            DisplayName = name,
+            ServerId = id,
+            IsOnline = true,
+            DeadlockCount = deadlocks,
+            DeadlockWindow = TimeSpan.FromHours(1),
+        };
 
     private static ServerSummaryItem WarningCollectors(string name, int id, int failed = 1) =>
         new() { DisplayName = name, ServerId = id, IsOnline = true, FailedCollectorCount = failed };
@@ -168,7 +178,7 @@ public sealed class ViewerFleetRollupBuilderTests
     [Fact]
     public void ClassifyBand_CriticalMetric_IsCritical()
     {
-        // A deadlock in the window is the card's Critical (DeadlockSeverity) → fleet Critical.
+        // A Critical deadlock RATE is the card's Critical (DeadlockSeverity) → fleet Critical (#3368).
         Assert.Equal(FleetHealthBand.Critical, FleetRollup.ClassifyBand(Critical("s", 1)));
         // CPU >= 95 is also the card's Critical.
         Assert.Equal(FleetHealthBand.Critical,
@@ -225,8 +235,12 @@ public sealed class ViewerFleetRollupBuilderTests
         var summaries = new[]
         {
             WarningCollectors("w1", 1, failed: 2),   // 2 failing collectors → counts once
-            Critical("c1", 2, deadlocks: 1),         // critical but no failing collector → not counted
-            new ServerSummaryItem { DisplayName = "c2", ServerId = 3, IsOnline = true, DeadlockCount = 1, FailedCollectorCount = 3 }, // both
+            Critical("c1", 2),                       // critical but no failing collector → not counted
+            new ServerSummaryItem
+            {
+                DisplayName = "c2", ServerId = 3, IsOnline = true,
+                DeadlockCount = 30, DeadlockWindow = TimeSpan.FromHours(1), FailedCollectorCount = 3,
+            }, // both
             Healthy("h1", 4),
         };
 
@@ -263,9 +277,24 @@ public sealed class ViewerFleetRollupBuilderTests
     [Fact]
     public void Build_WithinTheSameBand_RanksByHowManyMetricsAreBad()
     {
-        // Two Critical servers: one with two critical metrics (CPU + deadlock), one with a single deadlock.
-        var twoCritical = new ServerSummaryItem { DisplayName = "worse", ServerId = 1, IsOnline = true, CpuPercent = 96, DeadlockCount = 1 };
-        var oneCritical = new ServerSummaryItem { DisplayName = "milder", ServerId = 2, IsOnline = true, DeadlockCount = 1 };
+        /* Two Critical servers: one with two critical metrics (CPU + deadlock RATE), one with only the
+           deadlock rate. #3368: both declare the window their count covers, or the second is Warning and
+           this stops being a WITHIN-band comparison at all. */
+        var twoCritical = new ServerSummaryItem
+        {
+            DisplayName = "worse", ServerId = 1, IsOnline = true,
+            CpuPercent = 96, DeadlockCount = 30, DeadlockWindow = TimeSpan.FromHours(1),
+        };
+        var oneCritical = new ServerSummaryItem
+        {
+            DisplayName = "milder", ServerId = 2, IsOnline = true,
+            DeadlockCount = 30, DeadlockWindow = TimeSpan.FromHours(1),
+        };
+
+        /* The premise, asserted rather than assumed — the ranking claim below is meaningless if these land
+           in different bands. */
+        Assert.Equal(FleetHealthBand.Critical, FleetRollup.ClassifyBand(twoCritical));
+        Assert.Equal(FleetHealthBand.Critical, FleetRollup.ClassifyBand(oneCritical));
 
         var rollup = FleetRollup.Build(new[] { oneCritical, twoCritical }, NoTotals);
 
@@ -276,7 +305,7 @@ public sealed class ViewerFleetRollupBuilderTests
     [Fact]
     public void Build_CapsTheRankingAtWorstCount_AndReportsTheOverflow()
     {
-        var summaries = Enumerable.Range(1, 8).Select(i => Critical($"c{i}", i, deadlocks: 1)).ToArray();
+        var summaries = Enumerable.Range(1, 8).Select(i => Critical($"c{i}", i)).ToArray();
 
         var rollup = FleetRollup.Build(summaries, NoTotals, worstCount: 3);
 

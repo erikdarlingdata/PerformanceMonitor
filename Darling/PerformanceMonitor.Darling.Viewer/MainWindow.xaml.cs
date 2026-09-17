@@ -1433,6 +1433,23 @@ public partial class MainWindow : Window
         var lanes = ViewerReadFanOut.Lanes(list);
         using var readFanOut = ViewerReadFanOut.Of(lanes.Count);
 
+        /* #3368: the deadlock band's tiers, read ONCE for the whole refresh rather than inside each
+           per-server read below. Two reasons, and the second is the one that matters: it saves a settings
+           round-trip per card on a fleet-wide fan-out, and it means one refresh cannot band some cards on
+           the old pair and the rest on a reloaded one — a mixed reading no configuration ever held, which
+           is exactly why DarlingFleetReader.GetFleetOverviewAsync hoists its own copy of this read. A
+           failed read falls back to the shipped pair rather than emptying the panel: the Overview is a
+           READ that must still answer, and every card then agrees on the same numbers. */
+        DeadlockRateThresholds deadlockTiers;
+        try
+        {
+            deadlockTiers = await service.GetDeadlockRateThresholdsAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            deadlockTiers = DeadlockRateThresholds.Default;
+        }
+
         var perLane = await Task.WhenAll(lanes.Select(async lane =>
         {
             var found = new List<ServerSummaryItem>(lane.Count);
@@ -1441,7 +1458,8 @@ public partial class MainWindow : Window
             {
                 try
                 {
-                    var summary = await service.GetServerSummaryAsync(server.ServerId, server.DisplayName);
+                    var summary = await service.GetServerSummaryAsync(
+                        server.ServerId, server.DisplayName, deadlockTiers);
                     summary.ServerName = server.ServerName;
                     /* #3029: the engine discriminator comes from the REGISTRY row, which already carries it
                        (servers.engine_kind, via ManagedServersSql / ServersSql) — the per-server summary

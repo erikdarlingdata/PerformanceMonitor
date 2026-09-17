@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 
 namespace PerformanceMonitor.Notifications;
 
@@ -25,7 +26,13 @@ public class MuteRule
     public string? WaitTypePattern { get; set; }
     public string? JobNamePattern { get; set; }
 
-    public bool IsExpired => ExpiresAtUtc.HasValue && DateTime.UtcNow >= ExpiresAtUtc.Value;
+    /// <summary>Whether the rule's bound has passed as of <paramref name="nowUtc"/>. The clock-taking form,
+    /// so a caller that already holds an injected clock judges expiry on the SAME instant it judges
+    /// everything else — a rule read as unexpired by one clock and expired by another is a rule whose
+    /// suppression decision depends on which line of the caller asked.</summary>
+    public bool IsExpiredAt(DateTime nowUtc) => ExpiresAtUtc.HasValue && nowUtc >= ExpiresAtUtc.Value;
+
+    public bool IsExpired => IsExpiredAt(DateTime.UtcNow);
 
     public MuteRule Clone() => new()
     {
@@ -46,31 +53,78 @@ public class MuteRule
         ? (IsExpired ? "Expired" : ExpiresAtUtc.Value.ToLocalTime().ToString("g"))
         : "Never";
 
+    /// <summary>
+    /// The match dimensions this rule actually constrains, rendered one per entry. The SINGLE enumeration
+    /// behind both <see cref="Summary"/> and <see cref="MatchesEveryAlert"/>, and it names the same fields
+    /// <see cref="MatchesAt"/> tests.
+    ///
+    /// <para>One list rather than two hand-kept copies: a seventh dimension added to <see cref="MatchesAt"/>
+    /// but missed by a copied "is this rule unconstrained" predicate would make a rule narrowed ONLY by
+    /// that new dimension read as matching every alert. Sharing the list makes the two answers move
+    /// together by construction.</para>
+    /// </summary>
+    private List<string> MatchDescriptions()
+    {
+        var parts = new List<string>();
+        if (MetricName != null) parts.Add(MetricName);
+        if (ServerName != null) parts.Add($"on {ServerName}");
+        if (DatabasePattern != null) parts.Add($"db≈{DatabasePattern}");
+        if (QueryTextPattern != null) parts.Add($"query≈{QueryTextPattern}");
+        if (WaitTypePattern != null) parts.Add($"wait≈{WaitTypePattern}");
+        if (JobNamePattern != null) parts.Add($"job≈{JobNamePattern}");
+        return parts;
+    }
+
     public string Summary
     {
         get
         {
-            var parts = new System.Collections.Generic.List<string>();
-            if (MetricName != null) parts.Add(MetricName);
-            if (ServerName != null) parts.Add($"on {ServerName}");
-            if (DatabasePattern != null) parts.Add($"db≈{DatabasePattern}");
-            if (QueryTextPattern != null) parts.Add($"query≈{QueryTextPattern}");
-            if (WaitTypePattern != null) parts.Add($"wait≈{WaitTypePattern}");
-            if (JobNamePattern != null) parts.Add($"job≈{JobNamePattern}");
+            var parts = MatchDescriptions();
             return parts.Count > 0 ? string.Join(", ", parts) : "(matches all alerts)";
         }
     }
 
-    public bool Matches(AlertMuteContext context)
+    /// <summary>
+    /// True when the rule constrains NOTHING — no server, no metric, none of its patterns — so
+    /// <see cref="Matches"/> accepts every alert on the store rather than one recurring alert. The blast
+    /// radius, not the age: a blanket rule makes a whole fleet read quiet, which is why it is severity-
+    /// bearing wherever a mute is reported.
+    /// </summary>
+    public bool MatchesEveryAlert => MatchDescriptions().Count == 0;
+
+    /// <summary>
+    /// True when the rule's <see cref="MetricName"/> NAMES <paramref name="metricName"/> — the operator
+    /// typed this metric into this rule, rather than the rule reaching it because the metric dimension was
+    /// left unconstrained.
+    ///
+    /// <para>The distinction matters where a caller must tell a decision ABOUT an alert from a decision
+    /// that merely covers it (#3348). It is a meaningful distinction here only because the metric dimension
+    /// is EXACT: this is the same <see cref="StringComparison.OrdinalIgnoreCase"/> full-string equality
+    /// <see cref="MatchesAt"/> applies, and <see cref="MatchesAt"/> routes its metric arm through this
+    /// method so the two cannot drift into disagreeing about what "names" means. Unlike the four
+    /// <c>*Pattern</c> dimensions there is no substring, glob or regex form of a metric constraint, so a
+    /// rule either spells the metric out or does not constrain metrics at all — there is no third shape
+    /// that could match one incidentally while looking deliberate.</para>
+    /// </summary>
+    public bool NamesMetric(string? metricName) =>
+        MetricName != null
+        && string.Equals(MetricName, metricName, StringComparison.OrdinalIgnoreCase);
+
+    public bool Matches(AlertMuteContext context) => MatchesAt(context, DateTime.UtcNow);
+
+    /// <summary>
+    /// <see cref="Matches"/> judged against a caller-supplied instant rather than the ambient clock, so a
+    /// caller that already holds one decides the whole question on a single "now". Pure: no clock, no I/O.
+    /// </summary>
+    public bool MatchesAt(AlertMuteContext context, DateTime nowUtc)
     {
-        if (!Enabled || IsExpired) return false;
+        if (!Enabled || IsExpiredAt(nowUtc)) return false;
 
         if (ServerName != null &&
             !string.Equals(ServerName, context.ServerName, StringComparison.OrdinalIgnoreCase))
             return false;
 
-        if (MetricName != null &&
-            !string.Equals(MetricName, context.MetricName, StringComparison.OrdinalIgnoreCase))
+        if (MetricName != null && !NamesMetric(context.MetricName))
             return false;
 
         if (DatabasePattern != null &&
@@ -113,9 +167,18 @@ public class AlertMuteContext
     /// Query values may span multiple lines and use variant labels
     /// (Blocked Query, Blocking Query, Victim SQL).
     /// </summary>
-    public void PopulateFromDetailText(string? detailText)
+    /// <param name="metricName">The alert's metric name, when known. A custom alert rule
+    /// (<c>"Custom:&lt;id&gt;"</c>) has no Database/Wait Type/Job/Query dimension, so its detail_text is
+    /// NOT parsed for a mute-context pre-fill (#3309); omit or pass null for built-in alerts to parse as before.</param>
+    public void PopulateFromDetailText(string? detailText, string? metricName = null)
     {
         if (string.IsNullOrEmpty(detailText)) return;
+
+        /* #3309: a custom alert rule ("Custom:<id>") carries NO Database/Wait Type/Job/Query dimension. Its
+           detail_text is the user-authored rule name/description, so DMV-label parsing it for a mute-context
+           pre-fill is meaningless AND is the vector by which a crafted single-line name (e.g. "Database: master")
+           could forge a label line. Skip it for custom alerts; their mute context is ServerName + MetricName. */
+        if (metricName is not null && metricName.StartsWith("Custom:", StringComparison.Ordinal)) return;
 
         System.Text.StringBuilder? queryBuilder = null;
         var lines = detailText.Split('\n');

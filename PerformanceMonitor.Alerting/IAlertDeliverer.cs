@@ -24,7 +24,14 @@ namespace PerformanceMonitor.Alerting;
 /// <param name="CurrentValue">Human-readable current value (e.g. "3 deadlock(s) in the last hour").</param>
 /// <param name="ThresholdValue">Human-readable threshold it breached (e.g. "1", "80%").</param>
 /// <param name="Context">Structured detail context (built by <see cref="AlertContextBuilders"/>), or null when no detail was resolvable.</param>
-/// <param name="DetailText">Flat plain-text rendering of <paramref name="Context"/> (the engine emits <see cref="AlertContextBuilders.ContextToDetailText"/> output), or null.</param>
+/// <param name="DetailText">
+/// The alert's flat plain-text detail, or null. For an engine alert this is a rendering of
+/// <paramref name="Context"/> (<see cref="AlertContextBuilders.ContextToDetailText"/>), but it is NOT only
+/// that: a self-alert fires with <c>Context: null</c> and carries independent prose here — what happened,
+/// what it costs, and the operator action that clears it — which is the ONLY place that text exists. Every
+/// delivery channel renders it (#3297), suppressed on the engine case so the same content is not printed
+/// twice.
+/// </param>
 /// <param name="NumericCurrentValue">Numeric current value for history charting/thresholding, when the metric has one.</param>
 /// <param name="NumericThresholdValue">Numeric threshold twin of <paramref name="NumericCurrentValue"/>.</param>
 /// <param name="Muted">True when a mute rule matched — the host records the alert but must not toast/send it.</param>
@@ -36,6 +43,15 @@ namespace PerformanceMonitor.Alerting;
 /// engine because some bodies need per-row data (worst session id / query preview / job minutes)
 /// that the other display fields don't carry; interactive hosts render it as
 /// <c>$"{ServerName}: {ShortMessage}"</c>, headless hosts may log or ignore it.
+/// </param>
+/// <param name="DisplayName">
+/// Human-facing name rendered in notification titles/subjects INSTEAD of <paramref name="MetricName"/>,
+/// or null/empty for built-in alerts — which keep rendering <paramref name="MetricName"/> unchanged
+/// (byte-identical to before this field existed). Custom alert rules key history / mute / cooldown on the
+/// immutable <paramref name="MetricName"/> (<c>"Custom:&lt;id&gt;"</c>, rename-safe) but set this to the
+/// rule's (newline-stripped, length-capped) name so a human sees the name, not <c>Custom:42</c>. Every
+/// render site falls back to <paramref name="MetricName"/> whenever this is null or empty; the metric name
+/// stays the severity / cooldown / dedup key everywhere.
 /// </param>
 public sealed record AlertOutcome(
     string ServerKey,
@@ -49,7 +65,8 @@ public sealed record AlertOutcome(
     double? NumericThresholdValue,
     bool Muted,
     AlertSeverityLevel? Severity,
-    string? ShortMessage = null);
+    string? ShortMessage = null,
+    string? DisplayName = null);
 
 /// <summary>
 /// The record-and-send seam for the Phase-5 shared alert engine: the engine evaluates conditions

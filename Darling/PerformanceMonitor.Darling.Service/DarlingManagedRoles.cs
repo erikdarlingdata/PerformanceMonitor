@@ -29,19 +29,25 @@ namespace PerformanceMonitor.Darling.Service;
 /// <item><b><c>admin</c></b> — SELECT on both schemas + INSERT/UPDATE/DELETE on <c>config</c> only.
 /// The Viewer's default identity: it owns the alert-dismiss, mute-rule, and analysis-mute writes but
 /// can never DROP, alter schema, touch <c>collect</c> data, or create objects.</item>
-/// <item><b><c>viewer</c></b> — SELECT on both schemas, and (the single write exception, #1563)
-/// INSERT/UPDATE/DELETE on ONLY <c>config.custom_views</c> (the web dashboard's user-authored view
-/// definitions — non-secret JSON; editing is any AUTHENTICATED seat, the web surface's normal networked
-/// mode gated server-side by the host's token+CIDR auth — NOT loopback-only). No other writes anywhere. A
-/// locked-down deployment points the Viewer at this ("look but don't touch" — plus its own saved custom
-/// views).</item>
+/// <item><b><c>viewer</c></b> — SELECT on both schemas, plus a NARROW, enumerated set of writes: the web
+/// dashboard's write surfaces run as this role, so it holds INSERT/UPDATE/DELETE on
+/// <c>config.custom_views</c> (#1563, the user-authored view definitions), <c>config.custom_alert_rules</c>
+/// (#3285, the user-authored alert rules), <c>config.database_state_expected</c> (#1986, the Viewer's
+/// per-database override editor) and <c>config.config_mute_rules</c> (#3450, the dedicated mute-rule
+/// endpoints — plus the two <c>config_service</c> beacon columns its bump trigger writes as the caller).
+/// All non-secret tables; over the web, editing is gated server-side by the host's auth + the seat model
+/// (an OIDC viewer seat is refused every write) — these grants are only the floor beneath that gate. A
+/// locked-down deployment points the Viewer at this role, and its WPF surfaces still read as "look but
+/// don't touch": the read-only probe discriminates on a privilege this role never gets
+/// (<c>ViewerDataService.ReadOnlyProbeSql</c>).</item>
 /// <item><b><c>mcp</c></b> — the (optionally network-exposed) MCP host's store identity
 /// (darling-network-endpoints, D3-role): the SAME read surface as <c>viewer</c> (SELECT on
 /// <c>collect</c> + <c>config</c>-minus-the-secret-columns) PLUS a NARROW, enumerated set of writes —
 /// INSERT on <c>collect.analysis_findings</c> and <c>config.analysis_muted</c> (what <c>analyze_server</c>
 /// persists + the <c>mute</c> tool need), INSERT/UPDATE/DELETE on <c>config.custom_views</c> (the
 /// custom-view tools, #1599), the alert-tuning writes (INSERT/UPDATE/DELETE on
-/// <c>config.config_mute_rules</c> + UPDATE on the singleton <c>config.config_alert_settings</c>, plus the
+/// <c>config.config_mute_rules</c> + UPDATE on the singleton <c>config.config_alert_settings</c> + UPDATE on
+/// the single non-secret <c>email_cooldown_minutes</c> column of <c>config.config_notification</c>, plus the
 /// two beacon columns of <c>config.config_service</c> so the settings write's self-bump trigger can fire),
 /// and the server-onboarding writes (INSERT/UPDATE/DELETE on <c>config.config_monitored_servers</c> for the
 /// <c>add_servers</c>/<c>remove_server</c> tools — a single non-secret-KEY table; the credential column stays
@@ -243,7 +249,7 @@ public static class DarlingManagedRoles
         await command.ExecuteNonQueryAsync(cancellationToken);
 
         logger.LogInformation(
-            "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + write config.custom_views; mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_service reload beacon) + onboard servers (config_monitored_servers)) — the Viewer and MCP host no longer connect as the superuser");
+            "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + the narrow web-surface writes (custom_views, custom_alert_rules, database_state_expected, config_mute_rules + the reload beacon); mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_notification.email_cooldown_minutes, config_service reload beacon) + onboard servers (config_monitored_servers)) — the Viewer and MCP host no longer connect as the superuser");
 
         /* CLAMPED, not raw: the batch above wrote the clamped form, so returning the raw read would hand the
            caller a baseline that differs from what the roles actually carry (a stored 0 provisions '15s').
@@ -688,17 +694,25 @@ GRANT CONNECT ON DATABASE {database} TO {mcp};
 --    no sequence USAGE grant.
 GRANT INSERT, UPDATE, DELETE ON {config}.custom_views TO {viewer};
 GRANT INSERT, UPDATE, DELETE ON {config}.custom_views TO {mcp};
+-- Custom alerting (#3285): the web editor (viewer) and the MCP rule tools (mcp) CRUD config.custom_alert_rules,
+-- the same narrow single-table floor as custom_views (non-secret rule JSON -- no ViewerRestrictedConfigTables
+-- carve, no config_command pivot). Created by V116, so provisioning runs after migration. NOTE: the sibling
+-- config.custom_alert_state is written by the CustomAlertEvaluator on the OWNER pool only, so it deliberately
+-- gets NO viewer/mcp grant here (add a viewer SELECT only when the editor surfaces a rule's firing status).
+GRANT INSERT, UPDATE, DELETE ON {config}.custom_alert_rules TO {viewer};
+GRANT INSERT, UPDATE, DELETE ON {config}.custom_alert_rules TO {mcp};
 -- The Viewer's per-database database-state override editor (#1986) writes config.database_state_expected:
 -- the same narrow single-table floor as custom_views. Created by V49, so provisioning runs after migration.
 GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
 
 -- 8. Alert tuning (the MCP alert-tuning write tools): the mcp role's alert-config writes, mirroring section 7's
 --    custom_views grant model (EXPLICIT single-table statements, NO ALTER DEFAULT PRIVILEGES). update_alert_settings
---    / create_mute_rule / delete_mute_rule let a token-holder tune the SAME alert engine the Viewer's Settings
+--    / create_mute_rule / update_mute_rule / delete_mute_rule / set_mute_rule_enabled let a token-holder tune the SAME alert engine the Viewer's Settings
 --    window drives: INSERT/UPDATE/DELETE on config_mute_rules (the mute rules the delivery paths honor) and UPDATE
 --    on the SINGLETON config_alert_settings row (id=1 -- UPDATE only, never INSERT/DELETE: the row is a fixed
---    singleton the service seeds). Still NARROW -- never the config_command service-credential pivot, the
---    monitored-servers/notification secret tables, or a schema-wide config write.
+--    singleton the service seeds). Still NARROW -- never the config_command service-credential pivot, a
+--    schema-wide config write, or any SECRET column: the one config_notification write is a single column
+--    (see #3314 below), and the monitored-servers credential column stays SELECT-carved.
 --    The beacon caveat: a config_alert_settings write fires the existing statement-level bump trigger
 --    (trg_bump_alert_settings -> config_bump_version), which UPDATEs config_service.config_version AS THE CURRENT
 --    ROLE (the trigger function is SECURITY INVOKER). So mcp ALSO needs UPDATE on JUST the two beacon columns of
@@ -706,9 +720,45 @@ GRANT INSERT, UPDATE, DELETE ON {config}.database_state_expected TO {viewer};
 --    gated-live tests would never catch it (they connect as the owner). A COLUMN-level grant lets mcp bump the
 --    reload beacon but NOT flip paused / capture_plans / mcp_enabled / mcp_port. The targets exist here because
 --    provisioning runs AFTER migration; a recreated table re-grants on the next start (self-heal).
+--    EVERY mcp-writable beacon-triggered table rests on that one grant, not the alert-settings path alone:
+--    config_mute_rules carries trg_bump_mute_rules (V117 / #3315) and config_monitored_servers carries
+--    trg_bump_monitored_servers (section 9), so create_mute_rule / update_mute_rule / delete_mute_rule / set_mute_rule_enabled and add_servers /
+--    remove_server bump the beacon as mcp too. Narrowing the grant to update_alert_settings 42501s all of
+--    them -- one column UPDATE serves every trigger. Re-derive the set from which mcp-writable tables carry a
+--    bump trigger rather than from a count recorded here, which a later rung ages out without changing it.
 GRANT INSERT, UPDATE, DELETE ON {config}.config_mute_rules TO {mcp};
 GRANT UPDATE ON {config}.config_alert_settings TO {mcp};
 GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {mcp};
+-- #3450: the web dashboard's dedicated mute-rule endpoints (POST/PATCH/PUT/DELETE under /api/mute-rules) run
+--    as the least-privilege viewer role -- the web host's ONLY store identity -- so viewer gets the SAME
+--    single-table config_mute_rules write mcp holds above, the shape of the custom_views/custom_alert_rules
+--    pairs in section 7. The SEAT model, not this grant, decides who may call the endpoints (an OIDC viewer
+--    seat is refused every unsafe method by the host's write gate); this is only the narrow floor beneath that
+--    gate. The section-8 beacon caveat applies verbatim: config_mute_rules carries trg_bump_mute_rules ->
+--    config_bump_version (SECURITY INVOKER), which UPDATEs config_service.config_version AS viewer, so viewer
+--    needs the same two-column config_service grant mcp has -- and no more (paused / capture_plans / mcp_port
+--    stay out of reach; the column grant serves the trigger, never a service flag). One consequence is owned
+--    where it bites: the WPF Viewer's read-only probe used to ask has_table_privilege on exactly this table's
+--    INSERT, which this grant would have flipped to ''writable'' for a connectAs = ''viewer'' seat whose
+--    alert-dismiss writes still 42501 -- the probe now discriminates on config_alert_log UPDATE
+--    (ViewerDataService.ReadOnlyProbeSql), a write only admin/owner hold, so the locked-down Viewer's
+--    read-only UX is unchanged by this grant.
+GRANT INSERT, UPDATE, DELETE ON {config}.config_mute_rules TO {viewer};
+GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {viewer};
+-- #3314: the DELIVERY cooldown -- the sole throttle on a Slack/Teams/PagerDuty/webhook post -- is the one
+-- alert-engine knob stored on config_notification rather than config_alert_settings, so update_alert_settings
+-- spans two tables and needs a write here. This DOES widen mcp into a table holding bearer secrets (the SMTP
+-- password blob, the Teams/Slack/generic webhook URLs, the PagerDuty routing key), so the grant is
+-- COLUMN-level on exactly that one column -- the same shape as the config_service beacon grant above and for
+-- the same reason. MEASURED, not assumed: as mcp, the baseline UPDATE raises 42501; with this grant it
+-- succeeds; with the column SELECT revoked and this grant kept it STILL succeeds (so UPDATE is the privilege
+-- doing the work, not an ambient SELECT); and a write to smtp_encrypted_password, slack_url or even the
+-- non-secret sibling smtp_host stays 42501. A missing SELECT and a missing UPDATE both raise the identical
+-- 42501 permission-denied-for-table-config_notification message, so only isolating the grants separates them.
+-- The READ side needs nothing: email_cooldown_minutes is already in the section-6 non-secret column carve.
+-- The BEACON is already covered: config_notification carries trg_bump_notification -> config_bump_version
+-- (SECURITY INVOKER), which UPDATEs config_service.config_version AS mcp, and the column grant above serves it.
+GRANT UPDATE (email_cooldown_minutes) ON {config}.config_notification TO {mcp};
 
 -- 9. Server onboarding (the MCP server-admin write tools): the mcp role's monitored-server writes, mirroring
 --    sections 7/8's model (an EXPLICIT single-table statement, NO ALTER DEFAULT PRIVILEGES). add_servers /
@@ -721,8 +771,67 @@ GRANT UPDATE (config_version, updated_at) ON {config}.config_service TO {mcp};
 --    which UPDATEs config_service.config_version AS mcp, and section 8 already granted mcp
 --    UPDATE (config_version, updated_at) ON config_service -- so no additional config_service grant is needed here.
 GRANT INSERT, UPDATE, DELETE ON {config}.config_monitored_servers TO {mcp};
+
+-- 10. Custom-alert resolve-on-delete privileged write (#3334). The recovery/resolution row a caller-initiated
+--     rule DELETE writes (CustomAlertEvaluator.WriteTeardownResolutionAsync) lands in config.config_alert_log,
+--     which ONLY admin/owner may INSERT (section 3's schema-wide grant). But that delete runs as the
+--     least-privilege caller -- mcp (the delete_custom_alert_rule tool) or viewer (DELETE /api/alerts) -- so a
+--     direct INSERT is permission-denied, the write is failure-isolated, and the resolution row #3305 intends
+--     was SILENTLY dropped, leaving a deleted firing rule showing ""open"" in history forever. Rather than a
+--     blanket INSERT grant on the history table to viewer/mcp (which would let those roles fabricate ARBITRARY
+--     history rows, including fake fires), a SECURITY DEFINER function confines the privileged write to EXACTLY
+--     a no-channel resolution row: every delivery-shape column is HARDCODED (alert_sent false, notification_type
+--     'none', current/threshold 0, muted false, no send_error/context) -- the same zeroed/unmuted resolution
+--     shape BuildResolutionRecord + PgAlertHistoryStore.RecordAlertAsync write, but pinned to a NO-CHANNEL row
+--     rather than a natural clear's 'tray' (a teardown surfaces no operator notification) -- so a caller can
+--     page nothing and fabricate no fire; only server_id/name and the already-sanitized title/detail vary.
+--     Definer-safe: owned by the store owner (the creating provisioning role, {owner}), an explicit pinned
+--     search_path so no injected path can redirect the unqualified config_alert_log or now(), and a fully
+--     parameterized INSERT with NO dynamic SQL. Created + REVOKEd-from-PUBLIC by the shared builder below;
+--     EXECUTE is the only privilege the least-privilege roles get, and admin/owner keep their direct INSERT and
+--     never call it. NOT a versioned migration: CREATE OR REPLACE is idempotent and owner-run every start and
+--     has no probeable schema footprint (the section-1c role-SET rationale), so a V-number would drag in the
+--     probe rung + ladder fixture + version-pin tests for no gain.
+{BuildCustomAlertResolveFunctionSql(config)}
+GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) TO {viewer}, {mcp};
 ";
     }
+
+    /// <summary>
+    /// The <c>SECURITY DEFINER</c> function (#3334) that lets the least-privilege viewer/mcp roles write the ONE
+    /// resolution row a caller-initiated custom-alert rule delete records in <c>config_alert_log</c> -- a table
+    /// they may not INSERT directly -- WITHOUT a blanket INSERT grant that would let them fabricate arbitrary
+    /// history. Returns the <c>CREATE OR REPLACE FUNCTION</c> plus the <c>REVOKE ALL ... FROM PUBLIC</c> (a
+    /// freshly created function is EXECUTE-able by PUBLIC by default, so revoking is mandatory); the caller adds
+    /// the narrow <c>GRANT EXECUTE</c>. Shared so the gated live proof test creates the IDENTICAL function rather
+    /// than a drifting hand-copy. Definer-safe by construction: owned by whoever runs it (the provisioning owner,
+    /// which holds the config_alert_log INSERT the body needs), an explicit <c>SET search_path = {config},
+    /// pg_catalog</c> so neither the unqualified table nor <c>now()</c> can be redirected by a caller's
+    /// search_path, and a fully parameterized INSERT that hardcodes the resolution shape (never a fire) with no
+    /// dynamic SQL. The 12-column list matches <c>PgAlertHistoryStore.RecordAlertAsync</c>'s write for a
+    /// <c>BuildResolutionRecord</c> and so do the fixed values, EXCEPT this is pinned to a no-channel row
+    /// (<c>alert_sent</c> false, <c>notification_type</c> 'none') rather than a natural clear's 'tray': a
+    /// teardown surfaces no operator notification, and a grantee must never write a row claiming a delivery.
+    /// </summary>
+    internal static string BuildCustomAlertResolveFunctionSql(string config) => $@"
+CREATE OR REPLACE FUNCTION {config}.record_custom_alert_resolution(
+   p_server_id integer,
+   p_server_name text,
+   p_metric_name text,
+   p_detail_text text)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = {config}, pg_catalog
+AS $fn$
+   INSERT INTO config_alert_log
+      (alert_time, server_id, server_name, metric_name, current_value, threshold_value,
+       alert_sent, notification_type, send_error, muted, detail_text, context_json)
+   VALUES
+      ((now() AT TIME ZONE 'UTC'), p_server_id, p_server_name, p_metric_name, 0, 0,
+       false, 'none', NULL, false, p_detail_text, NULL);
+$fn$;
+REVOKE ALL ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) FROM PUBLIC;";
 
     /// <summary>
     /// The generated passwords are alnum by construction; this fails closed if that ever changes,

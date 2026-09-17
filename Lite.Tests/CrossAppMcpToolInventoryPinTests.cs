@@ -174,6 +174,19 @@ public sealed class CrossAppMcpToolInventoryPinTests
            forensics, port this and delete the entry; the ratchet only shrinks. */
         "get_collector_stall_probes",
 
+        /* #3398: the oversized-plan backlog read (get_oversized_plan_backlog) over
+           collect.oversized_plan_backlog - which cached plans the capture cap declined, and what the
+           out-of-band sweep has since done about each one. Darling-ONLY by architecture rather than a porting
+           to-do, and the SOURCE is the reason: the sweep that drains that table is invoked from the headless
+           worker's fleet-level cadence checks beside the daily retention purge, a loop Lite's single-instance
+           app has no counterpart of, and Lite's store has no such table for a twin to read.
+
+           The cap itself is SHARED - QueryPlanXmlCaptureLimits lives in the collectors project and Lite
+           declines the same oversized plans - so Lite has the blind spot and not the record of it. If Lite
+           ever gains the backlog table and a sweep, port this and delete the entry; the ratchet only
+           shrinks. */
+        "get_oversized_plan_backlog",
+
         /* #1562: the pre-banded fleet-overview read born from the web dashboard's DarlingFleetReader.
            Lite twin = a DuckDB fleet reader over the SAME shared ServerHealthClassifier (Common) — tracked
            in #1573 alongside unifying Lite's own card banding onto that classifier; port it, then remove
@@ -187,6 +200,16 @@ public sealed class CrossAppMcpToolInventoryPinTests
            rules — the per-replica and per-database severity logic lives in DarlingAgReader and would move to
            Common on the port. Port it, then remove this entry (the ratchet only shrinks). */
         "get_ag_health",
+
+        /* #3466: the fleet sweep report read (get_sweep_reports) over the four collect.fleet_sweep_*
+           tables — the scheduled, stateful whole-fleet summaries only a central store can hold. Darling-ONLY
+           by architecture, the get_fleet_overview kind of entry taken one step further: a sweep is one
+           statement about a FLEET diffed against its own persisted previous statement, and Lite (a
+           single-instance app over local DuckDB) has neither a fleet to sweep nor the sweep-state tables —
+           its store never creates them, and no Lite loop writes a sweep for a twin to read. If Lite ever
+           gains a multi-server store and a sweep engine, port this and delete the entry; the ratchet only
+           shrinks. */
+        "get_sweep_reports",
 
         /* #1600 + #1602: the Custom Views (CV2) tools — the Darling MCP server's write surface (the six that
            CRUD the user-authored dashboards/notebooks in the central Postgres store's config.custom_views and
@@ -207,13 +230,16 @@ public sealed class CrossAppMcpToolInventoryPinTests
         /* Darling MCP alert-tuning write tools — the write half of the alerts slice (the READ half,
            get_alert_history / get_alert_settings / get_mute_rules, IS shared with Lite). These write the
            central Postgres alert store: update_alert_settings partial-updates config.config_alert_settings,
-           create_mute_rule / delete_mute_rule CRUD config.config_mute_rules. Darling-ONLY by architecture,
+           create_mute_rule / update_mute_rule / delete_mute_rule / set_mute_rule_enabled CRUD config.config_mute_rules.
+           Darling-ONLY by architecture,
            not "not ported yet": Lite is a single-instance WPF app over local DuckDB with no central,
            service-honored alert store the same way, so there is no Lite twin to port (same reasoning as the
            Custom Views tools above). */
         "update_alert_settings",
         "create_mute_rule",
+        "update_mute_rule",
         "delete_mute_rule",
+        "set_mute_rule_enabled",
 
         /* Darling MCP server-onboarding write tools — add/remove the monitored servers in the CENTRAL store the
            whole fleet shares (config.config_monitored_servers). add_servers bulk-onboards (validate + in-process
@@ -223,6 +249,26 @@ public sealed class CrossAppMcpToolInventoryPinTests
            there is no Lite twin to port (same reasoning as the Custom Views + alert-tuning tools above). */
         "add_servers",
         "remove_server",
+
+        /* #3285: the custom-alert-rule tools — the Darling MCP server's write surface for user-authored alert
+           rules (create_custom_alert_rule / update_custom_alert_rule / delete_custom_alert_rule CRUD
+           config.custom_alert_rules in the central Postgres store; get_custom_alert_rule / list_custom_alert_rules
+           read them back; validate_custom_alert_rule checks a definition against the same compose catalog the
+           Custom Views tools draw from, without saving; test_custom_alert_rule (#3299) evaluates a rule's metric
+           now on each in-scope server and reports whether it would breach, without delivering or persisting;
+           list_custom_alert_templates (#3285 Component 7) lists the code-defined starter rule templates).
+           Darling-ONLY by architecture, the same kind of entry as the Custom Views + alert-tuning tools above
+           rather than a "not ported yet": custom alert rules are a central-store feature the headless service
+           evaluates on its sweep, and Lite (a single-instance WPF app over local DuckDB with no central,
+           service-honored alert store) has no twin to port. */
+        "create_custom_alert_rule",
+        "get_custom_alert_rule",
+        "list_custom_alert_rules",
+        "update_custom_alert_rule",
+        "delete_custom_alert_rule",
+        "validate_custom_alert_rule",
+        "test_custom_alert_rule",
+        "list_custom_alert_templates",
     };
 
     [Fact]
@@ -343,6 +389,85 @@ public sealed class CrossAppMcpToolInventoryPinTests
                 $"README.md's Lite tool count in {where} reads {match.Groups[1].Value} but Lite/Mcp exposes "
                 + $"{lite.Count}. Update the sentence.");
         }
+    }
+
+    /// <summary>
+    /// The root <c>README.md</c>'s DARLING tool census, held to the same standard as its Lite sibling above.
+    ///
+    /// <para>#3072 pinned the Lite figure and left this one, and it drifted exactly as predicted: it read 139
+    /// while <c>Darling/…/Mcp</c> exposed 147, eight tools behind, and nothing anywhere failed. The Dashboard's
+    /// figure in the same two sentences stays deliberately unpinned because <c>deprecated/</c> is frozen and a
+    /// pin over it could only ever be noise — that argument does NOT extend to Darling, which is the edition
+    /// gaining tools.</para>
+    ///
+    /// <para>Its own <c>[Fact]</c> rather than two more sites in the Lite one, so a failure names which of the
+    /// two censuses to edit.</para>
+    /// </summary>
+    [Fact]
+    public void RootReadmeDarlingToolCensus_MatchesTheScannedInventory()
+    {
+        var darling = ExtractToolNames(DarlingMcpDir);
+        var readme = ParitySource.ReadFile("README.md");
+
+        var sites = new (string Where, Regex Pattern)[]
+        {
+            ("the edition-comparison table", new Regex(@"MCP server \(LLM integration\) \| Built-in \(\d+ tools\) \| On request \((\d+) tools\)")),
+            ("the Available Tools paragraph", new Regex(@"\*\*Darling\*\* exposes (\d+)")),
+        };
+
+        foreach (var (where, pattern) in sites)
+        {
+            var match = pattern.Match(readme);
+            Assert.True(match.Success,
+                $"README.md no longer states the Darling tool count in {where} in the pinned shape ({pattern}). "
+                + "Keep it parseable so this pin can hold it to the real inventory — or delete the number, which "
+                + "is the other sanctioned outcome (#3072) and needs this site removed from the list above.");
+
+            Assert.True(darling.Count == int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture),
+                $"README.md's Darling tool count in {where} reads {match.Groups[1].Value} but "
+                + $"Darling/PerformanceMonitor.Darling.Service/Mcp exposes {darling.Count}. Update the sentence.");
+        }
+    }
+
+    /// <summary>
+    /// <c>llms.txt</c>'s tool figure is a RANGE across the two current editions, and both endpoints are the
+    /// scanned inventories — Lite at the low end and Darling at the high end today.
+    ///
+    /// <para><b>Why a range rather than one number.</b> That file is one paragraph describing the product,
+    /// not an edition-by-edition table, and the sentence it sits in names both current editions in its next
+    /// clause. A single figure there would have to pick an edition and would read as the product's total.</para>
+    ///
+    /// <para><b>Why min/max rather than naming which edition is which.</b> Asserting "low is Lite" bakes in
+    /// today's ordering; the claim that has to hold is that the range SPANS the editions, so the endpoints
+    /// are compared to the smaller and the larger of the two counts.</para>
+    ///
+    /// <para>It read <c>51-63</c> against real counts of 87 and 148 — wrong at both ends, by an amount whose
+    /// origin is no longer recoverable, because nothing pinned it. <c>README.md</c>'s Darling figure sat at
+    /// 139 through eight tools of drift for the same reason, which is the argument for pinning over
+    /// hand-correcting. Deleting the number is the other sanctioned outcome (#3072) and needs this pin
+    /// deleted with it.</para>
+    /// </summary>
+    [Fact]
+    public void LlmsTxtToolCensus_SpansTheTwoCurrentEditions()
+    {
+        var lite = ExtractToolNames(LiteMcpDir);
+        var darling = ExtractToolNames(DarlingMcpDir);
+        var llms = ParitySource.ReadFile("llms.txt");
+
+        var pattern = new Regex(@"a built-in MCP server with (\d+)-(\d+) tools");
+        var match = pattern.Match(llms);
+
+        Assert.True(match.Success,
+            $"llms.txt no longer states the tool count in the pinned shape ({pattern}). Keep it parseable so "
+            + "this pin can hold it to the real inventories — or delete the number, which is the other "
+            + "sanctioned outcome (#3072) and needs this pin deleted with it.");
+
+        var low = int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
+        var high = int.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture);
+
+        Assert.True(low == Math.Min(lite.Count, darling.Count) && high == Math.Max(lite.Count, darling.Count),
+            $"llms.txt reads {low}-{high} tools, but Lite/Mcp exposes {lite.Count} and "
+            + $"Darling/PerformanceMonitor.Darling.Service/Mcp exposes {darling.Count}. Update the sentence.");
     }
 
     private static string Format(IEnumerable<string> names) =>

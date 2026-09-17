@@ -62,12 +62,31 @@ public sealed partial class ViewerDataService
             return null;
         }
 
-        await using var command = _dataSource.CreateCommand(QueryStatsPlanXmlSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
-        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = queryHash });
-        return await ReadPlanTextOrGzipAsync(command, cancellationToken);
+        await using (var command = _dataSource.CreateCommand(QueryStatsPlanXmlSql))
+        {
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
+            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = queryHash });
+
+            var captured = await ReadPlanTextOrGzipAsync(command, cancellationToken);
+            if (captured is not null)
+            {
+                return captured;
+            }
+        }
+
+        /* #3392: a plan over QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes ships NULL for content and
+           produces no dimension row, so the guard above skips it and the read above returns nothing. The
+           backlog holds that same plan once the sweep has fetched it. $3 is the database filter's
+           null-guard, which a required database simply never exercises — one statement, shared with the
+           service-side twin in DarlingStoredPlanReader. */
+        await using var backlog = _dataSource.CreateCommand(OversizedPlanBacklog.QueryStatsFallbackSql);
+        backlog.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        backlog.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        backlog.Parameters.Add(new NpgsqlParameter<string> { TypedValue = queryHash });
+        backlog.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
+        return await ReadBacklogPlanXmlAsync(backlog, cancellationToken);
     }
 
     /// <summary>
@@ -147,13 +166,43 @@ public sealed partial class ViewerDataService
             return null;
         }
 
-        await using var command = _dataSource.CreateCommand(ProcedureStatsPlanXmlSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
-        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = schemaName ?? "" });
-        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = objectName });
-        return await ReadPlanTextOrGzipAsync(command, cancellationToken);
+        await using (var command = _dataSource.CreateCommand(ProcedureStatsPlanXmlSql))
+        {
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
+            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = schemaName ?? "" });
+            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = objectName });
+
+            var captured = await ReadPlanTextOrGzipAsync(command, cancellationToken);
+            if (captured is not null)
+            {
+                return captured;
+            }
+        }
+
+        /* #3392: the same second look, on the object identity this grid actually has. That read joins
+           procedure_stats to the backlog, which it can do EXACTLY — the three module-level DMVs expose no
+           statement offsets, so this collector's plan fetch passes fixed literals and plan_handle +
+           sql_handle is the whole key rather than a prefix of it. */
+        await using var backlog = _dataSource.CreateCommand(OversizedPlanBacklog.ProcedureStatsFallbackByObjectSql);
+        backlog.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        backlog.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        backlog.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
+        backlog.Parameters.Add(new NpgsqlParameter<string> { TypedValue = schemaName ?? "" });
+        backlog.Parameters.Add(new NpgsqlParameter<string> { TypedValue = objectName });
+        return await ReadBacklogPlanXmlAsync(backlog, cancellationToken);
+    }
+
+    /// <summary>
+    /// Executes a one-column backlog read (#3392). Plain text, never gzip: the backlog holds the content the
+    /// sweep fetched, and it does not route through the plan dimension — a capped row produced no dim row to
+    /// compress into.
+    /// </summary>
+    private static async Task<string?> ReadBacklogPlanXmlAsync(NpgsqlCommand command, CancellationToken cancellationToken)
+    {
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result is string plan ? plan : null;
     }
 
     /// <summary>

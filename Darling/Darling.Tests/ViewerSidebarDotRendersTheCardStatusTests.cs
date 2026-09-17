@@ -248,6 +248,7 @@ public sealed class ViewerSidebarDotRendersTheCardStatusTests
             LastCollectionTime = Now,
             CpuPercent = 99,
             DeadlockCount = 12,
+            DeadlockWindow = TimeSpan.FromMinutes(30),   // #3368: under the minimum, so no rate is claimed
             FailedCollectorCount = 3,
         };
         onFire.ApplyFreshness(Now);

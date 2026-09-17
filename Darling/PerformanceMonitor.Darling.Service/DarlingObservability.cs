@@ -97,10 +97,18 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
        collection-signal reads; yet (c) fully auditable via v_collection_log (WHERE collector_name =
        'data_retention'). Deliberately NOT a new fleet UI surface — just an auditable log row. */
     internal const int FleetServerId = 0;
-    private const string FleetServerName = "(fleet)";
+
+    /* Internal rather than private because get_collection_log accepts it as a server_name (#3399): the
+       sentinel population is only reachable to a client that can NAME it, and a second literal spelling of
+       it beside the read would be a string that can drift from the one the writes use. */
+    internal const string FleetServerName = "(fleet)";
 
     /* Matches the Dashboard's config.data_retention collector_name so the audit vocabulary twins across SKUs. */
     private const string RetentionCollectorName = "data_retention";
+
+    /* The oversized-plan backlog sweep's run-record name (#3399). Internal because the read side filters on
+       it exactly and the pins derive from it, so there is one spelling rather than three. */
+    internal const string OversizedPlanSweepCollectorName = "oversized_plan_sweep";
 
     /* The per-server analysis-state marker (V19): the analysis pass's insufficient-data determination,
        persisted so the Viewer's Recommendations tab can tell "still collecting" (a young deployment under
@@ -452,6 +460,138 @@ ON CONFLICT (server_id) DO UPDATE SET
             /* Failure-isolated by design — an observability write must never break the collection loop. */
             logger?.LogDebug("Observability: data_retention run-record write failed: {Message}", ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Records one oversized-plan backlog sweep tick in collection_log as an auditable
+    /// <c>oversized_plan_sweep</c> run-record (#3399), under the same reserved <see cref="FleetServerId"/>
+    /// sentinel and the same SUCCESS / WARNING vocabulary as <see cref="LogRetentionRunAsync"/>: the sweep
+    /// iterates the whole fleet in one pass, so it has no single monitored server to attribute a tick to.
+    ///
+    /// <para><b>An empty-backlog tick writes its row like any other</b>, with <c>rows_collected = 0</c>. That
+    /// is the case this exists for: a tick that found nothing to fetch would otherwise leave no trace in the
+    /// store at all — its outcome an <c>ILogger</c> line only — and "has the sweep run in the last N hours"
+    /// would have no answer from any client. An absent row past the sweep's own cadence
+    /// (<c>OversizedPlanBacklogSweep.SweepInterval</c>) is the signal.</para>
+    ///
+    /// <para><paramref name="plansCaptured"/> lands in <c>rows_collected</c>; the tick's remaining counts —
+    /// servers swept, plans claimed, expiries, fetch failures — are summarized in <paramref name="message"/>,
+    /// which rides a SUCCESS row the way the retention sweep's summary does. They are deliberately NOT spread
+    /// across the V110 fetch-phase columns: that half is all-five-or-none, and the fifth figure it requires
+    /// (<c>plan_fetch_probe_ids</c>, the references a probe EXAMINED) has no counterpart here — the claim
+    /// returns exactly the rows the pass then attempts, so the column would restate
+    /// <c>plan_fetch_ids_attempted</c> and the ratio those two exist for would be 1 on every row.</para>
+    ///
+    /// <para><paramref name="targetMs"/> is time inside the monitored-server fetches, which is what
+    /// <c>sql_duration_ms</c> means, so the sweep reports it there rather than zeroing it as the purge does.
+    /// The residual is recorded as the storage phase: the claim and the outcome writes are the only other work
+    /// in a tick, and the two terms then sum to <paramref name="durationMs"/> the way a collector's do.</para>
+    ///
+    /// <para>Failure-isolated (Debug + no-op) like every sibling observability write — an audit write must
+    /// never break the sweep it describes.</para>
+    /// </summary>
+    public static async Task LogOversizedPlanSweepRunAsync(
+        NpgsqlDataSource postgres,
+        string status,
+        int plansCaptured,
+        long durationMs,
+        long targetMs,
+        string? message,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var text = message;
+            if (text is not null && text.Length > 4000)
+            {
+                text = text.Substring(0, 4000);
+            }
+
+            var (elapsed, target, storage) = SplitSweepPhases(durationMs, targetMs);
+
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            using var command = new NpgsqlCommand(InsertCollectionLogSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+            command.Parameters.AddWithValue(CollectionIdGenerator.Next());                                    // log_id
+            command.Parameters.AddWithValue(FleetServerId);                                                   // server_id (sentinel)
+            command.Parameters.AddWithValue(FleetServerName);                                                 // server_name
+            command.Parameters.AddWithValue(OversizedPlanSweepCollectorName);                                 // collector_name
+            /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` — see PgCollectorRowWriter. */
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified)); // collection_time
+            command.Parameters.AddWithValue(elapsed);                                                         // duration_ms
+            command.Parameters.AddWithValue(status);                                                          // status
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)text ?? DBNull.Value }); // error_message
+            command.Parameters.AddWithValue(plansCaptured);                                                   // rows_collected
+            command.Parameters.AddWithValue(target);                                                          // sql_duration_ms
+            command.Parameters.AddWithValue(storage);                                                         // duckdb_duration_ms
+
+            /* The fan-out rollup columns (#2472), NULL for the retention writer's reason and by the same
+               shared-statement rule: the pass iterates SERVERS, not one server's databases, and it keeps no
+               per-server timing, so it has no slowest item to name. Three NULLs say that; a count with no
+               slowest item beside it is the half-answer the triple's all-or-nothing rule refuses. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // fanout_item_count
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DBNull.Value });    // slowest_item
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // slowest_item_ms
+
+            /* V108's phase split, NULL: one run-record covers a whole fleet pass, so there is no single
+               open/drain pair to report and no watermark read anywhere in the sweep. Three zeros would claim
+               a measured instant open on a row whose target time is a sum over dozens of connections. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // sql_open_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // sql_drain_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // watermark_ms
+
+            /* V109's drain forensics, NULL: the sweep reads one row per fetch by construction and holds no
+               target session across the pass, so there is no drain to describe. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = DBNull.Value });  // drain_rows_read
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = DBNull.Value });  // drain_bytes_read
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // drain_last_read_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // target_session_id
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // sweep_peer_max_ms
+
+            /* V110's fetch phase sums, NULL — the counts this pass has to report are in error_message
+               instead, for the reason the summary above gives: the plan half needs five figures and the fifth
+               has no meaning on a claim that returns exactly what it attempts. */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // plan_fetch_probe_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // plan_fetch_target_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // plan_fetch_write_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // plan_fetch_ids_attempted
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // plan_fetch_probe_ids
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_probe_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_target_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_write_ms
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_ids_attempted
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DBNull.Value }); // text_fetch_probe_ids
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            /* Failure-isolated by design — an observability write must never break the collection loop. */
+            logger?.LogDebug("Observability: oversized_plan_sweep run-record write failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Splits one sweep tick's elapsed time into the three figures collection_log stores for it: the total,
+    /// the monitored-server target phase, and the store phase that is the residual of the two.
+    ///
+    /// <para>Pure, and separate from the writer, because the CLAMPS are the part worth pinning and a store is
+    /// no help in exercising them. The tick's elapsed and the per-fetch times come off SEPARATE stopwatches,
+    /// so skew is reachable in both directions: the target phase is held at or below the run that contains it
+    /// (a collector's never exceeds its own total, and a reader dividing one by the other would otherwise get
+    /// a share above 1), and never below zero, which would put a negative into the storage residual. The
+    /// <c>CollectionLogEntry.SqlOtherMs</c> discipline, applied at the WRITE rather than left for each
+    /// reader to repeat.</para>
+    ///
+    /// <para>The two phases sum to the total by construction rather than by agreement, so the identity a
+    /// collector row carries — <c>duration_ms = sql_duration_ms + duckdb_duration_ms</c> — holds on this
+    /// collector's rows too.</para>
+    /// </summary>
+    internal static (int Elapsed, int TargetMs, int StorageMs) SplitSweepPhases(long durationMs, long targetMs)
+    {
+        var elapsed = durationMs < 0 ? 0 : durationMs > int.MaxValue ? int.MaxValue : (int)durationMs;
+        var target = targetMs < 0 ? 0 : targetMs > elapsed ? elapsed : (int)targetMs;
+
+        return (elapsed, target, elapsed - target);
     }
 
     /// <summary>

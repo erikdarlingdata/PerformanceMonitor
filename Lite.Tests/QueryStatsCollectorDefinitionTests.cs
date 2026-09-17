@@ -21,8 +21,8 @@ namespace Lite.Tests;
 /// Pins the parity contract of the extracted query_stats definition: the full row-identity delta
 /// key (sql_handle:start:end:plan_handle — the multi-statement cross-contamination fix), the
 /// interval-captured worker delta feeding sample_interval_seconds, the two query variants, and
-/// the 51-column payload with the query_plan_xml placeholder and the trailing host_object_name
-/// (#2012 stage 2).
+/// the 52-column payload with the query_plan_xml placeholder, the trailing host_object_name
+/// (#2012 stage 2) and query_plan_xml_bytes (#3392).
 /// </summary>
 public sealed class QueryStatsCollectorDefinitionTests
 {
@@ -101,7 +101,7 @@ public sealed class QueryStatsCollectorDefinitionTests
            statement offsets (the text DMV, so large/deep plans still return). */
         var plan = QueryStatsCollector.Instance.BuildQuery(MakeContext(capturePlanXml: true));
 
-        Assert.Contains("query_plan_xml = tqp.query_plan", plan.Text, StringComparison.Ordinal);
+        AssertPlanXmlSizeGuarded(plan.Text);
         Assert.Contains(
             "sys.dm_exec_text_query_plan(qs.plan_handle,qs.statement_start_offset,qs.statement_end_offset)AStqp",
             Collapse(plan.Text), StringComparison.Ordinal);
@@ -111,6 +111,32 @@ public sealed class QueryStatsCollectorDefinitionTests
         Assert.Contains("ORDER BY", plan.Text, StringComparison.Ordinal);
 
         AssertAppliesRunAgainstSurvivorsOnly(plan.Text);
+    }
+
+    /// <summary>
+    /// The drain-time fix: a per-row DATALENGTH cap on the captured plan XML, sourced from the single
+    /// shared constant rather than a literal repeated in each collector. Pins the shape (CASE/DATALENGTH
+    /// present, tqp.query_plan still the value on the non-NULL arm) and the literal byte count actually
+    /// used, so a change to QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes is required to move this
+    /// test, not merely a change to this collector's SQL in isolation.
+    /// </summary>
+    private static void AssertPlanXmlSizeGuarded(string sql)
+    {
+        var collapsed = Collapse(sql);
+        Assert.Contains(
+            "query_plan_xml=CASEWHENDATALENGTH(tqp.query_plan)>" + QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes + "THENNULLELSEtqp.query_planEND",
+            collapsed, StringComparison.Ordinal);
+
+        /* #3392: the measured size rides beside the gated content and is NEVER gated itself. A row over the
+           cap has to report its size WITH a NULL plan — that pairing is the only thing that distinguishes
+           "omitted for size" from "the handle aged out", and the backlog is keyed on it. So the bytes column
+           must be a bare DATALENGTH and must sit AFTER the gated one, which is the ordinal the reader reads. */
+        Assert.Contains("query_plan_xml_bytes=DATALENGTH(tqp.query_plan)", collapsed, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_plan_xml_bytes=CASE", collapsed, StringComparison.Ordinal);
+        Assert.True(
+            collapsed.IndexOf("query_plan_xml_bytes=DATALENGTH", StringComparison.Ordinal)
+                > collapsed.IndexOf("query_plan_xml=CASE", StringComparison.Ordinal),
+            "query_plan_xml_bytes moved ahead of the gated query_plan_xml — ReadAsync reads it at the trailing ordinal");
     }
 
     /// <summary>
@@ -148,7 +174,7 @@ public sealed class QueryStatsCollectorDefinitionTests
     {
         var plan = QueryStatsCollector.Instance.BuildQuery(MakeContext(isAzureSqlDb: true, capturePlanXml: true));
 
-        Assert.Contains("query_plan_xml = tqp.query_plan", plan.Text, StringComparison.Ordinal);
+        AssertPlanXmlSizeGuarded(plan.Text);
         Assert.Contains(
             "sys.dm_exec_text_query_plan(qs.plan_handle,qs.statement_start_offset,qs.statement_end_offset)AStqp",
             Collapse(plan.Text), StringComparison.Ordinal);
@@ -167,30 +193,37 @@ public sealed class QueryStatsCollectorDefinitionTests
 
         /* Flag on = the SELECT carries host_object_name at ordinal 42 (#2012 stage 2), then
            compile_age_seconds at 43 (#2235, inside SelectColumnsText so it is present in BOTH capture
-           modes), then the trailing query_plan_xml column at 44. */
-        var row45 = new object[45];
-        row45[0] = "SO"; row45[1] = "0xQH"; row45[2] = "0xQPH";
-        row45[3] = new DateTime(2026, 7, 2, 1, 0, 0, DateTimeKind.Utc);
-        row45[4] = new DateTime(2026, 7, 2, 2, 0, 0, DateTimeKind.Utc);
-        for (int i = 5; i < 36; i++) row45[i] = (long)i;
-        row45[22] = 4L; row45[23] = 8L;
-        row45[36] = "0xSH"; row45[37] = "0xPH"; row45[38] = "SELECT 1";
-        row45[39] = 3L; row45[40] = 66; row45[41] = 512;
-        row45[42] = "dbo.HostProc";
-        row45[43] = 17;
-        row45[44] = "<ShowPlanXML>captured</ShowPlanXML>";
+           modes), then the trailing query_plan_xml column at 44 and query_plan_xml_bytes at 45 (#3392). */
+        var row46 = new object[46];
+        row46[0] = "SO"; row46[1] = "0xQH"; row46[2] = "0xQPH";
+        row46[3] = new DateTime(2026, 7, 2, 1, 0, 0, DateTimeKind.Utc);
+        row46[4] = new DateTime(2026, 7, 2, 2, 0, 0, DateTimeKind.Utc);
+        for (int i = 5; i < 36; i++) row46[i] = (long)i;
+        row46[22] = 4L; row46[23] = 8L;
+        row46[36] = "0xSH"; row46[37] = "0xPH"; row46[38] = "SELECT 1";
+        row46[39] = 3L; row46[40] = 66; row46[41] = 512;
+        row46[42] = "dbo.HostProc";
+        row46[43] = 17;
+        row46[44] = "<ShowPlanXML>captured</ShowPlanXML>";
+        row46[45] = 37L;
 
-        using var reader = new FakeCollectorDataReader(row45);
+        using var reader = new FakeCollectorDataReader(row46);
         var rows = await QueryStatsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
         var writer = new RecordingCollectorRowWriter();
         QueryStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
 
-        Assert.Equal(51, writer.Values.Count);
+        Assert.Equal(52, writer.Values.Count);
         Assert.Equal("<ShowPlanXML>captured</ShowPlanXML>", writer.Values[37]);   /* query_plan_xml payload slot */
         Assert.Equal("dbo.HostProc", writer.Values[50]);                          /* host_object_name payload slot */
+        Assert.Equal(37L, writer.Values[51]);                                     /* #3392: query_plan_xml_bytes */
 
-        /* #2235: the compile age reaches the delta calculator and is NOT stored — 51 payload values, as
+        /* #3392: a measurement at or under the cap is not a backlog candidate, and a captured plan of 37
+           bytes is comfortably under it. Strictly-greater is what the SQL CASE does, so this side of the
+           boundary must agree. */
+        Assert.Null(QueryStatsCollector.Instance.DescribeOversizedPlan(rows[0]));
+
+        /* #2235: the compile age reaches the delta calculator and is NOT stored — 52 payload values, as
            pinned above, and one age per delta'd counter. Nine, because crediting only some of them would
            make one row's metrics disagree about how much work it did. */
         Assert.Equal(8, deltas.SeriesAges.Count);
@@ -237,15 +270,20 @@ public sealed class QueryStatsCollectorDefinitionTests
     }
 
     [Fact]
-    public void PayloadColumns_MatchSchemaOrder_51Columns()
+    public void PayloadColumns_MatchSchemaOrder_52Columns()
     {
         var names = QueryStatsCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
-        Assert.Equal(51, names.Length);
+        Assert.Equal(52, names.Length);
         Assert.Equal("database_name", names[0]);
         Assert.Equal("query_plan_xml", names[37]);
         Assert.Equal("sample_interval_seconds", names[49]);
         /* #2012 stage 2: appended LAST — append-only keeps every earlier ordinal stable. */
         Assert.Equal("host_object_name", names[50]);
+        /* #3392: appended after it, for the same reason. BigInt because DATALENGTH over an nvarchar(max)
+           expression returns bigint, and a store column typed narrower would silently overflow on the
+           megabyte-scale plans this column exists to describe. */
+        Assert.Equal("query_plan_xml_bytes", names[51]);
+        Assert.Equal(CollectorColumnType.BigInt, QueryStatsCollector.Instance.PayloadColumns[51].Type);
     }
 
     [Fact]
@@ -255,7 +293,9 @@ public sealed class QueryStatsCollectorDefinitionTests
         var context = CollectorTestContext.Make(deltas);
 
         /* 44 wide with the plan flag OFF: compile_age_seconds (#2235) lives inside SelectColumnsText, so
-           unlike query_plan_xml it is present in both capture modes and its ordinal never moves. */
+           unlike query_plan_xml and query_plan_xml_bytes it is present in both capture modes and its ordinal
+           never moves. Both plan columns are absent from the reader here, which is what makes this row also a
+           check that the #3392 read short-circuits on the flag rather than indexing past the end. */
         var row44 = new object[44];
         row44[0] = "SO"; row44[1] = "0xQH"; row44[2] = "0xQPH";
         row44[3] = new DateTime(2026, 7, 2, 1, 0, 0, DateTimeKind.Utc);
@@ -273,10 +313,15 @@ public sealed class QueryStatsCollectorDefinitionTests
         var writer = new RecordingCollectorRowWriter();
         QueryStatsCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
 
-        Assert.Equal(51, writer.Values.Count);
+        Assert.Equal(52, writer.Values.Count);
         Assert.Null(writer.Values[37]);                                   /* query_plan_xml placeholder */
         Assert.Equal(0, writer.Values[49]);                               /* interval from recording fake */
         Assert.Equal("dbo.HostProc", writer.Values[50]);                  /* host_object_name appended last */
+        Assert.Null(writer.Values[51]);                                   /* #3392: no measurement with plans off */
+
+        /* A row with no measurement is not a backlog candidate: null is "nobody measured", which is what a
+           plan-capture-off host and an aged-out handle both produce, and neither is an oversized plan. */
+        Assert.Null(QueryStatsCollector.Instance.DescribeOversizedPlan(rows[0]));
         Assert.Equal(8, deltas.Calls.Count);
         Assert.All(deltas.Calls, c => Assert.Equal("0xSH:66:512:0xPH", c.Key));
         Assert.Equal(

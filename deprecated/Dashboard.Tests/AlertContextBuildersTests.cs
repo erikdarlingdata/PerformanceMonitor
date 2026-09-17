@@ -294,7 +294,10 @@ public class AlertContextBuildersTests
                 AvgDurationSeconds = 90,        /* -> 1m 30s  */
                 P95DurationSeconds = 45,        /* -> 45s     */
                 PercentOfAverage = 350,
-                StartTime = new DateTime(2026, 6, 19, 14, 30, 15)
+                /* #3421: the run start is the monitored server's own clock, and the offset rides with the
+                   row so the body can state it in UTC. -240 is the measured fleet value. */
+                StartTime = new DateTime(2026, 6, 19, 14, 30, 15),
+                UtcOffsetMinutes = -240
             }
         };
 
@@ -311,7 +314,7 @@ public class AlertContextBuildersTests
                 ("Avg Duration", "1m 30s"),
                 ("P95 Duration", "45s"),
                 ("% of Average", $"{350m:F0}%"),
-                ("Started", "2026-06-19 14:30:15")
+                ("Started", "2026-06-19 18:30:15Z")
             },
             context.Details[0].Fields);
 
@@ -347,6 +350,7 @@ public class AlertContextBuildersTests
             {
                 JobName = "Backup Job",
                 RunDateTime = runTime,
+                UtcOffsetMinutes = -240,
                 StepId = 2,
                 StepName = "Backup databases",
                 Message = new string('x', 350)
@@ -360,7 +364,7 @@ public class AlertContextBuildersTests
             new List<(string, string)>
             {
                 ("Job", "Backup Job"),
-                ("Failed At", runTime.ToString("yyyy-MM-dd HH:mm:ss")),
+                ("Failed At", "2026-06-19 07:15:00Z"),
                 ("Step", "2 — Backup databases"),
                 ("Message", new string('x', 300) + "...")
             },

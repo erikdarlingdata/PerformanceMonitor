@@ -8,6 +8,7 @@
 
 using System;
 using System.ComponentModel;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -108,12 +109,22 @@ public sealed class DarlingMcpPgServerStateTools
         }
     }
 
-    [McpServerTool(Name = "get_pg_extensions"), Description("Gets which PostgreSQL extensions are installed, outdated, merely available, or absent, per database. Use this to answer why another read is empty: pg_stat_statements, pg_wait_sampling, pg_stat_kcache, pg_qualstats, pgstattuple, pg_buffercache and hypopg each back a specific tool, and 'absent' here is the reason that tool has nothing to show. State is one of installed, outdated, available or absent - 'available' means the files are on the server and CREATE EXTENSION would work, which is a different situation from absent and usually a one-line fix. IMPORTANT: extensions are per-DATABASE, so installed_version reflects the database the row names and not the cluster; an extension can be installed in the application database and absent from postgres.")]
+    [McpServerTool(Name = "get_pg_extensions"), Description("Gets which PostgreSQL extensions are installed, outdated, merely available, or absent, per database. Use this to answer why another read is empty: pg_stat_statements, pg_wait_sampling, pg_stat_kcache, pg_qualstats, pgstattuple, pg_buffercache and hypopg each back a specific tool, and 'absent' here is the reason that tool has nothing to show. State is one of installed, outdated, available or absent - 'available' means the files are on the server and CREATE EXTENSION would work, which is a different situation from absent and usually a one-line fix. IMPORTANT: extensions are per-DATABASE, so installed_version reflects the database the row names and not the cluster; an extension can be installed in the application database and absent from postgres. Rows are therefore the PRODUCT of databases and extension names - 102 extension names per database on the measured fleet - so a ten-database host needs 1,020 rows against a 1000-row maximum and cannot be completed in one call. Do NOT read a truncated row list as an install census: the ordering puts non-relevant 'installed' rows behind every non-relevant 'available' one, so plpgsql, which is installed in every database of every server, has no row at all once a host reaches ten databases. Read install_census instead - one row per extension created anywhere on the server with databases_installed against databases_total, aggregated so no row limit touches it - and pass database_name to complete one database's 102 rows at a time. The census and reach fields report the population and whether a larger limit would help; sampling this tool at a small limit returns exactly the 8 monitoring-relevant extensions per database and looks like a complete per-database answer.")]
     public static async Task<string> GetPgExtensions(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 168 (7 days) - this collector runs daily.")] int hours_back = 168,
         [Description("Maximum rows to return. Default 50.")] int limit = 50,
+        [Description("One database, or omit for every database on the server. Rows are one per (database, "
+            + "extension), so the row count is databases x extension names - 102 extension names per database "
+            + "on the measured fleet, which puts a ten-database host past the 1000-row maximum and a "
+            + "sixteen-database one at 1,632. ONE database's slice is 102 rows, so this is what makes such a "
+            + "host completable: sixteen calls that each finish instead of one that cannot. OMIT it for an "
+            + "install census: install_census is aggregated per extension and no row limit touches it, so "
+            + "one unfiltered call answers what is installed where. It follows this filter when you supply "
+            + "one, so a filtered response describes that database and nothing else - census, install_census "
+            + "and reach all share the rows' scope, and the echoed database_name names it.")]
+            string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
@@ -126,8 +137,18 @@ public sealed class DarlingMcpPgServerStateTools
 
         try
         {
+            var windowStart = windowEnd.AddHours(-hours_back);
+
+            /* NORMALISED ONCE, and everything downstream uses THIS value - the reads, the echo, and the
+               empty-path message. The reader's own bind applies the same helper, so the query and the label
+               cannot disagree: a whitespace-only database_name from the web surface produces server-wide
+               rows, and echoing the caller's raw string beside them claimed a scope the response did not
+               have. That is the "one response, one scope" guarantee the census and reach blocks rest on,
+               contradicted by its own label. */
+            var scope = DarlingPgExtensionAvailabilityReader.NormalizeDatabaseFilter(database_name);
+
             var rows = await DarlingPgExtensionAvailabilityReader.GetPgExtensionAvailabilityAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit);
+                postgres, resolved.ServerId, windowStart, windowEnd, limit, scope);
 
             if (rows.Count == 0)
             {
@@ -137,7 +158,13 @@ public sealed class DarlingMcpPgServerStateTools
                         "empty",
                         $"No extension inventory for {resolved.ServerName} in the last {hours_back} "
                         + "hour(s). This collector runs DAILY, so a short window can be empty on a healthy "
-                        + "server — widen it before concluding anything.");
+                        + "server — widen it before concluding anything."
+                        + (scope is null
+                            ? string.Empty
+                            : $" You filtered to database_name '{scope}': check the spelling and "
+                              + "that the collector enumerates it, because a name that matches nothing is "
+                              + "indistinguishable here from a server with no inventory. Re-run without the "
+                              + "filter to see which databases are reported."));
             }
 
             /* The result is capped at `limit`, so a summary count taken over the returned rows describes
@@ -146,6 +173,99 @@ public sealed class DarlingMcpPgServerStateTools
                looked at. Suppressed rather than renamed — "installed_in_this_page" is a number nobody
                wants. */
             var truncated = rows.Count >= limit;
+
+            /* THE POPULATION FIGURES AND THE INSTALL CENSUS, from their own query that no row limit touches
+               (#3425) — the #3278 pattern, applied to a read whose truncation removes precisely the rows a
+               census needs. Rows here are databases x extension names, so the row list outgrows any cap;
+               this is aggregated per extension, so it is bounded by what the PostgreSQL build offers and
+               does not grow as databases are added.
+
+               Asked on the POPULATED path too, and not only when truncated. A reader with 50 rows of a
+               1,632-row product has the same wrong impression as one with 1,000 of them, and a census that
+               only appeared once the response was capped would be missing exactly when somebody was
+               sampling.
+
+               SAME SCOPE AS THE ROWS: database_name goes to both, so one response describes one
+               population. Found in review of this change: a server-wide census beside one database's rows
+               put 1,632 against a complete 102-row answer and the reach classifier correctly answered
+               Unreachable, telling a filtered caller they could not see what they were holding. */
+            var census = await DarlingPgExtensionAvailabilityReader.GetInstallCensusAsync(
+                postgres, resolved.ServerId, windowStart, windowEnd, scope);
+
+            /* FROM THE CENSUS, not from the rows. Every row carries the same two scalars — they hang off a
+               one-row relation the per-extension groups join to — so the first row is the whole answer, and
+               an empty census still produces that row. Zero here means the census read nothing rather than
+               that the server has no databases, which is why it is reported rather than divided by. */
+            var databasesTotal = census.Count > 0 ? census[0].DatabasesTotal : 0;
+            var extensionNameCount = census.Count > 0 ? census[0].ExtensionNameCount : 0;
+            var rowsAvailable = census.Count > 0 ? census[0].RowsAvailable : 0;
+
+            /* WHICH DATABASES THE PAGE ACTUALLY FINISHED. A truncated response mixes complete databases
+               with ones cut to their first few rows and nothing per row says which, so this counts them:
+               measured on a sixteen-database host, nine databases complete, one at 43 rows and six holding
+               only their 8 monitoring-relevant rows, all in the same payload.
+
+               COMPLETE means "as many rows as the server has extension names", and when collection was
+               uneven that test calls a genuinely complete database partial. That is the direction to be
+               wrong in — see PgCappedReach on failing toward the worse label — and it is why
+               databases_complete is reported beside databases_in_page rather than as a share of it. */
+            var perDatabase = rows
+                .GroupBy(r => r.DatabaseName, StringComparer.Ordinal)
+                .ToList();
+            var databasesComplete = extensionNameCount > 0
+                ? perDatabase.Count(group => group.Count() >= extensionNameCount)
+                : 0;
+
+            /* THE CREATED ROWS ARE WHAT THE ORDERING PUTS LAST, so they are what a cap removes: every
+               non-relevant AVAILABLE row of every database sorts ahead of every non-relevant installed one,
+               and plpgsql is the only non-relevant installed extension on the measured fleet. So the
+               population a reader of this tool most often wants — what is actually created — is precisely
+               the one the truncation takes, and `reach` is the arithmetic for whether it was reachable at
+               all.
+
+               COMPUTED ONCE and passed to both arguments through a local. Two copies of this subtraction
+               would have to agree, and a disagreement's failure is a verdict whose own figures contradict
+               each other — a read that half works, for a reason no reader could see.
+
+               `rowsAvailable - createdRows` IS A CONSERVATIVE BOUND on the leading block, and deliberately
+               so. It counts every non-created row as being ahead of the created ones, while the non-relevant
+               ABSENT rows in fact sort behind them — so it over-states the block by exactly that count and
+               the verdict can only ever be pessimistic. On the measured fleet the error is zero: of 102
+               extension names per database, 93 non-relevant rows are `available`, one is `installed`
+               (plpgsql) and none is non-relevant `absent`, giving a bound of 100 against an exact 100.
+
+               The alternative is a second copy of PgExtensionAvailabilitySql's ORDER BY inside a window
+               function, to position the last created row exactly. That trades a documented bound that
+               cannot flatter for two ordering expressions that have to agree and whose disagreement nothing
+               would catch — the worse hazard, and the one this file's SQL comments already warn about.
+
+               Under database_name the product collapses to one database's slice, which is two orders of
+               magnitude under the cap, so nothing displaces anything and the page is that database's whole
+               answer.
+
+               GROUPED, and it is a property of this read's ORDER BY rather than a judgement (#3435). The
+               order is relevance band, then state band, then database and extension name - a partition,
+               not a ranking of the created rows by anything a reader would act on. So a cut here leaves
+               SOME DATABASES AND NOT OTHERS, and RankedTail's claim that the withheld rows rank below the
+               returned ones is false on this surface at every row count.
+
+               Declared rather than left to the figures, because the figures cannot carry it: the arm turns
+               on whether anything sorts ahead of the created rows, which is a count this server's contents
+               decide. A declaration makes the false claim unreachable at every count. */
+            var createdRows = census.Sum(row => row.DatabasesInstalled + row.DatabasesOutdated);
+
+            var reach = PgCappedRead.Classify(
+                rowsAhead: rowsAvailable - createdRows,
+                wantedRows: createdRows,
+                returnedRows: rows.Count,
+                limit: limit,
+                maxLimit: McpHelpers.MaxTop,
+                order: PgOrderSemantics.Grouped,
+                remedy: "install_census in this response answers what is created where, aggregated per "
+                      + "extension and unaffected by any row limit. For the per-database ROWS, pass "
+                      + "database_name: one database is "
+                      + extensionNameCount.ToString(CultureInfo.InvariantCulture)
+                      + " row(s) here, so a host is that many completable calls.");
 
             var extensions = rows.Select(r => new
             {
@@ -166,20 +286,98 @@ public sealed class DarlingMcpPgServerStateTools
                 hours_back,
                 extension_count = rows.Count,
                 truncated,
+                /* ECHOED NORMALISED, so a saved payload says which population it actually describes: one
+                   database's complete 102 rows and a 102-row slice of a sixteen-database product look
+                   identical otherwise, and a blank filter that the query ignored must not come back looking
+                   like a filter that applied. */
+                database_name = scope,
                 installed = truncated
                     ? (int?)null
                     : rows.Count(r => string.Equals(r.State, "installed", StringComparison.OrdinalIgnoreCase)),
                 available_not_installed = truncated
                     ? (int?)null
                     : rows.Count(r => string.Equals(r.State, "available", StringComparison.OrdinalIgnoreCase)),
+
+                /* THE POPULATION, measured by its own query and unaffected by the row limit (#3425). The
+                   two figures whose PRODUCT is what a caller's limit is really being compared against, and
+                   which no reader could obtain from the rows: a capped response names some databases and
+                   not others, so counting the ones it shows answers a question about the page. */
+                census = new
+                {
+                    databases_total = databasesTotal,
+                    extension_name_count = extensionNameCount,
+                    rows_available = rowsAvailable,
+                    /* The product beside the count, because they differ when a database's collection was
+                       partial and the difference is the only evidence of it available here. */
+                    rows_expected_if_uniform = databasesTotal * extensionNameCount,
+                    databases_in_page = perDatabase.Count,
+                    /* Complete for the databases it names, not complete for the server. Counted rather
+                       than shared, and pessimistic when collection was uneven - see the comment above. */
+                    databases_complete_in_page = databasesComplete,
+                    databases_absent_from_page = Math.Max(0, databasesTotal - perDatabase.Count),
+                },
+
+                /* WHETHER THE CREATED ROWS COULD APPEAR AT ALL, which `truncated` cannot say. The ordering
+                   puts non-relevant installed rows behind every non-relevant available one, so `installed`
+                   is the state a cap removes first - and once the rows ahead of it reach the surface
+                   maximum, no limit shows a single one of them. */
+                reach = new
+                {
+                    arm = reach.Reach.ToString(),
+                    /* WHAT THE ORDER MEANS, and on this read it is Grouped (#3435). The field is why the arm
+                       can never be RankedTail here: the rows a cap removes are other databases, so "what
+                       you lost ranks below what you got" would be false, and the type refuses to say it
+                       rather than saying it with a caveat. */
+                    order_semantics = reach.Order.ToString(),
+                    is_complete = reach.IsComplete,
+                    a_raised_limit_would_help = reach.ARaisedLimitWouldHelp,
+                    rows_ahead_of_created = reach.RowsAhead,
+                    created_rows_on_server = reach.WantedRows,
+                    created_rows_reachable_here = reach.ReachableRows,
+                    created_rows_reachable_at_max_limit = reach.ReachableAtMaxRows,
+                    created_rows_withheld = reach.WithheldRows,
+                    limit,
+                    max_limit = McpHelpers.MaxTop,
+                },
+
+                /* THE INSTALL CENSUS: one row per extension somebody created anywhere in this response's
+                   SCOPE, with the database count it is created in and the denominator beside it. Aggregated,
+                   so it CANNOT be truncated away while its siblings survive - which is what happens to
+                   plpgsql in the row list above on any host of ten databases or more. This is the answer to
+                   "is X installed everywhere", and it is complete whatever the row limit did.
+
+                   Scope, not server, because database_name narrows this too: one response describes one
+                   population, and databases_total says which. Unfiltered, the scope IS the server. */
+                install_census = census
+                    .Where(row => row.ExtensionName is not null)
+                    .Select(row => new
+                    {
+                        extension_name = row.ExtensionName,
+                        databases_installed = row.DatabasesInstalled,
+                        databases_outdated = row.DatabasesOutdated,
+                        /* Created at all: installed plus outdated. Both mean the extension exists in that
+                           database and only one of them means it is current, so they are reported apart and
+                           summed here rather than being collapsed at the source. */
+                        databases_created = row.DatabasesInstalled + row.DatabasesOutdated,
+                        databases_reporting = row.DatabasesReporting,
+                        databases_total = row.DatabasesTotal,
+                    }),
+
                 note = "Per DATABASE, not per cluster: installed_version describes the database the row "
                      + "names. 'available' means the files are present and CREATE EXTENSION would work — "
-                     + "usually a one-line fix for an empty panel elsewhere."
+                     + "usually a one-line fix for an empty panel elsewhere. Rows are the PRODUCT of "
+                     + "databases and extension names, so this row list outgrows any row limit on a "
+                     + "multi-database host — read install_census for what is installed where, because it "
+                     + "is aggregated per extension and no limit touches it."
                      + (truncated
                          ? " TRUNCATED at the row limit, so the state totals are WITHHELD: counting them "
-                           + "over a capped result would describe this page rather than the server. Raise "
-                           + "the limit for a complete inventory."
-                         : string.Empty),
+                           + "over a capped result would describe this page rather than the server. And the "
+                           + "cut is NOT a random slice — the ordering places non-relevant 'installed' rows "
+                           + "behind every non-relevant 'available' one, so what a cap removes first is "
+                           + "precisely what an install census needs. Do not read this page as one; use "
+                           + "install_census, or pass database_name to complete one database at a time."
+                         : string.Empty)
+                     + " " + reach.Message,
                 extensions,
             }, McpHelpers.JsonOptions);
         }

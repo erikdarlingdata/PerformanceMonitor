@@ -10,8 +10,15 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.CompilerServices;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Viewer;
@@ -89,10 +96,11 @@ public sealed class AlertDeliveryChannelTests
     /// <summary>
     /// <b>Sent implies a named delivering channel</b>, over the WHOLE input domain rather than the
     /// combinations the send core happens to produce. Enumerating every route to a violation is the point:
-    /// <c>EmailFanoutResult</c> carries four independent bools, and an <c>EmailSent</c> without an
-    /// <c>EmailAttempted</c> — which the send core never emits but the type freely represents — would
-    /// otherwise report a delivery on a channel that never named itself, putting a <c>true</c> back
-    /// alongside <c>tray</c> and re-breaking the legacy decode in
+    /// <c>EmailFanoutResult</c> carries two independent <see cref="AlertChannelOutcome"/> values and two
+    /// independent error strings, and a <see cref="AlertChannelOutcome.Delivered"/> alongside a muted
+    /// alert — which the send core never emits but the type freely represents — would otherwise report a
+    /// delivery on a channel that never named itself, putting a <c>true</c> back alongside <c>tray</c> and
+    /// re-breaking the legacy decode in
     /// <see cref="TheLegacyResolutionSignature_DecodesToNoChannel"/>.
     /// </summary>
     [Fact]
@@ -117,10 +125,10 @@ public sealed class AlertDeliveryChannelTests
             }
         }
 
-        /* The count IS the claim that the enumeration is the whole domain: 2^4 result bools x send_error
-           present-or-not x muted x trayChannelPresent. A shrunken loop would otherwise pass by covering
-           less. */
-        Assert.Equal(128, checked_);
+        /* The count IS the claim that the enumeration is the whole domain: 5 outcomes per channel x each
+           channel's error present-or-not x AnyChannelConfigured x muted x trayChannelPresent. A shrunken
+           loop would otherwise pass by covering less. */
+        Assert.Equal(800, checked_);
     }
 
     /// <summary>
@@ -133,11 +141,9 @@ public sealed class AlertDeliveryChannelTests
     [Fact]
     public void NoSentRow_LandsOnANonDeliveringChannel()
     {
-        string[] nonDelivering =
-        {
-            AlertDelivery.ChannelTray, AlertDelivery.ChannelNotApplicable,
-            AlertDelivery.ChannelNoneConfigured, AlertDelivery.ChannelMuted, AlertDelivery.ChannelUndelivered,
-        };
+        /* Read off the declared partition rather than listed again, so a channel added to the taxonomy
+           without being classified cannot slip past this by being absent from a hand-kept array. */
+        var nonDelivering = AlertDelivery.StateCarryingChannels;
 
         foreach (var (result, muted, tray) in EveryFanoutCase())
         {
@@ -163,34 +169,97 @@ public sealed class AlertDeliveryChannelTests
     }
 
     /// <summary>
-    /// <b>No state-carrying channel can carry a <c>send_error</c>.</b> Over the whole input domain, a
-    /// non-null error implies <see cref="AlertDelivery.DeliveringChannels"/> — because the error can only
-    /// come from the SMTP attempt, so its presence is itself email involvement.
+    /// <b>A <c>send_error</c> implies a channel that was ATTEMPTED.</b> Over the whole input domain, a
+    /// non-null error lands only on <see cref="AlertDelivery.DeliveringChannels"/> or on
+    /// <see cref="AlertDelivery.ChannelFailed"/> — the dispositions where something was actually tried.
+    /// Never on throttled, folded, muted, unconfigured, tray or none, all of which attempted nothing and
+    /// so have nothing to report.
     ///
     /// <para>This is what licenses two surfaces to check in different orders. The web dashboard tests
     /// <c>send_error</c> before its state lookup; <see cref="AlertDeliveryStatus.Describe"/> tests the state
-    /// channels first. Equivalent, but only because the two cases can never co-occur — which the review of
-    /// this change correctly noted was true of the reachable subset rather than of the type. It is now true
-    /// of the type.</para>
+    /// channels first. Equivalent, and <see cref="Failed_RendersTheSameWithOrWithoutAnError"/> is what
+    /// keeps them equivalent now that one state-carrying channel may carry an error: both orders answer
+    /// <see cref="AlertDeliveryStatus.Failed"/> for it.</para>
     ///
     /// <para>Residual, stated rather than papered over: a row PERSISTED by an earlier version could still
-    /// hold a state channel beside an error, and the two surfaces would label it differently. No producer
-    /// can write one, and none of the 32,546 rows on the three live stores carries a non-null
+    /// hold some other state channel beside an error, and the two surfaces would label it differently. No
+    /// producer can write one, and none of the 32,546 rows on the three live stores carries a non-null
     /// <c>send_error</c> at all.</para>
     /// </summary>
     [Fact]
-    public void NoStateCarryingChannel_CanCarryASendError()
+    public void ASendErrorImpliesAnAttemptedChannel()
     {
+        var attempted = AlertDelivery.DeliveringChannels
+            .Append(AlertDelivery.ChannelFailed)
+            .ToArray();
+
         foreach (var (result, muted, tray) in EveryFanoutCase())
         {
             var delivery = AlertDelivery.FromFanout(result, muted, tray);
 
             if (delivery.SendError is not null)
             {
-                Assert.Contains(delivery.Channel, AlertDelivery.DeliveringChannels);
-                Assert.DoesNotContain(delivery.Channel, AlertDelivery.StateCarryingChannels);
+                Assert.Contains(delivery.Channel, attempted);
             }
         }
+    }
+
+    /// <summary>
+    /// The one state-carrying channel that may carry an error renders the same label with or without one,
+    /// on both orders of check. Without this, an errorless <see cref="AlertDelivery.ChannelFailed"/> row
+    /// would read "Failed" on the web dashboard (a table keyed on <c>notification_type</c> alone) and
+    /// "Not sent" in the WPF grids, which is the cross-surface disagreement
+    /// <see cref="ASendErrorImpliesAnAttemptedChannel"/> used to rule out by making the case impossible.
+    /// </summary>
+    [Fact]
+    public void Failed_RendersTheSameWithOrWithoutAnError()
+    {
+        foreach (var tray in new[] { false, true })
+        {
+            Assert.Equal(
+                AlertDeliveryStatus.Failed,
+                AlertDeliveryStatus.Describe(false, AlertDelivery.ChannelFailed, null, tray));
+            Assert.Equal(
+                AlertDeliveryStatus.Failed,
+                AlertDeliveryStatus.Describe(false, AlertDelivery.ChannelFailed, "Slack: 500", tray));
+        }
+    }
+
+    /// <summary>
+    /// <b>A delivered row never carries a sibling channel's error.</b> The email cooldown seed
+    /// (<see cref="IAlertHistoryStore.GetLastEmailSentUtcAsync"/>) filters on <c>send_error IS NULL</c>, so
+    /// attaching a failed webhook's error to a successful email would take that send out of its own seed
+    /// and re-deliver it after a restart — a delivery regression bought with a diagnostic.
+    /// </summary>
+    [Fact]
+    public void ADeliveredRow_NeverCarriesTheWebhookError()
+    {
+        var probed = 0;
+
+        foreach (var (result, muted, tray) in EveryFanoutCase())
+        {
+            if (result.WebhookSendError is null)
+            {
+                continue;
+            }
+
+            var delivery = AlertDelivery.FromFanout(result, muted, tray);
+            if (!delivery.Sent)
+            {
+                continue;
+            }
+
+            probed++;
+            Assert.NotEqual(result.WebhookSendError, delivery.SendError);
+
+            /* The only error a sent row may carry is the email channel's own, which is what makes the
+               email arm a failure rather than an absence. */
+            Assert.True(delivery.SendError is null || delivery.SendError == result.SendError);
+        }
+
+        /* The domain HAS sent rows carrying a webhook error, so the loop above asserted something. Without
+           this, narrowing the cross-product to cases with no webhook error would pass by testing nothing. */
+        Assert.True(probed > 0, "no delivered row in the domain carried a webhook error");
     }
 
     /* ─────────────── the three states that used to be one `false` ─────────────── */
@@ -212,18 +281,123 @@ public sealed class AlertDeliveryChannelTests
     }
 
     /// <summary>
-    /// Configured, consulted, nothing delivered — a throttled send or a webhook post that came back
-    /// unsuccessful. Distinct from <see cref="AlertDelivery.ChannelNoneConfigured"/>, which is the whole
-    /// point: the two want different operator responses and used to arrive identically.
+    /// <b>#3427, the whole of it.</b> A throttled send, a folded send and a failed post are three
+    /// conditions that want three different operator responses, and every one of them arrives as
+    /// "configured, consulted, nothing delivered" with a null <c>send_error</c>. Each gets its own stored
+    /// value, and the three come back DIFFERENT — from each other, from a delivered row, and from the
+    /// unconfigured and muted rows they sit next to.
+    ///
+    /// <para>Asserting that each value is merely PRODUCIBLE would pass on a taxonomy that mapped all three
+    /// to one string, so the claim here is pairwise distinctness over a fixture where each mechanism is
+    /// active in turn — and the rendered labels are checked too, because two stored values that render
+    /// alike are two values an operator cannot tell apart.</para>
     /// </summary>
     [Fact]
-    public void WithAChannelConfiguredAndNothingDelivered_TheDispositionIsUndelivered()
+    public void TheThreeSuppressionMechanisms_AreMutuallyDistinguishable()
+    {
+        /* One fixture per mechanism, each differing from the others ONLY in which outcome the webhook
+           channel reports. Nothing else varies, so a difference in the answer can only come from the
+           mechanism. */
+        var throttled = AlertDelivery.FromFanout(
+            Fanout(webhook: AlertChannelOutcome.Throttled, anyChannelConfigured: true),
+            muted: false, trayChannelPresent: false);
+
+        var folded = AlertDelivery.FromFanout(
+            Fanout(webhook: AlertChannelOutcome.Folded, anyChannelConfigured: true),
+            muted: false, trayChannelPresent: false);
+
+        var failed = AlertDelivery.FromFanout(
+            Fanout(webhook: AlertChannelOutcome.Failed, webhookSendError: "Slack: 500 Internal Server Error",
+                   anyChannelConfigured: true),
+            muted: false, trayChannelPresent: false);
+
+        Assert.Equal(AlertDelivery.ChannelThrottled, throttled.Channel);
+        Assert.Equal(AlertDelivery.ChannelFolded, folded.Channel);
+        Assert.Equal(AlertDelivery.ChannelFailed, failed.Channel);
+
+        /* None of the three delivered, so alert_sent cannot separate them — which is why the channel has
+           to. */
+        Assert.False(throttled.Sent);
+        Assert.False(folded.Sent);
+        Assert.False(failed.Sent);
+
+        /* Pairwise distinct as STORED values, and pairwise distinct as RENDERED ones. */
+        var channels = new[] { throttled.Channel, folded.Channel, failed.Channel };
+        Assert.Equal(3, channels.Distinct(StringComparer.Ordinal).Count());
+
+        var labels = new[] { Describe(throttled), Describe(folded), Describe(failed) };
+        Assert.Equal(3, labels.Distinct(StringComparer.Ordinal).Count());
+
+        /* And distinct from the dispositions they are routinely mistaken for. */
+        Assert.DoesNotContain(AlertDelivery.ChannelUndelivered, channels);
+        Assert.DoesNotContain(AlertDelivery.ChannelNoneConfigured, channels);
+        Assert.DoesNotContain(AlertDelivery.ChannelMuted, channels);
+
+        /* send_error is NOT the discriminator: it is null on two of the three. Splitting the
+           not-delivered rows on it credits the throttle for a failure, which is the error #3427 records
+           having been made in production. */
+        Assert.Null(throttled.SendError);
+        Assert.Null(folded.SendError);
+        Assert.Equal("Slack: 500 Internal Server Error", failed.SendError);
+    }
+
+    /// <summary>
+    /// A failed post carries its reason, which is the half of #3427 the taxonomy alone does not fix: a
+    /// <c>failed</c> row with no error names no endpoint to go and look at. The channel's name is kept with
+    /// the message because four channels report into one string.
+    /// </summary>
+    [Fact]
+    public void AFailedWebhookPost_CarriesTheFailingChannelsError()
     {
         var delivery = AlertDelivery.FromFanout(
-            Fanout(anyChannelConfigured: true), muted: false, trayChannelPresent: false);
+            Fanout(webhook: AlertChannelOutcome.Failed, webhookSendError: "Teams: 404 Not Found",
+                   anyChannelConfigured: true),
+            muted: false, trayChannelPresent: false);
 
-        Assert.False(delivery.Sent);
-        Assert.Equal(AlertDelivery.ChannelUndelivered, delivery.Channel);
+        Assert.Equal(AlertDelivery.ChannelFailed, delivery.Channel);
+        Assert.Equal("Teams: 404 Not Found", delivery.SendError);
+        Assert.Equal(AlertDeliveryStatus.Failed, Describe(delivery));
+    }
+
+    /// <summary>
+    /// <b><see cref="AlertDelivery.ChannelUndelivered"/> is unreachable for a new row.</b> It is retained
+    /// for the ~8 weeks of history that holds it, where it means throttled OR folded OR failed with nothing
+    /// to say which. Over the whole representable domain the only shapes that still reach it are the ones
+    /// the send core cannot emit — every channel reporting
+    /// <see cref="AlertChannelOutcome.NotAttempted"/> while a channel is configured and the alert is not
+    /// muted, which cannot happen because a configured channel is always consulted.
+    ///
+    /// <para>Stated as an enumeration of the surviving routes rather than as "it does not occur in these
+    /// cases", because that is the form a reader can falsify: if a fourth suppression mechanism is added
+    /// and not given a value, it lands here and this names it.</para>
+    /// </summary>
+    [Fact]
+    public void Undelivered_IsReachedOnlyByShapesTheSendCoreCannotEmit()
+    {
+        var reached = 0;
+
+        foreach (var (result, muted, tray) in EveryFanoutCase())
+        {
+            if (AlertDelivery.FromFanout(result, muted, tray).Channel != AlertDelivery.ChannelUndelivered)
+            {
+                continue;
+            }
+
+            reached++;
+
+            Assert.Equal(AlertChannelOutcome.NotAttempted, result.EmailOutcome);
+            Assert.Equal(AlertChannelOutcome.NotAttempted, result.WebhookOutcome);
+            Assert.True(result.AnyChannelConfigured);
+            Assert.False(muted);
+            Assert.False(tray);
+
+            /* And a null email error, since a non-null one would have made this the email channel. */
+            Assert.Null(result.SendError);
+        }
+
+        /* The arm IS live in the type. Zero here would mean the assertions above ran on nothing, and would
+           read exactly like a proof of unreachability. */
+        Assert.True(reached > 0, "the undelivered fall-through was never taken");
     }
 
     /// <summary>An attempt that threw keeps its error, and reads as a failure rather than as an absence.</summary>
@@ -231,7 +405,7 @@ public sealed class AlertDeliveryChannelTests
     public void AnAttemptThatFailed_KeepsItsErrorAndReadsAsFailed()
     {
         var delivery = AlertDelivery.FromFanout(
-            Fanout(emailAttempted: true, sendError: "relay refused", anyChannelConfigured: true),
+            Fanout(email: AlertChannelOutcome.Failed, sendError: "relay refused", anyChannelConfigured: true),
             muted: false, trayChannelPresent: false);
 
         Assert.False(delivery.Sent);
@@ -314,6 +488,10 @@ public sealed class AlertDeliveryChannelTests
     [InlineData(false, AlertDelivery.ChannelNotApplicable, null, AlertDeliveryStatus.NoChannel)]
     [InlineData(false, AlertDelivery.ChannelNoneConfigured, null, AlertDeliveryStatus.NoChannelConfigured)]
     [InlineData(false, AlertDelivery.ChannelUndelivered, null, AlertDeliveryStatus.NotSent)]
+    [InlineData(false, AlertDelivery.ChannelThrottled, null, AlertDeliveryStatus.Throttled)]
+    [InlineData(false, AlertDelivery.ChannelFolded, null, AlertDeliveryStatus.ReportedElsewhere)]
+    [InlineData(false, AlertDelivery.ChannelFailed, null, AlertDeliveryStatus.Failed)]
+    [InlineData(false, AlertDelivery.ChannelFailed, "Slack: 500", AlertDeliveryStatus.Failed)]
     [InlineData(false, AlertDelivery.ChannelMuted, null, AlertDeliveryStatus.Muted)]
     [InlineData(false, AlertDelivery.ChannelEmail, "relay refused", AlertDeliveryStatus.Failed)]
     [InlineData(false, AlertDelivery.ChannelEmail, null, AlertDeliveryStatus.NotSent)]
@@ -397,6 +575,9 @@ public sealed class AlertDeliveryChannelTests
             (false, AlertDelivery.ChannelNotApplicable, null),
             (false, AlertDelivery.ChannelNoneConfigured, null),
             (false, AlertDelivery.ChannelUndelivered, null),
+            (false, AlertDelivery.ChannelThrottled, null),
+            (false, AlertDelivery.ChannelFolded, null),
+            (false, AlertDelivery.ChannelFailed, "Slack: 500 Internal Server Error"),
             (false, AlertDelivery.ChannelMuted, null),
             (false, AlertDelivery.ChannelEmail, "relay refused"),
             (true, AlertDelivery.ChannelEmailAndWebhook, null),
@@ -521,31 +702,41 @@ public sealed class AlertDeliveryChannelTests
         => AlertDeliveryStatus.Describe(delivery.Sent, delivery.Channel, delivery.SendError, producerHadTrayChannel: false);
 
     private static EmailFanoutResult Fanout(
-        bool emailAttempted = false, bool emailSent = false, string? sendError = null,
-        bool webhookSent = false, bool anyChannelConfigured = false)
-        => new(emailAttempted, emailSent, sendError, webhookSent, anyChannelConfigured);
+        AlertChannelOutcome email = AlertChannelOutcome.NotAttempted, string? sendError = null,
+        AlertChannelOutcome webhook = AlertChannelOutcome.NotAttempted, string? webhookSendError = null,
+        bool anyChannelConfigured = false)
+        => new(email, sendError, webhook, webhookSendError, anyChannelConfigured);
 
     /// <summary>
-    /// Every representable <c>EmailFanoutResult</c> shape crossed with both callers' answers — 128 cases.
-    /// <c>SendError</c> is in the cross-product because an arm DOES branch on it: it counts as email
-    /// involvement, which is what makes
-    /// <see cref="NoStateCarryingChannel_CanCarryASendError"/> hold over the whole domain.
+    /// Every representable <c>EmailFanoutResult</c> shape crossed with both callers' answers — 800 cases:
+    /// five <see cref="AlertChannelOutcome"/> values per channel, each channel's error present or not,
+    /// <c>AnyChannelConfigured</c>, <c>muted</c> and <c>trayChannelPresent</c>.
+    /// Both errors are in the cross-product because arms DO branch on them: the email one counts as email
+    /// involvement (which is what makes <see cref="ASendErrorImpliesAnAttemptedChannel"/> hold over the
+    /// whole domain), and the webhook one is what a <see cref="AlertDelivery.ChannelFailed"/> row carries.
     /// </summary>
     private static IEnumerable<(EmailFanoutResult Result, bool Muted, bool Tray)> EveryFanoutCase()
     {
-        foreach (var emailAttempted in new[] { false, true })
-        foreach (var emailSent in new[] { false, true })
-        foreach (var webhookSent in new[] { false, true })
+        foreach (var email in EveryOutcome)
+        foreach (var webhook in EveryOutcome)
         foreach (var anyConfigured in new[] { false, true })
         foreach (var sendError in new string?[] { null, "relay refused" })
+        foreach (var webhookError in new string?[] { null, "Slack: 500 Internal Server Error" })
         foreach (var muted in new[] { false, true })
         foreach (var tray in new[] { false, true })
         {
             yield return (
-                new EmailFanoutResult(emailAttempted, emailSent, sendError, webhookSent, anyConfigured),
+                new EmailFanoutResult(email, sendError, webhook, webhookError, anyConfigured),
                 muted, tray);
         }
     }
+
+    /// <summary>
+    /// Read off the enum rather than listed, so a sixth outcome joins every enumeration below on the same
+    /// commit that declares it instead of leaving each of them quietly covering less.
+    /// </summary>
+    private static readonly AlertChannelOutcome[] EveryOutcome =
+        Enum.GetValues<AlertChannelOutcome>();
 
     private static IEnumerable<string> SourceFilesUnder(string relativeDirectory)
         => Directory.EnumerateFiles(Path.Combine(RepoRoot(), relativeDirectory), "*.cs", SearchOption.AllDirectories)
@@ -556,4 +747,379 @@ public sealed class AlertDeliveryChannelTests
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
         => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", ".."));
+
+    /* ─────────────── #3297: the detail text reaches the WIRE, not just the payload builder ─────────────── */
+
+    /// <summary>
+    /// #3297: <see cref="AlertOutcome.DetailText"/> reached the history store, the Viewer, the MCP reader and
+    /// the triage endpoint — and no delivery channel. <c>WebhookAlertService</c> held zero references to it
+    /// across all 1,534 lines, and the email template's detail section was gated on
+    /// <see cref="AlertContext.Details"/>, a different and STRUCTURED field, which a self-alert leaves null.
+    /// So an operator whose only channel was email received a metric name, a value, a threshold and two
+    /// timestamps, with the remedy discarded — reported from the field on #3296.
+    ///
+    /// <para>This drives the WHOLE Darling path — <see cref="DarlingAlertDeliverer.DeliverAsync"/> through the
+    /// shared send core, the fan-out, and each channel's payload builder — and asserts against the bytes that
+    /// actually left the process. Deliberately not a payload-builder assertion: the defect was never in a
+    /// builder, it was that nothing passed the text TO one, and a builder-level pin is green on a fan-out
+    /// that drops the argument. There is no dogfooding path here (no email configured on any of the three
+    /// stores, and no webhook channel until one is stood up), so a test is the only instrument.</para>
+    ///
+    /// <para>Three requests: Teams, Slack and the generic channel all point at the one loopback endpoint.
+    /// PagerDuty is absent because its endpoint is the hardcoded Events v2 URL and cannot be redirected —
+    /// its builder is pinned in <c>Lite.Tests.PagerDutyWebhookTests</c> instead, and it takes the same
+    /// <c>prose</c> from the same single resolution in the fan-out as the three checked here.</para>
+    /// </summary>
+    [Fact]
+    public async Task TheDeliverer_PutsDetailTextOnTheWire_OnEmailAndEveryRedirectableWebhookChannel()
+    {
+        /* The #3296 alert's own detail, shortened. The marker is the operator action the reporter had to
+           work out for themselves because no channel delivered it. */
+        const string Prose =
+            "Store query_stats retention [1072] is HELD PAUSED by the rollup-coverage gate. Run the " +
+            "--backfill-rollups operator action, then RESTART the service.";
+
+        using var endpoint = new CapturingWebhookEndpoint();
+        using var smtp = new CapturingSmtpEndpoint();
+
+        var config = new DarlingConfig();
+        config.Webhooks.TeamsUrl = endpoint.Url;
+        config.Webhooks.SlackUrl = endpoint.Url;
+        config.Webhooks.GenericUrl = endpoint.Url;
+        config.Smtp.Host = "127.0.0.1";
+        config.Smtp.Port = smtp.Port;
+        config.Smtp.UseSsl = false;
+        config.Smtp.From = "monitor@example.invalid";
+        config.Smtp.To = "operator@example.invalid";
+
+        var settings = new DarlingAlertSettings(config);
+        var history = new DiscardingHistoryStore();
+        var webhooks = new WebhookAlertService(
+            settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
+        var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
+
+        /* A self-alert: Context null, prose in DetailText. The shape the defect hid in. */
+        await deliverer.DeliverAsync(
+            new AlertOutcome(
+                "retentionhold:1072", "Monitor Store", "Retention Held", "9.6x its 4 days horizon", "2.0x",
+                Context: null, DetailText: Prose, NumericCurrentValue: 9.6, NumericThresholdValue: 2.0,
+                Muted: false, Severity: AlertSeverityLevel.Critical),
+            TestContext.Current.CancellationToken);
+
+        var bodies = endpoint.Bodies;
+        Assert.Equal(3, bodies.Count);
+        Assert.All(bodies, body => Assert.Contains("--backfill-rollups", body, StringComparison.Ordinal));
+        Assert.All(bodies, body => Assert.Contains("RESTART the service", body, StringComparison.Ordinal));
+
+        /* And email, which is the channel #3296 actually reported and therefore the one that must not be
+           covered only at the payload builder. Both MIME parts: the HTML and plain-text bodies are built by
+           two different methods and a repair to one says nothing about the other. */
+        var message = Assert.Single(smtp.Messages);
+        Assert.Contains("--backfill-rollups", message, StringComparison.Ordinal);
+        Assert.Contains("RESTART the service", message, StringComparison.Ordinal);
+        /* TWICE: once in the text/plain part, once in the text/html one. A single occurrence would mean one
+           of the two bodies lost it, which the pre-#3297 code would have reported as a clean pass on the
+           other. */
+        Assert.Equal(2, CountOccurrences(message, "--backfill-rollups"));
+    }
+
+    /// <summary>
+    /// #3297 and #3303 arrived at this seam from opposite directions in the same week — the alert's prose
+    /// detail and a custom rule's human display name — and every signature from
+    /// <see cref="DarlingAlertDeliverer"/> down to each payload builder gained one parameter from each. Both
+    /// are <c>string?</c>, so nothing about losing one, or transposing the pair, is a compile error.
+    ///
+    /// <para>Each side's own suite covers its payload BUILDERS. Neither covers the three hops between the
+    /// deliverer and those builders with the OTHER field also present, because neither side had both fields
+    /// to pass. This drives the whole path once with both set and reads the bytes that left the process, so
+    /// "both survived" is measured at the hops the merge conflict was actually in rather than inferred from
+    /// the builders being intact.</para>
+    ///
+    /// <para>Bodies are identified by a channel-native marker, never by arrival order. And the generic
+    /// channel's exemption is asserted here rather than assumed: it carries the prose (alert content) but
+    /// keeps the immutable metric name, because <c>{{metric}}</c> is the key an automation correlates on and
+    /// that channel renders no title.</para>
+    /// </summary>
+    [Fact]
+    public async Task TheDeliverer_CarriesBothTheProseAndTheDisplayName_ThroughTheOneFanOut()
+    {
+        const string Prose =
+            "Signal wait time has exceeded its ceiling for 15 minutes. Check for a runaway parallel query "
+            + "before raising MAXDOP.";
+        const string DisplayName = "Signal wait % high";
+        const string MetricKey = "Custom:42";
+
+        using var endpoint = new CapturingWebhookEndpoint();
+        using var smtp = new CapturingSmtpEndpoint();
+
+        var config = new DarlingConfig();
+        config.Webhooks.TeamsUrl = endpoint.Url;
+        config.Webhooks.SlackUrl = endpoint.Url;
+        config.Webhooks.GenericUrl = endpoint.Url;
+        config.Smtp.Host = "127.0.0.1";
+        config.Smtp.Port = smtp.Port;
+        config.Smtp.UseSsl = false;
+        config.Smtp.From = "monitor@example.invalid";
+        config.Smtp.To = "operator@example.invalid";
+
+        var settings = new DarlingAlertSettings(config);
+        var history = new DiscardingHistoryStore();
+        var webhooks = new WebhookAlertService(
+            settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
+        var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
+
+        /* A custom-rule fire, the shape CustomAlertEvaluator.BuildFireOutcome produces: Context null, the
+           rule's prose in DetailText, the rule's name in DisplayName, "Custom:<id>" as the metric key. */
+        await deliverer.DeliverAsync(
+            new AlertOutcome(
+                "custom:42", "PROD01", MetricKey, "1500", ">= 1000",
+                Context: null, DetailText: Prose, NumericCurrentValue: 1500, NumericThresholdValue: 1000,
+                Muted: false, Severity: AlertSeverityLevel.Warning,
+                ShortMessage: null, DisplayName: DisplayName),
+            TestContext.Current.CancellationToken);
+
+        var bodies = endpoint.Bodies;
+        Assert.Equal(3, bodies.Count);
+
+        /* The prose is alert CONTENT, so every channel carries it. */
+        Assert.All(bodies, body => Assert.Contains(Prose, body, StringComparison.Ordinal));
+
+        /* The display name is a TITLE concern, so the two card channels carry it. */
+        var teams = Assert.Single(bodies, b => b.Contains("themeColor", StringComparison.Ordinal));
+        Assert.Contains(DisplayName, teams, StringComparison.Ordinal);
+        Assert.DoesNotContain(MetricKey, teams, StringComparison.Ordinal);
+
+        var slack = Assert.Single(bodies, b => b.Contains("\"blocks\"", StringComparison.Ordinal));
+        Assert.Contains(DisplayName, slack, StringComparison.Ordinal);
+        Assert.DoesNotContain(MetricKey, slack, StringComparison.Ordinal);
+
+        /* And the generic channel keeps the machine key instead. */
+        var generic = Assert.Single(bodies, b => b.Contains("\"metric\"", StringComparison.Ordinal));
+        Assert.Contains(MetricKey, generic, StringComparison.Ordinal);
+        Assert.DoesNotContain(DisplayName, generic, StringComparison.Ordinal);
+
+        /* Email is the channel #3296 was reported from, and its subject is where #3303's name shows. Both
+           MIME parts again, so losing either body fails. */
+        var message = Assert.Single(smtp.Messages);
+        Assert.Contains(DisplayName, message, StringComparison.Ordinal);
+        Assert.Contains("before raising MAXDOP", message, StringComparison.Ordinal);
+        Assert.Equal(2, CountOccurrences(message, "before raising MAXDOP"));
+    }
+
+    /* ────── #3302 regression: a finding's Diagnosis facts, delivered once and stored in full ────── */
+
+    /// <summary>
+    /// The counting marker for the two tests below. It appears exactly ONCE per rendering of the Diagnosis
+    /// facts — as the <c>Database</c> field of the structured item, and as the <c>Database:</c> line of the
+    /// prose — and nowhere else in any payload: not in the metric name (category + hash), not in the
+    /// current value (root fact key + value), not in the thresholds, not in the static advice prose, and
+    /// not in the email subject. So an occurrence count over a delivered body IS the number of times those
+    /// facts arrived.
+    /// </summary>
+    private const string FindingDatabaseMarker = "LedgerArchive_7731";
+
+    /// <summary>
+    /// What <c>config_alert_log.detail_text</c> holds for an analysis row. A frozen list of lines, not a
+    /// re-derivation from <c>FindingMessageFormatter</c> — which this assembly cannot see anyway, the
+    /// Notifications project granting <c>InternalsVisibleTo</c> to Lite and Dashboard but not here. That
+    /// limitation is useful: the expectation cannot follow the code it pins.
+    /// </summary>
+    private static string PersistedFindingDetailText => string.Join(Environment.NewLine, new[]
+    {
+        "  Story: CPU_SPIKE → PLAN_REGRESSION",
+        "  Severity: 1.80 (notify threshold 1.5)",
+        "  Confidence: 0.67",
+        "  Facts in chain: 2",
+        "  Database: " + FindingDatabaseMarker,
+        "  Window: 2026-09-11 01:00:00Z - 2026-09-11 02:00:00Z"
+    });
+
+    /// <summary>
+    /// A realistic <c>cpu_pressure</c> finding with every Diagnosis field populated and a FIXED window, so
+    /// the expected detail text above can be a literal.
+    /// </summary>
+    private static AnalysisFinding CpuFinding() => new()
+    {
+        ServerId = 1,
+        ServerName = "PROD01",
+        Category = "cpu_pressure",
+        StoryPath = "CPU_SPIKE → PLAN_REGRESSION",
+        StoryPathHash = "diag000000000001",
+        IncidentId = string.Empty,
+        Severity = 1.8,
+        Confidence = 0.67,
+        FactCount = 2,
+        RootFactKey = "CPU_SPIKE",
+        RootFactValue = 92.5,
+        DatabaseName = FindingDatabaseMarker,
+        TimeRangeStart = new DateTime(2026, 9, 11, 1, 0, 0, DateTimeKind.Utc),
+        TimeRangeEnd = new DateTime(2026, 9, 11, 2, 0, 0, DateTimeKind.Utc)
+    };
+
+    /// <summary>
+    /// The regression, on the wire. <c>FindingMessageFormatter</c> is a third producer of
+    /// <c>(Context, DetailText)</c> pairs that #3297 never touched: <c>BuildContext</c> puts story /
+    /// severity / notify threshold / confidence / fact count / database / window into a <c>Diagnosis</c>
+    /// item, and <c>DetailText</c> formats the same values with different labels and a different window
+    /// separator. Different text, so <c>AlertDetailText.ProseForDelivery</c>'s equality never fires, so
+    /// every channel rendered those facts twice — on the largest alert category there is.
+    ///
+    /// <para>Driven through the REAL producer rather than a hand-built <c>FindingAlert</c>: the
+    /// declaration under test belongs to <c>AnalysisNotificationService</c>, and a hand-built record
+    /// would assert the arrangement instead of the behaviour. From there it is the whole Darling path —
+    /// <see cref="DarlingFindingAlertSender"/> through the shared send core, the fan-out and each payload
+    /// builder — read off the bytes that left the process.</para>
+    ///
+    /// <para>An occurrence COUNT rather than an absence. Asserting only that the prose is gone would pass
+    /// just as well if the structured context had been dropped instead, which is the opposite defect and
+    /// the more expensive one: the context carries the advice, the remediation T-SQL and the drill-down
+    /// that the prose does not.</para>
+    /// </summary>
+    [Fact]
+    public async Task AnAnalysisFinding_DeliversItsDiagnosisFactsOnce_OnEveryRedirectableChannel()
+    {
+        using var endpoint = new CapturingWebhookEndpoint();
+        using var smtp = new CapturingSmtpEndpoint();
+
+        var config = new DarlingConfig();
+        config.Webhooks.TeamsUrl = endpoint.Url;
+        config.Webhooks.SlackUrl = endpoint.Url;
+        config.Webhooks.GenericUrl = endpoint.Url;
+        config.Smtp.Host = "127.0.0.1";
+        config.Smtp.Port = smtp.Port;
+        config.Smtp.UseSsl = false;
+        config.Smtp.From = "monitor@example.invalid";
+        config.Smtp.To = "operator@example.invalid";
+
+        var settings = new DarlingAlertSettings(config);
+        var sender = new DarlingFindingAlertSender(
+            settings, new DiscardingHistoryStore(),
+            new WebhookAlertService(settings, DarlingAlertDeliverer.Branding,
+                NullLogger<WebhookAlertService>.Instance, new DiscardingHistoryStore()),
+            NullLogger.Instance);
+
+        var notifier = new AnalysisNotificationService(
+            sender, settings, f => f.ServerId.ToString(),
+            NullLogger<AnalysisNotificationService>.Instance);
+
+        await notifier.NotifyAsync(new[] { CpuFinding() });
+
+        var bodies = endpoint.Bodies;
+        Assert.Equal(3, bodies.Count);
+        Assert.All(bodies, body => Assert.Equal(1, CountOccurrences(body, FindingDatabaseMarker)));
+
+        /* Email, and both MIME parts: one occurrence per body, built by two different methods. */
+        var message = Assert.Single(smtp.Messages);
+        Assert.Equal(2, CountOccurrences(message, FindingDatabaseMarker));
+
+        /* The rendering that survived is the STRUCTURED one, which is the copy that carries the advice
+           and the remediation T-SQL. Its own labels, not the prose's, on every channel. */
+        Assert.All(bodies, body => Assert.Contains("Diagnosis", body, StringComparison.Ordinal));
+        Assert.All(bodies, body => Assert.DoesNotContain("Facts in chain", body, StringComparison.Ordinal));
+        Assert.Contains("Diagnosis", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Facts in chain", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The constraint the whole approach rests on. The obvious repair — make
+    /// <c>FindingMessageFormatter.DetailText</c> the flattening of its own context, as every
+    /// <c>AlertEngine</c> fire site does — would change <c>config_alert_log.detail_text</c> for every
+    /// analysis row, and that column is read by the MCP alert reader, the triage endpoint and the Viewer's
+    /// detail pane, and PARSED by <c>AlertMuteContext.PopulateFromDetailText</c> for the mute pre-fill.
+    /// So the suppression is at delivery only, and that this is true of the STORED value is asserted here
+    /// rather than intended: same dispatch, channels configured, the row read off
+    /// <see cref="IAlertHistoryStore"/>.
+    /// </summary>
+    [Fact]
+    public async Task AnAnalysisFinding_PersistsItsProseDetailTextInFull_WhileTheChannelsRenderTheContext()
+    {
+        using var endpoint = new CapturingWebhookEndpoint();
+
+        var config = new DarlingConfig();
+        config.Webhooks.GenericUrl = endpoint.Url;
+
+        var settings = new DarlingAlertSettings(config);
+        var history = new CapturingHistoryStore();
+        var sender = new DarlingFindingAlertSender(
+            settings, history,
+            new WebhookAlertService(settings, DarlingAlertDeliverer.Branding,
+                NullLogger<WebhookAlertService>.Instance, history),
+            NullLogger.Instance);
+
+        var notifier = new AnalysisNotificationService(
+            sender, settings, f => f.ServerId.ToString(),
+            NullLogger<AnalysisNotificationService>.Instance);
+
+        await notifier.NotifyAsync(new[] { CpuFinding() });
+
+        /* The channel saw the facts once. */
+        var body = Assert.Single(endpoint.Bodies);
+        Assert.Equal(1, CountOccurrences(body, FindingDatabaseMarker));
+
+        /* And the row kept the prose whole, byte for byte what it held before this change. */
+        var record = Assert.Single(history.Records);
+        Assert.Equal(PersistedFindingDetailText, record.DetailText);
+        Assert.NotNull(record.ContextJson);
+    }
+
+    /// <summary>
+    /// The other direction, without which the fix is indistinguishable from reverting #3297 for this seam:
+    /// "never deliver a finding's prose" satisfies both tests above. The suppression is the PRODUCER's
+    /// declaration, read off the record, so a producer whose prose carries something its context does not
+    /// still has it delivered — the #2109 AG alerts' <c>SET HADR RESUME</c> being the standing example,
+    /// and the one case <c>AlertDetailText.ProseForDelivery</c> was deliberately built not to drop.
+    ///
+    /// <para>Hand-built here, because no producer in the tree answers <c>true</c> today. That is the point
+    /// of putting the question on the record rather than hardcoding the answer in each sender: the next
+    /// producer gets to answer it, and this is what proves the answer is still read.</para>
+    /// </summary>
+    [Fact]
+    public async Task AFindingWhoseProseIsNotARestatement_IsStillDelivered()
+    {
+        const string Remedy = "Fix the underlying cause, then resume it with ALTER DATABASE [Sales] SET HADR RESUME.";
+
+        using var endpoint = new CapturingWebhookEndpoint();
+
+        var config = new DarlingConfig();
+        config.Webhooks.GenericUrl = endpoint.Url;
+
+        var settings = new DarlingAlertSettings(config);
+        var history = new CapturingHistoryStore();
+        var sender = new DarlingFindingAlertSender(
+            settings, history,
+            new WebhookAlertService(settings, DarlingAlertDeliverer.Branding,
+                NullLogger<WebhookAlertService>.Instance, history),
+            NullLogger.Instance);
+
+        var independent = new FindingAlert(
+            "Analysis: ag_health [indep000]", "PROD01", "AG_DATABASE_SUSPENDED", "1.5", "1",
+            new AlertContext(), 1.8, 1.5, Remedy, DeliverDetailText: true);
+
+        await sender.SendFindingAlertAsync(independent);
+        Assert.Contains("SET HADR RESUME", Assert.Single(endpoint.Bodies), StringComparison.Ordinal);
+
+        /* The same alert declared a restatement: nothing on the wire, everything on the row. */
+        await sender.SendFindingAlertAsync(independent with
+        {
+            MetricName = "Analysis: ag_health [suppress]",
+            DeliverDetailText = false
+        });
+
+        Assert.Equal(2, endpoint.Bodies.Count);
+        Assert.DoesNotContain("SET HADR RESUME", endpoint.Bodies[1], StringComparison.Ordinal);
+        Assert.Equal(2, history.Records.Count);
+        Assert.All(history.Records, r => Assert.Equal(Remedy, r.DetailText));
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        int count = 0, index = 0;
+        while ((index = haystack.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += needle.Length;
+        }
+
+        return count;
+    }
 }

@@ -80,9 +80,19 @@ public sealed class DarlingManagedRolesTests
     {
         var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
 
-        /* #1563: the ONE viewer write — an EXPLICIT single-table grant on config.custom_views (the web
-           dashboard's user-authored view store; editing is loopback-gated server-side). */
+        /* #1563: the first viewer write — an EXPLICIT single-table grant on config.custom_views (the web
+           dashboard's user-authored view store; editing is loopback-gated server-side). The viewer write set
+           has since grown by the same single-table shape (custom_alert_rules #3285, database_state_expected
+           #1986, config_mute_rules #3450 below) and by nothing wider. */
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.custom_views TO viewer;", sql, StringComparison.Ordinal);
+
+        /* #3450: the web mute-rule endpoints run as viewer, so it holds the SAME single-table mute write the
+           mcp role has — plus the COLUMN-level config_service beacon grant the SECURITY-INVOKER bump trigger
+           needs (trg_bump_mute_rules UPDATEs config_service.config_version AS the writing role), and never a
+           table-wide config_service UPDATE that would reach paused / capture_plans / mcp_port. */
+        Assert.Contains("GRANT INSERT, UPDATE, DELETE ON config.config_mute_rules TO viewer;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT UPDATE (config_version, updated_at) ON config.config_service TO viewer;", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("GRANT UPDATE ON config.config_service TO viewer", sql, StringComparison.Ordinal);
 
         /* It must NOT widen the schema-wide config write to viewer (that grant stays admin-only, pinned here). */
         Assert.Contains("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;", sql, StringComparison.Ordinal);
@@ -386,5 +396,43 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains($"PASSWORD '{admin}'", sql, StringComparison.Ordinal);
         Assert.Contains($"PASSWORD '{viewer}'", sql, StringComparison.Ordinal);
         Assert.Contains($"PASSWORD '{mcp}'", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildProvisioningSql_CreatesResolveDefinerFunction_ScopedAndGrantedToViewerAndMcp()
+    {
+        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+
+        /* #3334: the SECURITY DEFINER resolve-on-delete write function, so viewer/mcp can record the recovery
+           row config_alert_log otherwise refuses them WITHOUT a blanket INSERT grant that would let them forge
+           history. Definer-safety is the whole point, so each safety property is pinned individually. */
+        Assert.Contains("CREATE OR REPLACE FUNCTION config.record_custom_alert_resolution(", sql, StringComparison.Ordinal);
+        Assert.Contains("SECURITY DEFINER", sql, StringComparison.Ordinal);
+
+        /* The pinned search_path (config first, then pg_catalog) is what makes injection impossible — no caller
+           path can redirect the unqualified config_alert_log or now(). */
+        Assert.Contains("SET search_path = config, pg_catalog", sql, StringComparison.Ordinal);
+
+        /* A fresh function is EXECUTE-able by PUBLIC by default, so the REVOKE is mandatory and must precede the
+           narrow grant; EXECUTE is the ONLY privilege the least-privilege roles get. */
+        Assert.Contains("REVOKE ALL ON FUNCTION config.record_custom_alert_resolution(integer, text, text, text) FROM PUBLIC;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, text, text) TO viewer, mcp;", sql, StringComparison.Ordinal);
+        var revokeAt = sql.IndexOf("REVOKE ALL ON FUNCTION config.record_custom_alert_resolution", StringComparison.Ordinal);
+        var grantAt = sql.IndexOf("GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution", StringComparison.Ordinal);
+        Assert.True(revokeAt >= 0 && grantAt > revokeAt, "the PUBLIC revoke must precede the EXECUTE grant.");
+
+        /* The body writes ONE config_alert_log row, shape-LOCKED to a no-channel resolution (alert_sent false,
+           notification_type 'none', zeroed values, unmuted) — so a grantee can page nothing and forge no fire. */
+        Assert.Contains("INSERT INTO config_alert_log", sql, StringComparison.Ordinal);
+        Assert.Contains("false, 'none', NULL, false,", sql, StringComparison.Ordinal);
+
+        /* NOT the rejected blanket grant: viewer/mcp never get a direct write on the history table. */
+        Assert.DoesNotContain("ON config.config_alert_log TO viewer", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ON config.config_alert_log TO mcp", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ON config_alert_log TO viewer", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ON config_alert_log TO mcp", sql, StringComparison.Ordinal);
+
+        /* The shared builder emits the same CREATE + REVOKE the gated live proof test creates the function from. */
+        Assert.Contains(DarlingManagedRoles.BuildCustomAlertResolveFunctionSql("config"), sql, StringComparison.Ordinal);
     }
 }

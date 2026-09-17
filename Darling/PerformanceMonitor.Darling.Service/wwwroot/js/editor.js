@@ -31,6 +31,7 @@ import { el, mount, apiGet, readTool } from "./util.js";
 import { renderPanel, VIZ } from "./panels.js";
 import { SERIES_COLORS, normalizeColor } from "./charts.js";
 import { renderComposedPanelCard } from "./compose.js";
+import { buildCreateAlertAction } from "./alert-seed.js";
 import * as api from "./views-api.js";
 import * as derive from "./derive.js";
 
@@ -120,6 +121,38 @@ export async function loadFleetOptions() {
     }))
     .filter((o) => o.value)
     .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/* Fleet TAG options for the alert-rule scope picker (#3350): the /api/fleet tag forest flattened depth-first
+   (parents before their children) into { value: String(tag id), label, depth }. The value is the STABLE tag id
+   — a tag-scoped rule stores scope.tagId, not the name, so a rename never re-scopes it — and depth lets a flat
+   <select> render the hierarchy with indentation. Cycle- and dangling-parent-safe, the same projection the
+   fleet page groups with. Empty when no tags are defined. */
+export async function loadFleetTagOptions() {
+  const res = await apiGet("/api/fleet");
+  if (res.kind !== "data" || !res.data) return [];
+  const forest = Array.isArray(res.data.tags) ? res.data.tags : [];
+  const known = new Set(forest.map((t) => t.id));
+  const byParent = new Map();
+  for (const t of forest) {
+    const p = t.parent_id != null && known.has(t.parent_id) ? t.parent_id : 0; // dangling parent -> root
+    if (!byParent.has(p)) byParent.set(p, []);
+    byParent.get(p).push(t);
+  }
+  for (const list of byParent.values()) {
+    list.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0) || String(a.name).localeCompare(String(b.name)));
+  }
+  const out = [];
+  const visited = new Set();
+  const emit = (t, depth) => {
+    if (visited.has(t.id)) return; // cycle guard
+    visited.add(t.id);
+    out.push({ value: String(t.id), label: t.name || "Tag " + t.id, depth });
+    for (const child of byParent.get(t.id) || []) emit(child, depth + 1);
+  };
+  for (const t of byParent.get(0) || []) emit(t, 0);
+  for (const t of forest) if (!visited.has(t.id)) emit(t, 0); // cycle / disconnected -> surface as a root
+  return out;
 }
 
 /* ─────────────────────────── model <-> stored definition ─────────────────────────── */
@@ -945,6 +978,8 @@ function buildComposedPanelEditor(p, index, ctx, kindToggle) {
       ctx.refreshSaveState();
     },
     showWidth: true,
+    /* #3285: a scalar panel can seed a new alert rule from its metric (a copy, not a live binding). */
+    panelExtraAction: (pm) => buildCreateAlertAction(pm, composedPanelToDesc),
   });
 
   refreshHead();
@@ -978,6 +1013,13 @@ function buildComposedPanelEditor(p, index, ctx, kindToggle) {
  *   onChange      — () => notify the wrapper a field changed (refresh its head echo + save state); the body owns
  *                   its own config rebuild + debounced preview, so onChange never rebuilds anything itself.
  *   showWidth     — show the Width (span 1|2) control; false for a notebook cell (single-column document flow).
+ *   metricOnly    — (#3285) lock the body to a SCALAR metric picker (Metric + Aggregate + Unit + Filters) for the
+ *                   alert editor: no shape / group / chart / identity controls, and no live compose preview (the
+ *                   alert editor renders its own would-fire preview from /api/alerts/test). The window is an alert
+ *                   concern with its own ceiling, so it lives in the alert editor, not here.
+ *   panelExtraAction — (p) => a node rendered at the foot of the config on each rebuild (or null to render nothing);
+ *                   a GENERIC hook with no alert knowledge — the composers pass the "Create alert from this metric"
+ *                   action, which returns null off a scalar panel, so it reveals/hides live as the shape flips.
  */
 export function buildComposedPanelBody(p, opts) {
   const catalog = opts.catalog;
@@ -987,6 +1029,8 @@ export function buildComposedPanelBody(p, opts) {
   const previewScope = opts.previewScope || (() => ({}));
   const onChange = opts.onChange || (() => {});
   const showWidth = opts.showWidth !== false;
+  const metricOnly = opts.metricOnly === true;
+  const panelExtraAction = typeof opts.panelExtraAction === "function" ? opts.panelExtraAction : null;
   let previewTimer = null;
 
   const bodyBox = el("div", { class: "panel-editor-body" });
@@ -995,6 +1039,7 @@ export function buildComposedPanelBody(p, opts) {
   previewSection.classList.add("panel-preview-col");
 
   function schedulePreview() {
+    if (metricOnly) return; // the alert metric picker has no compose preview (its editor owns the would-fire preview)
     clearTimeout(previewTimer);
     previewTimer = setTimeout(renderComposedPreview, PREVIEW_DEBOUNCE_MS);
   }
@@ -1036,6 +1081,20 @@ export function buildComposedPanelBody(p, opts) {
       m ? el("div", { class: "measure-caption", text: measureCaption(m, compose) }) : null,
       m ? measureAvailabilityNote(m, scopeServer) : null,
     ]);
+  }
+
+  /* #3285: the alert metric picker's fields — Aggregate (a ratio has none) + Unit, and no shape/group/chart. The
+     evaluation window is deliberately absent: it is an alert concern with its own ceiling, so the alert editor owns
+     it. Reuses the SAME aggregate + unit controls the full composer builds, so the two can't drift. */
+  function metricScalarBlock(m) {
+    const kids = [];
+    if (m.kind === "ratio") {
+      kids.push(field("Aggregation", el("div", { class: "static-field muted", text: "Ratio (numerator ÷ denominator)" })));
+    } else {
+      kids.push(field("Aggregate", aggregateSelect(m)));
+    }
+    kids.push(field("Unit / magnitude", unitControl(m)));
+    return el("div", { class: "composed-fields" }, kids);
   }
 
   function shapeAndAggBlock(m) {
@@ -1152,6 +1211,10 @@ export function buildComposedPanelBody(p, opts) {
 
   function filtersBlock(m) {
     const editor = buildComposedFiltersEditor(p, m, compose, onLive);
+    /* An alert metric has no view template variables, so its filter help is just the literal-value rule (no $name). */
+    if (metricOnly) {
+      return el("div", {}, [editor, el("div", { class: "block-help", text: "Values are literals (comma-separated for is/is-not)." })]);
+    }
     const declared = (getVariables() || []).filter((v) => v.name).map((v) => "$" + v.name);
     const help = declared.length
       ? el("div", { class: "block-help", text: "Values are literals (comma-separated for is/is-not); reference a view variable as " + declared.join(", ") + "." })
@@ -1350,6 +1413,10 @@ export function buildComposedPanelBody(p, opts) {
     const config = [labeledBlock("Metric", measureBlock(m))];
     if (!m) {
       config.push(el("div", { class: "panel-hint", text: "Choose a metric to begin." }));
+    } else if (metricOnly) {
+      /* Alert metric (#3285): a scalar value only — measure + aggregate + unit + filters, nothing that shapes a chart. */
+      config.push(metricScalarBlock(m));
+      config.push(labeledBlock("Filters", filtersBlock(m)));
     } else {
       config.push(shapeAndAggBlock(m));
       config.push(labeledBlock("Group by", groupByBlock(m)));
@@ -1357,8 +1424,14 @@ export function buildComposedPanelBody(p, opts) {
       config.push(labeledBlock("Chart", chartBlock(m)));
       config.push(advancedBlock(m));
       config.push(identityBlock());
+      /* A caller-supplied per-panel action (#3285 "Create alert from this metric"), rebuilt here so it reveals/hides
+         live as the shape flips; returns null (nothing rendered) off a non-scalar panel. */
+      if (panelExtraAction) {
+        const extra = panelExtraAction(p);
+        if (extra) config.push(extra);
+      }
     }
-    const hasPreview = !!(m && p.viz);
+    const hasPreview = !metricOnly && !!(m && p.viz);
     const kids = [el("div", { class: "panel-config" }, config)];
     if (hasPreview) kids.push(previewSection);
     bodyBox.className = "panel-editor-body" + (hasPreview ? " has-preview" : "");

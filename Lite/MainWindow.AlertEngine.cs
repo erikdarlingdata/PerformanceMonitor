@@ -82,7 +82,11 @@ public partial class MainWindow : Window
             SqlCpuPercent: summary.CpuPercent,
             TotalCpuPercent: summary.TotalCpuPercent,
             IsAzureSqlDb: connStatus?.SqlEngineEdition == 5,
-            Suppressed: suppressPopups);
+            Suppressed: suppressPopups,
+            /* #3282: the gate counts breaching CPU SAMPLES rather than sweeps. Lite's sweep is the
+               30-second overview timer and the ring-buffer sample behind CpuPercent advances about once a
+               minute, so without the instant one sample would fill the streak on its own. */
+            CpuSampleTimeUtc: summary.CpuSampleTime);
 
         AlertSweepResult sweep;
         try
@@ -175,6 +179,12 @@ public partial class MainWindow : Window
             AppLogger.Warn("Alerts", AlertFiringLog.Fired(
                 serverName, metricName, "Critical", currentValue, isMuted));
 
+            /* #3430: the effective delivery mode, so this alert obeys the same per-metric repeat ceiling
+               every alert the deliverer carries obeys. A network blip that drops several monitored servers
+               at once is exactly the fan-out that bound exists for — without this the connection edge would
+               be the one family on this store still costing one post per affected server. Read straight off
+               the ServerConnection in hand rather than through ServerManager's scan, which exists for the
+               callers that only have the hashed id. */
             _ = _emailAlertService.TrySendAlertEmailAsync(
                 metricName,
                 serverName,
@@ -183,7 +193,9 @@ public partial class MainWindow : Window
                 serverId,
                 context: null,
                 muted: isMuted,
-                detailText: detailText);
+                detailText: detailText,
+                deliveryMode: AlertDeliveryModeResolver.Resolve(
+                    server.AlertDeliveryModeOverride, App.AlertDeliveryMode));
         }
         catch (Exception ex)
         {
@@ -236,6 +248,36 @@ public partial class MainWindow : Window
         /* GetRecentlyFailedJobsAsync degrades every read failure (permissions, transient) to an
            empty list itself, so a broken msdb read can't fail the sweep. */
         return await _collectorService.GetRecentlyFailedJobsAsync(server, lookbackMinutes, cancellationToken);
+    }
+
+    /// <summary>
+    /// The engine's #3497 Agent-job name resolver for the Long-Running Query card — the live-msdb seam
+    /// beside <see cref="FetchFailedJobsForAlertAsync"/>, with its exact gate: only online,
+    /// non-Azure-SQL-DB servers whose login has msdb access are queried (Azure SQL DB has no SQL Agent;
+    /// a login without msdb can't read sysjobs), and every other case answers an EMPTY map, which the
+    /// card renders as the unresolved form — annotation, never suppression: the card already fired, and
+    /// this read can only ever add the job's name to it.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<AgentJobStepKey, AgentJobStepNames>> FetchAgentJobStepNamesForAlertAsync(
+        string serverKey, IReadOnlyList<AgentJobStepKey> keys, CancellationToken cancellationToken)
+    {
+        var server = _serverManager.GetAllServers().FirstOrDefault(s =>
+            RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)).ToString() == serverKey);
+        var connStatus = server != null ? _serverManager.GetConnectionStatus(server.Id) : null;
+
+        if (server == null
+            || _collectorService == null
+            || connStatus == null
+            || connStatus.IsOnline != true
+            || connStatus.SqlEngineEdition == 5
+            || !connStatus.HasMsdbAccess)
+        {
+            return new Dictionary<AgentJobStepKey, AgentJobStepNames>();
+        }
+
+        /* GetAgentJobStepNamesAsync degrades every read failure (permissions, transient) to an empty
+           map itself, so a broken msdb read can't fail the sweep — the failed-jobs fetcher's rule. */
+        return await _collectorService.GetAgentJobStepNamesAsync(server, keys, cancellationToken);
     }
 
     /// <summary>
@@ -376,6 +418,10 @@ public partial class MainWindow : Window
                     serverName, alert.MetricName, "Warning", alert.CurrentValue, isMuted));
             }
 
+            /* #3430: the effective delivery mode, for the reason the connection edge above gives — AG
+               replicas on one availability group flap together, so this family fans out across servers the
+               same way. Through ServerManager's scan because this path carries the hashed id, not the
+               ServerConnection. */
             _ = _emailAlertService.TrySendAlertEmailAsync(
                 alert.MetricName,
                 serverName,
@@ -384,7 +430,9 @@ public partial class MainWindow : Window
                 serverId,
                 context: alert.Context,
                 muted: isMuted,
-                detailText: alert.DetailText);
+                detailText: alert.DetailText,
+                deliveryMode: AlertDeliveryModeResolver.Resolve(
+                    _serverManager.ResolveAlertDeliveryModeOverride(serverId), App.AlertDeliveryMode));
         }
         catch (Exception ex)
         {

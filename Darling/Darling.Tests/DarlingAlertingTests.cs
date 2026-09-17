@@ -265,7 +265,9 @@ public sealed class DarlingAlertingTests
             var snapshot = new AlertServerSnapshot(
                 TestServerKey, TestServerName,
                 IsOnline: true, SqlCpuPercent: null, TotalCpuPercent: null,
-                IsAzureSqlDb: false, Suppressed: false);
+                IsAzureSqlDb: false, Suppressed: false,
+                /* No CPU value at all here, so the #3282 gate never observes anything on this path. */
+                CpuSampleTimeUtc: null);
 
             /* --- first sweep: the deadlock and the poison wait fire, unmuted --- */
             var (deliverer, engine) = await BuildStackAsync();

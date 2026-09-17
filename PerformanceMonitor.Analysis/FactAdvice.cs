@@ -2264,6 +2264,18 @@ public static class FactAdvice
             Remediation:
                 "Forcing the historical-better plan is the fast fix while you investigate why the worse plan was chosen — the engine attaches a ready-to-run force statement with the IDs filled in. **Confirm the better plan is still better against current data before forcing** — schema changes, data growth, or statistics updates may have made the old plan stale. Run both plans against representative parameter values first. Forcing is reversible: the snippet includes a commented unforce line for back-out. For the durable fix, address the root cause — stale statistics, a parameter-sensitivity swing on a new value, or a recently-dropped index are the usual culprits.");
 
+        /* The static fallback for SAME_STATEMENT_PILEUP (#3467). The detector freezes value-stated
+           advice — the measured session count, elapsed floor, waits, and baseline — into StoryText at
+           detection time, so this block serves the frozen path's two fallbacks: legacy rows and the
+           co-fired title lookup. Kept mechanism-true rather than value-true for that reason. */
+        t[SameStatementPileupDetector.RootFactKey] = new AdviceBlock(
+            Headline:
+                "Same-statement pileup — concurrent copies of one normally-fast statement all stuck at once on IO waits",
+            Investigation:
+                "The active-query snapshot caught several sessions running the SAME statement at one instant, every copy seconds deep on a statement whose recent snapshots showed sub-second in-flight observations, with at least one copy suspended on an IO-class wait. That is the live signature of a shared parameterized plan flipping to an IO-heavy shape: every caller inherits the flip simultaneously, the copies convoy on page reads, and client command timeouts follow within seconds. The drill-down quotes the piled-up sessions (elapsed, waits, reads) and the sub-second baseline observations. This finding is computed entirely from the active-query snapshot collector — deliberately, because on some deployments the Query Store readers are disabled (#2296) and a QS-keyed detector would be blind exactly where this shape hurts.",
+            Remediation:
+                "Evict the statement's current plan (DBCC FREEPROCCACHE with the plan handle, or sp_recompile on the object) — this incident class self-clears when the plan churns out, and eviction forces the churn now. Where Query Store is readable, the next analysis pass's PLAN_REGRESSION finding confirms the flip with plan history and offers the durable fix (forcing the historically-good plan). Recurring episodes fold onto one incident id; a statement that keeps re-drawing its bad plan on cache churn needs the parameter-sensitivity playbook (recompile hints, plan guides, or a rewrite that splits the sensitive predicate).");
+
         // ─────────────────────────────────────────────────────────────────
         // DB config
         // ─────────────────────────────────────────────────────────────────

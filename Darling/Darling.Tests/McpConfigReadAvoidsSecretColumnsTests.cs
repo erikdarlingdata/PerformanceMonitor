@@ -112,6 +112,49 @@ public sealed class McpConfigReadAvoidsSecretColumnsTests
         Assert.NotEmpty(namedSecrets);
     }
 
+    /// <summary>
+    /// #3314 put a <c>config_notification</c> read back on the MCP surface — the delivery cooldown, the one
+    /// alert-engine knob stored on that table — so the carve now has to hold for a read that DOES ship,
+    /// rather than by the whole read having been removed.
+    ///
+    /// <para>The mirror image of <see cref="TheNotificationReadStillNamesCarvedSecretColumns"/>, and it
+    /// fails in the costly direction: that one asserts the PRIVILEGED read still names secrets (so the skip
+    /// stays justified), this one asserts the MCP read names NONE. Column-level denial answers for the whole
+    /// TABLE, so a single carved column added to this SELECT does not degrade the read — it 42501s the entire
+    /// call, and that is the #2293 failure, where skipping one denied row simply moved the error to the next.
+    /// Every non-secret column is derived from the ACL rather than listed, so a column reclassified as secret
+    /// makes THIS fail on the day of the reclassification instead of on the next deployment.</para>
+    ///
+    /// <para>The read is also asserted to stay narrow: the value the tool needs is one column, and
+    /// <c>SELECT *</c> — or a convenience widening to "the non-secret columns" — is denied outright by the
+    /// carve for the star and is a pointless secret-adjacent read for the rest.</para>
+    /// </summary>
+    [Fact]
+    public void TheMcpDeliveryCooldownReadNamesNoCarvedSecretColumn()
+    {
+        var sql = PerformanceMonitor.Darling.Service.Mcp.DarlingAlertReader.DeliveryCooldownSelectSql;
+        var acl = DarlingManagedRoles.ViewerRestrictedConfigTables
+            .Single(t => string.Equals(t.Table, "config_notification", StringComparison.Ordinal));
+
+        Assert.Contains("FROM config_notification", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("*", sql, StringComparison.Ordinal);
+
+        var named = acl.SecretColumns.Where(c => sql.Contains(c, StringComparison.Ordinal)).ToArray();
+        Assert.Empty(named);
+
+        /* And it really does name the one non-secret column it needs -- without this the assertions above
+           are satisfied by a SELECT that reads nothing from the table at all. */
+        var selected = sql[(sql.IndexOf("SELECT", StringComparison.Ordinal) + 6)..
+                            sql.IndexOf("FROM config_notification", StringComparison.Ordinal)]
+            .Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(c => c.Trim())
+            .Where(c => c.Length > 0)
+            .ToArray();
+
+        Assert.Equal(new[] { "email_cooldown_minutes" }, selected);
+        Assert.Contains("email_cooldown_minutes", acl.NonSecretColumns);
+    }
+
     private static string RepoRoot([CallerFilePath] string thisFile = "")
     {
         var dir = Path.GetDirectoryName(thisFile)!;

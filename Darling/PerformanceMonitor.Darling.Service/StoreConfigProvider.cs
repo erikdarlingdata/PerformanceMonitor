@@ -677,8 +677,10 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
             true);
         AddDrift(drift, "auth", Trimmed(file.Auth), Trimmed(store.Auth), StringComparison.OrdinalIgnoreCase, true);
 
-        if (store.UsesSqlAuth)
+        if (store.UsesSqlAuth || store.UsesEntra)
         {
+            /* Username is meaningful for sql auth, for a service principal (the client id), and for a
+               user-assigned managed identity (its client id) — anything but integrated. #3484. */
             AddDrift(
                 drift,
                 "username",
@@ -955,6 +957,18 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
     {
         var a = config.Alerts;
         var an = config.Analysis;
+
+        /* Every knob rung APPENDS to this column list and to the bindings below in the same order, so
+           no existing placeholder ordinal moves: #2349's four file-growth gates, then #3297's two
+           Retention Held ratios (V119), then #3368's two deadlock-rate tiers (V120).
+
+           ANNOTATE HERE. THE COLUMN LIST CARRIES NO COMMENTS AT ALL, and that is a hard rule rather
+           than a preference: ConfigSeedStatementArityTests parses this statement with one regex that
+           captures the column list up to the first ')' and splits it on ','. A closing parenthesis in
+           a comment there ends the capture early, so the whole INSERT stops matching and its arity is
+           unchecked rather than wrong; a comma makes a clause of the comment count as a column. Both
+           are invisible in the statement itself and loud only in that guard, so wording a comment
+           carefully is not the fix - the fix is that the prose lives up here. */
         using var command = new NpgsqlCommand(@"
 INSERT INTO config_alert_settings (
     id, enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, blocking_count_threshold,
@@ -974,11 +988,15 @@ INSERT INTO config_alert_settings (
     self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold,
     disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes,
     store_job_cadence_warn_percent,
-    /* #2349 appended LAST so no existing placeholder ordinal moves. */
-    file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes)
+    file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes,
+    retention_hold_warn_ratio, retention_hold_critical_ratio,
+    deadlock_warn_per_hour, deadlock_critical_per_hour,
+    pg_deadlock_count_threshold, pg_blocking_count_threshold,
+    fleet_sweep_enabled, fleet_sweep_interval_minutes)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
-        $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59)
+        $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63,
+        $64, $65, $66, $67)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -1050,6 +1068,26 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         command.Parameters.AddWithValue(a.FileGrowthRiseMb);
         command.Parameters.AddWithValue(a.FileGrowthVolumePercent);
         command.Parameters.AddWithValue(a.FileGrowthLookbackMinutes);
+        /* #3297, bound in the same order the V119 columns were appended. Seeded RAW like every sibling: the
+           clamps live on DarlingAlertSettings, and a pair where critical sits below warn is a legitimate
+           setting (every fire is Critical), not a state to normalize on the way in. */
+        command.Parameters.AddWithValue(a.RetentionHoldWarnRatio);
+        command.Parameters.AddWithValue(a.RetentionHoldCriticalRatio);
+        /* #3368, bound in the same order the V120 columns were appended. Seeded RAW like every sibling: the
+           clamp lives on DeadlockRateThresholds, and a pair where critical sits below warn is a legitimate
+           setting (every banded rate is Critical), not a state to normalize on the way in. */
+        command.Parameters.AddWithValue(a.DeadlockWarnPerHour);
+        command.Parameters.AddWithValue(a.DeadlockCriticalPerHour);
+        /* #3444, bound in the same order the V122 columns were appended. Seeded RAW like every sibling:
+           the floor lives on DarlingAlertSettings, so what the store holds is what get_alert_settings
+           reports back. */
+        command.Parameters.AddWithValue(a.PgDeadlockCountThreshold);
+        command.Parameters.AddWithValue(a.PgBlockingCountThreshold);
+        /* #3466, bound in the same order the V124 columns were appended. Seeded RAW like every sibling:
+           the cadence clamp lives at the worker's read (FleetSweepCadence's bounds), so what the store
+           holds is what get_alert_settings reports back. */
+        command.Parameters.AddWithValue(a.FleetSweepEnabled);
+        command.Parameters.AddWithValue(a.FleetSweepIntervalMinutes);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -1319,7 +1357,11 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        self_disk_free_warn_percent, collection_stale_minutes, collection_failure_threshold,
        disk_critical_free_percent, disk_critical_free_gb, analysis_notify_cooldown_minutes,
        store_job_cadence_warn_percent,
-       file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes
+       file_growth_enabled, file_growth_rise_mb, file_growth_volume_percent, file_growth_lookback_minutes,
+       retention_hold_warn_ratio, retention_hold_critical_ratio,
+       deadlock_warn_per_hour, deadlock_critical_per_hour,
+       pg_deadlock_count_threshold, pg_blocking_count_threshold,
+       fleet_sweep_enabled, fleet_sweep_interval_minutes
 FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -1414,6 +1456,36 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
             FileGrowthRiseMb = reader.GetInt32(55),
             FileGrowthVolumePercent = reader.GetInt32(56),
             FileGrowthLookbackMinutes = reader.GetInt32(57),
+
+            /* #3297 Retention Held tiers appended (V119) at ordinals 58-59, double precision like
+               analysis_notify_severity. Same reachability rule as every appended knob above: ApplyToConfig
+               replaces config.Alerts wholesale, so a column selected but not read here -- or read but not
+               selected -- would silently reset the tier to the shipped default on every worker start, which
+               is precisely the "the setting did not stick" reading this issue exists to remove. */
+            RetentionHoldWarnRatio = reader.GetDouble(58),
+            RetentionHoldCriticalRatio = reader.GetDouble(59),
+
+            /* #3368 deadlock-rate band tiers appended (V120) at ordinals 60-61, double precision like the
+               pair above. Same reachability rule as every appended knob: ApplyToConfig replaces
+               config.Alerts wholesale, so a column selected but not read here -- or read but not selected --
+               would silently reset the tier to the shipped default on every worker start. */
+            DeadlockWarnPerHour = reader.GetDouble(60),
+            DeadlockCriticalPerHour = reader.GetDouble(61),
+
+            /* #3444 PostgreSQL count knobs appended (V122) at ordinals 62-63, integer like their SQL
+               Server twins rather than the double the two pairs above use. Same reachability rule as
+               every appended knob: ApplyToConfig replaces config.Alerts wholesale, so a column selected
+               but not read here -- or read but not selected -- would silently reset the threshold to the
+               shipped default on every worker start. */
+            PgDeadlockCountThreshold = reader.GetInt32(62),
+            PgBlockingCountThreshold = reader.GetInt32(63),
+
+            /* #3466 fleet-sweep cadence knobs appended (V124) at ordinals 64-65. Same reachability rule
+               as every appended knob: ApplyToConfig replaces config.Alerts wholesale, so a column selected
+               but not read here -- or read but not selected -- would silently reset the knob to the shipped
+               default on every worker start. */
+            FleetSweepEnabled = reader.GetBoolean(64),
+            FleetSweepIntervalMinutes = reader.GetInt32(65),
         };
         var analysis = new AnalysisConfig
         {
@@ -1540,10 +1612,12 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
             RemediationEncryptedPassword = reader.IsDBNull(18) ? null : reader.GetString(18),
         };
 
-        if (server.UsesSqlAuth && string.IsNullOrWhiteSpace(server.EncryptedPassword))
+        if (server.RequiresResolvedSecret && string.IsNullOrWhiteSpace(server.EncryptedPassword))
         {
+            /* Service principal keeps its client secret in the same EncryptedPassword slot as a SQL password,
+               so the bootstrap backfill (store row minted without the secret) covers it identically. #3484. */
             var matches = bootstrap.Servers.Where(s =>
-                s.UsesSqlAuth
+                s.RequiresResolvedSecret
                 && string.Equals(s.StorageName, server.StorageName, StringComparison.OrdinalIgnoreCase)
                 && string.Equals(s.Username, server.Username, StringComparison.Ordinal)).ToList();
 
@@ -1561,7 +1635,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     {
         var overrides = new List<ScheduleOverride>();
         using var command = new NpgsqlCommand(
-            "SELECT server_id, collector_name, frequency_minutes, retention_days, enabled FROM config_collector_schedules", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+            "SELECT server_id, collector_name, frequency_minutes, retention_days, enabled, databases FROM config_collector_schedules", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -1570,7 +1644,12 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
                 reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetInt32(2),
                 reader.IsDBNull(3) ? null : reader.GetInt32(3),
-                reader.GetBoolean(4)));
+                reader.GetBoolean(4),
+                /* V125 (#3477): NULL and an empty array are DIFFERENT readings here and both must
+                   survive the round trip — NULL falls through the layering, an explicit empty array
+                   is "no scope at this level" and stops it. Collapsing them at read time would make
+                   a server's opt-out of a fleet scope silently re-inherit that scope. */
+                reader.IsDBNull(5) ? null : reader.GetFieldValue<string[]>(5)));
         }
 
         return overrides;
@@ -1691,6 +1770,63 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         return def.RetentionDays;
     }
 
+    /// <summary>
+    /// The effective per-collector database scope (#3477) for one collector on one server: the
+    /// per-server row's <c>databases</c> if the column is NOT NULL, else the fleet row's, else
+    /// unscoped — the same per-column layering <see cref="ResolveSchedule"/> applies, with the one
+    /// array-specific reading layered on top: a NULL column falls through, an explicit EMPTY array is
+    /// "no scope at this level" and STOPS the fall-through, which is how one server opts back out of
+    /// a fleet-wide scope without naming every database it has. Returns the sanitized allow-list;
+    /// empty = every database the server enumerates (today's behavior). Pure — unit-testable without
+    /// a store. <c>excludedDatabases</c> is deliberately NOT consulted here: the exclusion wins
+    /// downstream, inside the same enumeration statements, where the ENGINE compares both lists'
+    /// names under one collation reality (<see cref="PerformanceMonitor.Collectors.DatabaseScopeFilter"/>).
+    /// </summary>
+    public static IReadOnlyList<string> ResolveDatabaseScope(string collectorName, int serverId, IReadOnlyList<ScheduleOverride>? overrides)
+    {
+        ScheduleOverride? perServer = null;
+        ScheduleOverride? fleet = null;
+        if (overrides is not null)
+        {
+            foreach (var o in overrides)
+            {
+                if (!string.Equals(o.CollectorName, collectorName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (o.ServerId == serverId)
+                {
+                    perServer = o;
+                }
+                else if (o.ServerId is null)
+                {
+                    fleet = o;
+                }
+            }
+        }
+
+        var scope = perServer?.Databases ?? fleet?.Databases;
+        if (scope is null || scope.Count == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        /* Sanitize the ValidRetention way: blank entries are hand-edit noise, not databases, and a
+           list that sanitizes to nothing degrades to "no scope" — the direction that keeps
+           collecting rather than silently collecting nothing on a row full of whitespace. */
+        var names = new List<string>(scope.Count);
+        foreach (var name in scope)
+        {
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                names.Add(name.Trim());
+            }
+        }
+
+        return names;
+    }
+
     /// <summary>A retention override is honored only when &gt;= 1 day; 0/negative would invert the purge
     /// cutoff and delete everything, so it degrades to "no override" (fall through to the default).</summary>
     private static int? ValidRetention(int? days) => days is int v && v >= 1 ? v : null;
@@ -1727,8 +1863,12 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         reader.IsDBNull(ordinal) ? new List<string>() : reader.GetFieldValue<string[]>(ordinal).ToList();
 }
 
-/// <summary>One sparse <c>config_collector_schedules</c> row — NULL <c>ServerId</c> = fleet-wide.</summary>
-public sealed record ScheduleOverride(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled);
+/// <summary>One sparse <c>config_collector_schedules</c> row — NULL <c>ServerId</c> = fleet-wide.
+/// <see cref="Databases"/> is the V125 per-collector allow-list (#3477): null = the column was NULL
+/// (no scope at this level, fall through), an empty list = the EXPLICIT "no scope" that stops the
+/// fall-through; the null/empty distinction is load-bearing and <see cref="StoreConfigProvider.ResolveDatabaseScope"/>
+/// documents it. Defaulted so every pre-V125 construction reads as "no scope column written".</summary>
+public sealed record ScheduleOverride(int? ServerId, string CollectorName, int? FrequencyMinutes, int? RetentionDays, bool Enabled, IReadOnlyList<string>? Databases = null);
 
 /// <summary>The resolved per-collector schedule (override layered on <see cref="CollectorScheduleDefaults"/>).</summary>
 public sealed record EffectiveSchedule(int FrequencyMinutes, int RetentionDays, bool Enabled);

@@ -31,11 +31,15 @@ public readonly record struct EnumeratedRunResult(int Rows, long SqlMs, long Sto
 /// What a per-database fan-out cost, rolled up to the one thing a blended <c>collection_log</c> row cannot
 /// say: how many items it covered, which one was dearest, and what that one cost (#2472).
 ///
-/// <para>The point is the RATIO, not the parts. <c>SlowestItemMs * ItemCount / duration_ms</c> is 1.0 for a
-/// perfectly even fan-out and rises with concentration, so 8 databases at 10.1s each reads 1.0 and one at
-/// 62s beside seven at 2.7s reads 6.1 — two runs that are both 80,900 ms and want opposite fixes. Neither
-/// <c>max_duration_ms</c> nor <c>p95_duration_ms</c> can tell them apart, because both aggregate over RUNS
-/// and each of those runs is one row.</para>
+/// <para>The point is the DERIVED figures, not the parts. <c>SlowestItemMs * ItemCount / duration_ms</c> is
+/// 1.0 for a perfectly even fan-out and rises with concentration, so 8 databases at 10.1s each reads 1.0 and
+/// one at 62s beside seven at 2.7s reads 6.1 — two runs that are both 80,900 ms and want opposite fixes.
+/// Neither <c>max_duration_ms</c> nor <c>p95_duration_ms</c> can tell them apart, because both aggregate
+/// over RUNS and each of those runs is one row. The read side derives a second figure from the same three
+/// parts — <c>SlowestItemMs / duration_ms</c>, the slowest item's share of the pass — and THAT one carries
+/// the width-versus-concentration verdict (#3502): the ratio's ceiling is <c>ItemCount</c>, so on a wide
+/// fan-out it reads high with no concentration behind it, and it stays published as the evenness reading
+/// only.</para>
 ///
 /// <para>Deliberately a rollup and not a distribution. The full per-item series would need its own retained
 /// hypertable; this rides three nullable columns on a row that is written anyway, and answers the question

@@ -84,6 +84,11 @@ public sealed class DarlingPgReadSqlParsesLiveTests
     private static readonly HashSet<string> NotQueryFields = new(StringComparer.Ordinal)
     {
         "DarlingPgColumnStatsReader.EvidenceStatusList",
+        /* #3278's twin of the line above, and the same reasoning: an IN-list fragment built from
+           EnumeratedCollectorDriver.FreshnessSuccessStatuses, so it is 'SUCCESS', 'SKIPPED' and not a
+           statement. The query it is spliced into - CoverageEvidenceSql - IS in the parse-checked
+           population, so the fragment is verified where it is used rather than left unverified. */
+        "DarlingPgIndexBloatReader.EvidenceStatusList",
         "DarlingPgServerConfigReader.SessionScopedSources",
         "DarlingPgTableBloatReader.StaleStatisticsChurnRatioSql",
     };

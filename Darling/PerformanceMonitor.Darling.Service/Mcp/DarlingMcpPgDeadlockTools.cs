@@ -44,8 +44,16 @@ public sealed class DarlingMcpPgDeadlockTools
 
             if (rows.Count == 0)
             {
+                /* Capability first — a permanent engine gap outranks a fixable precondition — then what the
+                   collector's own last run recorded (#3410): a denied pg_read_file grant, the file it could
+                   not open, or a logging_collector that is off all land in collection_log as a named
+                   non-fatal skip, and quoting that sentence here is what turns "no deadlocks" into
+                   not-collected WITH THE REASON. get_pg_plans already asks #2546's question for
+                   pg_plan_capture; the deadlock read reads the same file the same way and had never asked. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
                     postgres, resolved.ServerId, resolved.ServerName, "pg_deadlocks")
+                    ?? await DarlingRuntimePrecondition.StatusAsync(
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_deadlocks")
                     ?? McpHelpers.Status(
                         "no_deadlocks",
                         $"No deadlock was reported on {resolved.ServerName} in the last {hours_back} "

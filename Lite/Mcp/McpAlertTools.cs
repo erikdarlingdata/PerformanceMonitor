@@ -27,7 +27,7 @@ public sealed class McpAlertTools
     internal static string CpuModeFor(CpuAlertMode mode) =>
         mode == CpuAlertMode.SqlOnly ? CpuModeSql : CpuModeTotal;
 
-    [McpServerTool(Name = "get_alert_history"), Description("Gets recent alert history from the alert log. Shows what alerts fired, when, and whether email was sent successfully.")]
+    [McpServerTool(Name = "get_alert_history"), Description("Gets recent alert history from the alert log. Shows what alerts fired, when, and whether email was sent successfully. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'tray' is this instance's own balloon notification, which every non-muted alert gets, so it is what most rows read here and it does NOT report the email or webhook outcome; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'muted' means a mute rule suppressed it; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null whenever a cooldown or the per-metric repeat budget suppressed a send, and on every row written before those dispositions existed. 'throttled' and 'folded' are recorded by the headless service; on this instance the tray channel answers first, so a cooldown-suppressed or folded send is stored as 'tray'. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which.")]
     public static async Task<string> GetAlertHistory(
         LocalDataService dataService,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
@@ -77,7 +77,7 @@ public sealed class McpAlertTools
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration this instance is running on: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries and jobs, tempdb space, low disk, PVS, file growth, failed jobs, database state, Availability Group health, connection loss), the cooldown, the excluded databases, the deadlock/blocking delivery mode, the scheduled-analysis cadence, and the SMTP email configuration. The same nested shape Darling's get_alert_settings returns, minus its self_alerts group (the headless service's own store-volume and collection-health thresholds, which a single-instance Lite install has no equivalent for) and plus smtp, which Lite delivers itself. Read-only: Lite has no update_alert_settings, so these change in the Settings window.")]
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the current alert configuration this instance is running on: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries and jobs, tempdb space, low disk, PVS, file growth, failed jobs, database state, Availability Group health, connection loss), the cooldown, the excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the SMTP email configuration. The two cooldowns govern different stages: top-level cooldown_minutes gates whether an alert FIRES, delivery.cooldown_minutes bounds the resulting email/Teams/Slack/PagerDuty/webhook send both per alert FINGERPRINT and, for a re-notification, per METRIC across every monitored server (the servers it holds back are named on the send that does go out, under an 'Other Servers Affected' section; a first notice is never held back, and delivery.mode PerEvent opts out of the per-metric bound). The same nested shape Darling's get_alert_settings returns, minus its self_alerts group (the headless service's own store-volume and collection-health thresholds, which a single-instance Lite install has no equivalent for) and plus smtp, which Lite delivers itself. Read-only: Lite has no update_alert_settings, so these change in the Settings window.")]
     public static Task<string> GetAlertSettings()
     {
         try
@@ -168,13 +168,17 @@ public sealed class McpAlertTools
                     critical_free_percent = App.AlertDiskCriticalFreePercent,
                     critical_free_gb = App.AlertDiskCriticalFreeGb
                 },
-                /* Darling reports a self_alerts group in this position — its own store volume, collection
-                   staleness/failure counts, and store-job cadence. Deliberately NOT emitted here.
-                   AppAlertEngineSettings returns shipped constants for three of those members precisely
-                   because Lite has no headless store volume and no fleet collection loop to self-monitor,
-                   and Lite has no concept whatsoever of the fourth (store_job_cadence_warn_percent).
-                   Reporting constants under names that read as knobs would tell an agent it can tune
-                   something Lite cannot, and an admitted gap beats an overstated capability. */
+                /* Darling reports a self_alerts group in this position — the thresholds for alerts about its
+                   own STORE rather than a monitored server: store volume, collection staleness/failure
+                   counts, store-job cadence, and the Retention Held tiers. Deliberately NOT emitted here.
+                   AppAlertEngineSettings returns shipped constants for the members Lite has any analogue of
+                   at all, because Lite has no headless store volume and no fleet collection loop to
+                   self-monitor; the rest — the TimescaleDB background-job and retention-policy knobs — name
+                   machinery a DuckDB store does not contain. Reporting either kind under names that read as
+                   knobs would tell an agent it can tune something Lite cannot, and an admitted gap beats an
+                   overstated capability. Deliberately no count of which members fall in which half: a
+                   numeral here would be a frozen enumeration that the next Darling self-alert knob leaves
+                   behind. */
                 pvs = new
                 {
                     enabled = App.AlertPvsEnabled,
@@ -227,7 +231,15 @@ public sealed class McpAlertTools
                        update_alert_settings validates delivery.mode against "Summary"/"PerEvent", which are
                        those same member names. */
                     mode = App.AlertDeliveryMode.ToString(),
-                    per_event_max = App.AlertPerEventMaxPerCycle
+                    per_event_max = App.AlertPerEventMaxPerCycle,
+                    /* #3314. Lite runs the SAME shared throttle -- WebhookAlertService and EmailSendCore both
+                       hand IncidentCooldown App.EmailCooldownMinutes through AppAlertSettings -- so the
+                       channel-neutral name Darling adopted applies here verbatim. The stored spelling stays
+                       email_cooldown_minutes in settings.json and the Settings window; only the wire key is
+                       channel-neutral, because one number governs Teams, Slack, PagerDuty, the generic
+                       webhook AND email. DISTINCT from cooldown_minutes above, which gates the engine's FIRE
+                       decision rather than the post. */
+                    cooldown_minutes = App.EmailCooldownMinutes
                 },
                 analysis = new
                 {

@@ -1,0 +1,1041 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Reflection;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+using static Darling.Tests.RepoFile;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #3392: the oversized-plan backlog, the V121 rung that carries it, and the one property of the sweep that
+/// drains it which is not allowed to erode — that a plan fetch is ONE plan, on its OWN connection.
+///
+/// <para><b>Why that property needs a pin rather than a comment.</b> Batching several large plan fetches into
+/// one result set is the exact mechanism <see cref="QueryPlanXmlCaptureLimits"/> exists to prevent: the cost
+/// is the client materializing each plan as one managed string, and the Large-Object-Heap churn that produces
+/// stalls unrelated collectors on unrelated connections. So "fetch a few at once, it will be faster" reads
+/// like an optimization and IS the regression. A future reader looking only at the sweep sees ten
+/// single-row fetches a quarter-hour and a loop, and the cheapest-looking change available to them is to
+/// widen the loop into the query. These pins make that fail in the author's own test run.</para>
+///
+/// <para>Every fact here was verified red-first by mutating the shipped behaviour it describes.</para>
+/// </summary>
+public sealed class OversizedPlanBacklogPins
+{
+    private const string SweepSource = "Darling/PerformanceMonitor.Darling.Service/OversizedPlanBacklogSweep.cs";
+    private const string WorkerSource = "Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs";
+    private const string ConnectorSource = "Darling/PerformanceMonitor.Darling.Service/DarlingServerConnector.cs";
+
+    private static PgMigrations.Migration V121 =>
+        PgMigrations.Scripts.Single(m => m.Version == 121);
+
+    /* ---- the rung ------------------------------------------------------------------------------------ */
+
+    [Fact]
+    public void V121_IsRegisteredInTheLadder_AndCarriesBothFactColumnsPlusTheBacklogTable()
+    {
+        /* The "I am the top rung" claims have moved ON to PgAlertCountKnobRungTests (V122), the same
+           handoff this file received from DeadlockRateBandRungTests (V120). Asserting `Scripts[^1].Version
+           == 121` here would claim this rung is still the newest, which is how the NEXT rung's build goes
+           red. What stays is the ladder-top agreement (rung-agnostic) and this rung's own registration,
+           stated against its own number. */
+        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(121, V121.Version);
+        Assert.True(V121.Version < StorageVersion.SchemaVersion);
+        Assert.Equal("oversized-plan-backlog", V121.Name);
+
+        /* BOTH fact tables. Only adding one would leave the other's capped rows permanently undescribable,
+           and procedure_stats is the collector most likely to produce them — a module-grain plan aggregates
+           a whole object, so one heavy stored proc's plan dwarfs a single statement's. */
+        foreach (var table in new[] { "query_stats", "procedure_stats" })
+        {
+            Assert.Contains(
+                $"ALTER TABLE {table}{Environment.NewLine}    ADD COLUMN IF NOT EXISTS query_plan_xml_bytes bigint;",
+                V121.Sql.Replace("\r\n", Environment.NewLine, StringComparison.Ordinal),
+                StringComparison.Ordinal);
+        }
+
+        /* The DDL is the SAME constant the statements address, concatenated into the rung rather than
+           transcribed — so this asserts the composition, and drift is not merely unpinned, it is
+           unexpressible. */
+        Assert.Contains(OversizedPlanBacklog.CreateTableSql, V121.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void V121_RebuildsTheResolvingView_WithTheNewColumn_NeverAsSelectStar()
+    {
+        /* v_query_stats is the #1767 payload-RESOLVING view on any V38+ store. Re-expanding it as SELECT *
+           would overwrite the COALESCE that resolves the dimension tables, and the damage is invisible:
+           every text and plan read would return NULL for rows written since #1767, which looks like a
+           collection outage rather than a schema regression. */
+        Assert.DoesNotContain("CREATE OR REPLACE VIEW v_query_stats AS SELECT * FROM query_stats;", V121.Sql, StringComparison.Ordinal);
+
+        /* DROP first, because the generator emits payload columns BEFORE the trailing digest columns, so the
+           new column lands mid-list — an alteration CREATE OR REPLACE VIEW refuses. Without the DROP the
+           whole rung fails on every existing store.
+
+           PRESENCE is asserted before ORDER, and that is not belt-and-braces: IndexOf answers -1 for an
+           absent anchor, and -1 is less than every real offset — so an ordering comparison ALONE passes
+           loudest in exactly the case that breaks the field upgrade. Caught by mutating the rung. */
+        var drop = V121.Sql.IndexOf("DROP VIEW IF EXISTS v_query_stats;", StringComparison.Ordinal);
+        var create = V121.Sql.IndexOf("CREATE OR REPLACE VIEW v_query_stats AS", StringComparison.Ordinal);
+        Assert.True(drop >= 0,
+            "V121 does not drop v_query_stats — CREATE OR REPLACE cannot insert a column mid-list, so the rung would fail on every existing store");
+        Assert.True(create > drop, "V121 recreates v_query_stats before dropping it");
+
+        /* And the rebuilt view actually exposes the column, which is the only reason to rebuild it. */
+        Assert.Contains("f.query_plan_xml_bytes", V121.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheBacklogTable_IsNotACollectorTable_SoNothingCatalogDrivenReachesIt()
+    {
+        /* TimescaleSupport's hypertable conversion and DarlingRetention's purge loop both enumerate the
+           collector catalog. A hypertable could not carry this table's primary key anyway — a hypertable's
+           unique constraint must include the partitioning column, and a handle-and-offsets key cannot — so
+           conversion would reject the key that makes the sighting upsert an upsert. The store_metrics
+           precedent, asserted rather than assumed.
+
+           Derived from the shipped constant, not a literal of it: a pin that retyped the name would keep
+           passing if the table were renamed onto a collector's. */
+        var bare = OversizedPlanBacklog.TableName.Split('.')[^1];
+        Assert.Equal("oversized_plan_backlog", bare);
+        Assert.DoesNotContain(bare, CollectorCatalog.All.Select(c => c.TargetTable));
+        Assert.DoesNotContain(bare, TimescaleSupport.HypertableTables.Select(c => c.TargetTable));
+    }
+
+    /* ---- the cap boundary ---------------------------------------------------------------------------- */
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData(0L, false)]
+    [InlineData(524_287L, false)]
+    [InlineData(524_288L, false)]
+    [InlineData(524_289L, true)]
+    [InlineData(8_686_284L, true)]
+    public void ExceedsCaptureCap_IsStrictlyGreater_AndTreatsNoMeasurementAsNotOversized(long? bytes, bool expected)
+    {
+        /* Strictly greater, because that is what the collectors' SQL CASE does: a plan measuring EXACTLY the
+           cap is captured, so it is not a backlog candidate. The literals are the shipped cap and its
+           neighbours, checked against the constant so a cap change makes this fail rather than drift. */
+        Assert.Equal(512 * 1024, QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes);
+        Assert.Equal(expected, QueryPlanXmlCaptureLimits.ExceedsCaptureCap(bytes));
+    }
+
+    [Fact]
+    public void BothCollectors_DescribeAnObservation_OnlyAboveTheCap_AndOnlyWithBothHandles()
+    {
+        var cap = QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes;
+
+        /* query_stats: the observation carries the row's OWN statement offsets, because a plan_handle with
+           the wrong offsets is a different statement's plan — the cross-contamination this codebase already
+           recorded once, in that collector's delta key. */
+        var atCap = new QueryStatsCollector.Row
+        {
+            SqlHandle = "0xSH", PlanHandle = "0xPH", QueryHash = "0xQH", DatabaseName = "DB",
+            StatementStartOffset = 66, StatementEndOffset = 512, QueryPlanXmlBytes = cap,
+        };
+        Assert.Null(QueryStatsCollector.Instance.DescribeOversizedPlan(atCap));
+
+        var overCap = new QueryStatsCollector.Row
+        {
+            SqlHandle = "0xSH", PlanHandle = "0xPH", QueryHash = "0xQH", DatabaseName = "DB",
+            StatementStartOffset = 66, StatementEndOffset = 512, QueryPlanXmlBytes = cap + 1,
+        };
+        var observation = QueryStatsCollector.Instance.DescribeOversizedPlan(overCap);
+        Assert.NotNull(observation);
+        Assert.Equal(66, observation!.Value.StatementStartOffset);
+        Assert.Equal(512, observation.Value.StatementEndOffset);
+        Assert.Equal("0xQH", observation.Value.QueryHash);
+        Assert.Equal(cap + 1, observation.Value.ObservedBytes);
+
+        /* Either handle missing = no observation. A row with no plan_handle cannot be re-fetched at all, and
+           one with no sql_handle has no complete identity to dedupe repeated sightings on — so it would
+           occupy a backlog slot forever without ever resolving. */
+        foreach (var partial in new[]
+        {
+            new QueryStatsCollector.Row { SqlHandle = "0xSH", PlanHandle = null, QueryPlanXmlBytes = cap + 1 },
+            new QueryStatsCollector.Row { SqlHandle = null, PlanHandle = "0xPH", QueryPlanXmlBytes = cap + 1 },
+        })
+        {
+            Assert.Null(QueryStatsCollector.Instance.DescribeOversizedPlan(partial));
+        }
+
+        /* procedure_stats: the module-grain literals, never per-statement values this DMV family does not
+           expose. Taken from the constants the plan apply itself splices, so the deferred fetch is provably
+           the same call. */
+        var procObservation = ProcedureStatsCollector.Instance.DescribeOversizedPlan(MakeProcRow(cap + 1));
+        Assert.NotNull(procObservation);
+        Assert.Equal(ProcedureStatsCollector.ModuleStatementStartOffset, procObservation!.Value.StatementStartOffset);
+        Assert.Equal(ProcedureStatsCollector.ModuleStatementEndOffset, procObservation.Value.StatementEndOffset);
+        Assert.Null(procObservation.Value.QueryHash);
+        Assert.Null(ProcedureStatsCollector.Instance.DescribeOversizedPlan(MakeProcRow(cap)));
+    }
+
+    [Fact]
+    public void EveryOtherCollector_DescribesNoObservation()
+    {
+        /* The default is null on the base class AND on the interface — the RequiredPgExtensions pair — so a
+           collector that captures no plan XML cannot accidentally feed the backlog. Two overriders, named
+           from the constants the backlog's own reads filter on rather than as fresh literals. */
+        var overriders = CollectorCatalog.All
+            .Where(c => c.GetType().GetMethod("DescribeOversizedPlan")?.DeclaringType == c.GetType())
+            .Select(c => c.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(
+            new[] { OversizedPlanBacklog.ProcedureStatsCollectorName, OversizedPlanBacklog.QueryStatsCollectorName },
+            overriders);
+    }
+
+    [Fact]
+    public void BothCollectors_DeclareTheSizeAsTheirLastPayloadColumn()
+    {
+        /* Appended LAST on both, which is what keeps every earlier ordinal — and therefore every existing
+           store column's position, the positional binary COPY and the positional DuckDB appender — stable.
+           BigInt because DATALENGTH over an nvarchar(max) expression returns bigint, and a narrower store
+           column would silently overflow on the megabyte-scale plans this exists to describe.
+
+           This is the declaration half. The SELECT-ordinal-to-payload-slot agreement is driven through the
+           real shredder in Lite.Tests' two collector-definition suites, which own the reader fakes. */
+        Assert.Equal(52, QueryStatsCollector.Instance.PayloadColumns.Count);
+        Assert.Equal(36, ProcedureStatsCollector.Instance.PayloadColumns.Count);
+
+        foreach (ICollectorSchemaInfo collector in new ICollectorSchemaInfo[]
+        {
+            QueryStatsCollector.Instance,
+            ProcedureStatsCollector.Instance,
+        })
+        {
+            var names = collector.PayloadColumns.Select(c => c.Name).ToArray();
+
+            Assert.Equal("query_plan_xml_bytes", names[^1]);
+            Assert.Equal(CollectorColumnType.BigInt, collector.PayloadColumns[^1].Type);
+
+            /* The gated content column is still there and still AHEAD of the size, which is the pair a
+               reader tests as "measured, not captured". query_stats keeps other columns between them, so
+               this is an ORDERING check and not an adjacency one. */
+            Assert.Contains("query_plan_xml", names);
+            Assert.True(
+                Array.IndexOf(names, "query_plan_xml") < Array.IndexOf(names, "query_plan_xml_bytes"),
+                $"{collector.Name} declares the plan size ahead of the plan itself");
+        }
+    }
+
+    /* ---- the never-batched fetch -------------------------------------------------------------------- */
+
+    [Fact]
+    public void TheFetch_IsOneSingleRowTvfCall_WithNoSetValuedInput()
+    {
+        var sql = OversizedPlanBacklogSweep.FetchSql;
+
+        /* ONE reference to the TVF. Two would be two plans in one result set, which is the shape the capture
+           cap exists to prevent. */
+        Assert.Equal(1, CountOf(sql, "dm_exec_text_query_plan"));
+        Assert.Equal(1, CountOf(sql, "SELECT"));
+
+        /* Three SCALAR parameters and nothing that could carry a set: no IN list, no UNION, no table-valued
+           parameter, no APPLY over a list of handles. A batched variant cannot be written against this shape
+           without changing it, which is the point. */
+        Assert.Equal(1, CountOf(sql, "@plan_handle"));
+        Assert.Equal(1, CountOf(sql, "@statement_start_offset"));
+        Assert.Equal(1, CountOf(sql, "@statement_end_offset"));
+        Assert.DoesNotContain(" IN (", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("UNION", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("APPLY", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("READONLY", sql, StringComparison.Ordinal);
+
+        /* The handle round-trips as varbinary from the varchar(130) hex form the backlog stores, the same
+           conversion procedure_stats' own apply makes. */
+        Assert.Contains("CONVERT(varbinary(64), @plan_handle, 1)", sql, StringComparison.Ordinal);
+
+        /* Zero rows is the ONLY miss shape the caller has to handle, so the predicate has to collapse a
+           NULL plan into it — the DMV can find a handle and still render nothing. */
+        Assert.Contains("WHERE tqp.query_plan IS NOT NULL", sql, StringComparison.Ordinal);
+
+        /* The collector self-filter marker, so this query does not get collected as a top query next cycle. */
+        Assert.Contains("PerformanceMonitorLite", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OnlyThePerPlanMethod_ReachesAMonitoredServer_SoNPlansCostNConnections()
+    {
+        var source = ReadRepoFile(SweepSource);
+        var map = CSharpMemberMap.Of(source);
+
+        /* Comments and string literals are masked by the walker, so these are CODE occurrences — a mention
+           in a doc comment cannot satisfy or break this. These three shapes are TARGET-specific: the store
+           side of this file opens Postgres connections and builds NpgsqlCommands, so a generic name like
+           ExecuteReaderAsync would not discriminate and would pass while proving nothing. */
+        var reachesTarget = new[] { "TargetProviders.For(", "provider.CreateConnection(", "provider.CreateCommand(" };
+        var found = 0;
+
+        foreach (var call in reachesTarget)
+        {
+            for (var i = map.Code.IndexOf(call, StringComparison.Ordinal); i >= 0;
+                 i = map.Code.IndexOf(call, i + 1, StringComparison.Ordinal))
+            {
+                found++;
+                Assert.Equal("FetchOnePlanAsync", CSharpMemberMap.EnclosingMember(map, i));
+            }
+        }
+
+        /* A scan that found nothing would pass vacuously — three call shapes, once each. */
+        Assert.Equal(reachesTarget.Length, found);
+
+        /* The other side of it: the STORE is never opened from inside the per-plan fetch. A method holding
+           both would be one whose budget covers a target read and a store write together, and the sweep's
+           budget is sized for the target read alone. */
+        var storeOpens = 0;
+        for (var i = map.Code.IndexOf("postgres.OpenConnectionAsync(", StringComparison.Ordinal); i >= 0;
+             i = map.Code.IndexOf("postgres.OpenConnectionAsync(", i + 1, StringComparison.Ordinal))
+        {
+            storeOpens++;
+            Assert.NotEqual("FetchOnePlanAsync", CSharpMemberMap.EnclosingMember(map, i));
+        }
+
+        Assert.Equal(2, storeOpens);
+
+        /* And that method takes ONE plan. A parameter that could hold several is how a batched fetch would
+           arrive, so the signature is the bound rather than the loop that calls it. */
+        var fetch = typeof(OversizedPlanBacklogSweep)
+            .GetMethod("FetchOnePlanAsync", BindingFlags.NonPublic | BindingFlags.Static)!;
+        Assert.Contains(fetch.GetParameters(), p => p.ParameterType == typeof(OversizedPlanBacklog.PendingPlan));
+        Assert.DoesNotContain(
+            fetch.GetParameters(),
+            p => p.ParameterType != typeof(string) && typeof(IEnumerable).IsAssignableFrom(p.ParameterType));
+    }
+
+    [Fact]
+    public void NoMethodOnTheSweep_AcceptsASetOfPlans()
+    {
+        /* The claim RETURNS a set and the per-server pass loops it; nothing HANDS a set to anything. A
+           method that took one would be the seam a batched fetch needs. */
+        var offenders = typeof(OversizedPlanBacklogSweep)
+            .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.DeclaredOnly)
+            .SelectMany(m => m.GetParameters().Select(p => (Method: m.Name, p.ParameterType)))
+            .Where(x => x.ParameterType != typeof(string)
+                        && typeof(IEnumerable).IsAssignableFrom(x.ParameterType)
+                        && CarriesPendingPlans(x.ParameterType))
+            .Select(x => x.Method)
+            .ToArray();
+
+        Assert.Empty(offenders);
+    }
+
+    [Fact]
+    public void TheClaimsLimit_AndTheBudgets_AreDerivedFromTheShippedConstants()
+    {
+        /* The limit is interpolated from the policy constant rather than written into the SQL, so the
+           statement and the policy cannot disagree about how many plans one tick may fetch. */
+        Assert.Contains(
+            "LIMIT " + OversizedPlanBacklogSweep.MaxPlansPerServerPerTick.ToString(CultureInfo.InvariantCulture),
+            OversizedPlanBacklog.ClaimSql(OversizedPlanBacklogSweep.MaxPlansPerServerPerTick),
+            StringComparison.Ordinal);
+
+        /* Two-sided, and each end holds a different cost. The FLOOR is what a shorter cadence charges:
+           the sentinel run-record rate and the connect-wait budget, both derived in
+           TheDrainRate_ClearsTheMeasuredArrival_AndBothItsCostsAreBounded. The CEILING keeps the drain
+           inside reach of the ~1,400-an-hour over-cap arrival measured on the store class this rate is
+           sized for; the rate itself is asserted there too, since either constant can supply it. */
+        Assert.InRange(
+            OversizedPlanBacklogSweep.SweepInterval, TimeSpan.FromMinutes(15), TimeSpan.FromHours(1));
+
+        /* The wall clock is the binding bound; the command timeout can only ever fire at or before it. */
+        Assert.InRange(OversizedPlanBacklogSweep.PerPlanBudget, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(15));
+        Assert.True(
+            OversizedPlanBacklogSweep.FetchCommandTimeoutSeconds <= OversizedPlanBacklogSweep.PerPlanBudget.TotalSeconds,
+            "the fetch's command timeout outgrew the wall-clock budget, so the budget is no longer the bound");
+    }
+
+    /// <summary>
+    /// The drain RATE, and the two costs that bound it (#3416).
+    ///
+    /// <para>Asserted as the rate rather than as either knob, because either one supplies it: over-cap
+    /// identities arrive on one store class at ~1,400 an hour fleet-wide, and at 3 plans per server per hour
+    /// ~90% of them aged out unfetched at the 30-day sighting horizon. A pin on one constant is satisfied by
+    /// moving the other.</para>
+    ///
+    /// <para>Every figure is compared against a LITERAL rather than against a product this test builds,
+    /// which is the trap a sibling pin in this file guards explicitly: a total written as the shipped values
+    /// multiplied together equals itself however either value moves.</para>
+    /// </summary>
+    [Fact]
+    public void TheDrainRate_ClearsTheMeasuredArrival_AndBothItsCostsAreBounded()
+    {
+        /* The deliverable: 40 plans per server per hour, which on a 42-server fleet is 1,680 against the
+           ~1,400 measured arrival — a drain that exceeds arrival rather than one that merely tracks it. */
+        var plansPerServerPerHour =
+            OversizedPlanBacklogSweep.MaxPlansPerServerPerTick
+            * (TimeSpan.FromHours(1) / OversizedPlanBacklogSweep.SweepInterval);
+
+        Assert.True(plansPerServerPerHour >= 40d,
+            "the oversized-plan drain fell below 40 plans per server per hour, which is under the over-cap "
+            + "arrival rate measured on the store class this rate is sized for");
+
+        /* Cost of the per-server knob. One server's pass is serial under the per-plan budget, so the cap
+           times the budget IS the worst-case wall clock one monitored server spends being swept, and 150
+           seconds is the figure the raise was priced at. */
+        Assert.InRange(
+            OversizedPlanBacklogSweep.PerPlanBudget * OversizedPlanBacklogSweep.MaxPlansPerServerPerTick,
+            TimeSpan.FromSeconds(15),
+            TimeSpan.FromSeconds(150));
+
+        /* Cost of the cadence knob. One collection_log row lands per tick under the fleet sentinel whatever
+           the tick found (#3399), so a shorter interval buys drain with rows in the one table retention has
+           to prune: 96 a day here, against a 24-a-day floor at the slowest cadence the pin above admits. */
+        var sentinelRowsPerDay = TimeSpan.FromDays(1) / OversizedPlanBacklogSweep.SweepInterval;
+        Assert.InRange(sentinelRowsPerDay, 24d, 96d);
+    }
+
+    [Fact]
+    public void TheHandleParameter_IsBoundWideEnoughForTheHexForm()
+    {
+        /* The stored handle is '0x' + 128 hex characters = 130. NVarChar128 would truncate it, the truncated
+           value would CONVERT cleanly and then match nothing, and this sweep would read that as an evicted
+           plan and stamp an expiry — silently, on every row. The parameter enum's NVarChar260 doc records
+           the same trap for sys.traces.path. */
+        var source = CSharpMemberMap.Of(ReadRepoFile(SweepSource)).Code;
+        Assert.Contains("CollectorParameterType.NVarChar260", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("CollectorParameterType.NVarChar128", source, StringComparison.Ordinal);
+    }
+
+    /* ---- the cadence site --------------------------------------------------------------------------- */
+
+    [Fact]
+    public void TheSweep_RunsOffTheHostLoopsOwnCadence_NeverTheCollectorRotation()
+    {
+        /* The whole reason the sweep exists in this shape is that it must never compete with a live
+           collection cycle for a server's wall-clock budget. The collector runner records SIGHTINGS and
+           nothing else; if it ever learned to fetch, the fetch would be inside the budget the cap exists to
+           protect. */
+        var runner = CSharpMemberMap.Of(ReadRepoFile(
+            "Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs")).Code;
+        Assert.DoesNotContain("OversizedPlanBacklogSweep", runner, StringComparison.Ordinal);
+
+        var worker = CSharpMemberMap.Of(ReadRepoFile(
+            "Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs")).Code;
+        Assert.Contains("OversizedPlanBacklogSweep.RunAsync", worker, StringComparison.Ordinal);
+
+        /* Its cadence comes from the sweep, so the interval, the empty-target branch and the reasoning that
+           sized both live in one place. The NEGATIVE is the load-bearing half: naming SweepInterval at this
+           site is how the #3405 defect was written — an unconditional full-interval advance that a startup
+           tick reaching nothing paid in full — so the loop is not allowed to reach the constant at all, only
+           the function that decides between it and a short wait. */
+        Assert.Contains("OversizedPlanBacklogSweep.NextSweepDelay(", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("OversizedPlanBacklogSweep.SweepInterval", worker, StringComparison.Ordinal);
+
+        /* And the pass is LAUNCHED, never awaited on the tick. Its worst case is fleet width times the
+           per-server plan budget times the per-plan budget — 105 minutes on a 42-server fleet whose targets
+           are all timing out — and awaited that is 105 minutes in which the fleet loop launches no
+           collection bodies. The purge above it is awaited because it talks only to the store. */
+        Assert.DoesNotContain("await OversizedPlanBacklogSweep.RunAsync", worker, StringComparison.Ordinal);
+        Assert.Contains("_oversizedPlanSweep = OversizedPlanBacklogSweep.RunAsync", worker, StringComparison.Ordinal);
+        Assert.Contains("_oversizedPlanSweep.IsCompleted", worker, StringComparison.Ordinal);
+    }
+
+    /* ---- the empty-tick schedule (#3405) ------------------------------------------------------------ */
+
+    /// <summary>
+    /// A host with NO sweepable target holds the full interval, on every tick, forever — and that is the
+    /// fact the whole change exists to protect rather than an edge case it tolerates.
+    ///
+    /// <para>A PostgreSQL-only monitoring host sweeps zero servers on EVERY tick and is RIGHT to: the cap,
+    /// the backlog and this sweep all live in the SQL Server plan-XML collectors. Three consecutive
+    /// records of "Swept 0 server(s)", an hour apart, were measured on one, so it is a steady state, not a
+    /// startup transient. Every short-retry-on-empty shape proposed for the startup defect would have turned
+    /// that steady state into a re-attempt loop with no terminating condition, writing a sentinel row per
+    /// retry forever in the one table whose growth retention has to prune — ~1,440 rows/day where the
+    /// correct answer is 96.</para>
+    ///
+    /// <para>Simulated across 48 ticks rather than asserted on one, because "does not enter a loop" is a
+    /// claim about the SEQUENCE: a single call returning the interval would also pass for a function that
+    /// shortens on the second tick. The COUNT of decisions is asserted against a literal rather than
+    /// against the loop's own bound — a total written as <c>SweepInterval * ticks</c> is zero on both sides
+    /// when the loop stops running, and this pin passed that way until the crippling run caught it.</para>
+    /// </summary>
+    [Fact]
+    public void AHostWithNoSweepableTarget_HoldsTheFullInterval_OnEveryTickForever()
+    {
+        var delays = new List<TimeSpan>();
+        var waits = 0;
+
+        for (var tick = 0; tick < 48; tick++)
+        {
+            var (delay, next) = OversizedPlanBacklogSweep.NextSweepDelay(0, 0, waits);
+            delays.Add(delay);
+            waits = next;
+        }
+
+        /* The loop actually ran, 48 times — the discriminating assertion, and the reason it is a literal. */
+        Assert.Equal(48, delays.Count);
+
+        /* Half a day of ticks at the full interval and not one minute less, which is what makes this a
+           statement about the whole sequence rather than about one call. */
+        Assert.All(delays, delay => Assert.Equal(OversizedPlanBacklogSweep.SweepInterval, delay));
+
+        /* And the budget was never touched, so nothing about this host is one tick away from a burst. */
+        Assert.Equal(0, waits);
+    }
+
+    /// <summary>
+    /// A tick that found sweepable targets but no connected runtime among them re-attempts SHORTLY instead
+    /// of paying a full interval — the startup defect — and the re-attempts are bounded.
+    ///
+    /// <para>The bound is asserted as a COUNT over a simulation in which nothing ever connects, which is the
+    /// pathological host this has to not punish: a fleet whose SQL Server targets are all unreachable spends
+    /// <see cref="OversizedPlanBacklogSweep.MaxConnectWaitAttempts"/> short waits once and then writes
+    /// exactly one record per interval for the rest of the process's life. Counting them is what separates
+    /// "bounded" from "short interval forever", and the two are indistinguishable from any single call.</para>
+    /// </summary>
+    [Fact]
+    public void AZeroTargetTickOnAHostWithTargets_ReattemptsShortly_AndOnlySoManyTimes()
+    {
+        /* The first re-attempt, from a fresh process: short, and it has spent one of the budget. */
+        Assert.Equal(
+            (OversizedPlanBacklogSweep.ConnectWaitDelay, 1),
+            OversizedPlanBacklogSweep.NextSweepDelay(42, 0, 0));
+
+        var waits = 0;
+        var shortWaits = 0;
+        var fullIntervals = 0;
+
+        for (var tick = 0; tick < 48; tick++)
+        {
+            var (delay, next) = OversizedPlanBacklogSweep.NextSweepDelay(42, 0, waits);
+
+            if (delay == OversizedPlanBacklogSweep.ConnectWaitDelay)
+            {
+                shortWaits++;
+            }
+            else
+            {
+                Assert.Equal(OversizedPlanBacklogSweep.SweepInterval, delay);
+                fullIntervals++;
+            }
+
+            waits = next;
+        }
+
+        Assert.Equal(OversizedPlanBacklogSweep.MaxConnectWaitAttempts, shortWaits);
+        Assert.Equal(48 - OversizedPlanBacklogSweep.MaxConnectWaitAttempts, fullIntervals);
+
+        /* Spent, not reset: the counter stays at the maximum, so the burst cannot recur without a tick that
+           actually reached a server in between. Clearing it here is how a short retry interval becomes a
+           fresh burst every interval on a permanently unreachable fleet. */
+        Assert.Equal(OversizedPlanBacklogSweep.MaxConnectWaitAttempts, waits);
+    }
+
+    /// <summary>
+    /// A tick that reached at least one connected target takes the full interval and CLEARS the budget,
+    /// whatever it had spent — so what a restart costs is bounded by the first server to connect rather
+    /// than by the whole fleet, and a later total disconnection gets its own short wait rather than
+    /// inheriting an exhausted one.
+    /// </summary>
+    [Theory]
+    [InlineData(42, 42, 0)]
+    [InlineData(42, 1, 0)]
+    [InlineData(42, 1, 3)]
+    [InlineData(1, 1, 5)]
+    public void ATickThatReachedAServer_TakesTheFullInterval_AndClearsTheBudget(
+        int sweepable, int connected, int spent)
+    {
+        Assert.Equal(
+            (OversizedPlanBacklogSweep.SweepInterval, 0),
+            OversizedPlanBacklogSweep.NextSweepDelay(sweepable, connected, spent));
+    }
+
+    /// <summary>
+    /// The short wait is SHORTER than the interval it replaces and COARSER than the loop it runs on, and
+    /// both halves matter.
+    ///
+    /// <para>Equal to the interval, the fix does nothing. At or below the fleet loop's own cadence, the gate
+    /// re-fires on every pass until the first connect and each pass writes a run-record — the burst that
+    /// makes "just do not advance the stamp" worse than the slot it saves. The loop's cadence is READ from
+    /// the worker rather than retyped here, so shortening the loop fails this pin instead of silently
+    /// eroding the ratio.</para>
+    /// </summary>
+    [Fact]
+    public void TheShortWait_IsShorterThanTheInterval_AndCoarserThanTheLoop()
+    {
+        var worker = CSharpMemberMap.Of(ReadRepoFile(WorkerSource)).Code;
+        var at = worker.IndexOf("s_sweepInterval = TimeSpan.FromSeconds(", StringComparison.Ordinal);
+        Assert.True(at > 0,
+            "the fleet loop's cadence is no longer a FromSeconds literal, so this pin can no longer read it");
+
+        var open = worker.IndexOf('(', at);
+        var loopCadence = TimeSpan.FromSeconds(int.Parse(
+            worker[(open + 1)..worker.IndexOf(')', open)], CultureInfo.InvariantCulture));
+
+        Assert.True(OversizedPlanBacklogSweep.ConnectWaitDelay < OversizedPlanBacklogSweep.SweepInterval,
+            "the short wait reached the full interval, so a startup tick pays the whole slot again");
+        Assert.True(OversizedPlanBacklogSweep.ConnectWaitDelay >= loopCadence * 4,
+            "the short wait is within a few passes of the fleet loop's own cadence, so the gate re-fires "
+            + "almost every pass until the first connect and writes a run-record for each");
+
+        /* And the WHOLE budget stays a minority of the interval it shortens. Five one-minute waits is five
+           minutes of a fifteen-minute slot; a budget that covered a whole interval would be that interval
+           under another name and the gate would have no short path left to take. This is the relationship a
+           shorter interval puts pressure on, so it is asserted rather than left to two absolute values
+           happening to stay apart. */
+        Assert.True(
+            OversizedPlanBacklogSweep.ConnectWaitDelay * OversizedPlanBacklogSweep.MaxConnectWaitAttempts
+                < OversizedPlanBacklogSweep.SweepInterval,
+            "the connect-wait budget grew to cover a whole sweep interval, so the short wait no longer "
+            + "shortens anything");
+
+        /* And the budget is small enough that its worst case is legible: five short waits is five extra
+           sentinel rows per process, against a baseline of 96 a day. */
+        Assert.InRange(OversizedPlanBacklogSweep.MaxConnectWaitAttempts, 1, 10);
+    }
+
+    /// <summary>
+    /// The discriminator reads the REGISTRATION, and it admits exactly the registrations whose runtime
+    /// <see cref="OversizedPlanBacklogSweep.RunAsync"/> would then visit.
+    ///
+    /// <para>Two predicates have to agree and they are asked at different times:
+    /// <c>IsSweepableTarget</c> before a connect, on <c>MonitoredServer</c>, and the per-server skip inside
+    /// the pass after one, on <c>CollectorTargetInfo.Engine</c>. They agree because the connector branches
+    /// on the SAME property and only its PostgreSQL arm stamps an engine — so this asserts the arm count and
+    /// the enum default that the SQL Server side silently rests on, rather than trusting the two readings to
+    /// stay aligned.</para>
+    ///
+    /// <para>The PostgreSQL spellings are read OUT of the shipped switch instead of retyped, so a sixth
+    /// accepted token fails here rather than quietly becoming a target the gate waits a minute for and the
+    /// pass then skips.</para>
+    /// </summary>
+    [Fact]
+    public void TheDiscriminator_AdmitsExactlyWhatThePassWouldVisit()
+    {
+        /* !IsPostgres is a TWO-engine predicate. A third CollectorTargetEngine makes it admit a target the
+           pass skips, and the gate would then spend its short waits on a runtime it cannot use. */
+        Assert.Equal(2, Enum.GetValues<CollectorTargetEngine>().Length);
+
+        /* Of the connector's two connect paths, exactly ONE stamps an engine on the runtime it returns —
+           the PostgreSQL arm. The SQL Server arm sets none and inherits CollectorTargetInfo's own SqlServer
+           initialiser, so BOTH halves are asserted: the arm depends on that initialiser without saying so,
+           and together they are why a registration this predicate admits produces a runtime the pass does
+           not skip. Scoped to the Connect* members, because the same text appears as a defaulted record
+           parameter on ConnectionProbeResult, which returns no runtime and stamps nothing. */
+        Assert.Equal(CollectorTargetEngine.SqlServer, new CollectorTargetInfo().Engine);
+
+        var connector = CSharpMemberMap.Of(ReadRepoFile(ConnectorSource));
+        var stamping = new List<string>();
+        for (var i = connector.Code.IndexOf("Engine = CollectorTargetEngine.", StringComparison.Ordinal); i >= 0;
+             i = connector.Code.IndexOf("Engine = CollectorTargetEngine.", i + 1, StringComparison.Ordinal))
+        {
+            var member = CSharpMemberMap.EnclosingMember(connector, i);
+            if (member.StartsWith("Connect", StringComparison.Ordinal))
+            {
+                stamping.Add(member);
+            }
+        }
+
+        Assert.Equal(new[] { "ConnectPostgresAsync" }, stamping);
+
+        /* The accepted PostgreSQL spellings, lifted from the arm that maps them. */
+        var raw = ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs");
+        var armAt = raw.IndexOf("=> CollectorTargetEngine.PostgreSql,", StringComparison.Ordinal);
+        Assert.True(armAt > 0, "the engine-token switch no longer has a PostgreSql arm");
+
+        var lineStart = raw.LastIndexOf('\n', armAt) + 1;
+        var tokens = new List<string>();
+        for (var i = raw.IndexOf('"', lineStart); i >= 0 && i < armAt; i = raw.IndexOf('"', i + 1))
+        {
+            var close = raw.IndexOf('"', i + 1);
+            tokens.Add(raw[(i + 1)..close]);
+            i = close;
+        }
+
+        Assert.Equal(
+            new[] { "aurora", "aurora-postgresql", "pg", "postgres", "postgresql" },
+            tokens.OrderBy(t => t, StringComparer.Ordinal).ToArray());
+
+        /* Every one of them is REJECTED, so a PostgreSQL-only host counts zero sweepable targets. */
+        foreach (var token in tokens)
+        {
+            Assert.False(
+                OversizedPlanBacklogSweep.IsSweepableTarget(new MonitoredServer { Engine = token }),
+                $"engine token '{token}' maps to PostgreSQL but the gate counts it as sweepable");
+        }
+
+        /* And everything else is ADMITTED, including the shapes MonitoredServer.TargetEngine folds to SQL
+           Server rather than throwing: absent, empty, and misspelled. That direction is deliberate — the
+           connector will take its SQL Server arm for exactly these, so counting them as sweepable is what
+           keeps the two predicates agreeing on a typo instead of stranding it. */
+        foreach (var token in new[] { "sqlserver", "SQLSERVER", "  postgres  x", "postgrez", "", null })
+        {
+            Assert.True(
+                OversizedPlanBacklogSweep.IsSweepableTarget(new MonitoredServer { Engine = token! }),
+                $"engine token '{token}' resolves to SQL Server but the gate does not count it as sweepable");
+        }
+    }
+
+    /// <summary>
+    /// The gate at the cadence site actually USES the discriminator and the schedule, and it still LAUNCHES
+    /// the pass on a tick that found no targets.
+    ///
+    /// <para>The launch is the load-bearing half. The run-record is written in <c>RunAsync</c>'s
+    /// <c>finally</c>, so skipping the launch on an empty target list — the cheapest-looking fix, and the
+    /// one that removes the observability #3399 added — makes a PostgreSQL-only host stop answering "did the
+    /// sweep run" at all. Asserted as the ABSENCE of any branch between the schedule and the launch, which
+    /// is what makes that fix unexpressible here rather than merely absent today.</para>
+    /// </summary>
+    [Fact]
+    public void TheGate_DiscriminatesByRegistration_AndStillLaunchesAZeroTargetPass()
+    {
+        var worker = CSharpMemberMap.Of(ReadRepoFile(WorkerSource)).Code;
+
+        var gateAt = worker.IndexOf(
+            "DateTime.UtcNow >= _nextOversizedPlanSweepUtc", StringComparison.Ordinal);
+        Assert.True(gateAt > 0, "the oversized-plan sweep no longer has a cadence gate on the fleet loop");
+
+        var gate = CSharpSourceWalker.BraceBalanced(worker, worker.IndexOf('{', gateAt));
+
+        /* The count is taken off the REGISTRATION. A gate that discriminated on Runtime alone is the defect:
+           null means mid-connect on one host and forever on another. */
+        Assert.Contains("IsSweepableTarget(target.Config)", gate, StringComparison.Ordinal);
+
+        /* The stamp comes from the schedule function and from nothing else, so the two causes stay
+           distinguished at the only site that acts on the distinction. */
+        Assert.Contains("OversizedPlanBacklogSweep.NextSweepDelay(", gate, StringComparison.Ordinal);
+        Assert.Contains("_nextOversizedPlanSweepUtc = DateTime.UtcNow.Add(sweepDelay);", gate, StringComparison.Ordinal);
+        Assert.Contains("_oversizedPlanSweepConnectWaits = connectWaits;", gate, StringComparison.Ordinal);
+
+        /* Stamped BEFORE the launch: the IsCompleted guard on this gate only keeps a slow pass from stacking
+           if the stamp has already moved when the pass starts. */
+        var stamped = gate.IndexOf("_nextOversizedPlanSweepUtc = DateTime.UtcNow.Add", StringComparison.Ordinal);
+        var launched = gate.IndexOf("_oversizedPlanSweep = OversizedPlanBacklogSweep.RunAsync", StringComparison.Ordinal);
+        Assert.True(stamped > 0, "the gate no longer stamps its next due time");
+        Assert.True(launched > 0, "the gate no longer launches the pass");
+        Assert.True(stamped < launched, "the pass is launched before its slot is stamped, so a slow pass can stack");
+
+        /* And NOTHING branches between them. An `if` here is where "return before the record write when
+           there are no targets" would go, and on a host with no sweepable target that silences the run
+           record permanently. */
+        var between = gate[stamped..launched];
+        Assert.DoesNotContain("if (", between, StringComparison.Ordinal);
+        Assert.DoesNotContain("return", between, StringComparison.Ordinal);
+        Assert.DoesNotContain("continue", between, StringComparison.Ordinal);
+
+        /* The pass is handed the CONNECTED runtimes, not the registrations — the sweepable count exists to
+           schedule with, never to sweep with, since a registration without a runtime has no connection to
+           borrow. */
+        Assert.Contains("postgres, backlogTargets, _logger, stoppingToken", gate, StringComparison.Ordinal);
+        Assert.DoesNotContain("sweepableTargets, _logger", gate, StringComparison.Ordinal);
+    }
+
+    /* ---- retention ---------------------------------------------------------------------------------- */
+
+    [Fact]
+    public void TheBacklog_IsPurgedOnItsLastSighting_AtTheBaseDataHorizon()
+    {
+        /* last_seen_at, not first_seen_at and not captured_at: a plan that is still being collected must
+           never lose its content, and one that has stopped recurring explains nothing once the fact rows
+           referencing it are gone.
+
+           Read from the SHIPPED call site. Building the statement here from the column name this pin then
+           asserts would be vacuous — it would pass for any column, including the wrong one. */
+        var retention = ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingRetention.cs");
+        Assert.Contains(
+            "TimeSlicedDeleteSql(OversizedPlanBacklog.TableName, \"last_seen_at\")",
+            retention, StringComparison.Ordinal);
+        Assert.Contains("utcNow.AddDays(-OversizedPlanBacklogRetentionDays)", retention, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "TimeSlicedDeleteSql(OversizedPlanBacklog.TableName, \"first_seen_at\")",
+            retention, StringComparison.Ordinal);
+
+        /* Derived from the shared window rather than a literal of the same value, so the backlog stays worth
+           exactly as long as the data it explains. */
+        Assert.Equal(DarlingRetention.DataRetentionBaseDays, DarlingRetention.OversizedPlanBacklogRetentionDays);
+    }
+
+    /* ---- the store statements ----------------------------------------------------------------------- */
+
+    [Fact]
+    public void EveryColumnTheUpsertNames_ExistsInTheShippedDdl()
+    {
+        /* The DDL and the DML live in one file so they cannot drift — this checks that they in fact agree,
+           column by column, rather than resting on their proximity. */
+        var insertList = Between(OversizedPlanBacklog.UpsertSightingSql, "AS b\r\n(", ")\r\nVALUES");
+        var columns = insertList.Split(',').Select(c => c.Trim()).Where(c => c.Length > 0).ToArray();
+
+        Assert.Equal(11, columns.Length);
+        foreach (var column in columns)
+        {
+            Assert.Contains("    " + column + " ", OversizedPlanBacklog.CreateTableSql, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void ASightingClearsAStandingExpiry_AndNeverTouchesCapturedContent()
+    {
+        var upsert = OversizedPlanBacklog.UpsertSightingSql;
+
+        /* A collector only sees a row while its plan is in cache, so a fresh sighting is positive evidence
+           the handle resolves — which retires whatever made the previous fetch come back empty. Without the
+           clear, one transient miss retires the row permanently and recreates the blind spot. */
+        Assert.Contains("expired_at = NULL", upsert, StringComparison.Ordinal);
+
+        /* And it must not reopen a row whose content is already held: the key pins the handle AND the
+           offsets, so that row describes the same document and there is nothing to go back for. */
+        var onConflict = upsert.Split("DO UPDATE SET", StringSplitOptions.None)[1];
+        Assert.DoesNotContain("captured_at", onConflict, StringComparison.Ordinal);
+        Assert.DoesNotContain("plan_xml", onConflict, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EveryOutcomeStatement_AddressesTheWholePrimaryKey()
+    {
+        /* Six key columns, or the UPDATE stamps somebody else's row. The claim hands back all six and the
+           statements bind all six; the predicate is written once and shared, and this is what proves the
+           three of them actually use it. */
+        foreach (var sql in new[]
+        {
+            OversizedPlanBacklog.RecordCaptureSql,
+            OversizedPlanBacklog.RecordExpirySql,
+            OversizedPlanBacklog.RecordAttemptSql,
+        })
+        {
+            foreach (var column in new[]
+            {
+                "server_id = $1", "collector_name = $2", "plan_handle = $3",
+                "sql_handle = $4", "statement_start_offset = $5", "statement_end_offset = $6",
+            })
+            {
+                Assert.Contains(column, sql, StringComparison.Ordinal);
+            }
+
+            /* Every attempt is counted, whatever it established — a chronically unfetchable row has to be
+               legible in the TABLE, not only in a log line nobody greps. */
+            Assert.Contains("attempt_count = attempt_count + 1", sql, StringComparison.Ordinal);
+            Assert.Contains("last_attempt_at = $7", sql, StringComparison.Ordinal);
+        }
+
+        /* Only the capture stores content, and only the expiry stamps an expiry. A failed fetch established
+           nothing about the handle, so it must not retire the row. */
+        Assert.Contains("plan_xml = $8", OversizedPlanBacklog.RecordCaptureSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("plan_xml", OversizedPlanBacklog.RecordExpirySql, StringComparison.Ordinal);
+        Assert.DoesNotContain("plan_xml", OversizedPlanBacklog.RecordAttemptSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("expired_at", OversizedPlanBacklog.RecordAttemptSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheClaim_SkipsCapturedAndExpiredRows_AndOrdersSoNothingStarves()
+    {
+        var claim = OversizedPlanBacklog.ClaimSql(OversizedPlanBacklogSweep.MaxPlansPerServerPerTick);
+
+        Assert.Contains("captured_at IS NULL", claim, StringComparison.Ordinal);
+        Assert.Contains("expired_at IS NULL", claim, StringComparison.Ordinal);
+
+        /* Oldest ATTEMPT first is what makes head-of-line starvation impossible: one plan that can never be
+           fetched cannot occupy a slot every tick forever. Largest plan first only breaks ties among rows
+           never attempted — those are the plans the cap cost the most visibility on. */
+        Assert.Contains("last_attempt_at ASC NULLS FIRST", claim, StringComparison.Ordinal);
+        Assert.Contains("observed_bytes DESC", claim, StringComparison.Ordinal);
+        Assert.True(
+            claim.IndexOf("last_attempt_at ASC NULLS FIRST", StringComparison.Ordinal)
+                < claim.IndexOf("observed_bytes DESC", StringComparison.Ordinal),
+            "size overtook attempt age in the claim order — an unfetchable large plan would then starve the rest");
+    }
+
+    /* ---- the read surface --------------------------------------------------------------------------- */
+
+    [Fact]
+    public void BothStoredPlanReads_FallBackToTheBacklog()
+    {
+        /* Without this half nothing a user can see changes: the recording half alone moves the blind spot
+           into a table. Both MCP reads and both viewer twins go through the same statements. */
+        var mcp = CSharpMemberMap.Of(ReadRepoFile(
+            "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingStoredPlanReader.cs")).Code;
+        Assert.Contains("OversizedPlanBacklog.QueryStatsFallbackSql", mcp, StringComparison.Ordinal);
+        Assert.Contains("OversizedPlanBacklog.ProcedureStatsFallbackBySqlHandleSql", mcp, StringComparison.Ordinal);
+
+        var viewer = CSharpMemberMap.Of(ReadRepoFile(
+            "Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.Plans.cs")).Code;
+        Assert.Contains("OversizedPlanBacklog.QueryStatsFallbackSql", viewer, StringComparison.Ordinal);
+        Assert.Contains("OversizedPlanBacklog.ProcedureStatsFallbackByObjectSql", viewer, StringComparison.Ordinal);
+
+        /* The primary read still comes FIRST in both: collected content is the fresher of the two, and a
+           read that served only the backlog would answer nothing for every plan under the cap. */
+        Assert.Contains("QueryStatsPlanXmlByHashSql", mcp, StringComparison.Ordinal);
+
+        /* PRESENCE before ORDER, for the IndexOf reason: -1 is less than every real offset, so an ordering
+           comparison alone passes when the primary arm is gone entirely. */
+        var primary = mcp.IndexOf("ReadPlanTextOrGzipAsync(command", StringComparison.Ordinal);
+        var fallback = mcp.IndexOf("OversizedPlanBacklog.QueryStatsFallbackSql", StringComparison.Ordinal);
+        Assert.True(primary >= 0, "the MCP reads lost the collected-content arm and now serve only the backlog");
+        Assert.True(fallback > primary, "the MCP query_stats read reaches the backlog before its own collected content");
+
+        /* And the grids' presence flag admits the capped rows, or the viewer's fallback is unreachable from
+           the one surface that gates on it. No cap literal is needed to find them: DATALENGTH of a NULL plan
+           is NULL, so a size at all means the server had a plan for the row. */
+        foreach (var grid in new[] { "QueryStats", "ProcedureStats" })
+        {
+            Assert.Contains(
+                "OR query_plan_xml_bytes IS NOT NULL) AS has_query_plan",
+                ReadRepoFile($"Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.{grid}.cs"),
+                StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void TheQueryStatsFallback_KeysOnTheHash_BecauseTheFactRowCarriesNoOffsets()
+    {
+        /* This is the REASON, pinned. query_stats reads the statement offsets for its delta key and never
+           stores them, so a join from a stored fact row could only match plan_handle + sql_handle — which
+           for a multi-statement plan is several backlog rows describing DIFFERENT statements' plans. Serving
+           one of those as "the plan for this query" is worse than serving nothing. If the offsets ever DO
+           become stored columns, this pin fails and the fallback can become an exact join. */
+        var stored = QueryStatsCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
+        Assert.DoesNotContain("statement_start_offset", stored);
+        Assert.DoesNotContain("statement_end_offset", stored);
+
+        Assert.Contains("query_hash = $2", OversizedPlanBacklog.QueryStatsFallbackSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("plan_handle", OversizedPlanBacklog.QueryStatsFallbackSql, StringComparison.Ordinal);
+
+        /* procedure_stats CAN join exactly, and does: its three DMVs expose no offsets at all, so the plan
+           apply passes fixed literals and every backlog row for it carries that same pair. */
+        Assert.Contains("b.plan_handle = ps.plan_handle", OversizedPlanBacklog.ProcedureStatsFallbackByObjectSql, StringComparison.Ordinal);
+
+        /* Every fallback is scoped to its own collector and returns only rows that actually hold content. */
+        foreach (var sql in new[]
+        {
+            OversizedPlanBacklog.QueryStatsFallbackSql,
+            OversizedPlanBacklog.ProcedureStatsFallbackBySqlHandleSql,
+            OversizedPlanBacklog.ProcedureStatsFallbackByObjectSql,
+        })
+        {
+            Assert.Contains("collector_name = '", sql, StringComparison.Ordinal);
+            Assert.Contains("plan_xml IS NOT NULL", sql, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void TheDirectSqlContract_IsDocumented()
+    {
+        /* The store's "Reading the store directly" section exists BECAUSE a silent contract change for
+           direct-SQL consumers shipped once already (#2171: query_plan_xml went NULL for every new row and
+           the release notes did not say so). This change adds a THIRD state to the same question — a fact row
+           with a measured size and no digest, whose content is in a different table entirely — so the section
+           that answers "why is this NULL" has to name it or it misleads by omission.
+
+           Derived from the shipped names, not retyped, so a rename fails here instead of leaving the README
+           confidently wrong. */
+        var readme = ReadRepoFile("Darling", "README.md");
+
+        Assert.Contains(OversizedPlanBacklog.TableName, readme, StringComparison.Ordinal);
+        Assert.Contains("query_plan_xml_bytes", readme, StringComparison.Ordinal);
+
+        /* And it says the backlog's content is NOT gzip — the one thing a reader of that section would
+           otherwise reasonably assume, since every other plan column there is. */
+        Assert.Contains("plain text, never gzip", readme, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheViewersStoreProbe_HasAV121Sentinel_AboveTheV120Arm()
+    {
+        /* The viewer refuses a store below RequiredStoreSchemaVersion, which is StorageVersion.SchemaVersion.
+           MapProbedSchemaVersion answers newest-arm-first from capability sentinels, so a rung that bumps the
+           version WITHOUT adding a sentinel makes a fully-migrated store map one rung low and the viewer show
+           an upgrade banner on a store that is current. StoreLogViewerGateTests asserts that invariant through
+           reflection and needs the WPF assembly to do it; this reads the three source sites instead, so the
+           same property is checkable on a machine that cannot load the viewer.
+
+           The sentinel earns its place beyond that invariant: below V121 the viewer's two stored-plan reads
+           have no backlog to fall back to and the grids' presence flags read a column that does not exist. */
+        var viewer = ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.cs");
+
+        /* The probe asks the question, the caller reads the answer, the map has the parameter — three sites,
+           and a sentinel present at only some of them shifts every LATER ordinal onto the wrong column. The
+           two probe-site spellings are no longer end-anchored: `bool hasOversizedPlanBacklog = false)` and
+           `reader.GetBoolean(96));` each asserted this sentinel was the LAST one, which stopped being true
+           the moment V122 appended its own — a position within the signature, not its end, is what this
+           rung still owns. */
+        Assert.Contains("table_name = 'oversized_plan_backlog'", viewer, StringComparison.Ordinal);
+        Assert.Contains("bool hasOversizedPlanBacklog = false", viewer, StringComparison.Ordinal);
+        Assert.Contains("reader.GetBoolean(96)", viewer, StringComparison.Ordinal);
+
+        /* Above V120's arm. Newest-first is the whole contract of that method; "the TOP arm" was V122's
+           claim to inherit, and PgAlertCountKnobRungTests holds it now. */
+        var v121 = viewer.IndexOf("if (hasOversizedPlanBacklog)", StringComparison.Ordinal);
+        var v120 = viewer.IndexOf("if (hasDeadlockRateBandKnobs)", StringComparison.Ordinal);
+        Assert.True(v121 >= 0, "the viewer has no V121 sentinel arm — a fully-migrated store would map to 120");
+        Assert.True(v120 >= 0, "the V120 arm is gone, so this pin is comparing against nothing");
+        Assert.True(v121 < v120, "the V121 arm sits below V120's, so a store at exactly this rung maps one rung low");
+
+        /* The arm returns this rung's OWN number — the literal a demoted rung's test is allowed to carry
+           (its version, its probe ordinal, and the version its sentinel maps to). The `return
+           StorageVersion.SchemaVersion` spelling this pin used while V121 was the top rung is exactly the
+           claim that had to move: it stopped being satisfiable anywhere below the V122 arm the moment the
+           build's version bumped past this rung. */
+        Assert.Contains("return 121;", viewer[v121..], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheSweepsDocCommentNamesThisClassCorrectly()
+    {
+        /* The sweep's class doc points a reader here for the properties it claims are structural. It has to
+           say the name in <c>, not <see cref>, because a product assembly cannot reference a test one — so
+           the compiler cannot catch the pointer going stale, and it already had: the doc said
+           "OversizedPlanBacklogSweepPins", which has never existed. A reviewer found that, and a name that
+           resolves to nothing is worse here than no pointer at all, because the claim it carries is exactly
+           the one a future reader would want to check before widening the fetch.
+
+           Derived from the type rather than retyped, so renaming this class fails here instead of leaving
+           the sweep pointing at a ghost. */
+        var sweep = ReadRepoFile(SweepSource);
+
+        Assert.Contains("<c>" + nameof(OversizedPlanBacklogPins) + "</c>", sweep, StringComparison.Ordinal);
+        Assert.DoesNotContain("OversizedPlanBacklogSweepPins", sweep, StringComparison.Ordinal);
+    }
+
+    /* ---- helpers ------------------------------------------------------------------------------------ */
+
+    private static ProcedureStatsCollector.Row MakeProcRow(long bytes) => new(
+        "DB", "dbo", "usp_X", "PROCEDURE", null, null,
+        1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L,
+        "0xSH", "0xPH", null, bytes);
+
+    private static bool CarriesPendingPlans(Type type) =>
+        type.IsArray
+            ? type.GetElementType() == typeof(OversizedPlanBacklog.PendingPlan)
+            : type.GetGenericArguments().Contains(typeof(OversizedPlanBacklog.PendingPlan));
+
+    private static int CountOf(string text, string needle)
+    {
+        var count = 0;
+        for (var i = text.IndexOf(needle, StringComparison.Ordinal); i >= 0;
+             i = text.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
+    }
+
+    private static string Between(string text, string start, string end)
+    {
+        var from = text.IndexOf(start, StringComparison.Ordinal);
+        Assert.True(from >= 0, $"anchor '{start}' is gone — this pin would read nothing");
+        from += start.Length;
+        var to = text.IndexOf(end, from, StringComparison.Ordinal);
+        Assert.True(to > from, $"anchor '{end}' is gone — this pin would read nothing");
+        return text[from..to];
+    }
+}

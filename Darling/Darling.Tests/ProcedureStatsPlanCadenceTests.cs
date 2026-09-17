@@ -80,16 +80,25 @@ public class ProcedureStatsPlanCadenceTests
     public void TheGatedQuery_KeepsTheRowShapeTheWriterAndPayloadDimensionExpect()
     {
         /* The gated form must differ from the capturing form ONLY by the plan fragments — same payload
-           columns, same branches, same exclusion handling — because ReadAsync reads ordinal 27 only when
-           CapturePlanXml is set and PgCollectorRowWriter writes a NULL payload for the plan position.
-           Pinned by removing the two known fragments from the capturing text and demanding equality, which
-           fails if either form grows or loses anything else. */
+           columns, same branches, same exclusion handling — because ReadAsync reads ordinals 27 and 28 only
+           when CapturePlanXml is set and PgCollectorRowWriter writes NULL payloads for both plan positions.
+           Pinned by removing the known fragments from the capturing text and demanding equality, which
+           fails if either form grows or loses anything else.
+
+           This is also the pin that keeps #3392's query_plan_xml_bytes INSIDE the CapturePlanXml gate. A
+           size column spliced outside it would appear in the gated form too, the equality below would hold,
+           and Lite's SQL would have silently stopped being byte-identical to the no-plan form — so the
+           fragment stripped here carries BOTH plan columns as one unit, exactly as the collector splices
+           them. */
         var gated = BuiltQuery(capturePlanXml: false);
         var capturing = BuiltQuery(capturePlanXml: true);
 
+        /* Derived from the shared cap constant, not retyped, so this can't silently drift out of sync
+           with QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes the way a repeated literal could. */
+        var planXmlFragment = $",\r\n    query_plan_xml = CASE WHEN DATALENGTH(tqp.query_plan) > {QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes} THEN NULL ELSE tqp.query_plan END,\r\n    query_plan_xml_bytes = DATALENGTH(tqp.query_plan)";
         var stripped = capturing
-            .Replace(",\r\n    query_plan_xml = tqp.query_plan", "", StringComparison.Ordinal)
-            .Replace(",\n    query_plan_xml = tqp.query_plan", "", StringComparison.Ordinal)
+            .Replace(planXmlFragment, "", StringComparison.Ordinal)
+            .Replace(planXmlFragment.Replace("\r\n", "\n", StringComparison.Ordinal), "", StringComparison.Ordinal)
             .Replace("\r\nOUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handle, 1), 0, -1) AS tqp", "", StringComparison.Ordinal)
             .Replace("\nOUTER APPLY sys.dm_exec_text_query_plan(CONVERT(varbinary(64), ranked.plan_handle, 1), 0, -1) AS tqp", "", StringComparison.Ordinal);
 
@@ -104,6 +113,12 @@ public class ProcedureStatsPlanCadenceTests
            saturated and a gap cannot enlarge it. */
         Assert.Contains("TOP (150)", gated, StringComparison.Ordinal);
         Assert.Contains("TOP (150)", capturing, StringComparison.Ordinal);
+
+        /* #3392, stated directly rather than only implied by the equality above: the size column exists in
+           the capturing form and NOWHERE in the gated one. Without this, a future edit that moved the column
+           out of the gate and correspondingly widened the stripped fragment would still pass. */
+        Assert.Contains("query_plan_xml_bytes", capturing, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_plan_xml_bytes", gated, StringComparison.Ordinal);
     }
 
     [Fact]

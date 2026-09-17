@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Notifications;
 using Xunit;
@@ -111,6 +112,45 @@ public class AlertIncidentRenderTests
             f => f.GetProperty("value").GetString() == "bbb");
     }
 
+    /// <summary>
+    /// #3313: the delivery filter's output renders correctly on every shared surface. The filter removes a
+    /// stale incident's item and appends a one-line footer; this pins that all four renderers — Teams facts,
+    /// Slack fields, and the two independently-built email bodies — show the surviving fingerprint and the
+    /// footer, and none of them shows the stale one.
+    ///
+    /// <para>Lite and Darling share these builders, so a delivery pin on one SKU's service says nothing
+    /// about whether the other's renderers handle the shape. Read from the filter's own constants rather
+    /// than a copy of its text: a footer whose wording changed while this pin kept passing against the old
+    /// string would be asserting nothing.</para>
+    /// </summary>
+    [Fact]
+    public void AFilteredContext_RendersItsSurvivorAndFooter_OnEveryVehicle()
+    {
+        var ctx = new AlertContext();
+        AlertIncidentRenderer.Apply(ctx, new[]
+        {
+            new AlertIncident("stale-fingerprint", new[] { "SalesDb.dbo.Orders" }),
+            new AlertIncident("fresh-fingerprint", new[] { "SalesDb.dbo.Shipments" })
+        });
+
+        var render = IncidentDeliveryFilter.ForDelivery(ctx, null, new[] { "fresh-fingerprint" });
+        var filtered = render.Context;
+        Assert.Equal(1, render.SuppressedIncidentCount);
+
+        var teams = WebhookAlertService.BuildTeamsPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: filtered);
+        var slack = WebhookAlertService.BuildSlackPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: filtered);
+        var (html, plain) = EmailTemplateBuilder.BuildAlertEmail(
+            "Deadlocks Detected", "S1", "2", "n/a", 15, Branding, filtered);
+
+        foreach (var vehicle in new[] { teams, slack, html, plain })
+        {
+            Assert.Contains("fresh-fingerprint", vehicle);
+            Assert.DoesNotContain("stale-fingerprint", vehicle);
+            Assert.Contains(IncidentDeliveryFilter.OtherIncidentsHeading, vehicle);
+            Assert.Contains(IncidentDeliveryFilter.OtherIncidentsLabel, vehicle);
+        }
+    }
+
     [Fact]
     public void DedupKey_RendersOnTeamsSlackAndBothEmailBodies()
     {
@@ -180,5 +220,158 @@ public class AlertIncidentRenderTests
 
         var teams = WebhookAlertService.BuildTeamsPayload("Low Disk Space", "S1", "5%", "10%", Branding, context: ctx);
         Assert.DoesNotContain("\"name\":\"Resource\"", teams);
+    }
+
+    /// <summary>
+    /// #3297, the constraint the fix had to satisfy to be safe: an ENGINE alert's detail text is
+    /// <see cref="AlertDetailText.Flatten"/> of its own context, built that way at every
+    /// <c>AlertEngine</c> fire site. So carrying the detail text on top of the structured render would
+    /// print the same content twice on every channel — a regression in precisely the alerts that already
+    /// read correctly (blocking, deadlocks), which are the ones populating a structured context.
+    /// <para>Asserted by counting a marker from the flattened text rather than comparing whole payloads,
+    /// because every builder stamps <c>DateTime.UtcNow</c> and a byte comparison would be a clock race.
+    /// One marker in, one marker out, on all four channels and both email bodies.</para>
+    /// </summary>
+    [Fact]
+    public void AnEngineAlertsFlattenedDetail_IsNotRenderedTwice_OnAnyChannel()
+    {
+        const string Marker = "SalesDB.dbo.Orders";
+        var ctx = new AlertContext();
+        AlertIncidentRenderer.Apply(ctx, new[] { new AlertIncident("fingerprint-abc", new[] { Marker }) });
+        var flattened = AlertDetailText.Flatten(ctx)!;
+        Assert.Contains(Marker, flattened, StringComparison.Ordinal);
+
+        static int Count(string haystack, string needle)
+        {
+            int n = 0, i = 0;
+            while ((i = haystack.IndexOf(needle, i, StringComparison.Ordinal)) >= 0) { n++; i += needle.Length; }
+            return n;
+        }
+
+        var teamsWithout = WebhookAlertService.BuildTeamsPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx);
+        var teamsWith = WebhookAlertService.BuildTeamsPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx, detailText: flattened);
+        Assert.Equal(Count(teamsWithout, Marker), Count(teamsWith, Marker));
+
+        var slackWithout = WebhookAlertService.BuildSlackPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx);
+        var slackWith = WebhookAlertService.BuildSlackPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx, detailText: flattened);
+        Assert.Equal(Count(slackWithout, Marker), Count(slackWith, Marker));
+
+        var pdWithout = WebhookAlertService.BuildPagerDutyPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, "rk", context: ctx);
+        var pdWith = WebhookAlertService.BuildPagerDutyPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, "rk", context: ctx, detailText: flattened);
+        Assert.Equal(Count(pdWithout, Marker), Count(pdWith, Marker));
+
+        var genericWithout = WebhookAlertService.BuildGenericPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx);
+        var genericWith = WebhookAlertService.BuildGenericPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx, detailText: flattened);
+        Assert.Equal(Count(genericWithout, Marker), Count(genericWith, Marker));
+
+        var (htmlWithout, plainWithout) = EmailTemplateBuilder.BuildAlertEmail("Deadlocks Detected", "S1", "2", "n/a", 15, Branding, ctx);
+        var (htmlWith, plainWith) = EmailTemplateBuilder.BuildAlertEmail("Deadlocks Detected", "S1", "2", "n/a", 15, Branding, ctx, flattened);
+        Assert.Equal(Count(htmlWithout, Marker), Count(htmlWith, Marker));
+        Assert.Equal(Count(plainWithout, Marker), Count(plainWith, Marker));
+    }
+
+    /// <summary>
+    /// The complement, so the pin above cannot be satisfied by a channel that simply ignores the detail
+    /// text: an alert carrying prose the context does NOT already say adds that prose on every channel.
+    /// A pin that only ever asserts an absence is green whether the feature exists or not.
+    /// </summary>
+    [Fact]
+    public void IndependentProse_IsAdded_OnEveryChannel()
+    {
+        const string Prose = "Run the --backfill-rollups operator action, then RESTART the service.";
+        var ctx = new AlertContext();
+        AlertIncidentRenderer.Apply(ctx, new[] { new AlertIncident("fingerprint-abc", new[] { "SalesDB.dbo.Orders" }) });
+
+        Assert.Contains(Prose, WebhookAlertService.BuildTeamsPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx, detailText: Prose), StringComparison.Ordinal);
+        Assert.Contains(Prose, WebhookAlertService.BuildSlackPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx, detailText: Prose), StringComparison.Ordinal);
+        Assert.Contains(Prose, WebhookAlertService.BuildPagerDutyPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, "rk", context: ctx, detailText: Prose), StringComparison.Ordinal);
+        Assert.Contains(Prose, WebhookAlertService.BuildGenericPayload("Deadlocks Detected", "S1", "2", "n/a", Branding, context: ctx, detailText: Prose), StringComparison.Ordinal);
+
+        var (html, plain) = EmailTemplateBuilder.BuildAlertEmail("Deadlocks Detected", "S1", "2", "n/a", 15, Branding, ctx, Prose);
+        Assert.Contains(System.Net.WebUtility.HtmlEncode(Prose), html, StringComparison.Ordinal);
+        Assert.Contains(Prose, plain, StringComparison.Ordinal);
+    }
+    /* ---------------- Slack's per-section field ceiling (#3442) ----------------
+       Slack rejects a section block whose `fields` array holds more than 10 items, and it rejects the
+       whole message rather than the block — so a body that grows past the ceiling is not a degraded
+       alert, it is no alert. Nothing upstream bounds the field count of one item: the forensic detail,
+       the dedup metadata, the occurrence counts, the incident start and #3442's per-party deadlock facts
+       all land on the same item from different producers. The split lives in the Slack builder for that
+       reason, so no producer has to know what the others contributed. */
+
+    private const int SlackFieldsPerSection = 10;
+
+    private static List<System.Text.Json.JsonElement> SlackSections(string payload)
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse(payload);
+        return doc.RootElement.GetProperty("attachments")[0].GetProperty("blocks").EnumerateArray()
+            .Where(b => b.TryGetProperty("fields", out _))
+            .Select(b => b.Clone())
+            .ToList();
+    }
+
+    private static AlertContext ItemWithFields(int count)
+    {
+        var item = new AlertDetailItem { Heading = "Deadlock" };
+        for (var n = 0; n < count; n++)
+        {
+            item.Fields.Add(($"Fact {(char)('A' + n)}", $"value {n}"));
+        }
+
+        var ctx = new AlertContext();
+        ctx.Details.Add(item);
+        return ctx;
+    }
+
+    [Fact]
+    public void SlackFieldSections_StayInsideTheCeiling_AndLoseNoField()
+    {
+        /* 13 fields plus the heading entry is 14, which one section cannot carry. */
+        var ctx = ItemWithFields(13);
+        var sections = SlackSections(
+            WebhookAlertService.BuildSlackPayload("Deadlocks Detected", "S1", "1", "n/a", Branding, context: ctx));
+
+        var detailSections = sections.Skip(1).ToList();   // sections[0] is the lead server/value block
+        Assert.True(detailSections.Count > 1, "13 fields still rendered as a single section");
+
+        var entries = new List<string>();
+        foreach (var section in detailSections)
+        {
+            var fields = section.GetProperty("fields").EnumerateArray().ToList();
+            Assert.InRange(fields.Count, 1, SlackFieldsPerSection);
+            entries.AddRange(fields.Select(f => f.GetProperty("text").GetString()!));
+        }
+
+        /* Split, not sampled: the heading entry and all 13 facts arrive, in order. */
+        Assert.Equal(14, entries.Count);
+        Assert.Equal("*Deadlock*", entries[0]);
+        Assert.Equal(
+            Enumerable.Range(0, 13).Select(n => $"*Fact {(char)('A' + n)}:*\n{"value " + n}").ToList(),
+            entries.Skip(1).ToList());
+    }
+
+    [Fact]
+    public void SlackFieldSections_DoNotSplitWhatFits()
+    {
+        /* The discriminator for the pin above: at nine fields plus the heading the item is one section, so
+           a "split" assertion cannot be satisfied by a builder that splits unconditionally. */
+        var ctx = ItemWithFields(9);
+        var sections = SlackSections(
+            WebhookAlertService.BuildSlackPayload("Deadlocks Detected", "S1", "1", "n/a", Branding, context: ctx));
+
+        var detail = Assert.Single(sections.Skip(1));
+        Assert.Equal(SlackFieldsPerSection, detail.GetProperty("fields").GetArrayLength());
+    }
+
+    [Fact]
+    public void SlackLeadSection_IsAlsoSubjectToTheCeiling()
+    {
+        /* The lead block builds its own field list and would cross the ceiling by the same route; it goes
+           through the same splitter rather than a second rule. */
+        foreach (var section in SlackSections(
+            WebhookAlertService.BuildSlackPayload("High CPU", "S1", "97%", "90%", Branding)))
+        {
+            Assert.InRange(section.GetProperty("fields").GetArrayLength(), 1, SlackFieldsPerSection);
+        }
     }
 }

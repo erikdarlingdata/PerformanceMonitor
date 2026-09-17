@@ -186,4 +186,21 @@ public interface ICollectorDefinition<TRow> : ICollectorSchemaInfo
     /// computing any deltas via <see cref="CollectorContext.Deltas"/>.
     /// </summary>
     void WritePayload(TRow row, ICollectorRowWriter writer, CollectorContext context);
+
+    /// <summary>
+    /// Describes one already-read row as an oversized-plan backlog entry (#3392), or null when the row is not
+    /// one: no plan-XML measurement, a measurement at or under
+    /// <see cref="QueryPlanXmlCaptureLimits.MaxCapturedPlanXmlBytes"/>, or no usable cache handles to go back
+    /// with. Null for every collector that captures no cached-plan XML, which is all but two of them.
+    ///
+    /// <para><b>On the definition rather than the host.</b> The definition is what chose the plan fetch's
+    /// arguments — <c>query_stats</c> passes the statement offsets, <c>procedure_stats</c> the module-grain
+    /// literals — and a deferred fetch is only the same call if it passes the same ones. A host deriving them
+    /// would be re-deciding, per host, something the SQL already decided once.</para>
+    ///
+    /// <para><b>It reads a row; it writes nothing.</b> Whether a backlog exists to write to is a STORE
+    /// question, so the host that has one acts on this and the host that does not never asks. That is what
+    /// keeps the shared definition free of a table only one SKU has.</para>
+    /// </summary>
+    OversizedPlanObservation? DescribeOversizedPlan(TRow row) => null;
 }
