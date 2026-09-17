@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Alerting;
@@ -610,6 +611,108 @@ public static class AlertContextBuilders
         /* #1140: dedup key = query_hash (stable across literals/plans). Null hash -> no incident. */
         AlertIncidentRenderer.Apply(context, Decorate(LongRunningQueryIncidents(serverName, shown).ToList(), decorateIncidents));
         return context;
+    }
+
+    /* ---------------- High CPU: the active-maintenance annotation (#3495) ---------------- */
+
+    /// <summary>
+    /// How many maintenance sessions the High CPU card names before stating an omission instead of
+    /// growing without bound — the same budget the Long-Running Query card gives its own sessions
+    /// (<see cref="BuildLongRunningQueryContext"/> shows three), because both caps answer the same
+    /// question: how many lines help a reader before they stop reading. Never a silent cut: sessions
+    /// past the cap are counted on a stated-omission line, the #3494 discipline.
+    /// </summary>
+    public const int ActiveMaintenanceMaxLines = 3;
+
+    /// <summary>
+    /// The statement heads that read as system maintenance on a CPU card (#3495's BACKUP DATABASE /
+    /// RESTORE, plus ALTER INDEX — the issue's "plausibly, same shape": an online rebuild burns the SQL
+    /// CPU share exactly the way backup compression does). Matched against the TRIMMED head of the
+    /// captured statement text, case-insensitively, and deliberately NOT as a contains-anywhere search:
+    /// a head match can miss a maintenance statement buried mid-batch, which costs the card its
+    /// annotation and nothing else, while a contains match can NAME maintenance on a card where none
+    /// runs (someone's dynamic-SQL builder mentioning BACKUP DATABASE in a literal) — and an annotation
+    /// whose whole value is being trustworthy must fail toward silence.
+    /// </summary>
+    public static readonly IReadOnlyList<string> MaintenanceStatementHeads = new[]
+    {
+        "BACKUP DATABASE",
+        "BACKUP LOG",
+        "RESTORE DATABASE",
+        "RESTORE LOG",
+        "ALTER INDEX"
+    };
+
+    /// <summary>
+    /// The matched maintenance head for one session's statement text, normalized to the canonical
+    /// uppercase spelling for the card line — or null when the session is not a maintenance shape.
+    /// </summary>
+    public static string? TryGetMaintenanceStatementHead(string? queryText)
+    {
+        if (string.IsNullOrWhiteSpace(queryText)) return null;
+
+        var head = queryText.TrimStart();
+        foreach (var candidate in MaintenanceStatementHeads)
+        {
+            if (head.StartsWith(candidate, StringComparison.OrdinalIgnoreCase))
+                return candidate;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// #3495's one-line form, appended to the High CPU card's detail text when the fire-time
+    /// active-session snapshot holds system maintenance:
+    /// <c>Active maintenance: BACKUP DATABASE (RdsAdminService), 17m 3s elapsed, ASYNC_IO_COMPLETION</c>
+    /// — program name, elapsed, wait, straight off the session row. One line per concurrent maintenance
+    /// session in the input's own order (the read returns elapsed DESC, so the longest-running — the
+    /// likeliest pin — leads), capped at <see cref="ActiveMaintenanceMaxLines"/> with the omission
+    /// stated.
+    ///
+    /// <para><b>Annotation, never suppression</b> — the #3495 contract, spelled here because this is
+    /// the function that could most easily drift into judging: the tiers stay where they are, the page
+    /// still fires, and the line states what IS (session kind, program, elapsed, wait) and never a
+    /// verdict. A backup pinning CPU at 04:30 with the store idle is routine; the same pin at 14:30
+    /// under checkout load is a capacity finding with a named cause — that judgment belongs to the
+    /// reader, and suppressing or down-tiering CPU alerts during backups would blind exactly the case
+    /// where the overlap matters.</para>
+    ///
+    /// <para>Returns "" when no maintenance session is present, which is the regression pin: the
+    /// caller string-appends this, so an empty answer leaves the card BYTE-identical to today.</para>
+    /// </summary>
+    public static string BuildActiveMaintenanceDetail(IReadOnlyList<LongRunningQueryInfo> activeSessions)
+    {
+        if (activeSessions.Count == 0) return "";
+
+        var sb = new StringBuilder();
+        int named = 0;
+        int omitted = 0;
+        foreach (var session in activeSessions)
+        {
+            var head = TryGetMaintenanceStatementHead(session.QueryText);
+            if (head is null) continue;
+
+            if (named == ActiveMaintenanceMaxLines)
+            {
+                omitted++;
+                continue;
+            }
+
+            named++;
+            sb.Append("\n  Active maintenance: ").Append(head);
+            if (!string.IsNullOrEmpty(session.ProgramName))
+                sb.Append(" (").Append(session.ProgramName).Append(')');
+            sb.Append(", ").Append(FormatDuration(session.ElapsedSeconds)).Append(" elapsed");
+            if (!string.IsNullOrEmpty(session.WaitType))
+                sb.Append(", ").Append(session.WaitType);
+        }
+
+        /* The #3494 discipline: whole lines that fit, then a stated omission — never a silent cut. */
+        if (omitted > 0)
+            sb.Append("\n  Active maintenance: ").Append(omitted).Append(" more maintenance session(s) not shown");
+
+        return sb.ToString();
     }
 
     /* Returns the volumes whose free space is under the configured % or GB threshold (a 0 threshold

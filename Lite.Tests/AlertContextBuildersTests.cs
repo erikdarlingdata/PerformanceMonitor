@@ -167,6 +167,85 @@ public class AlertContextBuildersTests
         Assert.Null(context.Incidents);
     }
 
+    /* ---------------- #3495: the High CPU active-maintenance annotation ---------------- */
+
+    [Fact]
+    public void BuildActiveMaintenanceDetail_NoMaintenanceSessions_ReturnsEmpty_TheByteIdenticalArm()
+    {
+        /* The regression pin's builder half: the caller string-appends this, so "" leaves the High CPU
+           card byte-identical to the pre-#3495 render. An ordinary busy session is not maintenance. */
+        Assert.Equal("", AlertContextBuilders.BuildActiveMaintenanceDetail(new List<LongRunningQueryInfo>()));
+        Assert.Equal("", AlertContextBuilders.BuildActiveMaintenanceDetail(new List<LongRunningQueryInfo>
+        {
+            Lrq(71, 314, db: "StackOverflow", program: "HammerDB", query: "SELECT COUNT_BIG(*) FROM dbo.Users", waitType: "CXPACKET")
+        }));
+    }
+
+    [Fact]
+    public void BuildActiveMaintenanceDetail_NamesTheBackup_InTheIssuesOneLineForm()
+    {
+        /* #3495's acceptance shape: session kind, program, elapsed, wait — what IS, never a verdict. */
+        var detail = AlertContextBuilders.BuildActiveMaintenanceDetail(new List<LongRunningQueryInfo>
+        {
+            Lrq(120, 1034, db: "StackOverflow", program: "RdsAdminService",
+                query: "BACKUP DATABASE [StackOverflow] TO VIRTUAL_DEVICE = 'x' WITH COMPRESSION",
+                waitType: "ASYNC_IO_COMPLETION")
+        });
+
+        Assert.Equal("\n  Active maintenance: BACKUP DATABASE (RdsAdminService), 17m 14s elapsed, ASYNC_IO_COMPLETION", detail);
+    }
+
+    [Fact]
+    public void BuildActiveMaintenanceDetail_OmitsAnEmptyProgramAndAnAbsentWait_RatherThanRenderingBlanks()
+    {
+        var detail = AlertContextBuilders.BuildActiveMaintenanceDetail(new List<LongRunningQueryInfo>
+        {
+            Lrq(120, 45, query: "ALTER INDEX IX_Users_Rep ON dbo.Users REBUILD")
+        });
+
+        Assert.Equal("\n  Active maintenance: ALTER INDEX, 45s elapsed", detail);
+    }
+
+    [Fact]
+    public void BuildActiveMaintenanceDetail_MatchesTheStatementHead_NotALiteralMention()
+    {
+        /* The under-annotate direction is chosen deliberately: a head match can miss maintenance buried
+           mid-batch (costing only the annotation), while a contains-anywhere match could NAME maintenance
+           on a card where none runs — someone's dynamic-SQL builder mentioning the phrase in a literal. */
+        Assert.Null(AlertContextBuilders.TryGetMaintenanceStatementHead(
+            "SELECT command = N'BACKUP DATABASE ' + QUOTENAME(d.name) FROM sys.databases AS d"));
+        /* Leading whitespace and casing are presentation, not identity — both still match. */
+        Assert.Equal("BACKUP DATABASE", AlertContextBuilders.TryGetMaintenanceStatementHead("  \n backup database [x] TO DISK = 'y'"));
+        Assert.Equal("RESTORE LOG", AlertContextBuilders.TryGetMaintenanceStatementHead("RESTORE LOG [x] FROM DISK = 'y'"));
+        Assert.Null(AlertContextBuilders.TryGetMaintenanceStatementHead(null));
+        Assert.Null(AlertContextBuilders.TryGetMaintenanceStatementHead(""));
+    }
+
+    [Fact]
+    public void BuildActiveMaintenanceDetail_CapsTheLines_AndStatesTheOmission()
+    {
+        /* The #3494 discipline: whole lines that fit, then a stated omission — never a silent cut. Five
+           concurrent maintenance sessions render three lines (the input's own order — the read returns
+           elapsed DESC, so the longest-running leads) and one line counting the other two. */
+        var sessions = new List<LongRunningQueryInfo>();
+        for (int i = 0; i < 5; i++)
+        {
+            sessions.Add(Lrq(100 + i, 600 - (i * 60), program: "RdsAdminService",
+                query: $"BACKUP DATABASE [db{i}] TO VIRTUAL_DEVICE = 'x'", waitType: "ASYNC_IO_COMPLETION"));
+        }
+
+        var detail = AlertContextBuilders.BuildActiveMaintenanceDetail(sessions);
+
+        /* Every emitted line leads with "\n", so the split's first element is empty and the line count
+           is Length - 1: the cap's three named sessions plus the one stated-omission line. */
+        Assert.Equal(AlertContextBuilders.ActiveMaintenanceMaxLines + 2, detail.Split('\n').Length);
+        Assert.Equal(AlertContextBuilders.ActiveMaintenanceMaxLines,
+            System.Text.RegularExpressions.Regex.Matches(detail, "Active maintenance: BACKUP DATABASE").Count);
+        Assert.EndsWith("Active maintenance: 2 more maintenance session(s) not shown", detail, StringComparison.Ordinal);
+        /* The leader (longest elapsed) is named first — the likeliest pin leads the reader's eye. */
+        Assert.Contains("10m 0s elapsed", detail.Split('\n')[1], StringComparison.Ordinal);
+    }
+
     /* ---------------- low disk ---------------- */
 
     private static VolumeFreeSpaceInfo Volume(string mount, double totalMb, double freeMb) =>

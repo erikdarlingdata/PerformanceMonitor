@@ -130,11 +130,20 @@ public sealed class AlertEngineTests
             /* The seam contract: fetch-then-filter client-side, like Lite's loop. */
             Task.FromResult(PoisonWaits.FindAll(w => w.AvgMsPerWait >= thresholdMs));
 
+        /* #3495's degrade arm: the CPU card's fire-time maintenance probe rides this same seam, and the
+           pin that a failed probe costs the annotation and never the alert needs a read that faults. */
+        public bool ThrowOnLongRunningRead { get; set; }
+
         public Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(
             string serverKey, int thresholdMinutes, int maxResults,
             bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc,
             IReadOnlyList<string> excludedDatabases, CancellationToken cancellationToken = default)
         {
+            if (ThrowOnLongRunningRead)
+            {
+                throw new InvalidOperationException("active-session read is down");
+            }
+
             LastLrqArgs = (thresholdMinutes, maxResults, excludeSpServerDiagnostics, excludeWaitFor, excludeBackups, excludeMiscWaits, excludeCdc, excludedDatabases);
             return Task.FromResult(new List<LongRunningQueryInfo>(LongRunning));
         }
@@ -1444,6 +1453,129 @@ public sealed class AlertEngineTests
         Assert.Equal(5, args.MaxResults);
         Assert.True(args.Diag && args.WaitFor && args.Backups && args.Misc && args.Cdc);
         Assert.Contains("StageDb", args.Excluded);
+    }
+
+    /* ---------------- the sibling card annotations: #3495 (High CPU names active maintenance)
+       and #3497 (Long-Running Query names the Agent job). One contract, spelled once: ANNOTATION,
+       NEVER SUPPRESSION — the tiers stay, every card still fires, the annotation states what IS and
+       never a verdict, and every degrade arm costs the annotation rather than the page. ---------------- */
+
+    private static LongRunningQueryInfo BackupSession(int sessionId = 120, string db = "StackOverflow") => new()
+    {
+        SessionId = sessionId,
+        DatabaseName = db,
+        QueryText = "BACKUP DATABASE [StackOverflow] TO VIRTUAL_DEVICE = 'x' WITH COMPRESSION",
+        ProgramName = "RdsAdminService",
+        ElapsedSeconds = 1034, /* 17m 14s */
+        WaitType = "ASYNC_IO_COMPLETION"
+    };
+
+    [Fact]
+    public async Task Cpu_FiringDuringActiveMaintenance_NamesTheBackupOnTheCard()
+    {
+        /* #3495's acceptance shape, through the engine: a CPU page that fires while a backup session is
+           active names it — program, elapsed, wait, straight off the session row — because everything on
+           this line was knowable at fire time from the same active-session surface the operator read by
+           hand. The LRQ ALERT stays disabled here on purpose: the annotation is the CPU card's own read,
+           not a rider on the long-running-query check (whose excludeBackups opt-out exists precisely to
+           keep this session OFF that alert). */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.ExcludedDatabasesList.Add("StageDb");
+        h.Adapter.LongRunning.Add(BackupSession());
+        var engine = h.Build();
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("High CPU", fired.MetricName);
+        Assert.Equal(
+            "  Total CPU: 95%\n  Threshold: 80%\n  Active maintenance: BACKUP DATABASE (RdsAdminService), 17m 14s elapsed, ASYNC_IO_COMPLETION",
+            fired.DetailText);
+
+        /* The probe reads the RAW snapshot: threshold 0 (every running session), the bounded row budget,
+           all five noise opt-outs OFF (excludeBackups would remove exactly what this line names), and an
+           EMPTY exclusion list even though the settings carry one — an excluded database's backup still
+           burns this server's CPU. The LRQ check is disabled, so the recorded args are the probe's own. */
+        var args = h.Adapter.LastLrqArgs!.Value;
+        Assert.Equal(0, args.ThresholdMinutes);
+        Assert.Equal(AlertEngine.ActiveMaintenanceProbeMaxRows, args.MaxResults);
+        Assert.False(args.Diag || args.WaitFor || args.Backups || args.Misc || args.Cdc);
+        Assert.Empty(args.Excluded);
+    }
+
+    [Fact]
+    public async Task Cpu_NoMaintenanceSession_TheCardIsByteIdenticalToToday()
+    {
+        /* THE REGRESSION PIN: absent any maintenance shape, the annotation contributes zero bytes — the
+           exact pre-#3495 detail text, not a blank line, not an empty marker. An ordinary busy session in
+           the snapshot is not maintenance and must not be named as such. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Adapter.LongRunning.Add(new LongRunningQueryInfo
+        {
+            SessionId = 71,
+            DatabaseName = "StackOverflow",
+            QueryText = "SELECT u.Reputation FROM dbo.Users AS u WHERE u.Id = 1",
+            ProgramName = "HammerDB",
+            ElapsedSeconds = 5400,
+            WaitType = "CXPACKET"
+        });
+        var engine = h.Build();
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("  Total CPU: 95%\n  Threshold: 80%", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task Cpu_MaintenanceProbeFailure_CostsTheAnnotation_NeverThePage()
+    {
+        /* The degrade arm: the probe sits INSIDE the fire branch, after the condition was decided, so a
+           faulted read leaves a byte-identical pre-#3495 card and the page delivers. Counted on #3013's
+           surface — it is a store read the alert pass swallowed — under its own read name, so an operator
+           can tell an annotation gone blind from a condition gone blind. */
+        var counter = new AlertReadFailureCounter(() => new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc));
+        var h = new Harness { ReadFailures = counter };
+        h.Settings.CpuEnabled = true;
+        h.Adapter.ThrowOnLongRunningRead = true;
+        var engine = h.Build();
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("High CPU", fired.MetricName);
+        Assert.Equal("  Total CPU: 95%\n  Threshold: 80%", fired.DetailText);
+
+        var reading = counter.ReadFor(Key);
+        Assert.Equal(1, reading.ServerReadFailures);
+        Assert.Equal("CPU maintenance annotation", reading.LastFailureRead);
+    }
+
+    [Fact]
+    public async Task Cpu_ConcurrentMaintenanceSessions_OneLineEach_CappedWithAStatedOmission()
+    {
+        /* Multiple concurrent maintenance sessions get one line each in the read's own order (elapsed
+           DESC — the longest-running, likeliest pin leads), bounded by the shared display budget with the
+           omission STATED — the #3494 discipline, never a silent cut. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        for (int i = 0; i < 5; i++)
+        {
+            var s = BackupSession(sessionId: 120 + i, db: $"db{i}");
+            s.ElapsedSeconds = 600 - (i * 60);
+            h.Adapter.LongRunning.Add(s);
+        }
+        var engine = h.Build();
+
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+
+        var detail = Assert.Single(h.Deliverer.Outcomes).DetailText!;
+        Assert.Equal(AlertContextBuilders.ActiveMaintenanceMaxLines,
+            detail.Split('\n').Count(line => line.Contains("Active maintenance: BACKUP DATABASE", StringComparison.Ordinal)));
+        Assert.EndsWith("Active maintenance: 2 more maintenance session(s) not shown", detail, StringComparison.Ordinal);
+        Assert.Contains("10m 0s elapsed", detail, StringComparison.Ordinal);
     }
 
     /* ---------------- tempdb ---------------- */

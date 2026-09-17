@@ -457,6 +457,17 @@ public sealed class AlertEngine
     /// </summary>
     public const string CpuPersistenceMetric = "High CPU";
 
+    /// <summary>
+    /// Row budget for the #3495 fire-time active-session probe. The read orders by elapsed DESC and the
+    /// maintenance shapes are long-running by nature — a backup or rebuild burning enough CPU to matter
+    /// has been at it for minutes while an OLTP session's elapsed is milliseconds — so the sessions this
+    /// probe exists to find sort to the FRONT and fifty rows is generous headroom over any plausible
+    /// concurrent-maintenance count, not a coverage bet. Bounded at all because the probe runs inside
+    /// the fire branch of a paging alert: the page must never wait on an unbounded read of a busy
+    /// server's whole session list.
+    /// </summary>
+    public const int ActiveMaintenanceProbeMaxRows = 50;
+
     private async Task CheckCpuAsync(
         AlertServerSnapshot snapshot, string key, string serverName,
         DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
@@ -543,7 +554,60 @@ public sealed class AlertEngine
                 bool isMuted = _isAlertMuted(muteCtx);                              /* :75 */
                 _lastCpuAlert[key] = now;                                           /* :76 — stamped even when muted */
 
-                var cpuDetailText = $"  {cpuMetricLabel}: {alertCpuValue:F0}%\n  Threshold: {_settings.CpuThresholdPercent}%"; /* :89 */
+                /* #3495: name the active backup on the card. Everything the annotation needs was knowable
+                   at fire time from the same active-session surface the operator ended up reading by hand
+                   (get_active_queries' underlying table — the query_snapshots read the LRQ alert already
+                   rides), so this is one read of data the store already holds on the same sweep: no new
+                   collector, no new cadence. Inside the fire branch deliberately — cooldown-bounded, so a
+                   quiet sweep pays nothing — and taken for muted fires too, so the history row carries the
+                   same detail the delivered card would have.
+
+                   ANNOTATION, NEVER SUPPRESSION: the threshold compare, the persistence gate, the tiers and
+                   the fire above are all decided before this read exists; it can only ever ADD a line.
+
+                   Every filter is off and the exclusion list empty, on purpose: the LRQ alert's noise
+                   opt-outs exist to keep maintenance OFF that alert (excludeBackups drops BACKUPTHREAD/
+                   BACKUPIO waits), and this probe wants exactly the population those filters remove — the
+                   backup filtered out of the long-running alert is precisely what this line names. An
+                   excluded DATABASE stays visible too: the exclusion setting governs alert noise, and a
+                   backup of an excluded database still burns this server's CPU. Threshold 0 = every session
+                   in the latest fresh snapshot; the read's own 10-minute staleness floor still applies, so a
+                   dead collector cannot dress an old backup up as a live one.
+
+                   Log-and-degrade: a failed annotation read costs the card its maintenance line and NOTHING
+                   else — the alert already fired above this read in every sense that matters, and the empty
+                   string leaves cpuDetailText byte-identical to the pre-#3495 card. Counted on #3013's
+                   surface because it IS a store read the alert pass swallowed; Warning rather than Error
+                   because the CONDITION was evaluated correctly — only the annotation went blind. */
+                string maintenanceDetail = "";
+                var maintenanceClock = Stopwatch.StartNew();
+                try
+                {
+                    var activeSessions = await _readAdapter.GetLongRunningQueriesAsync(
+                        key,
+                        thresholdMinutes: 0,
+                        maxResults: ActiveMaintenanceProbeMaxRows,
+                        excludeSpServerDiagnostics: false,
+                        excludeWaitFor: false,
+                        excludeBackups: false,
+                        excludeMiscWaits: false,
+                        excludeCdc: false,
+                        Array.Empty<string>(),
+                        ct);
+                    maintenanceDetail = AlertContextBuilders.BuildActiveMaintenanceDetail(activeSessions);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning("Could not read active sessions for the High CPU card's maintenance annotation on {Server} after {ElapsedMs} ms — the alert fires without it: {Message}",
+                        serverName, maintenanceClock.ElapsedMilliseconds, ex.Message);
+                    _readFailures?.RecordReadFailure(key, "CPU maintenance annotation", maintenanceClock.ElapsedMilliseconds);
+                }
+
+                var cpuDetailText = $"  {cpuMetricLabel}: {alertCpuValue:F0}%\n  Threshold: {_settings.CpuThresholdPercent}%{maintenanceDetail}"; /* :89 + #3495 */
 
                 /* :91-98 — CPU passes no context; ShortMessage = the toast body of :84 minus the
                    server-name prefix. The numerics are REQUIRED, not optional (#1830): the ported
