@@ -67,6 +67,28 @@ public sealed class IndexObjectStatsCollectorDefinitionTests
         Assert.Contains("o.type IN (N'U', N'V')", plan.Text, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3508: the per-index DEFINITION metadata (key/include lists, the FK flags, compression) is
+    /// built from staged #temps and joined in, NOT rebuilt as correlated subqueries against the live
+    /// catalog once per index row - which is what made a wide schema pay per index (~28 s on a
+    /// 54K-index database). A revert to the correlated form would drop these markers.
+    /// </summary>
+    [Fact]
+    public void DefinitionMetadata_IsStaged_NotCorrelatedPerIndex()
+    {
+        var plan = IndexObjectStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas, isAzureSqlDb: true));
+
+        Assert.Contains("INTO #index_columns", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("INTO #index_definitions", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("INTO #index_compression", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN #index_definitions", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN #index_compression", plan.Text, StringComparison.Ordinal);
+        /* The final projection reads the definition metadata from the temps - the key/include lists
+           correlate to #index_columns during staging, never to the live catalog in the final SELECT. */
+        Assert.Contains("key_columns = defs.key_columns", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("data_compression_desc = comp.data_compression_desc", plan.Text, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void PayloadColumns_MatchSchemaOrder_58Columns()
     {
