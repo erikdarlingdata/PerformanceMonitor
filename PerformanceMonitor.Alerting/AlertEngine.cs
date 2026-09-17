@@ -1322,6 +1322,10 @@ public sealed class AlertEngine
 
                         if (agentKeys.Count > 0)
                         {
+                            /* The resolver is its own timed operation: without a Restart, a resolver
+                               fault would record the store read's elapsed on top of its own — the
+                               clock-to-itself rule the census holds every counted block to. */
+                            readClock.Restart();
                             try
                             {
                                 agentJobNames = await _agentJobStepResolver(key, agentKeys, ct);
