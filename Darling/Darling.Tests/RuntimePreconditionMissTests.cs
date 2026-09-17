@@ -441,9 +441,9 @@ public sealed class CollectorRuntimePreconditionTests
     [Fact]
     public void TheGoneDarkCutoff_IsTheOneTheStoppedBandAlreadyUses()
         => Assert.Equal(
+            CollectorRuntimePrecondition.GoneDarkHours,
             CollectorHealthClassifier.FailingThresholdHours(
-                CollectorScheduleDefaults.All["running_jobs"].FrequencyMinutes),
-            CollectorRuntimePrecondition.GoneDarkHours);
+                CollectorScheduleDefaults.All["running_jobs"].FrequencyMinutes));
 
     /// <summary>
     /// A gated-off collector cannot re-derive its own precondition, so BOTH its messages must carry the
@@ -684,8 +684,8 @@ public sealed class RuntimePreconditionReadWiringTests
                 $"the gated-off arm is wired for '{collector}', which has no CollectorScheduleDefaults entry");
 
             Assert.Equal(
-                CollectorHealthClassifier.FailingThresholdHours(schedule!.FrequencyMinutes),
-                CollectorRuntimePrecondition.GoneDarkHours);
+                CollectorRuntimePrecondition.GoneDarkHours,
+                CollectorHealthClassifier.FailingThresholdHours(schedule!.FrequencyMinutes));
         }
     }
 
