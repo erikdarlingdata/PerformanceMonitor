@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -734,5 +735,133 @@ public class CollectorCostDigestTests
         var mover = Mover("c", "s", latest, baseline, runs);
         Assert.Equal(expected, mover.AddedMsPerDay, 6);
         Assert.Equal(latest / baseline, mover.Ratio, 6);
+    }
+
+    /* ---------------- the delivery constraint (#3493) ---------------- */
+
+    /// <summary>Every string Slack counts against its per-text-object ceiling, wherever it sits in the
+    /// payload — section texts, field texts, the header title, context elements, button labels.</summary>
+    private static IEnumerable<string> AllTextObjects(JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (var prop in element.EnumerateObject())
+                {
+                    if (prop.NameEquals("text") && prop.Value.ValueKind == JsonValueKind.String)
+                    {
+                        yield return prop.Value.GetString()!;
+                        continue;
+                    }
+
+                    foreach (var s in AllTextObjects(prop.Value))
+                    {
+                        yield return s;
+                    }
+                }
+
+                break;
+
+            case JsonValueKind.Array:
+                foreach (var item in element.EnumerateArray())
+                {
+                    foreach (var s in AllTextObjects(item))
+                    {
+                        yield return s;
+                    }
+                }
+
+                break;
+        }
+    }
+
+    /// <summary>
+    /// The live failure, reconstructed end to end (#3493): a 20-mover digest — the shape both big-fleet
+    /// stores produced on the first two digest nights, and Slack rejected with HTTP 400
+    /// <c>invalid_attachments</c> while the same webhook delivered a rollup 80 milliseconds later — rendered
+    /// through the SHIPPED producer and fed to the SHIPPED Slack builder, must now satisfy both of Slack's
+    /// ceilings: every text object inside 3,000 characters and the message inside 50 blocks. And it must do
+    /// so IN FULL: at this size the split alone is enough, so every one of the twenty movers is present and
+    /// no stated-omission line appears — a fix that delivered a degraded digest where a whole one fits would
+    /// be trading one silent loss for a quieter one.
+    ///
+    /// <para>The fixture is the digest's own render, not a lookalike string, so its line lengths track the
+    /// real format: risers ranked by declining added cost (the read's ORDER BY, which the renderer trusts),
+    /// every row clearing #3462's materiality floor, and the census at its full ten-row cap — a busy fleet's
+    /// digest, because the busy fleets are exactly where the failure lived.</para>
+    /// </summary>
+    [Fact]
+    public async Task ATwentyMoverDigest_DeliversInFull_InsideBothSlackCeilings()
+    {
+        var collectors = new[]
+        {
+            "query_store", "query_stats", "procedure_stats", "wait_stats",
+            "latch_stats", "database_size_stats", "plan_correction", "cpu_utilization_stats",
+        };
+
+        /* Added cost declines 30,000 -> 3,400 s/day across the twenty lines, all above the 15 s/day
+           floor; (i % 8, i % 12) keeps every (collector, server) pair distinct. */
+        var movers = Enumerable.Range(0, 20).Select(i =>
+        {
+            var runs = 500L + (i * 37);
+            var baseline = 250.0 + (i * 55.5);
+            var latest = baseline + ((30_000_000.0 - (i * 1_400_000.0)) / runs);
+            return Mover(
+                collectors[i % collectors.Length],
+                "pm-server-" + ((i % 12) + 1).ToString(CultureInfo.InvariantCulture),
+                latestMsPerRun: latest, baselineMsPerRun: baseline, latestRuns: runs,
+                p95: baseline * 1.3, worstDay: baseline * 1.8, worstRunMs: (long)(latest * 2.2),
+                eligiblePairs: 177);
+        }).ToArray();
+
+        var census = new[]
+        {
+            Census("procedure_stats", 43, totalSqlMs: 98_100_000, runCount: 17_869, maxSqlMs: 137_455),
+            Census("query_stats", 43, totalSqlMs: 61_724_459, runCount: 43_891, maxSqlMs: 88_561),
+            Census("query_store", 4, totalSqlMs: 22_450_112, runCount: 1_204, maxSqlMs: 402_118),
+            Census("wait_stats", 43, totalSqlMs: 9_812_334, runCount: 44_120, maxSqlMs: 4_209),
+            Census("cpu_utilization_stats", 43, totalSqlMs: 7_401_889, runCount: 44_106, maxSqlMs: 3_118),
+            Census("latch_stats", 43, totalSqlMs: 5_220_741, runCount: 44_098, maxSqlMs: 2_953),
+            Census("database_size_stats", 43, totalSqlMs: 4_106_220, runCount: 21_997, maxSqlMs: 8_402),
+            Census("plan_correction", 41, totalSqlMs: 3_551_078, runCount: 20_446, maxSqlMs: 12_336),
+            Census("blocking_snapshot", 43, totalSqlMs: 2_900_432, runCount: 44_051, maxSqlMs: 1_890),
+            Census("collection_health", 43, totalSqlMs: 1_744_216, runCount: 43_960, maxSqlMs: 977),
+        };
+
+        var detail = await RenderAsync(movers, census);
+
+        /* The fixture guard: if the digest's render ever shrinks under one section's capacity, this test
+           stops exercising the split and must say so rather than passing vacuously. */
+        Assert.True(detail.Length > WebhookAlertService.SlackTextObjectLimit,
+            $"the 20-mover fixture renders {detail.Length} chars — no longer past the ceiling, rebuild it");
+
+        var payload = WebhookAlertService.BuildSlackPayload(
+            DarlingSelfAlertEvaluator.CollectorCostDigestMetric,
+            DarlingSelfAlertEvaluator.StoreServerLabel,
+            "20", "no threshold (report)", DarlingAlertDeliverer.Branding, detailText: detail);
+
+        /* Both ceilings, on the parsed document rather than the string. */
+        using var doc = JsonDocument.Parse(payload);
+        var blocks = doc.RootElement.GetProperty("attachments")[0].GetProperty("blocks")
+            .EnumerateArray().ToList();
+        Assert.True(blocks.Count <= WebhookAlertService.SlackMessageBlockLimit,
+            $"{blocks.Count} blocks");
+        Assert.All(AllTextObjects(doc.RootElement),
+            t => Assert.True(t.Length <= WebhookAlertService.SlackTextObjectLimit,
+                $"a text object is {t.Length} chars"));
+
+        /* The split actually engaged — one section was the defect. */
+        var proseSections = blocks.Count(b =>
+            b.GetProperty("type").GetString() == "section" && b.TryGetProperty("text", out _));
+        Assert.True(proseSections >= 2, $"{proseSections} prose section(s) — the split did not engage");
+
+        /* In full: every mover identity delivered (the splitter never cuts a line, so each appears intact
+           inside one section), and nothing was omitted. */
+        foreach (var mover in movers)
+        {
+            Assert.Contains($"{mover.CollectorName} on {mover.ServerName}:", payload, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("first omitted", payload, StringComparison.Ordinal);
     }
 }

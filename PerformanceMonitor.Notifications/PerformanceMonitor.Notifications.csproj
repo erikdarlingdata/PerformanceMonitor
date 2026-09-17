@@ -25,5 +25,8 @@
     <InternalsVisibleTo Include="PerformanceMonitorDashboard" />
     <InternalsVisibleTo Include="Lite.Tests" />
     <InternalsVisibleTo Include="Dashboard.Tests" />
+    <!-- #3493: the digest-shaped Slack delivery pin lives beside the digest's own fixtures, and feeds the
+         REAL rendered digest to the internal payload builder rather than a lookalike string. -->
+    <InternalsVisibleTo Include="Darling.Tests" />
   </ItemGroup>
 </Project>
