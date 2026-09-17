@@ -1057,6 +1057,148 @@ public sealed class DarlingSelfAlertTests
         Assert.Contains("never expires", fired.DetailText);
     }
 
+    /* ---------------- web dashboard TLS certificate expiry (#3514) ---------------- */
+
+    private static readonly DateTime CertClock = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+
+    private static DarlingSelfAlertEvaluator.WebTlsCertReport Cert(
+        DateTime notAfterUtc, string subject = "CN=Darling Web", string thumbprint = "ABC123DEF456") =>
+        new(Configured: true, NotAfterUtc: new DateTimeOffset(notAfterUtc, TimeSpan.Zero), Subject: subject, Thumbprint: thumbprint);
+
+    private static readonly DarlingSelfAlertEvaluator.WebTlsCertReport NoWebTlsCert =
+        new(Configured: false, NotAfterUtc: default, Subject: string.Empty, Thumbprint: string.Empty);
+
+    private static double WebTlsWarnDays => DarlingSelfAlertEvaluator.WebTlsCertWarnWindow.TotalDays;
+
+    [Fact]
+    public async Task WebTlsCert_WithinTheWindow_FiresWarning_WithTheFleetKeyAndTheCertRef()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(10)), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric, fired.MetricName);
+        Assert.Equal("webtlscert", fired.ServerKey);   // fleet sentinel key, not a real server_id
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, fired.ServerName);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.Contains("10 day", fired.ShortMessage);
+        Assert.Contains("ABC123DEF456", fired.DetailText);   // the thumbprint ties it to the host's own log line
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task WebTlsCert_Expired_FiresCritical_NamingTheLoopbackConsequence()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(-2)), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Contains("EXPIRED", fired.ShortMessage);
+        Assert.Contains("loopback-only", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task WebTlsCert_ComfortablyBeyondTheWindow_StaysSilent()
+    {
+        var h = new Harness { Now = CertClock };
+
+        await h.Build().ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(WebTlsWarnDays + 60)), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>The warning window is inclusive at its far edge (the web host's own <c>ExpiryWarning</c> begins
+    /// AT 30 days), so a certificate exactly that far out warns and one a minute further stays silent.</summary>
+    [Fact]
+    public async Task WebTlsCert_ExactlyAtTheWindow_Warns_AMinutePastIt_StaysSilent()
+    {
+        var atEdge = new Harness { Now = CertClock };
+        await atEdge.Build().ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(WebTlsWarnDays)), Ct);
+        Assert.Single(atEdge.Deliverer.Outcomes);
+
+        var pastEdge = new Harness { Now = CertClock };
+        await pastEdge.Build().ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(WebTlsWarnDays).AddMinutes(1)), Ct);
+        Assert.Empty(pastEdge.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task WebTlsCert_NoCertificateConfigured_StaysSilent()
+    {
+        var h = new Harness { Now = CertClock };
+
+        await h.Build().ApplyWebTlsCertificateAsync(NoWebTlsCert, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task WebTlsCert_MasterSwitchOff_StaysSilentEvenWhenExpired()
+    {
+        var h = new Harness { Now = CertClock };
+        h.Settings.AlertsEnabled = false;
+
+        await h.Build().ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(-5)), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    /// <summary>A standing condition: fire on entry, hold within the daily refire even across sweeps, re-state
+    /// once past it — the <see cref="DarlingSelfAlertEvaluator.WebTlsCertRefire"/> contract.</summary>
+    [Fact]
+    public async Task WebTlsCert_FiresOnceThenHolds_ReStatesAfterTheDailyRefire()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(10)), Ct);
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(10)), Ct);   // same sweep instant
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = CertClock.Add(DarlingSelfAlertEvaluator.WebTlsCertRefire).AddMinutes(1);
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(10)), Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    /// <summary>Renewing the certificate past the window (same evaluator instance) records exactly one
+    /// resolution, titled with the recognized "Renewed" suffix so the history styles it green.</summary>
+    [Fact]
+    public async Task WebTlsCert_RenewedPastTheWindow_RecordsOneResolution()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(5)), Ct);   // fires
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(WebTlsWarnDays + 300)), Ct);   // renewed
+
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, resolution.MetricName);
+    }
+
+    /// <summary>Turning TLS off entirely (a null report from an unconfigured/loopback web host) resolves an
+    /// active alert rather than leaving it firing forever — the report's <c>Configured=false</c> arm.</summary>
+    [Fact]
+    public async Task WebTlsCert_TlsRemoved_ResolvesAnActiveAlert()
+    {
+        var h = new Harness { Now = CertClock };
+        var e = h.Build();
+
+        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(5)), Ct);   // fires
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await e.ApplyWebTlsCertificateAsync(NoWebTlsCert, Ct);   // TLS no longer configured
+
+        Assert.Single(h.History.Records);
+    }
+
     [Fact]
     public async Task StaleMute_AFreshUnboundedRule_StaysSilent()
     {

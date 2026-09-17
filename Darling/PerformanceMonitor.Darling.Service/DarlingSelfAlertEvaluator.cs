@@ -572,6 +572,38 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <see cref="MaxListedUnhealthyRules"/>' reasoning — one bounded alert, not a wall of text.</summary>
     private const int MaxListedStaleMuteRules = 20;
 
+    /* -------- web dashboard TLS certificate expiry (#3514) -------- */
+
+    /// <summary>The fixed fleet-level key for the web-dashboard TLS certificate expiry edge (not a real
+    /// server); non-numeric so the deliverer's #1236 int.TryParse no-ops on it, like <see cref="StaleMuteKey"/>.</summary>
+    private const string WebTlsCertKey = "webtlscert";
+
+    private readonly ConcurrentDictionary<string, bool> _activeWebTlsCert = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastWebTlsCertAlert = new();
+
+    /// <summary>The metric the web-dashboard TLS certificate expiry self-alert fires under (#3514). A WEBHOOK
+    /// AUTOMATION KEY like its siblings — a const, stable across releases. State-only in the numeric columns:
+    /// an expiry is a DATE, an identity rather than a quantity (the <see cref="StoreUpgradeMetric"/> precedent),
+    /// so the human-readable expiry rides the text and no measurement column turns negative the day it matters.</summary>
+    internal const string WebTlsCertExpiryMetric = "Web TLS Certificate Expiring";
+
+    /// <summary>The resolution title recorded when the served certificate is healthy again — renewed past the
+    /// warning window, or TLS no longer configured. Carries a recognized resolution suffix ("Renewed") so
+    /// <c>AlertMetricClassifier.IsResolution</c> styles it green.</summary>
+    internal const string WebTlsCertRenewedMetric = "Web TLS Certificate Renewed";
+
+    /// <summary>How long before expiry this begins to warn — the SAME window the web host's startup log uses
+    /// (<see cref="Hosting.DarlingWebTls.ExpiryWarningDays"/>), so the two surfaces agree to the day and a
+    /// reader who saw the startup line sees the same threshold here.</summary>
+    internal static readonly TimeSpan WebTlsCertWarnWindow = TimeSpan.FromDays(Hosting.DarlingWebTls.ExpiryWarningDays);
+
+    /// <summary>How long this condition waits before re-stating itself while the certificate is still inside
+    /// the warning window — its OWN daily interval, for the <see cref="StaleMuteRefire"/> reason: the fact is a
+    /// fixed expiry date measured against the clock, identical every sweep, so the shared 5-to-120-minute
+    /// cooldown would flood the channel about a date that changes only when the operator renews. Daily
+    /// dominates the cooldown's two-hour ceiling under every setting.</summary>
+    internal static readonly TimeSpan WebTlsCertRefire = TimeSpan.FromDays(1);
+
     /// <summary>Length cap for one stale rule's operator-authored reason in the alert detail. Generous
     /// enough to carry a real sentence, bounded so <see cref="MaxListedStaleMuteRules"/> lines cannot grow
     /// the body without limit.</summary>
@@ -3336,6 +3368,155 @@ internal sealed class DarlingSelfAlertEvaluator
             /* NOT counted by #3013's swallowed-read counter: the report is a parameter; no store read happens here. */
             _logger?.LogError("Store runtime upgrade self-alert failed: {Message}", ex.Message);
         }
+    }
+
+    /* ---------------- web dashboard TLS certificate expiry (#3514) ---------------- */
+
+    /// <summary>
+    /// What the web host knows about its served TLS certificate, carried out to the worker's alert sweep — a
+    /// platform-neutral copy of the loaded certificate's facts so the alert path never touches an X.509 type.
+    /// <paramref name="Configured"/> is false when there is no LAN TLS certificate to watch (loopback-only, no
+    /// <c>tls</c> block, or an unusable one); the other fields are meaningful only when it is true.
+    /// </summary>
+    internal sealed record WebTlsCertReport(bool Configured, DateTimeOffset NotAfterUtc, string Subject, string Thumbprint);
+
+    /// <summary>
+    /// The isolating entry point the worker's sweep calls for the web-dashboard TLS certificate expiry
+    /// self-alert (#3514) — the fleet-level twin of <see cref="EvaluateStaleMuteRulesAsync"/>. Wraps
+    /// <see cref="ApplyWebTlsCertificateAsync"/> in the same failure isolation the sibling store-alerts use, so
+    /// a throwing pre-deliver mute check can never propagate out of the collection sweep. Cancellation still
+    /// propagates.
+    /// </summary>
+    public async Task EvaluateWebTlsCertificateAsync(WebTlsCertReport report, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyWebTlsCertificateAsync(report, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the report is a parameter from the web host's
+               in-memory WebTlsCertificateState publish, and this method performs no store read. */
+            _logger?.LogError("Web TLS certificate self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Edge-applies the "the web dashboard's served TLS certificate is expiring" condition (#3514).
+    ///
+    /// <para><b>Why this exists.</b> When the dashboard is LAN-exposed with a certificate, its expiry was
+    /// surfaced only two ways — a startup-log warning inside <see cref="WebTlsCertWarnWindow"/> and the
+    /// <c>--status</c> line — both of which require someone to look, on a HEADLESS service that can run for
+    /// months without a restart. The certificate is loaded ONCE at start, so as the clock crosses the window
+    /// nothing re-fires and the symptom is the dashboard silently dropping to loopback-only the day it lapses.
+    /// This re-reads the served certificate's fixed expiry against the evaluator's clock every sweep, so it
+    /// warns 30 days out and escalates to Critical once lapsed WITHOUT a restart — the Retention Held /
+    /// stale-mute shape: a correct, deliberate posture whose failure reads as silence.</para>
+    ///
+    /// <para><b>Severity follows what has already happened.</b> Inside the window but not yet lapsed is a
+    /// WARNING — the dashboard still serves and there is time to renew. Lapsed is CRITICAL: an expired
+    /// certificate fails every TLS handshake, so the LAN dashboard is already unreachable and binds
+    /// loopback-only on the next restart.</para>
+    ///
+    /// <para>A STANDING condition like its siblings: fire on entry, re-state per <see cref="WebTlsCertRefire"/>
+    /// while it holds, and ONE resolution when the served certificate is healthy again (renewed past the
+    /// window) or TLS is no longer configured. Gated on the master alerts switch. Internal so it pins directly
+    /// with a recording deliverer and a controllable clock.</para>
+    /// </summary>
+    internal async Task ApplyWebTlsCertificateAsync(WebTlsCertReport report, CancellationToken cancellationToken)
+    {
+        if (report is null || !_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+
+        /* Healthy is either "no certificate to watch" or "more than the warning window still to run". The
+           subtraction is DateTime-on-DateTime so it is a pure TimeSpan and never trips the DateTimeOffset(...)
+           Kind guard on a test-injected clock. */
+        var healthy =
+            !report.Configured
+            || report.NotAfterUtc.UtcDateTime - now > WebTlsCertWarnWindow;
+
+        if (healthy)
+        {
+            if (_activeWebTlsCert.TryRemove(WebTlsCertKey, out var was) && was)
+            {
+                _lastWebTlsCertAlert.TryRemove(WebTlsCertKey, out _);
+                await RecordResolutionAsync(new AlertResolution(
+                    StoreKey(WebTlsCertKey), _storeLabel, WebTlsCertExpiryMetric, WebTlsCertRenewedMetric,
+                    report.Configured
+                        ? "The web dashboard's TLS certificate is no longer within the expiry window"
+                        : "The web dashboard is no longer serving a TLS certificate to watch"), cancellationToken);
+            }
+
+            return;
+        }
+
+        _activeWebTlsCert[WebTlsCertKey] = true;
+
+        /* Standing condition: fire on entry, re-state only per WebTlsCertRefire while it holds — its OWN
+           interval rather than the shared cooldown, for the StaleMuteRefire reason (a fixed date measured
+           against the clock, identical every sweep). */
+        if (_lastWebTlsCertAlert.TryGetValue(WebTlsCertKey, out var lastFired)
+            && now - lastFired < WebTlsCertRefire)
+        {
+            return;
+        }
+
+        _lastWebTlsCertAlert[WebTlsCertKey] = now;
+
+        var expired = report.NotAfterUtc.UtcDateTime <= now;
+        var (shortMessage, detail, currentValue) = RenderWebTlsCert(report, now, expired);
+
+        await FireAsync(
+            StoreKey(WebTlsCertKey), _storeLabel, WebTlsCertExpiryMetric,
+            currentValue: currentValue,
+            thresholdValue: $"{Hosting.DarlingWebTls.ExpiryWarningDays} days",
+            detail: detail,
+            severity: expired ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+            shortMessage: shortMessage,
+            /* State-only: an expiry is a date, not a quantity — see WebTlsCertExpiryMetric. */
+            numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+            cancellationToken);
+    }
+
+    /// <summary>Renders the (shortMessage, detail, currentValue) for the web TLS certificate expiry alert. The
+    /// subject and thumbprint match the web host's own startup log line, so an operator can tie the alert to
+    /// the certificate it named. Pure but for the caller's clock; pinned by tests.</summary>
+    private static (string ShortMessage, string Detail, string CurrentValue) RenderWebTlsCert(
+        WebTlsCertReport report, DateTime now, bool expired)
+    {
+        var notAfter = report.NotAfterUtc.UtcDateTime;
+        var certRef = $"Certificate: subject {report.Subject}, thumbprint {report.Thumbprint}.";
+
+        if (expired)
+        {
+            var agoDays = Math.Max(0, (int)Math.Floor((now - notAfter).TotalDays));
+            var currentValue = $"expired {notAfter:u}";
+            var shortMessage =
+                $"web dashboard TLS certificate EXPIRED {notAfter:u} ({agoDays} day{(agoDays == 1 ? string.Empty : "s")} ago)";
+            var detail =
+                $"The web dashboard's TLS certificate expired on {notAfter:u}. An expired certificate fails every TLS "
+                + "handshake, so the LAN dashboard is unreachable now and binds loopback-only on the next service restart. "
+                + $"Install a renewed certificate and restart the service. {certRef}";
+            return (shortMessage, detail, currentValue);
+        }
+
+        var days = Math.Max(0, (int)Math.Ceiling((notAfter - now).TotalDays));
+        var plural = days == 1 ? string.Empty : "s";
+        var current = $"expires {notAfter:u} (in {days} day{plural})";
+        var shortMsg = $"web dashboard TLS certificate expires in {days} day{plural} ({notAfter:u})";
+        var det =
+            $"The web dashboard's TLS certificate expires on {notAfter:u}, in {days} day{plural}. When it lapses the LAN "
+            + "dashboard stops serving (it fails closed to loopback-only, never plain HTTP), so renew it and restart the "
+            + $"service before then. {certRef}";
+        return (shortMsg, det, current);
     }
 
     /// <summary>
