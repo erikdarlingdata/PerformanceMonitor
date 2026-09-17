@@ -747,18 +747,31 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          vpk upload github --repoUrl https://github.com/${{ github.repository }} --channel lite -o releases/velopack-lite --releaseName "v$env:VERSION" --tag "v$env:VERSION" --merge --token $env:GH_TOKEN
+          # Upload the Velopack channel feed with gh, not `vpk upload github --merge`.
+          # vpk's Octokit uploader dies mid-transfer on the large .nupkg (SslStream write,
+          # exhausts its own retries) and is NOT idempotent -- once releases.lite.json exists
+          # on the release it hard-fails ("merging release files is not supported"), so a
+          # re-run can't recover (#3520). vpk download+pack has already assembled the complete
+          # channel feed locally; gh just transfers it and --clobber makes a retry idempotent.
+          # Upload the nupkgs (including the downloaded prior full that the on-disk
+          # releases.lite.json references -- the index and every package it names must land
+          # together), the Setup and Portable, and the channel index. Skip the inert
+          # assets.lite.json / RELEASES-lite, which the Velopack client never fetches.
+          $dir = "releases/velopack-lite"
+          $files = @(Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Name -match '\.nupkg$' -or $_.Name -like '*-Setup.exe' -or $_.Name -like '*-Portable.zip' -or $_.Name -eq 'releases.lite.json' }).FullName
+          gh release upload "${{ github.event.release.tag_name }}" $files --clobber
 
       - name: Upload Darling Viewer Velopack artifacts
         if: github.event_name == 'release'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          vpk upload github --repoUrl https://github.com/${{ github.repository }} --channel darlingviewer -o releases/velopack-darlingviewer --releaseName "v$env:VERSION" --tag "v$env:VERSION" --merge --token $env:GH_TOKEN
+          # See the Lite step above for why this uses gh instead of `vpk upload github --merge`.
+          $dir = "releases/velopack-darlingviewer"
+          $files = @(Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Name -match '\.nupkg$' -or $_.Name -like '*-Setup.exe' -or $_.Name -like '*-Portable.zip' -or $_.Name -eq 'releases.darlingviewer.json' }).FullName
+          gh release upload "${{ github.event.release.tag_name }}" $files --clobber
 
   # #1587: gated-live Darling coverage BEFORE merge, not only in the nightly. Darling.Tests has
   # live-PostgreSQL tests (the *_AgainstDevPostgres classes) gated on DARLING_TEST_PG, which the
