@@ -159,15 +159,92 @@ public class CollectionLogFanoutRollupStoreTests
         var evenHealth = Health(even);
         var dominatedHealth = Health(dominated);
 
-        /* And now they are told apart, by the one number the rollup adds. */
+        /* And now they are told apart, by the numbers the rollup adds. */
         Assert.Equal(1.0, evenHealth.FanoutDominance!.Value, 2);
         Assert.Equal(6.13, dominatedHealth.FanoutDominance!.Value, 2);
 
-        /* The threshold the remedies turn on (#2468): near 1.0 the cost is the fan-out's WIDTH and bounded
-           parallelism is the lever; at 2.0 and above one database dominates and only a per-database override
-           or a stagger reaches it. */
-        Assert.True(evenHealth.FanoutDominance < 2.0);
-        Assert.True(dominatedHealth.FanoutDominance >= 2.0);
+        /* The verdict the remedies turn on rides the SHARE (#3502): the even fan-out's slowest item is an
+           eighth of its pass, the dominated one's is over three-quarters. Dominance agrees with the share
+           here only because both runs are 8 items wide — at equal width the two figures are one ordering
+           scaled — and TheShare_IsTheVerdict pins the case where the widths differ and near-neighbour
+           dominance scores carry shares 5.6x apart. */
+        Assert.Equal(12.5, evenHealth.FanoutSlowestSharePercent!.Value, 2);
+        Assert.Equal(76.61, dominatedHealth.FanoutSlowestSharePercent!.Value, 2);
+    }
+
+    /// <summary>
+    /// #3502's counter-example, preserved because it is short, real, and permanently instructive. The
+    /// dominance ratio is the slowest item against the MEAN item, so its ceiling is <c>items</c> and its
+    /// reading depends on the width — which the tool description's guidance ignored ("around 2.0 or above
+    /// one database dominates"), and at least one triage conversation followed it into the wrong remedy.
+    /// The decision-relevant quantity is the slowest item's share of the PASS: slowest_ms / run_ms, which
+    /// is dominance / items, published so no reader is left one division and one misreading away from it.
+    /// </summary>
+    [Fact]
+    public void TheShare_IsTheVerdict_AndDominanceAloneMisreadsTheWideInstance()
+    {
+        /* The #3477 reporter's two instances, to the published precision: 72 databases with the slowest at
+           4.97% of the pass, and 15 with the slowest at 27.98% of one. */
+        var wide = new CollectorHealth
+        {
+            FanoutItems = 72,
+            SlowestItem = "worst",
+            SlowestItemMs = 4_970,
+            SlowestRunDurationMs = 100_000,
+        };
+        var concentrated = new CollectorHealth
+        {
+            FanoutItems = 15,
+            SlowestItem = "worst",
+            SlowestItemMs = 27_980,
+            SlowestRunDurationMs = 100_000,
+        };
+
+        /* Near-neighbour dominance scores, both far above the retired "around 2.0" bar — so a threshold on
+           dominance calls these the SAME shape. */
+        Assert.Equal(3.58, wide.FanoutDominance!.Value, 2);
+        Assert.Equal(4.20, concentrated.FanoutDominance!.Value, 2);
+
+        /* The shares are 5.6x apart and want opposite remedies: 4.97% is width (no single database worth
+           chasing), 27.98% is one database owning over a quarter of the pass (a per-database override or a
+           stagger reaches exactly it). */
+        Assert.Equal(4.97, wide.FanoutSlowestSharePercent!.Value, 2);
+        Assert.Equal(27.98, concentrated.FanoutSlowestSharePercent!.Value, 2);
+
+        /* The issue's own limiting case: at 72 items, even a dominance of 10 is one database holding 14%
+           of a pass — the ratio's ceiling is items, so at width it cannot mean what the guidance said. */
+        var wideAtTen = new CollectorHealth
+        {
+            FanoutItems = 72,
+            SlowestItem = "worst",
+            SlowestItemMs = 10_000,
+            SlowestRunDurationMs = 72_000,
+        };
+        Assert.Equal(10.0, wideAtTen.FanoutDominance!.Value, 2);
+        Assert.Equal(13.89, wideAtTen.FanoutSlowestSharePercent!.Value, 2);
+
+        /* One run whose slowest item IS the whole pass: the share saturates at 100 and dominance reads the
+           width — the two figures' relationship (share = dominance / items) stated at its endpoint. */
+        var whole = new CollectorHealth
+        {
+            FanoutItems = 4,
+            SlowestItem = "worst",
+            SlowestItemMs = 8_000,
+            SlowestRunDurationMs = 8_000,
+        };
+        Assert.Equal(100.0, whole.FanoutSlowestSharePercent!.Value, 2);
+        Assert.Equal(4.0, whole.FanoutDominance!.Value, 2);
+
+        /* And the pin that the two figures can never drift apart or describe different runs: the share is
+           DERIVED from dominance (share = dominance / items * 100), asserted here over every populated row
+           this test built, so a future edit that recomputes one from different columns fails loudly. */
+        foreach (var health in new[] { wide, concentrated, wideAtTen, whole })
+        {
+            Assert.Equal(
+                health.FanoutDominance!.Value / health.FanoutItems!.Value * 100,
+                health.FanoutSlowestSharePercent!.Value,
+                10);
+        }
     }
 
     /// <summary>
@@ -183,6 +260,7 @@ public class CollectionLogFanoutRollupStoreTests
         Assert.Null(plain.FanoutItems);
         Assert.Null(plain.SlowestItem);
         Assert.Null(plain.FanoutDominance);
+        Assert.Null(plain.FanoutSlowestSharePercent);
 
         /* And a fan-out whose run somehow recorded no duration is null too: a ratio against nothing is a
            wrong answer, not a smaller one. */
@@ -194,6 +272,11 @@ public class CollectionLogFanoutRollupStoreTests
             SlowestRunDurationMs = 0,
         };
         Assert.Null(zeroRun.FanoutDominance);
+
+        /* The share holds the same line, by construction rather than by a twin guard: it is derived from
+           dominance, so it is null exactly when dominance is — never a 0% that would read as "perfectly
+           even" on a run that reported nothing. */
+        Assert.Null(zeroRun.FanoutSlowestSharePercent);
     }
 
     /// <summary>
@@ -288,6 +371,26 @@ public class CollectionLogFanoutRollupStoreTests
            a word the description writes in backticks and matched neither file. */
         Assert.Contains("slowest_ms * items / run_ms", lite, StringComparison.Ordinal);
         Assert.Contains("slowest_ms * items / run_ms", description, StringComparison.Ordinal);
+
+        /* #3502: the share's formula beside it, and the guidance routed through the share — the description
+           told readers to take the width-versus-concentration decision on dominance ("around 2.0 or above
+           one database dominates"), which misreads exactly the widest fan-outs. Both SKUs, same reason as
+           the dominance pin above. */
+        foreach (var toolSource in new[] { description, lite })
+        {
+            Assert.Contains("slowest_ms / run_ms", toolSource, StringComparison.Ordinal);
+            Assert.Contains("The remediation decision routes through the SHARE", toolSource, StringComparison.Ordinal);
+            Assert.DoesNotContain("around 2.0 or above one database dominates", toolSource, StringComparison.Ordinal);
+
+            /* The WIRING, because the fields are emitted by an anonymous object inside a tool method that
+               needs a live store to invoke — the #3010 lesson, where a mutation removing a field left the
+               whole suite green. Pinned with its rounding so the emitted figure is the counter-example's
+               precision (4.97, 27.98), not a re-rounded neighbour. */
+            Assert.Contains(
+                "slowest_share_pct = Math.Round(r.FanoutSlowestSharePercent!.Value, 2),",
+                toolSource,
+                StringComparison.Ordinal);
+        }
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────────────────────────

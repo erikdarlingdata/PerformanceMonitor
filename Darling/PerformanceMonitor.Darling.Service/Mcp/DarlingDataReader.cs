@@ -2199,11 +2199,13 @@ internal sealed class CollectorHealth
     public int? SlowestRunDurationMs { get; set; }
 
     /// <summary>
-    /// The answer, as one number: 1.0 is a perfectly even fan-out and it rises with concentration. Eight
-    /// databases at 10.1s each gives 1.0; one at 62s beside seven at 2.7s gives 6.1 — the same 80,900 ms
-    /// run either way. Roughly 2.0 or above is the shape a per-database schedule override or a stagger
-    /// can actually target; near 1.0 says the cost is the fan-out's WIDTH and bounded parallelism is the
-    /// lever instead (#2468).
+    /// The slowest item against the MEAN item: 1.0 is a perfectly even fan-out and it rises with
+    /// concentration. Eight databases at 10.1s each gives 1.0; one at 62s beside seven at 2.7s gives 6.1 —
+    /// the same 80,900 ms run either way. NOT a concentration verdict (#3502): its ceiling is
+    /// <see cref="FanoutItems"/>, so at width it reads well above the "one database dominates" bar with no
+    /// concentration behind it — the decision belongs to <see cref="FanoutSlowestSharePercent"/>, which is
+    /// this same ratio put against the whole pass instead of the mean. Kept because it still answers how
+    /// EVEN the fan-out is; it just cannot say whether one database is worth chasing.
     ///
     /// <para>Null when the collector does not fan out, and also when the run's duration is zero — a
     /// ratio against nothing is not a smaller answer, it is a wrong one.</para>
@@ -2212,6 +2214,21 @@ internal sealed class CollectorHealth
         FanoutItems is > 0 && SlowestItemMs.HasValue && SlowestRunDurationMs is > 0
             ? (double)SlowestItemMs.Value * FanoutItems.Value / SlowestRunDurationMs.Value
             : null;
+
+    /// <summary>
+    /// The slowest item's share of its whole pass, as a percentage: slowest_ms / run_ms, the one division
+    /// the width-versus-concentration decision actually turns on (#3502). Dominance is against the mean
+    /// item, so what it means depends on the width: 3.58 over 72 items is a 4.97% share — width, no single
+    /// database worth chasing — while the near-neighbour 4.20 over 15 items is 27.98%, one database owning
+    /// over a quarter of the pass. Two scores that read as the same shape carry shares 5.6x apart wanting
+    /// opposite remedies, which is why the share is published instead of left as one more division for
+    /// every reader to skip.
+    ///
+    /// <para>Derived from <see cref="FanoutDominance"/> — share = dominance / items, the same algebra that
+    /// exposed the misreading — rather than recomputed from the columns, so the two figures can never
+    /// describe different runs: null exactly when dominance is null, by construction.</para>
+    /// </summary>
+    public double? FanoutSlowestSharePercent => FanoutDominance / FanoutItems * 100;
 
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
 
