@@ -3244,6 +3244,91 @@ public sealed class DarlingSelfAlertTests
     }
 
     /// <summary>
+    /// #3496: the recent-N window reads newest-by-<c>collection_time</c> with <c>log_id</c> as the
+    /// deterministic tiebreak within one collection instant — the ordering that lets TimescaleDB's
+    /// ChunkAppend stop at the newest chunks instead of top-N-sorting a server's whole retention history
+    /// (~389K rows to return ten, measured live). The order swap is semantics-identical because a server's
+    /// id order and time order agree, and this arm pins BOTH halves of that claim against a real Postgres:
+    /// the window is filled newest-instant-first (an older instant's rows never displace a newer one's),
+    /// and within a tied instant the HIGHEST ids win. A revert to id-first ordering passes this test on any
+    /// store small enough to test against — that quietness is exactly how the defect shipped — so the
+    /// ordering itself is additionally pinned at the source by <see cref="CollectionSignalsChunkOrderTests"/>;
+    /// this arm is the behavioral floor that makes a WRONG reordering (time-first without the tiebreak,
+    /// or a descending/ascending mix-up) fail loudly.
+    /// </summary>
+    [Fact]
+    public async Task LiveStoreReads_RecentWindow_IsNewestByTimeFirst_WithLogIdBreakingTies()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live self-alert store reads.");
+
+        var ct = Ct;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteLiveRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var older = utcNow.AddMinutes(-10);
+            var newest = utcNow.AddMinutes(-1);
+
+            /* An older instant of four SUCCESSes under a newer instant of six rows sharing ONE
+               collection_time: three ERRORs on the LOW ids, three SUCCESSes on the HIGH ids. The id/time
+               agreement invariant holds (ids rise with time), and the tie group is wider than the small
+               window so the tiebreak decides which statuses are counted. */
+            long logId = 9_100_000;
+            for (int i = 0; i < 4; i++)
+            {
+                await InsertLogAsync(connection, ct, logId++, "wait_stats", older, "SUCCESS");
+            }
+
+            for (int i = 0; i < 3; i++)
+            {
+                await InsertLogAsync(connection, ct, logId++, "wait_stats", newest, "ERROR");
+            }
+
+            for (int i = 0; i < 3; i++)
+            {
+                await InsertLogAsync(connection, ct, logId++, "wait_stats", newest, "SUCCESS");
+            }
+
+            /* Window 3, inside the tied instant: log_id DESC must pick the three HIGHEST ids — all
+               SUCCESS. A missing or ascending tiebreak lets the tied instant's ERRORs leak in. */
+            var (_, tieRuns, tieSuccess) = await DarlingSelfAlertEvaluator.ReadCollectionSignalsAsync(
+                postgres, LiveServerId, 3, ct);
+            Assert.Equal(3, tieRuns);
+            Assert.Equal(3, tieSuccess);
+
+            /* Window 8, across both instants: all six newest-instant rows (3 ERROR + 3 SUCCESS) fill the
+               window before ANY older row — time-first — leaving room for exactly two of the older
+               SUCCESSes. 5 = 3 + 2 is only reachable by that fill order. */
+            var (lastSuccess, spanRuns, spanSuccess) = await DarlingSelfAlertEvaluator.ReadCollectionSignalsAsync(
+                postgres, LiveServerId, 8, ct);
+            Assert.Equal(8, spanRuns);
+            Assert.Equal(5, spanSuccess);
+
+            /* The MAX arm — the statement's measured 0.097 ms control, deliberately untouched by #3496 —
+               still answers the newest qualifying instant. */
+            Assert.NotNull(lastSuccess);
+            Assert.Equal(newest, DateTime.SpecifyKind(lastSuccess!.Value, DateTimeKind.Unspecified), TimeSpan.FromSeconds(1));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteLiveRowsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
     /// EXECUTES both Availability Group reads against a real Postgres (#991). This exists because the two
     /// grains were briefly read as two statements over a SINGLE command to save a round trip, and that is
     /// rejected by PostgreSQL: Npgsql only splits multi-statement text into a batch when it parses the SQL for

@@ -3779,6 +3779,30 @@ internal sealed class DarlingSelfAlertEvaluator
     /// plus — over the most recent <paramref name="recentWindow"/> logged runs — the run count and the
     /// success count (feeding the consecutive-failure fast path). Static + parameterized so the gated live
     /// test can seed rows and assert the raw signals directly.
+    ///
+    /// <para><b>#3496: the recent-N subqueries order by <c>collection_time DESC, log_id DESC</c>, and the
+    /// time column must stay FIRST.</b> <c>collection_log</c> is a TimescaleDB hypertable partitioned on
+    /// <c>collection_time</c> and carries no index on <c>log_id</c>, so <c>ORDER BY log_id DESC</c> had
+    /// exactly one legal plan: append EVERY chunk — decompressing the columnar history — into a top-N sort.
+    /// Measured live once the retention horizon filled: ~389,000 rows decompressed and heapsorted across
+    /// all 32 chunks to return ten, twice per statement (the status twin repeats the shape), every alert
+    /// pass, every 30 seconds, per server. The statement carried its own control: the
+    /// <c>MAX(collection_time)</c> arm below — same table, same <c>server_id</c> predicate — resolved in
+    /// 0.097 ms, because its sort key is chunk-orderable: ChunkAppend stopped at the newest chunk and 30 of
+    /// 32 chunks reported "never executed". Ordering the recent-N arms by the partition column buys the
+    /// same early stop, and the property is HORIZON-INDEPENDENT — ChunkAppend stops at the newest chunks no
+    /// matter how many chunks the retention horizon accumulates, so a future horizon extension cannot
+    /// regress this read back over its deadline. The semantics are identical: a server's <c>log_id</c>
+    /// order and its <c>collection_time</c> order agree (<c>CollectionIdGenerator</c> is a
+    /// process-monotonic counter re-seeded FORWARD from the clock across restarts), and <c>log_id</c>
+    /// stays in the ORDER BY as the deterministic tiebreak within one collection instant. The MAX arm is
+    /// deliberately untouched — it is the measured control, and its one residual (a server whose newest
+    /// qualifying row is ancient walks deeper before stopping) is the rare case and the right cost to pay
+    /// exactly then. This read's growth toward the 90-day retention steady state is what ate the alert
+    /// pass's 10 s command deadline margin — a deadline derived from a 1,744.9 ms measured worst case
+    /// (<see cref="DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds"/>): the warm mean sat near
+    /// 221 ms while the cold/contended excursions clocked 12.0–12.1 s and were swallowed as
+    /// <c>instance_read_failures</c>.</para>
     /// </summary>
     internal static async Task<(DateTime? LastSuccessUtc, int RecentRunCount, int RecentSuccessCount)> ReadCollectionSignalsAsync(
         NpgsqlDataSource postgres, int serverId, int recentWindow, CancellationToken cancellationToken)
@@ -3791,9 +3815,9 @@ SELECT
      WHERE server_id = $1
      AND   status IN ('SUCCESS', 'SKIPPED'))                                        AS last_success,
     (SELECT COUNT(*)
-     FROM (SELECT log_id FROM collection_log WHERE server_id = $1 ORDER BY log_id DESC LIMIT $2) r) AS recent_runs,
+     FROM (SELECT log_id FROM collection_log WHERE server_id = $1 ORDER BY collection_time DESC, log_id DESC LIMIT $2) r) AS recent_runs,
     (SELECT COUNT(*)
-     FROM (SELECT status FROM collection_log WHERE server_id = $1 ORDER BY log_id DESC LIMIT $2) r
+     FROM (SELECT status FROM collection_log WHERE server_id = $1 ORDER BY collection_time DESC, log_id DESC LIMIT $2) r
      WHERE r.status IN ('SUCCESS', 'SKIPPED'))                                       AS recent_success", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(recentWindow);
