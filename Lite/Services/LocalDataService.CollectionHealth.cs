@@ -582,15 +582,22 @@ public class CollectorHealthRow
     /// <summary>The whole run that item came from.</summary>
     public int? SlowestRunDurationMs { get; set; }
 
-    /// <summary>The answer, as one number: 1.0 is a perfectly even fan-out and it rises with
-    /// concentration. Near 1.0 the cost is the fan-out's WIDTH; around 2.0 or above one database
-    /// dominates and a per-database override or a stagger is the lever (#2468). Null when the collector
-    /// does not fan out, or when the run's duration is zero — a ratio against nothing is a wrong
-    /// answer rather than a smaller one.</summary>
+    /// <summary>The slowest item against the MEAN item: 1.0 is a perfectly even fan-out and it rises with
+    /// concentration. NOT a concentration verdict (#3502): its ceiling is <see cref="FanoutItems"/>, so at
+    /// width it reads high with nothing behind it — the width-versus-concentration decision belongs to
+    /// <see cref="FanoutSlowestSharePercent"/>. Null when the collector does not fan out, or when the run's
+    /// duration is zero — a ratio against nothing is a wrong answer rather than a smaller one.</summary>
     public double? FanoutDominance =>
         FanoutItems is > 0 && SlowestItemMs.HasValue && SlowestRunDurationMs is > 0
             ? (double)SlowestItemMs.Value * FanoutItems.Value / SlowestRunDurationMs.Value
             : null;
+
+    /// <summary>The slowest item's share of its whole pass, as a percentage: slowest_ms / run_ms, the one
+    /// division the remediation decision turns on (#3502). Derived from <see cref="FanoutDominance"/> —
+    /// share = dominance / items — rather than recomputed from the columns, so the two figures can never
+    /// describe different runs: null exactly when dominance is null, by construction. Expression-for-
+    /// expression Darling's.</summary>
+    public double? FanoutSlowestSharePercent => FanoutDominance / FanoutItems * 100;
 
     public double FailureRatePercent => TotalRuns > 0 ? (double)ErrorCount / TotalRuns * 100 : 0;
 
