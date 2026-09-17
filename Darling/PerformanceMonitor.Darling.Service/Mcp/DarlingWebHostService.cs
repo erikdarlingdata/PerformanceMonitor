@@ -76,6 +76,11 @@ public sealed class DarlingWebHostService : BackgroundService
     private readonly ILogger<DarlingWebHostService> _logger;
     private readonly WebRuntimeState _state;
 
+    /// <summary>#3514: the served TLS certificate's expiry facts, published here on load so the worker's alert
+    /// sweep can raise a self-alert as it approaches (the certificate is loaded once and only a log line ever
+    /// reported its expiry). Null-by-default when there is no LAN TLS certificate.</summary>
+    private readonly WebTlsCertificateState _certState;
+
     /// <summary>#2953: the collector's startup verdict, published by the worker and reported by
     /// <c>/api/ping</c>. Held rather than resolved per request so the route stays a field read — the whole
     /// point of that endpoint is that it answers without depending on anything that can be down.</summary>
@@ -109,11 +114,12 @@ public sealed class DarlingWebHostService : BackgroundService
     internal static readonly TimeSpan SessionLifetime = TimeSpan.FromHours(12);
     private const int SigningKeyBytes = 32;
 
-    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState)
+    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState)
     {
         _logger = logger;
         _state = state;
         _collectorState = collectorState;
+        _certState = certState;
     }
 
     /// <summary>The supervisor's per-tick verdict — pure over (running, runningPort, enabled, desiredPort) so a
@@ -489,6 +495,15 @@ public sealed class DarlingWebHostService : BackgroundService
                         {
                             var loaded = DarlingWebTls.Load(network.Tls!, plan.Shape);
                             var certificate = loaded.Leaf;
+
+                            /* #3514: publish the served certificate's expiry to the worker's alert sweep BEFORE
+                               the lifetime gate below, so an already-expired certificate the host is about to
+                               refuse still reaches the operator as a Critical self-alert, not only a log line.
+                               NotAfter is a LOCAL time (see the lifetime check below) — normalize to UTC. */
+                            _certState.Publish(
+                                new DateTimeOffset(certificate.NotAfter.ToUniversalTime()),
+                                certificate.Subject,
+                                certificate.Thumbprint);
 
                             if (plan.Warning is not null)
                             {

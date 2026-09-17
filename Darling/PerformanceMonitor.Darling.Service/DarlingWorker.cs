@@ -107,6 +107,11 @@ public sealed class DarlingWorker : BackgroundService
        so matching its #3304 neighbour costs nothing. */
     private static readonly TimeSpan s_staleMuteCheckInterval = TimeSpan.FromMinutes(5);
 
+    /// <summary>#3514: how often the sweep re-evaluates the web-dashboard TLS certificate's expiry. Hourly is
+    /// ample for a day-granularity fact (the evaluator's own daily refire gates the actual firing); the check
+    /// itself is a field read and a date compare.</summary>
+    private static readonly TimeSpan s_webTlsCheckInterval = TimeSpan.FromHours(1);
+
     /* The compression-job self-heal check's cadence (fleet-level, #1581). Compression is a slow archival tier
        and a stuck policy job takes hours to matter, so hourly is ample and cheap (one job_stats read + at most
        one alter_job per stuck job) — no need for the 15s sweep or the 30s alert cadence. */
@@ -445,6 +450,10 @@ public sealed class DarlingWorker : BackgroundService
        s_staleMuteCheckInterval. Fleet-level (mute rules are a store-wide concept), so a single field. */
     private DateTime _nextStaleMuteCheckUtc = DateTime.MinValue;
 
+    /* #3514: next due time for the web-dashboard TLS certificate expiry self-alert. Fleet-level (the web
+       certificate is a store-wide concept), so a single field like the stale-mute cadence above. */
+    private DateTime _nextWebTlsCheckUtc = DateTime.MinValue;
+
     /* MinValue = the first sweep after startup drains the oversized-plan backlog (#3392), then on whatever
        OversizedPlanBacklogSweep.NextSweepDelay returns for what that tick found. Both the cadence and the
        decision live with the sweep rather than here: its own doc derives the interval from the compile ages
@@ -622,6 +631,10 @@ public sealed class DarlingWorker : BackgroundService
        without a restart. */
     private readonly WebRuntimeState _webState;
 
+    /// <summary>#3514: the served web-dashboard TLS certificate's expiry, published by the web host and read
+    /// each sweep so the certificate-expiry self-alert fires without a restart.</summary>
+    private readonly WebTlsCertificateState _webTlsCertState;
+
     /* #2298: the live monitored-server registry seam — published beside the two above, read by the MCP
        host's plan-fetch resolver so it never re-reads config_monitored_servers as the mcp role (whose
        encrypted_password SELECT-carve fails that whole read). */
@@ -649,7 +662,7 @@ public sealed class DarlingWorker : BackgroundService
        indistinguishable from a healthy service on every automated surface there is. */
     private readonly CollectorRuntimeState _collectorState;
 
-    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState)
+    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState)
     {
         _logger = logger;
         _loggerFactory = loggerFactory;
@@ -657,6 +670,7 @@ public sealed class DarlingWorker : BackgroundService
         _webState = webState;
         _registryState = registryState;
         _collectorState = collectorState;
+        _webTlsCertState = webTlsCertState;
     }
 
     private sealed class ServerLoopState
@@ -2107,6 +2121,25 @@ public sealed class DarlingWorker : BackgroundService
             {
                 _nextStaleMuteCheckUtc = DateTime.UtcNow.Add(s_staleMuteCheckInterval);
                 await _selfAlerts.EvaluateStaleMuteRulesAsync(muteRuleService.GetRules(), stoppingToken);
+            }
+
+            /* #3514: the web-dashboard TLS certificate expiry self-alert. The web host loads the certificate
+               once at start and publishes its served expiry to WebTlsCertificateState; a headless service can
+               run for months without a restart, so the worker re-evaluates that fixed expiry against the clock
+               on its own slow cadence and the evaluator warns 30 days out / Critical once lapsed. A null
+               snapshot means no LAN TLS certificate to watch. Fleet-level, and the Evaluate* wrapper is
+               failure-isolated so a throw never stops the fleet loop. */
+            if (_selfAlerts is not null && DateTime.UtcNow >= _nextWebTlsCheckUtc)
+            {
+                _nextWebTlsCheckUtc = DateTime.UtcNow.Add(s_webTlsCheckInterval);
+                var certSnap = _webTlsCertState.Read();
+                await _selfAlerts.EvaluateWebTlsCertificateAsync(
+                    new DarlingSelfAlertEvaluator.WebTlsCertReport(
+                        Configured: certSnap is not null,
+                        NotAfterUtc: certSnap?.NotAfterUtc ?? default,
+                        Subject: certSnap?.Subject ?? string.Empty,
+                        Thumbprint: certSnap?.Thumbprint ?? string.Empty),
+                    stoppingToken);
             }
 
             /* #1581: the compression-job self-heal backstop. TimescaleDB compression policy jobs can silently

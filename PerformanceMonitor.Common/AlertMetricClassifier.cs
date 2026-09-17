@@ -45,15 +45,18 @@ namespace PerformanceMonitor.Common
         /// previously alerted has cleared — rather than an actionable alert. Recognizes every
         /// resolution suffix the alert engines emit: "&#8230; Cleared", "&#8230; Resolved",
         /// "&#8230; Restored" (e.g. Blocking Cleared, CPU Resolved, Capture Restored, Server Restored),
-        /// plus "&#8230; Resumed", "&#8230; Restarted", "&#8230; Recovered" and "&#8230; Reconnected".
+        /// plus "&#8230; Resumed", "&#8230; Restarted", "&#8230; Recovered", "&#8230; Reconnected" and
+        /// "&#8230; Renewed".
         ///
-        /// Those last four were the same #1225 drift one layer down: Darling's self-alert recoveries have
+        /// Those middle four were the same #1225 drift one layer down: Darling's self-alert recoveries have
         /// been emitting "Collection Resumed", "Agent Restarted" and "Compression Job Recovered" — genuine
         /// resolution rows, written by the very same <c>RecordResolutionAsync</c> path as the recognized
         /// "Capture Restored" — and every one of them was landing in the history grids styled as a live
         /// actionable alert, because the suffix list had never caught up with the alerts. The AG family
-        /// (#991) adds "AG Replica Reconnected", "AG Sync Recovered" and "AG Data Movement Resumed", so
-        /// the list is completed here rather than adding a fifth unrecognized suffix.
+        /// (#991) adds "AG Replica Reconnected", "AG Sync Recovered" and "AG Data Movement Resumed", and the
+        /// web-dashboard TLS certificate expiry self-alert (#3514) adds "&#8230; Renewed" ("Web TLS
+        /// Certificate Renewed", the natural word for a certificate replaced before it lapsed), so the list is
+        /// completed here rather than emitting an unrecognized suffix.
         ///
         /// No actionable metric name in either app contains any of these words, so widening the match
         /// cannot turn a real alert green.
@@ -69,7 +72,8 @@ namespace PerformanceMonitor.Common
                 || metricName.Contains("Resumed", StringComparison.Ordinal)
                 || metricName.Contains("Restarted", StringComparison.Ordinal)
                 || metricName.Contains("Recovered", StringComparison.Ordinal)
-                || metricName.Contains("Reconnected", StringComparison.Ordinal);
+                || metricName.Contains("Reconnected", StringComparison.Ordinal)
+                || metricName.Contains("Renewed", StringComparison.Ordinal);
         }
 
         /// <summary>
@@ -279,10 +283,15 @@ namespace PerformanceMonitor.Common
 
                        "Store Runtime Upgrade" — the PostgreSQL MAJOR VERSION ("PostgreSQL 18"), on both
                        sides: 18 as the "current value" and 17 as the "threshold". A version is an
-                       identity, not a quantity, and nothing about the store's upgrade is measured. */
+                       identity, not a quantity, and nothing about the store's upgrade is measured.
+
+                       "Web TLS Certificate Expiring" (#3514) — the current value is the certificate's expiry
+                       DATE ("expires 2026-... (in 10 days)" / "expired 2026-..."), a date rather than a
+                       measurement, and the fire site passes the 0 sentinel for both numeric columns. */
                     or "Collection Stopped"
                     or "Compression Job Stuck"
-                    or "Store Runtime Upgrade" => true,
+                    or "Store Runtime Upgrade"
+                    or "Web TLS Certificate Expiring" => true,
                 _ => false,
             };
         }

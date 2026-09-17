@@ -114,6 +114,7 @@ internal static class DarlingTriageEndpoint
         ("Store Job Cadence Recovered", DarlingSelfAlertEvaluator.JobCadenceMetric),
         ("Compression Job Recovered", DarlingSelfAlertEvaluator.CompressionJobMetric),
         (DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, DarlingSelfAlertEvaluator.StaleMuteMetric),
+        (DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric),
     };
 
     /// <summary>
@@ -258,6 +259,15 @@ internal static class DarlingTriageEndpoint
                 F("Mute rules in force", "get_mute_rules", ("enabled_only", "false")),
                 /* 168 hours because that is StaleMuteAge, and it is also this read's own ceiling. */
                 F("Recent alerts (a muted alert is still recorded here)", "get_alert_history", ("hours", "168"), ("limit", "50")),
+            },
+
+            /* #3514: the web-dashboard TLS certificate expiry alert is config/host-shaped like the stale-mute
+               one — get_store_metrics answers nothing about it, and renewing the certificate is an out-of-band
+               step on the service host. The actionable facts (subject, thumbprint, expiry) are in the alert
+               detail; the history is the firing trail, so the operator can see when the warning began. */
+            [DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric] = new[]
+            {
+                F("Recent alerts (the certificate's subject, thumbprint and expiry are in the alert detail)", "get_alert_history", ("hours", "168"), ("limit", "50")),
             },
 
             /* PostgreSQL alert family (PostgresAlertEvaluator). */

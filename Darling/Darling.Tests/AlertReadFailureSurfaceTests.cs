@@ -884,7 +884,7 @@ public sealed class AlertReadFailureSurfaceTests
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
         (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 14, 6),
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 8, 10),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 8, 11),
     };
 
     /// <summary>
@@ -968,6 +968,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Store-job cadence self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Retention-held self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Stale-mute self-alert failed"] = "handed its evidence (the live MuteRuleService cache) as a parameter and performs no store read at all - there is no read anywhere for this condition to be the swallowing of",
+        ["Web TLS certificate self-alert failed"] = "handed its evidence (the report from the web host's in-memory WebTlsCertificateState publish) as a parameter and performs no store read at all",
         ["Failed to record resolution"] = "an audit-row write",
         ["Could not record Postgres alert resolution"] = "a history write",
         ["could not read the store volume free space"] = "a local filesystem read, not a store read",
@@ -1067,8 +1068,10 @@ public sealed class AlertReadFailureSurfaceTests
         Assert.Equal(CountedSites, totalCounted);
         /* 22nd since #3466: the rollup's parse arm, which converts a non-parsing sweep document into the
            rollup's own unreadable count rather than a read failure. 23rd since #3497: the Agent-job
-           resolver's catch, an msdb read on the monitored server degrading to the unresolved form. */
-        Assert.Equal(23, totalExempt);
+           resolver's catch, an msdb read on the monitored server degrading to the unresolved form. 24th
+           since #3514: the web-dashboard TLS certificate self-alert's catch, whose evidence is the in-memory
+           WebTlsCertificateState report the web host publishes - there is no store read to swallow. */
+        Assert.Equal(24, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

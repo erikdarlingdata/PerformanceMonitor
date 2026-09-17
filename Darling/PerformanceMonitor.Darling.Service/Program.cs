@@ -402,6 +402,11 @@ if (OperatingSystem.IsWindows())
 builder.Services.AddSingleton<McpRuntimeState>();
 builder.Services.AddSingleton<WebRuntimeState>();
 
+/* #3514: the host->worker seam carrying the served web-dashboard TLS certificate's expiry, so the worker's
+   alert sweep can raise a self-alert as it approaches (the web host loads the certificate once and only a
+   log line ever reported its expiry). */
+builder.Services.AddSingleton<WebTlsCertificateState>();
+
 /* #2298: the worker-published monitored-server registry the MCP host's plan-fetch resolver reads,
    replacing its own mcp-role re-read of rows whose encrypted_password column that role is
    deliberately denied. */
