@@ -380,17 +380,17 @@ public sealed class ViewerServerMigrationTests
         var (row, reason) = fixture.Migration.TryProjectEntry(fixture.ServerStore.GetAllServers()[0]);
 
         Assert.Null(row);
-        Assert.Contains("no stored password", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("requires a stored secret", reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]
     [InlineData(AuthenticationTypes.EntraMFA)]
-    [InlineData(AuthenticationTypes.ServicePrincipal)]
-    [InlineData(AuthenticationTypes.ManagedIdentity)]
     [InlineData(AuthenticationTypes.EntraDefaultCredential)]
     [InlineData(AuthenticationTypes.EntraDeviceCode)]
-    public void Projection_AzureAuth_IsSkipped(string authType)
+    public void Projection_InteractiveEntraAuth_IsSkipped(string authType)
     {
+        /* #3484: the interactive Entra modes have no headless connect path, so they are skipped as "not
+           supported"; the non-interactive service principal + managed identity now project (below). */
         using var fixture = new Fixture();
         fixture.ServerStore.AddServer(
             new ViewerServerEntry { ServerName = "azure", DisplayName = "Azure", AuthenticationType = authType },
@@ -400,6 +400,48 @@ public sealed class ViewerServerMigrationTests
 
         Assert.Null(row);
         Assert.Contains("not supported", reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Projection_ServicePrincipal_SkipsWithoutSecret_ProjectsWithOne()
+    {
+        /* #3484: a service principal projects like SQL auth — the client id as username, the client secret
+           resolved into the same DPAPI blob; skipped when no secret is stored. */
+        using var noSecret = new Fixture();
+        noSecret.ServerStore.AddServer(
+            new ViewerServerEntry { ServerName = "azure", DisplayName = "Azure", AuthenticationType = AuthenticationTypes.ServicePrincipal },
+            null, null);
+        var (skippedRow, skipReason) = noSecret.Migration.TryProjectEntry(noSecret.ServerStore.GetAllServers()[0]);
+        Assert.Null(skippedRow);
+        Assert.Contains("requires a stored secret", skipReason, StringComparison.OrdinalIgnoreCase);
+
+        using var withSecret = new Fixture();
+        withSecret.ServerStore.AddServer(
+            new ViewerServerEntry { ServerName = "azure", DisplayName = "Azure", AuthenticationType = AuthenticationTypes.ServicePrincipal },
+            "app-client-id", "the-client-secret");
+        var (row, reason) = withSecret.Migration.TryProjectEntry(withSecret.ServerStore.GetAllServers()[0]);
+        Assert.Null(reason);
+        Assert.NotNull(row);
+        Assert.Equal("serviceprincipal", row!.Auth);
+        Assert.Equal("app-client-id", row.Username);
+        Assert.NotNull(row.EncryptedPassword);
+        /* The service must be able to read the client secret the migrate wrote. */
+        Assert.Equal("the-client-secret", DarlingSecrets.Unprotect(row.EncryptedPassword!));
+    }
+
+    [Fact]
+    public void Projection_ManagedIdentity_Projects_SecretLess()
+    {
+        /* #3484: managed identity carries no secret, so it projects with just its (optional) client id. */
+        using var fixture = new Fixture();
+        fixture.ServerStore.AddServer(
+            new ViewerServerEntry { ServerName = "azure", DisplayName = "Azure", AuthenticationType = AuthenticationTypes.ManagedIdentity },
+            null, null);
+        var (row, reason) = fixture.Migration.TryProjectEntry(fixture.ServerStore.GetAllServers()[0]);
+        Assert.Null(reason);
+        Assert.NotNull(row);
+        Assert.Equal("managedidentity", row!.Auth);
+        Assert.True(string.IsNullOrEmpty(row.EncryptedPassword));
     }
 
     [Fact]

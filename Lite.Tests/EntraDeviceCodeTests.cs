@@ -2073,13 +2073,17 @@ public class EntraDeviceCodeTests
 
         Assert.Contains("AuthenticationTypes.Windows", arms, StringComparison.Ordinal);
         Assert.Contains("AuthenticationTypes.SqlServer", arms, StringComparison.Ordinal);
+        /* #3484 added the two NON-interactive Entra modes to the whitelist — they are honored now. */
+        Assert.Contains("AuthenticationTypes.ServicePrincipal", arms, StringComparison.Ordinal);
+        Assert.Contains("AuthenticationTypes.ManagedIdentity", arms, StringComparison.Ordinal);
         Assert.Contains("_ => null", arms, StringComparison.Ordinal);
 
-        /* No Entra mode is named in it at all - the discriminating assertion, because a blacklist
-           that happened to list the six Azure modes would satisfy everything above. */
+        /* No INTERACTIVE Entra mode is named in it at all - the discriminating assertion for a device-code
+           (or MFA / default-credential) mode, because a blacklist that happened to list them would satisfy
+           everything above. The substring "Entra" matches only the interactive modes' AuthenticationTypes
+           constants (EntraMFA / EntraDeviceCode / EntraDefaultCredential); ServicePrincipal and ManagedIdentity
+           do not contain it, so this stays a clean whitelist-not-blacklist check that device code hits null. */
         Assert.DoesNotContain("Entra", arms, StringComparison.Ordinal);
-        Assert.DoesNotContain("ManagedIdentity", arms, StringComparison.Ordinal);
-        Assert.DoesNotContain("ServicePrincipal", arms, StringComparison.Ordinal);
     }
 
     [Fact]
