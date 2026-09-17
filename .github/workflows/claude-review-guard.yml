@@ -42,6 +42,12 @@ concurrency:
 
 jobs:
   verify:
+    # The DISPLAY name is the check-run name, and the check-run name is what branch protection's
+    # required-status-checks match on — the bare job id "verify" is what reported before this line
+    # existed, which made a required context of "Claude review guard" a phantom no run could ever
+    # satisfy (#3492's first CI cycle sat green-but-BLOCKED on exactly that). The name below is the
+    # enforcement contract: change it and the required context in branch protection must move with it.
+    name: Claude review guard
     runs-on: ubuntu-latest
     # The review is capped at 30 minutes; leave room to observe one that uses all of it.
     timeout-minutes: 40
