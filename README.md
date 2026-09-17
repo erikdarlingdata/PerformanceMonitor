@@ -20,7 +20,7 @@
 
 **Supported:** SQL Server 2016–2025 | Azure SQL Managed Instance | AWS RDS for SQL Server | Azure SQL Database (Lite and Darling)
 
-![Landing page with server health cards](Screenshots/Screenshot%20Dashboard%20landing%20page%20with%20server%20health%20cards.jpg)
+![Fleet overview: nine servers at a glance, one flagged Critical with live blocking and deadlocks](Screenshots/fleet-overview.jpg)
 
 ---
 
@@ -76,17 +76,29 @@ All editions include real-time alerts (system tray + email + webhooks), charts a
 
 ## More Screenshots
 
-### Lite Edition — Query Performance
-![Lite Edition — Query Performance](Screenshots/Lite%20Edition%20%E2%80%94%20Query%20Performance.jpg)
+### Custom dashboards — compose any metric into a chart
+![A saved custom view charting the HammerDB TPC-C contention story on one server: deadlock rate, wait time by type, latch waits, and transaction throughput](Screenshots/custom-view-hammerdb-contention.jpg)
+
+### Blocking & deadlocks
+![Per-server blocking and deadlock trends with the captured blocking chains beneath, under a live workload](Screenshots/blocking-and-deadlocks.jpg)
+
+### FinOps — right-sizing & cost analysis
+![FinOps utilization efficiency: a right-sizing verdict, CPU and memory headroom, and a 7-day provisioning trend](Screenshots/finops-utilization.png)
+
+### Recommendations — advise and act
+![The Recommendations tab: prioritized findings drawn from your own collected metrics, each with the reasoning behind it](Screenshots/recommendations.png)
+
+### Fleet Sweeps — scheduled fleet-wide health with memory
+![A fleet sweep differencing one server from Healthy to Critical, with per-server verdicts and instrument liveness](Screenshots/fleet-sweeps.jpg)
 
 ### Graphical Plan Viewer
-![Graphical plan viewer with missing index suggestions and operator analysis](Screenshots/New%20Query%20Plan%20Viewer.jpg)
+![Graphical plan viewer with plan insights, runtime summary, wait stats, and operator-level analysis](Screenshots/New%20Query%20Plan%20Viewer.jpg)
 
-### Alert Notifications
-![Alert notification](Screenshots/Screenshot%20alert%20notification%20or%20email.jpg)
+### Alert History
+![Alert history: blocking, deadlocks, and server-reachability events with values, thresholds, and detail](Screenshots/alert-history.jpg)
 
 ### MCP Server — AI-Powered Analysis
-![MCP server analysis](Screenshots/Screenshot%20MCP%20server%20analysis.jpg)
+![An AI assistant answering a health-check question from the monitor's own collected data over MCP](Screenshots/Screenshot%20MCP%20server%20analysis.jpg)
 
 ---
 
