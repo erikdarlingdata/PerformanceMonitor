@@ -83,12 +83,16 @@
                 <DataGridCheckBoxColumn Header="Enabled" Binding="{Binding Enabled, UpdateSourceTrigger=PropertyChanged}" Width="70"/>
                 <DataGridTextColumn Header="Every (min)" Binding="{Binding FrequencyMinutes}" Width="90"/>
                 <DataGridTextColumn Header="Keep (days)" Binding="{Binding RetentionDays}" Width="90"/>
+                <!-- The #3477 per-collector database scope: comma-separated names (the excluded-databases
+                     entry format), blank = every database. Only the per-database fan-out collectors read
+                     it; excluded databases still win. -->
+                <DataGridTextColumn Header="Databases" Binding="{Binding DatabasesText}" Width="140"/>
                 <DataGridTextColumn Header="Description" Binding="{Binding Description}" Width="*" IsReadOnly="True"/>
             </DataGrid.Columns>
         </DataGrid>
 
         <TextBlock Grid.Row="5" Margin="0,8,0,0" FontSize="11" Foreground="{StaticResource DimTextBrush}" TextWrapping="Wrap"
-                   Text="Every (min): 0 collects once on server load. Keep (days) must be at least 1. Changes apply on the service's next reload."/>
+                   Text="Every (min): 0 collects once on server load. Keep (days) must be at least 1. Databases: comma-separated allow-list for per-database collectors — blank collects every database, and a server's excluded databases always stay excluded. Changes apply on the service's next reload."/>
 
         <DockPanel Grid.Row="6" Margin="0,12,0,0" LastChildFill="False">
             <!-- Fleet-scale bulk reset: clears every server's per-server override in one write so they all fall

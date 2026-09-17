@@ -105,7 +105,13 @@ public static class DarlingXeSessions
         List<string> databases;
         try
         {
-            databases = await runner.GetAzureDatabaseListAsync(server, cancellationToken);
+            /* No #3477 scope here, deliberately: this list provisions SESSIONS for three collectors
+               (deadlocks, blocked_process_report, long_query_completions), each of which may carry a
+               DIFFERENT scope — the scope is a COLLECTION predicate on each collector's own read
+               fan-out, while the session inventory stays server-shaped. An unread session's ring
+               buffer is bounded server-side; a session dropped because ONE collector was scoped
+               would blind the other two. */
+            databases = await runner.GetAzureDatabaseListAsync(server, databaseScope: null, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -615,7 +621,10 @@ WHERE ses.name = @session_name;", connection))
         List<string> databases;
         try
         {
-            databases = await runner.GetAzureDatabaseListAsync(server, cancellationToken);
+            /* No #3477 scope, same reasoning as EnsureDatabaseScopedAsync: session lifecycle is
+               inventory-driven; the scope narrows the collector's READ loop, not where the trace
+               exists. */
+            databases = await runner.GetAzureDatabaseListAsync(server, databaseScope: null, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

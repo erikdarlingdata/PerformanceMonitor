@@ -197,6 +197,7 @@ public static class PgMigrations
         new Migration(122, "pg-deadlock-blocking-count-knobs", V122Sql),
         new Migration(123, "fleet-sweep-state", V123Sql),
         new Migration(124, "fleet-sweep-cadence-knobs", V124Sql),
+        new Migration(125, "collector-database-scope", V125Sql),
     };
 
     /// <summary>
@@ -613,6 +614,42 @@ ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS fleet_sweep_enabled boolean NOT NULL DEFAULT TRUE;
 ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS fleet_sweep_interval_minutes integer NOT NULL DEFAULT 60;";
+
+    /// <summary>
+    /// V125 — the optional per-collector database scope on <c>config_collector_schedules</c> (#3477):
+    /// an ALLOW-LIST of database names beside <c>enabled</c> and the cadence columns, so an expensive
+    /// per-database collector can be limited to a representative sample instead of turned off for the
+    /// whole server. The reporter's measured case is the sizing argument: a 72-database instance paid
+    /// a 43-minute <c>index_object_stats</c> pass whose slowest database carried 4.97% of it — pure
+    /// fan-out WIDTH — and the only alternatives were paying for all 72 or losing the collector (and
+    /// its growth trend) entirely. Pinned by <c>CollectorDatabaseScopeRungTests</c>.
+    ///
+    /// <para><b>An allow-list, deliberately, not a deny-list.</b> "Off everywhere except this one" on
+    /// a 72-database instance is one name as an allow-list and 71 as a deny-list — and under a
+    /// deny-list every newly created database silently REJOINS collection, which on a dev estate that
+    /// creates databases daily re-grows the pass day by day. Under the allow-list a new database
+    /// stays out until an operator names it, so the pass cost is independent of database-count
+    /// growth.</para>
+    ///
+    /// <para><b>Nullable, no default, no CHECK</b> — this table's own sparse convention (absent row /
+    /// NULL column = no override at this level), so every existing row and every untouched install
+    /// reads NULL and collects exactly what it collects today. NULL falls through the row's standard
+    /// per-column layering (per-server &gt; fleet-wide &gt; unscoped); an EMPTY array is DISTINCT from
+    /// NULL and is the explicit "no scope" — it stops the fall-through, which is what lets one server
+    /// opt back OUT of a fleet-wide scope without listing every database it has (the deny-list
+    /// failure again, one layer up). <c>excludedDatabases</c> on the server row still WINS: the scope
+    /// is an additional predicate on the same enumerations, so the effective set is scoped-in minus
+    /// excluded and the coarse instrument keeps its veto.</para>
+    ///
+    /// <para><b>No reload beacon of its own</b>: V17's statement-level
+    /// <c>trg_bump_collector_schedules</c> already bumps <c>config_service.config_version</c> on any
+    /// write here, so the running service re-resolves scopes on its next sweep with no restart. No
+    /// GRANT: this table carries table-level grants with no column carve, which is what every earlier
+    /// rung touching <c>config</c> tables says.</para>
+    /// </summary>
+    private const string V125Sql = @"
+ALTER TABLE config.config_collector_schedules
+    ADD COLUMN IF NOT EXISTS databases text[];";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

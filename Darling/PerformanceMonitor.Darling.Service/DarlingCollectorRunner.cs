@@ -372,6 +372,13 @@ public sealed class DarlingCollectorRunner
        all, so it is unaffected either way. */
     private readonly Func<int> _procedureStatsPlanCycleInterval;
 
+    /* Resolves the per-collector database scope (#3477) for one (collector, server) pair — the worker
+       passes StoreConfigProvider.ResolveDatabaseScope over its live schedule overrides, so a store
+       write to config_collector_schedules.databases is honored on the collector's NEXT run through the
+       same reload beacon every other schedule column rides. Provider-shaped like its knob siblings:
+       resolved ONCE per run, at dispatch, so one run cannot see two different scopes. Empty = unscoped. */
+    private readonly Func<string, int, IReadOnlyList<string>> _databaseScope;
+
     /// <summary>
     /// Per-(server, collector) cycle counter for the #2862 plan-capture cadence. In-memory, and lost on a
     /// service restart — deliberately, and harmlessly, which is the whole reason this needs no stored
@@ -624,7 +631,7 @@ public sealed class DarlingCollectorRunner
     /// every cycle and therefore the pre-#2862 collector. Every existing caller and test keeps the
     /// collector it already had without naming the knob.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _deltas = deltas ?? throw new ArgumentNullException(nameof(deltas));
@@ -639,6 +646,9 @@ public sealed class DarlingCollectorRunner
         _compressPlanContent = compressPlanContent ?? (() => true);
         /* Null provider = 1 = capture a plan on every cycle, i.e. the pre-#2862 behaviour. */
         _procedureStatsPlanCycleInterval = procedureStatsPlanCycleInterval ?? (() => 1);
+        /* Null provider = no scope for any collector = every database the server enumerates, which is
+           what Lite's twin and every pre-#3477 test constructs. */
+        _databaseScope = databaseScope ?? ((_, _) => Array.Empty<string>());
     }
 
     /* One ingestor for the process, so the resume marker survives between cycles - it is per-file and
@@ -899,6 +909,12 @@ public sealed class DarlingCollectorRunner
 
         var excludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>();
 
+        /* #3477: this collector's database scope on this server, resolved ONCE at dispatch (per-server
+           row > fleet row > unscoped, the schedule table's own layering) so the enumeration, the
+           per-database loop and the dispatch probe all see the same list within one run. Empty =
+           unscoped = every database the server enumerates — the shipped state of every install. */
+        var databaseScope = _databaseScope(definition.Name, server.ServerId);
+
         /* #2797: on the two FAN-OUT paths the answer to this read is thrown away — both of them overwrite
            context.Watermark with a per-database value before any query is built — so skip the round trip
            there, and only there. ServerWatermarkIsDiscarded holds the predicate and the argument for why it
@@ -924,6 +940,10 @@ public sealed class DarlingCollectorRunner
             Deltas = _deltas,
             Target = server.Target,
             ExcludedDatabases = excludedDatabases,
+            /* #3477: BuildEnumerationQuery now reads the scope too, so the probe carries it for the
+               same reason it carries the exclusions — the contract is "everything the enumeration
+               builders actually read", not "everything that changes the probe's answer". */
+            DatabaseScope = databaseScope,
         };
         var serverWatermarkDiscarded = ServerWatermarkIsDiscarded(definition, dispatchProbe);
 
@@ -1056,6 +1076,8 @@ public sealed class DarlingCollectorRunner
                re-derived: the probe's answer is only sound if it saw the exclusions this cycle will actually
                use, and two independent reads of server.Config could disagree. */
             ExcludedDatabases = excludedDatabases,
+            /* #3477: same shared-not-re-derived rule for the scope — one resolution per run, above. */
+            DatabaseScope = databaseScope,
             PerfmonCounterOverride = null,
             /* #2862: plan capture is additionally cadence-gated for procedure_stats — see
                ShouldCapturePlanForCollector. Every other collector reads exactly _capturePlans().
@@ -1152,8 +1174,8 @@ public sealed class DarlingCollectorRunner
                cannot read pg_database cannot monitor the server at all, so inventing a fallback would
                turn a permissions problem into a silent one-database collection. */
             var databases = server.Target.Engine == CollectorTargetEngine.PostgreSql
-                ? await GetPostgresDatabaseListAsync(server, cancellationToken)
-                : await GetAzureDatabaseListAsync(server, cancellationToken);
+                ? await GetPostgresDatabaseListAsync(server, databaseScope, cancellationToken)
+                : await GetAzureDatabaseListAsync(server, databaseScope, cancellationToken);
 
             var attempted = 0;
             var failed = 0;
@@ -4633,7 +4655,7 @@ RETURNING s.state_key";
     /// server into whichever registration ran the sweep — N registrations of N databases meant N² collection
     /// with every registration's history contaminated by its siblings'.</para>
     /// </summary>
-    internal async Task<List<string>> GetAzureDatabaseListAsync(ServerRuntime server, CancellationToken cancellationToken)
+    internal async Task<List<string>> GetAzureDatabaseListAsync(ServerRuntime server, IReadOnlyList<string>? databaseScope, CancellationToken cancellationToken)
     {
         var targetDb = new SqlConnectionStringBuilder(server.ConnectionString).InitialCatalog;
 
@@ -4648,6 +4670,11 @@ RETURNING s.state_key";
            probing master at all, rather than probing, failing, forming a verdict and falling back. Master is
            reached only by a registration that names no database — the logical-server registration, which has
            nothing else to enumerate from. */
+        /* #3477: the database scope deliberately does NOT filter this named-database return, for the
+           parity reason that governs the whole feature — ExcludedDatabases has never filtered it
+           either. A registration that names a database IS that database; the way to stop collecting
+           it is the collector's enabled flag for that server, not a scope that would have to be
+           matched client-side with a comparer the engine never sees. */
         var ownDatabase = AzureSweepScope.OwnDatabaseOrEmpty(targetDb);
         if (ownDatabase.Count > 0)
         {
@@ -4671,7 +4698,7 @@ RETURNING s.state_key";
            in exactly one place per engine. What stays here is the failure policy below, which is the
            part that is genuinely Azure-specific. */
         var (masterConnectionString, enumerationQuery) = SqlServerTargetProvider.Instance.BuildDatabaseListPlan(
-            server.ConnectionString, server.Config.ExcludedDatabases);
+            server.ConnectionString, server.Config.ExcludedDatabases, databaseScope);
 
         var databases = new List<string>();
         try
@@ -4813,11 +4840,11 @@ RETURNING s.state_key";
     /// out of reach. Falling back to the connected database would convert a permissions problem into a
     /// quiet partial collection, which is the failure mode that fallback exists to avoid elsewhere.</para>
     /// </summary>
-    internal async Task<List<string>> GetPostgresDatabaseListAsync(ServerRuntime server, CancellationToken cancellationToken)
+    internal async Task<List<string>> GetPostgresDatabaseListAsync(ServerRuntime server, IReadOnlyList<string>? databaseScope, CancellationToken cancellationToken)
     {
         var provider = TargetProviders.For(server.Target);
         var (connectionString, query) = provider.BuildDatabaseListPlan(
-            server.ConnectionString, server.Config.ExcludedDatabases);
+            server.ConnectionString, server.Config.ExcludedDatabases, databaseScope);
 
         var databases = new List<string>();
 

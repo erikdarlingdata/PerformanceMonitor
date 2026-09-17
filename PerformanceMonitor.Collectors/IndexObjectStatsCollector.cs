@@ -425,7 +425,9 @@ OPTION(RECOMPILE);";
     public override CollectorQuery BuildQuery(CollectorContext context) =>
         new(BuildPerDatabaseStatsBody(SupportsOptimizeForSequentialKey(context.Target)));
 
-    /// <summary>On-prem: enumerate accessible online databases (with exclusions), then per-item.</summary>
+    /// <summary>On-prem: enumerate accessible online databases (with the #3477 scope and the
+    /// exclusions — the composed predicate, so the scope narrows the fan-out and the exclusion
+    /// still wins), then per-item.</summary>
     public override CollectorQuery? BuildEnumerationQuery(CollectorContext context)
     {
         if (context.Target.IsAzureSqlDb)
@@ -433,7 +435,7 @@ OPTION(RECOMPILE);";
             return null;
         }
 
-        var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(context.ExcludedDatabases, "d.name");
+        var (exclusionClause, exclusionParameters) = DatabaseScopeFilter.BuildEnumerationPredicate(context, "d.name");
         var text = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SELECT

@@ -81,7 +81,7 @@ public sealed class PostgresDatabaseListScreenLivePostgresTests
             await CreateIfAbsentAsync(cs!, CustomerDatabase, ct);
 
             var (enumerationConnectionString, query) =
-                PostgresTargetProvider.Instance.BuildDatabaseListPlan(cs!, excludedDatabases: null);
+                PostgresTargetProvider.Instance.BuildDatabaseListPlan(cs!, excludedDatabases: null, databaseScope: null);
 
             var enumerated = new List<string>();
             await using (var connection = new NpgsqlConnection(enumerationConnectionString))

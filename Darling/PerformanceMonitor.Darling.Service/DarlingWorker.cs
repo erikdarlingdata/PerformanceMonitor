@@ -1498,7 +1498,11 @@ public sealed class DarlingWorker : BackgroundService
                above so the runner never sees an out-of-range interval. A file-only knob today, but read
                live like its siblings, so setting it to 1 restores every-cycle plan capture and promoting
                it to a store column later needs no change here. */
-            procedureStatsPlanCycleInterval: () => StoreConfigProvider.ClampProcedureStatsPlanCycleInterval(config.ProcedureStatsPlanCycleInterval));
+            procedureStatsPlanCycleInterval: () => StoreConfigProvider.ClampProcedureStatsPlanCycleInterval(config.ProcedureStatsPlanCycleInterval),
+            /* #3477: the per-collector database scope, resolved live against the SAME _scheduleOverrides
+               the cadence gate reads — one source, so the scope a run collects under and the schedule it
+               was dispatched under can never come from two different reloads. */
+            databaseScope: (collectorName, serverId) => StoreConfigProvider.ResolveDatabaseScope(collectorName, serverId, _scheduleOverrides));
         var servers = new List<ServerLoopState>();
         /* #1581 cold-start stagger: capture ONE startup instant so every initial server's first-sweep offset is
            measured from the same base — the deterministic per-server ColdStartFirstSweepDue then spreads the

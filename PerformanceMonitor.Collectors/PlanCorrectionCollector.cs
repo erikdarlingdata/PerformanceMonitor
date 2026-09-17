@@ -504,7 +504,10 @@ OPTION(RECOMPILE);";
             return null;
         }
 
-        var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(context.ExcludedDatabases, "d.name");
+        /* #3477: the composed scope+exclusion predicate rides the same splice point the exclusion
+           always used — the placeholder keeps its name because it marks WHERE the filter lands, and
+           the composition (allow-list AND NOT excluded) is DatabaseScopeFilter's to state once. */
+        var (exclusionClause, exclusionParameters) = DatabaseScopeFilter.BuildEnumerationPredicate(context, "d.name");
         var text = OnPremDatabaseListQueryText
             .Replace("/*EXCLUSION_FILTER*/", exclusionClause, StringComparison.Ordinal);
 
