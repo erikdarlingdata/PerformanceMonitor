@@ -15,6 +15,12 @@ name: Claude review guard
 # and a mark that goes red there is one people learn to ignore, which costs more than it catches. So
 # the zero-posted verdict is keyed on whether claude-review.yml actually promises a post.
 #
+# #3470: posting is not the same as being read. One night's PR train collected six review findings
+# as comments (one real) and auto-merge outran every one, because nothing made a finding cost
+# anything. So when the prompt promises a verdict review (the same sentinel), this guard also reads
+# the bot's newest formal review and fails while it says CHANGES_REQUESTED -- newest-verdict-wins,
+# so the fresh clean verdict a re-review submits clears the gate by itself, no --approve required.
+#
 # This guard is a SEPARATE workflow on purpose. Editing claude-review.yml makes this branch's copy
 # differ from the default branch, which triggers cause (1) for EVERY pull request in the repo until
 # the next release -- so a guard living inside the file it protects would disable review each time
@@ -62,13 +68,18 @@ jobs:
           REVIEW_STEP: Claude review
           # Author of every artifact the review leaves behind (the action reports bot_name).
           REVIEW_BOT: claude[bot]
-          # Whether "posted nothing" is a DEFECT depends on whether the review is obliged to post.
-          # Today's prompt says "use gh pr comment for top-level feedback" -- an instruction about
-          # HOW to report findings, not a promise to report when there are none -- so a clean review
-          # is legitimately silent, and failing on it would make this mark red on every tidy PR.
-          # Keyed on a sentinel in the prompt rather than on prose so the coupling is exact: add
-          # MUST_POST_SENTINEL to $WF along with the #2229 allowedTools cure and this guard turns
-          # strict by itself, with no second edit here to forget.
+          # Whether silence, or a missing verdict, is a DEFECT depends on what the review prompt
+          # promises -- and the copy that decides is the DEFAULT branch's, because that is the copy
+          # claude-code-action validates against and runs. Keyed on a sentinel in the prompt rather
+          # than on prose so the coupling is exact, and read at run time so the strict arms below
+          # turn on only once the promising prompt has actually shipped. The sentinel debuted WITH
+          # the VERDICT PROTOCOL (one commit, deliberately), so its presence means the prompt
+          # promises BOTH: post findings as comments AND end every run with one formal verdict
+          # review (gh pr review --request-changes, or --comment when clean). Absent the sentinel
+          # -- an older $WF, or a future prompt that drops the protocol -- both strict arms stand
+          # down: silence reads as a clean review, and the verdict arm must not enforce, because
+          # runs that never promise fresh verdicts can never clear a stale changes-requested, which
+          # would wedge the gate shut with no self-heal.
           MUST_POST_SENTINEL: ALWAYS POST
         run: |
           set -euo pipefail
@@ -243,15 +254,10 @@ jobs:
           summary "- inline comments: $inline"
           summary "- reviews: $reviews"
 
-          if [ "$total" -ne 0 ]; then
-            exit 0
-          fi
-
-          # Nothing posted. Whether that is a defect or a clean bill of health is NOT decidable from
-          # the artifact count -- the two are the same observation from out here -- so it is decided
-          # by the contract in $WF on the DEFAULT branch, which is the copy the action validated and
-          # ran. A missing file or an unreadable one reads as "no obligation", the same as a prompt
-          # without the sentinel: a lookup failure must not become a review verdict.
+          # The obligation read, feeding BOTH arms below: what does $WF promise, on the DEFAULT
+          # branch -- the copy the action validated and ran? A missing file or an unreadable one
+          # reads as "no obligation", the same as a prompt without the sentinel: a lookup failure
+          # must not become a review verdict.
           # The trailing `|| true` is load-bearing under `set -euo pipefail`: without it a 404 on
           # $WF, or a payload base64 cannot decode, fails the PIPELINE and kills this step -- turning
           # a lookup failure into exactly the hard guard failure the comment above forbids. Verified
@@ -261,6 +267,80 @@ jobs:
           must_post=$(printf '%s' "$encoded" | base64 -d 2>/dev/null \
             | { grep -qF "$MUST_POST_SENTINEL" && echo 1 || true; } || true)
 
+          if [ "$total" -ne 0 ]; then
+            # The VERDICT ARM. Posting was never the whole story: the #3470-#3473 train shipped six
+            # review findings in one night (one real) as comments that auto-merge outran before a
+            # human read them. So when the prompt carries the sentinel, every run also promises to
+            # END with one formal review -- changes-requested when a finding is substantive, a
+            # comment review ("LGTM") when not -- and this arm turns that verdict into the check's
+            # own color. Without the sentinel there is no verdict promise to hold the run to, and
+            # posted-something is the entire old contract, already satisfied here.
+            if [ -z "$must_post" ]; then
+              exit 0
+            fi
+
+            # NEWEST-VERDICT-WINS, over the whole PR rather than scoped to this run's window.
+            # Staleness is the concurrency groups' problem, not this scan's: a new push cancels the
+            # in-flight review AND this guard (cancel-in-progress above, matching the review's own),
+            # and the replacement guard waits for the replacement review run to COMPLETE before it
+            # gets here -- so by the time this scan runs, the current head's review has submitted
+            # its fresh verdict and that verdict IS the newest. A changes-requested left on a
+            # superseded push cannot outlive the next verdict; while a re-review is still running
+            # there is no completed guard to mislead, only a pending one. A human dismissing a
+            # changes-requested review flips its state to DISMISSED, which reads as cleared here --
+            # that is the manual override. --approve is no part of the protocol (the review token
+            # cannot approve without an org toggle this repo does not enable) and none is needed:
+            # a clean COMMENTED verdict clears the gate just as well.
+            # The API returns reviews oldest-first (documented: chronological order), and --paginate
+            # runs the --jq once PER PAGE -- a max_by here would be per-page, not global -- so the
+            # newest is the last LINE of the emitted stream, which pagination cannot break.
+            lookup "verdict scan (bot reviews)" "repos/$R/pulls/$PR/reviews" --paginate \
+              --jq ".[] | $mine | select(.submitted_at != null) | \"\(.state)\t\(.html_url)\""
+            newest=$(printf '%s\n' "$LOOKUP_OUT" | tail -n 1)
+
+            if [ -z "$newest" ]; then
+              # Comments landed but no formal review ever did, and the prompt promises one every
+              # run. The same broken-promise class as "posted nothing" below -- and worse, it is
+              # exactly the pre-verdict failure shape: findings living only in comments, which is
+              # the thing auto-merge outruns.
+              echo "::error title=Review posted no verdict::Review run $run_id posted comments, but"\
+                "$REVIEW_BOT has never submitted a formal review on PR #$PR, and $WF promises one"\
+                "verdict review per run. Findings that live only in comments are what auto-merge"\
+                "outruns (#3470), so do NOT read this PR as verdict-clean. Re-run the review"\
+                "workflow, then re-run this guard."
+              summary '### Claude review posted comments but no verdict review'
+              summary '- The prompt promises a verdict every run; none exists. Re-run the review.'
+              exit 1
+            fi
+
+            IFS=$'\t' read -r verdict_state verdict_url <<<"$newest"
+            summary "- newest verdict: $verdict_state -- $verdict_url"
+
+            if [ "$verdict_state" = "CHANGES_REQUESTED" ]; then
+              echo "::error title=Review requested changes::The newest verdict by $REVIEW_BOT on"\
+                "PR #$PR is CHANGES_REQUESTED: $verdict_url. A substantive finding is a failed"\
+                "check now, not a comment auto-merge can outrun. Address the findings and push --"\
+                "the re-review reads the new diff and submits a fresh verdict, and"\
+                "newest-verdict-wins clears this gate by itself -- or, if the findings are wrong,"\
+                "a human dismisses the review and DISMISSED reads as cleared."
+              summary '### Claude review requested changes'
+              summary "- $verdict_url"
+              summary '- Address the findings and push (the fresh verdict clears this), or dismiss'\
+                'the review.'
+              exit 1
+            fi
+
+            # COMMENTED (the LGTM shape), DISMISSED (a human overrode), or anything the API grows
+            # later: the newest verdict is not a standing objection, and a clean review is never a
+            # failure.
+            echo "::notice title=Review verdict clean::Newest verdict by $REVIEW_BOT is"\
+              "$verdict_state; no standing changes-requested."
+            exit 0
+          fi
+
+          # Nothing posted. Whether that is a defect or a clean bill of health is NOT decidable from
+          # the artifact count -- the two are the same observation from out here -- so it is decided
+          # by the obligation read above.
           if [ -z "$must_post" ]; then
             # The honest reading of today's prompt. Still surfaced, because "reviewed and clean" and
             # "reviewed and swallowed" are the same observation, and a reader deciding whether to
