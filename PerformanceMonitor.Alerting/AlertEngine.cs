@@ -98,7 +98,17 @@ public sealed class AlertEngine
     private readonly IAlertDeliverer _deliverer;
     private readonly Func<AlertMuteContext, bool> _isAlertMuted;
     private readonly Func<string, int, CancellationToken, Task<List<FailedJobInfo>>>? _failedJobsFetcher;
+    private readonly Func<string, IReadOnlyList<AgentJobStepKey>, CancellationToken, Task<IReadOnlyDictionary<AgentJobStepKey, AgentJobStepNames>>>? _agentJobStepResolver;
     private readonly Func<AlertResolution, CancellationToken, Task>? _resolutionCallback;
+
+    /// <summary>
+    /// The #3497 degrade arm's value: a resolver that THREW gets this instead of null, because the two
+    /// mean different things to the card — null says "no resolution was attempted" (render exactly as
+    /// before #3497), empty says "a resolution ran and answered nothing" (render the unresolved form,
+    /// which still states the Agent-job fact the parse alone establishes and carries the raw marker).
+    /// </summary>
+    private static readonly IReadOnlyDictionary<AgentJobStepKey, AgentJobStepNames> s_noAgentJobNames =
+        new Dictionary<AgentJobStepKey, AgentJobStepNames>();
     private readonly ILogger? _logger;
     private readonly Func<DateTime> _utcNow;
 
@@ -225,6 +235,15 @@ public sealed class AlertEngine
     /// it stays host-supplied: hosts run <see cref="FailedJobsQuery"/> on their own connections
     /// and degrade failures to an empty list. Null disables the failed-jobs check entirely.
     /// </param>
+    /// <param name="agentJobStepResolver">
+    /// #3497's live msdb job-name lookup (serverKey, parsed job/step keys, ct) — host-supplied for the
+    /// same reason as <paramref name="failedJobsFetcher"/>: job names live in the monitored server's
+    /// msdb, not in any collected table. Hosts run <see cref="AgentJobStepQuery.BuildSql"/> on their own
+    /// connections and degrade every failure (permission denied, transient, deleted job) to an empty
+    /// map. Called only inside the Long-Running Query FIRE branch — one msdb round trip per delivered
+    /// card, never per sweep — and only for sessions whose program_name parses as an Agent job step.
+    /// Null disables the annotation entirely: the card renders byte-identically to before #3497.
+    /// </param>
     /// <param name="resolutionCallback">
     /// Optional condition-recovered hook (see <see cref="AlertResolution"/>). Null = resolutions
     /// are tracked but not reported (state transitions still occur).
@@ -246,6 +265,7 @@ public sealed class AlertEngine
         IAlertDeliverer deliverer,
         Func<AlertMuteContext, bool> isAlertMuted,
         Func<string, int, CancellationToken, Task<List<FailedJobInfo>>>? failedJobsFetcher = null,
+        Func<string, IReadOnlyList<AgentJobStepKey>, CancellationToken, Task<IReadOnlyDictionary<AgentJobStepKey, AgentJobStepNames>>>? agentJobStepResolver = null,
         Func<AlertResolution, CancellationToken, Task>? resolutionCallback = null,
         ILogger? logger = null,
         Func<DateTime>? utcNow = null,
@@ -257,6 +277,7 @@ public sealed class AlertEngine
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
         _isAlertMuted = isAlertMuted ?? throw new ArgumentNullException(nameof(isAlertMuted));
         _failedJobsFetcher = failedJobsFetcher;
+        _agentJobStepResolver = agentJobStepResolver;
         _resolutionCallback = resolutionCallback;
         _logger = logger;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
@@ -457,6 +478,17 @@ public sealed class AlertEngine
     /// </summary>
     public const string CpuPersistenceMetric = "High CPU";
 
+    /// <summary>
+    /// Row budget for the #3495 fire-time active-session probe. The read orders by elapsed DESC and the
+    /// maintenance shapes are long-running by nature — a backup or rebuild burning enough CPU to matter
+    /// has been at it for minutes while an OLTP session's elapsed is milliseconds — so the sessions this
+    /// probe exists to find sort to the FRONT and fifty rows is generous headroom over any plausible
+    /// concurrent-maintenance count, not a coverage bet. Bounded at all because the probe runs inside
+    /// the fire branch of a paging alert: the page must never wait on an unbounded read of a busy
+    /// server's whole session list.
+    /// </summary>
+    public const int ActiveMaintenanceProbeMaxRows = 50;
+
     private async Task CheckCpuAsync(
         AlertServerSnapshot snapshot, string key, string serverName,
         DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
@@ -543,7 +575,60 @@ public sealed class AlertEngine
                 bool isMuted = _isAlertMuted(muteCtx);                              /* :75 */
                 _lastCpuAlert[key] = now;                                           /* :76 — stamped even when muted */
 
-                var cpuDetailText = $"  {cpuMetricLabel}: {alertCpuValue:F0}%\n  Threshold: {_settings.CpuThresholdPercent}%"; /* :89 */
+                /* #3495: name the active backup on the card. Everything the annotation needs was knowable
+                   at fire time from the same active-session surface the operator ended up reading by hand
+                   (get_active_queries' underlying table — the query_snapshots read the LRQ alert already
+                   rides), so this is one read of data the store already holds on the same sweep: no new
+                   collector, no new cadence. Inside the fire branch deliberately — cooldown-bounded, so a
+                   quiet sweep pays nothing — and taken for muted fires too, so the history row carries the
+                   same detail the delivered card would have.
+
+                   ANNOTATION, NEVER SUPPRESSION: the threshold compare, the persistence gate, the tiers and
+                   the fire above are all decided before this read exists; it can only ever ADD a line.
+
+                   Every filter is off and the exclusion list empty, on purpose: the LRQ alert's noise
+                   opt-outs exist to keep maintenance OFF that alert (excludeBackups drops BACKUPTHREAD/
+                   BACKUPIO waits), and this probe wants exactly the population those filters remove — the
+                   backup filtered out of the long-running alert is precisely what this line names. An
+                   excluded DATABASE stays visible too: the exclusion setting governs alert noise, and a
+                   backup of an excluded database still burns this server's CPU. Threshold 0 = every session
+                   in the latest fresh snapshot; the read's own 10-minute staleness floor still applies, so a
+                   dead collector cannot dress an old backup up as a live one.
+
+                   Log-and-degrade: a failed annotation read costs the card its maintenance line and NOTHING
+                   else — the alert already fired above this read in every sense that matters, and the empty
+                   string leaves cpuDetailText byte-identical to the pre-#3495 card. Counted on #3013's
+                   surface because it IS a store read the alert pass swallowed; Warning rather than Error
+                   because the CONDITION was evaluated correctly — only the annotation went blind. */
+                string maintenanceDetail = "";
+                var maintenanceClock = Stopwatch.StartNew();
+                try
+                {
+                    var activeSessions = await _readAdapter.GetLongRunningQueriesAsync(
+                        key,
+                        thresholdMinutes: 0,
+                        maxResults: ActiveMaintenanceProbeMaxRows,
+                        excludeSpServerDiagnostics: false,
+                        excludeWaitFor: false,
+                        excludeBackups: false,
+                        excludeMiscWaits: false,
+                        excludeCdc: false,
+                        Array.Empty<string>(),
+                        ct);
+                    maintenanceDetail = AlertContextBuilders.BuildActiveMaintenanceDetail(activeSessions);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning("Could not read active sessions for the High CPU card's maintenance annotation on {Server} after {ElapsedMs} ms — the alert fires without it: {Message}",
+                        serverName, maintenanceClock.ElapsedMilliseconds, ex.Message);
+                    _readFailures?.RecordReadFailure(key, "CPU maintenance annotation", maintenanceClock.ElapsedMilliseconds);
+                }
+
+                var cpuDetailText = $"  {cpuMetricLabel}: {alertCpuValue:F0}%\n  Threshold: {_settings.CpuThresholdPercent}%{maintenanceDetail}"; /* :89 + #3495 */
 
                 /* :91-98 — CPU passes no context; ShortMessage = the toast body of :84 minus the
                    server-name prefix. The numerics are REQUIRED, not optional (#1830): the ported
@@ -1198,7 +1283,72 @@ public sealed class AlertEngine
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :365 */
                     _lastLongRunningQueryAlert[key] = now;                          /* :366 */
 
-                    var lrqContext = AlertContextBuilders.BuildLongRunningQueryContext(serverName, longRunning, lrqOccurrences.Decorate); /* :379 */
+                    /* #3497: name the Agent job on the card. FIRE-time resolution, deliberately, over
+                       capture-time: no schema change on either store, and the degrade is per-card rather
+                       than baked into collected rows — a failed msdb lookup costs THIS card the job name
+                       and the next fire tries again. Only the sessions the card will SHOW are parsed (the
+                       builder's own display cap), deduped so N sessions of one job cost one key, and the
+                       host answers all keys in ONE msdb round trip (AgentJobStepQuery.BuildSql). Inside
+                       the cooldown-gated fire branch, so a quiet sweep pays nothing.
+
+                       ANNOTATION, NEVER SUPPRESSION — the #3495 contract, sibling card: the read above,
+                       the threshold, the fingerprint observation and the fire decision are all made before
+                       this exists; it can only ever add a field. The keys never reach
+                       LongRunningQueryIncidents, so the fingerprint (query_hash) is untouched by
+                       construction — a card that re-fires with a different elapsed, or with the job name
+                       freshly resolved, folds into the same incident it always did.
+
+                       Degrade arms, each distinct on purpose: no resolver wired, or no Agent sessions
+                       shown → agentJobNames stays NULL and the builder renders the pre-#3497 card
+                       byte-identically; a resolver that THREW → the empty map, so parsed sessions render
+                       the unresolved form with the raw job-id marker (the host's own permission arm
+                       already degrades a denied msdb read to an empty map before it can throw — this
+                       catch is the belt over resolver bugs and transport faults). NOT counted on #3013's
+                       surface: that counter is store reads, and this reads the MONITORED SERVER's msdb —
+                       the same exemption FetchFailedJobsAsync documents. */
+                    IReadOnlyDictionary<AgentJobStepKey, AgentJobStepNames>? agentJobNames = null;
+                    if (_agentJobStepResolver is not null)
+                    {
+                        var agentKeys = new List<AgentJobStepKey>();
+                        int shownCount = Math.Min(AlertContextBuilders.LongRunningQueryDisplayCap, longRunning.Count);
+                        for (int i = 0; i < shownCount; i++)
+                        {
+                            if (AgentJobStepQuery.TryParseProgramName(longRunning[i].ProgramName, out var jobKey)
+                                && !agentKeys.Contains(jobKey))
+                            {
+                                agentKeys.Add(jobKey);
+                            }
+                        }
+
+                        if (agentKeys.Count > 0)
+                        {
+                            /* The resolver is its own timed operation: without a Restart, a resolver
+                               fault would record the store read's elapsed on top of its own — the
+                               clock-to-itself rule the census holds every counted block to. */
+                            readClock.Restart();
+                            try
+                            {
+                                agentJobNames = await _agentJobStepResolver(key, agentKeys, ct);
+                            }
+                            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                            {
+                                throw;
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger?.LogWarning("Could not resolve Agent job names for the Long-Running Query card on {Server} — the card renders the unresolved form: {Message}",
+                                    serverName, ex.Message);
+                                agentJobNames = s_noAgentJobNames;
+                            }
+                        }
+                    }
+
+                    /* The resolver's time must not ride into whatever the block awaits next: a delivery
+                       fault after this point should record its own elapsed, not the msdb lookup's on top
+                       — the clock-to-itself rule, applied on the operation's EXIT as well as its entry. */
+                    readClock.Restart();
+
+                    var lrqContext = AlertContextBuilders.BuildLongRunningQueryContext(serverName, longRunning, lrqOccurrences.Decorate, agentJobNames); /* :379 + #3497 */
                     var detailText = AlertContextBuilders.ContextToDetailText(lrqContext);                       /* :380 */
 
                     /* :382-392. ShortMessage = the toast body of :374. */

@@ -883,7 +883,7 @@ public sealed class AlertReadFailureSurfaceTests
     /// </summary>
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
-        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 13, 5),
+        (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 14, 6),
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 8, 10),
     };
 
@@ -942,9 +942,12 @@ public sealed class AlertReadFailureSurfaceTests
     /// An EIGHTH since #3466: the fleet-sweep rollup read, whose swallowed failure skips the day's rollup
     /// tick without consuming the interval — counted because a fault folded into "empty day" would convert
     /// an unreadable store into a permanently quiet channel, the quiet-is-not-clean misreading at the
-    /// delivery end.</para>
+    /// delivery end. And <c>AlertEngine.cs</c> carries a FOURTEENTH since #3495: the maintenance-annotation
+    /// probe on the High CPU fire path — counted because its swallowed failure silently costs the card the
+    /// one line that closes the triage, and an operator chasing a mystery backup deserves to see that the
+    /// probe went blind rather than that no maintenance ran.</para>
     /// </summary>
-    private const int CountedSites = 31;
+    private const int CountedSites = 32;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
@@ -975,6 +978,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Skipping recently-failed-job check"] = "the same msdb read, permission-denied arm; not a store read",
         ["Failed to check failed jobs"] = "the fetcher reads the monitored server's msdb; the block's only store op is a write both stores swallow",
         ["CONVERTS the fault into the unreadable count"] = "a parse arm, not a read: the fleet-sweep rollup's store read is counted above it, and a document that does not parse becomes the rollup's own reportable unreadable count - the fault is evidence, not a swallow",
+        ["Could not resolve Agent job names"] = "reads the monitored server's msdb through the host resolver, not the store - the Recently-failed-job precedent one seam over; the card degrades to the unresolved form whose raw marker keeps the gap visible, and the page still delivers",
     };
 
     /// <summary>
@@ -1062,8 +1066,9 @@ public sealed class AlertReadFailureSurfaceTests
            a person rather than netting out silently. */
         Assert.Equal(CountedSites, totalCounted);
         /* 22nd since #3466: the rollup's parse arm, which converts a non-parsing sweep document into the
-           rollup's own unreadable count rather than a read failure. */
-        Assert.Equal(22, totalExempt);
+           rollup's own unreadable count rather than a read failure. 23rd since #3497: the Agent-job
+           resolver's catch, an msdb read on the monitored server degrading to the unresolved form. */
+        Assert.Equal(23, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

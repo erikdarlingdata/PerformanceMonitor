@@ -262,6 +262,10 @@ public partial class MainWindow : Window
                 new LiteAlertDeliverer(_emailAlertService, _muteRuleService, _serverManager, () => _trayService, Dispatcher),
                 _muteRuleService.IsAlertMuted,
                 failedJobsFetcher: FetchFailedJobsForAlertAsync,
+                /* #3497: the Long-Running Query card's Agent-job name lookup — the failed-jobs
+                   fetcher's seam shape, and the same degrade: every failure is an empty map, so a
+                   denied or broken msdb read costs a card its job NAME and never the card. */
+                agentJobStepResolver: FetchAgentJobStepNamesForAlertAsync,
                 resolutionCallback: ShowAlertResolutionToastAsync,
                 logger: new AppLoggerAdapter<AlertEngine>(),
                 /* #3013: the process counter every swallowed condition read is tallied on, which
