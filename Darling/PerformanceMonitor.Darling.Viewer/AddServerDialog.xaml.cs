@@ -304,10 +304,12 @@ public partial class AddServerDialog : Window
     /// multi-subnet values survive the round trip untouched) and never resets a value.
     ///
     /// <para>The PostgreSQL arm hides the auth modes the backend refuses for a PG target — Windows/Kerberos
-    /// and all the Entra modes — and force-checks SQL auth, the one inline mode left, rather than leaving the
-    /// operator a picker with one choice. The credential-profile source stays offered (a SQL profile is a
-    /// valid PG credential); a profile resolving to a non-SQL mode is refused at build time with the same
-    /// tailored message, the #3486 discipline of naming what IS supported instead of a bare no.</para>
+    /// and all the Entra modes — and hides the SQL-auth radio too: username/password is the one inline mode
+    /// left, so rather than show a lone radio mislabeled "SQL Server Authentication" it collapses the picker
+    /// and force-checks SQL auth, whose username/password panel then renders directly under the Authentication
+    /// header. The credential-profile source stays offered (a SQL profile is a valid PG credential); a profile
+    /// resolving to a non-SQL mode is refused at build time with the same tailored message, the #3486
+    /// discipline of naming what IS supported instead of a bare no.</para>
     /// </summary>
     private void EngineMode_Changed(object sender, RoutedEventArgs e)
     {
@@ -333,10 +335,15 @@ public partial class AddServerDialog : Window
         ServicePrincipalAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
         ManagedIdentityAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
 
-        /* Force-check SQL auth on the PostgreSQL arm so a hidden radio can never be the CHECKED one — a
-           checked-but-invisible Windows radio would build an integrated-auth PG row the save gate then
-           refuses, an error the operator was given no control to avoid. Going back to SQL Server leaves SQL
-           auth checked: it is a valid SQL Server mode, and un-picking a choice the operator made is worse. */
+        /* PostgreSQL has exactly one inline auth mode — username/password — so hide the SQL-auth radio too
+           rather than leave a lone radio mislabeled "SQL Server Authentication" on a PG target. Its
+           username/password panel keeps showing regardless: UpdateAuthPanels keys the SqlCredentialsPanel on
+           SqlAuthRadio.IsChecked, not its Visibility, and the force-check below keeps it checked. Force-checking
+           also means a hidden radio can never be the CHECKED one — a checked-but-invisible Windows radio would
+           build an integrated-auth PG row the save gate then refuses, an error the operator was given no control
+           to avoid. Going back to SQL Server restores the radio and leaves SQL auth checked: it is a valid SQL
+           Server mode, and un-picking a choice the operator made is worse. */
+        SqlAuthRadio.Visibility = postgres ? Visibility.Collapsed : Visibility.Visible;
         if (postgres && SqlAuthRadio.IsChecked != true)
         {
             SqlAuthRadio.IsChecked = true;
