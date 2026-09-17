@@ -45,7 +45,17 @@ public sealed class WebTlsCertificateState
     public void Publish(DateTimeOffset notAfterUtc, string subject, string thumbprint) =>
         _current = new Snapshot(notAfterUtc, subject ?? string.Empty, thumbprint ?? string.Empty);
 
+    /// <summary>Clears the published snapshot back to "nothing to watch" (web host only) — called when the
+    /// host STOPS serving TLS: a runtime disable of the dashboard, or a failed/degraded start. Without this
+    /// the snapshot is write-once and the worker keeps re-firing the expiry alert about a certificate the
+    /// process is no longer serving, with no resolution short of a full restart (#3514 follow-up). The
+    /// certificate is published again on the next successful start, so a port-change rebind — where Stop and
+    /// Start run back-to-back in one supervisor tick — re-publishes before the worker's next sweep observes
+    /// the null, and does not flicker a resolution.</summary>
+    public void Clear() => _current = null;
+
     /// <summary>The latest published snapshot, or null when the web host has no loaded TLS certificate
-    /// (loopback-only, no <c>tls</c> block, or an unusable one) — read by the worker as "nothing to watch".</summary>
+    /// (loopback-only, no <c>tls</c> block, an unusable one, or after a stop/degrade) — read by the worker as
+    /// "nothing to watch".</summary>
     public Snapshot? Read() => _current;
 }

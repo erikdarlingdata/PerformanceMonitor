@@ -1166,10 +1166,21 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }
 
-    /// <summary>Renewing the certificate past the window (same evaluator instance) records exactly one
-    /// resolution, titled with the recognized "Renewed" suffix so the history styles it green.</summary>
+    /// <summary>
+    /// The REACHABLE resolution path: the dashboard stops serving TLS (a runtime disable, or a
+    /// failed/degraded start) → the web host's <c>WebTlsCertificateState.Clear()</c> nulls the snapshot →
+    /// the worker builds a <c>Configured=false</c> report → this resolves the active alert exactly once,
+    /// titled with the recognized "Renewed" suffix so the history styles it green.
+    ///
+    /// <para>The #3514 adversarial review established that this is the ONLY in-process resolution. An
+    /// in-place renewal (a fresh certificate past the window on the SAME running process) cannot happen: the
+    /// served certificate is fixed for the process's life (network/TLS is restart-only), and renewal is a
+    /// restart, which starts a fresh evaluator with an empty active-state map and so writes no resolution
+    /// row. An earlier test fed a "renewed past the window" report the seam can never produce and was
+    /// removed; the <c>Configured=false</c> arm the follow-up <c>Clear()</c> makes real is what this pins.</para>
+    /// </summary>
     [Fact]
-    public async Task WebTlsCert_RenewedPastTheWindow_RecordsOneResolution()
+    public async Task WebTlsCert_DashboardStopsServingTls_ResolvesTheActiveAlert()
     {
         var h = new Harness { Now = CertClock };
         var e = h.Build();
@@ -1177,26 +1188,44 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(5)), Ct);   // fires
         Assert.Single(h.Deliverer.Outcomes);
 
-        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(WebTlsWarnDays + 300)), Ct);   // renewed
+        await e.ApplyWebTlsCertificateAsync(NoWebTlsCert, Ct);   // host Clear()ed the snapshot on stop/degrade
 
         var resolution = Assert.Single(h.History.Records);
         Assert.Equal(DarlingSelfAlertEvaluator.WebTlsCertRenewedMetric, resolution.MetricName);
     }
 
-    /// <summary>Turning TLS off entirely (a null report from an unconfigured/loopback web host) resolves an
-    /// active alert rather than leaving it firing forever — the report's <c>Configured=false</c> arm.</summary>
+    /// <summary>The seam the review said was untested end-to-end: the worker's report builder maps a null
+    /// <c>WebTlsCertificateState</c> snapshot (nothing served, or cleared on stop) to <c>Configured=false</c>
+    /// and a live snapshot to <c>Configured=true</c> with its fields — so the Clear-on-stop actually reaches
+    /// the evaluator's resolve arm. Pure static builder, the <c>BuildStoreUpgradeReport</c> precedent.</summary>
     [Fact]
-    public async Task WebTlsCert_TlsRemoved_ResolvesAnActiveAlert()
+    public void BuildWebTlsCertReport_MapsNullToUnconfigured_AndASnapshotToItsFields()
     {
-        var h = new Harness { Now = CertClock };
-        var e = h.Build();
+        var none = DarlingWorker.BuildWebTlsCertReport(null);
+        Assert.False(none.Configured);
 
-        await e.ApplyWebTlsCertificateAsync(Cert(CertClock.AddDays(5)), Ct);   // fires
-        Assert.Single(h.Deliverer.Outcomes);
+        var whenUtc = new DateTimeOffset(2027, 1, 2, 3, 4, 5, TimeSpan.Zero);
+        var snap = new WebTlsCertificateState.Snapshot(whenUtc, "CN=x", "THUMB");
+        var report = DarlingWorker.BuildWebTlsCertReport(snap);
+        Assert.True(report.Configured);
+        Assert.Equal(whenUtc, report.NotAfterUtc);
+        Assert.Equal("CN=x", report.Subject);
+        Assert.Equal("THUMB", report.Thumbprint);
+    }
 
-        await e.ApplyWebTlsCertificateAsync(NoWebTlsCert, Ct);   // TLS no longer configured
+    /// <summary><c>WebTlsCertificateState</c> is the host→worker seam: Publish sets, Clear (the #3514 follow-up)
+    /// resets to null so a stopped dashboard stops advertising a cert it no longer serves.</summary>
+    [Fact]
+    public void WebTlsCertificateState_PublishThenClear_ReadsBackNull()
+    {
+        var state = new WebTlsCertificateState();
+        Assert.Null(state.Read());
 
-        Assert.Single(h.History.Records);
+        state.Publish(new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero), "CN=x", "THUMB");
+        Assert.NotNull(state.Read());
+
+        state.Clear();
+        Assert.Null(state.Read());
     }
 
     [Fact]

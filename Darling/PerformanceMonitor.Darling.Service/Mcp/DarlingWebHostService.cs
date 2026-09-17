@@ -280,6 +280,13 @@ public sealed class DarlingWebHostService : BackgroundService
         _serverCertificate?.Dispose();
         _serverCertificate = null;
 
+        /* #3514 follow-up: the served certificate is gone, so stop advertising its expiry to the worker's
+           alert sweep. A runtime disable of the dashboard (a no-restart op) reaches here; without the clear
+           the worker keeps firing the expiry alert about a dashboard the operator turned off. A port-change
+           rebind runs Stop→Start in the same supervisor tick, so the next start re-publishes before the
+           hourly sweep can observe this null. */
+        _certState.Clear();
+
         _oidcClient?.Dispose();
         _oidcClient = null;
 
@@ -303,6 +310,10 @@ public sealed class DarlingWebHostService : BackgroundService
 
         try { _serverCertificate?.Dispose(); } catch { /* best-effort */ }
         _serverCertificate = null;
+
+        /* #3514 follow-up: a start that published its certificate (before the port-in-use / credential
+           bail below it) but never served TLS must not leave the worker alerting on a non-served cert. */
+        _certState.Clear();
 
         try { _oidcClient?.Dispose(); } catch { /* best-effort */ }
         _oidcClient = null;
@@ -593,6 +604,9 @@ public sealed class DarlingWebHostService : BackgroundService
                             _serverCertificate?.Dispose();
                             _serverCertificate = null;
                             serverCertificate = null;
+                            /* #3514 follow-up: this degrade published the certificate at load but is about to
+                               serve loopback-only, so retract the expiry advertisement too. */
+                            _certState.Clear();
 
                             _logger.LogCritical(
                                 "Web dashboard TLS certificate could not be loaded ({Message}) — refusing to expose; binding loopback-only.",
