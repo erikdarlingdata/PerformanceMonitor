@@ -13,7 +13,9 @@ actually materialized it. If a rollup has not caught up, dropping raw would dest
 coverage gate (#1680/#1877) pauses the retention policy instead.
 
 The gate is working when this alert fires. What the alert adds is that the hold has lasted long enough to
-cost real disk. "Monitor Store" in the alert is the Darling store itself, not one of your monitored servers.
+cost real disk. "Monitor Store" in the alert is the Darling store itself, not one of your monitored servers
+— or, on a store whose `peers.storeName` is set (#3500), that label is the store's self-chosen name for the
+same thing.
 
 ## Do not arm the policy by hand
 

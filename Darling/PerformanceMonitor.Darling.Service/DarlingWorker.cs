@@ -1637,7 +1637,13 @@ public sealed class DarlingWorker : BackgroundService
             retentionHoldCriticalRatio: () => alertSettings.RetentionHoldCriticalRatio,
             /* #3013: the same process counter the shared engine tallies on, so one number covers both
                halves of a server's alert work. */
-            readFailures: AlertReadFailureCounter.Shared);
+            readFailures: AlertReadFailureCounter.Shared,
+            /* #3500: the opt-in store label, straight from the file's peers block — NOT a Func like the
+               store-backed knobs above, because the peers block is file-only and restart-only, so a live
+               read would claim a hot-reload the config cannot deliver. Null/blank means the evaluator
+               fires under the shipped "Monitor Store" constant, byte-identical to every release before
+               the field existed. */
+            storeName: config.Peers?.StoreName);
 
         /* #1706: report this start's store runtime upgrade, now that there IS an alert engine to report it
            through. Fired once, here, and never re-evaluated — the store is down while an upgrade runs, so

@@ -196,6 +196,11 @@ public sealed class DarlingSelfAlertTests
         /// issue added.</summary>
         public bool WireRetentionHoldKnobs { get; set; } = true;
 
+        /// <summary>#3500: the opt-in <c>peers.storeName</c>. Null (the default) builds the evaluator with
+        /// the seam UNSUPPLIED — the shape of every install that never wrote the field — so the default
+        /// harness IS the byte-identical arm every pre-#3500 pin in this suite runs on.</summary>
+        public string? StoreName { get; set; }
+
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
         /// <summary>#1681: captures what the evaluator writes to the service log, so the firing/recovery pair
@@ -215,7 +220,8 @@ public sealed class DarlingSelfAlertTests
             agDisconnectRefireMinutes: () => AgDisconnectRefireMinutes,
             storeJobCadenceWarnPercent: WireCadenceKnob ? () => StoreJobCadenceWarnPercent : null,
             retentionHoldWarnRatio: WireRetentionHoldKnobs ? () => RetentionHoldWarnRatio : null,
-            retentionHoldCriticalRatio: WireRetentionHoldKnobs ? () => RetentionHoldCriticalRatio : null);
+            retentionHoldCriticalRatio: WireRetentionHoldKnobs ? () => RetentionHoldCriticalRatio : null,
+            storeName: StoreName);
     }
 
     /* ---------------- #991 Availability Group fixtures ---------------- */
@@ -4332,5 +4338,255 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         /* And the degenerate case is exactly the old bound, not merely "not below" it. */
         Assert.Equal(mean * factor,
             Regression(baselineMsPerRun: mean, baselineP95MsPerRun: 0.0).ThresholdMsPerRun(factor), 6);
+    }
+
+    /* ---------------- #3500: the opt-in store self-alert label (peers.storeName) ---------------- */
+
+    /// <summary>The one fallback decision, pinned at its edges: blank spellings are NOT an opt-in, a real
+    /// label is trimmed, and a label spelled exactly as the constant IS the constant — same bytes, same
+    /// fingerprints, no re-key — because an "opt-in" that changes nothing but the key shape would orphan
+    /// downstream work items for no visible difference at all.</summary>
+    [Theory]
+    [InlineData(null, "Monitor Store")]
+    [InlineData("", "Monitor Store")]
+    [InlineData("   ", "Monitor Store")]
+    [InlineData("Monitor Store", "Monitor Store")]
+    [InlineData("  use1-monitor-01  ", "use1-monitor-01")]
+    public void StoreLabel_EffectiveStoreLabel_BlankIsNotAnOptIn_AndTheConstantIsItself(
+        string? configured, string expected)
+    {
+        Assert.Equal(expected, DarlingSelfAlertEvaluator.EffectiveStoreLabel(configured));
+    }
+
+    /// <summary>
+    /// THE REGRESSION PIN THE OPT-IN PROMISE STANDS ON: an evaluator built without the seam and one built
+    /// with a blank spelling of it fire outcomes that are EQUAL AS RECORDS — server key, server name,
+    /// metric, values, severity, prose, everything the deliverer and the fingerprint read — so every
+    /// existing install's self-alert fingerprints are stable across the upgrade that ships the field.
+    /// <see cref="AlertOutcome"/> being a record is what lets one equality say "byte-identical" instead of
+    /// a field list that goes stale when the outcome grows a member.
+    /// </summary>
+    [Fact]
+    public async Task StoreLabel_Unset_FiresByteIdenticalToTheConstantLabel()
+    {
+        var unsupplied = new Harness();
+        var blank = new Harness { StoreName = "   " };
+
+        await unsupplied.Build().ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+        await blank.Build().ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+
+        var a = Assert.Single(unsupplied.Deliverer.Outcomes);
+        var b = Assert.Single(blank.Deliverer.Outcomes);
+
+        Assert.Equal(a, b);
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, a.ServerName);
+        Assert.Equal("mutestale", a.ServerKey);   // the raw family key: no label qualification when unset
+    }
+
+    /// <summary>
+    /// The opted-in arm, on two families so "every family flows through the one seam" is shown behaving and
+    /// not only pinned from source below: the label becomes the server NAME (what the card, the history row
+    /// and a mute rule see) and PREFIX-QUALIFIES the server KEY — derived from the unset arm's own key
+    /// rather than restated, so this test cannot drift apart from the family's real key shape. The key is
+    /// the half that makes fingerprints distinct: the delivery dedup identity for a no-incident alert is
+    /// <c>{serverKey}:{metric}</c> (<c>WebhookAlertService.DerivePagerDutyDedupKey</c>'s fallback), and the
+    /// server name is not in it.
+    /// </summary>
+    [Fact]
+    public async Task StoreLabel_OptedIn_NamesTheStore_AndQualifiesTheDeliveryKey()
+    {
+        var unset = new Harness();
+        var opted = new Harness { StoreName = "  use1-monitor-01  " };   // trimmed on the way in
+
+        var report = new DarlingSelfAlertEvaluator.StoreUpgradeReport(
+            Succeeded: true, FromMajor: 17, ToMajor: 18,
+            FromTimescale: "2.17.2", ToTimescale: "2.28.1",
+            FailedStep: null, FailureMessage: null, WithoutRollbackCopy: false);
+
+        var eUnset = unset.Build();
+        var eOpted = opted.Build();
+        await eUnset.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+        await eOpted.ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+        await eUnset.EvaluateStoreUpgradeAsync(report, Ct);
+        await eOpted.EvaluateStoreUpgradeAsync(report, Ct);
+
+        Assert.Equal(2, unset.Deliverer.Outcomes.Count);
+        Assert.Equal(2, opted.Deliverer.Outcomes.Count);
+
+        for (int i = 0; i < unset.Deliverer.Outcomes.Count; i++)
+        {
+            var baseline = unset.Deliverer.Outcomes[i];
+            var labeled = opted.Deliverer.Outcomes[i];
+
+            Assert.Equal("use1-monitor-01", labeled.ServerName);
+            Assert.Equal("use1-monitor-01:" + baseline.ServerKey, labeled.ServerKey);
+            /* The metric is the stable automation key (#2768's triage map and the webhook contract both
+               key on it) and must not move with the label. */
+            Assert.Equal(baseline.MetricName, labeled.MetricName);
+        }
+
+        /* And the RESOLUTION rows carry the label too — the paired "Cleared" entry an operator correlates
+           by server must name the same store its firing did. */
+        await eOpted.ApplyStaleMuteRulesAsync(Array.Empty<MuteRule>(), Ct);
+        var resolution = Assert.Single(opted.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StaleMuteResolvedMetric, resolution.MetricName);
+        Assert.Equal("use1-monitor-01", resolution.ServerName);
+        Assert.Equal("use1-monitor-01:mutestale", resolution.ServerId);
+    }
+
+    /// <summary>
+    /// The reporter's acceptance criterion (#3500): two stores with distinct storeNames produce DISTINCT
+    /// delivery fingerprints for the SAME self-alert family — the property whose absence silently folded
+    /// two hosts' incidents into one downstream work item. Asserted on the (serverKey, metric) pair the
+    /// no-incident fingerprint is a pure function of, and both must also differ from the unset arm's, or
+    /// one labeled store would collide with every unlabeled one.
+    /// </summary>
+    [Fact]
+    public async Task StoreLabel_TwoStores_SameFamily_DistinctDeliveryFingerprints()
+    {
+        var dc1 = new Harness { StoreName = "dc1-monitor" };
+        var dc2 = new Harness { StoreName = "dc2-monitor" };
+        var unset = new Harness();
+
+        await dc1.Build().ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+        await dc2.Build().ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+        await unset.Build().ApplyStaleMuteRulesAsync(new[] { Mute(StaleDays + 1) }, Ct);
+
+        var a = Assert.Single(dc1.Deliverer.Outcomes);
+        var b = Assert.Single(dc2.Deliverer.Outcomes);
+        var c = Assert.Single(unset.Deliverer.Outcomes);
+
+        /* Same family, same metric — the collision the constant caused was never about the metric. */
+        Assert.Equal(a.MetricName, b.MetricName);
+
+        Assert.NotEqual(a.ServerKey, b.ServerKey);
+        Assert.NotEqual(a.ServerKey, c.ServerKey);
+        Assert.NotEqual(b.ServerKey, c.ServerKey);
+    }
+
+    /// <summary>
+    /// THE MUTE-RULE COUPLING, both directions (#3500): mute rules match the alert row's server spelling,
+    /// so on an opted-in store a rule scoped to the storeName suppresses — and one still scoped to the old
+    /// constant no longer does, which is exactly what the field's comment and the CHANGELOG warn an
+    /// operator to re-scope. Exercised on the stale-mute condition because its explicit-mute scan is the
+    /// one mute path that does NOT go through the shared seam, so it needs its own proof that it matches
+    /// against the label the row actually carries.
+    /// </summary>
+    [Fact]
+    public async Task StoreLabel_OptedIn_MuteRulesMatchTheLabel_NotTheRetiredConstant()
+    {
+        var suppressed = new Harness { StoreName = "use1-monitor-01" };
+        await suppressed.Build().ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 1), ExplicitMute(serverName: "use1-monitor-01") }, Ct);
+        var fired = Assert.Single(suppressed.Deliverer.Outcomes);
+        Assert.True(fired.Muted);
+
+        var notSuppressed = new Harness { StoreName = "use1-monitor-01" };
+        await notSuppressed.Build().ApplyStaleMuteRulesAsync(
+            new[] { Mute(StaleDays + 1), ExplicitMute(serverName: DarlingSelfAlertEvaluator.StoreServerLabel) }, Ct);
+        var stillFired = Assert.Single(notSuppressed.Deliverer.Outcomes);
+        Assert.False(stillFired.Muted,
+            "a rule scoped to the retired constant must not match an opted-in store's rows — the coupling the docs warn about");
+    }
+
+    /// <summary>
+    /// And the ELEVEN families that DO ask the shared seam ask it with the label: the seam's context is
+    /// what every ordinary mute rule matches against, so if a fire site handed it the constant while the
+    /// row carried the label, a rule copied off the row would suppress nothing — the silent half of the
+    /// coupling. Captured at the seam itself rather than inferred from a rule's verdict.
+    /// </summary>
+    [Fact]
+    public async Task StoreLabel_OptedIn_TheSharedMuteSeam_IsAskedWithTheLabel()
+    {
+        var h = new Harness();
+        var seen = new List<AlertMuteContext>();
+
+        var evaluator = new DarlingSelfAlertEvaluator(
+            h.Settings, h.Deliverer, h.History,
+            ctx => { seen.Add(ctx); return false; },
+            storeName: "use1-monitor-01");
+
+        await evaluator.EvaluateStoreUpgradeAsync(
+            new DarlingSelfAlertEvaluator.StoreUpgradeReport(
+                Succeeded: true, FromMajor: 17, ToMajor: 18,
+                FromTimescale: "2.17.2", ToTimescale: "2.28.1",
+                FailedStep: null, FailureMessage: null, WithoutRollbackCopy: false),
+            Ct);
+
+        var context = Assert.Single(seen);
+        Assert.Equal("use1-monitor-01", context.ServerName);
+        Assert.Equal("Store Runtime Upgrade", context.MetricName);
+    }
+
+    /// <summary>
+    /// THE CENSUS, from source (the #2213 discipline): every fleet-level fire site reads the ONE label seam,
+    /// so a thirteenth self-alert family added later cannot quietly hardcode the constant back in and
+    /// re-create the collision one family at a time. Three invariants over the comment-and-string-stripped
+    /// evaluator source:
+    ///
+    /// <para>1. The <c>StoreServerLabel</c> identifier survives as a VALUE only inside the seam itself — the
+    /// const declaration, <c>EffectiveStoreLabel</c>'s fallback, and <c>StoreKey</c>'s unset gate. Any other
+    /// line reaching for it is a fire site bypassing the seam.</para>
+    ///
+    /// <para>2. Everywhere the label travels as a FireAsync/AlertResolution server-name argument (the
+    /// <c>, _storeLabel,</c> shape), the server KEY beside it goes through <c>StoreKey(</c> — the two halves
+    /// of the identity move together, because a site passing the label with a raw family key would relabel
+    /// the card while its fingerprint kept colliding, the invisible half of the bug.</para>
+    ///
+    /// <para>3. The literal "Monitor Store" is spelled exactly once in the evaluator — the const — so no
+    /// message prose can re-hardcode the spelling an opted-in store no longer uses. And the worker actually
+    /// wires the seam from the peers block, because a perfect seam nobody constructs with is the config
+    /// field that does nothing.</para>
+    /// </summary>
+    [Fact]
+    public void StoreLabel_EveryFleetLevelFireSite_FlowsThroughTheOneSeam()
+    {
+        var raw = RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs");
+        var stripped = CSharpSourceWalker.StripCommentsAndStrings(raw);
+
+        var offenders = stripped
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n')
+            .Select((line, i) => (Line: line, Number: i + 1))
+            .Where(l => l.Line.Contains("StoreServerLabel", StringComparison.Ordinal))
+            .Where(l =>
+                !l.Line.Contains("internal const string StoreServerLabel", StringComparison.Ordinal)
+                && !l.Line.Contains("string.Equals(trimmed, StoreServerLabel", StringComparison.Ordinal)
+                && !l.Line.Contains("? StoreServerLabel", StringComparison.Ordinal)
+                && !l.Line.Contains("_storeLabel == StoreServerLabel", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.True(offenders.Count == 0,
+            "these evaluator lines reach for StoreServerLabel instead of the _storeLabel/StoreKey seam, "
+            + "so an opted-in store would fire them under the wrong identity: "
+            + string.Join("; ", offenders.Select(o => $"line {o.Number}: {o.Line.Trim()}")));
+
+        var unpairedLabelSites = stripped
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n')
+            .Select((line, i) => (Line: line, Number: i + 1))
+            .Where(l => l.Line.Contains(", _storeLabel,", StringComparison.Ordinal)
+                && !l.Line.Contains("StoreKey(", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.True(unpairedLabelSites.Count == 0,
+            "these fire sites pass the label without qualifying the key, so their cards would be relabeled "
+            + "while their fingerprints kept colliding across stores: "
+            + string.Join("; ", unpairedLabelSites.Select(o => $"line {o.Number}: {o.Line.Trim()}")));
+
+        /* The literal census reads the STRING LITERALS themselves — the stripper blanks them, and a literal
+           is exactly where a re-hardcoded spelling would hide. "Monitor Store" (the label's exact casing)
+           may appear inside precisely one literal body: the const's own definition. Contains rather than
+           equality, so prose that EMBEDS the constant's spelling (which an opted-in store no longer uses)
+           is caught too; the lowercase "Monitor store volume…" prose is deliberately not — that names the
+           volume, not the label. */
+        var literalCount = CSharpSourceWalker.StringLiteralBodies(raw)
+            .Count(b => b.Text.Contains("Monitor Store", StringComparison.Ordinal));
+        Assert.Equal(1, literalCount);
+
+        var worker = RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        Assert.Contains("storeName: config.Peers?.StoreName", worker, StringComparison.Ordinal);
     }
 }

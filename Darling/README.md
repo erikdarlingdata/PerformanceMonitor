@@ -598,6 +598,7 @@ Once enabled, open `http://localhost:5153/` in a browser on the service host. Li
 
 | Key | Default | Notes |
 |---|---|---|
+| `storeName` | `""` | **Opt-in.** A short label for THIS store itself; when set, every store self-alert fires under it instead of `Monitor Store` — see below, setting it re-keys the self-alert fingerprints |
 | `thisStoreCovers` | `""` | One sentence naming what THIS store monitors — the anchor the peer list is relative to |
 | `stores[].name` | — | **Required.** Whatever an operator would recognize (the box name, "the use1 store") |
 | `stores[].covers` | `""` | A short sentence naming what that store monitors. Human prose — never parsed, only shown |
@@ -605,6 +606,7 @@ Once enabled, open `http://localhost:5153/` in a browser on the service host. Li
 
 ```jsonc
 "peers": {
+  "storeName": "prod-sql-use1-monitor-01",
   "thisStoreCovers": "the 42 us-east-1 SQL Server primaries",
   "stores": [
     {
@@ -622,6 +624,8 @@ What it changes, with peers declared:
 - **The MCP instructions** gain a Fleet Coverage section, high enough that an agent reads which store it is talking to before it reads the tool census.
 - **`list_servers`** gains `this_store_covers`, a `peer_fleets` array, and a `peer_note`. Both are always present: an *empty* `peer_fleets` has two very different meanings (this really is the only store, or nobody declared the siblings) and the service cannot tell them apart, so `peer_note` says exactly that rather than letting an empty array read as "this is the whole fleet." An **empty registry** answers in prose rather than JSON, and carries the peer list too — a store with nothing registered is a fresh or just-restarted box, which is the worst place to drop the disclosure.
 - **The server-resolution miss** appends the disclosure to the existing "Could not resolve server. Available servers:" listing, naming the peer whose declared coverage matches — so *not monitored here* stops looking like *not monitored anywhere*.
+
+**`storeName` names the store on its own self-alerts.** Every fleet-level self-alert — `Store Disk Pressure`, `Retention Held`, the `Collector Cost Digest`, the `Fleet Sweep Rollup`, all twelve families and their resolution edges — fires under the constant `Monitor Store`, which is unambiguous with exactly one store and collides with exactly two: on a shared channel the alert cannot say which host it is about, and the delivery fingerprint downstream automation dedups on is identical on both stores, so the second store's incident lands on the first store's ticket as a recurrence rather than opening its own. Set `storeName` on each store and its self-alerts carry that label instead — into the cards, the alert history, the mute-rule matching and the fingerprint, the same way a monitored server's display name travels. **Setting it is accepting a re-key**: the label is part of the fingerprint, so open work items keyed on the old one are orphaned and fresh ones start beside them. That is why it is opt-in with the constant as the default (unset is byte-identical to every earlier release), and why there is deliberately no machine-hostname fallback — a fallback would perform that re-key on every existing install at upgrade, silently. Two couplings to plan for: **mute rules match the alert row's spelling**, so re-scope any self-alert mute from `Monitor Store` to the new label; and **do not reuse a monitored server's display name** — the two would be indistinguishable on every shared surface including the triage page, and nothing polices it, because the registry is store-authoritative after seeding and config validation cannot see it.
 
 `matches` is deliberately plain substrings, no globbing and no regex: it exists to answer "which region/role prefix is this name?", and a pattern language would be a config surface with its own failure modes. Blank entries are dropped — an empty substring matches every name, which would make one peer claim the whole fleet. A peer with no `matches` is still disclosed everywhere; it just cannot be singled out on a miss, and the miss message says so instead of implying the server is unmonitored.
 

@@ -1981,6 +1981,35 @@ public sealed class PeersConfig
     [JsonPropertyName("thisStoreCovers")]
     public string ThisStoreCovers { get; set; } = "";
 
+    /// <summary>
+    /// A short LABEL naming this store itself (#3500) — the box name, "the use1 store" — where
+    /// <see cref="ThisStoreCovers"/> stays the sentence it is. When set, every fleet-level store self-alert
+    /// (Store Disk Pressure, Retention Held, the cost digest, the sweep rollup, all twelve families and their
+    /// resolution edges) fires under this label instead of the constant "Monitor Store", so on a multi-store
+    /// estate two stores' identical self-alerts stop being indistinguishable: the Teams card names the host,
+    /// and the delivery fingerprint downstream automation dedups on becomes distinct per store instead of
+    /// colliding two hosts into one work item.
+    ///
+    /// <para><b>OPT-IN, and setting it IS accepting a re-key.</b> The label is part of the self-alerts'
+    /// delivery fingerprint, so changing it orphans every open downstream work item keyed on the old one and
+    /// starts fresh ones beside them. Unset (the default), every self-alert is byte-identical to before this
+    /// field existed. The reporter's suggested machine-hostname fallback is deliberately NOT taken for
+    /// exactly that reason: it would re-key every existing install's self-alert fingerprints on upgrade,
+    /// silently — the precise harm the opt-in exists to prevent. Only setting this field opts in.</para>
+    ///
+    /// <para><b>Mute rules match the alert row's spelling.</b> A rule scoped to server "Monitor Store" stops
+    /// matching this store's self-alerts the moment this is set; re-scope such rules to the label (copy the
+    /// spelling off the new alert rows, the same advice the mute tools already give). And a label that
+    /// equals a monitored server's display name is NOT policed — the registry is store-authoritative after
+    /// seeding, so config validation cannot see it — but it would make the two indistinguishable on every
+    /// shared surface, including the triage page, which treats the label as fleet-level. Do not reuse one.</para>
+    ///
+    /// <para>File-only like its siblings (deployment identity, not a peer's Viewer's to edit); trimmed;
+    /// blank/whitespace means unset; an edit takes effect on the next service restart.</para>
+    /// </summary>
+    [JsonPropertyName("storeName")]
+    public string StoreName { get; set; } = "";
+
     /// <summary>The sibling Darling stores. Empty (the default) = nothing declared, and every surface behaves as before.</summary>
     [JsonPropertyName("stores")]
     public List<PeerStoreConfig> Stores { get; set; } = new();
@@ -2027,6 +2056,21 @@ public sealed class PeersConfig
                 $"peers.thisStoreCovers contains '{selfOffending}'. The peers block is DISCLOSURE ONLY — its text " +
                 "is sent verbatim to every connected MCP client — so it must carry no connection string and no " +
                 "credential.");
+        }
+
+        /* storeName gets the same unconditional guard, in the same pre-early-return position, for a stronger
+           version of the same reason: it is not only disclosed to MCP clients, it rides OUT on every
+           self-alert delivery channel (#3500) — Teams, Slack, PagerDuty, the generic webhook, email. */
+        var storeNameText = peers.StoreName ?? "";
+        var storeNameOffending = CredentialShapedTokens.FirstOrDefault(
+            t => storeNameText.Contains(t, StringComparison.OrdinalIgnoreCase));
+
+        if (storeNameOffending is not null)
+        {
+            problems.Add(
+                $"peers.storeName contains '{storeNameOffending}'. The store label is sent verbatim on every " +
+                "self-alert delivery channel and to every connected MCP client, so it must carry no connection " +
+                "string and no credential. Name the box, not how to reach it.");
         }
 
         if (peers.Stores is null)

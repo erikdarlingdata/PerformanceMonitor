@@ -125,6 +125,83 @@ public sealed class DarlingPeerDisclosureTests
         Assert.Empty(config.Peers.Stores);
         Assert.True(DarlingPeerDirectory.FromConfig(config.Peers).IsEmpty);
         Assert.Empty(PeersConfig.Validate(config.Peers));
+        /* #3500: the sample documents storeName but must not OPT A FRESH INSTALL IN — a shipped label would
+           perform the fingerprint re-key the field's whole design makes the operator's explicit choice. */
+        Assert.Equal("", config.Peers.StoreName);
+        Assert.Equal("", DarlingPeerDirectory.FromConfig(config.Peers).StoreName);
+    }
+
+    /* ────────────── #3500: the opt-in store label (peers.storeName) ────────────── */
+
+    [Fact]
+    public void StoreName_ParsesAndTrims_AndBlankMeansUnset()
+    {
+        var config = DarlingConfig.Parse("""
+            {
+              "postgres": { "connectionString": "Host=localhost;Database=darling" },
+              "servers": [ { "host": "SQL2022" } ],
+              "peers": { "storeName": "  use1-monitor-01  " }
+            }
+            """);
+
+        Assert.Equal("use1-monitor-01", DarlingPeerDirectory.FromConfig(config.Peers).StoreName);
+
+        /* Whitespace normalizes to "" — which every reader treats as "not opted in", the same treatment
+           the sibling strings get, so a stray space cannot half-opt a store into a re-keyed identity. */
+        Assert.Equal("", DarlingPeerDirectory.FromConfig(new PeersConfig { StoreName = "   " }).StoreName);
+    }
+
+    [Fact]
+    public void StoreName_Alone_DoesNotSummonTheFleetCoverageDisclosure()
+    {
+        /* The label names the store on its own self-alerts; it does not declare a fleet split, so setting
+           it alone must leave every peers-declared surface (instructions section, list_servers additions)
+           exactly as an undeclared store has them — IsEmpty is the gate they all read. */
+        var snapshot = DarlingPeerDirectory.FromConfig(new PeersConfig { StoreName = "use1-monitor-01" });
+
+        Assert.True(snapshot.IsEmpty);
+        Assert.Equal("use1-monitor-01", snapshot.StoreName);
+        Assert.Equal("", DarlingPeerDirectory.InstructionsSection(snapshot));
+    }
+
+    [Theory]
+    [InlineData("Host=box1;Password=hunter2")]
+    [InlineData("see its connectionString")]
+    [InlineData("Server=x;Integrated Security=true")]
+    public void Validate_RefusesCredentialShapedStoreName(string storeName)
+    {
+        /* The label rides OUT on every self-alert delivery channel — a wider broadcast than the MCP-only
+           siblings — so it gets the same unconditional guard, named by field so the operator knows which
+           line to fix. */
+        Assert.Contains(
+            PeersConfig.Validate(new PeersConfig { StoreName = storeName }),
+            p => p.Contains("peers.storeName", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void StoreName_TravelsThroughTheAmbientPublish()
+    {
+        /* The triage endpoint reads the label off DarlingPeerDirectory.Current (#3500), so the publish must
+           carry it — and a refused block must drop it with everything else, because a label from a config
+           the operator has not finished is a label the alerts may not actually be firing under. */
+        try
+        {
+            var ok = DarlingPeerDirectory.Publish(new PeersConfig { StoreName = "use1-monitor-01" });
+            Assert.False(ok.Refused);
+            Assert.Equal("use1-monitor-01", DarlingPeerDirectory.Current.StoreName);
+
+            var refused = DarlingPeerDirectory.Publish(new PeersConfig
+            {
+                StoreName = "use1-monitor-01",
+                Stores = { new PeerStoreConfig { Name = "box2", Covers = "password=oops" } },
+            });
+            Assert.True(refused.Refused);
+            Assert.Equal("", DarlingPeerDirectory.Current.StoreName);
+        }
+        finally
+        {
+            DarlingPeerDirectory.Reset();
+        }
     }
 
     [Fact]
