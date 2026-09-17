@@ -44,14 +44,18 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /* The full column list, shared by the upsert (Add/Edit) and the insert-if-absent (migrate-in). The
-       toggled-boolean-free VALUES bind every field as a parameter; created_at/modified_at are server-side. */
+       toggled-boolean-free VALUES bind every field as a parameter; created_at/modified_at are server-side.
+       #3499: engine + port joined the list — the V70 columns the MCP add_servers tool and the service seed
+       had been writing all along, which the viewer's writes silently defaulted ('sqlserver'/0) and its reads
+       never surfaced. That default is exactly why the dialog could not author a PostgreSQL target: the row
+       it produced was a SQL Server row whatever the operator meant. */
     private const string MonitoredServerColumns =
         "server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, " +
         "trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, " +
-        "monthly_cost_usd, capture_plans, is_enabled, alert_delivery_mode_override";
+        "monthly_cost_usd, capture_plans, is_enabled, alert_delivery_mode_override, engine, port";
 
     private const string MonitoredServerValues =
-        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, " +
+        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, " +
         "(now() AT TIME ZONE 'UTC'), (now() AT TIME ZONE 'UTC')";
 
     /// <summary>Upsert by <c>server_id</c> — the Add/Edit save. ON CONFLICT rewrites every field but
@@ -75,6 +79,8 @@ ON CONFLICT (server_id) DO UPDATE SET
     capture_plans = EXCLUDED.capture_plans,
     is_enabled = EXCLUDED.is_enabled,
     alert_delivery_mode_override = EXCLUDED.alert_delivery_mode_override,
+    engine = EXCLUDED.engine,
+    port = EXCLUDED.port,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>Insert only when the <c>server_id</c> is absent — the one-time <c>viewer-servers.json</c>
@@ -106,7 +112,7 @@ ON CONFLICT (server_id) DO NOTHING";
     public const string MonitoredServersSelectSql = @"
 SELECT server_id, name, host, database, auth, username, encrypt_mode,
        trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
-       monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override
+       monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port
 FROM config_monitored_servers
 ORDER BY name";
 
@@ -116,7 +122,7 @@ ORDER BY name";
     public const string MonitoredServerByIdSql = @"
 SELECT server_id, name, host, database, auth, username, encrypted_password, encrypt_mode,
        trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
-       monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override
+       monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port
 FROM config_monitored_servers
 WHERE server_id = $1";
 
@@ -128,7 +134,7 @@ WHERE server_id = $1";
     public const string MonitoredServerByIdNoSecretSql = @"
 SELECT server_id, name, host, database, auth, username, encrypt_mode,
        trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
-       monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override
+       monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port
 FROM config_monitored_servers
 WHERE server_id = $1";
 
@@ -148,15 +154,32 @@ WHERE server_id = $1";
     /// in SQL: a plain <c>=</c> would never match the server-scoped registrations (the common case), so every
     /// one of them would read as "address free". Secret-free projection — the caller only needs to know whether
     /// a row exists and which id it has, so this runs for a read-only seat too.</para>
+    ///
+    /// <para><b>Engine and port are part of the address (#3499, the #2218 identity applied here).</b> Without
+    /// them, the first PostgreSQL target the dialog can author would be refused whenever a SQL Server
+    /// registration already lives on the same host — a valid pair rejected because the guard compared a
+    /// NARROWER identity than the product keys on, the exact defect #2218 fixed in the MCP tool's dedupe gate.</para>
+    ///
+    /// <para><b>Engine is compared as a KIND ($4, boolean "is PostgreSQL"), not as the raw string.</b> The
+    /// stored spelling is whatever onboarded the row ("postgres" from the dialogs and MCP, but a darling.json
+    /// seed persists its raw text — "pg", "aurora-postgresql", "PostgreSQL"), while the IDENTITY folds every
+    /// spelling to one token (<c>ServerIdHelper.EngineToken</c>). A raw compare would miss a same-identity row
+    /// under a different spelling, and since the upsert lands ON CONFLICT (server_id), the guard's miss is not
+    /// a duplicate row but a silent CLOBBER of the existing registration — the exact write this guard exists
+    /// to refuse. The IN list is the TargetEngine parse, spelled in SQL; everything else is SQL Server, the
+    /// same unrecognized-means-SqlServer rule. <c>port</c> is a plain <c>=</c>: V70 declared both columns NOT
+    /// NULL with defaults, so there is no NULL arm to miss.</para>
     /// </summary>
     public const string MonitoredServerByAddressSql = @"
 SELECT server_id, name, host, database, auth, username, encrypt_mode,
        trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
-       monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override
+       monthly_cost_usd, capture_plans, is_enabled, created_at, alert_delivery_mode_override, engine, port
 FROM config_monitored_servers
 WHERE host = $1
 AND   database IS NOT DISTINCT FROM $2
-AND   read_only_intent = $3";
+AND   read_only_intent = $3
+AND   (lower(btrim(engine)) IN ('postgres', 'postgresql', 'pg', 'aurora-postgresql', 'aurora')) = $4
+AND   port = $5";
 
     /// <summary>Row count — the migrate-in / reconcile "is the config-server set seeded yet?" guard.</summary>
     public const string MonitoredServersCountSql = "SELECT COUNT(*) FROM config_monitored_servers";
@@ -271,12 +294,17 @@ ORDER BY COALESCE(s.display_name, c.name)";
 
     /// <summary>
     /// The shared-identity <c>server_id</c> for a server: FNV-1a hash of the canonical storage name
-    /// (<c>host[:database][:RO]</c>). Identical to the service's seed
+    /// (<c>host[:database][:pg][:port][:RO]</c>). Identical to the service's seed
     /// (<c>ServerIdHelper.GetDeterministicHashCode(server.StorageName)</c>) and the collectors' stamp, so the
     /// row JOINs collected data and the service reconcile matches it. Pure — unit-testable.
+    ///
+    /// <para>#3499: engine and port are OPTIONAL with the same inert defaults as the shared helper — a SQL
+    /// Server caller passing neither derives the byte-identical name it always did (the #2218 protection),
+    /// while a PostgreSQL Add derives the same id the MCP <c>add_servers</c> tool would for the same target,
+    /// which is the whole parity contract: one server, one identity, whichever door it came in through.</para>
     /// </summary>
-    public static int ComputeServerId(string host, string? database, bool readOnlyIntent) =>
-        ServerIdHelper.GetDeterministicHashCode(ServerIdHelper.BuildStorageName(host, database, readOnlyIntent));
+    public static int ComputeServerId(string host, string? database, bool readOnlyIntent, string? engine = null, int port = 0) =>
+        ServerIdHelper.GetDeterministicHashCode(ServerIdHelper.BuildStorageName(host, database, readOnlyIntent, engine, port));
 
     /// <summary>All configured servers (Manage Servers list + the sidebar reconcile source), read without the
     /// <c>encrypted_password</c> secret so a read-only <c>viewer</c> seat can list them (#1416). The Edit dialog
@@ -326,13 +354,16 @@ ORDER BY COALESCE(s.display_name, c.name)";
     /// read the DPAPI blob, and skipping it means a read-only seat gets the same answer instead of 42501.</para>
     /// </summary>
     public async Task<MonitoredServerRow?> GetMonitoredServerByAddressAsync(
-        string host, string? database, bool readOnlyIntent, CancellationToken cancellationToken = default)
+        string host, string? database, bool readOnlyIntent, bool isPostgres = false, int port = 0,
+        CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(MonitoredServerByAddressSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = host });
         command.Parameters.Add(new NpgsqlParameter { Value = (object?)database ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = readOnlyIntent });
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = isPostgres });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = port });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await reader.ReadAsync(cancellationToken) ? ReadMonitoredServerRowNoSecret(reader) : null;
     }
@@ -405,7 +436,7 @@ ORDER BY COALESCE(s.display_name, c.name)";
         await ExecuteWriteAsync(command, cancellationToken);
     }
 
-    /// <summary>Binds the 15 upsert/insert parameters ($1..$15) from a row (created_at/modified_at are server-side).</summary>
+    /// <summary>Binds the 18 upsert/insert parameters ($1..$18) from a row (created_at/modified_at are server-side).</summary>
     private static void BindMonitoredServer(NpgsqlCommand command, MonitoredServerRow row)
     {
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.ServerId });                 // $1
@@ -425,6 +456,10 @@ ORDER BY COALESCE(s.display_name, c.name)";
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = row.IsEnabled });               // $15
         /* #1236: per-server delivery override as its enum name, or NULL = "inherit the global". */
         AddNullableText(command, row.AlertDeliveryModeOverride?.ToString());                             // $16
+        /* #3499: the engine string rides VERBATIM (like the service seed since V68) so the single parse in
+           MonitoredServer.TargetEngine stays the only interpreter; port 0 = the driver's default (5432). */
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = row.Engine });                 // $17
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = row.Port });                     // $18
     }
 
     private static MonitoredServerRow ReadMonitoredServerRow(NpgsqlDataReader reader) => new()
@@ -446,6 +481,8 @@ ORDER BY COALESCE(s.display_name, c.name)";
         IsEnabled = reader.GetBoolean(14),
         CreatedAt = reader.IsDBNull(15) ? null : DateTime.SpecifyKind(reader.GetDateTime(15), DateTimeKind.Utc),
         AlertDeliveryModeOverride = ParseDeliveryOverride(reader.IsDBNull(16) ? null : reader.GetString(16)),
+        Engine = reader.GetString(17),
+        Port = reader.GetInt32(18),
     };
 
     /// <summary>
@@ -475,6 +512,8 @@ ORDER BY COALESCE(s.display_name, c.name)";
         IsEnabled = reader.GetBoolean(13),
         CreatedAt = reader.IsDBNull(14) ? null : DateTime.SpecifyKind(reader.GetDateTime(14), DateTimeKind.Utc),
         AlertDeliveryModeOverride = ParseDeliveryOverride(reader.IsDBNull(15) ? null : reader.GetString(15)),
+        Engine = reader.GetString(16),
+        Port = reader.GetInt32(17),
     };
 
     private static void AddTextArray(NpgsqlCommand command, IEnumerable<string>? values) =>
@@ -508,10 +547,39 @@ ORDER BY COALESCE(s.display_name, c.name)";
 /// </summary>
 public sealed class MonitoredServerRow
 {
+    /// <summary>The canonical <c>engine</c> tokens the dialogs WRITE — the same two values the MCP
+    /// <c>add_servers</c> tool stores. The store may HOLD other accepted spellings (a darling.json seed
+    /// persists its raw string, e.g. <c>"aurora-postgresql"</c>), which is why reads go through
+    /// <see cref="IsPostgres"/> rather than comparing against these.</summary>
+    public const string EngineSqlServer = "sqlserver";
+    public const string EnginePostgres = "postgres";
+
     public int ServerId { get; set; }
     public string Name { get; set; } = "";
     public string Host { get; set; } = "";
     public string? Database { get; set; }
+
+    /// <summary>Which database engine the target runs — <c>config_monitored_servers.engine</c> (V70),
+    /// defaulted to SQL Server exactly like <c>MonitoredServer.Engine</c> so every pre-#3499 constructor
+    /// call site (the bulk dialog, the migrate-in) keeps writing the row it always wrote. Carried VERBATIM
+    /// through an edit — the service's <c>TargetEngine</c> is the one interpreter of the string.</summary>
+    public string Engine { get; set; } = EngineSqlServer;
+
+    /// <summary>TCP port for a PostgreSQL target on a non-default port; <c>0</c> (the default) means "the
+    /// driver's default", 5432. Unused for SQL Server, which carries a non-default port in the host itself
+    /// as <c>host,1433</c> — the same contract as <c>MonitoredServer.Port</c> and the MCP tool's
+    /// <c>port</c> field (#2218).</summary>
+    public int Port { get; set; }
+
+    /// <summary>True when <see cref="Engine"/> names PostgreSQL under ANY accepted spelling — the same
+    /// parse as the service's <c>MonitoredServer.TargetEngine</c> (postgres / postgresql / pg / aurora /
+    /// aurora-postgresql, case-insensitive), so the Edit dialog recognizes a row however it was onboarded.
+    /// Anything unrecognized reads as SQL Server, mirroring the service: a typo must not flip a row's UI.</summary>
+    public bool IsPostgres => Engine?.Trim().ToLowerInvariant() switch
+    {
+        "postgres" or "postgresql" or "pg" or "aurora-postgresql" or "aurora" => true,
+        _ => false,
+    };
 
     /// <summary><see cref="ServerStoreCredential.Integrated"/> or <see cref="ServerStoreCredential.Sql"/>.</summary>
     public string Auth { get; set; } = ServerStoreCredential.Integrated;

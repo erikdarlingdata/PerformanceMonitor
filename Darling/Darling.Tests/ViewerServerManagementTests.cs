@@ -30,7 +30,7 @@ public sealed class ViewerMonitoredServerSqlTests
     {
         "server_id", "name", "host", "database", "auth", "username", "encrypted_password", "encrypt_mode",
         "trust_server_certificate", "read_only_intent", "multi_subnet_failover", "excluded_databases",
-        "monthly_cost_usd", "capture_plans", "is_enabled", "alert_delivery_mode_override",
+        "monthly_cost_usd", "capture_plans", "is_enabled", "alert_delivery_mode_override", "engine", "port",
     };
 
     [Fact]
@@ -44,8 +44,9 @@ public sealed class ViewerMonitoredServerSqlTests
             Assert.Contains(column, sql, StringComparison.Ordinal);
         }
 
-        /* Every value is a $N parameter (16 columns incl. the V18 alert_delivery_mode_override), never inlined. */
-        for (var i = 1; i <= 16; i++)
+        /* Every value is a $N parameter (18 columns incl. the V18 alert_delivery_mode_override and the #3499
+           engine + port — the V70 columns the MCP tool wrote and the viewer silently defaulted), never inlined. */
+        for (var i = 1; i <= 18; i++)
         {
             Assert.Contains("$" + i.ToString(System.Globalization.CultureInfo.InvariantCulture), sql, StringComparison.Ordinal);
         }
@@ -112,6 +113,38 @@ public sealed class ViewerMonitoredServerSqlTests
         Assert.Equal(
             ServerIdHelper.GetDeterministicHashCode(svc.StorageName),
             ViewerDataService.ComputeServerId("SQL2022", "tpcc", true));
+    }
+
+    /// <summary>
+    /// #3499's identity parity, both halves. A PostgreSQL Add in the dialog derives the SAME id the service
+    /// (and hence the MCP add_servers tool, which hashes the same StorageName) derives for the same target —
+    /// one server, one identity, whichever door onboarded it — and the new optional parameters are INERT for a
+    /// SQL Server caller, so every id the viewer ever derived before this change is byte-identical (the #2218
+    /// protection, held at the viewer's own seam).
+    /// </summary>
+    [Fact]
+    public void ComputeServerId_EngineAndPort_MatchTheServiceIdentity_AndAreInertForSqlServer()
+    {
+        var pg = new MonitoredServer { Host = "pg18.example.test", Engine = "postgres", Port = 6432 };
+        Assert.Equal(
+            ServerIdHelper.GetDeterministicHashCode(pg.StorageName),
+            ViewerDataService.ComputeServerId("pg18.example.test", null, false, "postgres", 6432));
+
+        /* Default port (0) and explicit engine also agree with the service's derivation. */
+        var pgDefaultPort = new MonitoredServer { Host = "pg18.example.test", Engine = "postgres" };
+        Assert.Equal(
+            ServerIdHelper.GetDeterministicHashCode(pgDefaultPort.StorageName),
+            ViewerDataService.ComputeServerId("pg18.example.test", null, false, "postgres"));
+
+        /* And the engine discriminates: same host, two engines, two identities — the #2218 point. */
+        Assert.NotEqual(
+            ViewerDataService.ComputeServerId("host01", null, false),
+            ViewerDataService.ComputeServerId("host01", null, false, "postgres"));
+
+        /* Inert defaults: the sqlserver token and port 0 change nothing, so no pre-#3499 id moves. */
+        Assert.Equal(
+            ViewerDataService.ComputeServerId("SQL2022", "tpcc", true),
+            ViewerDataService.ComputeServerId("SQL2022", "tpcc", true, "sqlserver", 0));
     }
 }
 
@@ -247,6 +280,44 @@ public sealed class ViewerCommandSqlTests
         var server = JsonSerializer.Deserialize<MonitoredServer>(json, s_caseInsensitive);
         Assert.NotNull(server);
         Assert.Equal(CollectorTargetEngine.PostgreSql, server!.TargetEngine);
+    }
+
+    /// <summary>
+    /// #3499: a non-default PostgreSQL port rides the probe request and lands on the service's
+    /// <c>MonitoredServer.Port</c> — the field its connection builder reads — so Test Connection probes the
+    /// exact connection the save will store. Without it, the probe reached 5432 whatever the dialog said, and
+    /// a green test vouched for a row that would then fail on every sweep.
+    /// </summary>
+    [Fact]
+    public void BuildTestConnectArgs_PostgresPort_ReachesTheServiceMonitoredServer()
+    {
+        var json = ViewerDataService.BuildTestConnectArgs(
+            new TestConnectServer { Host = "pg18.example.test", Auth = "sql", Engine = "postgres", Port = 6432 });
+
+        Assert.Contains("\"port\":6432", json, StringComparison.Ordinal);
+
+        var server = JsonSerializer.Deserialize<MonitoredServer>(json, s_caseInsensitive);
+        Assert.NotNull(server);
+        Assert.Equal(6432, server!.Port);
+    }
+
+    /// <summary>
+    /// The other half of the #3499 port contract: the DEFAULT port (0, "driver default") is OMITTED from the
+    /// args — an absent port already means exactly one thing to the deserializer — which keeps every SQL
+    /// Server request's args_json byte-identical to what the dialogs sent before the field existed. Engine
+    /// stays always-emitted for #3244's reason (silence there gets guessed at); the two fields' different
+    /// treatments are both deliberate.
+    /// </summary>
+    [Fact]
+    public void BuildTestConnectArgs_DefaultPort_IsOmitted_SoSqlServerArgsAreByteStable()
+    {
+        var json = ViewerDataService.BuildTestConnectArgs(new TestConnectServer { Host = "SQL2022", Auth = "integrated" });
+
+        Assert.DoesNotContain("\"port\"", json, StringComparison.Ordinal);
+
+        var server = JsonSerializer.Deserialize<MonitoredServer>(json, s_caseInsensitive);
+        Assert.NotNull(server);
+        Assert.Equal(0, server!.Port);
     }
 }
 
@@ -797,6 +868,37 @@ public sealed class BulkServerOnboardingMappingTests
     {
         var seen = AddMultipleServersDialog.SeedGate(new[] { Row("host", "db1", false) });
         Assert.True(seen.Add(AddMultipleServersDialog.GateKey(Row("host", "db2", false))));
+    }
+
+    /// <summary>
+    /// #3499: the gate keys on the FULL #2218 identity now that the store it seeds from carries PostgreSQL
+    /// rows. An existing PostgreSQL registration must NOT block a pasted SQL Server add of the same host (a
+    /// valid pair — the narrower key read it as a duplicate), while a same-engine, same-port row still does;
+    /// and two PostgreSQL instances on one host distinguished only by port stay distinct.
+    /// </summary>
+    [Fact]
+    public void DedupeGate_EngineAndPort_AreIdentity_SoAPostgresRowDoesNotBlockASqlServerAdd()
+    {
+        var pgRow = Row("shared-host", null, false);
+        pgRow.Engine = "postgres";
+
+        /* PG in the store, SQL Server pasted: distinct identities, not a duplicate. */
+        var seen = AddMultipleServersDialog.SeedGate(new[] { pgRow });
+        Assert.True(seen.Add(AddMultipleServersDialog.GateKey(Row("shared-host", null, false))));
+
+        /* A store row seeded from darling.json keeps its raw spelling — the key folds it, so "pg" and
+           "postgres" are ONE identity, exactly as ComputeServerId derives it. */
+        var rawSpelling = Row("shared-host", null, false);
+        rawSpelling.Engine = "pg";
+        var seenRaw = AddMultipleServersDialog.SeedGate(new[] { rawSpelling });
+        Assert.False(seenRaw.Add(AddMultipleServersDialog.GateKey(pgRow)));
+
+        /* Two PG instances on one host, different ports: distinct. */
+        var port5433 = Row("shared-host", null, false);
+        port5433.Engine = "postgres";
+        port5433.Port = 5433;
+        var seenPorts = AddMultipleServersDialog.SeedGate(new[] { pgRow });
+        Assert.True(seenPorts.Add(AddMultipleServersDialog.GateKey(port5433)));
     }
 
     private static MonitoredServerRow Row(string host, string? database, bool readOnlyIntent) => new()

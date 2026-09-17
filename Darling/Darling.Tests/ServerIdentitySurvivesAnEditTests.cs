@@ -50,8 +50,10 @@ public sealed class ServerIdentitySurvivesAnEditTests
     {
         var source = ReadDialogSource();
 
+        /* #3499 widened the derivation to the full #2218 identity (engine + port, inert for SQL Server);
+           the shape under pin — assigned identity first, derivation only on Add — is unchanged. */
         Assert.Contains(
-            "ServerId = _originalServerId ?? ViewerDataService.ComputeServerId(host, database, readOnlyIntent),",
+            "ServerId = _originalServerId ?? ViewerDataService.ComputeServerId(host, database, readOnlyIntent, engine, port),",
             source, StringComparison.Ordinal);
 
         /* And the delete-the-old-identity step is GONE: with the id preserved there is no second row to clean
@@ -73,7 +75,11 @@ public sealed class ServerIdentitySurvivesAnEditTests
     {
         var source = ReadDialogSource();
 
-        Assert.Contains("GetMonitoredServerByAddressAsync(row.Host, row.Database, row.ReadOnlyIntent)", source, StringComparison.Ordinal);
+        /* #3499: the address is the full #2218 identity — engine (as a kind) and port included — so a
+           PostgreSQL target does not collide with a SQL Server registration sharing its host. Two substrings
+           rather than one because the call wraps; the argument list is the load-bearing half. */
+        Assert.Contains("GetMonitoredServerByAddressAsync(", source, StringComparison.Ordinal);
+        Assert.Contains("row.Host, row.Database, row.ReadOnlyIntent, row.IsPostgres, row.Port)", source, StringComparison.Ordinal);
         /* Compared by id afterwards, which is what excludes "collided with myself" on an edit that leaves the
            address alone (a rename, or new credentials). */
         Assert.Contains("occupant.ServerId != row.ServerId", source, StringComparison.Ordinal);
@@ -93,6 +99,13 @@ public sealed class ServerIdentitySurvivesAnEditTests
         Assert.Contains("WHERE host = $1", sql, StringComparison.Ordinal);
         Assert.Contains("database IS NOT DISTINCT FROM $2", sql, StringComparison.Ordinal);
         Assert.Contains("read_only_intent = $3", sql, StringComparison.Ordinal);
+        /* #3499: engine folded to a KIND (the raw column holds whatever spelling onboarded the row) and port,
+           completing the #2218 identity — without them the guard read a PostgreSQL add of a SQL-occupied host
+           as a collision, and MISSED a same-identity PG row stored under another spelling, where a miss is a
+           silent ON CONFLICT clobber rather than a refusal. */
+        Assert.Contains("lower(btrim(engine)) IN ('postgres', 'postgresql', 'pg', 'aurora-postgresql', 'aurora')", sql, StringComparison.Ordinal);
+        Assert.Contains("= $4", sql, StringComparison.Ordinal);
+        Assert.Contains("port = $5", sql, StringComparison.Ordinal);
         /* Secret-free, so a read-only seat gets an answer rather than 42501 on the column it is denied. */
         Assert.DoesNotContain("encrypted_password", sql, StringComparison.Ordinal);
     }
