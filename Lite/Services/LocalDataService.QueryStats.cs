@@ -158,7 +158,7 @@ WITH ranked AS (
     AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + @"
     GROUP BY database_name, query_hash, host_object_name
     HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
-    ORDER BY SUM(delta_elapsed_time) DESC
+    ORDER BY SUM(delta_worker_time) DESC
     LIMIT $4 + 5
 ),
 module AS (
@@ -210,7 +210,7 @@ LEFT JOIN LATERAL (
 ) t ON TRUE
 LEFT JOIN module m ON m.sql_handle = r.sql_handle
 WHERE t.query_text IS NULL OR t.query_text NOT LIKE 'WAITFOR%'
-ORDER BY r.total_elapsed_us DESC
+ORDER BY r.total_cpu_us DESC
 LIMIT $4";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -916,7 +916,7 @@ AND   collection_time <= $3
 AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + @"
 GROUP BY database_name, schema_name, object_name, object_type
 HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
-ORDER BY SUM(delta_elapsed_time) DESC
+ORDER BY SUM(delta_worker_time) DESC
 LIMIT $4";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
