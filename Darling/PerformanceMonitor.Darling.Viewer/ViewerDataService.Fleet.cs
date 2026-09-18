@@ -691,8 +691,22 @@ public sealed class FleetRollup
             parts.Add("collection stale");
         }
 
+        if (s.MetricCount > 0 && s.MeasuredMetricCount == 0)
+        {
+            /* #3539 A6: the card banded Warning through OverallMetricSeverity's nothing-measured arm, and no
+               per-metric clause above can fire when every band is Unknown — without this the ranking and the
+               tooltip would fall to UnspecifiedReason against a card that CAN say why. The service's
+               DarlingFleetReader.BuildReason spells it identically. */
+            parts.Add(NoMetricMeasuredReason);
+        }
+
         return parts.Count > 0 ? string.Join(", ", parts) : UnspecifiedReason;
     }
+
+    /// <summary>The reason clause for a card on which no metric was measured (#3539 A6). The same words as
+    /// the service's fleet-card reason, kept as a constant so <see cref="BandHeadline"/> can recognise the
+    /// case it already covers.</summary>
+    public const string NoMetricMeasuredReason = "no metric measured yet";
 
     /// <summary>
     /// What <see cref="BuildReason"/> answers when it can name nothing — a card banded away from Healthy by a
@@ -780,10 +794,12 @@ public sealed class FleetRollup
 
         /* The guarded reason-append stays WithReason's (one copy — its own doc says why); the qualifier
            rides after whatever it produced: beside a named reason as a second " · " phrase (the web status
-           line's list separator), else straight after the bare label. */
+           line's list separator), else straight after the bare label. At ZERO measured the reason already
+           says "no metric measured yet" (#3539 A6), and "· 0 of 6 measured" after it would restate the
+           same fact in different words, so the qualifier stands down there and only there. */
         var label = ServerHealthClassifier.BandLabel(band);
         var headline = WithReason(label, " — ", s);
-        if (coverage.Length == 0)
+        if (coverage.Length == 0 || s.MeasuredMetricCount == 0)
         {
             return headline;
         }

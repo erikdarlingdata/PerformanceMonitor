@@ -41,11 +41,14 @@ internal static class DarlingAlertReader
 
     /// <summary><paramref name="Dismissed"/> is the operator's Viewer acknowledgement (#3541 A3): a row the
     /// operator hid from the Alert History grid. Always false on the default read, which excludes those rows;
-    /// carried so a read that INCLUDES them can label each one.</summary>
+    /// carried so a read that INCLUDES them can label each one.
+    /// <para><paramref name="ContextJson"/> (#3539 A8e) is the persisted context, read so the tool can report
+    /// the tier the alert FIRED at through <c>AlertHistoryRowSeverity</c> rather than the colour its name
+    /// implies; null on resolution rows and rows written with no context.</para></summary>
     public sealed record AlertHistoryReadRow(
         DateTime AlertTime, int ServerId, string ServerName, string MetricName,
         double CurrentValue, double ThresholdValue, bool AlertSent, string NotificationType,
-        string? SendError, bool Muted, string? DetailText, bool Dismissed);
+        string? SendError, bool Muted, string? DetailText, bool Dismissed, string? ContextJson = null);
 
     private const string AlertHistorySelectColumns = @"
     alert_time,
@@ -59,6 +62,7 @@ internal static class DarlingAlertReader
     send_error,
     muted,
     detail_text,
+    context_json,
     dismissed";
 
     /// <summary>Per-server alert history — the viewer's <c>AlertHistorySql</c>. $1 window start, $2 window
@@ -166,7 +170,10 @@ AND   dismissed = TRUE";
                 reader.IsDBNull(8) ? null : reader.GetString(8),
                 !reader.IsDBNull(9) && reader.GetBoolean(9),
                 reader.IsDBNull(10) ? null : reader.GetString(10),
-                !reader.IsDBNull(11) && reader.GetBoolean(11)));
+                /* context_json sits at ordinal 11 and dismissed stays the LAST column at 12 — the viewer's
+                   own column order, and the "dismissed is selected" pin anchors on it closing the list. */
+                !reader.IsDBNull(12) && reader.GetBoolean(12),
+                reader.IsDBNull(11) ? null : reader.GetString(11)));
         }
 
         return rows;

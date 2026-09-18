@@ -49,6 +49,7 @@ public sealed class ViewerOverviewExplainsItselfTests
             CpuPercent = 96,
             BlockingCount = 6,
             MaxBlockingWaitMs = 70000,
+            CollectorCount = 40,   // #3539 A6: the collectors row is measured only with a denominator declared
         };
 
     private static ServerSummaryItem Stale(string name = "s1", int id = 3) =>
@@ -136,6 +137,7 @@ public sealed class ViewerOverviewExplainsItselfTests
             CurrentWorkers = 100,
             DeadlockWindow = TimeSpan.FromHours(1),
             BlockingWindow = TimeSpan.FromHours(1),   // #3539 A3: a zero count is measured only over a window
+            CollectorCount = 40,                      // #3539 A6: zero failing is measured only with a denominator
         };
 
     /// <summary>
@@ -149,9 +151,11 @@ public sealed class ViewerOverviewExplainsItselfTests
     public void TheCardsTooltip_QualifiesAHealthyBand_ThatFoldedOverUnmeasuredMetrics()
     {
         /* No CPU/threads snapshot, DMV-sourced memory/blocking/deadlocks nulled by the engine — only the
-           collector row measured. The same shape DarlingFleetReader's card serializes as 1-of-6. */
+           collector row measured, which since #3539 A6 means its denominator is declared: forty banded,
+           none failing. The same shape DarlingFleetReader's card serializes as 1-of-6. */
         var pg = Healthy();
         pg.IsPostgres = true;
+        pg.CollectorCount = 40;
 
         Assert.Equal(1, pg.MeasuredMetricCount);
         Assert.Equal(6, pg.MetricCount);

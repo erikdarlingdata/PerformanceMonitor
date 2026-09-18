@@ -831,8 +831,21 @@ GROUP BY server_id, collector_name";
             parts.Add("collection stale");
         }
 
+        if (c.MetricCount > 0 && c.MeasuredMetricCount == 0)
+        {
+            /* #3539 A6: the card banded Warning because NOTHING on it was measured (OverallMetricSeverity's
+               nothing-measured arm), and no per-metric clause above can fire for a card whose every band is
+               Unknown — so without this the ranking would show "Needs attention" against a card that
+               cannot say why. The same words the viewer's reason uses. */
+            parts.Add(NoMetricMeasuredReason);
+        }
+
         return parts.Count > 0 ? string.Join(", ", parts) : "Needs attention";
     }
+
+    /// <summary>The reason clause for a card on which no metric was measured (#3539 A6) — the viewer's
+    /// <c>FleetRollup.BuildReason</c> spells it identically, so the two surfaces read alike.</summary>
+    internal const string NoMetricMeasuredReason = "no metric measured yet";
 
     /// <summary>The card's status word. Delegates to the one ladder every Darling surface renders (#2473):
     /// this file's own copy agreed with the WPF card, but the WPF sidebar row's copy did not, and three
@@ -1430,17 +1443,23 @@ public sealed class FleetServerCard
     /// <summary>Every collector banded for this server in the health window, on any band (#3539 A8d) — the
     /// denominator <c>collector_severity</c> grades <c>failed_collector_count</c> against. Not
     /// healthy + failed: STALE, WARNING, STOPPED and the permission bands are banded collectors that are
-    /// neither.</summary>
+    /// neither. Zero with nothing failing bands <c>collector_severity</c> Unknown, not Healthy (#3539
+    /// A6): no collector has been banded for this server, so there is no collection to call clean.</summary>
     [JsonPropertyName("collector_count")] public int CollectorCount { get; init; }
     [JsonPropertyName("collector_severity")] public HealthSeverity CollectorSeverity { get; init; }
 
+    /// <summary>The worst per-metric band, or Unknown when NOT ONE metric on the card was measured (#3539
+    /// A6) — which <c>band</c> then reads as Warning, the never-collected server's band, rather than
+    /// Healthy.</summary>
     [JsonPropertyName("overall_metric_severity")] public HealthSeverity OverallMetricSeverity { get; init; }
 
     /// <summary>How many of the card's per-metric severities carried a real reading when it banded (#3528)
     /// — the band's fold skips Unknown, so a card can read Healthy off one measured metric of six. When
     /// this is below <see cref="MetricCount"/>, the band label deserves the qualifier ("Healthy — 1 of 6
     /// measured"); the web fleet page renders exactly that. Purely descriptive: it feeds neither the band
-    /// nor the worst-first score, so rank-neutrality of Unknown is unchanged.</summary>
+    /// nor the worst-first score, so rank-neutrality of Unknown is unchanged — with the one exception
+    /// #3539 A6 draws at zero: a card measuring NOTHING is not Healthy (see <c>overall_metric_severity</c>),
+    /// and its <c>reason</c> says so.</summary>
     [JsonPropertyName("measured_metric_count")] public int MeasuredMetricCount { get; init; }
 
     /// <summary>The denominator for <see cref="MeasuredMetricCount"/> — how many per-metric severities the

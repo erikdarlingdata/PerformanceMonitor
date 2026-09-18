@@ -18,6 +18,12 @@ namespace Darling.Tests;
 /// the old duplicated inline copies missed, and the last four are the same drift caught one layer down in
 /// Darling's self-alert recoveries (#991) — plus the critical (Deadlock/Poison) and warning buckets, over
 /// the metric names the alert engines actually emit.
+///
+/// <para>#3539 A8e: the critical/warning buckets are the FALLBACK the two SKU grids use for a row that
+/// carries no persisted tier; a row that does is styled by the tier it fired at, through
+/// <c>AlertHistoryRowSeverity</c> (pinned in <c>AlertHistoryRowSeverityTests</c>). The by-name pins here
+/// therefore hold for the rows that predate the member, which is what "Poison Wait" being critical by name
+/// means now — every such SQL Server row was a presence-flat critical fire.</para>
 /// </summary>
 public class AlertMetricClassifierTests
 {

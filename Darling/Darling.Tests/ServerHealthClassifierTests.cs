@@ -197,12 +197,15 @@ public sealed class ServerHealthClassifierTests
     /// <summary>
     /// One failing of forty and forty of forty no longer band alike: any FAILING collector is Warning, and a
     /// FAILING share past the collector-health classifier's own 20% bar is Critical. Nothing failing is
-    /// Healthy whatever the denominator; no denominator with something failing is Warning and never
-    /// Critical — a share nobody computed cannot escalate.
+    /// Healthy when collectors were banded, and Unknown when none were (#3539 A6 — no collection to call
+    /// clean); no denominator with something failing is Warning and never Critical — a share nobody
+    /// computed cannot escalate.
     /// </summary>
     [Theory]
     [InlineData(0, 40, HealthSeverity.Healthy)]
-    [InlineData(0, 0, HealthSeverity.Healthy)]
+    [InlineData(0, 1, HealthSeverity.Healthy)]
+    [InlineData(0, 0, HealthSeverity.Unknown)]     // nothing banded: not a clean collection, an unmeasured one
+    [InlineData(0, -1, HealthSeverity.Unknown)]
     [InlineData(1, 40, HealthSeverity.Warning)]     // 2.5%
     [InlineData(8, 40, HealthSeverity.Warning)]     // exactly 20% — the bar is strict, as the classifier's is
     [InlineData(9, 40, HealthSeverity.Critical)]    // 22.5%
@@ -305,9 +308,43 @@ public sealed class ServerHealthClassifierTests
     [Fact]
     public void OverallMetricSeverity_AllCalm_IsHealthy_UnknownNeverEscalates()
     {
-        // No CPU snapshot (Unknown) and no threads snapshot (Unknown) must not escalate the card.
-        var m = new ServerHealthMetrics { CpuPercentForAlert = null, TotalThreads = null };
+        // No CPU snapshot (Unknown) and no threads snapshot (Unknown) must not escalate the card. Memory
+        // is measured and calm, so the fold has one real reading to answer Healthy from (#3539 A6: with
+        // NO reading it answers Unknown, pinned separately below).
+        var m = new ServerHealthMetrics { CpuPercentForAlert = null, TotalThreads = null, HasMemoryPressure = false };
         Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.OverallMetricSeverity(m));
+    }
+
+    /// <summary>
+    /// #3539 A6: a bundle on which NOT ONE metric was measured folds to Unknown, not Healthy, and the fleet
+    /// band reads it as Warning — the never-collected server's band — so it leaves the healthy mass. The
+    /// pre-fix fold answered Healthy here ("0 of 6 measured" was the only tell), which put an online server
+    /// nothing had banded yet in <c>healthy_count</c>. One measured reading is enough to lift the fold off
+    /// Unknown, which is what keeps #3528's partially-measured Healthy exactly where it was.
+    /// </summary>
+    [Fact]
+    public void OverallMetricSeverity_NothingMeasured_IsUnknown_AndBandsWarning()
+    {
+        var nothing = new ServerHealthMetrics();
+        Assert.Equal((0, 6), ServerHealthClassifier.MeasuredMetricCounts(nothing));
+
+        var overall = ServerHealthClassifier.OverallMetricSeverity(nothing);
+        Assert.Equal(HealthSeverity.Unknown, overall);
+        Assert.Equal(
+            FleetHealthBand.Warning,
+            ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, collectionStale: false, overall));
+
+        /* One measured, calm reading and the fold is Healthy again — the #3528 partial-coverage card. */
+        var one = nothing with { CollectorCount = 40 };
+        Assert.Equal((1, 6), ServerHealthClassifier.MeasuredMetricCounts(one));
+        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.OverallMetricSeverity(one));
+
+        /* A Warning among Unknowns is still Warning — the nothing-measured arm never de-escalates. */
+        Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.OverallMetricSeverity(nothing with { CpuPercentForAlert = 85 }));
+        /* And the order the readings arrive in cannot matter: Warning first then Healthy, Healthy first
+           then Warning, both Warning. */
+        Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.OverallMetricSeverity(nothing with { CpuPercentForAlert = 85, CollectorCount = 40 }));
+        Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.OverallMetricSeverity(nothing with { HasMemoryPressure = false, FailedCollectorCount = 1, CollectorCount = 40 }));
     }
 
     /* ── measured-metric coverage (#3528) ── */
@@ -325,6 +362,7 @@ public sealed class ServerHealthClassifierTests
             BlockingWindow = TimeSpan.FromHours(1),      // #3539 A3: a zero count is measured only over a window
             DeadlockCount = 0,
             DeadlockWindow = TimeSpan.FromHours(1),
+            CollectorCount = 40,                         // #3539 A6: zero failing is measured only with a denominator
         };
 
         Assert.Equal((6, 6), ServerHealthClassifier.MeasuredMetricCounts(m));
@@ -337,8 +375,9 @@ public sealed class ServerHealthClassifierTests
            (no CPU/threads snapshot, DMV-sourced memory/blocking/deadlocks nulled), only the collector row
            measured. The fold deliberately skips Unknown, so the band label is still Healthy — and the
            counts are what let a consumer render that label as "Healthy — 1 of 6 measured" instead of an
-           unqualified green. */
-        var m = new ServerHealthMetrics();
+           unqualified green. The collector row is measured only because a denominator was declared
+           (#3539 A6): forty banded, none failing. */
+        var m = new ServerHealthMetrics { CollectorCount = 40 };
 
         Assert.Equal((1, 6), ServerHealthClassifier.MeasuredMetricCounts(m));
 
@@ -364,8 +403,12 @@ public sealed class ServerHealthClassifierTests
             BlockingWindow = TimeSpan.FromHours(1),
             DeadlockCount = 0,
             DeadlockWindow = TimeSpan.FromHours(1),
+            CollectorCount = 40,
         };
-        var unmeasured = new ServerHealthMetrics();
+        /* One of six measured (the collectors row, #3539 A6's denominator declared) against six of six:
+           the partial-coverage neutrality #3528 promised. A bundle measuring NOTHING is the one case that
+           does move, and OverallMetricSeverity_NothingMeasured_IsUnknown_AndBandsWarning owns it. */
+        var unmeasured = new ServerHealthMetrics { CollectorCount = 40 };
 
         Assert.NotEqual(
             ServerHealthClassifier.MeasuredMetricCounts(measured),
@@ -401,6 +444,23 @@ public sealed class ServerHealthClassifierTests
     public void ClassifyBand_OnlineCalm_IsHealthy() =>
         Assert.Equal(FleetHealthBand.Healthy,
             ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, collectionStale: false, HealthSeverity.Healthy));
+
+    /// <summary>#3539 A6: an online card whose fold is Unknown (nothing measured) is Warning — the same band
+    /// the awaiting-first-collection server gets, for the same reason — and never Healthy, stale or not.
+    /// Offline still wins over it.</summary>
+    [Fact]
+    public void ClassifyBand_OnlineNothingMeasured_IsWarning_LikeAwaitingFirstCollection()
+    {
+        Assert.Equal(FleetHealthBand.Warning,
+            ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, collectionStale: false, HealthSeverity.Unknown));
+        Assert.Equal(FleetHealthBand.Warning,
+            ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, collectionStale: true, HealthSeverity.Unknown));
+        Assert.Equal(FleetHealthBand.Offline,
+            ServerHealthClassifier.ClassifyBand(isOnline: false, awaitingFirstCollection: false, collectionStale: false, HealthSeverity.Unknown));
+        Assert.Equal(
+            ServerHealthClassifier.ClassifyBand(isOnline: null, awaitingFirstCollection: true, collectionStale: false, HealthSeverity.Unknown),
+            ServerHealthClassifier.ClassifyBand(isOnline: true, awaitingFirstCollection: false, collectionStale: false, HealthSeverity.Unknown));
+    }
 
     /* ── worst-first score ── */
 

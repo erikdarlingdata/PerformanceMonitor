@@ -564,7 +564,14 @@ public sealed class ViewerServerSummaryDisplayTests
         Assert.Equal(HealthSeverity.Warning, failing.CollectorSeverity);
         Assert.Equal("2 failed", failing.CollectorDisplay);
         Assert.Equal("Healthy: 28, Failing: 2", failing.CollectorDetail);
-        Assert.Equal("OK", new ServerSummaryItem { HealthyCollectorCount = 30 }.CollectorDisplay);
+        Assert.Equal("OK", new ServerSummaryItem { HealthyCollectorCount = 30, CollectorCount = 30 }.CollectorDisplay);
+
+        /* #3539 A6: with NO collector banded the dot is Unknown and the word is the card's "no reading"
+           spelling, not a green "OK" — a reachable server nothing has classified yet is not a clean one. */
+        var nothingBanded = new ServerSummaryItem { IsOnline = true };
+        Assert.Equal(HealthSeverity.Unknown, nothingBanded.CollectorSeverity);
+        Assert.Equal("--", nothingBanded.CollectorDisplay);
+        Assert.Equal("Healthy: 0, Failing: 0", nothingBanded.CollectorDetail);
     }
 
     /// <summary>#3539 A8d: the collector dot is graded on the FAILING share — one of forty is Warning,
@@ -607,19 +614,19 @@ public sealed class ViewerServerSummaryDisplayTests
 
         // A GENUINE collector failure on a reachable server still surfaces red / "N failed" — not swallowed
         // into Stale.
-        var failing = new ServerSummaryItem { IsOnline = true, HealthyCollectorCount = 28, FailedCollectorCount = 2 };
+        var failing = new ServerSummaryItem { IsOnline = true, HealthyCollectorCount = 28, FailedCollectorCount = 2, CollectorCount = 30 };
         Assert.Equal("2 failed", failing.CollectorDisplay);
         Assert.Equal(HealthSeverity.Warning, failing.CollectorSeverity);
 
-        // A healthy ONLINE server is unchanged — green "OK".
-        var healthy = new ServerSummaryItem { IsOnline = true, HealthyCollectorCount = 30, FailedCollectorCount = 0 };
+        // A healthy ONLINE server is unchanged — green "OK" (its thirty banded collectors declared, #3539 A6).
+        var healthy = new ServerSummaryItem { IsOnline = true, HealthyCollectorCount = 30, FailedCollectorCount = 0, CollectorCount = 30 };
         Assert.Equal("OK", healthy.CollectorDisplay);
         Assert.Equal("Healthy: 30, Failing: 0", healthy.CollectorDetail);
         Assert.Equal(HealthSeverity.Healthy, healthy.CollectorSeverity);
 
         // Not-yet-connection-classified (IsOnline null — awaiting first collection) keeps the normal reading:
         // "Stale" is for a KNOWN-offline server only, matching the web's strict `is_online === false`.
-        var notChecked = new ServerSummaryItem { HealthyCollectorCount = 30, FailedCollectorCount = 0 };
+        var notChecked = new ServerSummaryItem { HealthyCollectorCount = 30, FailedCollectorCount = 0, CollectorCount = 30 };
         Assert.False(notChecked.IsOffline);
         Assert.Equal("OK", notChecked.CollectorDisplay);
         Assert.Equal(HealthSeverity.Healthy, notChecked.CollectorSeverity);

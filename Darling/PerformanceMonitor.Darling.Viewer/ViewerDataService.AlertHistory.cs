@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
@@ -21,7 +22,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// (Lite/Services/LocalDataService.AlertHistory.cs): the same metric-keyed value formatting
 /// (#1134), the same shared <see cref="AlertDeliveryStatus.Describe"/> behind
 /// <see cref="StatusDisplay"/> (differing only in the tray answer each SKU gives it), and the shared
-/// <see cref="AlertMetricClassifier"/> for critical/warning/resolved row emphasis. Carries
+/// <see cref="AlertHistoryRowSeverity"/> / <see cref="AlertMetricClassifier"/> pair for critical/warning/resolved
+/// row emphasis (the tier the alert fired at where the row carries it, the name otherwise). Carries
 /// <see cref="ServerId"/> + <see cref="ServerName"/> so the all-servers Alert History surface (W2a)
 /// can show a Server column and key the dismiss write on (alert_time, server_id, metric_name).
 /// Darling has no parquet archive tier, so there is no <c>Source</c>/<c>IsArchived</c> split — every
@@ -79,9 +81,12 @@ public sealed class ViewerAlertRow
 
     public bool IsResolved => AlertMetricClassifier.IsResolution(MetricName);
 
-    public bool IsCritical => AlertMetricClassifier.IsCritical(MetricName);
+    /* #3539 A8e: the emphasis is the tier the alert FIRED at, read off ContextJson, with the by-name
+       classifier only for rows that carry none — Lite's row, the web alerts page and get_alert_history make
+       the same call through AlertHistoryRowSeverity, whose summary states why the fallback still exists. */
+    public bool IsCritical => AlertHistoryRowSeverity.IsCritical(MetricName, ContextJson);
 
-    public bool IsWarning => AlertMetricClassifier.IsWarning(MetricName);
+    public bool IsWarning => AlertHistoryRowSeverity.IsWarning(MetricName, ContextJson);
 
     /// <summary>
     /// This row as the <see cref="AlertMuteContext"/> a <see cref="MuteRule"/> is judged against — the SAME

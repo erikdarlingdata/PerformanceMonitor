@@ -157,13 +157,14 @@ public sealed class FleetCardCollectionStaleNamesItsPopulationTests
 
         var failingButCurrent = Card(TimeSpan.FromSeconds(5), failing: 1);
         var reason = DarlingFleetReader.BuildReason(failingButCurrent);
-        Assert.Equal("1 collector failing", reason);
+        /* "of 40": the helper declares the denominator (#3539 A8d names it when there is one). */
+        Assert.Equal("1 of 40 collectors failing", reason);
         Assert.DoesNotContain("stale", reason, StringComparison.Ordinal);
 
         /* A card carrying both reports both, in their own clauses — the axes are additive in the prose
            exactly as they are in the payload. */
         var both = Card(ServerHealthThresholds.StaleThreshold + TimeSpan.FromMinutes(1), failing: 2);
-        Assert.Equal("2 collectors failing, collection stale", DarlingFleetReader.BuildReason(both));
+        Assert.Equal("2 of 40 collectors failing, collection stale", DarlingFleetReader.BuildReason(both));
     }
 
     /// <summary>
@@ -310,7 +311,10 @@ public sealed class FleetCardCollectionStaleNamesItsPopulationTests
         var flags = ServerCollectionStatusRules.FlagsFor(
             ServerHealthClassifier.ClassifyFreshness(lastCollection, Now));
 
-        var metrics = new ServerHealthMetrics { CpuPercentForAlert = 4, FailedCollectorCount = failing };
+        /* Forty collectors banded (#3539 A6): the collectors row is a MEASURED reading, so "nothing failing"
+           is Healthy here and the two collection axes stay the only variables. */
+        const int bandedCollectors = 40;
+        var metrics = new ServerHealthMetrics { CpuPercentForAlert = 4, FailedCollectorCount = failing, CollectorCount = bandedCollectors };
         var overall = ServerHealthClassifier.OverallMetricSeverity(metrics);
 
         return new FleetServerCard
@@ -325,9 +329,10 @@ public sealed class FleetCardCollectionStaleNamesItsPopulationTests
             Status = ServerCollectionStatusRules
                 .Classify(flags.IsOnline, flags.CollectionStale, flags.AwaitingFirstCollection).Word(),
             FailedCollectorCount = failing,
-            /* No denominator declared: the share cannot form, so a failing count is Warning and never
-               Critical (#3539 A8d) — the two collection axes stay the only variables. */
-            CollectorSeverity = ServerHealthClassifier.CollectorSeverity(failing, collectorCount: 0),
+            CollectorCount = bandedCollectors,
+            /* Every failing count this file uses is under the 20% bar of forty, so a failing count is
+               Warning and never Critical (#3539 A8d) — the two collection axes stay the only variables. */
+            CollectorSeverity = ServerHealthClassifier.CollectorSeverity(failing, bandedCollectors),
             OverallMetricSeverity = overall,
             Band = ServerHealthClassifier.ClassifyBand(
                 flags.IsOnline, flags.AwaitingFirstCollection, flags.CollectionStale, overall),

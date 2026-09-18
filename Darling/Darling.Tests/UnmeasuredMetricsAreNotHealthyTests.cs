@@ -40,17 +40,29 @@ namespace Darling.Tests;
 /// existing code rather than a happy accident of this change, and
 /// <see cref="UnknownIsBandAndRankNeutral_SoTheFixCannotReorderTheFleet"/> pins it so an "improvement" that
 /// made Unknown escalate would fail here instead of silently reordering the fleet.</para>
+///
+/// <para><b>#3539 A6, the two edges of the same family.</b> The collectors row had a Healthy arm no other
+/// metric here has: <c>(failed 0, banded 0)</c> — a server nothing had banded yet — read Healthy, a green
+/// dot for a collection nobody had classified. And the fold over a card on which NOTHING was measured
+/// answered Healthy, so an online server with six Unknowns counted in the fleet's healthy mass with a
+/// "0 of 6 measured" qualifier as its only tell. Both now read Unknown, and the all-Unknown card bands
+/// Warning — the never-collected server's band. Neutrality is unchanged wherever anything IS measured:
+/// the pins below hold a one-of-six card exactly where #3528 left it.</para>
 /// </summary>
 public sealed class UnmeasuredMetricsAreNotHealthyTests
 {
     private static readonly DateTime Now = new(2026, 9, 10, 12, 0, 0, DateTimeKind.Utc);
 
+    /// <param name="bandedCollectors">Collectors banded for this server, none failing — forty by default so
+    /// the card's collectors row is a MEASURED calm reading and the DMV metrics stay this file's only
+    /// variable. Zero is the #3539 A6 shape: nothing banded, nothing measured.</param>
     private static FleetServerCard Card(
         string? engineKind,
         bool memoryPressure = false,
         int blocking = 0,
         long maxBlockingWaitMs = 0,
-        int deadlocks = 0) =>
+        int deadlocks = 0,
+        int bandedCollectors = 40) =>
         DarlingFleetReader.BuildCard(
             new DarlingFleetReader.FleetServerRow(1, "t", "t", null, engineKind, false),
             default,
@@ -61,7 +73,7 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
             new DarlingFleetReader.BlockingRow(blocking, maxBlockingWaitMs, 0, 0),
             new DarlingFleetReader.DeadlockRow(deadlocks, deadlocks > 0 ? Now.AddMinutes(-5) : null),
             Now.AddSeconds(-30),
-            default,
+            new DarlingFleetReader.CollectorCounts(bandedCollectors, 0, bandedCollectors),
             null,
             Now,
             /* #3368: a real one-hour window and the shipped tiers. This file's subject is the
@@ -76,12 +88,15 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
         bool memoryPressure = false,
         int blocking = 0,
         long maxBlockingWaitMs = 0,
-        int deadlocks = 0)
+        int deadlocks = 0,
+        int bandedCollectors = 40)
     {
         var card = new ServerSummaryItem
         {
             ServerName = "t",
             ServerId = 1,
+            HealthyCollectorCount = bandedCollectors,
+            CollectorCount = bandedCollectors,
             MemoryWaiterCount = memoryPressure ? 3 : 0,
             BlockingCount = blocking,
             MaxBlockingWaitMs = maxBlockingWaitMs,
@@ -312,16 +327,124 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
 
     /// <summary>
     /// <c>default(ServerHealthMetrics)</c> flipped from "all zero, therefore Healthy" to "all null,
-    /// therefore Unknown" when the fields became nullable. That is only safe BECAUSE Unknown is inert, so it
-    /// is pinned rather than assumed: a bundle nobody populated still bands and scores as it did.
+    /// therefore Unknown" when the fields became nullable, and #3539 A6 closed the last gap: its collectors
+    /// row <c>(0, 0)</c> is Unknown too, so a bundle nobody populated measures NOTHING — and the fold says
+    /// so rather than answering Healthy from six Unknowns. Its band is the never-collected server's Warning,
+    /// and the score is that band's rank alone: the magnitude terms still skip Unknown, so it cannot climb
+    /// within the band on readings it does not have.
     /// </summary>
     [Fact]
-    public void AnUnpopulatedMetricBundleBandsAndScoresAsItAlwaysDid()
+    public void AnUnpopulatedMetricBundleMeasuresNothing_AndIsNotHealthy()
     {
         var empty = default(ServerHealthMetrics);
 
-        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.OverallMetricSeverity(empty));
-        Assert.Equal(0L, ServerHealthClassifier.FleetHealthScore(FleetHealthBand.Healthy, empty));
+        Assert.Equal((0, 6), ServerHealthClassifier.MeasuredMetricCounts(empty));
+        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.OverallMetricSeverity(empty));
+
+        var band = ServerHealthClassifier.ClassifyBand(true, false, false, HealthSeverity.Unknown);
+        Assert.Equal(FleetHealthBand.Warning, band);
+        /* The Warning rank step and nothing else: no Critical/Warning metric to add magnitude, no incident
+           count — so an all-Unknown card sorts at the foot of the Warning band, under any card with a real
+           amber reading. */
+        Assert.Equal(2000L, ServerHealthClassifier.FleetHealthScore(band, empty));
+    }
+
+    /* ─────────────────────────── #3539 A6: nothing banded, nothing measured ─────────────────────────── */
+
+    /// <summary>
+    /// The collectors row with NO collector banded reads Unknown on both cards, not Healthy — the #3539 A6
+    /// sibling. The viewer's offline arm and the web's <c>is_online === false</c> chip cover a KNOWN-dark
+    /// server; this is a reachable one whose collection nobody has classified, and "nothing failing" is not
+    /// a health claim when nothing could have failed. Held on a SQL Server card so the other five rows are
+    /// measured and the collectors row is the only thing that changed.
+    /// </summary>
+    [Fact]
+    public void ZeroBandedCollectors_ReadUnknownNotHealthy_OnBothCards()
+    {
+        var card = Card(MonitoredEngineKind.SqlServer, bandedCollectors: 0);
+        Assert.Equal(0, card.CollectorCount);
+        Assert.Equal(0, card.FailedCollectorCount);
+        Assert.Equal(HealthSeverity.Unknown, card.CollectorSeverity);
+
+        var viewer = ViewerCard(MonitoredEngineKind.SqlServer, bandedCollectors: 0);
+        Assert.Equal(HealthSeverity.Unknown, viewer.CollectorSeverity);
+        /* The word beside the dot agrees with it: "--" is the card's spelling of "no reading", where "OK"
+           was a green word under what is now a grey dot. */
+        Assert.Equal("--", viewer.CollectorDisplay);
+
+        /* And with ONE collector banded the arm is Healthy again, on both — the fix is the zero, not the
+           count. */
+        Assert.Equal(HealthSeverity.Healthy, Card(MonitoredEngineKind.SqlServer, bandedCollectors: 1).CollectorSeverity);
+        Assert.Equal(HealthSeverity.Healthy, ViewerCard(MonitoredEngineKind.SqlServer, bandedCollectors: 1).CollectorSeverity);
+        Assert.Equal("OK", ViewerCard(MonitoredEngineKind.SqlServer, bandedCollectors: 1).CollectorDisplay);
+
+        /* The collectors row is one of the six the coverage counts fold over: this helper's SQL Server card
+           measures memory, blocking and deadlocks (no CPU or threads row is handed in), so it says "3 of 6
+           measured" with nothing banded and "4 of 6" with one collector — the row moved, and only the row. */
+        Assert.Equal(3, card.MeasuredMetricCount);
+        Assert.Equal(6, card.MetricCount);
+        Assert.Equal(4, Card(MonitoredEngineKind.SqlServer, bandedCollectors: 1).MeasuredMetricCount);
+        Assert.Equal(FleetHealthBand.Healthy, card.Band);
+    }
+
+    /// <summary>
+    /// The A6 card itself: an ONLINE PostgreSQL target with nothing banded — no CPU source, no threads, the
+    /// three DMV rows structurally null, zero collectors — measures nothing, and is NOT Healthy. Before this
+    /// it banded Healthy with "0 of 6 measured" as its only tell and counted in <c>healthy_count</c> on the
+    /// web fleet page, <c>get_fleet_overview</c> and the viewer's rollup. Now it bands Warning like a server
+    /// awaiting its first collection, leaves the healthy mass on every one of those surfaces, and the
+    /// ranking's reason says why in words rather than falling to "Needs attention".
+    /// </summary>
+    [Theory]
+    [InlineData(MonitoredEngineKind.Postgres)]
+    [InlineData(MonitoredEngineKind.AuroraPostgres)]
+    public void AnOnlineCardMeasuringNothing_IsNotInTheHealthyMass_OnAnySurface(string engineKind)
+    {
+        var card = Card(engineKind, bandedCollectors: 0);
+        Assert.True(card.IsOnline);
+        Assert.False(card.AwaitingFirstCollection);
+        Assert.Equal(0, card.MeasuredMetricCount);
+        Assert.Equal(6, card.MetricCount);
+        Assert.Equal(HealthSeverity.Unknown, card.OverallMetricSeverity);
+        Assert.Equal(FleetHealthBand.Warning, card.Band);
+
+        /* The service's rollup — /api/fleet and get_fleet_overview read this: zero healthy, one warning. */
+        var rollup = DarlingFleetReader.BuildRollup(new[] { card }, Now, Now.AddHours(-1), Now);
+        Assert.Equal(0, rollup.HealthyCount);
+        Assert.Equal(1, rollup.WarningCount);
+        var ranked = Assert.Single(rollup.WorstServers);
+        Assert.Equal(DarlingFleetReader.NoMetricMeasuredReason, ranked.Reason);
+
+        /* The viewer's card and rollup, same server, same answer (#2473). */
+        var viewer = ViewerCard(engineKind, bandedCollectors: 0);
+        Assert.Equal(0, viewer.MeasuredMetricCount);
+        Assert.Equal(HealthSeverity.Unknown, viewer.OverallMetricSeverity);
+        Assert.Equal(FleetHealthBand.Warning, FleetRollup.ClassifyBand(viewer));
+        Assert.Equal(FleetRollup.NoMetricMeasuredReason, FleetRollup.BuildReason(viewer));
+        Assert.Equal(DarlingFleetReader.NoMetricMeasuredReason, FleetRollup.NoMetricMeasuredReason);
+
+        var viewerRollup = FleetRollup.Build(new[] { viewer }, new FleetTotals());
+        Assert.Equal(0, viewerRollup.HealthyCount);
+        Assert.Equal(1, viewerRollup.WarningCount);
+        Assert.Contains(viewer, FleetRollup.NeedsAttention(new[] { viewer }));
+
+        /* The tooltip's headline names the band and the reason once — not "Warning — no metric measured yet
+           · 0 of 6 measured", which would say the same thing twice. */
+        Assert.StartsWith("Warning — " + FleetRollup.NoMetricMeasuredReason, viewer.StatusTooltip, StringComparison.Ordinal);
+        Assert.DoesNotContain("0 of 6", viewer.StatusTooltip, StringComparison.Ordinal);
+
+        /* The border agrees with the band: the awaiting-first-collection amber, not the calm dark. */
+        Assert.Equal("#FFFFD54F", viewer.CardBorderBrush.Color.ToString());
+
+        /* ONE banded collector and the same card is #3528's "Healthy — 1 of 6 measured", exactly where
+           that issue left it: the healthy mass loses only the cards that measured nothing. */
+        var one = Card(engineKind, bandedCollectors: 1);
+        Assert.Equal(1, one.MeasuredMetricCount);
+        Assert.Equal(FleetHealthBand.Healthy, one.Band);
+        Assert.Equal(1, DarlingFleetReader.BuildRollup(new[] { one }, Now, Now.AddHours(-1), Now).HealthyCount);
+        var oneViewer = ViewerCard(engineKind, bandedCollectors: 1);
+        Assert.Equal(FleetHealthBand.Healthy, FleetRollup.ClassifyBand(oneViewer));
+        Assert.StartsWith("Healthy — 1 of 6 measured", oneViewer.StatusTooltip, StringComparison.Ordinal);
     }
 
     /* ─────────────────────────── the ordering the guards depend on ─────────────────────────── */

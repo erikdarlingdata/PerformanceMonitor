@@ -600,7 +600,8 @@ namespace PerformanceMonitor.Common
         /// turns <see cref="FailedCollectorCount"/> into a share. Zero means no denominator was declared;
         /// <see cref="ServerHealthClassifier.CollectorSeverity"/> then bands a non-zero failing count
         /// Warning and never Critical, the fail-away-from-Healthy reading every undeclared denominator
-        /// here takes.
+        /// here takes — and a ZERO failing count Unknown rather than Healthy (#3539 A6), because with no
+        /// collector banded there was nothing that could have failed.
         /// </summary>
         public int CollectorCount { get; init; }
     }
@@ -999,8 +1000,9 @@ namespace PerformanceMonitor.Common
             collectorCount > 0 ? failedCollectorCount * 100.0 / collectorCount : null;
 
         /// <summary>
-        /// Collectors band (#3539 A8d): Healthy with nothing FAILING; otherwise Warning, escalating to
-        /// Critical when the FAILING share of this server's banded collectors exceeds
+        /// Collectors band (#3539 A8d): Unknown when NO collector has been banded for this server at all;
+        /// Healthy with collectors banded and nothing FAILING; otherwise Warning, escalating to Critical
+        /// when the FAILING share of this server's banded collectors exceeds
         /// <see cref="CollectorHealthClassifier.WarningFailureRatePercent"/>.
         ///
         /// <para><b>Graded on a share, because a count of failing collectors was presence-flat.</b> The arm
@@ -1023,9 +1025,27 @@ namespace PerformanceMonitor.Common
         /// gap in what this server's other bands can see, and the count is disclosed beside the band, so
         /// the Healthy arm stays reserved for nothing failing. With no denominator declared the share cannot
         /// be formed and a non-zero count fails away from Healthy into Warning, never into Critical — the
-        /// unrateable-window discipline the rate bands above follow. Nothing failing bands Healthy whatever
-        /// the denominator, as before: the counts come off a seven-day aggregate that only lacks rows for a
-        /// server that has collected nothing in a week, which the freshness axis already paints.</para>
+        /// unrateable-window discipline the rate bands above follow.</para>
+        ///
+        /// <para><b>Zero banded collectors is Unknown, not Healthy (#3539, A6's sibling).</b> The arm this
+        /// replaces read <c>failing == 0 → Healthy</c> whatever the denominator, on the argument that the
+        /// counts come off a seven-day aggregate that only lacks rows for a server that has collected nothing
+        /// in a week, which the freshness axis already paints. That argument covers OFFLINE. It does not
+        /// cover a server registered and reachable whose first collection has not landed in the aggregate
+        /// yet, or a store whose collector-health read returned no rows for it: both handed this band
+        /// <c>(0, 0)</c> and got a green dot for a collection nobody had banded — the same positive claim of
+        /// health for an unmeasured metric that <see cref="MemorySeverity"/>'s null arm exists to refuse,
+        /// one row down the card. "Nothing failing" is only a health claim when there was something that
+        /// could have failed; with no collector banded there was not, and Unknown is the honest reading.
+        /// The viewer's offline arm and the web's <c>is_online === false</c> chip stay where they are: they
+        /// paint a KNOWN-dark server, and this arm paints one nothing has banded yet, which are different
+        /// facts on different axes.</para>
+        ///
+        /// <para>Unknown here is rank-neutral like every other Unknown on the card: the worst-of fold and the
+        /// fleet score skip it, and <see cref="MeasuredMetricCounts"/> stops counting the collectors row as
+        /// measured, so a card whose ONLY reading used to be this green dot now reads "0 of 6 measured" and
+        /// bands through <see cref="OverallMetricSeverity"/>'s nothing-measured arm rather than as Healthy.
+        /// A card with any collector banded is unchanged.</para>
         /// </summary>
         /// <param name="failedCollectorCount">Collectors whose seven-day band is FAILING.</param>
         /// <param name="collectorCount">Collectors banded at all in the same window (every band). Required
@@ -1035,7 +1055,10 @@ namespace PerformanceMonitor.Common
         {
             if (failedCollectorCount <= 0)
             {
-                return HealthSeverity.Healthy;
+                /* Nothing failing is Healthy only when something was banded; (0, 0) is a collection nobody
+                   has classified, not a clean one. A non-zero failing count with no denominator still falls
+                   through to the Warning arm below: a failure was observed even if the population was not. */
+                return collectorCount > 0 ? HealthSeverity.Healthy : HealthSeverity.Unknown;
             }
 
             var share = FailingCollectorSharePercent(failedCollectorCount, collectorCount);
@@ -1060,11 +1083,28 @@ namespace PerformanceMonitor.Common
 
         /// <summary>
         /// The card's worst metric band (offline handled separately by the border / overlay). Unknown and Healthy
-        /// never escalate — matching <c>ServerHealthStatus.OverallSeverity</c>'s reduce.
+        /// never escalate — matching <c>ServerHealthStatus.OverallSeverity</c>'s reduce — and a card on which
+        /// NO metric was measured folds to <see cref="HealthSeverity.Unknown"/>, not Healthy.
+        ///
+        /// <para><b>The nothing-measured arm (#3539 A6).</b> The fold skips Unknown so that an unmeasured
+        /// metric can never escalate a card, and that is still right: a partially-measured card bands on
+        /// what WAS read and <see cref="MeasuredMetricCounts"/> lets every label say how much that was
+        /// ("Healthy — 1 of 6 measured", #3528). But a fold over six Unknowns has nothing to fold, and
+        /// answering Healthy from it was a positive claim about a server on which not one reading had been
+        /// taken — an online server whose collectors had not yet been banded counted in the fleet's healthy
+        /// mass and drew a green card, with only a "0 of 6 measured" qualifier to say the green was empty.
+        /// Unknown is the reading the fold actually has, and <see cref="ClassifyBand"/> gives it the band
+        /// the product already gives a server nothing has measured yet: the awaiting-first-collection
+        /// Warning.</para>
+        ///
+        /// <para>This does not move a partially-measured card. One measured Healthy metric among five
+        /// Unknowns still folds to Healthy, exactly as before, so the #3528 rank-neutrality of Unknown holds
+        /// wherever there is anything measured to be neutral against; the only cards that move are the ones
+        /// on which there was nothing.</para>
         /// </summary>
         public static HealthSeverity OverallMetricSeverity(in ServerHealthMetrics m)
         {
-            var worst = HealthSeverity.Healthy;
+            var worst = HealthSeverity.Unknown;
             foreach (var s in MetricSeverities(m))
             {
                 if (s == HealthSeverity.Critical)
@@ -1075,6 +1115,12 @@ namespace PerformanceMonitor.Common
                 if (s == HealthSeverity.Warning)
                 {
                     worst = HealthSeverity.Warning;
+                }
+                else if (s == HealthSeverity.Healthy && worst == HealthSeverity.Unknown)
+                {
+                    /* The first measured reading lifts the fold off Unknown; a Warning already found keeps
+                       its place, because Healthy never de-escalates. */
+                    worst = HealthSeverity.Healthy;
                 }
             }
 
@@ -1108,7 +1154,21 @@ namespace PerformanceMonitor.Common
         /// <summary>
         /// Collapses a server's health to one fleet band, mirroring the card border: offline collection -> Offline;
         /// a never-collected (queued-during-bootstrap) server -> Warning (attention-worthy but not the red overlay);
-        /// else the card's worst metric band, with a stale collection also Warning.
+        /// else the card's worst metric band, with a stale collection also Warning, and a card on which nothing
+        /// was measured (<see cref="HealthSeverity.Unknown"/> overall) Warning for the same reason the
+        /// never-collected server is.
+        ///
+        /// <para><b>Why Unknown overall is Warning and not a band of its own (#3539 A6).</b> An online server
+        /// with no metric measured is in the same epistemic state as one awaiting its first collection — the
+        /// product knows nothing about its health — and that state already has a band here: Warning,
+        /// "attention-worthy but not the red overlay", chosen after a 24-server bootstrap incident put a
+        /// never-collected fleet under the red Offline overlay. A fifth <see cref="FleetHealthBand"/> member
+        /// would have been the alternative, and was rejected: it is a wire-visible enum on <c>/api/fleet</c>
+        /// and <c>get_fleet_overview</c>, every band consumer (the web tiles, the viewer's brushes, the
+        /// worst-first score's rank steps, the sweep's counts) would need an arm, and the reading it would
+        /// give — "this needs a look" — is the one Warning already gives. What this arm changes is that such
+        /// a server leaves the healthy mass: <c>healthy_count</c> no longer counts it, and it appears in the
+        /// worst-first ranking with a reason that says nothing was measured.</para>
         /// </summary>
         public static FleetHealthBand ClassifyBand(bool? isOnline, bool awaitingFirstCollection, bool collectionStale, HealthSeverity overallMetricSeverity)
         {
@@ -1126,6 +1186,7 @@ namespace PerformanceMonitor.Common
             {
                 HealthSeverity.Critical => FleetHealthBand.Critical,
                 HealthSeverity.Warning => FleetHealthBand.Warning,
+                HealthSeverity.Unknown => FleetHealthBand.Warning,
                 _ => collectionStale ? FleetHealthBand.Warning : FleetHealthBand.Healthy,
             };
         }
