@@ -1704,7 +1704,11 @@ public sealed class DarlingWorker : BackgroundService
                read would claim a hot-reload the config cannot deliver. Null/blank means the evaluator
                fires under the shipped "Monitor Store" constant, byte-identical to every release before
                the field existed. */
-            storeName: config.Peers?.StoreName);
+            storeName: config.Peers?.StoreName,
+            /* #3580: the two daily documents' delivered-today stamps, in the store's own key/value state
+               table, so a restart of this process does not re-announce a digest or rollup the previous
+               process delivered an hour ago — and does re-attempt one whose delivery failed. */
+            deliveryStamps: new PgSelfAlertDeliveryStampStore(postgres, _logger));
 
         /* #1706: report this start's store runtime upgrade, now that there IS an alert engine to report it
            through. Fired once, here, and never re-evaluated — the store is down while an upgrade runs, so

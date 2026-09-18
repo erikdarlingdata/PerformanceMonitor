@@ -335,11 +335,28 @@ internal sealed class DarlingSelfAlertEvaluator
     /// and cannot be taken from a phone at 3am. A longer interval alone would have produced the same
     /// unactionable card less often.</para>
     ///
-    /// <para><b>In-memory, like every sibling's interval, and a restart costs one extra digest.</b> That is
-    /// the failure class <see cref="StaleMuteRefire"/> and #3430's <c>RepeatDeliveryBudget</c> both already
-    /// accept, and it is what keeps this change free of a migration rung. An extra copy of a report is the
-    /// cheapest possible failure; nothing is lost either way, because the digest is recomputed from the
-    /// store every time rather than accumulated in process.</para>
+    /// <para><b>Gated on DELIVERED-TODAY in the store, not fired-today in memory (#3580).</b> This shipped
+    /// as "in-memory, like every sibling's interval, and a restart costs one extra digest" — the failure
+    /// class <see cref="StaleMuteRefire"/> and #3430's <c>RepeatDeliveryBudget</c> both accept, on the
+    /// argument that an extra copy of a report is the cheapest possible failure. The v3.8.0 install night
+    /// priced it: three stores restarted once each, and the channel carried SIX re-announcements among ~23
+    /// overnight posts — a quarter of the channel was this document and the rollup, twice — because a fresh
+    /// process has an empty <see cref="_lastCostDigest"/> and the gate was answering "has THIS PROCESS sent
+    /// one today" when the reader's question is "has one been DELIVERED today". The same night showed the
+    /// case the fix must keep: a pair whose delivery had FAILED (a transport fault, not a suppression) was
+    /// correctly re-attempted after the restart and landed; the restart was the recovery.</para>
+    ///
+    /// <para>So the gate now reads a delivery stamp from <see cref="ISelfAlertDeliveryStampStore"/> (the
+    /// store's existing key/value state table, no rung) and skips while <c>now - stamp</c> is inside this
+    /// interval, restart or not; and the stamp is written only when the deliverer reports a disposition
+    /// other than <see cref="AlertDelivery.ChannelFailed"/>. A failed delivery writes nothing, so the next
+    /// tick — restart or not — retries; the in-memory dictionary remains as a same-process fast path (23 of
+    /// 24 ticks still cost one lookup and no store read) but is no longer the authority. A store fault on
+    /// the stamp falls back to that fast path and warns — fail-open toward delivering, the direction every
+    /// store-fault posture in this evaluator already takes, because the alternative (skip on an unreadable
+    /// stamp) would let a store hiccup silence a daily document, and the memory gate still bounds the
+    /// fallback at one copy per process. The nothing-is-lost half of the original argument still holds:
+    /// the digest is recomputed from the store every time rather than accumulated in process.</para>
     /// </summary>
     internal static readonly TimeSpan CollectorCostDigestInterval = TimeSpan.FromDays(1);
 
@@ -352,9 +369,11 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>How many collectors the digest's heaviest-first census spells out.</summary>
     private const int MaxListedCostHeaviest = 10;
 
-    /// <summary>When the digest was last sent — the <see cref="_lastStaleMuteAlert"/> idiom, one fixed key.
-    /// A digest has no active flag and no resolution edge: it is a report of a measurement, not a condition
-    /// that can be entered and left, so there is nothing to clear.</summary>
+    /// <summary>When the digest was last known DELIVERED — the <see cref="_lastStaleMuteAlert"/> idiom, one
+    /// fixed key, but since #3580 a CACHE of the store's stamp rather than the authority: filled from the
+    /// stamp on the first tick that has to ask, and from the fire itself on a delivery the deliverer did
+    /// not report failed. A digest has no active flag and no resolution edge: it is a report of a
+    /// measurement, not a condition that can be entered and left, so there is nothing to clear.</summary>
     private readonly ConcurrentDictionary<string, DateTime> _lastCostDigest = new();
 
     /// <summary>
@@ -378,10 +397,15 @@ internal sealed class DarlingSelfAlertEvaluator
     /// the trailing day and only the trailing day, so what a post claims to cover and how often one can
     /// arrive are the same number and cannot drift apart.
     ///
-    /// <para><b>In-memory, like <see cref="CollectorCostDigestInterval"/>, and a restart costs one extra
-    /// rollup.</b> The same accepted failure class: an extra copy of a report is the cheapest possible
-    /// failure, and the rollup is recomputed from the sweep store every time rather than accumulated in
-    /// process, so nothing is lost in either direction.</para>
+    /// <para><b>Gated on delivered-today in the store, like <see cref="CollectorCostDigestInterval"/> and
+    /// for the same night's reason (#3580).</b> This shipped in-memory with "a restart costs one extra
+    /// rollup" accepted as the cheapest failure; the install night's census — three restarts, six
+    /// re-announcements, this document being three of them — is what that acceptance cost, and the digest's
+    /// remarks carry the arc. The one-post-per-day CEILING above is a ruling, and a gate that a restart
+    /// resets is a ceiling the deployment procedure breaches on every install. The rollup takes the same
+    /// stamp store, the same failed-writes-nothing rule and the same fail-open fallback, under its own key.
+    /// Still recomputed from the sweep store every time rather than accumulated in process, so nothing is
+    /// lost in either direction.</para>
     /// </summary>
     internal static readonly TimeSpan FleetSweepRollupInterval = TimeSpan.FromDays(1);
 
@@ -398,9 +422,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// stay readable on the fleet-wide day it exists for.</summary>
     private const int MaxListedRollupLedgerServers = 10;
 
-    /// <summary>When the rollup was last sent — the <see cref="_lastCostDigest"/> idiom, one fixed key. A
-    /// rollup is a report of a period, not a condition: no active flag, no resolution edge, nothing to
-    /// clear.</summary>
+    /// <summary>When the rollup was last known DELIVERED — the <see cref="_lastCostDigest"/> idiom, one
+    /// fixed key, and since #3580 the same cache-of-the-stamp role rather than the authority. A rollup is a
+    /// report of a period, not a condition: no active flag, no resolution edge, nothing to clear.</summary>
     private readonly ConcurrentDictionary<string, DateTime> _lastSweepRollup = new();
 
     /// <summary>The fixed key for the fleet-level Store Disk Pressure edge (not a real server).</summary>
@@ -776,7 +800,8 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<double>? retentionHoldWarnRatio = null,
         Func<double>? retentionHoldCriticalRatio = null,
         AlertReadFailureCounter? readFailures = null,
-        string? storeName = null)
+        string? storeName = null,
+        ISelfAlertDeliveryStampStore? deliveryStamps = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
@@ -811,7 +836,17 @@ internal sealed class DarlingSelfAlertEvaluator
            seam behaves like a store that never opted in — the AG-seam discipline, and the byte-identical
            promise the opt-in stands on. */
         _storeLabel = EffectiveStoreLabel(storeName);
+        /* #3580: unsupplied means the two daily documents gate on process memory alone — the pre-#3580
+           behavior, and what every test harness that does not care about restarts gets. Production
+           passes the store-backed stamps. */
+        _deliveryStamps = deliveryStamps;
     }
+
+    /// <summary>
+    /// Where the two daily documents' DELIVERED-TODAY stamps live across restarts (#3580), or null when the
+    /// process-memory gate is the only gate. See <see cref="CollectorCostDigestInterval"/> for the arc.
+    /// </summary>
+    private readonly ISelfAlertDeliveryStampStore? _deliveryStamps;
 
     /// <summary>
     /// Where a SWALLOWED self-alert store read is counted (#3013), or null when nothing is counting.
@@ -1195,11 +1230,13 @@ internal sealed class DarlingSelfAlertEvaluator
         var routing = RouteCostRegressions(regressions, census);
         await ApplyCostRegressionsAsync(routing.Paging, cancellationToken);
 
-        /* The digest's own interval, checked here so 23 of every 24 hourly ticks do no extra store work.
-           The master switch already returned above, before the first store read (#3464); AlertsEnabled is
+        /* The digest's own interval, checked here so 23 of every 24 hourly ticks do no extra store work —
+           the delivered-today gate (#3580): memory first, the stamp only when memory cannot answer. The
+           master switch already returned above, before the first store read (#3464); AlertsEnabled is
            ALSO checked inside the apply, like every sibling, so a direct caller cannot skip it. */
-        if (_lastCostDigest.TryGetValue(CollectorCostDigestKey, out var lastDigest)
-            && _utcNow() - lastDigest < CollectorCostDigestInterval)
+        if (await DocumentDeliveredInsideIntervalAsync(
+                _lastCostDigest, CollectorCostDigestKey, PgSelfAlertDeliveryStampStore.CostDigestStateKey,
+                CollectorCostDigestInterval, _utcNow(), "collector-cost digest", cancellationToken))
         {
             return;
         }
@@ -1467,8 +1504,9 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         var now = _utcNow();
-        if (_lastCostDigest.TryGetValue(CollectorCostDigestKey, out var lastSent)
-            && now - lastSent < CollectorCostDigestInterval)
+        if (await DocumentDeliveredInsideIntervalAsync(
+                _lastCostDigest, CollectorCostDigestKey, PgSelfAlertDeliveryStampStore.CostDigestStateKey,
+                CollectorCostDigestInterval, now, "collector-cost digest", cancellationToken))
         {
             return;
         }
@@ -1478,10 +1516,13 @@ internal sealed class DarlingSelfAlertEvaluator
             return;
         }
 
-        _lastCostDigest[CollectorCostDigestKey] = now;
         var (shortMessage, detail) = RenderCollectorCostDigest(movers, census);
 
-        await FireAsync(
+        /* #3580: the stamp is written AFTER the fire and only on a delivery the deliverer did not report
+           failed — it used to be written before the fire, unconditionally, which is the "fired-today" gate
+           this issue retires. A fire that throws before the deliverer is reached (the mute seam) delivered
+           nothing either, and takes the same path: no stamp, the next tick retries. */
+        var delivery = await FireAsync(
             StoreKey(CollectorCostDigestKey), _storeLabel, CollectorCostDigestMetric,
             currentValue: movers.Count.ToString(CultureInfo.InvariantCulture),
             /* There is no threshold. Saying so in the string is the point of the string: this surface
@@ -1497,6 +1538,10 @@ internal sealed class DarlingSelfAlertEvaluator
             numericCurrentValue: movers.Count,
             numericThresholdValue: 0,
             cancellationToken);
+
+        await RecordDocumentDeliveredAsync(
+            _lastCostDigest, CollectorCostDigestKey, PgSelfAlertDeliveryStampStore.CostDigestStateKey,
+            delivery, now, "collector-cost digest", cancellationToken);
     }
 
     /// <summary>
@@ -1636,8 +1681,10 @@ internal sealed class DarlingSelfAlertEvaluator
     /// left to discover it.</para>
     ///
     /// <para>Called from the worker's hourly store-metrics tick beside the collector-cost evaluation; 23 of
-    /// every 24 ticks cost one dictionary lookup. Testable through
-    /// <see cref="ApplyFleetSweepRollupAsync"/> with a recording deliverer and a controllable clock.</para>
+    /// every 24 ticks cost one dictionary lookup, and the first tick after a start costs one stamp read
+    /// instead of a re-announcement (#3580 — <see cref="DocumentDeliveredInsideIntervalAsync"/>). Testable
+    /// through <see cref="ApplyFleetSweepRollupAsync"/> with a recording deliverer, a controllable clock and
+    /// an in-memory stamp store.</para>
     /// </summary>
     public async Task EvaluateFleetSweepRollupAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
@@ -1649,8 +1696,10 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         var now = _utcNow();
-        if (_lastSweepRollup.TryGetValue(FleetSweepRollupKey, out var lastSent)
-            && now - lastSent < FleetSweepRollupInterval)
+        /* #3580: delivered-today, memory first and the stamp when memory cannot answer. */
+        if (await DocumentDeliveredInsideIntervalAsync(
+                _lastSweepRollup, FleetSweepRollupKey, PgSelfAlertDeliveryStampStore.FleetSweepRollupStateKey,
+                FleetSweepRollupInterval, now, "fleet-sweep rollup", cancellationToken))
         {
             return;
         }
@@ -1730,8 +1779,9 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         var now = _utcNow();
-        if (_lastSweepRollup.TryGetValue(FleetSweepRollupKey, out var lastSent)
-            && now - lastSent < FleetSweepRollupInterval)
+        if (await DocumentDeliveredInsideIntervalAsync(
+                _lastSweepRollup, FleetSweepRollupKey, PgSelfAlertDeliveryStampStore.FleetSweepRollupStateKey,
+                FleetSweepRollupInterval, now, "fleet-sweep rollup", cancellationToken))
         {
             return;
         }
@@ -1742,10 +1792,10 @@ internal sealed class DarlingSelfAlertEvaluator
             return;
         }
 
-        _lastSweepRollup[FleetSweepRollupKey] = now;
         var (shortMessage, detail) = RenderFleetSweepRollup(facts, spanStartUtc, spanEndUtc);
 
-        await FireAsync(
+        /* #3580: stamped after the fire, and only on a delivery not reported failed — the digest's rule. */
+        var delivery = await FireAsync(
             StoreKey(FleetSweepRollupKey), _storeLabel, FleetSweepRollupMetric,
             currentValue: facts.Sweeps.ToString(CultureInfo.InvariantCulture),
             /* There is no threshold - the digest's exact posture, stated in the string because the NOT NULL
@@ -1760,6 +1810,179 @@ internal sealed class DarlingSelfAlertEvaluator
             numericCurrentValue: facts.Sweeps,
             numericThresholdValue: 0,
             cancellationToken);
+
+        await RecordDocumentDeliveredAsync(
+            _lastSweepRollup, FleetSweepRollupKey, PgSelfAlertDeliveryStampStore.FleetSweepRollupStateKey,
+            delivery, now, "fleet-sweep rollup", cancellationToken);
+    }
+
+    /* ------------------------- #3580: the daily documents' delivered-today gate ------------------------- */
+
+    /// <summary>
+    /// Whether a daily document was DELIVERED inside its interval as of <paramref name="now"/> — the gate
+    /// both documents' evaluate and apply halves consult (#3580). The store SEEDS process memory after a
+    /// start; memory serves the process; every delivery writes both — the shape #981 gave the email
+    /// cooldown (<c>IAlertHistoryStore.GetLastEmailSentUtcAsync</c> seeds it across restart), applied to
+    /// the one gate that was still memory-only.
+    ///
+    /// <para><b>Memory answers whenever it holds anything.</b> 23 of every 24 hourly ticks fall inside the
+    /// interval of a delivery this process already knows about, and those ticks cost one dictionary lookup
+    /// and no store round-trip — the cost promise the documents' callers make. Memory is also allowed to
+    /// answer "outside the interval, deliver" without re-asking the store, because there is ONE writer per
+    /// store and it is this process: once memory is seeded the store can never hold a newer stamp than
+    /// memory does, so a second read could only return what memory already knows. That is also why the
+    /// evaluate half's pre-check and the apply half's own check cost one store read between them and not
+    /// two — the first seeds, the second finds memory populated.</para>
+    ///
+    /// <para><b>The stamp store is asked ONCE per document per process — on the first tick, when memory is
+    /// empty</b> — and whatever it answers is cached, including "nothing": a stamp inside the interval
+    /// gates; a stamp outside it lets the document proceed to its reads and stays cached, so a subsequent
+    /// failed delivery leaves memory pointing at the last REAL delivery rather than at nothing; no row, or
+    /// a read that failed, caches <see cref="NoDeliveryKnown"/>, which reads as "deliver" from then on.
+    /// Caching the empty answer is exact under the single-writer fact above — a store that had no row for
+    /// this process's first tick cannot gain one except through this process, which would populate memory
+    /// directly — and it is what keeps the cost model honest in the fault case as well as the happy one: the
+    /// evaluate half's pre-check asks, and the apply half's own check, seconds later on the same tick,
+    /// finds memory populated whether the store answered, was empty, or threw. Re-asking on a fault would
+    /// log the same failure twice and count it twice in the #3013 census on every tick the fault persisted,
+    /// for one logical failure. The retry the install night's recovery case needs is unaffected: a document
+    /// that has never delivered reads "deliver" from memory on every tick until a delivery lands.</para>
+    ///
+    /// <para><b>A stamp read that fails falls OPEN to memory, warns, and is counted.</b> Fail-open toward
+    /// delivering is the direction every store-fault posture in this evaluator already takes for its
+    /// documents — the rollup's read fault "skips the tick WITHOUT consuming the interval" so an unreadable
+    /// store cannot become a permanently quiet channel; the digest's does the same — and it is bounded: the
+    /// memory gate still holds within the process once one delivery lands, so a store that cannot answer
+    /// costs at most one extra copy per process, which is exactly the pre-#3580 posture and not a spam
+    /// path. Failing CLOSED (skip when the stamp cannot be read) would let a store hiccup silence a daily
+    /// document, the worse failure. Counted into #3013's census because it is a store read the alert pass
+    /// performed, failed and swallowed, and the census exists so that population is not invisible; the
+    /// warning beside it names the document that could not ask. Counted ONCE per process, per the
+    /// paragraph above — the census measures faults the pass met, and this pass meets this one once.</para>
+    ///
+    /// <para>No store configured (<see cref="_deliveryStamps"/> null) is the pre-#3580 gate exactly: memory
+    /// only.</para>
+    /// </summary>
+    private async Task<bool> DocumentDeliveredInsideIntervalAsync(
+        ConcurrentDictionary<string, DateTime> lastDelivered, string memoryKey, string stampKey,
+        TimeSpan interval, DateTime now, string documentName, CancellationToken cancellationToken)
+    {
+        if (lastDelivered.TryGetValue(memoryKey, out var known))
+        {
+            return known != NoDeliveryKnown && now - known < interval;
+        }
+
+        if (_deliveryStamps is null)
+        {
+            return false;
+        }
+
+        DateTime? stamped;
+        var stampClock = Stopwatch.StartNew();
+        try
+        {
+            stamped = await _deliveryStamps.GetDeliveredAtUtcAsync(stampKey, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* One read name for both documents, because the #3013 census keys a counted site on a LITERAL
+               name with its own clock and this is one site serving two callers; the log line beside it
+               names the document, so the actionable half is not lost — it is a line away. The sentinel
+               is what makes this warning and this count fire once per process rather than once per check:
+               the apply half's own gate, seconds from now, finds memory populated and does not re-ask. */
+            _logger?.LogWarning(ex,
+                "{Document} delivery stamp could not be read after {ElapsedMs} ms; gating on process memory from here, which re-announces once per restart until the store answers",
+                documentName, stampClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "daily-document delivery-stamp self-alert", stampClock.ElapsedMilliseconds);
+            lastDelivered[memoryKey] = NoDeliveryKnown;
+            return false;
+        }
+
+        if (stamped is not DateTime deliveredAt)
+        {
+            lastDelivered[memoryKey] = NoDeliveryKnown;
+            return false;
+        }
+
+        lastDelivered[memoryKey] = deliveredAt;
+        return now - deliveredAt < interval;
+    }
+
+    /// <summary>
+    /// What <see cref="DocumentDeliveredInsideIntervalAsync"/> caches when the store was asked and had no
+    /// answer — no row, or a read that threw — so the store is asked once per document per process and
+    /// never re-asked on the same tick by the apply half (#3580). Reads as "deliver": the gate compares it
+    /// by identity before the interval arithmetic, so it can never be mistaken for a real stamp, and the
+    /// first delivery that lands replaces it with a real one. <see cref="DateTime.MinValue"/> rather than a
+    /// nullable value because the dictionaries are the pre-#3580 shape and every sibling gate in this file
+    /// keys on presence; a value that means "asked, nothing known" keeps presence meaning "asked".
+    /// </summary>
+    private static readonly DateTime NoDeliveryKnown = DateTime.MinValue;
+
+    /// <summary>
+    /// Records that a daily document was DELIVERED at <paramref name="now"/> — into process memory and,
+    /// when a store is configured, into the delivery stamp — unless the deliverer reported the send
+    /// <see cref="AlertDelivery.ChannelFailed"/> (#3580).
+    ///
+    /// <para><b>"Failed" is the one disposition that writes nothing, and the rule is stated as that one
+    /// exclusion on purpose.</b> It is the disposition the install night's recovery case wore: a channel
+    /// was attempted and came back unsuccessful, so nothing reached a reader, and the next tick — restart
+    /// or not — must retry. Every other answer is either a delivery (<see cref="AlertDelivery.Sent"/>) or
+    /// the product's own decision that nothing is owed: <see cref="AlertDelivery.ChannelMuted"/> (a mute
+    /// rule chose the silence), <see cref="AlertDelivery.ChannelNoneConfigured"/> (no channel exists to
+    /// deliver to — the history row IS the delivery, and retrying hourly would write 24 rows a day for
+    /// nothing), <see cref="AlertDelivery.ChannelThrottled"/> (a copy went out inside the cooldown, so this
+    /// one is not owed) and <see cref="AlertDelivery.ChannelFolded"/> (reported on another delivery's
+    /// roster). A <c>null</c> report — a deliverer that does not report, or one whose outer isolation
+    /// caught something outside the channels — is "unreported", not "failed", and stamps: that is how
+    /// every fire before #3580 was treated, and a deliverer that KNOWS a send failed says so. Stating the
+    /// exclusion rather than an allow-list means a disposition added later defaults to the quiet side; one
+    /// that means "not delivered and owed" has to be added here by name.</para>
+    ///
+    /// <para><b>The stamp write is failure-isolated and NOT counted</b> — a write, not a condition read,
+    /// the <see cref="RecordResolutionAsync"/> distinction. Memory is stamped first, so a store that will
+    /// not take the write still gates this process; the warning says the next restart will re-announce.
+    /// The instant recorded is the evaluator's <paramref name="now"/>, the controllable clock, so a test
+    /// can place the stamp and the interval compare is against the same clock it was written from.</para>
+    /// </summary>
+    private async Task RecordDocumentDeliveredAsync(
+        ConcurrentDictionary<string, DateTime> lastDelivered, string memoryKey, string stampKey,
+        AlertDelivery? delivery, DateTime now, string documentName, CancellationToken cancellationToken)
+    {
+        if (delivery is { Channel: AlertDelivery.ChannelFailed })
+        {
+            _logger?.LogWarning(
+                "{Document} delivery failed ({Error}); no delivery stamp written, so the next tick retries it",
+                documentName, delivery.SendError ?? "no error text");
+            return;
+        }
+
+        lastDelivered[memoryKey] = now;
+
+        if (_deliveryStamps is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _deliveryStamps.RecordDeliveredAtUtcAsync(stampKey, now, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: a stamp WRITE, not a condition read. */
+            _logger?.LogWarning(ex,
+                "{Document} was delivered but its delivery stamp could not be written; process memory gates it until the next restart, which will re-announce it",
+                documentName);
+        }
     }
 
     /// <summary>One band transition a covered sweep reported: the server by name (the documents carry names
@@ -4524,10 +4747,14 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
     /// own subject. That condition scans the rules it already holds for one that NAMES it and passes the
     /// verdict in here instead (#3348). Nothing else may pass this: a caller that hands in a decision it did
     /// not derive from an explicit naming has re-introduced the self-suppression the seam cannot see.</para></param>
+    /// <returns>What the deliverer reported the channels did (#3580), or <c>null</c> when it reported
+    /// nothing — read by the two daily documents' stamps and ignored by every condition-class caller,
+    /// whose lifecycle is edge-driven and owes nothing to a failed send. See
+    /// <see cref="IAlertDeliverer.DeliverAndReportAsync"/> for why the report rides a second method.</returns>
     /* The optional context TRAILS the cancellation token so the dozens of existing positional call
        sites stay untouched — only the callers that have discrete facts to carry (#2109: the AG
        database alerts) name it. Same for muted, which defaults to asking the seam like its siblings. */
-    private async Task FireAsync(
+    private async Task<AlertDelivery?> FireAsync(
         string serverKey, string serverName, string metricName, string currentValue, string thresholdValue,
         string detail, AlertSeverityLevel? severity, string shortMessage,
         double? numericCurrentValue, double? numericThresholdValue, CancellationToken cancellationToken,
@@ -4552,7 +4779,7 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
             AlertFiringLog.Fired(
                 serverName, metricName, severity?.ToString() ?? "Warning", shortMessage, isMuted));
 
-        await _deliverer.DeliverAsync(new AlertOutcome(
+        return await _deliverer.DeliverAndReportAsync(new AlertOutcome(
             serverKey, serverName, metricName, currentValue, thresholdValue,
             Context: context, DetailText: detail,
             NumericCurrentValue: numericCurrentValue, NumericThresholdValue: numericThresholdValue,

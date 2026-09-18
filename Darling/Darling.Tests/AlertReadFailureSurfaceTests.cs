@@ -884,7 +884,7 @@ public sealed class AlertReadFailureSurfaceTests
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
         (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 14, 6),
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 8, 11),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 9, 12),
     };
 
     /// <summary>
@@ -945,9 +945,14 @@ public sealed class AlertReadFailureSurfaceTests
     /// delivery end. And <c>AlertEngine.cs</c> carries a FOURTEENTH since #3495: the maintenance-annotation
     /// probe on the High CPU fire path — counted because its swallowed failure silently costs the card the
     /// one line that closes the triage, and an operator chasing a mystery backup deserves to see that the
-    /// probe went blind rather than that no maintenance ran.</para>
+    /// probe went blind rather than that no maintenance ran. And <c>DarlingSelfAlertEvaluator.cs</c> a
+    /// NINTH since #3580: the daily documents' delivered-today stamp read, ONE site serving both the digest
+    /// and the rollup (so one literal name; the warning beside it names the document) — counted because a
+    /// swallowed stamp read is the gate falling back to process memory, which is the pre-#3580
+    /// re-announce-per-restart posture returning for that tick, and a population of those under store
+    /// contention is exactly what this census exists to make visible. Its sibling WRITE is exempt.</para>
     /// </summary>
-    private const int CountedSites = 32;
+    private const int CountedSites = 33;
 
     /// <summary>
     /// Log-message fragments that identify a catch block DELIBERATELY not counted, each paired with the
@@ -980,6 +985,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Failed to check failed jobs"] = "the fetcher reads the monitored server's msdb; the block's only store op is a write both stores swallow",
         ["CONVERTS the fault into the unreadable count"] = "a parse arm, not a read: the fleet-sweep rollup's store read is counted above it, and a document that does not parse becomes the rollup's own reportable unreadable count - the fault is evidence, not a swallow",
         ["Could not resolve Agent job names"] = "reads the monitored server's msdb through the host resolver, not the store - the Recently-failed-job precedent one seam over; the card degrades to the unresolved form whose raw marker keeps the gap visible, and the page still delivers",
+        ["delivery stamp could not be written"] = "a write (#3580): the daily document was already delivered and process memory already gates it; the dropped stamp costs one re-announcement at the next restart and never a delivery - the stamp READ beside it is the read, and it is counted",
     };
 
     /// <summary>
@@ -1070,8 +1076,10 @@ public sealed class AlertReadFailureSurfaceTests
            rollup's own unreadable count rather than a read failure. 23rd since #3497: the Agent-job
            resolver's catch, an msdb read on the monitored server degrading to the unresolved form. 24th
            since #3514: the web-dashboard TLS certificate self-alert's catch, whose evidence is the in-memory
-           WebTlsCertificateState report the web host publishes - there is no store read to swallow. */
-        Assert.Equal(24, totalExempt);
+           WebTlsCertificateState report the web host publishes - there is no store read to swallow. 25th
+           since #3580: the daily documents' delivery-stamp WRITE, a write whose loss costs one
+           re-announcement at the next restart and never a delivery. */
+        Assert.Equal(25, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

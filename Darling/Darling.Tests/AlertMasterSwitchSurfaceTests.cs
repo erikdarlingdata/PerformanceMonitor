@@ -47,7 +47,9 @@ public sealed class AlertMasterSwitchSurfaceTests
     /* ---------------- the delivery-call census ---------------- */
 
     /// <summary>
-    /// A call that can put an alert on a channel: the shared deliverer seam (<c>DeliverAsync</c>), the
+    /// A call that can put an alert on a channel: the shared deliverer seam (<c>DeliverAsync</c>, and its
+    /// #3580 reporting twin <c>DeliverAndReportAsync</c> — the same send, answering what the channels did,
+    /// which the self-alert funnel now calls so the two daily documents can stamp delivered-today), the
     /// analysis notify seam (<c>NotifyAsync</c> / <c>SendFindingAlertAsync</c>), Lite's direct send seam
     /// (<c>TrySendAlertEmailAsync</c>), the shared send core (<c>TrySendAsync</c>), and the deliberate
     /// channel-probe statics (<c>SendTest*</c>). Dot-qualified on purpose: a DECLARATION has no receiver,
@@ -55,7 +57,7 @@ public sealed class AlertMasterSwitchSurfaceTests
     /// comment-and-string-stripped source, so prose mentioning a seam is not a site.
     /// </summary>
     private static readonly Regex s_deliveryCall = new(
-        @"\??\.\s*(?:DeliverAsync|NotifyAsync|TrySendAlertEmailAsync|TrySendAsync|SendFindingAlertAsync|SendTestPagerDutyAsync|SendTestTeamsAsync|SendTestSlackAsync|SendTestGenericAsync)\s*\(",
+        @"\??\.\s*(?:DeliverAsync|DeliverAndReportAsync|NotifyAsync|TrySendAlertEmailAsync|TrySendAsync|SendFindingAlertAsync|SendTestPagerDutyAsync|SendTestTeamsAsync|SendTestSlackAsync|SendTestGenericAsync)\s*\(",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>How a censused site pays for its place on a delivery path.</summary>
@@ -282,8 +284,10 @@ public sealed class AlertMasterSwitchSurfaceTests
 
         for (var i = 0; i < lines.Length; i++)
         {
-            /* A firing call, not the funnel's own declaration: FireAsync is called bare (same class). */
-            if (!Regex.IsMatch(lines[i], @"(?<![\w.])FireAsync\s*\(") || Regex.IsMatch(lines[i], @"\bTask\s+FireAsync\s*\("))
+            /* A firing call, not the funnel's own declaration: FireAsync is called bare (same class). The
+               declaration's return type is generic since #3580 (Task<AlertDelivery?> — the funnel reports
+               what the channels did), so the exclusion allows a type-argument list on the Task. */
+            if (!Regex.IsMatch(lines[i], @"(?<![\w.])FireAsync\s*\(") || Regex.IsMatch(lines[i], @"\bTask(?:<[^>]*>)?\s+FireAsync\s*\("))
             {
                 continue;
             }
