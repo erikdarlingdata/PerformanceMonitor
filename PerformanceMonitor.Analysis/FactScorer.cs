@@ -633,7 +633,15 @@ public class FactScorer
        memory total/target (bar 101%) can never reach 3x their bars, so a young store's CPU or memory
        anomaly cannot escape on an untrustworthy baseline at all, which is correct: "we do not know your
        normal yet" is not evidence of an outage. An operator who scales a metric's deviation threshold
-       scales its fire_threshold with it (ModifiedZThresholdFor), so the escape bar tracks the knob. */
+       scales its fire_threshold with it (ModifiedZThresholdFor), so the escape bar tracks the knob — up
+       to the display cap: AnomalyGate clamps the stored deviation_sigma at SigmaDisplayCap (25σ) BEFORE
+       the scorer ever sees it, so a bar above 25σ would be unreachable and the escape would go silently
+       dead for exactly the deployments that tuned a metric hard (a knob past ~8.3x the shipped anchor
+       puts 3x over 25) — the same "structurally quietest" defect this constant exists to fix, just for a
+       differently-tuned store. IsExtremeAnomaly therefore takes min(3x anchor, SigmaDisplayCap): a sigma
+       pinned at the cap means "at least 25σ", which is extreme under any anchor an operator can set. The
+       wait profile's modified_z is not display-capped (BaselineMath.ModifiedZScore) and needs no such
+       bound. */
     private const double ExtremeAnomalyMultiple = 3.0;
 
     /// <summary>
@@ -704,7 +712,9 @@ public class FactScorer
             if (fact.Metadata.GetValueOrDefault("baseline_low_quality") >= 1.0)
                 return fact.Metadata.GetValueOrDefault("fallback_exceedance") >= ExtremeAnomalyMultiple;
 
-            return fact.Metadata.GetValueOrDefault("deviation_sigma") >= ExtremeAnomalyMultiple * FireAnchor(fact);
+            // Bounded at the display cap — see ExtremeAnomalyMultiple: the stored sigma can never exceed it.
+            var escapeBar = Math.Min(ExtremeAnomalyMultiple * FireAnchor(fact), Baselines.AnomalyThresholds.SigmaDisplayCap);
+            return fact.Metadata.GetValueOrDefault("deviation_sigma") >= escapeBar;
         }
 
         if (fact.Key.StartsWith("ANOMALY_WAIT_PROFILE", StringComparison.OrdinalIgnoreCase))

@@ -556,6 +556,9 @@ public class FactScorerTests : IClassFixture<SharedDuckDbFixture>
     // (a pre-#1743 fact with no fire_threshold) → 6σ; robust 3.5 → 10.5σ; heavy-tail 5.0 → 15σ. Each
     // row plants the root beside the same two co-fires (+0.3 +0.3 → 1.6 when released, 1.49 when
     // capped) and probes one side of the bar. The root's base is 1.0 in every row (all are >= 2x anchor).
+    // The last two rows pin the display-cap bound (review-caught on this PR): AnomalyGate clamps the
+    // stored deviation_sigma at SigmaDisplayCap (25σ), so an operator-scaled anchor of 10.0 (3x = 30σ,
+    // unreachable) must open at 25σ instead of going silently dead — and a hair under 25 stays capped.
     [Theory]
     [InlineData(6.0, 0.0, 1.6)]      // classical: 3 x 2.0 → released
     [InlineData(5.99, 0.0, 1.49)]    // classical: a hair under → capped
@@ -563,6 +566,8 @@ public class FactScorerTests : IClassFixture<SharedDuckDbFixture>
     [InlineData(10.49, 3.5, 1.49)]   // robust: a hair under → capped
     [InlineData(15.0, 5.0, 1.6)]     // heavy-tail: 3 x 5.0 → released
     [InlineData(14.99, 5.0, 1.49)]   // heavy-tail: a hair under → capped
+    [InlineData(25.0, 10.0, 1.6)]    // hard-tuned anchor: min(30, 25) = the display cap → released
+    [InlineData(24.99, 10.0, 1.49)]  // hard-tuned anchor: a hair under the cap → capped
     public void Score_AnomalyExtremityEscape_OpensAtThreeTimesTheFireThreshold(
         double deviationSigma, double fireThreshold, double expected)
     {
