@@ -297,6 +297,16 @@ public sealed class DarlingComposeTests
             PostgresMajorVersion = 17, PostgresVersionNum = 170_005, IsInRecovery = false,
         };
 
+        /* #3604: pg_wait_sampling is gated OFF Aurora (the module cannot be preloaded there; pg_wait_stats is
+           the instrument on that engine), so its measures surface for a stock writer instead. Every other
+           PostgreSQL measure still clears the Aurora writer, and the two shapes together still cover the
+           whole PostgreSQL measure set - which is the property this test exists for. */
+        var stockWriterWithExtension = new CollectorTargetInfo
+        {
+            Engine = CollectorTargetEngine.PostgreSql, IsAurora = false, HasPgWaitSamplingExtension = true,
+            PostgresMajorVersion = 17, PostgresVersionNum = 170_005, IsInRecovery = false,
+        };
+
         var pg = PostgresMeasures();
         Assert.NotEmpty(pg);
         foreach (var measure in pg)
@@ -308,6 +318,16 @@ public sealed class DarlingComposeTests
                 $"pg measure '{measure.Key}' source '{measure.SourceTable}' engine gate must exclude SQL Server.");
             Assert.False(CollectorCatalog.AppliesTo(collector!, sqlServer),
                 $"pg measure '{measure.Key}' source '{measure.SourceTable}' must not apply to a SQL Server target.");
+
+            if (string.Equals(measure.SourceTable, PgWaitSamplingCollector.Instance.TargetTable, StringComparison.Ordinal))
+            {
+                Assert.False(CollectorCatalog.AppliesTo(collector!, auroraWriter),
+                    $"pg measure '{measure.Key}' reads pg_wait_sampling, which #3604 gated off Aurora - it must not surface there.");
+                Assert.True(CollectorCatalog.AppliesTo(collector!, stockWriterWithExtension),
+                    $"pg measure '{measure.Key}' source '{measure.SourceTable}' must apply to a stock writer with the extension.");
+                continue;
+            }
+
             Assert.True(CollectorCatalog.AppliesTo(collector!, auroraWriter),
                 $"pg measure '{measure.Key}' source '{measure.SourceTable}' must apply to a modern Aurora writer.");
         }

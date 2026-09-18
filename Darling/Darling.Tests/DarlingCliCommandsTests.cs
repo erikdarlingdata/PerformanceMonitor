@@ -145,16 +145,40 @@ public sealed class DarlingCliCommandsTests
         Assert.DoesNotContain("Unknown (0)", line, StringComparison.Ordinal);
     }
 
-    /// <summary>An Aurora writer clears every gate, so the count says so rather than listing nothing.</summary>
+    /// <summary>
+    /// An Aurora writer clears every gate but ONE, and the line names it. Until #3604 Aurora was a strict
+    /// superset of what the PostgreSQL collectors read and the line said "all N apply"; <c>pg_wait_sampling</c>
+    /// is now gated off Aurora — the engine cannot preload the module and has <c>pg_wait_stats</c> instead —
+    /// so the pre-flight is where an operator first sees that one collector, by name, does not run there.
+    /// Counted from the catalog and the collectors' own gates rather than hard-coded, so a second Aurora
+    /// gap shows up here as a changed count rather than a silently passing pin.
+    /// </summary>
     [Fact]
-    public void FormatProbeLine_AuroraWriter_ReportsEveryPostgresCollectorApplies()
+    public void FormatProbeLine_AuroraWriter_ReportsEveryPostgresCollectorButTheOneAuroraCannotHave()
     {
-        var expected = CollectorCatalog.All.Count(d => d.TargetEngine == CollectorTargetEngine.PostgreSql);
+        var target = PostgresProbe().ToTargetInfo();
+        var postgres = CollectorCatalog.All.Where(d => d.TargetEngine == CollectorTargetEngine.PostgreSql).ToList();
+        var skipped = postgres.Where(d => !CollectorCatalog.AppliesTo(d, target)).Select(d => d.Name).ToList();
+        Assert.Equal(new[] { PgWaitSamplingCollector.Instance.Name }, skipped);
 
         var line = DarlingCliCommands.FormatProbeLine("aurora-writer", PostgresProbe());
 
-        Assert.Contains($"all {expected} PostgreSQL collectors apply", line, StringComparison.Ordinal);
-        Assert.DoesNotContain("skipped", line, StringComparison.Ordinal);
+        Assert.Contains($"{postgres.Count - 1} of {postgres.Count} PostgreSQL collectors apply", line, StringComparison.Ordinal);
+        Assert.Contains("skipped: pg_wait_sampling", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>The line an Aurora writer used to get, every PostgreSQL collector applying, is now the STOCK
+    /// writer's with the extension present — the shape #3604 made the finest stock tier.</summary>
+    [Fact]
+    public void FormatProbeLine_StockWriterWithTheExtension_ReportsEveryPostgresCollectorApplies()
+    {
+        var expected = CollectorCatalog.All.Count(d => d.TargetEngine == CollectorTargetEngine.PostgreSql);
+        var probe = PostgresProbe() with { IsAurora = false, HasPgWaitSamplingExtension = true };
+
+        /* pg_wait_stats and pg_cpu_utilization are Aurora-only, so a stock target skips those two instead. */
+        var line = DarlingCliCommands.FormatProbeLine("stock-writer", probe);
+        Assert.Contains($"{expected - 2} of {expected} PostgreSQL collectors apply", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_wait_sampling", line, StringComparison.Ordinal);
     }
 
     /// <summary>

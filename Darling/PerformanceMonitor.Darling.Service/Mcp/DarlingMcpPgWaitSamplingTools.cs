@@ -120,20 +120,6 @@ public sealed class DarlingMcpPgWaitSamplingTools
     }
 
     /// <summary>
-    /// The response body, split out so the WIRE SHAPE can be asserted without a live store.
-    ///
-    /// <para><b>The denominator is the window's, not the page's</b> (#3541 A7). <paramref name="page"/> carries
-    /// <c>WindowTotalSamples</c> from the same statement as its rows, and every <c>pct_of_samples</c> divides by
-    /// THAT. The previous shape divided by the sum of the rows fetched, so at <c>limit = 3</c> the three shares
-    /// summed to 100% and "waiting or working?" was answered over three series rather than over the
-    /// profile. The page's own sum still travels as <c>returned_samples</c>; the ratio of the two is
-    /// <c>returned_pct_of_total</c>.</para>
-    ///
-    /// <para>The denominator is SAMPLES, not the estimate. Every row's estimate is the same count times the
-    /// same period, so the two shares are arithmetically identical — and taking it from the count keeps
-    /// the percentage anchored to what was actually observed.</para>
-    /// </summary>
-    /// <summary>
     /// The sentence the empty arm appends about the instrument (#3604): the service tier's floor caveat when
     /// that is what is sampling, nothing when the extension is (its idle answer needs no qualification), and a
     /// plain "not yet recorded" when no cycle has stated an arm.
@@ -153,6 +139,20 @@ public sealed class DarlingMcpPgWaitSamplingTools
             : string.Empty;
     }
 
+    /// <summary>
+    /// The response body, split out so the WIRE SHAPE can be asserted without a live store.
+    ///
+    /// <para><b>The denominator is the window's, not the page's</b> (#3541 A7). <paramref name="page"/> carries
+    /// <c>WindowTotalSamples</c> from the same statement as its rows, and every <c>pct_of_samples</c> divides by
+    /// THAT. The previous shape divided by the sum of the rows fetched, so at <c>limit = 3</c> the three shares
+    /// summed to 100% and "waiting or working?" was answered over three series rather than over the
+    /// profile. The page's own sum still travels as <c>returned_samples</c>; the ratio of the two is
+    /// <c>returned_pct_of_total</c>.</para>
+    ///
+    /// <para>The denominator is SAMPLES, not the estimate. Every row's estimate is the same count times the
+    /// same period, so the two shares are arithmetically identical — and taking it from the count keeps
+    /// the percentage anchored to what was actually observed.</para>
+    /// </summary>
     internal static string BuildWaitSamplingJson(
         string serverName,
         int hoursBack,
