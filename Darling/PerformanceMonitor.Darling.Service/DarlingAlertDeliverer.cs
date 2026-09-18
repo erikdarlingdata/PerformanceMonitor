@@ -143,8 +143,10 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
            only Context.SeverityOverride — so every self-alert (fired with Context: null) rendered
            INFO-blue in Teams/Slack/PagerDuty/webhooks while its log line said Critical. Fold the
            outcome's severity into the context here, once, upstream of every channel; ??= so an
-           explicit override set by a context builder still wins. The context also serializes into
-           alert history, so replays keep the severity too. */
+           explicit override set by a context builder still wins. The context serializes into alert
+           history below, and since #3539 A8e the serializer carries this property as the row's Severity
+           member — so the history grids and get_alert_history read the tier the alert fired at (before
+           that the projection dropped it, and this comment's "replays keep the severity" was not true). */
         if (outcome.Severity is not null)
         {
             context ??= new AlertContext();

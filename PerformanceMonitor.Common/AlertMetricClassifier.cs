@@ -16,6 +16,14 @@ namespace PerformanceMonitor.Common
     /// <see cref="IsWarning"/>) are used by ALL THREE Alert History grids — Lite's, the Darling
     /// Viewer's and the deprecated Dashboard's — and by the Dashboard sidebar's Alert badge count.
     ///
+    /// <para><b>Since #3539 A8e the two SKU grids reach <see cref="IsCritical"/> / <see cref="IsWarning"/>
+    /// only as a FALLBACK</b>, through <c>AlertHistoryRowSeverity</c> (Alerting): a row that persisted
+    /// the tier the alert fired at (the serializer's <c>Severity</c> member) is styled by that tier, and
+    /// the name decides only for rows that carry none — written before the member existed, fired with no
+    /// runtime grade, or a resolution. <see cref="IsResolution"/> stays the primary arm it always was: a
+    /// resolution is a naming convention, not a tier. The Dashboard still calls the name predicates
+    /// directly; its own engine fires presence-flat, so for its rows the name IS the tier.</para>
+    ///
     /// Alert classification across this codebase is metric-name based — there is no structural "kind"
     /// field on a row — so this centralizes a string convention that was previously duplicated inline
     /// in Dashboard's AlertsHistoryContent and Lite's AlertHistoryRow, and had drifted: both copies
@@ -79,6 +87,12 @@ namespace PerformanceMonitor.Common
         /// <summary>
         /// True when the metric name denotes a critical-severity alert (deadlock or poison wait),
         /// used for row emphasis in the history grids. Mirrors the long-standing inline convention.
+        ///
+        /// <para>"Poison" stays here although Poison Wait is GRADED at both engines' fire sites now (#2711,
+        /// #3539 A4), because this predicate is what a row with NO persisted tier is styled by, and every
+        /// SQL Server Poison Wait row written before #3539 A4 was a presence-flat CRITICAL fire — so red is
+        /// the faithful replay for exactly the rows that still reach this by name. A graded row never
+        /// does: <c>AlertHistoryRowSeverity</c> reads its tier first (#3539 A8e).</para>
         /// </summary>
         public static bool IsCritical(string? metricName)
         {

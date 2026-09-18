@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using PerformanceMonitor.Analysis;
 
 namespace PerformanceMonitor.Notifications;
@@ -27,9 +28,18 @@ public class AlertContext
     /// Forces the rendered severity tier (email badge/color, Teams/Slack accent) regardless of
     /// metric name, for metrics graded at runtime — low-disk fires WARNING normally and CRITICAL
     /// when critically low (#1136). <c>null</c> = use the per-metric <see cref="AlertSeverity"/>
-    /// map. Deliberately not persisted (like <see cref="AttachmentXml"/>): it drives the live
-    /// email/webhook render only, and the alert-history UI does not re-derive severity, so the
-    /// JSON projection (<see cref="AlertContextSerializer"/>) need not carry it.
+    /// map.
+    ///
+    /// <para><b>Persisted since #3539 A8e</b>, as the trailing <c>Severity</c> member of the JSON projection
+    /// (<see cref="AlertContextSerializer"/>), so the alert-history row carries the tier the alert actually
+    /// FIRED at. It was deliberately not persisted before, on the argument that it drove the live
+    /// email/webhook render only and the alert-history UI did not re-derive severity — which was true, and
+    /// was the defect: the history grids styled a row by its metric NAME
+    /// (<c>AlertMetricClassifier.IsCritical</c>), so once Poison Wait became graded (#2711 on
+    /// PostgreSQL, #3539 A4 on SQL Server) a WARNING-graded fire rendered red in every grid, and a
+    /// CRITICAL-graded low-disk fire rendered amber. <c>AlertHistoryRowSeverity</c> (Alerting) is the read side:
+    /// the row's own tier where one was persisted, the by-name classifier for rows that predate the member.
+    /// <see cref="AttachmentXml"/> stays unpersisted for its own reason (no dialog surface, and size).</para>
     /// </summary>
     public AlertSeverityLevel? SeverityOverride { get; set; }
 
@@ -210,8 +220,18 @@ public class AlertDetailItem
 /// persisted context survives the round-trip into the in-app dialog.
 /// <see cref="AlertContext.AttachmentXml"/>/<see cref="AlertContext.AttachmentFileName"/>
 /// are deliberately not persisted (the dialog has no attachment surface).
+/// <para>
+/// <c>Severity</c> (#3539 A8e) is the tier the alert fired at — <see cref="AlertContext.SeverityOverride"/>
+/// — trailing and nullable like <c>Incidents</c>, so a row written before it existed rehydrates to null,
+/// which reads as "this row carries no tier" and sends the grids to the by-name fallback. Serialized as the
+/// enum's NAME rather than its ordinal: the column outlives any build, and a persisted <c>1</c> would change
+/// meaning the day a member is inserted ahead of it, where <c>"Critical"</c> cannot.
+/// </para>
 /// </summary>
-public record AlertContextDto(List<AlertDetailItemDto> Details, List<AlertIncidentDto>? Incidents = null);
+public record AlertContextDto(
+    List<AlertDetailItemDto> Details,
+    List<AlertIncidentDto>? Incidents = null,
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] AlertSeverityLevel? Severity = null);
 public record AlertDetailItemDto(string Heading, List<FieldDto> Fields, string? Body, bool IsCodeBlock, RemediationActionDto? Remediation = null);
 public record FieldDto(string Label, string Value);
 
@@ -467,8 +487,49 @@ public static class AlertContextSerializer
                 d.Body,
                 d.IsCodeBlock,
                 ToDto(d.Remediation))),
-            ToDto(context.Incidents));
+            ToDto(context.Incidents),
+            /* #3539 A8e: the tier the alert fired at rides the row. Both SKUs' deliverers fold
+               AlertOutcome.Severity into this property before serializing (#2090), so a graded fire on
+               either engine persists its grade here with no store change on either side. */
+            context.SeverityOverride);
         return JsonSerializer.Serialize(dto);
+    }
+
+    /// <summary>
+    /// The tier a persisted alert-history row FIRED at (#3539 A8e), or <c>null</c> when the row carries none
+    /// — written before the member existed, an alert that fired with no override (so the per-metric map
+    /// decided), a resolution row (persisted with a null context), or unparseable JSON. Reads the one
+    /// property rather than rehydrating the whole context: the grids call this once per row, and a Details
+    /// list with remediation actions is the expensive part of a row it does not need.
+    /// </summary>
+    public static AlertSeverityLevel? TryReadSeverity(string? contextJson)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(contextJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty(nameof(AlertContextDto.Severity), out var severity)
+                || severity.ValueKind != JsonValueKind.String)
+            {
+                return null;
+            }
+
+            /* Name match only, exact: the writer emits the enum's name, and Enum.TryParse on its own would
+               also accept a bare digit ("1"), which is the ordinal coupling the string form exists to avoid
+               — so the parsed member must spell itself back to the stored text. */
+            var text = severity.GetString();
+            return Enum.TryParse<AlertSeverityLevel>(text, ignoreCase: false, out var level)
+                && string.Equals(Enum.GetName(level), text, StringComparison.Ordinal)
+                ? level
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -543,6 +604,10 @@ public static class AlertContextSerializer
             var dto = JsonSerializer.Deserialize<AlertContextDto>(json);
             if (dto?.Details is null)
                 return false;
+
+            /* #3539 A8e: the tier the alert fired at. A row written before the member existed rehydrates it
+               null, which is the same state a fire with no override left it in. */
+            context.SeverityOverride = dto.Severity;
 
             foreach (var d in dto.Details)
             {

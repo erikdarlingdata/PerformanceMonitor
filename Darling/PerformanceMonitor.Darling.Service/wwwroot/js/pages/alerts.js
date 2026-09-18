@@ -28,12 +28,33 @@ const ALERT_COLUMNS = [
   { key: "alert_time", label: "Time", format: "time" },
   { key: "server_name", label: "Server" },
   { key: "metric_name", label: "Metric" },
+  { key: "severity", label: "Severity", render: (a) => severityCell(a) },
   { key: "current_value", label: "Value", format: "num1" },
   { key: "threshold_value", label: "Threshold", format: "num1" },
   { key: "status", label: "Status", render: (a) => statusCell(a) },
   { key: "detail_text", label: "Detail", render: (a) => detailCell(a) },
   { key: "triage", label: "Triage", render: (a) => triageCell(a) },
 ];
+
+/* #3539 A8e: the tier the alert FIRED at, as the tool reports it — never re-derived here from the metric name
+ * (R1). The service reads it off the row's persisted context and falls back to the name only for rows that
+ * carry none; severity_source says which arm answered, and it rides as the cell's title because the two are
+ * not equal evidence: "critical" from the row is what the operator was paged with, "critical" from the name
+ * is what the map says about the name. The tone classes are the status cell's own. */
+const SEVERITY_TONE = { critical: "Critical", warning: "Warning", resolution: "Healthy", info: "Unknown" };
+const SEVERITY_SOURCE_TITLE = {
+  fired: "The tier this alert fired at, read from the row",
+  metric_name: "Implied by the metric name; this row carries no fired tier",
+};
+
+function severityCell(a) {
+  if (a.severity == null) return el("span", { class: "muted", text: "—" });
+  return el("span", {
+    class: "status-cell sev-" + (SEVERITY_TONE[a.severity] || "Unknown"),
+    text: String(a.severity),
+    title: SEVERITY_SOURCE_TITLE[a.severity_source] || null,
+  });
+}
 
 /* Deep-link into the #2710 triage page for this row — the SAME route the alert webhooks link to, anchored at
  * this row's own firing instant, so the in-app path and the delivered link land on an identical page. */

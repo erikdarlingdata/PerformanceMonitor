@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Database;
@@ -522,7 +523,12 @@ public class AlertHistoryRow
         AlertDeliveryStatus.Describe(AlertSent, NotificationType, SendError, producerHadTrayChannel: true);
 
     public bool IsResolved => AlertMetricClassifier.IsResolution(MetricName);
-    public bool IsCritical => AlertMetricClassifier.IsCritical(MetricName);
-    public bool IsWarning => AlertMetricClassifier.IsWarning(MetricName);
+
+    /* #3539 A8e: the row's emphasis is the tier the alert FIRED at, read off the persisted context, and the
+       by-name classifier only for rows that carry none (written before the member existed, or fired with no
+       grade). The two arms live in AlertHistoryRowSeverity — one decision for this grid, the Darling
+       Viewer's, the web page and get_alert_history — and its summary is where the fallback's reasons are. */
+    public bool IsCritical => AlertHistoryRowSeverity.IsCritical(MetricName, ContextJson);
+    public bool IsWarning => AlertHistoryRowSeverity.IsWarning(MetricName, ContextJson);
 
 }

@@ -633,16 +633,25 @@ export function metricBands(c) {
      the reachability signal the card already carries (is_online, the same one that bands the card Offline and
      titles the header "no recent collection"): when the server is offline the chip reads "Stale" in the neutral
      Unknown tone instead of a green "OK · N healthy" (the "no recent collection" detail carries the specifics,
-     and "Stale" is the word the Collection Health tab lands on for these rows once its own floor is crossed). */
+     and "Stale" is the word the Collection Health tab lands on for these rows once its own floor is crossed).
+
+     #3539 A6: a REACHABLE server with no collector banded at all (collector_count 0, nothing failing) arrives
+     with collector_severity "Unknown" from the shared band, and its value reads "n/a" — the chip's word for a
+     metric with no reading (the Threads chip's) — rather than "OK". R1: the severity is read off the card, not
+     re-derived here; only the WORD keys on the count, and only so a green word never sits under a grey chip. */
   const collectorsStale = c.is_online === false;
   const collectorsValue = collectorsStale
     ? "Stale"
     : c.failed_collector_count > 0
     ? fmtInt(c.failed_collector_count) + " failing"
-    : "OK";
+    : c.collector_count > 0
+    ? "OK"
+    : "n/a";
   const collectorsDetail = collectorsStale
     ? "no recent collection" + (c.last_collection ? " · last " + relTime(c.last_collection) : "")
-    : fmtInt(c.healthy_collector_count) + " healthy · " + fmtInt(c.failed_collector_count) + " failing";
+    : c.collector_count > 0
+    ? fmtInt(c.healthy_collector_count) + " healthy · " + fmtInt(c.failed_collector_count) + " failing"
+    : "no collector banded yet";
   const collectorsSeverity = collectorsStale ? "Unknown" : c.collector_severity;
 
   return el("div", { class: "metric-bands" }, [

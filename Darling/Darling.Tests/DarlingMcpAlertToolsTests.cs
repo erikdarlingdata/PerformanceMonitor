@@ -1924,6 +1924,20 @@ public sealed class DarlingMcpAlertToolsLivePostgresTests
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
                 when, ServerId, ServerName, "High CPU", 92.5, 80.0, true, "email", null, false, "CPU sustained above threshold");
 
+            /* #3539 A8e: a Poison Wait row that FIRED Warning, with the tier persisted the way both SKUs'
+               deliverers persist it (the serializer's Severity member), and a legacy Deadlocks row carrying
+               no context at all. */
+            var gradedContext = new AlertContext { SeverityOverride = AlertSeverityLevel.Warning };
+            gradedContext.Details.Add(new AlertDetailItem { Heading = "THREADPOOL" });
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted, detail_text, context_json)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+                when.AddMinutes(-1), ServerId, ServerName, "Poison Wait", 61000.0, 60000.0, true, "webhook", null, false, "THREADPOOL", AlertContextSerializer.Serialize(gradedContext));
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted, detail_text)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+                when.AddMinutes(-2), ServerId, ServerName, "Deadlocks Detected", 1.0, 1.0, true, "email", null, false, null);
+
             /* Seed the single global settings row — every column has a default, so id alone suffices.
                BOTH singletons, because #3314 made get_alert_settings read the delivery cooldown off
                config_notification: the service seeds the two in one pass, and the tool reports `unavailable`
@@ -1942,13 +1956,29 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             var scoped = await DarlingMcpAlertTools.GetAlertHistory(postgres, ServerName);
             DarlingMcpTestData.AssertEnvelope(scoped, ServerName, "alerts");
             Assert.Contains("High CPU", scoped, StringComparison.Ordinal);
-            /* #3541 A3: one planted, undismissed row — the page says so, says the filter applied and hid
+            /* #3541 A3: three planted, undismissed rows — the page says so, says the filter applied and hid
                nothing, and carries no `total_` key. */
-            JsonAssert.Contains("\"alerts_returned\": 1", scoped);
+            JsonAssert.Contains("\"alerts_returned\": 3", scoped);
             JsonAssert.Contains("\"truncated\": false", scoped);
             JsonAssert.Contains("\"dismissed_excluded\": true", scoped);
             JsonAssert.Contains("\"dismissed_excluded_count\": 0", scoped);
             Assert.DoesNotContain("total_alerts", scoped, StringComparison.Ordinal);
+
+            /* #3539 A8e: the tier the alert FIRED at, per row, and where it came from. The Poison Wait row
+               reads the Warning it fired at off its context ("fired") — not the red its name implies — while
+               the two rows with no context are classified by name and say so. Asserted on the row objects
+               rather than by substring, so a "warning" from one row cannot satisfy a pin about another. */
+            using (var page = JsonDocument.Parse(scoped))
+            {
+                var byMetric = page.RootElement.GetProperty("alerts").EnumerateArray()
+                    .ToDictionary(a => a.GetProperty("metric_name").GetString()!, a => a);
+                Assert.Equal("warning", byMetric["Poison Wait"].GetProperty("severity").GetString());
+                Assert.Equal(AlertHistoryRowSeverity.SourceFired, byMetric["Poison Wait"].GetProperty("severity_source").GetString());
+                Assert.Equal("critical", byMetric["Deadlocks Detected"].GetProperty("severity").GetString());
+                Assert.Equal(AlertHistoryRowSeverity.SourceMetricName, byMetric["Deadlocks Detected"].GetProperty("severity_source").GetString());
+                Assert.Equal("warning", byMetric["High CPU"].GetProperty("severity").GetString());
+                Assert.Equal(AlertHistoryRowSeverity.SourceMetricName, byMetric["High CPU"].GetProperty("severity_source").GetString());
+            }
 
             var fleet = await DarlingMcpAlertTools.GetAlertHistory(postgres);
             Assert.False(fleet.StartsWith("Error during", StringComparison.Ordinal), fleet);
