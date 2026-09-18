@@ -58,6 +58,11 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
 
     public int BlockingWaitSecondsThreshold => App.AlertBlockingWaitSecondsThreshold;
     public int DeadlockCountThreshold => App.AlertDeadlockThreshold;
+    /* #3653 (A8e): Lite has no deadlock-rate knob, so the engine grades on the shipped pair — the same
+       pair Lite's own fleet card and Performance Calendar band on (DeadlockRateThresholds.Default). Not a
+       new setting: a Lite operator who wants the card's tiers moved has no surface for that today either,
+       and inventing one here would put a knob under the alert that the card does not honour. */
+    public DeadlockRateThresholds DeadlockRateThresholds => DeadlockRateThresholds.Default;
     /* #3539 A4: pass-through of a knob the engine no longer reads — see the interface member's doc. */
     public int PoisonWaitThresholdMs => App.AlertPoisonWaitThresholdMs;
     public int LongRunningQueryThresholdMinutes => App.AlertLongRunningQueryThresholdMinutes;

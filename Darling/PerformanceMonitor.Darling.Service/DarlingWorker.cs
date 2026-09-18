@@ -591,6 +591,12 @@ public sealed class DarlingWorker : BackgroundService
        collection-time guard: rows collected before the last recorded fire were, by definition, already
        reported by the process that fired it. */
     private readonly ConcurrentDictionary<string, bool> _pgPoisonWaitCooldownSeeded = new(StringComparer.Ordinal);
+    /* #3653: per SERVER, the "held on an unobserved window" Debug line has been written for the current
+       stretch of collector silence. Set when a sweep holds at least one active poison subject because the
+       window had no collector run and no row; removed on the next observed window, so each outage logs
+       once rather than every 30 s sweep. Keyed on the server, not the subject, because the silence is the
+       collector's, not any one event's. */
+    private readonly ConcurrentDictionary<string, bool> _pgPoisonWaitHoldLogged = new(StringComparer.Ordinal);
 
     /* #2719: CPU is a continuous gauge, so it does not need RollingCountAlertGate, which exists for
        rolling-WINDOW COUNTS (Deadlocks/Blocking) where the same event can sit in the window across several
@@ -4671,6 +4677,20 @@ public sealed class DarlingWorker : BackgroundService
     /// Aurora-only — and no rows is silence, the honest empty. Extending the poison definition to
     /// self-hosted targets via <c>pg_wait_sampling</c> needs its own calibration (sampled counts, not
     /// accumulated time) and its own fleet evidence first.</para>
+    ///
+    /// <para><b>The Cleared edge requires an OBSERVED window (#3653) — the contract
+    /// <c>AlertEngine.CheckPoisonWaitsAsync</c> adopted in #3593, ported.</b> Unwatched is not quiet: a
+    /// collector that stops delivering must not make this host announce "Poison Waits Cleared", which is
+    /// exactly what the pre-#3653 arm did — every active subject cleared the moment the read came back empty.
+    /// On SQL Server the rows are their own witness (THREADPOOL lands a row every cycle); on PostgreSQL they
+    /// are not, because since #2694 the <c>pg_wait_stats</c> collector skips an event whose waits delta is
+    /// zero — a quiet event and a dead collector both read as "no row for that subject". So the read carries
+    /// the collector's own <c>collection_log</c> SUCCESS count over the same window
+    /// (<see cref="PostgresPoisonWaitWindow.Observed"/>, the #3537 xmin-horizon witness), and a standing
+    /// subject clears only when the window was looked at and the subject is no longer over the bar — which
+    /// includes the subject having written NO row (quiet, on an observed window). An unobserved window holds
+    /// every active flag where it is and says so once at Debug per server (the #3282 rule for a CPU reading
+    /// that stops arriving); the next observed window either re-fires or clears on evidence.</para>
     /// </summary>
     private async Task EvaluatePgPoisonWaitAsync(
         ServerRuntime runtime, AlertServerSnapshot snapshot, DarlingConfig config, CancellationToken cancellationToken)
@@ -4693,8 +4713,9 @@ public sealed class DarlingWorker : BackgroundService
         try
         {
             var adapter = new DarlingPostgresAlertReadAdapter(_postgres);
-            var rows = await adapter.GetPoisonWaitPressureAsync(runtime.ServerId, cancellationToken);
+            var window = await adapter.GetPoisonWaitPressureAsync(runtime.ServerId, cancellationToken);
             readClock.Restart();
+            var rows = window.Waits;
             var findings = PostgresAlertEvaluator.EvaluatePoisonWaits(rows);
 
             var now = DateTime.UtcNow;
@@ -4801,11 +4822,32 @@ public sealed class DarlingWorker : BackgroundService
                 readClock.Restart();
             }
 
-            /* The Cleared edge, per subject: previously active, no longer over the bar. Late by up to one
-               window (the rolling sums age out rather than reset), which is accepted — a Cleared that
-               arrives a few minutes conservative beats one that flaps with each sweep. */
+            /* The Cleared edge, per subject: previously active, no longer over the bar, ON AN OBSERVED WINDOW
+               (#3653 — see the method's doc comment). Late by up to one window (the rolling sums age out
+               rather than reset), which is accepted — a Cleared that arrives a few minutes conservative
+               beats one that flaps with each sweep. An UNOBSERVED window — no collector run logged and no
+               row stored inside it — is collector silence, not the server going quiet: every active flag
+               holds, and the hold is logged once per server (Debug: the collector's own Collection Stopped
+               self-alert is the loud channel for a dead collector; this line only explains why a Cleared
+               the operator might expect has not arrived). The once-flag resets on the next observed
+               window so a second outage logs again. */
             var activePrefix = string.Create(
                 CultureInfo.InvariantCulture, $"{serverKey}|{metricName}|");
+            if (!window.Observed)
+            {
+                if (_activePgPoisonWaitAlert.Any(e => e.Value && e.Key.StartsWith(activePrefix, StringComparison.Ordinal))
+                    && _pgPoisonWaitHoldLogged.TryAdd(serverKey, true))
+                {
+                    _logger.LogDebug(
+                        "[{Server}] PostgreSQL poison wait window unobserved: no pg_wait_stats collector run logged and no row stored in the last {WindowMinutes} min — holding the standing alert(s) rather than announcing Cleared on collector silence (#3653)",
+                        runtime.Config.DisplayName, PostgresAlertEvaluator.PoisonWaitWindowMinutes);
+                }
+
+                return;
+            }
+
+            _pgPoisonWaitHoldLogged.TryRemove(serverKey, out _);
+
             foreach (var entry in _activePgPoisonWaitAlert)
             {
                 if (!entry.Value

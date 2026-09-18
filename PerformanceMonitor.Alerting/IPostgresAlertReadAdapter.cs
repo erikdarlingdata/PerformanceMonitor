@@ -55,10 +55,14 @@ public interface IPostgresAlertReadAdapter
     /// one departure from this interface's "current state" convention, because the poison condition is
     /// defined by recent accrual rather than a level (see
     /// <see cref="PostgresAlertEvaluator.PoisonWaitWindowMinutes"/>'s doc comment).
-    /// <para>An empty list is the healthy case AND the only possible answer on a target whose engine does
-    /// not populate the source (the cumulative wait counters are Aurora-only); the evaluator treats both
-    /// as silence, never as failure.</para>
+    /// <para>An empty <see cref="PostgresPoisonWaitWindow.Waits"/> is the healthy case AND the only possible
+    /// answer on a target whose engine does not populate the source (the cumulative wait counters are
+    /// Aurora-only); the evaluator treats both as silence, never as failure. What the host may NOT treat
+    /// as silence is an UNOBSERVED window (#3653): the read also carries how many times the collector
+    /// logged a run inside the window, and the host clears a standing alert only when that witness says
+    /// the window was looked at — see <see cref="PostgresPoisonWaitWindow.Observed"/> for why the rows
+    /// alone cannot answer that on PostgreSQL.</para>
     /// </summary>
-    Task<List<PostgresPoisonWaitAlertInfo>> GetPoisonWaitPressureAsync(
+    Task<PostgresPoisonWaitWindow> GetPoisonWaitPressureAsync(
         int serverId, CancellationToken cancellationToken = default);
 }
