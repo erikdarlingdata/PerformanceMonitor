@@ -199,8 +199,10 @@ public class AnalysisService
                    window — and scoring those alone would produce a pass whose every windowed rate is
                    absent and whose all-clear (or config-only findings) still reads as "analyzed this
                    window". Nothing was measured over the window; the same envelope says so. */
-                var unobserved = facts.Count > 0;
-                WindowEmptyMessage = unobserved
+                /* True when the WINDOW went unobserved but point-in-time facts (config, trace flags,
+                   hardware) still read — the case that used to slip past the facts.Count == 0 check. */
+                var hasPointInTimeFactsOnly = facts.Count > 0;
+                WindowEmptyMessage = hasPointInTimeFactsOnly
                     ? $"The collector observed none of the analysis window " +
                       $"({context.TimeRangeStart:yyyy-MM-dd HH:mm} to {context.TimeRangeEnd:yyyy-MM-dd HH:mm} UTC): " +
                       $"no collection interval landed inside it, even though this server has {dataSpanHours:F1} hours " +
