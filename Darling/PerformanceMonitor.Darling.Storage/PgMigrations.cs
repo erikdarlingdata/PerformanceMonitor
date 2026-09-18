@@ -210,6 +210,7 @@ public static class PgMigrations
             + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
         new Migration(129, "pg-log-events", V129Sql),
         new Migration(130, "pg-log-event-metrics", V130Sql),
+        new Migration(131, "notification-routes", V131Sql),
     };
 
     /// <summary>
@@ -1005,6 +1006,75 @@ ALTER TABLE collect.pg_log_events
     ADD COLUMN IF NOT EXISTS wal_records bigint,
     ADD COLUMN IF NOT EXISTS wal_bytes bigint,
     ADD COLUMN IF NOT EXISTS is_analyze boolean;";
+
+    /// <summary>
+    /// V131 — <c>config.config_notification_routes</c>, the sparse routes table that lets alert FAMILIES land
+    /// on different channels (#3598). Before it the notification model had one routing decision, made at
+    /// install time: the singleton <c>config_notification</c> row holds one destination per channel TYPE and
+    /// the fan-out sends every alert to every configured one. A self-monitor alert about the store, a
+    /// collector-cost digest, a failed Agent job and a deadlock page interleaved on one channel, and the
+    /// reader did the routing in their head on every post. This table is the layer over the parent row that
+    /// <c>config_collector_schedules</c> is over the code defaults: a row per family (or per exact metric
+    /// name) with a destination per channel, EMPTY meaning "inherit the parent's", so a store with zero rows
+    /// behaves byte for byte as it did and the rung is a no-op for every existing install.
+    ///
+    /// <para><b>The columns mirror the parent row's destinations, one per channel type</b> —
+    /// <c>teams_url</c>, <c>slack_url</c>, <c>generic_url</c>, <c>pagerduty_routing_key</c>,
+    /// <c>smtp_recipients</c> — spelled identically so the same ACL list, the same secret classification and
+    /// the same reader idiom apply. Proxies, the generic channel's headers/template and the PagerDuty region
+    /// flag are NOT mirrored: they say how a channel type is reached, not where a family lands. <c>NOT NULL
+    /// DEFAULT ''</c> like the parent's, so "inherit" and "unset" are one state and the resolver has one
+    /// test. <c>metric_match</c> is a family name from the closed <c>AlertFamily</c> taxonomy or an exact
+    /// metric name; the CHECK refuses a blank one, which would match nothing and read as a configured route.</para>
+    ///
+    /// <para><b><c>configured_channels</c> is generated, and exists for the roles that may not read the
+    /// URLs.</b> Four of the five destination columns are bearer secrets exactly as they are on the parent
+    /// row, so they are carved from the <c>viewer</c> and <c>mcp</c> roles' SELECT
+    /// (<c>DarlingManagedRoles.ViewerRestrictedConfigTables</c>). Without this column those roles could list
+    /// a route and not say which channels it configures — the one fact a settings read needs. A STORED
+    /// generated column over the secret columns discloses presence and nothing else (column-level SELECT
+    /// is per column), so the MCP <c>get_alert_settings</c> and a read-only seat can say "route 3 sets
+    /// Slack and PagerDuty" without ever holding either value. <c>array_remove</c> and <c>&lt;&gt;</c> are
+    /// IMMUTABLE, which a generated expression requires.</para>
+    ///
+    /// <para><b>The trigger is V117's shape</b>: statement-level, <c>config.config_bump_version()</c> verbatim,
+    /// <c>AFTER INSERT OR UPDATE OR DELETE</c> — DELETE because it is the direction that costs most (an
+    /// operator removes a route believing alerts fall back to the parent, and a stale route list keeps
+    /// sending them elsewhere). The service's <c>StoreConfigProvider</c> reads this table with the parent
+    /// row on every beacon change, so a route lands on the next firing with no restart. <c>DROP TRIGGER IF
+    /// EXISTS</c> first so a replay is a harmless no-op. <c>GENERATED ALWAYS AS IDENTITY</c> like
+    /// <c>config_command</c>, so the admin INSERT needs no sequence USAGE grant.</para>
+    ///
+    /// <para><b>No GRANT here.</b> <c>admin</c> gets its writes from the schema-wide default privileges;
+    /// the <c>viewer</c>/<c>mcp</c> column carve and the mcp role's narrow <c>UPDATE (enabled, modified_at)</c>
+    /// + <c>DELETE</c> are provisioning statements, re-asserted every managed start after migration, and
+    /// hand-mirrored in <c>Darling/tools/provision-roles.sql</c> for bring-your-own stores (the drift test
+    /// holds the two together). Pinned by <c>NotificationRoutesRungTests</c>.</para>
+    /// </summary>
+    private const string V131Sql = @"
+CREATE TABLE IF NOT EXISTS config.config_notification_routes (
+    route_id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    metric_match text NOT NULL,
+    teams_url text NOT NULL DEFAULT '',
+    slack_url text NOT NULL DEFAULT '',
+    generic_url text NOT NULL DEFAULT '',
+    pagerduty_routing_key text NOT NULL DEFAULT '',
+    smtp_recipients text NOT NULL DEFAULT '',
+    configured_channels text[] GENERATED ALWAYS AS (array_remove(ARRAY[
+        CASE WHEN teams_url <> '' THEN 'Teams' END,
+        CASE WHEN slack_url <> '' THEN 'Slack' END,
+        CASE WHEN generic_url <> '' THEN 'Generic' END,
+        CASE WHEN pagerduty_routing_key <> '' THEN 'PagerDuty' END,
+        CASE WHEN smtp_recipients <> '' THEN 'Email' END], NULL)) STORED,
+    enabled boolean NOT NULL DEFAULT TRUE,
+    modified_at timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'),
+    CONSTRAINT ck_config_notification_routes_metric_match CHECK (btrim(metric_match) <> '')
+);
+
+DROP TRIGGER IF EXISTS trg_bump_notification_routes ON config.config_notification_routes;
+CREATE TRIGGER trg_bump_notification_routes
+    AFTER INSERT OR UPDATE OR DELETE ON config.config_notification_routes
+    FOR EACH STATEMENT EXECUTE FUNCTION config.config_bump_version();";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

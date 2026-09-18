@@ -205,6 +205,19 @@ public sealed class DarlingConfig
     public WebhooksConfig Webhooks { get; set; } = new();
 
     /// <summary>
+    /// The sparse notification routes layered over <see cref="Smtp"/> and <see cref="Webhooks"/> (#3598,
+    /// V131 <c>config.config_notification_routes</c>): a family or exact-metric match with a destination
+    /// per channel, empty meaning "inherit". STORE-ONLY, like mute rules — <c>JsonIgnore</c> because a
+    /// route is an operator's live tuning through the Viewer's Settings grid, not deployment plumbing, and a
+    /// darling.json copy would be overwritten by the first store reload exactly as <c>Alerts</c> is
+    /// (<c>ApplyToConfig</c> swaps it wholesale). Empty until the store reload delivers a list, which is
+    /// the pre-routes fan-out exactly.
+    /// </summary>
+    [JsonIgnore]
+    public IReadOnlyList<PerformanceMonitor.Notifications.NotificationRoute> NotificationRoutes { get; set; } =
+        Array.Empty<PerformanceMonitor.Notifications.NotificationRoute>();
+
+    /// <summary>
     /// The scheduled-analysis cadence + delivery knobs (Phase-5 AN3 / control-plane Stage 1). Every
     /// default mirrors Lite's <c>App.*</c> analysis defaults (enabled, 30-minute interval,
     /// notify-severity 1.5) EXCEPT <see cref="AnalysisConfig.NotificationsEnabled"/>, which defaults

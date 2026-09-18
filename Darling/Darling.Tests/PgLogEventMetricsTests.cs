@@ -442,16 +442,20 @@ public sealed class PgLogEventMetricsParserTests
 }
 
 /// <summary>
-/// V130 (#3602, #3603): the family-specific columns on <c>collect.pg_log_events</c>, and the "I am the top
-/// rung" claims handed off from <see cref="PgLogEventsRungTests"/> (V129) — a fully-migrated store must map
-/// to EXACTLY this version, or the viewer's connect-time gate refuses a store that is actually current.
+/// V130 (#3602, #3603): the family-specific columns on <c>collect.pg_log_events</c>. The "I am the top rung"
+/// claims this class carried moved to <c>NotificationRoutesRungTests</c> (V131) when that rung landed, the
+/// same handoff this class received from <see cref="PgLogEventsRungTests"/> (V129). What stays here is the
+/// one-rung-behind half: a store carrying this and not V131 maps to 130, which is the honest answer for it
+/// and what makes the upgrade banner correct in both directions.
 /// </summary>
 public sealed class PgLogEventMetricsRungTests
 {
     private const int RungVersion = 130;
     private const int PreviousVersion = 129;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V131 appended
+    /// its own — so the invariant that outlives the handoff is that the ordinal is FIXED: a later rung
+    /// appends after it and never shifts it.</summary>
     private const int ProbeOrdinal = 105;
 
     private static readonly string[] Columns =
@@ -461,14 +465,16 @@ public sealed class PgLogEventMetricsRungTests
     };
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("pg-log-event-metrics", PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        /* One below the top since V131 landed; the "RungVersion == StorageVersion.SchemaVersion" half of
+           the top-arm claim moved to NotificationRoutesRungTests with the top. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion, "V130 is expected to sit below the ladder's top now that V131 has landed");
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
@@ -529,7 +535,7 @@ public sealed class PgLogEventMetricsRungTests
     }
 
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeCarriesThisRungsSentinel_AndAFullyMigratedStoreMapsToTheLaddersTop()
     {
         Assert.Contains(
             "table_name = 'pg_log_events'\n                                                     AND   column_name = 'wal_bytes'",
@@ -537,7 +543,6 @@ public sealed class PgLogEventMetricsRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasPgLogEventMetrics", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
@@ -545,9 +550,12 @@ public sealed class PgLogEventMetricsRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* This rung's sentinel sits strictly BELOW the last argument now that V131 has appended its own; the
+           "is the last argument" claim moved to NotificationRoutesRungTests with the top. */
+        Assert.True(ProbeOrdinal < arity - 1, "V130's sentinel is expected to sit below the top rung's now that V131 has landed");
 
+        /* Every sentinel true = a fully-migrated store, which must map to exactly the ladder's top. Stated
+           against StorageVersion rather than this rung's number, so it survives every later rung. */
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
@@ -560,10 +568,10 @@ public sealed class PgLogEventMetricsRungTests
 
         var thisArm = viewer.IndexOf("if (hasPgLogEventMetrics)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasPgLogEvents)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V130 sentinel arm — a fully-migrated store would map one rung low");
+        Assert.True(thisArm >= 0, "the viewer has no V130 sentinel arm — a store that stopped here would map to 129");
         Assert.True(previousArm >= 0);
-        Assert.True(thisArm < previousArm, "the V130 arm sits below the previous rung's, so a current store maps one rung low");
-        Assert.Contains("return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";", viewer[thisArm..previousArm], StringComparison.Ordinal);
+        Assert.True(thisArm < previousArm, "the V130 arm sits below the previous rung's, so a store that stopped here maps one rung low");
+        Assert.Contains("return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";", viewer[thisArm..previousArm], StringComparison.Ordinal);
     }
 
     [Fact]

@@ -50,6 +50,17 @@ public class AlertContext
     /// (alert type not wired, or no objects resolvable). Persisted in the alert-history context JSON.
     /// </summary>
     public List<AlertIncident>? Incidents { get; set; }
+
+    /// <summary>
+    /// Where this firing's posts went (#3598, design point 3): the alert's family, the route that matched
+    /// it, and each delivered channel with the route that supplied its destination. Set by the deliverer
+    /// from the send result AFTER the channels ran — the fan-out resolves it once per firing, post-cooldown
+    /// — and persisted as the trailing <c>Route</c> member of the JSON projection so the alert-history row
+    /// can answer "which destination matched" when a routing mistake is being reconstructed. Null on a row
+    /// that never reached resolution (throttled, folded, muted, no channel configured) and on every row
+    /// written before the member existed; never rendered to a channel.
+    /// </summary>
+    public AlertRouteDto? Route { get; set; }
 }
 
 /// <summary>
@@ -280,7 +291,22 @@ public sealed record AlertDetailRecord(int Ordinal, string Summary, List<(string
 public record AlertContextDto(
     List<AlertDetailItemDto> Details,
     List<AlertIncidentDto>? Incidents = null,
-    [property: JsonConverter(typeof(JsonStringEnumConverter))] AlertSeverityLevel? Severity = null);
+    [property: JsonConverter(typeof(JsonStringEnumConverter))] AlertSeverityLevel? Severity = null,
+    AlertRouteDto? Route = null);
+
+/// <summary>
+/// The persisted routing provenance of one alert-history row (#3598): trailing and nullable on
+/// <see cref="AlertContextDto"/> like <c>Incidents</c> and <c>Severity</c>, so a row written before it
+/// existed rehydrates to null, which reads as "this row carries no routing record". <c>Family</c> is the
+/// alert's <see cref="AlertFamily"/>; <c>RouteId</c> the most specific route that matched (null = the parent
+/// defaults answered everything); <c>Destinations</c> one entry per channel that was DELIVERED, each naming
+/// the route that supplied it (null = the parent default) and the level it came from, spelled as the
+/// <see cref="RouteSource"/> member's NAME for the same reason <c>Severity</c> is: the column outlives any
+/// build and an ordinal would change meaning the day a member is inserted.
+/// </summary>
+public record AlertRouteDto(string Family, int? RouteId, List<AlertRouteDestinationDto> Destinations);
+public record AlertRouteDestinationDto(string Channel, int? RouteId, string Source);
+
 public record AlertDetailItemDto(string Heading, List<FieldDto> Fields, string? Body, bool IsCodeBlock, RemediationActionDto? Remediation = null);
 public record FieldDto(string Label, string Value);
 
@@ -540,8 +566,39 @@ public static class AlertContextSerializer
             /* #3539 A8e: the tier the alert fired at rides the row. Both SKUs' deliverers fold
                AlertOutcome.Severity into this property before serializing (#2090), so a graded fire on
                either engine persists its grade here with no store change on either side. */
-            context.SeverityOverride);
+            context.SeverityOverride,
+            /* #3598: where the posts went. Already the persisted shape, so it rides through as-is. */
+            context.Route);
         return JsonSerializer.Serialize(dto);
+    }
+
+    /// <summary>
+    /// The routing record a persisted alert-history row carries (#3598), or <c>null</c> when it carries none
+    /// — written before the member existed, a row that never reached resolution, a resolution row, or
+    /// unparseable JSON. Reads the one property rather than rehydrating the whole context, for the reason
+    /// <see cref="TryReadSeverity"/> gives: the MCP history read calls this once per row.
+    /// </summary>
+    public static AlertRouteDto? TryReadRoute(string? contextJson)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(contextJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty(nameof(AlertContextDto.Route), out var route)
+                || route.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            return route.Deserialize<AlertRouteDto>();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -657,6 +714,9 @@ public static class AlertContextSerializer
             /* #3539 A8e: the tier the alert fired at. A row written before the member existed rehydrates it
                null, which is the same state a fire with no override left it in. */
             context.SeverityOverride = dto.Severity;
+
+            /* #3598: the routing record, null on every row written before it existed. */
+            context.Route = dto.Route;
 
             foreach (var d in dto.Details)
             {

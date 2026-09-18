@@ -595,6 +595,15 @@
                 <TextBlock Text="Create rules to suppress specific recurring alerts while still logging them."
                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                            Margin="20,0,0,0" TextWrapping="Wrap"/>
+                <!-- #3598: the sparse routes layered over the channel sections below (Teams / Slack / PagerDuty /
+                     Generic / Email). Beside Manage Mute Rules because both are per-alert tuning of the SAME
+                     delivery the channel sections configure: mutes decide whether, routes decide where. -->
+                <Button x:Name="ManageNotificationRoutesButton" Content="Manage _Notification Routes..."
+                        Click="ManageNotificationRoutesButton_Click" HorizontalAlignment="Left"
+                        Padding="12,4" Margin="20,8,0,4"/>
+                <TextBlock Text="Send alert families (self-monitor, reports, agent-jobs, performance) or single alerts to different Teams / Slack / PagerDuty / webhook / email destinations than the channels configured below. With no routes every alert goes to every configured channel."
+                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                           Margin="20,0,0,0" TextWrapping="Wrap"/>
                 <CheckBox x:Name="LogAlertDismissalsCheckBox" Content="Log alert dismiss and mute actions"
                           Margin="20,8,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
 

@@ -75,7 +75,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpAlertTools
 {
-    [McpServerTool(Name = "get_alert_history"), Description("Gets recent alert history from the alert log, NEWEST FIRST: what alerts fired, when, for which server, the current vs threshold value, whether email/webhook delivery succeeded, and whether the alert was muted. Omit server_name to see the whole fleet (each row names its server); pass one to scope to a single server. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: alerts_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_alert_time / newest_returned_alert_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached, so on a noisy fleet a 24-hour request at the default limit may cover minutes. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help. BY DEFAULT THIS READ EXCLUDES DISMISSED ALERTS — rows an operator acknowledged in the Viewer's Alert History grid. Dismissal says nothing about whether the alert fired or mattered, so an incident reconstruction that ignores it can miss the very critical someone already looked at: dismissed_excluded says whether the filter applied and dismissed_excluded_count is how many rows in the window it removed, and include_dismissed = true returns them, each labelled dismissed = true. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'throttled' means the delivery cooldown was still inside this alert's window so nothing was attempted (the throttle working, not a fault); 'folded' means a repeat was rolled onto another server's post for the same metric and is named there under 'Other Servers Affected', so it WAS reported; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'unconfigured' means no email or webhook channel is set up; 'muted' means a mute rule suppressed it; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null on 'throttled' and 'folded' rows and on every row written before those values existed, so a null error is not evidence of a working cooldown. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which — count those rows separately rather than attributing them. severity is the row's tier — 'critical', 'warning', 'info' or 'resolution' — and severity_source says where it came from: 'fired' when the row persisted the tier the alert actually fired at (graded alerts such as Poison Wait, Volume Free Space and Database State fire Warning OR Critical by measurement), 'metric_name' when the row carries no tier and the metric's name is the only evidence (rows written before the tier was persisted, alerts whose severity is fixed per metric, and every resolution row). Do not infer a graded alert's tier from its name: a 'Poison Wait' row with severity 'warning' fired as a warning.")]
+    [McpServerTool(Name = "get_alert_history"), Description("Gets recent alert history from the alert log, NEWEST FIRST: what alerts fired, when, for which server, the current vs threshold value, whether email/webhook delivery succeeded, and whether the alert was muted. Omit server_name to see the whole fleet (each row names its server); pass one to scope to a single server. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: alerts_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_alert_time / newest_returned_alert_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached, so on a noisy fleet a 24-hour request at the default limit may cover minutes. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help. BY DEFAULT THIS READ EXCLUDES DISMISSED ALERTS — rows an operator acknowledged in the Viewer's Alert History grid. Dismissal says nothing about whether the alert fired or mattered, so an incident reconstruction that ignores it can miss the very critical someone already looked at: dismissed_excluded says whether the filter applied and dismissed_excluded_count is how many rows in the window it removed, and include_dismissed = true returns them, each labelled dismissed = true. notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver: 'email'/'webhook'/'email+webhook' delivered on that channel; 'throttled' means the delivery cooldown was still inside this alert's window so nothing was attempted (the throttle working, not a fault); 'folded' means a repeat was rolled onto another server's post for the same metric and is named there under 'Other Servers Affected', so it WAS reported; 'failed' means a channel was attempted and came back unsuccessful, with send_error carrying the first failing channel's text; 'unconfigured' means no email or webhook channel is set up; 'muted' means a mute rule suppressed it; 'none' is a resolution row, which no channel applies to. Do NOT split the not-delivered rows on send_error: it is null on 'throttled' and 'folded' rows and on every row written before those values existed, so a null error is not evidence of a working cooldown. 'undelivered' is a retained legacy value that means throttled OR folded OR failed with nothing in the row to say which — count those rows separately rather than attributing them. severity is the row's tier — 'critical', 'warning', 'info' or 'resolution' — and severity_source says where it came from: 'fired' when the row persisted the tier the alert actually fired at (graded alerts such as Poison Wait, Volume Free Space and Database State fire Warning OR Critical by measurement), 'metric_name' when the row carries no tier and the metric's name is the only evidence (rows written before the tier was persisted, alerts whose severity is fixed per metric, and every resolution row). Do not infer a graded alert's tier from its name: a 'Poison Wait' row with severity 'warning' fired as a warning. route says WHERE the posts went (#3598): the alert's family (self-monitor / reports / agent-jobs / performance), the notification route that matched it (route_id null = the parent channels in Settings > Notifications answered everything) and each delivered channel with the route that supplied its destination — see get_notification_routes for the taxonomy and the routes. route is null on rows written before routing existed and on rows that never reached a delivery decision (throttled, folded, muted, unconfigured, resolutions), so a null route is not evidence of a routing fault.")]
     public static async Task<string> GetAlertHistory(
         NpgsqlDataSource postgres,
         [Description("Server name or display name. Omit to return alerts across all servers (the fleet default).")] string? server_name = null,
@@ -161,6 +161,12 @@ public sealed class DarlingMcpAlertTools
                        the two are not equal evidence; see AlertHistoryRowSeverity.Describe. */
                     severity,
                     severity_source = severitySource,
+                    /* #3598 (design point 3): WHERE this firing's posts went — the alert's family, the route
+                       that matched it (null = the parent channels answered everything) and each DELIVERED
+                       channel with the route that supplied its destination. Null on rows written before
+                       routes existed and on rows that never reached resolution (throttled, folded, muted,
+                       unconfigured, resolutions): a row that consulted no destination records none. */
+                    route = RouteHistoryPayload(AlertContextSerializer.TryReadRoute(r.ContextJson)),
                     detail_text = r.DetailText,
                 };
             });
@@ -424,6 +430,168 @@ public sealed class DarlingMcpAlertTools
         }
     };
 
+    [McpServerTool(Name = "get_notification_routes"), Description(
+        "Gets WHERE each alert family is delivered (#3598): the closed family taxonomy — which metric names belong to " +
+        "self-monitor, reports, agent-jobs and performance — and the sparse notification routes layered over the " +
+        "parent channel set. Every store starts with ZERO routes, which means every alert goes to every channel " +
+        "configured in the Viewer's Settings > Notifications (the parent). A route names a family (or one exact metric " +
+        "name) and a destination per channel type; an EMPTY channel on a route INHERITS the parent's, so a route " +
+        "can redirect Slack for one family and leave PagerDuty as the parent has it, or ENABLE a channel the parent " +
+        "does not have (a paging key on the performance route alone is how 'only pages page' is spelled). A route " +
+        "cannot silence a channel the parent has: empty means inherit, not off. Resolution order per channel: an " +
+        "enabled route matching the metric EXACTLY, then one matching its FAMILY, then the parent; within a level the " +
+        "lowest route_id with a non-empty column wins. A recovery routes as its firing (Server Restored as Server " +
+        "Unreachable), so a channel that saw the fire sees the clear. Routing sits AFTER the cooldown: it changes " +
+        "where a post lands, never whether it is sent. Destination values (webhook URLs, the PagerDuty routing key) " +
+        "are bearer secrets and are NOT reported — configured_channels lists which channels each route sets by " +
+        "name; smtp_recipients is reported because an address list is not a secret. get_alert_history rows carry a " +
+        "route field naming the family, the matched route_id and the delivered channels, so a misrouted post can " +
+        "be traced. Routes are authored in the Viewer's Settings window; here they can be disabled or deleted " +
+        "(set_notification_route_enabled / delete_notification_route).")]
+    public static async Task<string> GetNotificationRoutes(
+        NpgsqlDataSource postgres)
+    {
+        try
+        {
+            var routes = await new PgNotificationRouteStore(postgres).LoadSummariesAsync();
+
+            return JsonSerializer.Serialize(new
+            {
+                /* The taxonomy first: the vocabulary a route's metric_match is written in, with every metric name
+                   each family owns, so a caller can tell which family an alert it saw in get_alert_history belongs
+                   to without a second tool. Recoveries are listed with the firing they route as. */
+                families = AlertFamily.All.Select(family => new
+                {
+                    family,
+                    description = FamilyDescription(family),
+                    metrics = AlertFamily.MetricFamilies
+                        .Where(kv => kv.Value == family && !AlertFamily.RecoveryPairs.ContainsKey(kv.Key))
+                        .Select(kv => kv.Key)
+                        .OrderBy(m => m, StringComparer.Ordinal),
+                    metric_prefixes = AlertFamily.PrefixFamilies
+                        .Where(p => p.Family == family)
+                        .Select(p => p.Prefix + "*"),
+                }),
+                recoveries_route_as_their_firing = AlertFamily.RecoveryPairs.Select(kv => new { recovery = kv.Key, firing = kv.Value }),
+                unclassified_metrics_route_as = AlertFamily.Performance,
+                resolution_order = new[] { "exact metric route", "family route", "parent channel (Settings > Notifications)" },
+                route_count = routes.Count,
+                enabled_route_count = routes.Count(r => r.Enabled),
+                /* Zero routes is the ordinary state and the caller must be able to tell it from a failed read: an
+                   empty array here with route_count 0 IS the answer "every alert goes to every parent channel". */
+                routes = routes.Select(r => new
+                {
+                    route_id = r.RouteId,
+                    metric_match = r.MetricMatch,
+                    match_kind = r.Family is null ? "exact_metric" : "family",
+                    family = r.Family ?? AlertFamily.Of(r.MetricMatch),
+                    configured_channels = r.ConfiguredChannels,
+                    smtp_recipients = r.EmailRecipients,
+                    enabled = r.Enabled,
+                    modified_at_utc = r.ModifiedAtUtc,
+                }),
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_notification_routes", ex);
+        }
+    }
+
+    /// <summary>The <c>route</c> member of a get_alert_history row (#3598): the persisted provenance, re-spelled
+    /// in the tool's snake_case, or null when the row carries none.</summary>
+    internal static object? RouteHistoryPayload(AlertRouteDto? route) => route is null ? null : new
+    {
+        family = route.Family,
+        route_id = route.RouteId,
+        destinations = route.Destinations.Select(d => new { channel = d.Channel, route_id = d.RouteId, source = d.Source }),
+    };
+
+    /// <summary>The one-line audience each family names, for the taxonomy the read tool publishes.</summary>
+    internal static string FamilyDescription(string family) => family switch
+    {
+        AlertFamily.SelfMonitor => "Alerts about the monitoring tool itself: its store, collectors, jobs and certificates.",
+        AlertFamily.Reports => "Scheduled prose (the collector-cost digest, the fleet sweep rollup) — to read, never to be paged by.",
+        AlertFamily.AgentJobs => "SQL Server Agent: failed and anomalously long jobs, and the Agent service being down.",
+        AlertFamily.Performance => "A monitored server's health: blocking, deadlocks, CPU, long-running queries, space, availability groups, connection loss, custom rules and analysis findings. Also the fall-through for any metric the taxonomy does not name.",
+        _ => "",
+    };
+
+    [McpServerTool(Name = "set_notification_route_enabled"), Description(
+        "Enables or disables a notification route by its route_id (from get_notification_routes) WITHOUT deleting it. " +
+        "A disabled route is skipped at resolution exactly as if it did not exist, so the alerts it matched fall to " +
+        "the next level (a family route, then the parent channels) on the next firing — the reversible form of " +
+        "'send this family to the parent channels for now'. Returns {status:\"updated\", route:{...}} with the route AS " +
+        "STORED, {status:\"unchanged\", route:{...}} when it already holds that value (a retry is safe and costs no " +
+        "write), or {status:\"not_found\"}. The running service picks the change up on its next collection sweep, " +
+        "when the write's config_version bump makes it reload its channel configuration. This tool cannot author or " +
+        "re-point a route: destinations are bearer secrets and are set only in the Viewer's Settings window.")]
+    public static async Task<string> SetNotificationRouteEnabled(
+        NpgsqlDataSource postgres,
+        [Description("The route_id to enable or disable (from get_notification_routes).")] int route_id,
+        [Description("true to put the route back in force, false to skip it at resolution while keeping it.")] bool enabled)
+    {
+        try
+        {
+            var store = new PgNotificationRouteStore(postgres);
+            var existing = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
+            if (existing is null)
+            {
+                return Outcome("not_found", $"No notification route with route_id {route_id}.");
+            }
+
+            if (existing.Enabled == enabled)
+            {
+                return JsonSerializer.Serialize(new { status = "unchanged", route = RoutePayload(existing) }, McpHelpers.JsonOptions);
+            }
+
+            await store.SetEnabledAsync(route_id, enabled);
+
+            /* Re-read AFTER the write, so the reported row is the stored one (set_mute_rule_enabled's rule). */
+            var stored = (await store.LoadSummariesAsync()).FirstOrDefault(r => r.RouteId == route_id);
+            return JsonSerializer.Serialize(new { status = "updated", route = stored is null ? null : RoutePayload(stored) }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("set_notification_route_enabled", ex);
+        }
+    }
+
+    [McpServerTool(Name = "delete_notification_route"), Description(
+        "Deletes a notification route by its route_id (from get_notification_routes). Permanent: the alerts it " +
+        "matched fall to the next level (a family route, then the parent channels) on the next firing. Returns " +
+        "{status:\"deleted\", route_id} or {status:\"not_found\"}. Prefer set_notification_route_enabled for a " +
+        "temporary change — a deleted route's destinations are gone and only the Viewer's Settings window can author " +
+        "them again. The running service stops honoring the route on its next collection sweep.")]
+    public static async Task<string> DeleteNotificationRoute(
+        NpgsqlDataSource postgres,
+        [Description("The route_id to delete (from get_notification_routes).")] int route_id)
+    {
+        try
+        {
+            var deleted = await new PgNotificationRouteStore(postgres).DeleteAsync(route_id);
+            return deleted == 0
+                ? Outcome("not_found", $"No notification route with route_id {route_id}.")
+                : JsonSerializer.Serialize(new { status = "deleted", route_id }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("delete_notification_route", ex);
+        }
+    }
+
+    private static object RoutePayload(PgNotificationRouteStore.RouteSummary r) => new
+    {
+        route_id = r.RouteId,
+        metric_match = r.MetricMatch,
+        match_kind = r.Family is null ? "exact_metric" : "family",
+        family = r.Family ?? AlertFamily.Of(r.MetricMatch),
+        configured_channels = r.ConfiguredChannels,
+        smtp_recipients = r.EmailRecipients,
+        enabled = r.Enabled,
+        modified_at_utc = r.ModifiedAtUtc,
+    };
+
     [McpServerTool(Name = "get_mute_rules"), Description("Gets the configured alert mute rules. Mute rules suppress specific recurring alerts (by server, metric, database, query text, wait type, or job name) while still logging them — so an agent can tell a genuinely healthy-quiet server from one whose alerts are being suppressed.")]
     public static async Task<string> GetMuteRules(
         NpgsqlDataSource postgres,
@@ -520,7 +688,7 @@ public sealed class DarlingMcpAlertTools
         "The fleet_sweep group is NOT an alert family and the alerts_enabled master switch does not govern it: " +
         "fleet_sweep.enabled turns the scheduled whole-fleet sweep report on or off, and " +
         "fleet_sweep.interval_minutes (15\u20131440, default 60) is its cadence. Sweeps deliberately keep running " +
-        "under alerts_enabled: false \u2014 that is when they carry the would-have-paged ledger \u2014 so muting the " +
+        "under alerts_enabled: false — that is when they carry the would-have-paged ledger — so muting the " +
         "fleet does not blind the report surface. " +
         "For silencing ONE recurring signature for a " +
         "long stretch, use create_mute_rule instead of a long delivery cooldown: a mute is scoped, expires, is " +

@@ -189,6 +189,21 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
            "unconfigured", which is the state an operator can act on. */
         var delivery = AlertDelivery.FromFanout(result, outcome.Muted, trayChannelPresent: false);
 
+        /* #3598 (design point 3): the ledger says WHERE the post went. The send core reports the routing
+           decision the fan-out actually used — resolved once, after the cooldown, so it is the decision and
+           not a re-derivation that could disagree with it if the route list reloaded in between — and it
+           rides the row's context_json as the trailing Route member, beside #3539 A8e's Severity, with no
+           schema change. Null when no channel reached resolution (throttled, folded, muted, unconfigured):
+           a row that consulted no destination records none. The context is created here if the alert had
+           none (every self-alert fires with Context: null), exactly as #2090 does for the severity above;
+           the Viewer's detail window falls back to detail_text for a context with no detail items, so an
+           empty-Details context carrying only provenance costs the operator nothing. */
+        if (result.Route is { } route)
+        {
+            context ??= new AlertContext();
+            context.Route = route.ToDto();
+        }
+
         /* Always log the alert, regardless of channel status (EmailAlertService.cs:82-94). */
         string? contextJson = context is not null ? AlertContextSerializer.Serialize(context) : null;
         await _historyStore.RecordAlertAsync(new AlertHistoryRecord(

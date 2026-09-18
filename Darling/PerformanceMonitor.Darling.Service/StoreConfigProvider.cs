@@ -1214,6 +1214,11 @@ ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceComma
                the skip parameter is gone with its last caller. */
             var (smtp, webhooks) = await ReadNotificationAsync(connection, cancellationToken);
 
+            /* #3598 (V131): the routes layered over that row, read on the same privileged connection for the
+               same reason — four of its five destination columns are the same bearer secrets. Zero rows is the
+               ordinary state and resolves to the parent row exactly. */
+            var routes = await ReadNotificationRoutesAsync(connection, cancellationToken);
+
             var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken);
             var schedules = await ReadScheduleOverridesAsync(connection, cancellationToken);
 
@@ -1247,6 +1252,7 @@ ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceComma
                 Analysis = analysis,
                 Smtp = smtp,
                 Webhooks = webhooks,
+                NotificationRoutes = routes,
                 EnabledServers = servers,
                 ScheduleOverrides = schedules,
             };
@@ -1643,6 +1649,35 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         return server;
     }
 
+    /// <summary>The routes SELECT, public-const so the viewer's writer and the tests can pin column parity
+    /// against it the way <c>NotificationColumns</c> is pinned against <see cref="ReadNotificationAsync"/>.
+    /// Ordered by <c>route_id</c> so "first matching route wins" in the resolver is a statement about the
+    /// table rather than about row order.</summary>
+    public const string NotificationRoutesSelectSql =
+        "SELECT route_id, metric_match, teams_url, slack_url, generic_url, pagerduty_routing_key, smtp_recipients, enabled "
+        + "FROM config_notification_routes ORDER BY route_id";
+
+    private static async Task<IReadOnlyList<NotificationRoute>> ReadNotificationRoutesAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var routes = new List<NotificationRoute>();
+        using var command = new NpgsqlCommand(NotificationRoutesSelectSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+        using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            routes.Add(new NotificationRoute(
+                reader.GetInt32(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetString(5),
+                reader.GetString(6),
+                reader.GetBoolean(7)));
+        }
+
+        return routes;
+    }
+
     private static async Task<IReadOnlyList<ScheduleOverride>> ReadScheduleOverridesAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         var overrides = new List<ScheduleOverride>();
@@ -1691,6 +1726,9 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         config.Analysis = view.Analysis;
         config.Smtp = view.Smtp;
         config.Webhooks = view.Webhooks;
+        /* #3598: the routes swap with the row they layer over, so DarlingAlertSettings.NotificationRoutes
+           reads the new list by reference on the next firing — the hot-reload path the V131 trigger bumps. */
+        config.NotificationRoutes = view.NotificationRoutes;
         config.CapturePlans = view.CapturePlans;
         config.QueryStoreBackfillEnabled = view.QueryStoreBackfillEnabled;
         config.QueryStoreTextBudgetMb = view.QueryStoreTextBudgetMb;
@@ -1950,6 +1988,11 @@ public sealed class StoreConfigView
     public AnalysisConfig Analysis { get; init; } = new();
     public SmtpConfig Smtp { get; init; } = new();
     public WebhooksConfig Webhooks { get; init; } = new();
+
+    /// <summary>#3598 (V131): the sparse notification routes, ordered by <c>route_id</c>. Empty on every store
+    /// that has not authored one, which resolves every firing to the parent row exactly.</summary>
+    public IReadOnlyList<NotificationRoute> NotificationRoutes { get; init; } = Array.Empty<NotificationRoute>();
+
     public IReadOnlyList<MonitoredServer> EnabledServers { get; init; } = Array.Empty<MonitoredServer>();
     public IReadOnlyList<ScheduleOverride> ScheduleOverrides { get; init; } = Array.Empty<ScheduleOverride>();
 }
