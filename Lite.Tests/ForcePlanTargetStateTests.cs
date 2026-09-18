@@ -396,16 +396,43 @@ public sealed class ForcePlanTargetStateTests : IClassFixture<SharedDuckDbFixtur
     }
 
     [Fact]
-    public void ThePlanForceBotsGate_IsTheOriginalOverload_AndStillAgreesWithTheTargetHalf()
+    public void ThePlanForceBotsGate_IsTheWholeGate_PlusItsOwnTwo_AndTheOverloadsStillAgreeOnTheTargetHalf()
     {
-        /* PlanForceBot consults the one-argument overload, which has no state and therefore none of the
-           #3652 blockers — #3654 carries that gap; this pin is so it is a test, not a
-           surprise. The two overloads agree on the target-carried half. */
-        var t = Target(psp: true, replica: "Secondary");
+        /* Until #3654 this pinned the GAP: PlanForceBot consulted the one-argument overload, which has
+           no state and therefore none of the #3652 blockers. Now it pins the closure: the bot judges
+           through ForcePlanBotPolicy.Blockers, which is the two-argument gate's list verbatim (same
+           names, same evidence — what an agent reads is what the bot enforces) plus the two blockers
+           only an unattended actor needs. On the live #3652 shape — APC verifying its own AUTO force on
+           exactly the proposed plan — the one-argument overload still says nothing, and the bot's gate
+           says apc_owns_it. */
+        var t = Target();
+        var apcVerifying = State(planForced: true, forcingType: "AUTO", failures: 0,
+            apcState: "Verifying", apcLastGood: 99, apcLastGoodForcingType: "AUTO", apcLastGoodForced: true, flgp: "OFF");
+
+        Assert.Empty(FactRemediation.ForcePlanBlockers(t));
+        var shared = FactRemediation.ForcePlanBlockers(t, apcVerifying);
+        var bot = ForcePlanBotPolicy.Blockers(t, apcVerifying, stateUnavailableReason: null);
+        Assert.Equal(new[] { ForcePlanBlockerNames.ApcOwnsIt }, shared.Select(b => b.Name));
+        Assert.Equal(shared, bot);
+
+        /* The bot's own two ride AFTER the shared gate's and never appear in the shared vocabulary:
+           FLGP on for the database stands the bot down where the advice only changes its verb, and an
+           unreadable state is a blocker for the bot where the advice writes a note. */
+        var flgpOn = apcVerifying with { ForceLastGoodPlanActualState = "ON" };
         Assert.Equal(
-            FactRemediation.ForcePlanBlockers(t),
-            FactRemediation.ForcePlanBlockers(t, null).Select(b => b.Name).ToList());
-        Assert.Empty(FactRemediation.ForcePlanBlockers(Target()));
+            new[] { ForcePlanBlockerNames.ApcOwnsIt, ForcePlanBotPolicy.ReasonApcEnabledForDatabase },
+            ForcePlanBotPolicy.Blockers(t, flgpOn, null).Select(b => b.Name));
+        Assert.Equal("on", Project(t, flgpOn).ApcMode);
+        Assert.Equal(
+            new[] { ForcePlanBotPolicy.ReasonStateUnavailable },
+            ForcePlanBotPolicy.Blockers(t, null, "read failed").Select(b => b.Name));
+        Assert.StartsWith("unknown: read failed", Project(t, null, "read failed").StateNote, StringComparison.Ordinal);
+
+        /* The two overloads still agree on the target-carried half. */
+        var carried = Target(psp: true, replica: "Secondary");
+        Assert.Equal(
+            FactRemediation.ForcePlanBlockers(carried),
+            FactRemediation.ForcePlanBlockers(carried, null).Select(b => b.Name).ToList());
     }
 
     /* ------------------------------------------------------------------ 5. the reader SQL, both SKUs */
