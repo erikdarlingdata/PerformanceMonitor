@@ -444,6 +444,13 @@ internal static class FindingMessageFormatter
     /// First detail item is the Diagnosis summary; then the Advice/Remediation block
     /// (when the shared analysis library has one for the finding's root fact-key); then
     /// the finding's drill-down detail flattened into label/value pairs.
+    /// <para>#3612: the order is load-bearing on Slack, not just readable. The Slack builder keeps the
+    /// longest LEADING run of details that fits its 50-block message budget and drops the rest with a
+    /// stated omission, so most-essential-first here is what decides that the finding (Diagnosis, Advice,
+    /// the T-SQL pointer) survives and the drill-down's tail and the per-hash incident fingerprints go
+    /// first. A five-fact story attaches seven drill-downs and up to fifteen incidents through this method
+    /// — 19 to 21 items, 55 to 59 blocks before the budget — and three such pages were lost before it
+    /// existed. Anything added here goes AFTER what it is less important than.</para>
     /// </summary>
     public static AlertContext BuildContext(AnalysisFinding finding, double notifyThreshold)
     {
