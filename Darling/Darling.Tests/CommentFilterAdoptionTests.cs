@@ -80,7 +80,7 @@ public sealed class CommentFilterAdoptionTests
     /// <see cref="AnalysisPassTokenThreadingTests"/> gives: the way a wildcard grows is that nobody has to
     /// name a new entry.
     ///
-    /// <para>Four kinds live here and they are not the same kind. Five <b>collect</b> a doc-comment run,
+    /// <para>Four kinds live here and they are not the same kind. Six <b>collect</b> a doc-comment run,
     /// where the prefix is what defines the run. One reads a <b>stated, measured</b> bound off a named file.
     /// One filters <b>SQL</b>, which the C# walk cannot help with. One <b>demonstrates</b> the shape on an
     /// arranged fixture, which is this file.</para>
@@ -134,6 +134,17 @@ public sealed class CommentFilterAdoptionTests
             + "because the collected prose is then asserted to open at <summary> and close at </summary> "
             + "before any figure is compared - a truncated walk fails there instead of silently pinning half "
             + "a comment.",
+
+        ["Lite.Tests/FactScorerTests.cs"] =
+            "COLLECTS a doc run. GetWaitThresholds_EveryEntryCarriesItsMeasurementLineage (#3538 A5) gathers the "
+            + "contiguous // run above each entry of FactScorer.GetWaitThresholds and asks it for a percentile, "
+            + "a max, 'measured' or 'unmeasured' - the lineage lives ONLY in those comments, so asking for the "
+            + "walker would leave nothing to read. Stated bound: the collector recognises // lines and entry "
+            + "lines and skips everything else, so lineage written in a /* */ block whose continuation lines "
+            + "carry no prefix is invisible to it and the entry reads as UNDOCUMENTED - a spurious red, the "
+            + "loud direction. Entries are matched by a quoted-key regex, so a block-comment continuation line "
+            + "that happened to spell one would register as a phantom entry needing lineage of its own, "
+            + "which is again loud; nothing in the table today is a block comment.",
 
         ["Lite.Tests/LiteSidebarDotRendersTheCardStatusTests.cs"] =
             "STATED BOUND, and asking for the walker would BREAK it. Its doc comment records the measurement: "
