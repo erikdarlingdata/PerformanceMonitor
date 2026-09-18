@@ -929,7 +929,10 @@ VALUES ($1, $2, $3, $4, 'client backend', 'relation', $5, $6, $7, 5, 1, 0, 0, 1,
         string? hotQueryId)
     {
         var cut = JsonDocument.Parse(cutJson).RootElement;
-        Assert.False(cut.TryGetProperty("status", out _), "expected a data-bearing payload, got a status envelope: " + cutJson);
+        /* Data-bearing means the ROWS are there, not that `status` is absent: get_pg_io_stats carries
+           status = "io_activity" on its data payload, so a classifier keyed on the presence of `status`
+           called a correct 60% page a status envelope (first CI run of this test). */
+        Assert.True(cut.TryGetProperty(rowsKey, out _), $"expected a data-bearing payload with `{rowsKey}`, got: " + cutJson);
         Assert.Equal(1, cut.GetProperty(returnedCountKey).GetInt32());
         Assert.True(cut.GetProperty("truncated").GetBoolean());
         Assert.Equal(1000.0, cut.GetProperty(totalKey).GetDouble());
