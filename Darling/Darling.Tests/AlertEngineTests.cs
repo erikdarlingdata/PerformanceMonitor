@@ -159,14 +159,18 @@ public sealed class AlertEngineTests
 
         /* #2349: EMPTY by default. These tests mostly exercise other alerts, and a fabricated file would
            make the file-growth gate fire inside an unrelated scenario; the #3539 A8c pins below plant rows
-           and read back the lookback the engine asked for. */
+           and read back the lookback the engine asked for. #3636: a fetch counter beside it, like the
+           forced-plan seam, so the once-per-observation pins can assert both what fired and that the read
+           still happened on every pass. */
         public List<DatabaseFileGrowthInfo> Files { get; } = new();
         public int? FileGrowthLookbackAsked { get; private set; }
+        public int FileGrowthFetches { get; private set; }
 
         public Task<List<DatabaseFileGrowthInfo>> GetDatabaseFileGrowthAsync(
             string serverKey, int lookbackMinutes, CancellationToken cancellationToken = default)
         {
             FileGrowthLookbackAsked = lookbackMinutes;
+            FileGrowthFetches++;
             return Task.FromResult(new List<DatabaseFileGrowthInfo>(Files));
         }
 
@@ -2172,6 +2176,309 @@ public sealed class AlertEngineTests
         await engine.EvaluateServerAsync(Harness.Snapshot());
 
         Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    /* ---------------- #3636: the rise arm fires once per hourly observation, not once per cooldown ---------------- */
+
+    /// <summary>Two consecutive hourly collections of <c>database_size_stats</c>, so the pins below replay the
+    /// shape the issue describes rather than an invented one: a rise observed at the top of the hour, twelve
+    /// five-minute cooldowns of re-reads against the same two rows, the next collection an hour later.</summary>
+    private static readonly DateTime HourlyCollection0 = new(2026, 9, 18, 6, 0, 0, DateTimeKind.Utc);
+    private static readonly DateTime HourlyCollection1 = HourlyCollection0.AddHours(1);
+
+    /// <summary>A rise-only file (2% of a 4 TB volume — the level gate cannot see it) stamped with the collection
+    /// that produced it. 20 GB in the 60-minute window is twice the default 10,240 MB/hr bar.</summary>
+    private static DatabaseFileGrowthInfo RiseOnlyFile(DateTime? observedAt, double growthMb = 20_480, string fileName = "tempdev")
+    {
+        var f = GrowingFile(growthMb, windowMinutes: 60);
+        f.FileName = fileName;
+        f.ObservedAtUtc = observedAt;
+        return f;
+    }
+
+    /// <summary>A level-only file: 80% of a small volume and not growing at all. The standing-level shape that
+    /// re-fires on the cooldown by design.</summary>
+    private static DatabaseFileGrowthInfo LevelOnlyFile(DateTime? observedAt) => new()
+    {
+        DatabaseName = "Sales", FileName = "Sales_log", PhysicalName = @"L:\log\Sales_log.ldf", FileTypeDesc = "LOG",
+        TotalSizeMb = 400_000, GrowthMb = 0, GrowthWindowMinutes = 60,
+        VolumeMountPoint = @"L:\", VolumeTotalMb = 500_000, VolumeFreeMb = 90_000, ObservedAtUtc = observedAt,
+    };
+
+    [Fact]
+    public async Task FileGrowth_SameHourlyObservationAcrossTwelveCooldowns_FiresOnce_ThenResolvesOnTheNextCollection()
+    {
+        /* #3636's shape: the collector landed a 20 GB rise at 06:00 and nothing else until 07:00. Between those
+           two collections the adapter returned the SAME row (newest = 06:00, baseline = the window's far edge)
+           on every ~30 s pass, and the pre-#3636 engine fired on every cooldown expiry — up to twelve cards for
+           one growth event. The cooldown elapsing is not proof a new observation exists. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var first = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Database File Growth", first.MetricName);
+
+        /* Eleven more passes, each past the cooldown, none a new observation — the twelve-card loop. */
+        for (var pass = 1; pass <= 11; pass++)
+        {
+            h.Now = HourlyCollection0.AddMinutes(pass * 5).AddSeconds(40);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
+        Assert.Single(h.Deliverer.Outcomes);
+        /* And the read still happened on every pass — the guard is on the FIRE, never on the fetch, so the
+           recovery arm keeps seeing fresh evidence. */
+        Assert.Equal(12, h.Adapter.FileGrowthFetches);
+
+        /* 07:00: the next collection. The file did not grow in the new window; the read returns it under the
+           bar, and the recovery is announced exactly as before #3636. */
+        h.Adapter.Files.Clear();
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection1, growthMb: 0));
+        h.Now = HourlyCollection1.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes);
+        var resolution = Assert.Single(h.Resolutions, r => r.MetricName == "Database File Growth");
+        Assert.Contains("no file is growing past the threshold", resolution.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FileGrowth_NewerObservationWithARise_FiresAgain_CarryingItsOwnNumbers()
+    {
+        /* A file that keeps growing across successive hourly collections is still a standing condition: each
+           collection is a NEW observation with a new rise, and it re-fires — the guard removes repeats of one
+           observation, not the second card for a second hour of growth. The card carries the new observation's
+           growth, not the first one's. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0, growthMb: 20_480));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("grew 20.0 GB in 60 min", h.Deliverer.Outcomes[0].ShortMessage, StringComparison.Ordinal);
+
+        /* The next collection: another 30 GB in the new window. Same file key, newer stamp. */
+        h.Adapter.Files.Clear();
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection1, growthMb: 30_720));
+        h.Now = HourlyCollection1.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Contains("grew 30.0 GB in 60 min", h.Deliverer.Outcomes[1].ShortMessage, StringComparison.Ordinal);
+
+        /* And that observation, re-read past another cooldown, is one card too. */
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task FileGrowth_NewerObservationWithoutARise_DoesNotFire_AndResolves()
+    {
+        /* The third arm: a newer observation in which the file did NOT grow past the bar is not news for the
+           rise gate — it is the falling edge. No second card; the recovery is announced. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Adapter.Files.Clear();
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection1, growthMb: 512)); /* a twentieth of the bar */
+        h.Now = HourlyCollection1.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Single(h.Resolutions, r => r.MetricName == "Database File Growth");
+    }
+
+    [Fact]
+    public async Task FileGrowth_TheLevelArm_StillRefiresEveryCooldown_OnTheSameObservation()
+    {
+        /* The guard is on the RISE gate only. A file at 80% of its volume is at 80% on every pass whether or
+           not a new collection has landed — a standing level, re-fired on the cooldown by design (#2349), and
+           #3636 leaves that alone. Same stamp on every read; it fires on every cooldown regardless. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(LevelOnlyFile(HourlyCollection0));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+
+        /* And a rise-only file riding on the same server's card does not silence the level file: the card is
+           per server, one file with news is enough, and the level file is always news. */
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0));
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(5, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task FileGrowth_NewObservationInsideTheCooldown_FiresOnceTheCooldownElapses()
+    {
+        /* The memory is 'last ALERTED observation', not 'last SEEN' (the #3579 lesson): a collection that lands
+           while the cooldown from the previous card is still running has not been reported, so when the
+           cooldown elapses and the row is still that observation, it fires. Folding the two into one 'last
+           seen' stamp would record it as seen on the quiet pass and then never fire it. The hourly collector
+           makes this rare; a shortened cadence or a manual collection makes it real. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        var quickCollection = HourlyCollection0.AddMinutes(2);
+        h.Adapter.Files.Clear();
+        h.Adapter.Files.Add(RiseOnlyFile(quickCollection, growthMb: 25_600));
+        h.Now = quickCollection.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes); /* cooldown holds it — rate limiting is still the cooldown's job */
+
+        h.Now = HourlyCollection0.AddMinutes(5).AddSeconds(50);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task FileGrowth_MutedFire_StampsTheObservation_SoUnmutingDoesNotReplayIt()
+    {
+        /* A muted fire is still a fire: delivered flagged Muted, it stamps the cooldown, and since #3636 it
+           stamps the observation. A mute rule lifted mid-hour must not turn the same 06:00 rise into a fresh
+           card — the operator muted the server's file growth, not the engine's memory of it. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Muted = true;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var muted = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(muted.Muted);
+
+        h.Muted = false;
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task FileGrowth_RecoveryForgetsTheObservation_SoANewEpisodeFires()
+    {
+        /* The falling edge clears the memory with the server (the #2166 lesson, at file grain): a file that
+           recovers and later grows again is a new episode and its first rise fires, whatever the stamp. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Adapter.Files.Clear();
+        h.Now = HourlyCollection1.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Resolutions, r => r.MetricName == "Database File Growth");
+
+        var laterCollection = HourlyCollection1.AddHours(3);
+        h.Adapter.Files.Add(RiseOnlyFile(laterCollection));
+        h.Now = laterCollection.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task FileGrowth_AFileThatLeavesTheBreachedSet_LosesItsMemory_WhileAnotherKeepsTheCardActive()
+    {
+        /* The memory is per FILE, pruned as files leave the breached set, not per server. tempdev fires at
+           06:00; at 07:00 tempdev is quiet and templog has the rise — templog has never fired, so the card goes
+           (no recovery: the server still has a breaching file). At 08:00 tempdev is back with a fresh stamp
+           and templog is quiet: tempdev's 06:00 memory went with it when it left, and it fires as a new
+           episode would anyway — asserted through the card's headline naming the file. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0, fileName: "tempdev"));
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection0, growthMb: 0, fileName: "templog"));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.StartsWith("tempdb.tempdev", h.Deliverer.Outcomes[0].ShortMessage, StringComparison.Ordinal);
+
+        h.Adapter.Files.Clear();
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection1, growthMb: 0, fileName: "tempdev"));
+        h.Adapter.Files.Add(RiseOnlyFile(HourlyCollection1, fileName: "templog"));
+        h.Now = HourlyCollection1.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.StartsWith("tempdb.templog", h.Deliverer.Outcomes[1].ShortMessage, StringComparison.Ordinal);
+        Assert.Empty(h.Resolutions);
+
+        /* Same 07:00 observation re-read past the cooldown: templog was reported; nothing new. */
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task FileGrowth_StamplessRow_KeepsThePre3636CooldownRepeat()
+    {
+        /* The stated fallback for an adapter that supplies no observation stamp (the shipped two always do):
+           a null never matches a remembered stamp, so every read counts as new and the cooldown alone
+           rate-limits it — the pre-#3636 behaviour, degraded towards repetition rather than silence, the same
+           direction IAlertStateStore's no-op fallbacks degrade. Pinned so the fallback is a decision and not
+           an accident of null comparison. */
+        var h = new Harness();
+        h.Settings.FileGrowthEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = HourlyCollection0.AddSeconds(40);
+        h.Adapter.Files.Add(RiseOnlyFile(observedAt: null));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }
 
     /* ---------------- persistent version store (#1984) ---------------- */

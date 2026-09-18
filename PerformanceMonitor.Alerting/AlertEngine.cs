@@ -192,6 +192,22 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, bool> _activePvsAlert = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastFileGrowthAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeFileGrowthAlert = new();
+
+    /* #3636: per server, the OBSERVATION each breached file was last alerted on — keyed "database|file", the
+       same key FileGrowthIncidents fingerprints on — so the RISE gate fires once per collection rather than
+       once per cooldown. The file-growth condition had no per-file state before this (its DTO says so: "no
+       per-file state to keep, survive a restart, or leak"), only the per-server cooldown clock and active
+       flag above; this sits beside them at file grain because files enter and leave the breached set
+       independently and a per-server stamp would let a threshold change mid-observation silence a file that
+       had never been reported. Stamped on FIRE only — including a muted fire — never on a pass that merely
+       saw the file (the #3579 seen ≠ alerted lesson: a collection landing inside the cooldown must still
+       fire when it elapses). A file that leaves the breached set loses its entry, and the server's recovery
+       clears the map, so a later episode starts with no memory exactly as the cooldown clock does.
+
+       In-memory only, like the forced-plan memory it copies: a restart empties it, so the first pass after
+       one may re-fire once for an observation still in the window — which is exactly what the cooldown
+       clock, also emptied, already did before #3636, so the guard never makes a restart noisier than it was. */
+    private readonly ConcurrentDictionary<string, Dictionary<string, DateTime>> _lastAlertedFileGrowthObservation = new();
     private readonly ConcurrentDictionary<string, double> _lastAlertedPvsPercent = new();
 
     /* Rolling-count edge-trigger watermarks (#1091) — Lite's MainWindow.xaml.cs:103-104;
@@ -1757,6 +1773,23 @@ public sealed class AlertEngine
     ///
     /// <para>Observation sits OUTSIDE the fire branch, like blocking's (#2216/#2362): counting only at delivery
     /// lets a file that stops breaching during a cooldown mask the next one.</para>
+    ///
+    /// <para><b>The RISE gate fires once per OBSERVATION, not once per cooldown (#3636).</b> The rise is a stored
+    /// fact about two collections — the newest sample and the oldest inside the window — and the
+    /// <c>database_size_stats</c> collector lands one per HOUR, while this check runs every ~30 s and the
+    /// cooldown is 5 minutes: at pass granularity "still growing" and "no new data yet" are indistinguishable,
+    /// so the pre-#3636 loop re-fired on every cooldown expiry against the SAME two rows — up to twelve cards
+    /// for one growth event before the next collection replaced the observation. #3579 found this mechanism
+    /// first in the forced-plan alert (5-minute cadence, six cards measured on one production store) and its
+    /// <c>CheckForcePlanFailuresAsync</c> remarks carry the fuller explanation; this is that guard one
+    /// condition over. The contract now: <b>a file whose only breach is the rise gate fires once per new
+    /// <see cref="DatabaseFileGrowthInfo.ObservedAtUtc"/></b> — the engine remembers, per (server, database,
+    /// file), the stamp it last fired on and declines to fire the same stamp again regardless of cooldown; a
+    /// newer stamp with a rise fires (a file growing across successive hourly collections still re-fires, each
+    /// collection being a new observation), the cooldown still rate-limits those, and recovery is unchanged.
+    /// A file breaching the LEVEL gate is a standing level and re-fires on the cooldown exactly as before — the
+    /// guard never consults it. A row without a stamp falls back to the pre-#3636 cooldown-repeat rather than to
+    /// silence.</para>
     /// </summary>
     private async Task CheckFileGrowthAsync(
         string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
@@ -1789,11 +1822,42 @@ public sealed class AlertEngine
                 var worst = breached[0];
                 _activeFileGrowthAlert[key] = true;
 
-                if (!suppressed && CooldownElapsed(_lastFileGrowthAlert, key, now, alertCooldown))
+                /* #3636: the observation guard, per file. A file that leaves the breached set loses its memory
+                   here (a later re-entry is a new episode, like a forced plan that recovers and fails again); a
+                   file that stays is news when it breaches the LEVEL gate — a standing level, re-fired by design
+                   — or when its rise carries a stamp NEWER than the one this file last fired on. "Not newer"
+                   rather than "equal", so an older stamp (nothing produces one today; a deleted newest row or a
+                   clock step would) is not mistaken for news, and a null on either side never matches: a
+                   stampless row keeps the cooldown-repeat, and a file that has not fired yet is always eligible.
+                   The card is per server and carries every breached file, so ONE file with news is enough to
+                   send it and every file on it is then stamped as reported. */
+                var alertedObservations = _lastAlertedFileGrowthObservation.GetOrAdd(key, _ => new Dictionary<string, DateTime>(StringComparer.Ordinal));
+                var breachedKeys = new HashSet<string>(breached.Select(FileGrowthObservationKey), StringComparer.Ordinal);
+                foreach (var departed in alertedObservations.Keys.Where(k => !breachedKeys.Contains(k)).ToList())
+                {
+                    alertedObservations.Remove(departed);
+                }
+
+                bool anyNewObservation = breached.Any(f =>
+                    AlertContextBuilders.BreachesLevelGate(f, _settings.FileGrowthVolumePercent)
+                    || !(f.ObservedAtUtc is { } observedAt
+                         && alertedObservations.TryGetValue(FileGrowthObservationKey(f), out var lastAlertedAt)
+                         && observedAt <= lastAlertedAt));
+
+                if (!suppressed && anyNewObservation && CooldownElapsed(_lastFileGrowthAlert, key, now, alertCooldown))
                 {
                     var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Database File Growth" };
                     bool isMuted = _isAlertMuted(muteCtx);
                     _lastFileGrowthAlert[key] = now;
+                    foreach (var f in breached)
+                    {
+                        /* #3636: stamped even when muted, like the cooldown — the operator muted the server's
+                           file growth, not the engine's memory of which observation it already reported. */
+                        if (f.ObservedAtUtc is { } reported)
+                        {
+                            alertedObservations[FileGrowthObservationKey(f)] = reported;
+                        }
+                    }
 
                     var context = AlertContextBuilders.BuildFileGrowthContext(
                         serverName, breached, fileGrowthOccurrences.Decorate);
@@ -1830,6 +1894,10 @@ public sealed class AlertEngine
             else if (_activeFileGrowthAlert.TryGetValue(key, out var wasGrowing) && wasGrowing)
             {
                 _activeFileGrowthAlert[key] = false;
+                /* #3636: the recovery drops the server's observation memory with it, deliberately — a file
+                   that recovers and later grows again is a new episode and starts with no memory, exactly as
+                   the cooldown clock beside it does when the condition next fires. */
+                _lastAlertedFileGrowthObservation.TryRemove(key, out _);
                 await ClearOccurrencesAsync(key, FileGrowthWatermarkMetric);
                 readClock.Restart();
 
@@ -1852,6 +1920,12 @@ public sealed class AlertEngine
             _readFailures?.RecordReadFailure(key, "database file growth", readClock.ElapsedMilliseconds);
         }
     }
+
+    /// <summary>#3636: the per-file key of the observation memory — <c>database|file</c>, the same key
+    /// <see cref="AlertContextBuilders.FileGrowthIncidents"/> fingerprints on, so the memory and the occurrence
+    /// accumulator agree about what a "file" is (eight tempdb data files are eight files; a log file running
+    /// away is a different incident from its data files).</summary>
+    private static string FileGrowthObservationKey(DatabaseFileGrowthInfo f) => f.DatabaseName + "|" + f.FileName;
 
     /* ---------------- anomalous Agent jobs (Lite AlertEngine.cs:557-632) ---------------- */
 

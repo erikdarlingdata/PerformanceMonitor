@@ -557,6 +557,15 @@ LIMIT $3";
     /// chunks rather than scanning retention. The reported window width is measured rather than assumed, so a
     /// gap in collection cannot make a slow rise look fast.</para>
     ///
+    /// <para><b>The newest sample's <c>collection_time</c> travels with the row (#3636)</b> as <c>observed_at</c>,
+    /// the last column. The growth is a fact about two COLLECTIONS and reads byte-identical on every alert pass
+    /// until the next collection lands — and this collector's cadence is an HOUR against a 5-minute cooldown,
+    /// so the engine needs the observation's identity to fire the rise gate once per collection instead of up to
+    /// twelve times. <c>current_files</c> already carried <c>collection_time</c> for the window-width arithmetic;
+    /// it was simply never projected. Appended rather than inserted so the fourteen ordinals the reader already
+    /// binds do not move. #3579's <c>observed_at</c> on the forced-plan read is the same column for the same
+    /// reason.</para>
+    ///
     /// <para>$1 server_id, $2 window start (naive UTC).</para>
     /// </summary>
     public const string DatabaseFileGrowthSql = @"
@@ -592,7 +601,8 @@ SELECT
     c.auto_growth_mb,
     COALESCE(c.is_percent_growth, false) AS is_percent_growth,
     c.growth_pct,
-    c.max_size_mb
+    c.max_size_mb,
+    c.collection_time AS observed_at
 FROM current_files c
 LEFT JOIN baseline b
   ON  b.database_name = c.database_name
@@ -632,6 +642,11 @@ ORDER BY c.database_name, c.file_name";
                 IsPercentGrowth = !reader.IsDBNull(11) && reader.GetBoolean(11),
                 GrowthPct = reader.IsDBNull(12) ? null : Convert.ToDouble(reader.GetValue(12)),
                 MaxSizeMb = reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
+                /* #3636: the stored value is naive UTC (the $2 window bound above is built the same way), read
+                   back with Kind Unspecified; stamped Utc because that is what it IS and what the property's name
+                   says. The engine only ever compares one file's stamps with each other, so the Kind is honesty
+                   rather than arithmetic — #3579's forced-plan read does exactly this. */
+                ObservedAtUtc = reader.IsDBNull(14) ? null : DateTime.SpecifyKind(reader.GetDateTime(14), DateTimeKind.Utc),
             });
         }
 
