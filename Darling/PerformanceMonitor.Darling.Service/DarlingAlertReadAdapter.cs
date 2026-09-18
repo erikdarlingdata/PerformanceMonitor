@@ -361,6 +361,16 @@ LIMIT 50";
     /// "known quiet" claim. Deltas are never negative (the calculator returns 0 on a reset), so no floor is
     /// applied; a defensive one would only hide a calculator regression.</para>
     ///
+    /// <para><b>Cost, under the alert pass's 10-second read deadline while the hourly CAGG refresh runs</b>
+    /// (#3597: 4–7 minutes on the largest store). Cheap by SHAPE, not by any index the planner may or may not
+    /// pick: the WHERE is predicate-identical to the retired read's — one server_id, the three wait_type
+    /// literals, a collection_time floor ten minutes back — so it touches exactly the rows that read touched
+    /// and aggregates them instead of ordering them for a <c>LIMIT 3</c>. At the wait_stats collector's
+    /// one-minute cadence that is at most ~10 collections × 3 types ≈ 30 rows per server, all inside the
+    /// last ten minutes of the current one-day chunk (uncompressed head; chunk exclusion keeps compressed
+    /// history out of the plan). The PostgreSQL twin (<see cref="DarlingPostgresAlertReadAdapter.PoisonWaitSql"/>)
+    /// has run this exact aggregate shape over pg_wait_stats under the same deadline since #2711.</para>
+    ///
     /// <para>The V128 keystone lane is adding <c>sample_interval_seconds</c> to this table and may later
     /// guard readers on it; this text deliberately carries no interval handling so that lane can rebase
     /// onto it cleanly.</para>
