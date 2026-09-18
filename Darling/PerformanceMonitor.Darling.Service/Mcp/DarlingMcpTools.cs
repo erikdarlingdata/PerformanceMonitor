@@ -1047,15 +1047,19 @@ internal static class ToolRecommendations
             new("get_file_io_trend", "Track log I/O latency over time"),
             new("get_perfmon_trend", "Check Transactions/sec to see commit rate driving log flush pressure", new() { ["counter_name"] = "Transactions/sec" })
         ],
-        /* #3616 rider: the synchronous-commit wait fact scores since that lane landed but had no next_tools
-           here, so its story rendered an empty list. Lite's twin landed in #3659; this is the Darling half. The
-           AG read exists only on this SKU, which is why the pair is not byte-identical. */
+        /* #3653 (from #3538 A5): the scorer has graded HADR_SYNC_COMMIT since #3616 and this table had no entry,
+           so the finding arrived with next_tools empty — the one wait on the table whose card told the agent
+           nothing to do next. The AG sibling of WRITELOG: the primary waiting for a synchronous secondary to
+           harden the log before a commit can return. Lite's twin landed in #3659 pointing at get_alert_history,
+           because Lite has no AG-health read; this SKU has get_ag_health, so the health half points there — the
+           one deliberate difference between the two entries. The remediation is never "switch to async":
+           synchronous commit is a durability policy (FactAdvice), so every tool here is a read. */
         ["HADR_SYNC_COMMIT"] =
         [
-            new("get_wait_trend", "Track synchronous-commit wait time over the window", new() { ["wait_type"] = "HADR_SYNC_COMMIT" }),
-            new("get_ag_health", "Check the availability group's synchronous replicas, their send/redo queues and hardening latency"),
-            new("get_perfmon_trend", "Check Transactions/sec to see the commit rate the secondary must harden", new() { ["counter_name"] = "Transactions/sec" }),
-            new("get_file_io_stats", "Check transaction log file latency on the primary, which a slow secondary compounds")
+            new("get_wait_trend", "Track synchronous-commit wait over time — does it track commit volume, or step up when a secondary falls behind", new() { ["wait_type"] = "HADR_SYNC_COMMIT" }),
+            new("get_ag_health", "Check the synchronous secondaries' state, send/redo queues and hardening latency in the same window — the secondary-side cause this wait is the primary-side symptom of"),
+            new("get_perfmon_trend", "Check Transactions/sec: a commit-rate rise raises this wait without any replica fault", new() { ["counter_name"] = "Transactions/sec" }),
+            new("get_file_io_stats", "Check log-file write latency — a slow log on either replica shows up here as commit latency")
         ],
         ["LCK"] =
         [
