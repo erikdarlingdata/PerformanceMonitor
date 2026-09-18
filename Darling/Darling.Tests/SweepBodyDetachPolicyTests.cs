@@ -39,6 +39,13 @@ namespace Darling.Tests;
 /// has zero fanout at p90 11,964ms. A fanout-derived split would detach the cheap collector and leave
 /// the expensive one starving the tier. See #2840.</para>
 ///
+/// <para><b>The third member is detached for a different reason (#3604).</b> <c>pg_wait_sampling</c>'s
+/// service-sampler arm holds its connection for thirty one-second <c>pg_stat_activity</c> snapshots per cycle
+/// BY DESIGN — a deterministic 30 s run, not a bimodal tail — and awaited inline that would delay every
+/// other collector on a stock PostgreSQL target by half a minute every five. The criterion generalises: a
+/// single-run cost that would starve the fast tier if it sat in the body, whether measured or designed. It
+/// sits on the five-minute tier, so the one-minute-tier invariant below holds for it as for the others.</para>
+///
 /// <para><b>The 4.5x evidence.</b> use2 runs the same Balanced preset with Query Store dead since
 /// 2026-08-17 17:36. Its <c>query_stats</c> delivered cadence stepped from 4.69-9.02 min (Query Store
 /// live) to 1.44-1.57 min (dead) the following day, and held there for two weeks.</para>
@@ -46,10 +53,11 @@ namespace Darling.Tests;
 public sealed class SweepBodyDetachPolicyTests
 {
     /// <summary>The collectors #2700/#2717 detach, by the criterion documented on this class.</summary>
-    private static readonly string[] ExpectedDetached = { "query_store", "plan_correction" };
+    private static readonly string[] ExpectedDetached = { "query_store", "plan_correction", "pg_wait_sampling" };
 
     private static bool IsDetached(string name) =>
-        DarlingWorker.IsQueryStoreCollector(name) || DarlingWorker.IsPlanCorrectionCollector(name);
+        DarlingWorker.IsQueryStoreCollector(name) || DarlingWorker.IsPlanCorrectionCollector(name)
+        || DarlingWorker.IsPgWaitSamplingCollector(name);
 
     /// <summary>
     /// The invariant that makes detaching safe, and the one that GENERALISES: a detached collector runs

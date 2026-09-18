@@ -13,6 +13,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -24,7 +25,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgWaitTools
 {
-    [McpServerTool(Name = "get_pg_wait_stats"), Description("Gets the top PostgreSQL wait events aggregated over a time period, for Amazon Aurora PostgreSQL targets. Waits reveal what the database spends time waiting on: IO events point at storage or cache misses, Lock events at blocking between sessions, LWLock at internal contention, and LSN is Aurora's storage-durability wait. Background-worker and client-idle waits are already excluded by the collector, so every row here is real work. Note this is a separate tool from get_wait_stats, which covers SQL Server: PostgreSQL has a two-level type/event taxonomy, no signal-wait concept, and reports in microseconds, so the two cannot share one result shape. THE PAGE IS BOUNDED BY limit: wait_events_returned is how many events you got, truncated says the window held more, and the rows are the heaviest so the ones past the cap are lighter. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_total_wait's denominator is total_wait_time_ms, the WHOLE window's wait time across every event, computed in the same statement as the rows - so a three-row page does not sum to 100%, and the gap between returned_wait_time_ms (what the page adds up to) and total_wait_time_ms is the waiting the cap left out; returned_pct_of_total is that ratio stated once.")]
+    [McpServerTool(Name = "get_pg_wait_stats"), Description("Gets the top PostgreSQL wait events aggregated over a time period, for Amazon Aurora PostgreSQL targets - the engine_cumulative tier, the finest of the three PostgreSQL wait instruments (Aurora native > pg_wait_sampling extension > service sampler; stock targets take one of the other two and get_pg_wait_sampling serves them, disclosing which). Waits reveal what the database spends time waiting on: IO events point at storage or cache misses, Lock events at blocking between sessions, LWLock at internal contention, and LSN is Aurora's storage-durability wait. Background-worker and client-idle waits are already excluded by the collector, so every row here is real work. Note this is a separate tool from get_wait_stats, which covers SQL Server: PostgreSQL has a two-level type/event taxonomy, no signal-wait concept, and reports in microseconds, so the two cannot share one result shape. THE PAGE IS BOUNDED BY limit: wait_events_returned is how many events you got, truncated says the window held more, and the rows are the heaviest so the ones past the cap are lighter. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_total_wait's denominator is total_wait_time_ms, the WHOLE window's wait time across every event, computed in the same statement as the rows - so a three-row page does not sum to 100%, and the gap between returned_wait_time_ms (what the page adds up to) and total_wait_time_ms is the waiting the cap left out; returned_pct_of_total is that ratio stated once.")]
     public static async Task<string> GetPgWaitStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -126,6 +127,16 @@ public sealed class DarlingMcpPgWaitTools
             wait_events_returned = result.Count,
             truncated,
             order = "total_wait_time_ms_desc",
+            /* #3604: the instrument, stated on this surface too so the three PostgreSQL wait tiers read
+               alike. Constant here rather than looked up: pg_wait_stats is Aurora-gated and reads the
+               engine's own counters, so nothing else can have fed this table. */
+            instrument = PgWaitInstrument.EngineCumulative,
+            instrument_note = "Aurora's aurora_stat_system_waits(): every wait's count and measured time, "
+                            + "accumulated by the engine since instance start - the finest of the three "
+                            + "PostgreSQL wait instruments and the only one that measures time rather than "
+                            + "estimating it from samples. Stock PostgreSQL targets are served by "
+                            + "get_pg_wait_sampling instead, whose instrument field says whether the "
+                            + "pg_wait_sampling extension or the service-side sampler fed them.",
             /* The WINDOW's wait time, across every event that accrued any — the denominator of every
                pct_of_total_wait above. NOT the sum of the rows; that is returned_wait_time_ms. */
             total_wait_time_ms = Math.Round(windowTotalMs, 1),

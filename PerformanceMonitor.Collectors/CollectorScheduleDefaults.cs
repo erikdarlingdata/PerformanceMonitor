@@ -276,13 +276,14 @@ public static class CollectorScheduleDefaults
            pg_stat_statements get installed" and "when did this extension get upgraded" are asked months
            later, usually right after a plan changed shape and nobody can explain why. */
         /* HOURLY, not every five minutes, and the reason is the fleet rather than the collector. All
-           four of these need an extension or a readable server log, and Aurora offers neither - so on a
+           three of these need an extension or a readable server log, and Aurora offers neither - so on a
            managed target they can only ever record a non-fatal skip, and at a five-minute cadence that
            is roughly 900 skip rows per target per day saying the same thing.
 
-           Hourly costs nothing for THREE of them: pg_wait_sampling_profile, pg_stat_kcache and
-           pg_qualstats are cumulative COUNTERS, so a longer interval loses no events - it only widens the
-           window each delta covers. That is the opposite of a sampled collector like pg_blocking, where
+           Hourly costs nothing for the two counter readers still here: pg_stat_kcache and pg_qualstats are
+           cumulative COUNTERS, so a longer interval loses no events - it only widens the window each delta
+           covers. (pg_wait_sampling_profile was the third until #3604 gave that collector a sampled arm and
+           its own five-minute entry below.) That is the opposite of a sampled collector like pg_blocking, where
            the cadence IS the resolution and stretching it genuinely loses sightings.
 
            pg_plan_capture is the fourth and it is neither. It reads a LOG, and "append-only" is not the
@@ -303,7 +304,18 @@ public static class CollectorScheduleDefaults
            the threshold. What is missing is that the collector cannot SAY it happened, and it already
            selects the file's size, so a stored previous size would make the skipped span a measurement
            instead of an absence. Until then a self-hosted operator lowers this per server. */
-        ["pg_wait_sampling"] = new(60, 30),
+        /* #3604: FIVE MINUTES, split off the hourly trio above. Both halves of the hourly argument stopped
+           applying to this collector when it grew its sampler arm. The skip-row half: it is gated off Aurora
+           now and takes the sampler arm everywhere else, so it records EXTENSION_MISSING on no target at all.
+           The loses-nothing half is true of the extension arm's cumulative counters but false of the sampler
+           arm, whose window is thirty one-second snapshots per cycle - there the cadence IS the duty cycle
+           (30 s in 300 s, 10%), and an hour would make it 0.8%. Five minutes rather than one for two reasons
+           the file already states elsewhere: a 30 s single run is half the 60,000 ms body budget
+           SweepPressureClassifier sums single-run costs against, so it must run DETACHED from the sequential
+           body (DarlingWorker, beside query_store and plan_correction), and SweepBodyDetachPolicyTests pins
+           that nothing detached sits on the one-minute tier. The extension arm pays 12x the rows it did
+           hourly (at most 500 per cycle, cumulative) for deltas twelve times finer. */
+        ["pg_wait_sampling"] = new(5, 30),
         ["pg_kernel_stats"] = new(60, 30),
         ["pg_predicate_stats"] = new(60, 30),
         ["pg_plan_capture"] = new(60, 14),

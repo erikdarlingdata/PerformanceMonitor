@@ -308,6 +308,40 @@ SELECT
         }
     }
 
+    /// <summary>
+    /// Whether the <c>pg_wait_sampling</c> extension is created in the database this connection landed in
+    /// (#3604) — the connect-time fact that picks <c>PgWaitSamplingCollector</c>'s arm on a stock target:
+    /// the extension's own 10 ms profile when present, the service-side <c>pg_stat_activity</c> sampler when
+    /// not. <c>pg_extension</c> is per database, and the collector reads <c>pg_wait_sampling_profile</c> from
+    /// exactly this database, so this is the fact that decides whether that read can succeed rather than a
+    /// proxy for it (<c>pg_available_extensions</c> would say "installable", which is a different question).
+    /// </summary>
+    public const string PostgresWaitSamplingProbeQueryText =
+        @"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_wait_sampling')";
+
+    /// <summary>
+    /// Runs <see cref="PostgresWaitSamplingProbeQueryText"/>. Fails CLOSED to false on any error other than
+    /// cancellation, and for the same reason <see cref="ProbeAuroraAsync"/> does: this probe decides which
+    /// arm an optional collector takes, and a target that answered every other connect question must still be
+    /// monitored. False routes the target to the sampler arm, which reads only <c>pg_stat_activity</c> — the
+    /// floor — so the failure direction produces a coarser wait history rather than none.
+    /// </summary>
+    private static async Task<bool> ProbeWaitSamplingExtensionAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken, ILogger? logger = null)
+    {
+        try
+        {
+            using var command = new NpgsqlCommand(PostgresWaitSamplingProbeQueryText, connection) { CommandTimeout = 15 };
+            var present = await command.ExecuteScalarAsync(cancellationToken);
+            return present is bool b && b;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(ex, "pg_wait_sampling extension probe did not succeed; treating the extension as absent (#3604)");
+            return false;
+        }
+    }
+
     /// <summary>Connects, probes, and returns the runtime state for one configured server.</summary>
     public static async Task<ServerRuntime> ConnectAsync(MonitoredServer config, ILogger? logger, CancellationToken cancellationToken)
     {
@@ -406,9 +440,15 @@ SELECT
 
         var isAurora = await ProbeAuroraAsync(connection, cancellationToken, logger);
 
+        /* #3604: the wait-tier decision's second fact. Probed AFTER Aurora-ness and independently of it —
+           an Aurora cluster cannot load the module, so the answer there is false by construction, but the
+           gate reads the two facts separately and the sweep varies them separately. */
+        var hasWaitSampling = await ProbeWaitSamplingExtensionAsync(connection, cancellationToken, logger);
+
         logger?.LogInformation(
-            "Connected to PostgreSQL target '{Server}': major {Major} (server_version_num {Num}), {Role}, Aurora: {Aurora} — {VersionText}",
+            "Connected to PostgreSQL target '{Server}': major {Major} (server_version_num {Num}), {Role}, Aurora: {Aurora}, pg_wait_sampling: {WaitSampling} — {VersionText}",
             config.DisplayName, majorVersion, versionNum, isInRecovery ? "reader (in recovery)" : "writer", isAurora,
+            hasWaitSampling ? "present (extension_sampled tier)" : isAurora ? "n/a (engine_cumulative tier)" : "absent (service_sampled tier)",
             versionText);
 
         /* A Postgres target reached through the SQL Server path would have failed on the detection
@@ -434,6 +474,8 @@ SELECT
                 IsAwsRds = RdsEndpoint.TryParse(
                     new NpgsqlConnectionStringBuilder(connectionString).Host) is not null,
                 IsInRecovery = isInRecovery,
+                /* #3604: which stock-PostgreSQL wait instrument this target gets, decided here once. */
+                HasPgWaitSamplingExtension = hasWaitSampling,
             },
             StorageName = storageName,
             ServerId = config.ServerId,
@@ -478,7 +520,8 @@ SELECT
                 PostgresMajorVersion: runtime.Target.PostgresMajorVersion,
                 PostgresVersionNum: runtime.Target.PostgresVersionNum,
                 IsAurora: runtime.Target.IsAurora,
-                IsInRecovery: runtime.Target.IsInRecovery);
+                IsInRecovery: runtime.Target.IsInRecovery,
+                HasPgWaitSamplingExtension: runtime.Target.HasPgWaitSamplingExtension);
         }
         catch (OperationCanceledException)
         {
@@ -588,7 +631,10 @@ public sealed record ConnectionProbeResult(
     /* #2280: the database the connection ACTUALLY reached, so a registration-time collision check can compare
        what the SERVER says against what other registrations claim, rather than comparing two claims. Trailing
        and defaulted, so every existing construction of this record still compiles unchanged. */
-    string? ConnectedDatabase = null)
+    string? ConnectedDatabase = null,
+    /* #3604: the wait-tier fact, so --test-connection's "which collectors would run" count is computed
+       against the same shape the gate reads. Trailing and defaulted for the #2280 reason. */
+    bool HasPgWaitSamplingExtension = false)
 {
     /// <summary>
     /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually
@@ -607,5 +653,6 @@ public sealed record ConnectionProbeResult(
         PostgresVersionNum = PostgresVersionNum,
         IsAurora = IsAurora,
         IsInRecovery = IsInRecovery,
+        HasPgWaitSamplingExtension = HasPgWaitSamplingExtension,
     };
 }

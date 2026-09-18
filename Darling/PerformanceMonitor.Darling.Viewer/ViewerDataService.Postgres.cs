@@ -392,6 +392,13 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, int limit, CancellationToken cancellationToken = default) =>
         DarlingPgWaitSamplingReader.GetPgWaitSamplingAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 
+    /// <summary>Which instrument is feeding this server's sampled waits (#3604) — the collector's own recorded
+    /// arm, so the panel note can say whether the grid is the extension's 10 ms profile or the service's
+    /// one-second floor. Null when no cycle has recorded one.</summary>
+    public Task<DarlingPgWaitSamplingReader.WaitInstrumentState?> GetPgWaitInstrumentAsync(
+        int serverId, CancellationToken cancellationToken = default) =>
+        DarlingPgWaitSamplingReader.GetWaitInstrumentAsync(_dataSource, serverId, cancellationToken);
+
     /// <summary>
     /// The kernel's own CPU and disk per query (#2603). Deltas and reset detection live in the reader.
     /// </summary>

@@ -84,6 +84,11 @@ public class AuroraOnlySqlIsGatedTests
             "aurora_stat_statements(), every other PostgreSQL the vanilla view with the Aurora-only columns " +
             "null. The tool reads the STORE, never the target; the dependency itself is " +
             "PgStatementStatsCollector's PAIRED entry above.",
+
+        ["DarlingMcpPgWaitTools.cs"] =
+            "PROSE (#3604). get_pg_wait_stats' instrument_note tells the caller which source fed the rows — " +
+            "Aurora's aurora_stat_system_waits() — so a count can be read beside its grain. The tool reads " +
+            "the STORE, never the target; the collector it describes is PgWaitStatsCollector's GATED entry.",
     };
 
     [Fact]

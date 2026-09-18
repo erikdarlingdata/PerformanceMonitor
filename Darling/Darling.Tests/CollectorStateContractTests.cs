@@ -110,13 +110,16 @@ public sealed class CollectorStateContractTests
            collector is a two-host concern rather than a definition-local one. Pinned on the catalog
            surface both hosts iterate.
 
-           ONE of them now: default_trace_events' last-seen trace FILE (#1962). pg_index_bloat's
-           per-database rotation cursor (#3153) was the other and #3234 retired it — the statistics
-           estimate covers every index in one statement, so there is no position to resume from. It did
-           not need host CODE, and neither does the survivor: the wiring below is generic. Enumerated in
-           the same file that pins that wiring, so a collector newly declaring state lands here first. */
+           TWO of them now. default_trace_events' last-seen trace FILE (#1962); pg_index_bloat's
+           per-database rotation cursor (#3153) was the other until #3234 retired it — the statistics
+           estimate covers every index in one statement, so there is no position to resume from. Then
+           pg_wait_sampling (#3604): the arm that ran (its instrument token, which the reads disclose) and,
+           on the service-sampler arm, the cumulative tally the next cycle adds to — state a MAX() over the
+           table cannot recover, since the table holds only the tally's last written value per key. Neither
+           needed host CODE: the wiring below is generic. Enumerated in the same file that pins that wiring,
+           so a collector newly declaring state lands here first. */
         Assert.Equal(
-            new[] { "default_trace_events" },
+            new[] { "default_trace_events", "pg_wait_sampling" },
             CollectorCatalog.All
                 .Where(c => c.StateKeys.Count > 0)
                 .Select(c => c.Name)

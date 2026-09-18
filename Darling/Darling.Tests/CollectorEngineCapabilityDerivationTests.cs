@@ -477,12 +477,21 @@ public sealed class CollectorEngineCapabilityMovingGateTests
         Assert.All(sqlServer, c => Assert.True(CollectorEngineCapability.IsCollectedOnEngineKind(c, MonitoredEngineKind.SqlServer)));
         Assert.All(postgres, c => Assert.False(CollectorEngineCapability.IsCollectedOnEngineKind(c, MonitoredEngineKind.SqlServer)));
 
-        /* Aurora is a strict superset of the surfaces the PostgreSQL collectors read, so every one of them
-           applies there. This is the half that would break if a new collector were written against something
-           Aurora removes rather than adds. */
-        Assert.All(postgres, c => Assert.True(
-            CollectorEngineCapability.IsCollectedOnEngineKind(c, MonitoredEngineKind.AuroraPostgres),
-            $"{c.Name} is reported as a permanent gap on Aurora PostgreSQL"));
+        /* Aurora is a strict superset of the surfaces the PostgreSQL collectors read - with ONE exception
+           since #3604, and it is the case this half was written to catch: pg_wait_sampling is written against
+           something Aurora REMOVES (the ability to preload the module; Aurora permits a fixed list of
+           libraries and pg_wait_sampling is not on it), so it is a permanent gap there by design, and
+           CoveredInsteadBy sends an Aurora caller to pg_wait_stats, which reads the engine's own counters.
+           Named here rather than filtered generically, so a SECOND collector gated off Aurora has to argue
+           its case in this comment rather than slip through. */
+        var auroraGaps = postgres
+            .Where(c => !CollectorEngineCapability.IsCollectedOnEngineKind(c, MonitoredEngineKind.AuroraPostgres))
+            .Select(c => c.Name)
+            .ToArray();
+        Assert.Equal(new[] { "pg_wait_sampling" }, auroraGaps);
+        Assert.Contains("pg_wait_stats",
+            CollectorEngineCapability.NotCollectedMessage("aurora-01", 0, MonitoredEngineKind.AuroraPostgres, "pg_wait_sampling"),
+            StringComparison.Ordinal);
 
         /* Stock PostgreSQL is where the Aurora-only surfaces become a real gap (#2532), so the two tokens
            genuinely differ — counted from the catalog rather than listed, and asserted as a PROPER subset so

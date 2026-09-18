@@ -2923,6 +2923,20 @@ public sealed class DarlingWorker : BackgroundService
         string.Equals(collectorName, PlanCorrectionCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
+    /// #3604: whether a dispatched collector name is <c>pg_wait_sampling</c> — the third collector detached
+    /// from the sequential body, and the first detached for a DELIBERATE run length rather than a bimodal
+    /// one. Its sampler arm holds its connection for thirty one-second snapshots per cycle by design; awaited
+    /// inline that would delay every other collector on a stock PostgreSQL target by half a minute every five,
+    /// which is the #2700 starvation with a known cause. Detached behind the generic per-(server, collector)
+    /// gate, a still-running window simply skips the tick — and it cannot still be running, because the run is
+    /// 30 s and the cadence is 300 s; the gate is there for the day someone lengthens the window. On the
+    /// extension arm the run is a 500-row read and the detach costs nothing. Compared against the collector's
+    /// OWN declared name, for the renaming-safety reason the two siblings state.
+    /// </summary>
+    internal static bool IsPgWaitSamplingCollector(string collectorName) =>
+        string.Equals(collectorName, PgWaitSamplingCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// #2219: refreshes this PostgreSQL server's statement text if it is due, and swallows everything if not.
     ///
     /// <para><b>Best-effort by construction.</b> It runs after the statistics have already been collected and
@@ -6605,7 +6619,9 @@ LIMIT 1";
                    at completion is correct only for the sequential arm; a detached run finishes 100-230s
                    later, by which time the 15s sweep has reset and rebuilt the mark from unrelated ticks. */
                 var peerMaxAtDispatchMs = PeerMaxOrNull(server);
-                if (IsQueryStoreCollector(name) || IsPlanCorrectionCollector(name))
+                /* #3604: pg_wait_sampling is the third, and the reason is different in kind — see
+                   IsPgWaitSamplingCollector: a deliberate 30 s sampling window, not a bimodal tail. */
+                if (IsQueryStoreCollector(name) || IsPlanCorrectionCollector(name) || IsPgWaitSamplingCollector(name))
                 {
                     _ = RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken);
                 }
@@ -7614,7 +7630,7 @@ LIMIT 1";
            NotGated (mirroring QueryStoreServerGate's) collapses this to a single null check below — a
            future third collector needs only its own IsXCollector check added to this one condition,
            never a second one to keep in sync. */
-        using var detachedGate = IsPlanCorrectionCollector(collectorName)
+        using var detachedGate = IsPlanCorrectionCollector(collectorName) || IsPgWaitSamplingCollector(collectorName)
             ? _detachedCollectorGates.GetOrAdd((runtime.ServerId, collectorName), static _ => new DetachedCollectorGate()).TryAcquire()
             : DetachedCollectorGate.NotGated;
 
