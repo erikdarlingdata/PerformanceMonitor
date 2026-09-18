@@ -213,6 +213,64 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
         var facts = await SeedAndCollectAsync(s => s.SeedEverythingOnFireServerAsync());
 
         Assert.True(facts.ContainsKey("PERFMON_BATCH_REQ_SEC"), "PERFMON_BATCH_REQ_SEC should be collected");
+
+        /* #3527: the seeder plants delta 30000 over a measured 60s interval — the fact must be the
+           per-second rate 500, not the raw per-interval delta. */
+        var batch = facts["PERFMON_BATCH_REQ_SEC"];
+        Assert.Equal(500.0, batch.Value);
+        Assert.Equal(30000, batch.Metadata["delta_cntr_value"]);
+        Assert.Equal(60, batch.Metadata["sample_interval_seconds"]);
+    }
+
+    /// <summary>
+    /// #3527 fixture: delta 6000 over a measured 60s interval is 100 requests/sec — the fact value is
+    /// the division, with the raw delta and the divisor preserved in metadata. Before the fix the fact
+    /// carried the raw 6000 (60x truth at this cadence).
+    /// </summary>
+    [Fact]
+    public async Task CollectFacts_Perfmon_DividesDeltaByMeasuredInterval()
+    {
+        var facts = await SeedAndCollectAsync(async s =>
+        {
+            await s.ClearTestDataAsync();
+            await s.SeedTestServerAsync();
+            await s.SeedPerfmonRawAsync("Batch Requests/sec", deltaValue: 6000, sampleIntervalSeconds: 60);
+        });
+
+        var batch = facts["PERFMON_BATCH_REQ_SEC"];
+        Assert.Equal(100.0, batch.Value);
+        Assert.Equal(6000, batch.Metadata["delta_cntr_value"]);
+        Assert.Equal(60, batch.Metadata["sample_interval_seconds"]);
+    }
+
+    /// <summary>
+    /// #3527: sample_interval_seconds = 0 means NO delta was knowable (first sighting, counter reset,
+    /// gap past the delta policy) — such a row must never become a fact of 0 or of the raw delta. The
+    /// newest usable row wins instead, and a counter with ONLY unusable rows emits no fact at all.
+    /// </summary>
+    [Fact]
+    public async Task CollectFacts_Perfmon_SkipsIntervalZeroRows()
+    {
+        var facts = await SeedAndCollectAsync(async s =>
+        {
+            await s.ClearTestDataAsync();
+            await s.SeedTestServerAsync();
+
+            /* Older usable row, then a NEWER interval-0 row: the fact must come from the usable row. */
+            await s.SeedPerfmonRawAsync("Batch Requests/sec", deltaValue: 6000, sampleIntervalSeconds: 60,
+                collectionTime: TestDataSeeder.TestPeriodEnd.AddMinutes(-5));
+            await s.SeedPerfmonRawAsync("Batch Requests/sec", deltaValue: 0, sampleIntervalSeconds: 0);
+
+            /* A counter whose only row in the window is interval-0: no fact, not a fact of 0. */
+            await s.SeedPerfmonRawAsync("SQL Re-Compilations/sec", deltaValue: 0, sampleIntervalSeconds: 0);
+        });
+
+        var batch = facts["PERFMON_BATCH_REQ_SEC"];
+        Assert.Equal(100.0, batch.Value);
+        Assert.Equal(60, batch.Metadata["sample_interval_seconds"]);
+
+        Assert.False(facts.ContainsKey("PERFMON_RECOMPILATIONS_SEC"),
+            "a counter with only interval-0 rows must emit no fact — 0 is not a knowable rate");
     }
 
     [Fact]

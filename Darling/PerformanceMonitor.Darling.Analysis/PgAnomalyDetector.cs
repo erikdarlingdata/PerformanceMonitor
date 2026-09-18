@@ -207,14 +207,20 @@ FROM v_file_io_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 AND   (delta_reads > 0 OR delta_writes > 0)";
 
+    /* Batch-request window: per-second rate per sample (#3527) — delta_cntr_value spans one collection
+       interval, so divide by the row's MEASURED sample_interval_seconds (#2234). Interval <= 0 marks an
+       unknowable delta (first sighting/reset/gap) and the row is skipped, never read as 0. Keeps the
+       window statistic in the same requests/sec unit as the baseline and the BatchRequestFloor/Fallback
+       thresholds. */
     public const string BatchRequestWindowSql = @"
-SELECT AVG(delta_cntr_value) AS avg_batch,
-       MAX(delta_cntr_value) AS peak_batch,
+SELECT AVG(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) AS avg_batch,
+       MAX(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) AS peak_batch,
        COUNT(*) AS sample_count
 FROM v_perfmon_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 AND   counter_name = 'Batch Requests/sec'
-AND   delta_cntr_value >= 0";
+AND   delta_cntr_value >= 0
+AND   sample_interval_seconds > 0";
 
     public const string SessionWindowSql = @"
 WITH per_collection AS (

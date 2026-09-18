@@ -294,13 +294,19 @@ WITH clean AS (
             // Cumulative counter — restart exclusion via subquery with QUALIFY.
             // Excludes samples where delta drops to 0 when prior sample was > 1000
             // (restart signature for cumulative counters).
+            // #3527: v is the per-second rate — the per-interval delta divided by the row's measured
+            // sample_interval_seconds — so the baseline population is in the same requests/sec unit as
+            // the detector's window statistic. Interval <= 0 rows (unknowable delta) are skipped, never
+            // read as 0. The restart signature stays on the RAW delta: its > 1000 bar predates the
+            // division and marks a counter reset regardless of cadence.
             MetricNames.BatchRequests => @"
 WITH clean AS (
-    SELECT collection_time, delta_cntr_value AS v
+    SELECT collection_time, delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0) AS v
     FROM v_perfmon_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   counter_name = 'Batch Requests/sec'
     AND   delta_cntr_value >= 0
+    AND   sample_interval_seconds > 0
     QUALIFY NOT (delta_cntr_value = 0
         AND COALESCE(LAG(delta_cntr_value) OVER (ORDER BY collection_time), 0) > 1000)
 )," + RobustTierScaffold,

@@ -242,6 +242,170 @@ public sealed class DarlingAnomalyBaselineTests
         /* The pre-window row filter is unchanged from Lite. */
         Assert.Contains("counter_name = 'Batch Requests/sec'", TimescaleSupport.CreatePerfmonBaselineSql, StringComparison.Ordinal);
         Assert.Contains("delta_cntr_value >= 0", TimescaleSupport.CreatePerfmonBaselineSql, StringComparison.Ordinal);
+
+        /* #3527: v is the PER-SECOND rate. The perfmon_baseline supply materializes only
+           (collection_time, delta_cntr_value) — no stored interval, and a continuous aggregate cannot
+           grow a column without forfeiting the history the 4-day raw tier can't refill — so the divisor
+           is derived from LAG(collection_time) over the collapsed series (the WaitMsPerSec idiom),
+           computed in the SAME windowed CTE (window-before-filter holds for it too), with the
+           interval-less first row filtered alongside the restart exclusion. The DOUBLE PRECISION cast
+           is the io-arm rule: STDDEV_SAMP over numeric can overflow System.Decimal. */
+        var intervalAt = sql.IndexOf("extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_sec", StringComparison.Ordinal);
+        Assert.True(intervalAt >= 0 && intervalAt < fromCteAt, "interval_sec must be derived inside the windowed CTE");
+        Assert.Contains("delta_cntr_value::DOUBLE PRECISION / interval_sec AS v", sql, StringComparison.Ordinal);
+        var intervalFilterAt = sql.IndexOf("interval_sec > 0", StringComparison.Ordinal);
+        Assert.True(intervalFilterAt > fromCteAt, "the interval filter must sit OUTSIDE the windowed CTE, with the exclusion");
+    }
+
+    /// <summary>
+    /// #3527: the batch-request WINDOW statistic must be requests/sec — the per-interval
+    /// delta_cntr_value divided by the row's measured sample_interval_seconds — or the
+    /// BatchRequestFloor/Fallback thresholds (defined in requests/sec) admit 60-300x-inflated
+    /// deltas and the comparison against the per-second baseline is cross-unit. Interval &lt;= 0
+    /// rows carry NO knowable delta and must be filtered, never read as a rate of 0 or as the
+    /// raw delta.
+    /// </summary>
+    [Fact]
+    public void BatchRequestWindow_DividesByMeasuredInterval_AndSkipsUnknowableRows()
+    {
+        var sql = PgAnomalyDetector.BatchRequestWindowSql;
+
+        Assert.Contains("AVG(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0))", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0))", sql, StringComparison.Ordinal);
+        Assert.Contains("sample_interval_seconds > 0", sql, StringComparison.Ordinal);
+
+        /* A raw AVG/MAX of the delta is exactly the #3527 defect — pin its absence. */
+        Assert.DoesNotContain("AVG(delta_cntr_value)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MAX(delta_cntr_value)", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3527 proven live, both halves in one place: the BatchRequests BASELINE arm derives its
+    /// per-second unit from LAG(collection_time) over the perfmon_baseline supply, and the DETECTOR's
+    /// window read divides by the stored measured interval — so the two sides meet in the same
+    /// requests/sec unit and the absolute bars judge honest rates.
+    ///
+    /// <para>History (one Monday-10:00 bucket, 12 collections at 300s spacing, delta 30000 each —
+    /// 100 req/sec): c1 has no prior (interval NULL → dropped), c6 is a restart zero (prior 30000 &gt;
+    /// 1000 → excluded), c7 is a genuine idle zero (prior 0 → kept at 0/sec). 10 samples, mean
+    /// (9x100 + 0)/10 = 90 — in requests/sec, where the raw-delta unit would read 27000.</para>
+    ///
+    /// <para>Window (the following Monday): three rows at stored interval 60, delta 600000 — 10000
+    /// req/sec — plus one interval-0 row with a wild delta that must be SKIPPED, not rated. The one
+    /// planted history day leaves the bucket untrustworthy (Full tier needs 3 distinct days), so the
+    /// detector fires on the absolute BatchRequestFallback bar (5000 req/sec): peak 10000 clears it
+    /// honestly. Pre-#3527 the raw deltas cleared every bar by orders of magnitude regardless of
+    /// workload; post-fix the emitted Value, peak/avg metadata, and baseline_mean are all per-second.</para>
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_BatchRequestArm_PerSecondBaselineAndWindow_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live batch-request test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int batchServerId = TestServerId + 2; // own id — this test cleans its own rows
+        const string batchServerName = "batch-per-second-e2e";
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand(
+            $"DELETE FROM perfmon_stats WHERE server_id = {batchServerId}; " +
+            $"DELETE FROM wait_stats WHERE server_id = {batchServerId};", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var day = DateTime.UtcNow.Date.AddDays(-8);
+            while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+            var historyStart = DateTime.SpecifyKind(day.AddHours(10), DateTimeKind.Unspecified);
+
+            for (var i = 0; i < 12; i++)
+            {
+                var delta = (i == 5 || i == 6) ? 0L : 30000L;
+                await InsertAsync(connection,
+                    "INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                    (long)(200 + i), historyStart.AddMinutes(5 * i), batchServerId, batchServerName,
+                    "SQLServer:SQL Statistics", "Batch Requests/sec", "", delta * 2, delta, 300);
+            }
+
+            /* The baseline supply must exist (see the wait test's note) — plain fallback views. */
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+            var provider = new PgBaselineProvider(postgres);
+            var analysisTime = historyStart.AddDays(7);
+
+            var baseline = await provider.GetBaselineAsync(batchServerId, MetricNames.BatchRequests, analysisTime);
+            Assert.Equal(10L, baseline.SampleCount);
+            Assert.Equal(90.0, baseline.Mean, 0.001);
+            Assert.Equal(BaselineTier.Full, baseline.Tier);
+            Assert.Equal(10, baseline.HourOfDay);
+            Assert.Equal((int)DayOfWeek.Monday, baseline.DayOfWeek);
+
+            /* Canary for the HasBaselineData gate — OUTSIDE the analysis window so the wait
+               detector's own window read stays empty and it emits nothing. */
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                300L, historyStart, batchServerId, batchServerName, TestWaitType, 1L, 100L);
+
+            /* The anomalous current window: 10000 req/sec (delta 600000 over a measured 60s),
+               plus one interval-0 row whose wild delta must never be rated. */
+            for (var i = 0; i < 3; i++)
+            {
+                await InsertAsync(connection,
+                    "INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                    (long)(400 + i), analysisTime.AddMinutes(5 * (i + 1)), batchServerId, batchServerName,
+                    "SQLServer:SQL Statistics", "Batch Requests/sec", "", 1200000L, 600000L, 60);
+            }
+            await InsertAsync(connection,
+                "INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                403L, analysisTime.AddMinutes(20), batchServerId, batchServerName,
+                "SQLServer:SQL Statistics", "Batch Requests/sec", "", 0L, 999999999L, 0);
+
+            var detector = new PgAnomalyDetector(postgres, provider);
+            var context = new AnalysisContext
+            {
+                ServerId = batchServerId,
+                ServerName = batchServerName,
+                TimeRangeStart = analysisTime,
+                TimeRangeEnd = analysisTime.AddMinutes(30),
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            var anomalies = await detector.DetectAnomaliesAsync(context);
+
+            var fact = Assert.Single(anomalies);
+            Assert.Equal("ANOMALY_BATCH_REQUESTS", fact.Key);
+            Assert.Equal(10000.0, fact.Value, 0.001);                              // per-second, not 600000
+            Assert.Equal(10000.0, fact.Metadata["peak_batch_requests"], 0.001);
+            Assert.Equal(10000.0, fact.Metadata["avg_batch_requests"], 0.001);
+            Assert.Equal(3.0, fact.Metadata["window_samples"]);                    // the interval-0 row is NOT a sample
+            Assert.Equal(90.0, fact.Metadata["baseline_mean"], 0.001);             // same unit as the window
+            Assert.Equal(1.0, fact.Metadata["baseline_low_quality"]);              // one distinct day → absolute bar
+            Assert.Equal(2.0, fact.Metadata["fallback_exceedance"], 0.001);        // 10000 / the 5000 req/sec bar
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using (var command = new NpgsqlCommand(
+                    $"DELETE FROM perfmon_stats WHERE server_id = {batchServerId}; " +
+                    $"DELETE FROM wait_stats WHERE server_id = {batchServerId};", cleanup))
+                {
+                    await command.ExecuteNonQueryAsync(cleanupCt);
+                }
+                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
+            });
+        }
     }
 
     [Fact]
