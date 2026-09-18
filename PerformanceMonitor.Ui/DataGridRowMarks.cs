@@ -59,9 +59,28 @@ public enum DataGridRowMark
 /// </summary>
 public static class DataGridRowMarks
 {
+    /// <summary>
+    /// The theme resource keys the three marks paint with (#3577). One fixed tint cannot suit both a light
+    /// well and a near-black one: the 20% tints that shipped with #2645 composite to 1.2–1.4:1 against the
+    /// Dark theme's rows, and the operator who asked for the marks could not find the rows they had marked.
+    /// Each theme dictionary now carries its own values, measured against its own row backgrounds, under
+    /// these keys; the light themes keep the original tints and Dark gets stronger ones.
+    /// </summary>
+    public const string DoneBrushKey = "RowMarkDoneBrush";
+
+    /// <inheritdoc cref="DoneBrushKey"/>
+    public const string ToDoBrushKey = "RowMarkToDoBrush";
+
+    /// <inheritdoc cref="DoneBrushKey"/>
+    public const string DoNotBrushKey = "RowMarkDoNotBrush";
+
     /* Deliberately translucent. These sit UNDER the selection highlight and the alert-severity row
        triggers, both of which the operator still needs to read on a marked row — an opaque fill would
-       win the argument with every one of them. */
+       win the argument with every one of them.
+
+       Since #3577 these literals are the FALLBACK only — the #2645 originals, used when the host's resources
+       do not carry the theme keys above — so a mark can never silently paint nothing. Every shipped theme
+       defines the keys; a test pins that. */
     private static readonly Brush s_done = Frozen(Color.FromArgb(0x33, 0x22, 0xC5, 0x5E));
     private static readonly Brush s_toDo = Frozen(Color.FromArgb(0x33, 0xD9, 0x77, 0x06));
     private static readonly Brush s_doNot = Frozen(Color.FromArgb(0x33, 0xDC, 0x26, 0x26));
@@ -106,21 +125,30 @@ public static class DataGridRowMarks
             return;
         }
 
-        var brush = Get(row.Item) switch
+        (string? key, Brush? fallback) = Get(row.Item) switch
         {
-            DataGridRowMark.Done => s_done,
-            DataGridRowMark.ToDo => s_toDo,
-            DataGridRowMark.DoNot => s_doNot,
-            _ => null,
+            DataGridRowMark.Done => (DoneBrushKey, s_done),
+            DataGridRowMark.ToDo => (ToDoBrushKey, s_toDo),
+            DataGridRowMark.DoNot => (DoNotBrushKey, s_doNot),
+            _ => (null, null),
         };
 
-        if (brush is null)
+        if (key is null)
         {
+            /* ClearValue also drops a resource reference set below, so the recycling note above still holds. */
             row.ClearValue(DataGridRow.BackgroundProperty);
+        }
+        else if (row.TryFindResource(key) is Brush)
+        {
+            /* A resource REFERENCE rather than the brush it currently resolves to, so a marked row follows a
+               theme switch instead of holding the palette it happened to be painted under (#3577). It sets a
+               local value, exactly as the direct assignment did, so its precedence over the row style's
+               selection/hover triggers is unchanged. */
+            row.SetResourceReference(DataGridRow.BackgroundProperty, key);
         }
         else
         {
-            row.Background = brush;
+            row.Background = fallback;
         }
     }
 

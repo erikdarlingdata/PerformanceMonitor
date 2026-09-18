@@ -10,8 +10,17 @@
 
     <!-- Brand Colors -->
     <Color x:Key="AccentColor">#1E6FA8</Color>
-    <Color x:Key="AccentHoverColor">#2B87C8</Color>
+    <!-- #3577: was #2B87C8, on which no ink passes AA (white 3.89:1, the page text 3.76:1), and it sits under
+         text on a selected+hovered tab, a highlighted combo item and a hovered accent button. Pulled one step
+         toward the accent so white clears 4.56:1; still a lighter hover than the #1E6FA8 rest state. -->
+    <Color x:Key="AccentHoverColor">#267BB8</Color>
     <Color x:Key="AccentPressedColor">#155A8A</Color>
+    <!-- Ink for text and glyphs that sit ON an accent fill: the selected tab, a highlighted combo item, an
+         accent button, a selected grid row. #3577: the accent is a mid blue, and the dark ForegroundColor
+         those surfaces used to carry measures 2.71:1 against it (WCAG AA text wants 4.5:1). White — already
+         the grid-selection ink — is 5.39:1 on AccentColor, 4.56:1 on AccentHoverColor, 7.34:1 on
+         AccentPressedColor. -->
+    <Color x:Key="AccentForegroundColor">#FFFFFF</Color>
 
     <!-- Background Colors -->
     <Color x:Key="BackgroundDarkColor">#CFDDE9</Color>
@@ -54,6 +63,7 @@
     <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource AccentColor}"/>
     <SolidColorBrush x:Key="AccentHoverBrush" Color="{StaticResource AccentHoverColor}"/>
     <SolidColorBrush x:Key="AccentPressedBrush" Color="{StaticResource AccentPressedColor}"/>
+    <SolidColorBrush x:Key="AccentForegroundBrush" Color="{StaticResource AccentForegroundColor}"/>
 
     <SolidColorBrush x:Key="BackgroundDarkBrush" Color="{StaticResource BackgroundDarkColor}"/>
     <SolidColorBrush x:Key="AlternatingRowBrush" Color="{StaticResource AlternatingRowColor}"/>
@@ -85,6 +95,14 @@
     <SolidColorBrush x:Key="DeadlockEdgeBrush" Color="#455A6E"/>
     <SolidColorBrush x:Key="ErrorBrush" Color="{StaticResource ErrorColor}"/>
     <SolidColorBrush x:Key="InfoBrush" Color="{StaticResource InfoColor}"/>
+
+    <!-- Row-mark tints for "Mark Done / To Do / Do Not Do" (#2645), painted by DataGridRowMarks. Theme keys
+         since #3577 so Dark can carry its own values; these are the #2645 originals unchanged (20% of the
+         green/amber/red), which read as pastel tints on the cool-blue wells. Measured over #CFDDE9 with
+         #1A2A3A text: Done -> #ACD8CD, To Do -> #D1C9BC, Do Not -> #D2B8C2; row text 9.4:1 / 8.9:1 / 7.9:1. -->
+    <SolidColorBrush x:Key="RowMarkDoneBrush"  Color="#22C55E" Opacity="0.2"/>
+    <SolidColorBrush x:Key="RowMarkToDoBrush"  Color="#D97706" Opacity="0.2"/>
+    <SolidColorBrush x:Key="RowMarkDoNotBrush" Color="#DC2626" Opacity="0.2"/>
 
     <!-- ============================================ -->
     <!-- Window Style                                 -->
@@ -162,6 +180,8 @@
     <!-- Accent Button Style (for primary actions) -->
     <Style x:Key="AccentButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
         <Setter Property="Background" Value="{StaticResource AccentBrush}"/>
+        <!-- #3577: the base Button's page-text Foreground on the accent fill was 2.71:1. -->
+        <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}"/>
         <Setter Property="FontWeight" Value="SemiBold"/>
         <Setter Property="Template">
             <Setter.Value>
@@ -172,7 +192,14 @@
                             CornerRadius="3"
                             Padding="{TemplateBinding Padding}"
                             TextElement.Foreground="{TemplateBinding Foreground}">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <!-- #3577: see the TabItem header presenter. A plain-string Content becomes a
+                                 TextBlock that the app-level implicit style would repaint in ForegroundBrush;
+                                 shadowing that style lets the text inherit the button's Foreground. -->
+                            <ContentPresenter.Resources>
+                                <Style TargetType="TextBlock"/>
+                            </ContentPresenter.Resources>
+                        </ContentPresenter>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
@@ -250,7 +277,10 @@
     <!-- Tab Close Button Style -->
     <Style x:Key="TabCloseButton" TargetType="Button">
         <Setter Property="Background" Value="Transparent"/>
-        <Setter Property="Foreground" Value="White"/>
+        <!-- No Foreground setter on purpose (#3577): the × inherits the tab header's ink, so it reads on an
+             unselected tab (page text on the tab well) and on the selected one (AccentForegroundBrush on the
+             accent fill) alike. The hard-coded White it carried was invisible on this theme's pale unselected
+             tab. The hover/pressed triggers below still paint White on red. -->
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Width" Value="22"/>
         <Setter Property="Height" Value="22"/>
@@ -545,14 +575,22 @@
                             BorderThickness="{TemplateBinding BorderThickness}"
                             Padding="{TemplateBinding Padding}">
                         <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
-                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}">
+                            <!-- #3577: see the TabItem header presenter — lets the item text take the
+                                 Foreground the triggers below set on the accent fills (was 2.71:1 selected / 3.76:1 highlighted). -->
+                            <ContentPresenter.Resources>
+                                <Style TargetType="TextBlock"/>
+                            </ContentPresenter.Resources>
+                        </ContentPresenter>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsSelected" Value="True">
                             <Setter TargetName="Bd" Property="Background" Value="{StaticResource AccentBrush}"/>
+                            <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}"/>
                         </Trigger>
                         <Trigger Property="IsHighlighted" Value="True">
                             <Setter TargetName="Bd" Property="Background" Value="{StaticResource AccentHoverBrush}"/>
+                            <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -572,7 +610,10 @@
 
     <Style TargetType="TabItem">
         <Setter Property="Background" Value="{StaticResource BackgroundLightBrush}"/>
-        <Setter Property="Foreground" Value="{StaticResource ForegroundDimBrush}"/>
+        <!-- ForegroundBrush, not Dim: the header text has always rendered in ForegroundBrush (see the presenter
+             note below), so this keeps the unselected tab exactly as it looked while the selected setter
+             becomes live. -->
+        <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>
         <Setter Property="BorderThickness" Value="0"/>
         <Setter Property="Padding" Value="12,8"/>
         <Setter Property="Margin" Value="0,0,2,0"/>
@@ -588,12 +629,29 @@
                         <ContentPresenter x:Name="contentPresenter"
                                           ContentSource="Header"
                                           HorizontalAlignment="Center"
-                                          VerticalAlignment="Center"/>
+                                          VerticalAlignment="Center">
+                            <!-- #3577: a string header becomes a TextBlock, and this dictionary's app-level
+                                 implicit TextBlock style out-ranks the Foreground that TextBlock would inherit
+                                 from the TabItem (WPF looks an implicit style up past the template boundary into
+                                 Application resources, and a style setter beats an inherited value). So the
+                                 Foreground setters on this style never reached the header text: the selected
+                                 tab always rendered ForegroundBrush on the accent fill — 1.99:1 on Dark, 2.71:1 on
+                                 Cool Breeze. An empty implicit style HERE is found first and shadows the app-level
+                                 one inside the header, so the text inherits the TabItem's Foreground the way
+                                 stock WPF intends. Explicit Foregrounds on custom header elements (the alert
+                                 badge) are local values and still win. -->
+                            <ContentPresenter.Resources>
+                                <Style TargetType="TextBlock"/>
+                            </ContentPresenter.Resources>
+                        </ContentPresenter>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsSelected" Value="True">
                             <Setter TargetName="border" Property="Background" Value="{StaticResource AccentBrush}"/>
-                            <Setter Property="Foreground" Value="#EEF4FA"/>
+                            <!-- #3577: the reported defect. The literal #EEF4FA here was dead (see above) and the
+                                 header rendered ForegroundBrush on the accent: 2.71:1. Now the live on-accent ink:
+                                 5.39:1 selected, 4.56:1 selected+hover. -->
+                            <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}"/>
                         </Trigger>
                         <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="border" Property="Background" Value="{StaticResource BackgroundLighterBrush}"/>
@@ -752,15 +810,16 @@
         <Setter Property="Background" Value="#9DBFD9"/>
     </Style>
 
-    <!-- Foreground to use on selected rows (white text on the cool-breeze accent background) -->
-    <SolidColorBrush x:Key="GridSelectionForegroundBrush" Color="#FFFFFF"/>
+    <!-- Foreground to use on selected rows: the on-accent ink (#3577; same #FFFFFF as before, 5.39:1 on the
+         accent selection fill, now through the shared key). -->
+    <SolidColorBrush x:Key="GridSelectionForegroundBrush" Color="{StaticResource AccentForegroundColor}"/>
 
     <!-- Override WPF system selection brushes so all controls (DataGrid, ListBox, etc.)
-         use the theme accent and the matching readable text color. -->
+         use the theme accent and the matching readable text color (the on-accent ink, #3577). -->
     <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}"                    Color="{StaticResource AccentColor}"/>
-    <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}"                Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}"                Color="{StaticResource AccentForegroundColor}"/>
     <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightBrushKey}"   Color="{StaticResource AccentColor}"/>
-    <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightTextBrushKey}" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightTextBrushKey}" Color="{StaticResource AccentForegroundColor}"/>
 
     <!-- Named base style for DataGridTextColumn ElementStyles that must set an explicit
          Foreground.  BasedOn this style; keep the unselected Foreground setter in the
@@ -797,7 +856,8 @@
         <Style.Triggers>
             <Trigger Property="IsSelected" Value="True">
                 <Setter Property="Background" Value="{StaticResource AccentBrush}"/>
-                <Setter Property="Foreground" Value="#FFFFFF"/>
+                <!-- #3577: the on-accent ink, through the shared key (same #FFFFFF, 5.39:1). -->
+                <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}"/>
             </Trigger>
         </Style.Triggers>
     </Style>
@@ -1099,7 +1159,12 @@
                         <Border x:Name="Background" Background="Transparent" CornerRadius="3"/>
                         <ContentPresenter x:Name="Content"
                                           HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
-                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}">
+                            <!-- #3577: see the TabItem header presenter. -->
+                            <ContentPresenter.Resources>
+                                <Style TargetType="TextBlock"/>
+                            </ContentPresenter.Resources>
+                        </ContentPresenter>
                     </Grid>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
@@ -1107,6 +1172,8 @@
                         </Trigger>
                         <Trigger Property="IsSelected" Value="True">
                             <Setter TargetName="Background" Property="Background" Value="{StaticResource AccentBrush}"/>
+                            <!-- #3577: the day number on the accent fill was ForegroundBrush at 2.71:1. -->
+                            <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}"/>
                         </Trigger>
                         <Trigger Property="IsToday" Value="True">
                             <Setter TargetName="Background" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
@@ -1141,7 +1208,12 @@
                         <Border x:Name="Background" Background="Transparent" CornerRadius="3"/>
                         <ContentPresenter x:Name="Content"
                                           HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
-                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}">
+                            <!-- #3577: see the TabItem header presenter. -->
+                            <ContentPresenter.Resources>
+                                <Style TargetType="TextBlock"/>
+                            </ContentPresenter.Resources>
+                        </ContentPresenter>
                     </Grid>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
@@ -1149,6 +1221,8 @@
                         </Trigger>
                         <Trigger Property="HasSelectedDays" Value="True">
                             <Setter TargetName="Background" Property="Background" Value="{StaticResource AccentBrush}"/>
+                            <!-- #3577: see CalendarDayButton. -->
+                            <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}"/>
                         </Trigger>
                         <Trigger Property="IsInactive" Value="True">
                             <Setter Property="Foreground" Value="{StaticResource ForegroundMutedBrush}"/>

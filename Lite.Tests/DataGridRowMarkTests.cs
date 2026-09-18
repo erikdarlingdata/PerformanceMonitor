@@ -136,6 +136,30 @@ public class DataGridRowMarkTests
         }
     }
 
+    /// <summary>
+    /// #3577: the marks paint through theme keys so Dark can carry tints that are actually visible on its
+    /// near-black rows. <c>Apply</c> falls back to the original fixed tints when a key is missing — which is
+    /// the right behaviour for a host without the theme, and exactly the wrong one for a typo in a shipped
+    /// dictionary, where it would silently revert Dark to the 1.3:1 tints this fixed. So every theme file in
+    /// both apps must define all three keys, spelled the way the code looks them up.
+    /// </summary>
+    [Theory]
+    [InlineData("Lite", "Themes", "DarkTheme.xaml")]
+    [InlineData("Lite", "Themes", "LightTheme.xaml")]
+    [InlineData("Lite", "Themes", "CoolBreezeTheme.xaml")]
+    [InlineData("Darling", "PerformanceMonitor.Darling.Viewer", "Themes", "DarkTheme.xaml")]
+    [InlineData("Darling", "PerformanceMonitor.Darling.Viewer", "Themes", "LightTheme.xaml")]
+    [InlineData("Darling", "PerformanceMonitor.Darling.Viewer", "Themes", "CoolBreezeTheme.xaml")]
+    public void EveryThemeDefinesTheBrushKeysTheMarksPaintWith(params string[] relativePath)
+    {
+        var xaml = File.ReadAllText(Path.Combine(new[] { RepoRoot() }.Concat(relativePath).ToArray()));
+
+        foreach (var key in new[] { DataGridRowMarks.DoneBrushKey, DataGridRowMarks.ToDoBrushKey, DataGridRowMarks.DoNotBrushKey })
+        {
+            Assert.Contains($"x:Key=\"{key}\"", xaml, StringComparison.Ordinal);
+        }
+    }
+
     private static string RepoRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
