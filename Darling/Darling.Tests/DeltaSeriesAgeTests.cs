@@ -231,6 +231,198 @@ public sealed class DeltaSeriesAgeTests
         Assert.Equal(0, deltas.CalculateDeltaWithSeriesAge(ServerId, "other_collector", "k", 500, 5, out _, T1, Gap));
     }
 
+    /* ---------------- #3540 A4: the pass window survives a restart ---------------- */
+
+    /// <summary>
+    /// THE restart pin. Before #3540 no host seeded the pass window, so the first pass after a restart
+    /// always saw "no previous look" and baselined every new key — the rescue was inert on exactly the
+    /// cycle it exists for. A seeded Current alone arms it: the first post-restart pass rolls it into
+    /// Previous and measures the gap against it.
+    /// </summary>
+    [Fact]
+    public void ASeededPassWindowArmsTheRescueOnTheFirstPostRestartPass()
+    {
+        var deltas = new SeedingCalculator();
+        deltas.SeedPassWindow(ServerId, Collector, current: T0);
+
+        /* The first pass of the new process: a plan compiled 20 s ago, inside the 60 s since the
+           predecessor's last look, is credited in full with a real interval. */
+        var delta = deltas.CalculateDeltaWithSeriesAge(
+            ServerId, Collector, "sql:0:99:planB", 900, seriesAgeSeconds: 20, out var interval, T1, Gap);
+
+        Assert.Equal(900, delta);
+        Assert.Equal(60, interval);
+
+        /* The control: the same first pass on an UNSEEDED calculator is the pre-#3540 behaviour. */
+        var cold = new CollectorDeltaCalculator();
+        Assert.Equal(0, cold.CalculateDeltaWithSeriesAge(ServerId, Collector, "sql:0:99:planB", 900, 20, out var coldInterval, T1, Gap));
+        Assert.Equal(0, coldInterval);
+    }
+
+    /// <summary>
+    /// The seeded window is still bounded by the gap policy and by the age: a series older than the gap
+    /// since the seeded look, or a first pass past the policy, is refused exactly as an in-process window
+    /// would refuse it. Seeding restores the window; it does not loosen the rule.
+    /// </summary>
+    [Fact]
+    public void ASeededPassWindowKeepsTheGapAndAgeBounds()
+    {
+        var deltas = new SeedingCalculator();
+        deltas.SeedPassWindow(ServerId, Collector, current: T0);
+
+        Assert.Equal(0, deltas.CalculateDeltaWithSeriesAge(ServerId, Collector, "old", 999, seriesAgeSeconds: 3_600, out var i1, T1, Gap));
+        Assert.Equal(0, i1);
+        Assert.Equal(0, deltas.CalculateDeltaWithSeriesAge(ServerId, Collector, "fresh", 777, seriesAgeSeconds: 30, out var i2, T0.AddHours(2), Gap));
+        Assert.Equal(0, i2);
+    }
+
+    /// <summary>
+    /// A seeded Previous is never what the first post-restart pass reads: that pass carries a NEW
+    /// collection time, so <c>PreviousPass</c> rolls the seeded Current into Previous before returning.
+    /// Pinned so a seeder that returns one collection time per server (the wait_stats shape) is known
+    /// to lose nothing by passing null — and so nobody widens a seed read to fetch a second timestamp
+    /// on the belief that the rescue needs it.
+    /// </summary>
+    [Fact]
+    public void TheSeededPreviousIsNotWhatTheFirstPostRestartPassReads()
+    {
+        var withPrevious = new SeedingCalculator();
+        withPrevious.SeedPassWindow(ServerId, Collector, current: T0, previous: T0.AddMinutes(-5));
+
+        var withoutPrevious = new SeedingCalculator();
+        withoutPrevious.SeedPassWindow(ServerId, Collector, current: T0);
+
+        var a = withPrevious.CalculateDeltaWithSeriesAge(ServerId, Collector, "k", 900, 20, out var ia, T1, Gap);
+        var b = withoutPrevious.CalculateDeltaWithSeriesAge(ServerId, Collector, "k", 900, 20, out var ib, T1, Gap);
+
+        Assert.Equal(900, a);
+        Assert.Equal(a, b);
+        Assert.Equal(60, ia);
+        Assert.Equal(ia, ib);
+    }
+
+    /// <summary>The seeded window is per server and per group, like the live one.</summary>
+    [Fact]
+    public void ASeededPassWindowIsPerServerAndPerGroup()
+    {
+        var deltas = new SeedingCalculator();
+        deltas.SeedPassWindow(ServerId, Collector, current: T0);
+
+        Assert.Equal(0, deltas.CalculateDeltaWithSeriesAge(2, Collector, "k", 500, 5, out _, T1, Gap));
+        Assert.Equal(0, deltas.CalculateDeltaWithSeriesAge(ServerId, "query_stats_exec", "k", 500, 5, out _, T1, Gap));
+    }
+
+    /// <summary><c>ClearServer</c> drops a SEEDED window too — the re-add path both hosts wire.</summary>
+    [Fact]
+    public void ClearServerDropsASeededPassWindow()
+    {
+        var deltas = new SeedingCalculator();
+        deltas.SeedPassWindow(ServerId, Collector, current: T0);
+
+        deltas.ClearServer(ServerId);
+
+        Assert.Equal(0, deltas.CalculateDeltaWithSeriesAge(ServerId, Collector, "k", 900, 5, out var interval, T1, Gap));
+        Assert.Equal(0, interval);
+    }
+
+    /// <summary>
+    /// <c>SeedPasses</c> seeds EVERY group named, from the tracker's per-server window — a seeder that
+    /// seeded the family name instead of its groups would arm nothing, because the live window is keyed
+    /// by the group the collector passes as <c>collectorName</c>.
+    /// </summary>
+    [Fact]
+    public void SeedPassesArmsEveryGroupItIsGiven()
+    {
+        var deltas = new SeedingCalculator();
+        deltas.SeedFromTracker(new[] { (ServerId, T0) }, "query_stats_exec", "query_stats_worker", "query_stats_rows");
+
+        foreach (var group in new[] { "query_stats_exec", "query_stats_worker", "query_stats_rows" })
+        {
+            Assert.Equal(900, deltas.CalculateDeltaWithSeriesAge(ServerId, group, "k", 900, 20, out _, T1, Gap));
+        }
+
+        /* The family name itself is not a group and must not have been armed. */
+        Assert.Equal(0, deltas.CalculateDeltaWithSeriesAge(ServerId, "query_stats", "k", 900, 20, out _, T1, Gap));
+    }
+
+    /// <summary>
+    /// The tracker keeps the two most recent DISTINCT times per server whatever order the rows stream in,
+    /// and ignores a null time rather than guessing — the seed reads are unordered by time within a
+    /// server, and a latest-collection read repeats one time across every row.
+    /// </summary>
+    [Fact]
+    public void TheSeedPassTrackerKeepsTheLatestAndTheOneBefore_InAnyArrivalOrder()
+    {
+        var a = T0.AddMinutes(-4);
+        var b = T0.AddMinutes(-2);
+        var c = T0;
+
+        var arrivals = new[]
+        {
+            new[] { a, b, c },
+            new[] { c, b, a },
+            new[] { b, c, a, c, b, b },
+        };
+
+        foreach (var order in arrivals)
+        {
+            var tracker = new SeedingCalculator.Tracker();
+            foreach (var t in order)
+            {
+                tracker.Observe(ServerId, t);
+            }
+            tracker.Observe(ServerId, null);
+
+            var window = Assert.Single(tracker.Servers);
+            Assert.Equal(ServerId, window.ServerId);
+            Assert.Equal(c, window.Latest);
+            Assert.Equal(b, window.Before);
+        }
+
+        /* One time observed many times: Latest is it, Before is nothing — not a copy of Latest. */
+        var single = new SeedingCalculator.Tracker();
+        single.Observe(ServerId, c);
+        single.Observe(ServerId, c);
+        var only = Assert.Single(single.Servers);
+        Assert.Equal(c, only.Latest);
+        Assert.Null(only.Before);
+
+        /* And nothing observed is nothing seeded: a null-only stream yields no server. */
+        var empty = new SeedingCalculator.Tracker();
+        empty.Observe(ServerId, null);
+        Assert.Empty(empty.Servers);
+        Assert.Equal(0, empty.Count);
+    }
+
+    /// <summary>
+    /// A host stand-in exposing the protected seeding hooks. The real hosts (Lite's DeltaCalculator,
+    /// DarlingDeltaCalculator) call the same members from their store reads; this one calls them from
+    /// literals so the window's semantics are pinned without an engine.
+    /// </summary>
+    private sealed class SeedingCalculator : CollectorDeltaCalculator
+    {
+        public void SeedPassWindow(int serverId, string group, DateTime current, DateTime? previous = null)
+            => SeedPass(serverId, group, current, previous);
+
+        public void SeedFromTracker((int ServerId, DateTime Time)[] rows, params string[] groups)
+        {
+            var tracker = new SeedPassTracker();
+            foreach (var (serverId, time) in rows)
+            {
+                tracker.Observe(serverId, time);
+            }
+            SeedPasses(tracker, groups);
+        }
+
+        public sealed class Tracker
+        {
+            private readonly SeedPassTracker _inner = new();
+            public void Observe(int serverId, DateTime? t) => _inner.Observe(serverId, t);
+            public System.Collections.Generic.IEnumerable<(int ServerId, DateTime Latest, DateTime? Before)> Servers => _inner.Servers;
+            public int Count => _inner.Count;
+        }
+    }
+
     /// <summary>
     /// An implementer that never opted in keeps compiling and keeps its old behaviour, which is the
     /// reason the interface method is default-implemented rather than abstract.

@@ -87,7 +87,7 @@ public sealed class CommandPlaneCommandTimeoutTests
     /// site that pin's file-scoped list missed, not a member of this regime. <c>ReadStoreSizeBytesAsync</c>
     /// runs on the 5-minute disk-check cadence. <c>StoreConfigProvider</c>'s other twelve sites seed and
     /// reconcile ONCE per process start, unlike the beacon below which the sweep re-runs every 15 s for the
-    /// life of the process. <c>DarlingDeltaCalculator</c>'s four are startup seeds.
+    /// life of the process. <c>DarlingDeltaCalculator</c>'s seeds (ten since #3540 A4) are startup seeds.
     /// <c>DarlingCommandExecutor</c>'s <c>test_connect</c>, <c>snapshot_now</c>, <c>analyze_now</c>,
     /// <c>purge_now</c>, <c>fetch_plan</c> and <c>fetch_active_queries</c> branches touch the store through
     /// members other groups own or not at all.</para>

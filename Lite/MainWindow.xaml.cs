@@ -1790,6 +1790,11 @@ public partial class MainWindow : Window
             RemoteCollectorService.GetServerNameForStorage(server));
         _collectorService?.ClearHealthForServer(removedServerId);
         _agAlertEvaluator.Forget(removedServerId);
+        /* #3540 A4: the delta baselines and pass window too. The tab-close path already drops them, but a
+           server deleted from Manage Servers with no tab open kept its cached counters, and a re-add inside
+           the gap policy's hour subtracted the new server's counters from the old one's — a fabricated
+           delta against a different identity. Same deterministic id, same one deep-cleanup. */
+        _collectorService?.DeltaCalculator?.ClearServer(removedServerId);
         if (_dataService != null)
         {
             try

@@ -530,6 +530,11 @@ public sealed class DarlingWorker : BackgroundService
        self-alerts inherit its delivery/cooldown/restart-replay. Held as a field because the connection
        edge fires from TryConnectAsync and the reconcile drops per-server state through it. */
     private DarlingSelfAlertEvaluator? _selfAlerts;
+    /* The delta calculator, held for the same reason as _selfAlerts (#3540 A4): the reconcile-remove branch
+       drops a departing server's baselines and pass window through it, so a server removed and re-added
+       inside the gap policy's hour cannot subtract the new identity's counters from the old one's. Built
+       and seeded once in RunCollectionLoopAsync, ahead of the runner that shares it. */
+    private CollectorDeltaCalculator? _deltas;
     /* Concrete rather than IAlertDeliverer: there is exactly one implementation here and it is constructed
        a few lines from where this is assigned, so the interface bought an indirection per delivered alert
        and no seam (CA1859). */
@@ -1484,6 +1489,7 @@ public sealed class DarlingWorker : BackgroundService
            of zeroes. A seed failure logs a warning and collection proceeds with first-cycle-zero. */
         var deltas = new DarlingDeltaCalculator();
         await deltas.SeedFromStoreAsync(postgres, _logger, stoppingToken);
+        _deltas = deltas;
 
         /* Control-plane Stage 1: SEED the config store from darling.json once (idempotent; only empty
            sections), then read the store view and make it authoritative — the held DarlingConfig is
@@ -3256,6 +3262,12 @@ public sealed class DarlingWorker : BackgroundService
                 /* Drop the Stage 4 self-alert edge state so a later re-add starts from the Unknown baseline
                    (no stale "was online" / "was stopped" flag carried across a remove+re-add). */
                 _selfAlerts?.Forget(id);
+                /* And its delta baselines + pass window (#3540 A4), for the same reason: a re-add mints a fresh
+                   ServerLoopState, and its first pass must be a first pass, not a subtraction from whatever the
+                   removed server's counters were. An in-flight body for the retired state can still make delta
+                   calls after this and re-populate the server's cache for one pass; that is the same window the
+                   Forget above tolerates, and a re-add inside it is the A5 epoch question, not this one. */
+                _deltas?.ClearServer(id);
                 servers.RemoveAt(i);
                 continue;
             }
