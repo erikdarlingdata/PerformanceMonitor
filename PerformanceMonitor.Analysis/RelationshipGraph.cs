@@ -72,6 +72,7 @@ public class RelationshipGraph
         BuildLatchEdges();
         BuildTempDbEdges();
         BuildQueryEdges();
+        BuildMaintenanceEdges();
     }
 
     /* ── CPU Pressure ── */
@@ -431,6 +432,49 @@ public class RelationshipGraph
         AddEdge("PLAN_REGRESSION", "CPU_SPIKE", "query_performance",
             "CPU spike — the regressed plan is burning CPU",
             facts => HasFact(facts, "CPU_SPIKE") && facts["CPU_SPIKE"].BaseSeverity > 0);
+    }
+
+    /* ── Maintenance ── */
+
+    /// <summary>
+    /// #3538 A9: the edges that let a maintenance window be ONE incident. Before these, nothing in the
+    /// graph touched SCH_M or RUNNING_JOBS, so a nightly index rebuild surfaced as two or three unlinked
+    /// single-node cards every night — the schema-lock waits, the long-running job, and the write-latency /
+    /// log-flush pair — each re-litigating the same event with nobody saying they were the same event.
+    /// <see cref="InferenceEngine.ClusterIntoIncidents"/> unions stories across an ACTIVE edge, so one
+    /// fired edge from each symptom onto the job is what folds them into one incident that names it.
+    ///
+    /// <para>The predicate on every edge is the same: RUNNING_JOBS FIRED — its base severity is above
+    /// zero, which <c>FactScorer.ScoreJobFact</c> grants only when at least one Agent job is running past
+    /// its own historical duration (the fact's value is the running-long count; the concerning bar is 1).
+    /// Mere presence of the fact would not do: the collector emits RUNNING_JOBS whenever ANY job is
+    /// running, and an edge on presence would pin every SCH_M or write-latency finding to whatever
+    /// routine job happened to be executing. The edges run symptom → job (the direction the operator
+    /// reasons in: "what is holding schema locks / hammering the log? — that job"), and only that way:
+    /// a job → symptom edge would let a RUNNING_JOBS root consume SCH_M into its own story and change
+    /// which key the persisted finding is rooted on, and the clustering needs one direction only.</para>
+    ///
+    /// <para>What this does NOT do: it does not model the maintenance SCHEDULE (a window that MOVES is
+    /// still undetectable), does not score recurrence (the same incident every night reads as new every
+    /// night), and does not name the job — the RUNNING_JOBS fact carries counts and durations, not a job
+    /// name; <c>get_running_jobs</c> names it. Those are the structural half of A9, deferred.</para>
+    /// </summary>
+    private void BuildMaintenanceEdges()
+    {
+        // SCH_M → RUNNING_JOBS (schema-modification waits while a job runs long — index maintenance)
+        AddEdge("SCH_M", "RUNNING_JOBS", "maintenance",
+            "Agent job running past its normal duration — the schema locks are probably its index maintenance",
+            facts => HasFact(facts, "RUNNING_JOBS") && facts["RUNNING_JOBS"].BaseSeverity > 0);
+
+        // IO_WRITE_LATENCY_MS → RUNNING_JOBS (write latency while a job runs long — rebuild/CHECKDB write volume)
+        AddEdge("IO_WRITE_LATENCY_MS", "RUNNING_JOBS", "maintenance",
+            "Agent job running past its normal duration — its write volume is a candidate for the latency",
+            facts => HasFact(facts, "RUNNING_JOBS") && facts["RUNNING_JOBS"].BaseSeverity > 0);
+
+        // WRITELOG → RUNNING_JOBS (log-flush waits while a job runs long — a rebuild is fully logged)
+        AddEdge("WRITELOG", "RUNNING_JOBS", "maintenance",
+            "Agent job running past its normal duration — a fully logged rebuild or reload drives log flushes",
+            facts => HasFact(facts, "RUNNING_JOBS") && facts["RUNNING_JOBS"].BaseSeverity > 0);
     }
 
     private static bool HasFact(IReadOnlyDictionary<string, Fact> facts, string key)

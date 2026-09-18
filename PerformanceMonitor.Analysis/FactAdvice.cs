@@ -175,6 +175,9 @@ public static class FactAdvice
             "RESOURCE_SEMAPHORE" or "RESOURCE_SEMAPHORE_QUERY_COMPILE" or "WRITELOG" or "HADR_SYNC_COMMIT"
                 or "LATCH_EX" or "LATCH_SH" or "PAGELATCH_UP" or "LCK_M_S" or "LCK_M_IS"
                 => ComposeWaitByKey(rootFactKey, factsByKey),
+            // #3538 A9: schema-modification waits name the long-running job when RUNNING_JOBS fired — the
+            // same window the SCH_M → RUNNING_JOBS graph edge folds the two cards into one incident.
+            "SCH_M" => ComposeSchM(factsByKey),
             // Query-level: state the cost-swing ratio / regression factor / tempdb driver the engine
             // measured, and permute on the discriminating flag (forced-plan-failing, dominant consumer).
             "PARAMETER_SENSITIVITY" => ComposeParameterSensitivity(factsByKey),
@@ -909,10 +912,12 @@ public static class FactAdvice
             "Queries are queuing for compile memory — RESOURCE_SEMAPHORE_QUERY_COMPILE",
             "This is memory pressure during query COMPILATION, not execution — too many concurrent compilations competing for compile memory, typically a flood of unparameterized ad-hoc queries each compiling its own plan.",
             "Parameterize the ad-hoc queries so they reuse cached plans instead of compiling fresh, enable 'optimize for ad hoc workloads' so one-off plans stop bloating the cache, and address whatever generates the compile storm (an ORM emitting literal values, or unnecessary recompiles)."),
+        // #3538 A9: the WRITELOG → RUNNING_JOBS edge's prose — a fully logged rebuild or reload while a job
+        // runs long is the log-flush driver, so the job is named beside the storage advice.
         "WRITELOG" => ComposeSimpleWait(facts, key, "Log-flush waits",
             "Transaction log flushes are slow — WRITELOG",
             "WRITELOG is time spent waiting for the transaction log to harden to disk on commit. Sustained WRITELOG points at slow log storage or a commit-heavy workload doing many tiny transactions, each forcing its own flush.",
-            "Put the transaction log on the fastest storage available — write latency matters far more than throughput here — and batch tiny transactions where the application allows, so fewer, larger commits flush less often. Confirm the log is not autogrowing in small increments under load."),
+            "Put the transaction log on the fastest storage available — write latency matters far more than throughput here — and batch tiny transactions where the application allows, so fewer, larger commits flush less often. Confirm the log is not autogrowing in small increments under load." + LinkedJobClause(facts)),
         "HADR_SYNC_COMMIT" => ComposeSimpleWait(facts, key, "Synchronous-commit waits",
             "Commits are waiting on a synchronous availability-group secondary — HADR_SYNC_COMMIT",
             "HADR_SYNC_COMMIT is the time a committing transaction on the primary spends waiting for a synchronous-commit secondary to acknowledge that it has hardened the log block. It is the availability-group half of commit latency — the local log flush is WRITELOG — so on a synchronous AG every commit pays both. Sustained HADR_SYNC_COMMIT means the round trip to the secondary is slow: the secondary's own log write, the network between the replicas, or a secondary that is busy with redo or with readable-secondary queries and is slow to harden.",
@@ -1040,6 +1045,9 @@ public static class FactAdvice
             rem.Append("Write latency is usually the storage or the log path: confirm the data and log files are on adequately fast storage, watch for autogrowth events stalling writes, and check whether a backup, CHECKDB, or index maintenance overlapped the window.");
             if (Fired(facts, "WRITELOG"))
                 rem.Append(" WRITELOG co-fired, pointing specifically at the log.");
+            // #3538 A9: when the IO_WRITE_LATENCY_MS → RUNNING_JOBS edge fired, the "check whether index
+            // maintenance overlapped the window" above is no longer a guess — say which job.
+            rem.Append(LinkedJobClause(facts));
         }
 
         return fallback with
@@ -1618,6 +1626,65 @@ public static class FactAdvice
         };
     }
 
+    /// <summary>
+    /// #3538 A9: the sentence that ties a symptom card to the long-running job when RUNNING_JOBS FIRED
+    /// this window (running-long count above zero — the same predicate the maintenance edges in
+    /// <see cref="RelationshipGraph"/> use, so the prose and the incident clustering agree on when the
+    /// link exists). States the job facts the engine collected (count, worst overrun, longest runtime)
+    /// rather than re-describing the symptom. Empty when the fact is absent or no job is running long,
+    /// so a caller can append it unconditionally. Leading space included. The RUNNING_JOBS fact carries
+    /// no job NAME (its metadata is counts and durations), so the sentence points at the Running Jobs
+    /// view for the name instead of pretending to know it.
+    /// </summary>
+    private static string LinkedJobClause(IReadOnlyDictionary<string, Fact> facts)
+    {
+        if (!Fired(facts, "RUNNING_JOBS"))
+            return string.Empty;
+        var longCount = FactMeta(facts, "RUNNING_JOBS", "running_long_count");
+        if (longCount is not > 0)
+            return string.Empty;
+
+        var pct = FactMeta(facts, "RUNNING_JOBS", "max_percent_of_average");
+        var dur = FactMeta(facts, "RUNNING_JOBS", "max_duration_seconds");
+        var sb = new StringBuilder($" RUNNING_JOBS fired in the same window — {Plural(longCount.Value, "Agent job")} running well past normal duration");
+        if (pct is > 0)
+            sb.Append($", the worst at {pct.Value:N0}% of its historical average");
+        if (dur is > 0)
+            sb.Append($" (about {Duration(dur.Value * 1000)} so far)");
+        sb.Append(" — so this finding and that job are ONE incident, not two: the Running Jobs view names the job, and moving or shortening it is the fix for both cards.");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// SCH_M composed (#3538 A9): states the schema-lock wait totals and, when RUNNING_JOBS fired, names
+    /// the long-running job as the likely holder instead of telling the operator to go and look for one.
+    /// Falls back to the static block when the wait metadata is absent AND no job is running long.
+    /// </summary>
+    private static AdviceBlock ComposeSchM(IReadOnlyDictionary<string, Fact> facts)
+    {
+        var fallback = _byKey["SCH_M"];
+        var numbers = WaitNumbers(facts, "SCH_M", "Schema-modification lock waits");
+        var linked = LinkedJobClause(facts);
+        if (numbers.Length == 0 && linked.Length == 0)
+            return fallback;
+
+        var concept =
+            "SCH-M is the most exclusive lock SQL Server takes — it is incompatible with everything, including the IS lock a SELECT requires, so a session holding SCH-M on a hot table blocks the entire workload against that table. Sources: `ALTER TABLE`, `CREATE/DROP INDEX`, partition operations, and certain statistics updates.";
+        var inv = new StringBuilder(numbers).Append(concept);
+        if (linked.Length > 0)
+            inv.Append(linked);
+        else
+            inv.Append(" No Agent job was running past its normal duration this window, so look for ad-hoc DDL or an index operation issued outside the job schedule.");
+
+        return fallback with
+        {
+            Headline = linked.Length > 0
+                ? "Schema-modification lock waits while an Agent job runs long — its index maintenance is blocking the workload"
+                : fallback.Headline,
+            Investigation = inv.ToString()
+        };
+    }
+
     /// <summary>RUNNING_JOBS composed: states how many jobs overran and by how much.</summary>
     private static AdviceBlock ComposeRunningJobs(IReadOnlyDictionary<string, Fact> facts)
     {
@@ -1634,6 +1701,16 @@ public static class FactAdvice
         if (dur is > 0)
             inv.Append($" (longest current runtime about {Duration(dur.Value * 1000)})");
         inv.Append(". A job running far past its average is usually stuck — blocked, waiting on a resource, or hung — rather than simply busy.");
+        // #3538 A9: the reverse link — the job card names the symptoms whose graph edges point at it, so
+        // whichever card the operator opens first says the incident is one thing. "Fired" here is the
+        // scorer's >0 working set (the same set the edge predicates evaluate against); a symptom that also
+        // ROOTED its own finding is clustered with this one, a trace-level one is merely linked.
+        var symptoms = new List<string>();
+        if (longCount.Value > 0 && Fired(facts, "SCH_M")) symptoms.Add("SCH_M (schema-modification lock waits — the job is probably index maintenance holding schema locks)");
+        if (longCount.Value > 0 && Fired(facts, "IO_WRITE_LATENCY_MS")) symptoms.Add("IO_WRITE_LATENCY_MS (its write volume is a candidate for the latency)");
+        if (longCount.Value > 0 && Fired(facts, "WRITELOG")) symptoms.Add("WRITELOG (a fully logged rebuild or reload drives log flushes)");
+        if (symptoms.Count > 0)
+            inv.Append($" Also elevated this window and linked to this job by the engine: {string.Join("; ", symptoms)}. Where one of them rooted its own finding, it and this card are ONE incident, not two.");
 
         var rem =
             "Check the long-running jobs in Agent history: one at several times its normal runtime is typically " +

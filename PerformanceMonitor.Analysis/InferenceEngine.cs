@@ -22,7 +22,9 @@ namespace PerformanceMonitor.Analysis;
 public class InferenceEngine
 {
     private const double MinimumSeverityThreshold = 0.5;
-    private const int MaxPathDepth = 10; // Safety limit
+    /// <summary>Hops the greedy traversal will follow from a root before it stops (a safety limit); the
+    /// longest story path is therefore this plus the root — <see cref="StoryConfidence.MaxPathNodes"/>.</summary>
+    internal const int MaxPathDepth = 10;
 
     /// <summary>
     /// Config-advisory fact keys that root a finding at ANY positive severity, bypassing the
@@ -122,6 +124,10 @@ public class InferenceEngine
                 RootFactKey = "server_health",
                 RootFactValue = 0,
                 Severity = 0,
+                // 1.0 by construction, not by evidence arithmetic: an absolution is the statement that
+                // every fact was scored and none rooted, which is exactly as certain as the scoring
+                // pass itself. StoryConfidence.DescribeBasis names this arm so a reader never mistakes
+                // it for the legacy path-shape 1.0 (#3538 A6).
                 Confidence = 1.0,
                 Category = "absolution",
                 Path = ["server_health"],
@@ -193,9 +199,11 @@ public class InferenceEngine
         var storyPath = string.Join(" → ", effectivePath);
         var category = rootFact?.Source ?? "unknown";
 
-        // Confidence = what fraction of edge destinations had matching facts
-        // For single-node paths, confidence is 1.0 (we found the symptom, just no deeper cause)
-        var confidence = path.Count == 1 ? 1.0 : (path.Count - 1.0) / path.Count;
+        // Confidence is an EVIDENCE statistic (#3538 A6): how much of the corroboration the engine knows
+        // to look for around this root actually showed up — the root fact's matched amplifier share plus
+        // the depth of the graph path it traversed. See StoryConfidence for the formula, the worked
+        // examples, and why a lone uncorroborated symptom now scores LOW rather than 1.0.
+        var confidence = StoryConfidence.Compute(rootFact, path.Count);
 
         return new AnalysisStory
         {

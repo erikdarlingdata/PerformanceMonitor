@@ -159,6 +159,19 @@ public sealed class McpMissMessageParityPinTests
            but this sentence is supplied by each tool body at its own call site, lives twice, and is exactly
            what drifts. A tree missing it is a tree whose get_running_jobs never grew the arm at all. */
         "tables are not reachable to a monitoring login at all and no grant changes that.",
+
+        /* The confidence DEFINITION (#3538 A6). The confidence_basis STRING itself is built by the shared
+           StoryConfidence.DescribeBasis and is byte-identical by construction, so it does not belong here;
+           what lives twice is the tool-description sentence teaching a caller what the number is — and
+           that is exactly the text that would drift into one SKU saying "evidence score" while the other
+           still implied a probability. analyze_server, get_analysis_findings (the legacy-row warning) and
+           get_analysis_facts (the baseline_confidence disambiguation), plus the instructions rows. */
+        "confidence is an EVIDENCE score, not a probability: 0.20 for the fired symptom alone, plus up to 0.48 for the share of the root fact's amplifier checks (its expected companions) that matched and up to 0.32 for the depth of the evidence chain",
+        "Rank by severity for impact and by confidence for how much of the engine's own corroboration showed up; do not multiply them.",
+        "Rows persisted before this definition carried a PATH-LENGTH statistic under the same name, with a lone symptom at 1.0 — confidence_basis labels those rows path-shape (pre-#3538) and they must not be read as corroborated.",
+        "For ANOMALY_* facts the metadata carries baseline_confidence — the baseline's own trustworthiness (tier x sample density), which the scorer multiplies into that fact's severity; it is a different quantity from a finding's confidence in analyze_server.",
+        "Each finding's `confidence` is an EVIDENCE score (0.20 for the symptom alone, more as the root fact's amplifier checks match and the chain deepens — a lone uncorroborated symptom is 0.20, never 1.0) and `confidence_basis` says in words what it rests on",
+        "(an ANOMALY_* fact's `baseline_confidence` is the baseline's trustworthiness, not a finding's `confidence`)",
     };
 
     [Theory]
