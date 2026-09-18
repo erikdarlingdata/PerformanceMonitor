@@ -134,7 +134,7 @@ public sealed class DarlingMcpTrendTools
 
     /// <summary>
     /// Half the 1-minute cadence floor both collectors share (<c>CollectorScheduleDefaults</c>). The two
-    /// series each stamp their own <c>DateTime.UtcNow</c> per collector run, so same-cycle rows sit seconds
+    /// series each stamp their own capture clock per collector run, so same-cycle rows sit seconds
     /// apart and can never be equality-joined — while a grants series on a slower cadence must NOT smear
     /// onto every memory point. Within half the finest cadence, at most one snapshot can claim a point.
     /// </summary>
