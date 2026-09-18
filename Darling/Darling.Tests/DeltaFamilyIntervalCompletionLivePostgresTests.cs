@@ -80,7 +80,7 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
             await ProcedureAsync(connection, t4, "usp_A", 24, 1_200_000, 120, ct);
             await ProcedureAsync(connection, t4, "usp_New", 0, 0, 0, ct);
 
-            var points = await viewer.GetProcedureDurationTrendAsync(ServerId, t1.AddMinutes(-1), t4.AddMinutes(1), cancellationToken: ct);
+            var points = (await viewer.GetProcedureDurationTrendAsync(ServerId, t1.AddMinutes(-1), t4.AddMinutes(1), cancellationToken: ct)).Points;
             Assert.Equal(new[] { t2, t4 }, points.Select(p => p.CollectionTime).ToArray());
             Assert.Equal(2.0, points[0].Value, precision: 6);      /* 600 ms / LAG 300 s */
             Assert.Equal(0, points[0].ExecutionCount);             /* 30 / 300 = 0.1 executions/sec, truncated to long as always */

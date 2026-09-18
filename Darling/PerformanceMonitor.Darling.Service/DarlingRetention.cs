@@ -52,27 +52,31 @@ public static class DarlingRetention
     /// The base data-retention window the collection_log horizon is a multiple of. 30 days matches the
     /// dominant collector <see cref="CollectorScheduleDefaults"/> horizon and the Dashboard's
     /// <c>@effective_retention_days</c> default (config.data_retention).
+    /// <para>#3653: the NUMBER lives on <see cref="DarlingRetentionHorizons"/> in Storage, where the daily-summary
+    /// readers of both apps (the MCP health reader and the viewer's calendar, which cannot see this assembly)
+    /// judge a day against the same horizon this purge enforces. This and the three aliases below keep the
+    /// purge's own names; the values are read from one place.</para>
     /// </summary>
-    internal const int DataRetentionBaseDays = 30;
+    internal const int DataRetentionBaseDays = DarlingRetentionHorizons.DataRetentionBaseDays;
 
     /// <summary>
     /// collection_log isn't a collector, so it has no <see cref="CollectorScheduleDefaults"/> entry to carry
     /// its horizon. It is kept at 2x the base window (mirrors the Dashboard's <c>retention_date x2</c> rule)
     /// so a collector run-record survives long enough to diagnose WHY a collector failed AFTER its metric
     /// rows have aged out — a 30-day metric row and its failure log would otherwise expire together, erasing
-    /// the evidence. Effectively 60 days.
+    /// the evidence. Effectively 60 days. Aliased from Storage (#3653, see <see cref="DataRetentionBaseDays"/>).
     /// </summary>
-    internal const int CollectionLogRetentionDays = DataRetentionBaseDays * 2;
+    internal const int CollectionLogRetentionDays = DarlingRetentionHorizons.CollectionLogRetentionDays;
 
     /// <summary>
     /// #1743 follow-up: the raw collectors whose hypertables serve baselines DIRECTLY (their
     /// retired sum/sumsq rollups could not produce a median). Their effective purge horizon is
     /// floored at <see cref="BaselineMath.BaselineWindowDays"/> regardless of the user-editable
     /// schedule — the product-controlled insulation the rollups' fixed retention used to provide.
-    /// BaselineSupplyTests pins membership against the provider's raw-reading arms.
+    /// BaselineSupplyTests pins membership against the provider's raw-reading arms. Aliased from Storage
+    /// (#3653, see <see cref="DataRetentionBaseDays"/>): the daily-summary horizon floors the same collectors.
     /// </summary>
-    internal static readonly IReadOnlySet<string> BaselineServingRawCollectors =
-        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "cpu_utilization", "file_io_stats" };
+    internal static readonly IReadOnlySet<string> BaselineServingRawCollectors = DarlingRetentionHorizons.BaselineServingRawCollectors;
 
     /// <summary>
     /// config_alert_log (the fired-alert history: what alerted + delivery status, read by the viewer Alert
@@ -82,9 +86,10 @@ public static class DarlingRetention
     /// purge path, so without a horizon it grows unbounded — the same class as the #1471 findings-cleanup gap.
     /// Kept 90 days (a quarter): alert history is low-volume and a valuable audit trail, so the horizon is
     /// generous, but it is BOUNDED. No operator setting governs this today (config_alert_settings carries the
-    /// cooldown / lookback knobs, not an alert-history horizon), so this constant is the single source of truth.
+    /// cooldown / lookback knobs, not an alert-history horizon), so this constant is the single source of truth
+    /// — read from Storage since #3653 (see <see cref="DataRetentionBaseDays"/>).
     /// </summary>
-    internal const int AlertHistoryRetentionDays = 90;
+    internal const int AlertHistoryRetentionDays = DarlingRetentionHorizons.AlertHistoryRetentionDays;
 
     /// <summary>
     /// config.config_command (the imperative command queue the Viewer/MCP/CLI enqueue into and the service

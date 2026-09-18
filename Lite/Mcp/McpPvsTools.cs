@@ -102,7 +102,10 @@ public sealed class McpPvsTools
                         points = g.Select(p => new
                         {
                             collection_time = p.CollectionTime.ToString("o"),
+                            /* #3653: an unmeasured point is null, with the same pvs_measured flag the latest
+                               snapshot carries — never a fabricated 0 MB in the series. */
                             pvs_size_mb = p.PvsSizeMb,
+                            pvs_measured = p.PvsSizeMb.HasValue,
                             pct_of_database = p.PctOfDatabase is { } pct ? Math.Round(pct, 2) : (double?)null,
                         }),
                     });

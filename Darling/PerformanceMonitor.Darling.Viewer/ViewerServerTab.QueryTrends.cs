@@ -81,12 +81,53 @@ public partial class ViewerServerTab
         UpdateExecutionCountTrendChart(executionCountTask.Result, startUtc, endUtc);
     }
 
-    private void UpdateQueryDurationTrendChart(List<QueryTrendPoint> data, DateTime startUtc, DateTime endUtc)
+    /// <summary>
+    /// What a routed trend chart says about what it served (#3653) — the chart-side form of the MCP payload's
+    /// <c>source</c> / <c>effective_start</c> / <c>truncated</c> triple, rendered as the plot title the way
+    /// the heatmap titles itself. Always names the tier, because a series read from the hourly rollup is a
+    /// different measurement from one read per collection (bucket-width denominator, up to two hours behind
+    /// the clock) and a user comparing two loads of the same chart across the raw horizon must be able to
+    /// see that the resolution changed underneath them. Names the first served point only when the series
+    /// is truncated — when the tier did not hold the window's head — which is the one case where the axis
+    /// (the requested window) and the data (what the store still had) disagree and the chart would
+    /// otherwise present four days as seven. The same #1661 disclosure the FinOps expensive-queries panel
+    /// makes for its text horizon: say what was served rather than presenting a slice as the whole. The
+    /// tier is spelled with the payload's own word (<see cref="QueryTrendSeries.Source"/>: <c>raw</c> /
+    /// <c>hourly</c>) so a user reading the chart and an agent reading <c>get_query_duration_trend</c> are
+    /// told the same thing in the same vocabulary; the parenthetical says what the word means on a chart.
+    /// </summary>
+    internal static string DescribeTrendCoverage(QueryTrendSeries series)
     {
+        var source = series.Tier == PerformanceMonitor.Darling.Storage.RetentionTier.Raw
+            ? $"{series.Source} (one point per collection)"
+            : $"{series.Source} rollup (one point per hour)";
+        if (!series.Truncated)
+        {
+            return $"Source: {source}";
+        }
+
+        var from = ViewerTimeHelper.ForDisplay(series.EffectiveStartUtc);
+        return $"Source: {source} — data begins {from:yyyy-MM-dd HH:mm}; the store no longer holds the rest of this window at this tier";
+    }
+
+    /// <summary>Puts <see cref="DescribeTrendCoverage"/> on a chart as its title, coloured like its tick
+    /// labels (the heatmap's title idiom) so it reads as chart chrome rather than as a series.</summary>
+    private static void ShowTrendCoverage(ScottPlot.WPF.WpfPlot chart, QueryTrendSeries series)
+    {
+        chart.Plot.Title(DescribeTrendCoverage(series));
+        chart.Plot.Axes.Title.Label.ForeColor = chart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
+        chart.Plot.Axes.Title.Label.FontSize = 11;
+        chart.Plot.Axes.Title.Label.Bold = false;
+    }
+
+    private void UpdateQueryDurationTrendChart(QueryTrendSeries series, DateTime startUtc, DateTime endUtc)
+    {
+        var data = series.Points;
         ClearChart(QueryDurationTrendChart);
         ApplyTheme(QueryDurationTrendChart);
 
         if (data.Count == 0) { RefreshEmptyChart(QueryDurationTrendChart, "Query Duration", "Duration (ms/sec)"); return; }
+        ShowTrendCoverage(QueryDurationTrendChart, series);
 
         var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
         var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
@@ -109,12 +150,14 @@ public partial class ViewerServerTab
         QueryDurationTrendChart.Refresh();
     }
 
-    private void UpdateProcDurationTrendChart(List<QueryTrendPoint> data, DateTime startUtc, DateTime endUtc)
+    private void UpdateProcDurationTrendChart(QueryTrendSeries series, DateTime startUtc, DateTime endUtc)
     {
+        var data = series.Points;
         ClearChart(ProcDurationTrendChart);
         ApplyTheme(ProcDurationTrendChart);
 
         if (data.Count == 0) { RefreshEmptyChart(ProcDurationTrendChart, "Procedure Duration", "Duration (ms/sec)"); return; }
+        ShowTrendCoverage(ProcDurationTrendChart, series);
 
         var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
         var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
@@ -165,12 +208,14 @@ public partial class ViewerServerTab
         QueryStoreDurationTrendChart.Refresh();
     }
 
-    private void UpdateExecutionCountTrendChart(List<QueryTrendPoint> data, DateTime startUtc, DateTime endUtc)
+    private void UpdateExecutionCountTrendChart(QueryTrendSeries series, DateTime startUtc, DateTime endUtc)
     {
+        var data = series.Points;
         ClearChart(ExecutionCountTrendChart);
         ApplyTheme(ExecutionCountTrendChart);
 
         if (data.Count == 0) { RefreshEmptyChart(ExecutionCountTrendChart, "Executions", "Executions/sec"); return; }
+        ShowTrendCoverage(ExecutionCountTrendChart, series);
 
         var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
         var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();

@@ -637,11 +637,13 @@ public partial class FinOpsTab : UserControl
         PvsTrendChart.Plot.Clear();
 
         var seriesIndex = 0;
-        foreach (var series in trend.GroupBy(t => t.DatabaseName).OrderByDescending(g => g.Max(t => t.PvsSizeMb)))
+        /* #3653: an unmeasured point (null size) is not plotted — not as 0, not interpolated across. A series
+           with no measured point at all draws nothing rather than a line at zero. */
+        foreach (var series in trend.Where(t => t.PvsSizeMb.HasValue).GroupBy(t => t.DatabaseName).OrderByDescending(g => g.Max(t => t.PvsSizeMb!.Value)))
         {
             var points = series.OrderBy(t => t.CollectionTime).ToList();
             var times = points.Select(t => ServerTimeHelper.ToServerTime(t.CollectionTime).ToOADate()).ToArray();
-            var values = points.Select(t => t.PvsSizeMb).ToArray();
+            var values = points.Select(t => t.PvsSizeMb!.Value).ToArray();
 
             var line = PvsTrendChart.Plot.Add.TimeSeries(times, values);
             line.Color = ScottPlot.Color.FromHex(ChartPalette.CyclingColor(seriesIndex++));

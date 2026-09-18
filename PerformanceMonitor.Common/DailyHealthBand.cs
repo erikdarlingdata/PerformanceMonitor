@@ -433,6 +433,50 @@ namespace PerformanceMonitor.Common
         }
 
         /// <summary>
+        /// <see cref="Describe(in DailyHealthSignals)"/> for a day the reader has judged against the store's
+        /// retention horizon (#3541 A9, #3653): the same signal lines, with the day's
+        /// <see cref="DailySummaryDataState"/> spoken in ONE sentence a calendar cell can carry. "No data
+        /// collected." was the only thing the tooltip could say about a grey cell, and for a purged day it is
+        /// false — the day WAS collected; retention took it — so a user asked to trust the calendar's greens
+        /// had no way to learn why last month went grey. Each state names what the cell's zeros ARE, in the
+        /// vocabulary of <see cref="DailySummaryRetention.Note"/> (the MCP payload's sentence) shortened to a
+        /// hover.
+        /// </summary>
+        /// <param name="signals">The day's signals, with <see cref="DailyHealthSignals.HasData"/> already folded
+        /// through the state (false for purged / past-horizon).</param>
+        /// <param name="state">The reader's verdict on the row's counts.</param>
+        /// <param name="retentionHorizon">The horizon the state was judged against, named in the two past-horizon
+        /// sentences; null falls back to the sentence without a date.</param>
+        /// <param name="signalSourcesPresent">How many of the <see cref="DailySummaryRetention.SignalSourceCount"/>
+        /// signal sources still hold rows for the day — the past-horizon sentence's count.</param>
+        public static string Describe(
+            in DailyHealthSignals signals, DailySummaryDataState state, DateTime? retentionHorizon, int signalSourcesPresent = 0)
+        {
+            var horizon = retentionHorizon is DateTime h
+                ? " (" + h.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + ")"
+                : "";
+
+            switch (state)
+            {
+                case DailySummaryDataState.Purged:
+                    return "No verdict: this day is before the store's retention horizon" + horizon
+                        + " and its signal rows have been purged. The zeros are absences, not measurements.";
+                case DailySummaryDataState.PastHorizon:
+                    return "No verdict: this day is before the store's retention horizon" + horizon + ", but "
+                        + signalSourcesPresent.ToString(CultureInfo.InvariantCulture) + " of "
+                        + DailySummaryRetention.SignalSourceCount.ToString(CultureInfo.InvariantCulture)
+                        + " signal sources still hold rows for it. Non-zero counts are real; a zero may be an absence.";
+                case DailySummaryDataState.NoRunRecord when signals.HasData:
+                    /* Inside retention the band stands (every zero is a measurement), so the signal lines are the
+                       tooltip and the missing run record is a trailing disclosure, not a replacement. */
+                    return Describe(signals) + Environment.NewLine
+                        + "No collector run is recorded for this day; the counts are as read, but nothing records that the day was fully collected.";
+                default:
+                    return Describe(signals);
+            }
+        }
+
+        /// <summary>
         /// The day-detail "Why this day is &lt;band&gt;" reasons: one line per non-zero signal that drove the
         /// band, using the SAME per-signal wording as the calendar tooltip (<see cref="Describe"/>) so the two
         /// can't drift, plus — when <paramref name="peakBlockMs"/> is supplied (&gt; 0) — the day's peak block

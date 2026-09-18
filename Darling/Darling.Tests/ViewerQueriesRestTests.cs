@@ -47,8 +47,10 @@ public sealed class ViewerQueryTrendsSqlTests
         Assert.Contains("LAG(collection_time) OVER (ORDER BY collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("extract(epoch FROM", sql, StringComparison.Ordinal);
         Assert.Contains("date_trunc('second', collection_time)", sql, StringComparison.Ordinal);
-        /* interval_seconds > 0 guards the first row (LAG NULL -> rate 0). */
+        /* interval_seconds > 0 guards the first row: its LAG is NULL, its rate unknowable, and the CASE has no
+           ELSE — NULL, not a fabricated 0 (#3653; #3642 on the MCP copies). The reader skips the row. */
         Assert.Contains("CASE WHEN interval_seconds > 0 THEN", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY collection_time", sql, StringComparison.Ordinal);
     }
@@ -58,7 +60,8 @@ public sealed class ViewerQueryTrendsSqlTests
     /// rows, 0 → NULL through NULLIF so a restart's marker collection drops rather than plotting 0.00 — and
     /// falls back to the LAG derivation only for a pre-V128 collection (NULL). No ELSE 0 anywhere in it: the
     /// rate is NULL when the interval is unknowable or absent and the reader drops the point. Its
-    /// query-stats sibling deliberately keeps the LAG-only form (the A11a residual, reported not rewritten).
+    /// query-stats sibling deliberately keeps the LAG-only form (the A11a residual, reported not rewritten) —
+    /// and since #3653 has no ELSE 0 either (the theory above).
     /// </summary>
     [Fact]
     public void ProcedureDurationTrendSql_PrefersTheStoredInterval_AndNeverFabricatesZero()
@@ -71,13 +74,31 @@ public sealed class ViewerQueryTrendsSqlTests
         Assert.Contains("CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
         Assert.Contains("CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second", sql, StringComparison.Ordinal);
 
-        /* And the shared reader DROPS a NULL-rate row rather than reading it as 0 — the C# half of the idiom. */
+        /* And the shared reader DROPS a NULL-rate row rather than reading it as 0 — the C# half of the idiom.
+           #3653: one loop (ReadTrendPointsAsync) serves every trend here, including the execution-count one
+           that used to coerce its NULL to 0 in a loop of its own, so the file has no `IsDBNull(n) ? 0` left. */
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.QueryTrends.cs");
-        var reader = source[source.IndexOf("private async Task<List<QueryTrendPoint>> ReadDurationTrendAsync(", StringComparison.Ordinal)..];
+        var reader = source[source.IndexOf("private async Task<List<QueryTrendPoint>> ReadTrendPointsAsync(", StringComparison.Ordinal)..];
         reader = reader[..reader.IndexOf("return items;", StringComparison.Ordinal)];
-        Assert.Contains("if (reader.IsDBNull(1))", reader, StringComparison.Ordinal);
+        Assert.Contains("if (reader.IsDBNull(valueOrdinal))", reader, StringComparison.Ordinal);
         Assert.Contains("continue;", reader, StringComparison.Ordinal);
-        Assert.DoesNotContain("reader.IsDBNull(1) ? 0", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("reader.IsDBNull(1) ? 0", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("IsDBNull(valueOrdinal) ? 0", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3653: the Query Store trend's raw shape — the fallback on a store without the corrected rollup — no
+    /// longer fabricates a 0 for the first placed interval either; the rollup-routed builder stopped in #3642,
+    /// and a store's two routes must open a series the same way.
+    /// </summary>
+    [Fact]
+    public void QueryStoreDurationTrendSql_FirstPlacedInterval_IsUnrated_NotZero()
+    {
+        var sql = ViewerDataService.QueryStoreDurationTrendSql;
+        Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second", sql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ELSE 0", ViewerDataService.QueryStoreDurationTrendRollupSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -393,14 +414,22 @@ public sealed class ViewerQueriesRestLivePostgresTests
             await InsertQueryStatsAsync(connection, TrendServerId, t1, "0xA", deltaExec: 10, deltaWorker: 30_000, deltaElapsed: 60_000, deltaReads: 100, deltaWrites: 0, queryText: "SELECT a");
             await InsertQueryStatsAsync(connection, TrendServerId, t2, "0xA", deltaExec: 120, deltaWorker: 60_000, deltaElapsed: 120_000, deltaReads: 200, deltaWrites: 0, queryText: "SELECT a");
 
-            var points = await viewer.GetQueryDurationTrendAsync(TrendServerId, start, end);
+            var series = await viewer.GetQueryDurationTrendAsync(TrendServerId, start, end);
+            var points = series.Points;
 
-            Assert.Equal(2, points.Count);
-            Assert.Equal(t1, points[0].CollectionTime);
-            Assert.Equal(0.0, points[0].Value); /* first row: LAG NULL -> rate 0 */
-            Assert.Equal(t2, points[1].CollectionTime);
-            Assert.Equal(2.0, points[1].Value, 3);          /* 120_000 us = 120 ms over 60 s -> 2 ms/sec */
-            Assert.Equal(2, points[1].ExecutionCount);       /* 120 execs over 60 s -> 2/sec (truncated) */
+            /* #3653: the first collection's LAG is NULL, its rate unknowable, and it is NOT plotted — no
+               fabricated 0.0 opening the series (#3642's correction, ported). One point survives. */
+            var point = Assert.Single(points);
+            Assert.Equal(t2, point.CollectionTime);
+            Assert.Equal(2.0, point.Value, 3);          /* 120_000 us = 120 ms over 60 s -> 2 ms/sec */
+            Assert.Equal(2, point.ExecutionCount);       /* 120 execs over 60 s -> 2/sec (truncated) */
+
+            /* A 24-hour window routes raw, and the series says so; its head is the first SERVED point (t2,
+               61 minutes past the start — inside the 90-minute slack, so not truncated). */
+            Assert.Equal(RetentionTier.Raw, series.Tier);
+            Assert.Equal("raw", series.Source);
+            Assert.Equal(t2, series.EffectiveStartUtc);
+            Assert.False(series.Truncated);
 
             bodySucceeded = true;
         }
