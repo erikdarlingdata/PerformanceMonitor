@@ -244,9 +244,9 @@ Adding the first PostgreSQL target does not need a store change of its own, but 
 against an existing store migrates it** — applied automatically on start, forward-only, no
 down-migration. The first PostgreSQL collector tables arrived as rungs V63–V69 and the registry's
 engine/port columns as V70, and the ladder has kept climbing with the collectors since (V71 blocking
-edges, V83–V95, plan capture at v99, ...): a current build carries any older store to **v114**.
-`StorageVersion.SchemaVersion` is the source of truth, and step 5's proof line quotes whatever it says
-at your build.
+edges, V83–V95, plan capture at v99, the PostgreSQL alert count knobs at V122, ...): a current build
+carries any older store to **v127**. `StorageVersion.SchemaVersion` is the source of truth, and step 5's
+proof line quotes whatever it says at your build.
 
 **Before starting, if your store is unmanaged and has TimescaleDB**, re-derive the background-worker
 settings. Every collector table becomes a hypertable — all 69 of them, 27 PostgreSQL — so the required
@@ -269,7 +269,7 @@ a missing feature.
 was behind — on a fresh store it is all of them):
 
 ```
-Postgres store ready (schema v114, 9 migration(s) applied)
+Postgres store ready (schema v127, 9 migration(s) applied)
 ```
 
 The target was probed as PostgreSQL:
@@ -578,22 +578,60 @@ the bloat estimate reports `estimate_unavailable`, and every other collector is 
 
 ## 9. Alerting
 
-The three outage predictors alert; the other 24 collectors are read-only signals.
+Eight alert families fire on a PostgreSQL target, in two groups that are tuned differently. This section
+used to open with "the three outage predictors alert; the other 24 collectors are read-only signals",
+which stopped being true when #2711 and #2719 landed five more, and the sentence after it — thresholds
+"not yet configurable" — stopped being true for two of those five at #3444. Both were the kind of
+understatement #3608 was filed about, so here is the current shape, re-derived from `DarlingWorker`'s
+PostgreSQL alert pass.
+
+**The three Tier 0 outage predictors** — `PostgreSQL Wraparound Risk`, `PostgreSQL Vacuum Horizon
+Blocked` and `PostgreSQL Replication Slot Retention`, reading `pg_wraparound_stats`, `pg_xmin_horizon`
+and `pg_replication_slots`:
 
 - Evaluated on the **30-second** alert sweep, after the shared SQL Server sweep, gated on the probed
   engine.
-- Reads only data collected in the last **2 hours**. A stale target alerts on nothing — which is what the
+- Read only data collected in the last **2 hours**. A stale target alerts on nothing — which is what the
   separate collection-stopped self-alert is for.
 - Delivered through the same deliverer, history and mute rules as every SQL Server alert.
 - Thresholds derive from the target's own settings — wraparound grades against *that cluster's*
-  `autovacuum_freeze_max_age`, not a constant — and are **not yet configurable**. See
-  [`postgres-alerting-design-note.md`](postgres-alerting-design-note.md).
+  `autovacuum_freeze_max_age`, not a constant — and **these three have no knob**, by decision rather than
+  by omission: each bar is a ratio of a setting the row itself carries, so there is no number a user would
+  set differently, and [`postgres-alerting-design-note.md`](postgres-alerting-design-note.md) is the record
+  of that decision. Do not widen it into "PostgreSQL alert thresholds are not configurable"; the next
+  group's are.
+
+**The five that ride alongside** carry the SAME alert names a SQL Server target raises — deliberately, so
+a mute rule, a history filter or a dashboard built against `Deadlocks Detected` does not have to know
+which engine a server runs. They are switched and tuned through the shared `alerts` settings, and the
+same seed-once rule as step 2 applies: the `alerts` section of `darling.json` seeds
+`config.config_alert_settings` when that table is empty, and after that the store is authoritative —
+tune through `get_alert_settings` / `update_alert_settings` over MCP or the Viewer's alert settings, and
+the running service picks the change up on its next sweep, no restart:
+
+| Alert | Reads | Enabled by | Threshold |
+|---|---|---|---|
+| `Deadlocks Detected` | `pg_deadlocks` | `deadlockEnabled` — shared with SQL Server | **`pgDeadlockCountThreshold`** (`deadlocks.pg_count_threshold` on the MCP surface): distinct deadlocks inside the rolling one-hour window; default 1, floor 1 (#3444, V122) |
+| `Blocking Detected` | `pg_blocking` | `blockingEnabled` — shared | **`pgBlockingCountThreshold`** (`blocking.pg_count_threshold`): distinct ROOT blockers inside the rolling one-hour window; default 1, floor 1 (#3444, V122) |
+| `Long-Running Query` | `pg_session_states` | `longRunningQueryEnabled` — shared | `longRunningQueryThresholdMinutes` — the shared value, judged against the most recent capture |
+| `Poison Wait` | `pg_wait_stats` (Aurora only — the IPC pair `BtreePage` / `BufferIo`) | `poisonWaitEnabled` — shared | the shared accumulation bars: one backend continuously stuck across the ten-minute window warns, ten is critical; no per-engine knob, by the same reasoning as the trio |
+| `High CPU` | `pg_cpu_utilization` (Aurora/RDS only) | `cpuEnabled` — shared | `cpuThresholdPercent` — the shared value, sustained across the same consecutive-sample gate SQL Server uses |
+
+The two PostgreSQL count knobs are deliberately **not** their SQL Server neighbours
+(`deadlockCountThreshold`, `blockingCountThreshold`), and a store that upgrades without touching them
+fires exactly where it did. The SQL Server figures are calibrated against surfaces a PostgreSQL target
+does not have — a deadlock health band, engine-recorded blocked-process reports — while the PostgreSQL
+blocking count is distinct roots in a periodic SAMPLE of `pg_stat_activity` (step 7: `pg_blocking` is a
+sample, not an event log). Moving one does not move the other; the `enabled` switch in each pair governs
+both engines; both PostgreSQL keys are inert on a store with no PostgreSQL targets.
 
 **Proof on a healthy target is silence**, which is unfalsifiable, so verify the path rather than the
 outcome: confirm the collectors backing it have fresh rows (step 6 — `pg_wraparound_stats`,
-`pg_xmin_horizon`, `pg_replication_slots`), and that a *SQL Server* alert has delivered through the same
-deliverer at some point. Nothing here fires on a healthy cluster, and that is the design: a predictor
-that cries wolf gets muted, and a muted outage predictor is worse than none.
+`pg_xmin_horizon`, `pg_replication_slots`, and `pg_deadlocks` / `pg_blocking` / `pg_session_states` for
+the second group), that `get_alert_settings` reports the two `pg_count_threshold` values you expect, and
+that a *SQL Server* alert has delivered through the same deliverer at some point. Nothing here fires on a
+healthy cluster, and that is the design: a predictor that cries wolf gets muted, and a muted outage
+predictor is worse than none.
 
 ## 10. Failure modes
 
@@ -640,19 +678,34 @@ keep or revert; Darling only ever read the log it produced.
 
 ## 12. What this does not cover, because it does not exist yet
 
-This list used to be longer, and everything struck from it is covered in the steps above: plan capture
-shipped (`pg_plan_capture` — #2566 self-hosted via the server log, #2538/#2692 on Aurora/RDS via the
-log API, with `pg_plan_capture_readiness` naming any missing precondition), blocking chains shipped
-(`pg_blocking` and `get_pg_blocking`), and the Viewer shipped its PostgreSQL surfaces (#2530 — a
-PostgreSQL target gets seven inner tabs in place of the nineteen SQL Server ones). What genuinely
-remains:
+This list used to be longer, and everything struck from it is covered in the steps above — each strike
+names the step that now carries it, because a runbook that says "not built" about a shipped feature
+sends a new operator away from the thing that would have answered their first week's questions (#3608):
+
+- **Plan capture** shipped: `pg_plan_capture` — #2566 self-hosted via the server log, #2538/#2692 on
+  Aurora/RDS via the log API — with `pg_plan_capture_readiness` naming any missing precondition. The
+  grants are step 1's log-reader and IAM subsections, the cadence trap is in step 7, and `get_pg_plans` /
+  `get_pg_plan_capture_readiness` are in step 8's table.
+- **Blocking chains** shipped: `pg_blocking` (step 7 — a sample, not an event log), `get_pg_blocking`
+  (step 8) and the `Blocking Detected` alert with its own count knob (step 9). The
+  [blocking design note](postgres-blocking-design-note.md) records what building it changed.
+- **Configurable alert thresholds** shipped for the alerts that have a number worth moving:
+  `pgDeadlockCountThreshold` and `pgBlockingCountThreshold` (#3444, V122), on `get_alert_settings` /
+  `update_alert_settings`, the Viewer and `darling.json`. Step 9 has the table. The three Tier 0
+  predictors still carry no knob, and that is a decision the alerting design note defends rather than
+  a gap — their bars are ratios of the target's own settings.
+- **The Viewer's PostgreSQL surfaces** shipped (#2530 — a PostgreSQL target gets seven inner tabs in
+  place of the nineteen SQL Server ones).
+
+What genuinely remains, re-checked against `dev` at the time of this revision:
 
 - **Scheduled analysis findings.** The analysis pipeline is still SQL-Server-shaped and a PostgreSQL
   target produces no findings — but it now says so instead of sitting blank: `analysis_state` records
   that scheduled analysis does not apply to a PostgreSQL target and routes you to the `get_pg_*` reads
-  and the three outage-predictor alerts. Do not read that message as "still collecting".
-- **Configurable alert thresholds.** Still derived from the target's own settings and not
-  operator-tunable (step 9) — [`postgres-alerting-design-note.md`](postgres-alerting-design-note.md).
+  and the outage-predictor alerts. Do not read that message as "still collecting". Deliberate, until a
+  PostgreSQL inference engine exists.
+- **Knobs on the three Tier 0 predictors.** Not a gap in the sense the rest of this list is — see above
+  and step 9 — but listed so nobody goes looking for a `pgWraparound...` setting that does not exist.
 - **The `pg_stats` helper-function route.** Step 8 documents `pg_read_all_data` and the
   `SECURITY DEFINER` alternative; only the grant is implemented. A fleet that will not widen the role
   gets measured sizes and suppressed estimates, exactly as step 8 describes.
