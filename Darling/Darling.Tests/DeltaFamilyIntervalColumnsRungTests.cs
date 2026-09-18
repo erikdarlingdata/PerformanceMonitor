@@ -29,9 +29,12 @@ namespace Darling.Tests;
 /// perfmon_stats and query_stats carried the column from the start; this rung gives the other four the same
 /// column in the same type.</para>
 ///
-/// <para>This file carries the "I am the top rung" claims that moved off the previous top rung's test when this
-/// rung landed — a fully-migrated store must map to EXACTLY this version, or the viewer's connect-time gate
-/// refuses a store that is actually current.</para>
+/// <para>The "I am the top rung" claims have moved ON to <see cref="DeltaFamilyIntervalCompletionRungTests"/>
+/// (V128), the same handoff this file received from <see cref="SelfDiskWarnGbFloorRungTests"/> (V126) and
+/// that file received from <see cref="CollectorDatabaseScopeRungTests"/> (V125). What stays here is
+/// everything true of this rung wherever it sits in the ladder; what left is every claim that was really
+/// about being NEWEST — keeping a copy of those would assert this rung is still the top, which is how the
+/// NEXT rung's build goes red.</para>
 /// </summary>
 public sealed class DeltaFamilyIntervalColumnsRungTests
 {
@@ -39,7 +42,8 @@ public sealed class DeltaFamilyIntervalColumnsRungTests
 
     private const int PreviousVersion = 126;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V128
+    /// appended its own — so this is a position within the signature rather than its end.</summary>
     private const int ProbeOrdinal = 102;
 
     private const string IntervalColumn = "sample_interval_seconds";
@@ -49,7 +53,7 @@ public sealed class DeltaFamilyIntervalColumnsRungTests
     /* ---- the rung ------------------------------------------------------------------------------------ */
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
@@ -59,7 +63,11 @@ public sealed class DeltaFamilyIntervalColumnsRungTests
 
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+
+        /* Not `RungVersion == SchemaVersion` any more: that asserted this rung is the newest, which
+           stopped being true when V128 landed. The invariant that outlives the handoff is that the
+           LADDER's top and the declared version agree, which the two lines above already say. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
@@ -140,18 +148,18 @@ public sealed class DeltaFamilyIntervalColumnsRungTests
         }
     }
 
-    /* ---- the probe (three sites, top arm) ------------------------------------------------------------- */
+    /* ---- the probe (three sites) ---------------------------------------------------------------------- */
 
     /// <summary>
-    /// The viewer probe's three sites carry this rung's sentinel, and the map treats it as the TOP arm.
+    /// The viewer probe's three sites carry this rung's sentinel, and a store that stopped here maps to it.
     ///
     /// <para>The probe asks the question, the caller reads the answer, the map has the parameter — three
     /// sites, and a sentinel present at only some of them shifts every LATER ordinal onto the wrong column.
-    /// Miss all three and a fully-migrated store probes one rung short, so the connect-time gate refuses a
-    /// store that is in fact current — permanently, because no later upgrade changes the answer.</para>
+    /// The top-arm claims (last argument, returns the build's version) moved to
+    /// <see cref="DeltaFamilyIntervalCompletionRungTests"/> with V128.</para>
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeCarriesThisRungsSentinel_AndAFullyMigratedStoreMapsToTheLaddersTop()
     {
         Assert.Contains(
             $"table_name = 'wait_stats'\n                                                     AND   column_name = '{IntervalColumn}'",
@@ -167,8 +175,10 @@ public sealed class DeltaFamilyIntervalColumnsRungTests
             .GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* A position within the signature, not its end: `ProbeOrdinal == arity - 1` asserted this rung is
+           the NEWEST sentinel, which stopped being true the moment V128 appended its own. Strictly-less is
+           the form every other non-top rung's test here uses. */
+        Assert.True(ProbeOrdinal < arity - 1);
 
         /* Every sentinel true = a fully-migrated store, which must map to exactly this version. Built by
            reflection so the arity tracks the signature. */
@@ -187,14 +197,15 @@ public sealed class DeltaFamilyIntervalColumnsRungTests
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
         /* And in the source, the arm sits ABOVE the previous rung's — newest-first is the whole contract of
-           that method — and returns this build's version rather than a literal that could drift from it. */
+           that method. It returns this rung's own literal now, not the build's version: the "returns
+           StorageVersion.SchemaVersion" half of the top-arm claim moved to V128's test with the top. */
         var thisArm = viewer.IndexOf("if (hasDeltaFamilyIntervalColumns)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasSelfDiskWarnGbFloor)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V127 sentinel arm — a fully-migrated store would map one rung low");
+        Assert.True(thisArm >= 0, "the viewer has no V127 sentinel arm — a store that stopped here would map to 126");
         Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(thisArm < previousArm, "the V127 arm sits below the previous rung's, so a current store maps one rung low");
+        Assert.True(thisArm < previousArm, "the V127 arm sits below the previous rung's, so a V127 store maps one rung low");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..], StringComparison.Ordinal);
     }
 
@@ -229,11 +240,12 @@ public sealed class DeltaFamilyIntervalColumnsRungTests
     /// <summary>
     /// The calculator's own doc claim is TRUE again. It said "every consumer already maps 0 to NULL via
     /// NULLIF(sample_interval_seconds, 0)" while four of six families discarded the interval at the write;
-    /// the sentence now names which families the claim holds for and which still do not persist one, so it
-    /// cannot silently become false again by a seventh family shipping naked.
+    /// the sentence now names which families this rung dressed and when, so the history of how the claim
+    /// went false and came back is in the file that made it. (The "and which still do not" half of this
+    /// pin moved to <see cref="DeltaFamilyIntervalCompletionRungTests"/> when V128 emptied that list.)
     /// </summary>
     [Fact]
-    public void TheCalculatorDoc_NamesTheFamiliesTheNullifClaimHoldsFor()
+    public void TheCalculatorDoc_NamesTheFamiliesThisRungDressed()
     {
         var source = RepoFile.ReadRepoFile("PerformanceMonitor.Collectors", "CollectorDeltaCalculator.cs");
 

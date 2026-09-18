@@ -53,6 +53,33 @@ public sealed class ViewerQueryTrendsSqlTests
         Assert.Contains("ORDER BY collection_time", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3540 (V128): the procedure trend reads the collection's STORED interval — MAX over the collection's
+    /// rows, 0 → NULL through NULLIF so a restart's marker collection drops rather than plotting 0.00 — and
+    /// falls back to the LAG derivation only for a pre-V128 collection (NULL). No ELSE 0 anywhere in it: the
+    /// rate is NULL when the interval is unknowable or absent and the reader drops the point. Its
+    /// query-stats sibling deliberately keeps the LAG-only form (the A11a residual, reported not rewritten).
+    /// </summary>
+    [Fact]
+    public void ProcedureDurationTrendSql_PrefersTheStoredInterval_AndNeverFabricatesZero()
+    {
+        var sql = ViewerDataService.ProcedureDurationTrendSql;
+        Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
+        Assert.Contains("THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second", sql, StringComparison.Ordinal);
+
+        /* And the shared reader DROPS a NULL-rate row rather than reading it as 0 — the C# half of the idiom. */
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.QueryTrends.cs");
+        var reader = source[source.IndexOf("private async Task<List<QueryTrendPoint>> ReadDurationTrendAsync(", StringComparison.Ordinal)..];
+        reader = reader[..reader.IndexOf("return items;", StringComparison.Ordinal)];
+        Assert.Contains("if (reader.IsDBNull(1))", reader, StringComparison.Ordinal);
+        Assert.Contains("continue;", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("reader.IsDBNull(1) ? 0", reader, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void DurationTrendSql_SumsElapsedMs_ExecutionTrendSql_OnlyExecutions()
     {

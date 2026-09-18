@@ -123,6 +123,11 @@ public sealed class DarlingPerformanceTrendsReadTests
                 Two snapshots five minutes apart, two executions between them: 0.0067/sec. The shipped
                 integer field truncates that to 0, which reads as an idle server; the double does not.
                 This is the whole reason executions_per_second exists.
+
+                These rows carry no sample_interval_seconds (the pre-V128 shape), so the read LAG-derives
+                the interval — and since V128 (#3540) the FIRST snapshot, which has nothing to LAG against,
+                is absent rather than a fabricated 0.0 point (the correction V127 made for the wait trends).
+                One point comes back: the second snapshot, whose rate is the thing under test.
             */
             await SeedProcedureAsync(connection, ct, MinutesAgo(20), executions: 0, elapsedUs: 0);
             await SeedProcedureAsync(connection, ct, MinutesAgo(15), executions: 2, elapsedUs: 600_000);
@@ -130,9 +135,9 @@ public sealed class DarlingPerformanceTrendsReadTests
             var procs = JsonDocument.Parse(
                 await DarlingMcpTrendTools.GetProcedureDurationTrend(postgres, ServerName, 4)).RootElement;
             var procTrend = procs.GetProperty("trend");
-            Assert.Equal(2, procTrend.GetArrayLength());
+            Assert.Equal(1, procTrend.GetArrayLength());
 
-            var second = procTrend[1];
+            var second = procTrend[0];
             Assert.True(second.GetProperty("value").GetDouble() > 0, "elapsed ms/sec must be a real rate");
             Assert.Equal(0, second.GetProperty("execution_count").GetInt64());
             Assert.True(
@@ -146,10 +151,11 @@ public sealed class DarlingPerformanceTrendsReadTests
             /*
                 #3541 A2: the disclosure block. A 4-hour window anchored at now sits inside the raw horizon
                 (the shared fixture carries no continuous aggregates — every test that builds them mints a
-                ScratchPostgres — so raw is also the only tier here), and the series the store held begins
-                at the 20-minutes-ago seed: effective_start says so, and the head sits three-plus hours past
-                the requested start, which is what `truncated` means. The point is that the label matches
-                the data rather than the request.
+                ScratchPostgres — so raw is also the only tier here), and the series the read SERVED begins
+                at its first point — the 15-minutes-ago seed, since V128 dropped the prior-less first
+                snapshot: effective_start says so, and the head sits three-plus hours past the requested
+                start, which is what `truncated` means. The point is that the label matches the data rather
+                than the request.
             */
             Assert.Equal("raw", procs.GetProperty("source").GetString());
             Assert.Equal("per-collection", procs.GetProperty("bucket").GetString());

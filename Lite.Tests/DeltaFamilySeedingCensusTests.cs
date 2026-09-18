@@ -35,8 +35,10 @@ namespace PerformanceMonitorLite.Tests;
 /// <see cref="CollectorDeltaCalculator.DeltaFamilyCollectors"/> and per host that monitors it: a seed read
 /// over the family's table; a delta-group list equal to the groups the collector actually passes; a
 /// <c>SeedPasses</c> over that list; and a per-family guard, so one family's failure cannot cost the rest
-/// their continuity. The one family that cannot be key-seeded is named, with the store fact that makes it
-/// so asserted beside it, so the exemption dies the day the fact does.</para>
+/// their continuity. Until Darling V128 / Lite v61 one family could not be key-seeded and was named here
+/// with the store fact that made it so; that fact died with the rung, the exemption set is EMPTY, and the
+/// record of why it existed stays below so the next family that cannot be seeded has the idiom to
+/// follow.</para>
 /// </summary>
 public sealed class DeltaFamilySeedingCensusTests
 {
@@ -45,12 +47,15 @@ public sealed class DeltaFamilySeedingCensusTests
     private const string CollectorsDir = "PerformanceMonitor.Collectors";
 
     /// <summary>
-    /// Families whose KEYS the store cannot reproduce, so the host seeds their pass window only. query_stats
-    /// keys its deltas on <c>sql_handle:statement_start_offset:statement_end_offset:plan_handle</c> and the
-    /// store persists neither offset — asserted below against the catalog, so a rung that adds them turns
-    /// this exemption red and demands the key seed. Not a permanent exemption: a follow-up on #3540.
+    /// Families whose KEYS the store cannot reproduce, so the host seeds their pass window only. EMPTY since
+    /// Darling V128 / Lite v61 (#3540): <c>query_stats</c> sat here from #3614 until then, because its delta
+    /// key is <c>sql_handle:statement_start_offset:statement_end_offset:plan_handle</c> and the store
+    /// persisted neither offset; the exemption was asserted against the catalog so the rung that added them
+    /// would turn it red and demand the key seed — which is exactly what happened. The set is kept, empty,
+    /// because the census arms below are the idiom a future un-seedable family would use, and because an
+    /// empty exemption list is itself the claim: every delta family on both hosts is key-seeded.
     /// </summary>
-    private static readonly HashSet<string> PassWindowOnly = new(StringComparer.Ordinal) { "query_stats" };
+    private static readonly HashSet<string> PassWindowOnly = new(StringComparer.Ordinal);
 
     private static readonly Regex s_seedFamilyCall = new(@"SeedFamilyAsync\(\s*""([^""]+)""\s*,", RegexOptions.Compiled);
     private static readonly Regex s_seedSqlConst = new(@"public const string (\w+SeedSql) = @""([^""]*)"";", RegexOptions.Compiled | RegexOptions.Singleline);
@@ -188,7 +193,10 @@ public sealed class DeltaFamilySeedingCensusTests
         var darling = s_seedSqlConst.Matches(ReadRepoFile(DarlingSeeder)).ToDictionary(m => m.Groups[1].Value, m => m.Groups[2].Value, StringComparer.Ordinal);
 
         var shared = lite.Keys.Intersect(darling.Keys, StringComparer.Ordinal).OrderBy(k => k, StringComparer.Ordinal).ToList();
-        Assert.Equal(8, shared.Count); /* the six SQL Server key seeds, the memory-grant seed and the query_stats pass seed */
+        Assert.Equal(8, shared.Count); /* the eight SQL Server key seeds — query_stats' replaced its pass-window-only read at V128 / v61 */
+        Assert.Contains("QueryStatsSeedSql", shared);
+        Assert.DoesNotContain("QueryStatsPassSeedSql", lite.Keys);
+        Assert.DoesNotContain("QueryStatsPassSeedSql", darling.Keys);
 
         foreach (var name in shared)
         {
@@ -218,21 +226,42 @@ public sealed class DeltaFamilySeedingCensusTests
     }
 
     /// <summary>
-    /// The pass-window-only exemption rests on a store fact: query_stats persists neither statement offset.
-    /// Asserted against the catalog so the day a rung adds them, this fails and the key seed is owed.
+    /// The record of the exemption that used to live here, and the fact that retired it. From #3614 until
+    /// Darling V128 / Lite v61 this test asserted that query_stats persisted NEITHER statement offset, so
+    /// the day a rung added them the exemption would go red and the key seed would be owed. The rung added
+    /// them; this now asserts the inverse — both offsets are stored, as the Integer the DMV reports, at the
+    /// TAIL of the payload (both stores' writers are positional) — and that the collector still keys on
+    /// exactly the string the seeders rebuild, so the key seed is about THIS key and not a guess. The
+    /// exemption set is empty, and asserted so.
     /// </summary>
     [Fact]
-    public void ThePassWindowOnlyExemption_RestsOnTheOffsetsNotBeingStored()
+    public void TheOffsetsAreStored_SoNoFamilyIsPassWindowOnly()
     {
-        Assert.All(PassWindowOnly, family => Assert.Contains(family, CollectorDeltaCalculator.DeltaFamilyCollectors));
+        Assert.Empty(PassWindowOnly);
 
         var queryStats = CollectorCatalog.Find("query_stats")!;
-        Assert.DoesNotContain(queryStats.PayloadColumns, c => c.Name == "statement_start_offset");
-        Assert.DoesNotContain(queryStats.PayloadColumns, c => c.Name == "statement_end_offset");
+        var start = queryStats.PayloadColumns.Single(c => c.Name == "statement_start_offset");
+        var end = queryStats.PayloadColumns.Single(c => c.Name == "statement_end_offset");
+        Assert.Equal(CollectorColumnType.Integer, start.Type);
+        Assert.Equal(CollectorColumnType.Integer, end.Type);
+        Assert.Equal(queryStats.PayloadColumns.Count - 2, queryStats.PayloadColumns.ToList().IndexOf(start));
+        Assert.Equal(queryStats.PayloadColumns.Count - 1, queryStats.PayloadColumns.ToList().IndexOf(end));
 
-        /* And the collector really does key on them, so the exemption is about THIS key and not a guess. */
+        /* The collector's key, verbatim, and both seeders rebuilding it with the same interpolation over the
+           same raw parts — so a null handle formats as empty on both sides and the offsets (-1 included) are
+           spelled by the same int formatting. A normalized form on either side would seed nothing, silently. */
         var source = ReadRepoFile(CollectorsDir + "/QueryStatsCollector.cs");
         Assert.Contains("$\"{row.SqlHandle}:{row.StatementStartOffset}:{row.StatementEndOffset}:{row.PlanHandle}\"", source, StringComparison.Ordinal);
+        foreach (var host in Hosts())
+        {
+            Assert.Contains("$\"{sqlHandle}:{reader.GetInt32(2)}:{reader.GetInt32(3)}:{planHandle}\"", host.Source, StringComparison.Ordinal);
+            /* NULL offsets (pre-V128 / pre-v61 rows) seed no key but still feed the pass window: the
+               skip sits AFTER the Observe, in the seeder, not in the SQL. */
+            var seeder = host.Source[host.Source.IndexOf("SeedQueryStatsAsync(", StringComparison.Ordinal)..];
+            var observe = seeder.IndexOf("passes.Observe(serverId, ts);", StringComparison.Ordinal);
+            var skip = seeder.IndexOf("if (reader.IsDBNull(2) || reader.IsDBNull(3))", StringComparison.Ordinal);
+            Assert.True(observe >= 0 && skip > observe, $"{host.Label}: the query_stats seeder must observe the pass window from every row BEFORE skipping a NULL-offset row's key");
+        }
     }
 
     /// <summary>

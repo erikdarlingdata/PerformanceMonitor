@@ -767,10 +767,12 @@ public sealed class PayloadDimensionTests
            exactly this tripwire's regression in review: its first cut was a SELECT * passthrough.
            The shipped V51 DROPs the view (the new column lands mid-list, which CREATE OR REPLACE
            refuses) and re-emits the generator's resolving definition. V121 re-defines it again for
-           query_plan_xml_bytes, by the same DROP-then-re-emit route and for the same reason.
-           The literal is deliberate: a rung that redefines this view has to change this line, which
-           is what brings a human to the paragraph above. */
-        Assert.Equal(121, definers[^1].Version);
+           query_plan_xml_bytes, by the same DROP-then-re-emit route and for the same reason. V128
+           (#3540) re-defines it a fourth time for statement_start_offset / statement_end_offset — the
+           delta key's two halves — again DROP-then-re-emit, because the offsets land ahead of the digest
+           columns. The literal is deliberate: a rung that redefines this view has to change this line,
+           which is what brings a human to the paragraph above. */
+        Assert.Equal(128, definers[^1].Version);
         Assert.Contains(
             "COALESCE(f.query_text, qtd.query_text) AS query_text",
             definers[^1].Sql,

@@ -204,28 +204,36 @@ public sealed class OversizedPlanBacklogPins
     }
 
     [Fact]
-    public void BothCollectors_DeclareTheSizeAsTheirLastPayloadColumn()
+    public void BothCollectors_DeclareTheSizeAtTheOrdinalItWasAppendedAt()
     {
-        /* Appended LAST on both, which is what keeps every earlier ordinal — and therefore every existing
-           store column's position, the positional binary COPY and the positional DuckDB appender — stable.
-           BigInt because DATALENGTH over an nvarchar(max) expression returns bigint, and a narrower store
-           column would silently overflow on the megabyte-scale plans this exists to describe.
+        /* Appended LAST on both when #3392 landed, which is what keeps every earlier ordinal — and therefore
+           every existing store column's position, the positional binary COPY and the positional DuckDB
+           appender — stable. BigInt because DATALENGTH over an nvarchar(max) expression returns bigint, and
+           a narrower store column would silently overflow on the megabyte-scale plans this exists to
+           describe.
+
+           No longer the LAST column: V128 / Lite v61 (#3540) appended behind it — the interval on
+           procedure_stats, the two statement offsets on query_stats — by the same append-only rule. The
+           claim that outlives that is the one the stores depend on: this column's ORDINAL never moved.
+           Pinned as the ordinal (51 and 35), which is what "appended last at #3392" means once later rungs
+           exist; a `names[^1]` pin here would assert #3392 is still the newest appender, which is how the
+           next rung's build goes red.
 
            This is the declaration half. The SELECT-ordinal-to-payload-slot agreement is driven through the
            real shredder in Lite.Tests' two collector-definition suites, which own the reader fakes. */
-        Assert.Equal(52, QueryStatsCollector.Instance.PayloadColumns.Count);
-        Assert.Equal(36, ProcedureStatsCollector.Instance.PayloadColumns.Count);
+        Assert.Equal(54, QueryStatsCollector.Instance.PayloadColumns.Count);
+        Assert.Equal(37, ProcedureStatsCollector.Instance.PayloadColumns.Count);
 
-        foreach (ICollectorSchemaInfo collector in new ICollectorSchemaInfo[]
+        foreach (var (collector, ordinal) in new (ICollectorSchemaInfo, int)[]
         {
-            QueryStatsCollector.Instance,
-            ProcedureStatsCollector.Instance,
+            (QueryStatsCollector.Instance, 51),
+            (ProcedureStatsCollector.Instance, 35),
         })
         {
             var names = collector.PayloadColumns.Select(c => c.Name).ToArray();
 
-            Assert.Equal("query_plan_xml_bytes", names[^1]);
-            Assert.Equal(CollectorColumnType.BigInt, collector.PayloadColumns[^1].Type);
+            Assert.Equal("query_plan_xml_bytes", names[ordinal]);
+            Assert.Equal(CollectorColumnType.BigInt, collector.PayloadColumns[ordinal].Type);
 
             /* The gated content column is still there and still AHEAD of the size, which is the pair a
                reader tests as "measured, not captured". query_stats keeps other columns between them, so
@@ -895,19 +903,23 @@ public sealed class OversizedPlanBacklogPins
     }
 
     [Fact]
-    public void TheQueryStatsFallback_KeysOnTheHash_BecauseTheFactRowCarriesNoOffsets()
+    public void TheQueryStatsFallback_KeysOnTheHash_TheGrainItsReadersAskAt()
     {
-        /* This is the REASON, pinned. query_stats reads the statement offsets for its delta key and never
-           stores them, so a join from a stored fact row could only match plan_handle + sql_handle — which
-           for a multi-statement plan is several backlog rows describing DIFFERENT statements' plans. Serving
-           one of those as "the plan for this query" is worse than serving nothing. If the offsets ever DO
-           become stored columns, this pin fails and the fallback can become an exact join. */
+        /* This was "…BecauseTheFactRowCarriesNoOffsets" and pinned the absence of the two offset columns,
+           with the note that the day they became stored columns the pin would fail and the fallback could
+           become an exact join. V128 (#3540) stored them, the pin failed as designed, and the decision is
+           recorded here rather than taken silently: the fallback STAYS keyed on query_hash. Two reasons,
+           both in the SQL's own doc — the readers ask at the query_hash grain, which the backlog row serves
+           directly; and every row written before V128 carries NULL offsets, so an exact join would go dark
+           on an upgraded store for a raw retention's worth of history. The offsets are asserted PRESENT and
+           trailing so this record cannot drift back into the old claim. */
         var stored = QueryStatsCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
-        Assert.DoesNotContain("statement_start_offset", stored);
-        Assert.DoesNotContain("statement_end_offset", stored);
+        Assert.Equal("statement_start_offset", stored[^2]);
+        Assert.Equal("statement_end_offset", stored[^1]);
 
         Assert.Contains("query_hash = $2", OversizedPlanBacklog.QueryStatsFallbackSql, StringComparison.Ordinal);
         Assert.DoesNotContain("plan_handle", OversizedPlanBacklog.QueryStatsFallbackSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("statement_start_offset", OversizedPlanBacklog.QueryStatsFallbackSql, StringComparison.Ordinal);
 
         /* procedure_stats CAN join exactly, and does: its three DMVs expose no offsets at all, so the plan
            apply passes fixed literals and every backlog row for it carries that same pair. */

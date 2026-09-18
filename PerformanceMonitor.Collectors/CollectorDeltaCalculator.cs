@@ -27,12 +27,15 @@ namespace PerformanceMonitor.Collectors;
 /// and memory_grant_stats; latch_stats, spinlock_stats, query_stats, procedure_stats and the PostgreSQL
 /// pair took the first-sighting path after every restart or deploy, so each fabricated one full interval
 /// of quiet per restart — and the pass window was never seeded at all, which left the #2235 series-age
-/// rescue inert on exactly the cycle it exists for. The one family a host cannot key-seed is named where
-/// it is not seeded rather than left to be discovered: query_stats keys its deltas on
-/// <c>sql_handle:statement_start_offset:statement_end_offset:plan_handle</c> and the store persists
-/// neither offset, so no store row can reproduce the key; its PASS WINDOW is seeded (which is what the
-/// series-age rescue reads), and the offsets are a rung. Lite.Tests' <c>DeltaFamilySeedingCensusTests</c>
-/// enumerates the family against both hosts' seeders so an eleventh family cannot ship unseeded.</para>
+/// rescue inert on exactly the cycle it exists for. query_stats was the one family a host could not
+/// key-seed until Darling V128 / Lite v61: it keys its deltas on
+/// <c>sql_handle:statement_start_offset:statement_end_offset:plan_handle</c> and the store persisted
+/// neither offset, so no store row could reproduce the key and only its PASS WINDOW was seeded. The
+/// offsets are stored now and both hosts key-seed it from rows that carry them; a pre-V128 row (NULL
+/// offsets) still contributes its collection time to the pass window and seeds no key, because a key
+/// built from a fabricated offset is one nothing will ever present. Lite.Tests'
+/// <c>DeltaFamilySeedingCensusTests</c> enumerates the family against both hosts' seeders so an eleventh
+/// family cannot ship unseeded.</para>
 /// </summary>
 public class CollectorDeltaCalculator : ICollectorDeltaCalculator
 {
@@ -310,20 +313,23 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
                        a 0 delta over a REAL interval is a claim that nothing happened for that long,
                        and this is the one case where that claim would be false. That invariant
                        (interval 0 <=> no delta knowable) is what lets a reader tell a fabricated zero
-                       from an idle one — but only where the interval REACHES the store. Every SQL Server
-                       delta family that persists a sample_interval_seconds column beside its deltas
-                       (perfmon_stats and query_stats from the start; wait_stats, file_io_stats,
-                       latch_stats and spinlock_stats since Darling V127 / Lite v60, #3540) maps the 0 to
-                       NULL at the read via NULLIF(sample_interval_seconds, 0), or filters it out of an
-                       aggregate with sample_interval_seconds IS DISTINCT FROM 0. Before #3540 this comment
-                       claimed "every consumer" while four of those six families discarded the interval at
-                       the write, so the fabricated zero survived as a measured one and their readers
-                       LAG-divided it into a confident 0.00 at exactly the moments it was unknowable. The
-                       remaining delta families persist no interval: procedure_stats and memory_grant_stats
-                       take CalculateDelta's bare long, and the PostgreSQL pair asks for the interval only
-                       to skip idle rows at the write. A delta-family census in Lite.Tests
-                       (DeltaFamilyIntervalColumnTests) names those four so the naked list shrinks
-                       deliberately rather than growing by accident. */
+                       from an idle one — and since Darling V128 / Lite v61 the interval REACHES the store
+                       for EVERY delta family: all ten members of DeltaFamilyCollectors persist a
+                       sample_interval_seconds column beside their deltas (perfmon_stats and query_stats
+                       from the start; wait_stats, file_io_stats,
+                       latch_stats and spinlock_stats since Darling V127 / Lite v60, #3540;
+                       procedure_stats, memory_grant_stats, pg_wait_stats and pg_statement_stats since
+                       Darling V128 / Lite v61, #3540), and every per-second reader maps the 0 to NULL
+                       via NULLIF(sample_interval_seconds, 0) or filters it out of an aggregate with
+                       sample_interval_seconds IS DISTINCT FROM 0. Before #3540 this comment
+                       claimed "every consumer" while four of six SQL Server families discarded the
+                       interval at the write, so the fabricated zero survived as a measured one and their
+                       readers LAG-divided it into a confident 0.00 at exactly the moments it was
+                       unknowable; two more took the bare long and the PostgreSQL pair asked for the
+                       interval only to skip idle rows. The claim is pinned rather than trusted:
+                       Lite.Tests' DeltaFamilyIntervalColumnTests is the census that asserts every member
+                       of DeltaFamilyCollectors carries the column, so an eleventh family cannot ship
+                       naked and this sentence cannot silently go false again. */
                     delta = 0;
                     interval = 0;
                 }

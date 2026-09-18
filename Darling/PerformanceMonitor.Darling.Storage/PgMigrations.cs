@@ -200,6 +200,14 @@ public static class PgMigrations
         new Migration(125, "collector-database-scope", V125Sql),
         new Migration(126, "self-disk-warn-gb-floor", V126Sql),
         new Migration(127, "delta-family-interval-columns", V127Sql),
+        /* V128 re-emits the payload-resolving v_query_stats (its two new query_stats columns land mid-list,
+           ahead of the digests, which CREATE OR REPLACE VIEW refuses), so it rides the V121 idiom: V54's
+           gz pre-add, then every payload column's pre-add, then the regenerated view. MigrationLadderPins
+           holds the ordering. */
+        new Migration(128, "delta-family-interval-completion",
+            V128Sql + "\n" + V54Sql + "\n"
+            + PgSchemaGenerator.GenerateQueryStatsPayloadColumnPreAdds() + "\n"
+            + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
     };
 
     /// <summary>
@@ -744,6 +752,107 @@ CREATE OR REPLACE VIEW collect.v_wait_stats AS SELECT * FROM collect.wait_stats;
 CREATE OR REPLACE VIEW collect.v_file_io_stats AS SELECT * FROM collect.file_io_stats;
 CREATE OR REPLACE VIEW collect.v_latch_stats AS SELECT * FROM collect.latch_stats;
 CREATE OR REPLACE VIEW collect.v_spinlock_stats AS SELECT * FROM collect.spinlock_stats;";
+
+    /// <summary>
+    /// V128 — the completion of V127 (#3540): <c>sample_interval_seconds</c> on the four delta families
+    /// V127 left naked — <c>procedure_stats</c>, <c>memory_grant_stats</c>, <c>pg_wait_stats</c>,
+    /// <c>pg_statement_stats</c> — and the two statement offsets on <c>query_stats</c> that its delta key
+    /// is made of. After this rung EVERY member of <c>CollectorDeltaCalculator.DeltaFamilyCollectors</c>
+    /// stores the interval its deltas accrued over, so the calculator's (delta 0, interval 0) "no delta
+    /// knowable" marker reaches the store from every family and no restart zero reads as a measurement
+    /// anywhere; Lite.Tests' <c>DeltaFamilyIntervalColumnTests</c> census asserts the set with nothing
+    /// left on its still-naked list. Same <c>integer</c> type as the six that already carry it, so the
+    /// one <c>NULLIF(sample_interval_seconds, 0)</c> idiom reads all ten. Pinned by
+    /// <c>DeltaFamilyIntervalCompletionRungTests</c>.
+    ///
+    /// <para><b>Why five tables in one rung.</b> The repo allows one un-landed rung at a time, and these
+    /// five changes are one change: every column here exists so the same reader idiom can be applied
+    /// uniformly (stored interval → <c>NULLIF(…, 0)</c>; NULL → the LAG derivation; no <c>ELSE 0</c>),
+    /// and the offsets exist so the restart seed can rebuild the one delta key the store could not
+    /// reproduce. Five rungs would have been five fleet schema hops carrying one idea.</para>
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b> on all six columns, matching V127 and every
+    /// column-adding rung on a collector table (V80, V81, V121): a historical row never recorded its
+    /// interval or its offsets, so NULL is the honest value. A backfilled 0 interval would stamp every
+    /// pre-V128 row "unknowable" and blank 30 days of rate history; a backfilled 0/-1 offset pair would
+    /// build a delta key nothing will ever present, and the seed would restore baselines under it
+    /// silently. Readers treat the three interval states distinctly: <c>n &gt; 0</c> measured; <c>0</c>
+    /// the unknowable marker, mapped to NULL (the point is absent, never 0.00); <c>NULL</c> a pre-V128
+    /// row, falling back to the LAG-over-collection_time derivation those readers always used. The seed
+    /// consumes only rows whose offsets are NOT NULL for keys, and every row for the pass window. A
+    /// nullable no-default ADD COLUMN is catalog-only in PostgreSQL and TimescaleDB accepts it on a
+    /// compressed hypertable with continuous aggregates attached (verified live on 2.28.1 against
+    /// <c>procedure_stats</c> with its hourly/daily aggregates and <c>query_stats</c> with its hourly one),
+    /// so this stays instant on a multi-hundred-GB store.</para>
+    ///
+    /// <para><b>The offsets' semantics, stated here because this is where the next reader will look.</b>
+    /// <c>statement_start_offset</c> and <c>statement_end_offset</c> are <c>sys.dm_exec_query_stats</c>'s
+    /// own columns: the statement's position inside its batch text in <b>BYTES</b> of the
+    /// <c>nvarchar</c> text, not characters — so slicing the text at them divides by two (the
+    /// collector's <c>SUBSTRING(st.text, (statement_start_offset / 2) + 1, …)</c>), and a reader who
+    /// forgets the Unicode factor lands halfway into the wrong statement. <c>statement_end_offset = -1</c>
+    /// means "to the end of the batch"; <c>(0, -1)</c> is the whole batch. They are stored
+    /// <b>verbatim as the DMV reports them</b>, <c>-1</c> included and never normalized to a length,
+    /// because the collector's delta key is <c>$"{sql_handle}:{start}:{end}:{plan_handle}"</c> over the raw
+    /// ints and the seed has to spell the same string byte for byte.</para>
+    ///
+    /// <para><b>The PostgreSQL pair's columns are added in TWO places and both are required</b> — the V101
+    /// rule. A store's tables come from one of two texts depending on when it was created: a fresh store
+    /// builds every table from V1's generated schema, walked from the collector catalog, while a store that
+    /// predates V63/V64 has whatever those rungs built. So the <c>pg_wait_stats</c> and
+    /// <c>pg_statement_stats</c> CREATE TABLE rungs gain the column for the population that first meets them
+    /// (<c>PgSchemaGeneratorTests</c> enforces the rung text against the generator, column for column) and
+    /// THIS rung's ALTER carries the existing one. Neither is redundant: the CREATE is <c>IF NOT EXISTS</c>
+    /// and never re-runs on a store that already has the table, and the ALTER is <c>ADD COLUMN IF NOT
+    /// EXISTS</c> and is a no-op wherever the column already exists. The three SQL Server tables need no
+    /// second site: they are generated at V1 and only ever ALTERed.</para>
+    ///
+    /// <para><b>Two view treatments.</b> <c>v_memory_grant_stats</c> is a <c>SELECT *</c> passthrough
+    /// and is refreshed here for the V14/V80/V81/V127 reason (Postgres freezes the column list at CREATE;
+    /// appending is the one alteration <c>CREATE OR REPLACE VIEW</c> permits). <c>procedure_stats</c>,
+    /// <c>pg_wait_stats</c> and <c>pg_statement_stats</c> have no <c>v_*</c> view (their readers hit the
+    /// base table; <c>PgSchemaGenerator.AllPassthroughViews</c> pins the set). <c>v_query_stats</c> is
+    /// the #1767 payload-RESOLVING view, not a passthrough, and the generator emits payload columns BEFORE
+    /// the trailing digest columns, so the two offsets land mid-list — an alteration
+    /// <c>CREATE OR REPLACE VIEW</c> refuses. Hence <c>DROP VIEW</c> here and the regenerated resolving
+    /// definition concatenated after this constant in the ladder entry, exactly as V51 and V121 did, with
+    /// <c>V54Sql</c> and <c>GenerateQueryStatsPayloadColumnPreAdds()</c> ahead of it so a store climbing
+    /// from below those rungs has every column the view names (<c>MigrationLadderPins</c>). Plain DROP,
+    /// no CASCADE: nothing persistent depends on the view.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do.</b> It does not touch
+    /// <c>collect.wait_stats_baseline</c> (V127's stated follow-up is a new aggregate under a new name —
+    /// an aggregate-plus-retirement operation, not a column, and not this rung). It does not backfill. It
+    /// does not change <c>procedure_stats_hourly</c>/<c>_daily</c> or <c>query_stats_hourly</c>: those sum
+    /// deltas, and a fabricated 0 adds nothing to a sum.</para>
+    /// </summary>
+    private const string V128Sql = @"
+ALTER TABLE collect.procedure_stats
+    ADD COLUMN IF NOT EXISTS sample_interval_seconds integer;
+ALTER TABLE collect.memory_grant_stats
+    ADD COLUMN IF NOT EXISTS sample_interval_seconds integer;
+ALTER TABLE collect.pg_wait_stats
+    ADD COLUMN IF NOT EXISTS sample_interval_seconds integer;
+ALTER TABLE collect.pg_statement_stats
+    ADD COLUMN IF NOT EXISTS sample_interval_seconds integer;
+
+/* The delta key's two halves that were never stored. BYTE offsets into the batch's nvarchar text
+   (a character position is offset / 2); statement_end_offset = -1 means ""to the end of the batch"";
+   stored raw, -1 included, because the key string carries the raw values. */
+ALTER TABLE collect.query_stats
+    ADD COLUMN IF NOT EXISTS statement_start_offset integer;
+ALTER TABLE collect.query_stats
+    ADD COLUMN IF NOT EXISTS statement_end_offset integer;
+
+/* Postgres FREEZES a view's SELECT * column list at CREATE, so the passthrough would keep serving the
+   pre-V128 column list forever — the V14 lesson, restated by V80, V81 and V127. The other three interval
+   tables have no v_ view. */
+CREATE OR REPLACE VIEW collect.v_memory_grant_stats AS SELECT * FROM collect.memory_grant_stats;
+
+/* v_query_stats is the payload-RESOLVING view (#1767), and its two new columns land ahead of the digest
+   columns — mid-list, which CREATE OR REPLACE VIEW refuses. Dropped here; the ladder entry concatenates
+   the regenerated resolving definition after the pre-adds, the V51/V121 idiom. */
+DROP VIEW IF EXISTS collect.v_query_stats;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
@@ -1909,7 +2018,8 @@ CREATE TABLE IF NOT EXISTS collect.pg_wait_stats (
     waits bigint,
     wait_time_us bigint,
     delta_waits bigint,
-    delta_wait_time_us bigint
+    delta_wait_time_us bigint,
+    sample_interval_seconds integer
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_wait_stats_time
@@ -1972,7 +2082,8 @@ CREATE TABLE IF NOT EXISTS collect.pg_statement_stats (
     max_exec_peakmem_bytes bigint,
     delta_calls bigint,
     delta_total_exec_time_ms bigint,
-    delta_rows bigint
+    delta_rows bigint,
+    sample_interval_seconds integer
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_statement_stats_time

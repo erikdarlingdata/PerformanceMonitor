@@ -238,6 +238,95 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
         Assert.Equal(10.0, spin[1].CollisionsPerSecond, precision: 6);
     }
 
+    /// <summary>
+    /// #3540 (v61): the procedure duration trend, the read that LAG-divided procedure_stats' fabricated
+    /// zero into a confident 0.00 ms/sec. Four collections five minutes apart: t1/t2 are pre-v61 collections
+    /// (NULL interval) — t1 has no prior and is not a point, t2 divides by the LAG's 300 s. t3 is a restart:
+    /// every row stores 0, so MAX is 0 and the collection is absent. t4 is a steady pass with a plan the
+    /// TOP (150) just readmitted (its row stores 0 beside a 0 delta) beside a measured row (120 s), so MAX is
+    /// 120 — the stored interval wins over the LAG's 300 — and the readmitted plan adds nothing to the sums.
+    /// </summary>
+    [Fact]
+    public async Task ProcedureDurationTrend_DropsTheUnknowableCollection_PrefersTheStoredInterval_KeepsPreV61History()
+    {
+        var t1 = Truncate(DateTime.UtcNow.AddHours(-2));
+        var t2 = t1.AddMinutes(5);
+        var t3 = t2.AddMinutes(5);
+        var t4 = t3.AddMinutes(5);
+
+        await SeedProcedureAsync(t1, "usp_A", deltaExecutions: 5, deltaElapsedUs: 100_000, interval: null);
+        await SeedProcedureAsync(t2, "usp_A", deltaExecutions: 30, deltaElapsedUs: 600_000, interval: null);
+        await SeedProcedureAsync(t3, "usp_A", deltaExecutions: 0, deltaElapsedUs: 0, interval: 0);
+        await SeedProcedureAsync(t4, "usp_A", deltaExecutions: 24, deltaElapsedUs: 1_200_000, interval: 120);
+        await SeedProcedureAsync(t4, "usp_New", deltaExecutions: 0, deltaElapsedUs: 0, interval: 0);
+
+        var points = await _dataService.GetProcedureDurationTrendAsync(ServerId, hoursBack: 3);
+
+        Assert.Equal(new[] { t2, t4 }, points.Select(p => p.CollectionTime).ToArray());
+
+        /* t2 (pre-v61): 600 ms / 300 s = 2.0 ms/sec; 30 / 300 = 0.1 executions/sec. */
+        Assert.Equal(2.0, points[0].Value, precision: 6);
+        Assert.Equal(0.1, points[0].ExecutionsPerSecond, precision: 6);
+
+        /* t4: the STORED 120 s — 1200 / 120 = 10.0, not the LAG's 1200 / 300 = 4.0; 24 / 120 = 0.2. */
+        Assert.Equal(10.0, points[1].Value, precision: 6);
+        Assert.Equal(0.2, points[1].ExecutionsPerSecond, precision: 6);
+    }
+
+    /// <summary>
+    /// #3540 (v61): the procedure history grid's "Interval (sec)" column shows the row's STORED interval where
+    /// it has one — the marker's 0 INCLUDED, which is what the query-stats history has always shown for an
+    /// unknowable row (a displayed interval is not a rate, so 0 is honest here where it would be a lie in a
+    /// division) — and the LAG-derived gap for a pre-v61 row that never recorded one.
+    /// </summary>
+    [Fact]
+    public async Task ProcedureHistory_ShowsTheStoredIntervalIncludingTheMarker_DerivesOnlyForPreV61Rows()
+    {
+        var t1 = Truncate(DateTime.UtcNow.AddHours(-2));
+        var t2 = t1.AddMinutes(5);
+        var t3 = t2.AddMinutes(5);
+        var t4 = t3.AddMinutes(5);
+
+        await SeedProcedureAsync(t1, "usp_H", 5, 100_000, interval: null);
+        await SeedProcedureAsync(t2, "usp_H", 30, 600_000, interval: null);
+        await SeedProcedureAsync(t3, "usp_H", 0, 0, interval: 0);
+        await SeedProcedureAsync(t4, "usp_H", 24, 1_200_000, interval: 120);
+
+        var rows = await _dataService.GetProcedureStatsHistoryAsync(ServerId, "AppDb", "dbo", "usp_H", hoursBack: 3);
+
+        Assert.Equal(new[] { t1, t2, t3, t4 }, rows.Select(r => r.CollectionTime).ToArray());
+        Assert.Null(rows[0].SampleIntervalSeconds);      /* pre-v61, no prior: nothing to derive from */
+        Assert.Equal(300, rows[1].SampleIntervalSeconds); /* pre-v61: the LAG gap */
+        Assert.Equal(0, rows[2].SampleIntervalSeconds);   /* the marker, shown as the 0 it is */
+        Assert.Equal(120, rows[3].SampleIntervalSeconds); /* stored, not the LAG's 300 */
+    }
+
+    /// <summary>
+    /// #3540 (v61): the resource-semaphore snapshot carries the stored interval and <c>IsUnknowable</c> is
+    /// true ONLY for the marker — never for a pre-v61 NULL, which is "never recorded" rather than
+    /// "unknowable". Three semaphores at the latest collection: a marker, a measured row, a pre-v61 row.
+    /// </summary>
+    [Fact]
+    public async Task ResourceSemaphoreSnapshot_CarriesTheStoredInterval_UnknowableOnlyForTheMarker()
+    {
+        var t = Truncate(DateTime.UtcNow.AddMinutes(-2));
+
+        await SeedMemoryGrantAsync(t, poolId: 1, interval: 0);
+        await SeedMemoryGrantAsync(t, poolId: 2, interval: 120);
+        await SeedMemoryGrantAsync(t, poolId: 3, interval: null);
+
+        var rows = await _dataService.GetResourceSemaphoreSnapshotAsync(ServerId, hoursBack: 1);
+        var byPool = rows.ToDictionary(r => r.PoolId);
+        Assert.Equal(3, byPool.Count);
+
+        Assert.Equal(0, byPool[1].SampleIntervalSeconds);
+        Assert.True(byPool[1].IsUnknowable);
+        Assert.Equal(120, byPool[2].SampleIntervalSeconds);
+        Assert.False(byPool[2].IsUnknowable);
+        Assert.Null(byPool[3].SampleIntervalSeconds);
+        Assert.False(byPool[3].IsUnknowable);
+    }
+
     /* ---- seeding ---------------------------------------------------------------------------------------- */
 
     private static DateTime Truncate(DateTime value) =>
@@ -286,6 +375,43 @@ public sealed class DeltaFamilyUnknowableRowReadTests : IClassFixture<SharedDuck
              sample_interval_seconds)
             VALUES ($1, $2, $3, $4, $5, $6, 'ROWS', '', 100, $7, $8, 0, 0, $9, $10, $11)";
         foreach (var v in new object[] { _nextId--, at, ServerId, ServerName, database, file, reads, writes, stallRead, stallWrite, IntervalValue(interval) })
+        {
+            cmd.Parameters.Add(new DuckDBParameter { Value = v });
+        }
+
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private async Task SeedProcedureAsync(DateTime at, string objectName, long deltaExecutions, long deltaElapsedUs, int? interval)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO procedure_stats
+            (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, object_type,
+             execution_count, total_worker_time, total_elapsed_time, total_logical_reads, total_physical_reads, total_logical_writes,
+             delta_execution_count, delta_worker_time, delta_elapsed_time, sample_interval_seconds)
+            VALUES ($1, $2, $3, $4, 'AppDb', 'dbo', $5, 'PROCEDURE', 0, 0, 0, 0, 0, 0, $6, 0, $7, $8)";
+        foreach (var v in new object[] { _nextId--, at, ServerId, ServerName, objectName, deltaExecutions, deltaElapsedUs, IntervalValue(interval) })
+        {
+            cmd.Parameters.Add(new DuckDBParameter { Value = v });
+        }
+
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private async Task SeedMemoryGrantAsync(DateTime at, int poolId, int? interval)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO memory_grant_stats
+            (collection_id, collection_time, server_id, server_name, resource_semaphore_id, pool_id,
+             target_memory_mb, max_target_memory_mb, total_memory_mb, available_memory_mb, granted_memory_mb, used_memory_mb,
+             grantee_count, waiter_count, timeout_error_count, forced_grant_count,
+             timeout_error_count_delta, forced_grant_count_delta, sample_interval_seconds)
+            VALUES ($1, $2, $3, $4, 0, $5, 100, 200, 90, 80, 10, 8, 3, 1, 5, 2, 0, 0, $6)";
+        foreach (var v in new object[] { _nextId--, at, ServerId, ServerName, poolId, IntervalValue(interval) })
         {
             cmd.Parameters.Add(new DuckDBParameter { Value = v });
         }

@@ -107,6 +107,19 @@ public static class DarlingPgTrendReader
     /// cumulative ones again. They are written on collection, where the previous reading is in hand, and
     /// re-deriving them here would give a DIFFERENT answer whenever a snapshot is missing — the collector's
     /// delta spans the gap it actually observed, and a LAG here would span the gap in the stored data.</para>
+    ///
+    /// <para><b>The same reasoning now applies to the INTERVAL (#3540, V128).</b> The collector stores
+    /// <c>sample_interval_seconds</c> beside the deltas — the span the delta actually accrued over, which
+    /// is not the gap between stored snapshots either: this collector skips idle rows at the write, so for
+    /// a statement that ran, went quiet for three passes and ran again, the stored delta spans four
+    /// intervals and a LAG over the rows it left behind spans one. Per snapshot the interval is <c>MAX</c>
+    /// over the queryid's rows (one per database/user/toplevel entry) — an entry first seen in an
+    /// otherwise steady pass carries 0 and contributes 0 to the sums, so MAX is 0 only when every row was
+    /// unknowable (a restart or a <c>pg_stat_statements_reset()</c>), and that 0 becomes NULL through
+    /// <c>NULLIF</c>; a NULL rate drops the point in the reader rather than plotting 0.00 calls/sec. NULL
+    /// (a pre-V128 row that never recorded one) falls back to the LAG this read always used, so history
+    /// renders as it did. No <c>ELSE 0</c>: the first snapshot of a pre-V128 series is absent rather than
+    /// a fabricated 0.0.</para>
     /// </summary>
     public const string QueryDurationTrendSql = """
         WITH per_snapshot AS (
@@ -114,7 +127,10 @@ public static class DarlingPgTrendReader
                 collection_time,
                 SUM(delta_calls)                AS calls,
                 SUM(delta_total_exec_time_ms)   AS total_exec_ms,
-                extract(epoch FROM (collection_time - LAG(collection_time) OVER (ORDER BY collection_time))) AS interval_seconds
+                CASE WHEN MAX(sample_interval_seconds) IS NULL
+                     THEN extract(epoch FROM (collection_time - LAG(collection_time) OVER (ORDER BY collection_time)))
+                     ELSE NULLIF(MAX(sample_interval_seconds), 0)
+                END                             AS interval_seconds
             FROM pg_statement_stats
             WHERE server_id = $1
             AND   queryid = $2
@@ -133,9 +149,9 @@ public static class DarlingPgTrendReader
                  THEN coalesce(total_exec_ms, 0)::double precision / calls
                  ELSE NULL
             END                                             AS mean_exec_ms,
+            /* NULL, not 0, when the interval is unknowable or absent — the reader drops the point. */
             CASE WHEN interval_seconds > 0
                  THEN coalesce(calls, 0)::double precision / interval_seconds
-                 ELSE 0
             END                                             AS calls_per_second
         FROM per_snapshot
         ORDER BY collection_time
@@ -266,12 +282,21 @@ public static class DarlingPgTrendReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* A NULL rate is an unknowable interval (#3540, V128) — every row of the snapshot stored 0, a
+               restart or a stats reset — or a pre-V128 first snapshot with nothing to LAG against. The
+               point is dropped: its calls and time are the calculator's fabricated zeros, and a point that
+               says "0 calls, 0 ms" at the moment of a restart is the lie this column exists to stop. */
+            if (reader.IsDBNull(4))
+            {
+                continue;
+            }
+
             points.Add(new PgQueryDurationTrendPoint(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                 reader.IsDBNull(2) ? 0 : reader.GetDouble(2),
                 reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
-                reader.IsDBNull(4) ? 0 : reader.GetDouble(4)));
+                reader.GetDouble(4)));
         }
 
         return points;

@@ -130,7 +130,7 @@ public sealed class StartupCommandTimeoutTests
         ("DarlingDeltaCalculator.cs", "SeedLatchStatsAsync", 1, 0, 0, 0),
         ("DarlingDeltaCalculator.cs", "SeedSpinlockStatsAsync", 1, 0, 0, 0),
         ("DarlingDeltaCalculator.cs", "SeedProcedureStatsAsync", 1, 0, 0, 0),
-        ("DarlingDeltaCalculator.cs", "SeedQueryStatsPassesAsync", 1, 0, 0, 0),
+        ("DarlingDeltaCalculator.cs", "SeedQueryStatsAsync", 1, 0, 0, 0),
         ("DarlingDeltaCalculator.cs", "SeedPgWaitStatsAsync", 1, 0, 0, 0),
         ("DarlingDeltaCalculator.cs", "SeedPgStatementStatsAsync", 1, 0, 0, 0),
         ("StoreConfigProvider.cs", "WarnAboutFileOnlyServersAsync", 1, 0, 0, 0),

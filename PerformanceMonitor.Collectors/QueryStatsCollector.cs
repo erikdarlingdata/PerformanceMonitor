@@ -86,7 +86,20 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
         public long? QueryPlanXmlBytes { get; set; }
 
         public long PlanGenerationNum { get; set; }
+
+        /// <summary>
+        /// <c>sys.dm_exec_query_stats.statement_start_offset</c> / <c>statement_end_offset</c>: the statement's
+        /// position inside its batch text, in BYTES of the <c>nvarchar</c> text, so a character slice divides
+        /// by two (the <c>SUBSTRING(st.text, (start / 2) + 1, …)</c> in the SELECT above). <c>-1</c> as the end
+        /// offset means "to the end of the batch"; <c>(0, -1)</c> is the whole batch. Half of the delta key
+        /// (<c>sql_handle:start:end:plan_handle</c>) — a multi-statement batch shares one sql_handle and one
+        /// plan_handle across its statements, and only the offsets tell them apart. Stored since Darling
+        /// V128 / Lite v61 (#3540) exactly as read, <c>-1</c> included, so the restart seed can rebuild the
+        /// key from the store.
+        /// </summary>
         public int StatementStartOffset { get; set; }
+
+        /// <summary>See <see cref="StatementStartOffset"/>.</summary>
         public int StatementEndOffset { get; set; }
 
         /// <summary>The statement's host object (schema.name) from <c>sys.dm_exec_sql_text.objectid</c>;
@@ -383,6 +396,17 @@ OUTER APPLY
            expression returns bigint, and a plan XML document is measured in megabytes on the tail this
            exists to describe. */
         new CollectorColumn("query_plan_xml_bytes", CollectorColumnType.BigInt),
+        /* #3540 (Darling V128 / Lite v61), appended after it for the same reason: the two statement
+           offsets the delta key is made of. Until these were stored no row in query_stats could
+           reproduce the key WritePayload builds, so the restart seed could restore this family's pass
+           window but not one baseline, and every plan older than the restart gap re-baselined on every
+           deploy. Integer, the DMV's own type. BYTE offsets into the batch's nvarchar text (Unicode, so a
+           character position is offset / 2), and statement_end_offset = -1 means "to the end of the
+           batch" — stored verbatim, -1 included, because the key string carries the raw values and the
+           seed has to spell the same string. NULL on every pre-V128 row: the offsets were never
+           recorded, and a fabricated 0/-1 would build a key nothing will ever present. */
+        new CollectorColumn("statement_start_offset", CollectorColumnType.Integer),
+        new CollectorColumn("statement_end_offset", CollectorColumnType.Integer),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -461,7 +485,11 @@ OUTER APPLY
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
         /* Delta key = the dm_exec_query_stats row identity (sql_handle + offsets + plan_handle).
-           Keying on plan_handle alone cross-contaminated multi-statement plans — parity contract. */
+           Keying on plan_handle alone cross-contaminated multi-statement plans — parity contract.
+           The two hosts' restart seeds (DeltaCalculator / DarlingDeltaCalculator, QueryStatsSeedSql)
+           rebuild THIS string from the stored handles and offsets with the same interpolation — a null
+           handle formats as empty here and there, and the raw offsets (-1 included) are spelled by the
+           same int formatting — so the seeded key is the one this line presents. */
         var deltaKey = $"{row.SqlHandle}:{row.StatementStartOffset}:{row.StatementEndOffset}:{row.PlanHandle}";
 
         /* #2235: plan_handle is in the key above, and it changes on every recompile — so a churning plan
@@ -540,7 +568,9 @@ OUTER APPLY
             .Value(row.PlanGenerationNum)
             .Value(sampleIntervalSeconds)      /* sample_interval_seconds INTEGER */
             .Value(row.HostObjectName)         /* #2012 stage 2: NULL for ad-hoc text */
-            .Value(row.QueryPlanXmlBytes);     /* #3392: measured size, never gated by the cap */
+            .Value(row.QueryPlanXmlBytes)      /* #3392: measured size, never gated by the cap */
+            .Value(row.StatementStartOffset)   /* #3540: the delta key's offsets, raw, -1 included */
+            .Value(row.StatementEndOffset);
     }
 
     /// <summary>

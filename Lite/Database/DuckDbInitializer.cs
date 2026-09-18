@@ -271,7 +271,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 60;
+    internal const int CurrentSchemaVersion = 61;
 
     private readonly string _archivePath;
 
@@ -1646,6 +1646,68 @@ public class DuckDbInitializer
                 catch (Exception ex)
                 {
                     _logger?.LogWarning("Migration to v60 on {Table} encountered an error (non-fatal): {Error}", table, ex.Message);
+                }
+            }
+        }
+
+        if (fromVersion < 61)
+        {
+            /* v61 (#3540): the completion of v60, twinning Darling's V128. procedure_stats and
+               memory_grant_stats gain sample_interval_seconds — the measured seconds each row's deltas
+               accrued over — so EVERY delta family Lite stores now carries the interval, and the shared
+               calculator's (delta 0, interval 0) "no delta knowable" marker survives every family's write.
+               These two took the calculator's bare long and discarded the interval, so a restart's
+               fabricated zero read as a measured idle one: the procedure duration trend LAG-divided it into
+               a confident 0.00 ms/sec, and a memory-grant row's 0 timeouts over a restart read as a quiet
+               semaphore. Darling's V128 also dresses pg_wait_stats and pg_statement_stats; Lite stores no
+               pg_* tables (DuckDbSchemaGenerator.StoredCollectors), so this side has only the two.
+
+               query_stats gains statement_start_offset and statement_end_offset — the two halves of its
+               delta key (sql_handle:start:end:plan_handle) the store never persisted, so the restart seed
+               could restore this family's pass window but not one baseline (#3614 named it as the residual).
+               Their semantics, stated here because this is where the next reader will look: they are
+               sys.dm_exec_query_stats' own columns, the statement's position inside its batch text in BYTES
+               of the nvarchar text, not characters — a character slice divides by two, which is the
+               collector's SUBSTRING(st.text, (statement_start_offset / 2) + 1, ...) — and
+               statement_end_offset = -1 means "to the end of the batch" ((0, -1) is the whole batch). They
+               are stored VERBATIM as the DMV reports them, -1 included and never normalized to a length,
+               because the collector's key is built over the raw ints and the seed has to spell the same
+               string byte for byte (DeltaCalculator.QueryStatsSeedSql).
+
+               All three appended at the end of their PayloadColumns lists, so the positional appender and
+               old parquet are unaffected. Nothing to backfill and nothing that COULD be: a row collected
+               before the upgrade never recorded its interval or its offsets, so NULL is the honest value —
+               the readers treat a NULL interval as "pre-v61, derive from the previous collection_time"
+               (exactly what they always did) and 0 as "unknowable, render nothing"; the seed treats NULL
+               offsets as "no key can be rebuilt from this row" and still takes its collection time for the
+               pass window. A backfilled 0 interval would stamp all of history unknowable and blank every
+               procedure rate chart for 30 days; a backfilled 0/-1 offset pair would seed baselines under a
+               key nothing will ever present.
+
+               REQUIRED on this side for the v60 reason: the appender writes one value per declared payload
+               column, so a database without these columns fails EndRow() on the first batch of either
+               collector — the whole batch, not the column. Fresh installs get them from
+               DuckDbSchemaGenerator; these ALTERs are for an existing database and are idempotent. The v_
+               passthrough views need no work here: Lite rebuilds every v_ view on start
+               (CreateArchiveViewsAsync, called after this). Non-fatal per statement, matching v59/v60. */
+            _logger?.LogInformation("Running migration to v61: every delta family stores its interval, and query_stats stores the statement offsets its delta key is made of");
+
+            foreach (var (table, column) in new[]
+            {
+                ("procedure_stats", "sample_interval_seconds"),
+                ("memory_grant_stats", "sample_interval_seconds"),
+                ("query_stats", "statement_start_offset"),
+                ("query_stats", "statement_end_offset"),
+            })
+            {
+                try
+                {
+                    await ExecuteNonQueryAsync(connection,
+                        $"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} INTEGER");
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning("Migration to v61 on {Table}.{Column} encountered an error (non-fatal): {Error}", table, column, ex.Message);
                 }
             }
         }

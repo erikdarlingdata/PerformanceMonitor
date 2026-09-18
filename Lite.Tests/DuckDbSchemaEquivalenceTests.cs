@@ -193,6 +193,17 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
     /// <see cref="DuckDbInitializer"/>'s v60 migration adds it to existing databases;
     /// <c>DeltaFamilyIntervalColumnTests</c> is the census that keeps a seventh delta family from shipping
     /// without it.</para>
+    ///
+    /// <para>#3540 / schema v61: the completion. <c>sample_interval_seconds</c> on <c>procedure_stats</c> and
+    /// <c>memory_grant_stats</c> — the last two Lite-stored delta families without it, so every family Lite
+    /// stores now carries the interval and the census's still-naked list is empty. And
+    /// <c>query_stats.statement_start_offset</c> / <c>statement_end_offset</c>: the two halves of that
+    /// family's delta key the store never persisted, so the restart seed could restore its pass window but
+    /// not one baseline. INTEGER (the DMV's type), nullable, trailing; BYTE offsets into the batch's nvarchar
+    /// text, <c>-1</c> as the end offset meaning "to the end of the batch", stored raw because the key string
+    /// is built over the raw values. NULL on every pre-v61 row: "never recorded", which the seed reads as
+    /// "no key can be rebuilt from this row". <see cref="DuckDbInitializer"/>'s v61 migration adds all four
+    /// to existing databases.</para>
     /// </summary>
     private static readonly HashSet<string> IntentionalAppendedColumns = new(StringComparer.Ordinal)
     {
@@ -203,6 +214,10 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
         "file_io_stats.sample_interval_seconds",
         "latch_stats.sample_interval_seconds",
         "spinlock_stats.sample_interval_seconds",
+        "procedure_stats.sample_interval_seconds",
+        "memory_grant_stats.sample_interval_seconds",
+        "query_stats.statement_start_offset",
+        "query_stats.statement_end_offset",
     };
 
     [Fact]

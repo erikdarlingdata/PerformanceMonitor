@@ -42,11 +42,12 @@ public class DeltaCalculator : CollectorDeltaCalculator
        - Latest collection per server (the original four, latch_stats, spinlock_stats): these
          collectors write every key they read on every pass, so the newest collection holds every
          key's current counter and the row-value probe is the cheapest exact read.
-       - Latest row per key (procedure_stats here; the PostgreSQL pair on Darling): these collectors
-         do NOT write every key every pass — procedure_stats is a TOP (150) that churns, and the
-         PostgreSQL collectors skip idle rows at the write — so the newest collection is missing keys
-         whose counters are nevertheless unchanged, and a key seeded from nothing takes the
-         first-sighting path. DISTINCT ON (server_id, key) ... ORDER BY collection_time DESC over the
+       - Latest row per key (procedure_stats and query_stats here; the PostgreSQL pair on Darling):
+         these collectors do NOT write every key every pass — procedure_stats and query_stats are
+         TOP (n) reads that churn, and the PostgreSQL collectors skip idle rows at the write — so the
+         newest collection is missing keys whose counters are nevertheless unchanged, and a key seeded
+         from nothing takes the first-sighting path. DISTINCT ON (server_id, key) ... ORDER BY
+         collection_time DESC over the
          cutoff window returns each key's newest row instead. Its bound is the single
          collection_time >= $1 on its only table read: there is no inner aggregate to bind a second
          time, and the window's rows are the whole working set (one sort over fifteen minutes of one
@@ -55,13 +56,18 @@ public class DeltaCalculator : CollectorDeltaCalculator
          value is exact (the counter was idle in between, which is why no newer row exists) and the
          gap policy still bounds the span.
 
-       query_stats has NO key seed on either host, and the reason is stated rather than left as a gap:
-       its delta key is sql_handle:statement_start_offset:statement_end_offset:plan_handle and the
-       store persists neither offset, so no row in query_stats can reproduce the key the collector
-       will present, and a seed under any other key seeds nothing. Its PASS WINDOW is seeded below
-       (QueryStatsPassSeedSql), which is what the #2235 series-age rescue reads — so on the first
-       post-restart pass a plan that compiled since the last pre-restart pass is credited in full even
-       though older plans baseline. Persisting the offsets is a rung, tracked on #3540. */
+       query_stats joined the per-key shape with Lite v61 / Darling V128 (#3540). Its delta key is
+       sql_handle:statement_start_offset:statement_end_offset:plan_handle, and until v61 the store
+       persisted neither offset, so no row could reproduce the key the collector presents and only the
+       family's PASS WINDOW could be seeded (the #2235 series-age rescue's input). The offsets are
+       stored now, raw (-1 = "to the end of the batch", byte offsets into the nvarchar batch text) and
+       the seed rebuilds the key from them with the collector's own interpolation. Two rules, both in
+       the seeder rather than the SQL: a row whose offsets are NULL — every row written before v61 —
+       seeds NO key, because a key built from a fabricated 0/-1 would be one nothing ever presents and
+       the baseline under it would sit unread until it aged out; and EVERY row, NULL offsets or not,
+       still feeds the pass window, so the first restart after the upgrade (when the whole window is
+       pre-v61 rows) keeps the rescue armed exactly as #3614 left it. One read serves both, which is
+       why the offset filter is not in the WHERE. */
 
     public const string WaitStatsSeedSql = @"
 SELECT server_id, wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms, collection_time
@@ -146,14 +152,20 @@ FROM (
 ) AS recent
 ORDER BY server_id, delta_key, collection_time DESC";
 
-    /* The pass window only (see the header): every distinct collection time per server inside the
-       cutoff, which is a handful of rows per server from an index on (server_id, collection_time).
-       GROUP BY rather than DISTINCT so the shape reads as the aggregate it is. */
-    public const string QueryStatsPassSeedSql = @"
-SELECT server_id, collection_time
+    /* QueryStatsCollector keys on the dm_exec_query_stats row identity — sql_handle, both statement
+       offsets, plan_handle — and its TOP (n) churns like procedure_stats', so: latest row per that
+       identity. DISTINCT ON treats NULL offsets as one group, which is harmless: those are pre-v61 rows
+       the seeder reads for the pass window only (see the header). The eight counters are the ones the
+       collector's eight CalculateDeltaWithSeriesAge calls difference. */
+    public const string QueryStatsSeedSql = @"
+SELECT DISTINCT ON (server_id, sql_handle, statement_start_offset, statement_end_offset, plan_handle)
+       server_id, sql_handle, statement_start_offset, statement_end_offset, plan_handle,
+       execution_count, total_worker_time, total_elapsed_time,
+       total_logical_reads, total_logical_writes, total_physical_reads, total_rows, total_spills,
+       collection_time
 FROM query_stats
 WHERE collection_time >= $1
-GROUP BY server_id, collection_time";
+ORDER BY server_id, sql_handle, statement_start_offset, statement_end_offset, plan_handle, collection_time DESC";
 
     /* The delta GROUP names each family's collector passes — the pass window is keyed by these, not
        by the collector name, so a seeder that seeded "query_stats" would arm nothing. Spelled once per
@@ -214,7 +226,7 @@ GROUP BY server_id, collection_time";
             await SeedFamilyAsync("latch_stats", () => SeedLatchStatsAsync(connection, cutoff));
             await SeedFamilyAsync("spinlock_stats", () => SeedSpinlockStatsAsync(connection, cutoff));
             await SeedFamilyAsync("procedure_stats", () => SeedProcedureStatsAsync(connection, cutoff));
-            await SeedFamilyAsync("query_stats", () => SeedQueryStatsPassesAsync(connection, cutoff));
+            await SeedFamilyAsync("query_stats", () => SeedQueryStatsAsync(connection, cutoff));
 
             _logger?.LogInformation(
                 "Delta calculator seeded from database (baselines from the last {Minutes} minutes)",
@@ -414,19 +426,50 @@ GROUP BY server_id, collection_time";
         if (count > 0) _logger?.LogDebug("Seeded {Count} procedure_stats baseline rows", count);
     }
 
-    /* Pass window only — see the header for why query_stats has no key seed. */
-    private async Task SeedQueryStatsPassesAsync(DuckDBConnection connection, DateTime cutoff)
+    private async Task SeedQueryStatsAsync(DuckDBConnection connection, DateTime cutoff)
     {
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = QueryStatsPassSeedSql;
+        cmd.CommandText = QueryStatsSeedSql;
         cmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
         using var reader = await cmd.ExecuteReaderAsync();
+        var count = 0;
+        var preV61 = 0;
         var passes = new SeedPassTracker();
         while (await reader.ReadAsync())
         {
-            passes.Observe(reader.GetInt32(0), reader.IsDBNull(1) ? (DateTime?)null : reader.GetDateTime(1));
+            var serverId = reader.GetInt32(0);
+            var ts = reader.IsDBNull(13) ? (DateTime?)null : reader.GetDateTime(13);
+
+            /* The pass window takes EVERY row, offsets or not — see the header. */
+            passes.Observe(serverId, ts);
+
+            /* A pre-v61 row never recorded its offsets. Its key cannot be rebuilt, and a key built from a
+               guessed pair would be a baseline nothing ever reads — so it seeds nothing. */
+            if (reader.IsDBNull(2) || reader.IsDBNull(3))
+            {
+                preV61++;
+                continue;
+            }
+
+            /* The key exactly as QueryStatsCollector.WritePayload spells it: the same interpolation over
+               the same raw parts, so a null handle formats as empty and the offsets — -1 included — are
+               spelled by the same int formatting on both sides. Never normalized. */
+            var sqlHandle = reader.IsDBNull(1) ? null : reader.GetString(1);
+            var planHandle = reader.IsDBNull(4) ? null : reader.GetString(4);
+            var deltaKey = $"{sqlHandle}:{reader.GetInt32(2)}:{reader.GetInt32(3)}:{planHandle}";
+
+            Seed(serverId, "query_stats_exec", deltaKey, reader.IsDBNull(5) ? 0 : reader.GetInt64(5), ts);
+            Seed(serverId, "query_stats_worker", deltaKey, reader.IsDBNull(6) ? 0 : reader.GetInt64(6), ts);
+            Seed(serverId, "query_stats_elapsed", deltaKey, reader.IsDBNull(7) ? 0 : reader.GetInt64(7), ts);
+            Seed(serverId, "query_stats_reads", deltaKey, reader.IsDBNull(8) ? 0 : reader.GetInt64(8), ts);
+            Seed(serverId, "query_stats_writes", deltaKey, reader.IsDBNull(9) ? 0 : reader.GetInt64(9), ts);
+            Seed(serverId, "query_stats_phys_reads", deltaKey, reader.IsDBNull(10) ? 0 : reader.GetInt64(10), ts);
+            Seed(serverId, "query_stats_rows", deltaKey, reader.IsDBNull(11) ? 0 : reader.GetInt64(11), ts);
+            Seed(serverId, "query_stats_spills", deltaKey, reader.IsDBNull(12) ? 0 : reader.GetInt64(12), ts);
+            count++;
         }
         SeedPasses(passes, QueryStatsGroups);
-        if (passes.Count > 0) _logger?.LogDebug("Seeded the query_stats pass window for {Count} servers", passes.Count);
+        if (count > 0) _logger?.LogDebug("Seeded {Count} query_stats baseline rows", count);
+        if (preV61 > 0) _logger?.LogDebug("Skipped {Count} query_stats rows with no stored statement offsets (pre-v61); their collection times still seeded the pass window", preV61);
     }
 }

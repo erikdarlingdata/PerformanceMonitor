@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Globalization;
@@ -120,7 +121,11 @@ public sealed class PgStatementStatsCollector : PostgresCollectorDefinitionBase<
            added to the list WritePayload will later be called once per. */
         long DeltaCalls,
         long DeltaTotalExecTimeMs,
-        long DeltaRows);
+        long DeltaRows,
+        /* #3540 (Darling V128): the measured seconds the three deltas accrued over — the minimum over the
+           row's groups, so 0 means "no delta in this row is knowable". Computed beside the deltas in
+           ReadAsync because that is where the calculator is called. */
+        int SampleIntervalSeconds);
 
     /* Column names DIFFER between PostgreSQL 16 and 17 and our fleet spans both, so the query is
        built per major rather than SELECT *-ed. Verified against live 16.11 and 17.7:
@@ -287,6 +292,14 @@ WHERE calls > 0";
         new CollectorColumn("delta_calls", CollectorColumnType.BigInt),
         new CollectorColumn("delta_total_exec_time_ms", CollectorColumnType.BigInt),
         new CollectorColumn("delta_rows", CollectorColumnType.BigInt),
+        /* Appended (Darling V128, #3540): the measured seconds the row's three deltas accrued over, or 0
+           when no delta was knowable. Appended at the END because the COPY writer is positional — the
+           same rule GoldenCollectorSchema's header states for every column a numbered migration adds by
+           ALTER TABLE. Until V128 this collector asked the calculator for the interval only to decide
+           the idle-row skip and stored nothing, so every row it DID ship with interval 0 (first sighting,
+           reset, gap re-baseline — the three cases the skip deliberately lets through) carried delta 0s
+           that the per-statement duration trend divided by a LAG-derived span into 0.00 calls/sec. */
+        new CollectorColumn("sample_interval_seconds", CollectorColumnType.Integer),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -327,12 +340,18 @@ WHERE calls > 0";
                THIS series stale while the calls series (called for every row, always) stayed fresh —
                so the next genuinely active cycle could see a gap here that calls never sees, and report a
                false counter-reset on a real accrual. See the class remarks. */
-            var deltaTotalTime = context.Deltas.CalculateDelta(
-                context.ServerId, "pg_statement_stats_time", key, (long)totalExecTimeMs,
+            var deltaTotalTime = context.Deltas.CalculateDeltaWithInterval(
+                context.ServerId, "pg_statement_stats_time", key, (long)totalExecTimeMs, out var timeIntervalSeconds,
                 collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-            var deltaRows = context.Deltas.CalculateDelta(
-                context.ServerId, "pg_statement_stats_rows", key, rowsReturned,
+            var deltaRows = context.Deltas.CalculateDeltaWithInterval(
+                context.ServerId, "pg_statement_stats_rows", key, rowsReturned, out var rowsIntervalSeconds,
                 collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+            /* #3540 (V128): the stored interval is the MINIMUM over the row's three groups — the V127 rule
+               (WaitStatsCollector). The groups share a key and a collection time, so they agree in every
+               case but an independent single-counter reset, and pg_stat_statements resets an entry's
+               counters together; the minimum makes the stored pair mean "every delta in this row is
+               knowable", so a reader never divides one group's reset 0 by a sibling's real span. */
+            var sampleIntervalSeconds = Math.Min(callsIntervalSeconds, Math.Min(timeIntervalSeconds, rowsIntervalSeconds));
 
             /* The skip: a REAL interval (this is not a first sighting, a counter reset, or a gap this
                pass just re-baselined) with zero new calls means the statement demonstrably did not run,
@@ -377,7 +396,8 @@ WHERE calls > 0";
                 MaxExecPeakMemBytes: NullableLong(reader, 26),
                 DeltaCalls: deltaCalls,
                 DeltaTotalExecTimeMs: deltaTotalTime,
-                DeltaRows: deltaRows));
+                DeltaRows: deltaRows,
+                SampleIntervalSeconds: sampleIntervalSeconds));
         }
 
         return rows;
@@ -421,6 +441,7 @@ WHERE calls > 0";
             .Value(row.MaxExecPeakMemBytes)
             .Value(row.DeltaCalls)
             .Value(row.DeltaTotalExecTimeMs)
-            .Value(row.DeltaRows);
+            .Value(row.DeltaRows)
+            .Value(row.SampleIntervalSeconds);  /* sample_interval_seconds INTEGER — measured, 0 = unknowable */
     }
 }

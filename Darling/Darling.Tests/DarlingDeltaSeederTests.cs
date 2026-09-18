@@ -28,8 +28,9 @@ namespace Darling.Tests;
 /// the per-group pass window the #2235 series-age rescue reads. Two query shapes are pinned here: the
 /// original latest-collection-per-server row-value probe (now also latch_stats and spinlock_stats), and
 /// the latest-row-per-key <c>DISTINCT ON</c> form for the families whose collectors do not write every
-/// key every pass (procedure_stats, pg_wait_stats, pg_statement_stats). query_stats has a pass-window
-/// seed only; the reason is in the calculator's header and the census in Lite.Tests names it.</para>
+/// key every pass (procedure_stats, pg_wait_stats, pg_statement_stats — and query_stats since V128, #3540,
+/// once the store persisted the two statement offsets its key is made of; a pre-V128 row seeds the pass
+/// window and no key). The census in Lite.Tests holds the set.</para>
 /// </summary>
 /* Live-fixture tests share one Postgres store; the collection serializes them so
    cross-test row churn (inserts/purges/deletes) cannot race another class's assertions. */
@@ -168,21 +169,27 @@ public sealed class DarlingDeltaSeederTests
     }
 
     /// <summary>
-    /// query_stats seeds its PASS WINDOW only — the store persists neither statement offset the delta key
-    /// carries, so no row can reproduce the key. The read is the distinct collection times per server
-    /// inside the cutoff, and nothing else: a key seed here would be a claim the store cannot back.
+    /// query_stats is key-seeded since V128 (#3540): the store persists both statement offsets now, so
+    /// the read partitions by the collector's FULL key — sql_handle, both offsets, plan_handle — and
+    /// returns each key's latest row inside the window, with the eight counters the collector's eight
+    /// series difference. The offsets are selected RAW (no COALESCE, no arithmetic) because the seeder
+    /// rebuilds the key from them with the collector's own interpolation, and there is no offset filter
+    /// in the SQL: a pre-V128 row (NULL offsets) is read for the pass window and skipped for keys in C#,
+    /// so one read serves both halves.
     /// </summary>
     [Fact]
-    public void SeedSql_QueryStats_IsThePassWindowOnly()
+    public void SeedSql_QueryStats_PartitionsByTheFullDeltaKeyAndSelectsTheOffsetsRaw()
     {
-        var sql = DarlingDeltaCalculator.QueryStatsPassSeedSql;
-        Assert.Contains("SELECT server_id, collection_time", sql, StringComparison.Ordinal);
+        var sql = DarlingDeltaCalculator.QueryStatsSeedSql;
+        Assert.Contains("SELECT DISTINCT ON (server_id, sql_handle, statement_start_offset, statement_end_offset, plan_handle)", sql, StringComparison.Ordinal);
+        Assert.Contains("server_id, sql_handle, statement_start_offset, statement_end_offset, plan_handle,", sql, StringComparison.Ordinal);
+        Assert.Contains("execution_count, total_worker_time, total_elapsed_time,", sql, StringComparison.Ordinal);
+        Assert.Contains("total_logical_reads, total_logical_writes, total_physical_reads, total_rows, total_spills,", sql, StringComparison.Ordinal);
         Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY server_id, collection_time", sql, StringComparison.Ordinal);
-        Assert.Equal(1, CountOccurrences(sql, "collection_time >= $1"));
-        Assert.DoesNotContain("sql_handle", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("plan_handle", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("execution_count", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY server_id, sql_handle, statement_start_offset, statement_end_offset, plan_handle, collection_time DESC", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("IS NOT NULL", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("COALESCE", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("GROUP BY", sql, StringComparison.Ordinal);
     }
 
     public static TheoryData<string, string> SeedQueries() => new()
@@ -195,10 +202,11 @@ public sealed class DarlingDeltaSeederTests
         { DarlingDeltaCalculator.SpinlockStatsSeedSql, "spinlock_stats" },
     };
 
-    /// <summary>The latest-row-per-key shape (#3540 A4): one table read, one bound, DISTINCT ON.</summary>
+    /// <summary>The latest-row-per-key shape (#3540 A4, query_stats since V128): one table read, one bound, DISTINCT ON.</summary>
     public static TheoryData<string, string> PerKeySeedQueries() => new()
     {
         { DarlingDeltaCalculator.ProcedureStatsSeedSql, "procedure_stats" },
+        { DarlingDeltaCalculator.QueryStatsSeedSql, "query_stats" },
         { DarlingDeltaCalculator.PgWaitStatsSeedSql, "pg_wait_stats" },
         { DarlingDeltaCalculator.PgStatementStatsSeedSql, "pg_statement_stats" },
     };
@@ -435,7 +443,8 @@ public sealed class DarlingDeltaSeederTests
             (DarlingDeltaCalculator.LatchStatsSeedSql, 6),
             (DarlingDeltaCalculator.SpinlockStatsSeedSql, 7),
             (DarlingDeltaCalculator.ProcedureStatsSeedSql, 10),
-            (DarlingDeltaCalculator.QueryStatsPassSeedSql, 2),
+            /* #3540 V128: 5 key parts + 8 counters + collection_time */
+            (DarlingDeltaCalculator.QueryStatsSeedSql, 14),
             (DarlingDeltaCalculator.PgWaitStatsSeedSql, 5),
             (DarlingDeltaCalculator.PgStatementStatsSeedSql, 9),
         };
@@ -500,11 +509,18 @@ public sealed class DarlingDeltaSeederTests
             await ProcAsync(connection, latest, null, "db", "dbo", "proc3", 3);
             await ProcAsync(connection, stale, "0x02", "db", "dbo", "p2", 1);
 
-            /* query_stats: three passes, one stale — the pass window must come from the two inside. */
+            /* query_stats: three PRE-V128 passes (no offsets), one stale — the pass window must come from the
+               two inside; plus V128 rows carrying the offsets (#3540): the whole-batch statement (0, -1) in
+               both passes, a second statement of the same batch/plan (100, 240) only in the older pass, and a
+               null-handle row. */
             foreach (var t in new[] { stale, older, latest })
             {
                 await QueryStatsAsync(connection, t);
             }
+            await KeyedQueryStatsAsync(connection, older, "0xSH1", 0, -1, "0xPH1", 10);
+            await KeyedQueryStatsAsync(connection, latest, "0xSH1", 0, -1, "0xPH1", 15);
+            await KeyedQueryStatsAsync(connection, older, "0xSH1", 100, 240, "0xPH1", 7);
+            await KeyedQueryStatsAsync(connection, latest, null, 0, -1, null, 3);
 
             /* pg_wait_stats: 1001 both passes; 1002 idle at the latest pass, so its newest row is the older. */
             await PgWaitAsync(connection, older, 1001, 5, 500);
@@ -560,10 +576,25 @@ public sealed class DarlingDeltaSeederTests
             Assert.Equal(1, deltas.CalculateDelta(TestServerId, "pg_statement_stats_rows", "11|16384|10|1", 61, pass, Gap));
             Assert.Equal(1, deltas.CalculateDelta(TestServerId, "pg_statement_stats_calls", "12|16384|10|0", 8, pass, Gap));
 
-            /* The series-age rescue on the FIRST post-restart pass: query_stats has no key seed, but its pass
-               window is seeded from the table, so a plan compiled 30 s ago (inside the ~120 s since the last
-               pre-restart pass) is credited in full with a real interval, while a plan older than that gap
-               baselines honestly. Unseeded, both are (0, 0) — the defect this lane closes. */
+            /* query_stats KEYS (#3540, V128): the latest pass is the baseline for the key both passes wrote,
+               spelled with the raw -1 as the collector spells it; the statement that fell out of the TOP (n)
+               is restored from its OLDER row over ~240 s; a null handle formats as empty on both sides; and
+               the pre-V128 rows seeded NOTHING — not even under a normalizing guess (gap policy off, so only a
+               first sighting reads 0; a seeded baseline of 1 would return 4). */
+            Assert.Equal(3, deltas.CalculateDeltaWithInterval(TestServerId, "query_stats_exec", "0xSH1:0:-1:0xPH1", 18, out var keyedInterval, pass, Gap));
+            Assert.InRange(keyedInterval, 118, 122);
+            Assert.Equal(210, deltas.CalculateDelta(TestServerId, "query_stats_spills", "0xSH1:0:-1:0xPH1", 1260, pass, Gap));
+            Assert.Equal(2, deltas.CalculateDeltaWithInterval(TestServerId, "query_stats_exec", "0xSH1:100:240:0xPH1", 9, out var fellOutInterval, pass, Gap));
+            Assert.InRange(fellOutInterval, 238, 242);
+            Assert.Equal(2, deltas.CalculateDelta(TestServerId, "query_stats_exec", ":0:-1:", 5, pass, Gap));
+            Assert.Equal(0, deltas.CalculateDelta(TestServerId, "query_stats_exec", "sh:0:0:ph", 5, pass, 0));
+            Assert.Equal(0, deltas.CalculateDelta(TestServerId, "query_stats_exec", "sh:0:-1:ph", 5, pass, 0));
+
+            /* The series-age rescue on the FIRST post-restart pass: the pass window is seeded from EVERY
+               query_stats row, the pre-V128 ones included, so a plan compiled 30 s ago (inside the ~120 s
+               since the last pre-restart pass) is credited in full with a real interval, while a plan older
+               than that gap baselines honestly. Unseeded, both are (0, 0) — the defect #3614 closed and V128
+               must not reopen on the first restart after the upgrade, when the window holds only such rows. */
             Assert.Equal(900, deltas.CalculateDeltaWithSeriesAge(TestServerId, "query_stats_worker", "sh:0:99:newplan", 900, 30, out var rescueInterval, pass, Gap));
             Assert.InRange(rescueInterval, 118, 122);
             Assert.Equal(0, deltas.CalculateDeltaWithSeriesAge(TestServerId, "query_stats_exec", "sh:0:99:oldplan", 900, 3_000, out var oldInterval, pass, Gap));
@@ -707,6 +738,32 @@ public sealed class DarlingDeltaSeederTests
             "VALUES (1, $1, $2, 'delta-seed-e2e', 'qh', 'sh', 'ph', 1)", connection);
         cmd.Parameters.AddWithValue(t);
         cmd.Parameters.AddWithValue(TestServerId);
+        await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>A V128 query_stats row (#3540): both offsets stored raw; the eight counters are multiples of the
+    /// execution count so every group's expected delta is derivable.</summary>
+    private static async Task KeyedQueryStatsAsync(NpgsqlConnection connection, DateTime t, string? sqlHandle, int start, int end, string? planHandle, long executions)
+    {
+        using var cmd = new NpgsqlCommand(
+            "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, query_hash, sql_handle, plan_handle, " +
+            "statement_start_offset, statement_end_offset, " +
+            "execution_count, total_worker_time, total_elapsed_time, total_logical_reads, total_logical_writes, total_physical_reads, total_rows, total_spills) " +
+            "VALUES (1, $1, $2, 'delta-seed-e2e', 'qh', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)", connection);
+        cmd.Parameters.AddWithValue(t);
+        cmd.Parameters.AddWithValue(TestServerId);
+        cmd.Parameters.AddWithValue((object?)sqlHandle ?? DBNull.Value);
+        cmd.Parameters.AddWithValue((object?)planHandle ?? DBNull.Value);
+        cmd.Parameters.AddWithValue(start);
+        cmd.Parameters.AddWithValue(end);
+        cmd.Parameters.AddWithValue(executions);
+        cmd.Parameters.AddWithValue(executions * 10);
+        cmd.Parameters.AddWithValue(executions * 20);
+        cmd.Parameters.AddWithValue(executions * 30);
+        cmd.Parameters.AddWithValue(executions * 40);
+        cmd.Parameters.AddWithValue(executions * 50);
+        cmd.Parameters.AddWithValue(executions * 60);
+        cmd.Parameters.AddWithValue(executions * 70);
         await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 

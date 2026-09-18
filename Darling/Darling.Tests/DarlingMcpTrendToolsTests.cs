@@ -205,6 +205,39 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     }
 
     /// <summary>
+    /// #3540 (V128): the procedure trend reads the collection's STORED interval — MAX over the collection's
+    /// rows, 0 → NULL through NULLIF so a restart's marker collection drops rather than plotting 0.00 — and
+    /// falls back to the LAG derivation only for a pre-V128 collection. No ELSE 0. Byte-identical to the
+    /// viewer's copy apart from the database filter, as the pair always were.
+    /// </summary>
+    [Fact]
+    public void ProcedureDurationTrendSql_PrefersTheStoredInterval_NeverFabricatesZero_AndMirrorsTheViewer()
+    {
+        var sql = DarlingTrendReader.ProcedureDurationTrendSql;
+        Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
+
+        /* The viewer's copy minus its database-filter line is this string, whitespace aside. */
+        var viewer = string.Join('\n', ViewerDataService.ProcedureDurationTrendSql
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Split('\n')
+            .Where(l => !l.Contains("$4::text[]", StringComparison.Ordinal))
+            .Select(l => l.Trim()));
+        var mcp = string.Join('\n', sql.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n').Select(l => l.Trim()));
+        Assert.Equal(viewer, mcp);
+
+        /* And the shared reader DROPS a NULL-rate row rather than reading it as 0 — the C# half of the idiom. */
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingTrendReader.cs");
+        var reader = source[source.IndexOf("private static async Task<List<QueryDurationTrendPoint>> ReadDurationPointsAsync(", StringComparison.Ordinal)..];
+        reader = reader[..reader.IndexOf("return items;", StringComparison.Ordinal)];
+        Assert.Contains("if (reader.IsDBNull(1))", reader, StringComparison.Ordinal);
+        Assert.Contains("continue;", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("reader.IsDBNull(1) ? 0", reader, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// #2484: the Query Store trend carries the #1841 tier-2 interval placement, copied from the viewer's
     /// read rather than rewritten. Both arms are pinned because losing either one changes the numbers: drop
     /// arm 1 and every open interval is charged to each cycle that fetched it; drop arm 2 and rows collected
