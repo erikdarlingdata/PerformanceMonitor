@@ -71,9 +71,10 @@ public sealed class PgPlanCaptureCollector : PostgresCollectorDefinitionBase<PgP
         string PlanJson);
 
     /// <summary>
-    /// How much of the log tail to read per cycle. Bounded because the file can reach hundreds of megabytes
-    /// — #2565 measured 772 MB in twenty seconds at capture-everything — and reading it whole would turn a
-    /// monitoring collector into the server's biggest reader.
+    /// How much of the log tail to read per cycle — <see cref="PgServerLogTail.TailBytes"/>, shared with
+    /// every other <c>pg_read_file</c> reader (#3601). Bounded because the file can reach hundreds of
+    /// megabytes — #2565 measured 772 MB in twenty seconds at capture-everything — and reading it whole
+    /// would turn a monitoring collector into the server's biggest reader.
     ///
     /// <para><b>It is a window, not a resume marker, and that is what decides coverage.</b> The read is
     /// always the last <c>TailBytes</c> of the current file, so consecutive cycles see overlapping text
@@ -91,55 +92,26 @@ public sealed class PgPlanCaptureCollector : PostgresCollectorDefinitionBase<PgP
     /// target lowers the interval for that server in the meantime; the managed route reaches this table
     /// through the RDS log API instead, which keeps a resume marker and has no equivalent exposure.</para>
     /// </summary>
-    private const int TailBytes = 4 * 1024 * 1024;
+    private const int TailBytes = PgServerLogTail.TailBytes;
 
     /* Spliced into the query text as a literal. A const string keeps QueryText a compile-time constant,
-       which every other collector here relies on, and keeps the number in ONE place. */
-    private const string TailBytesLiteral = "4194304";
+       which every other collector here relies on, and keeps the number in ONE place — PgServerLogTail's. */
+    private const string TailBytesLiteral = PgServerLogTail.TailBytesLiteral;
 
-    /* pg_ls_logdir() to find the CURRENT file rather than a configured name: log_filename is a strftime
-       pattern, so the actual name is only knowable by asking. pg_monitor can call this one; it is
-       pg_read_file that needs the extra grant.
-
-       The DIRECTORY is asked for on the same grounds. pg_ls_logdir() returns bare names relative to
-       log_directory, and pg_read_file resolves a relative path against the data directory, so
-       current_setting('log_directory') is right in both regimes: a relative setting concatenates to a path
-       under the data directory, and an absolute one — which some installers pick, to keep logs on their own
-       volume — resolves as itself and is readable, because pg_read_file admits an absolute path under
-       log_directory even when log_directory sits outside the data directory. Hardcoding 'log/' is correct
-       only where log_directory holds its default, and elsewhere raises 58P01 for the file this same query
-       just listed (#3410). PgDeadlocksCollector reads its log the same way.
-
-       The tail is read from a negative offset via greatest(size - TailBytes, 0), so a fresh small log is
-       read whole and a large one is read from its end.
+    /* The tailer — which file, how much of it, gated on what — is PgServerLogTail.TailCteSql, shared
+       byte-for-byte with PgDeadlocksCollector and PgLogEventsCollector (#3601); its header carries the
+       full argument for pg_ls_logdir(), current_setting('log_directory') (#3410) and the logging_collector
+       gate. What is THIS collector's is everything after the CTEs:
 
        Plans are extracted with regexp_matches rather than parsed line by line because auto_explain writes
        the JSON tab-indented under its LOG line, so the block is recognisable as a unit. The tabs are
        stripped to make it valid JSON.
 
-       The listing is GATED on logging_collector, with a marker row instead of log rows when it is off
-       (#3410) — PgDeadlocksCollector's query carries the full argument, since the two read the same file.
-       The short form: off means the server logs to stderr, the log directory may legitimately not exist,
-       and 58P01 every cycle on a deliberate configuration is the wrong report. The gate is a pseudoconstant
-       predicate the planner enforces as a one-time filter, so pg_ls_logdir() never runs when it is false;
-       ReadAsync turns the marker into PgLoggingCollectorOffException, and the runner records the named
-       non-fatal skip — not-collected with the reason, never a silent zero that reads as a target with
-       nothing slow on it. */
-    private const string QueryText = @"
-WITH newest AS (
-    SELECT name, size
-    FROM pg_catalog.pg_ls_logdir()
-    WHERE pg_catalog.current_setting('logging_collector') = 'on'
-    ORDER BY modification DESC
-    LIMIT 1
-),
-tail AS (
-    SELECT pg_catalog.pg_read_file(
-               pg_catalog.current_setting('log_directory') || '/' || n.name,
-               greatest(n.size - " + TailBytesLiteral + @", 0),
-               " + TailBytesLiteral + @") AS body
-    FROM newest AS n
-)
+       The marker row the gate emits instead of log rows when logging_collector is off (#3410) is spelled
+       in this query's own three columns; ReadAsync turns it into PgLoggingCollectorOffException, and the
+       runner records the named non-fatal skip — not-collected with the reason, never a silent zero that
+       reads as a target with nothing slow on it. */
+    private const string QueryText = PgServerLogTail.TailCteSql + @"
 SELECT
     (m[1])::bigint                                   AS query_id,
     (m[2])::double precision                         AS duration_ms,
@@ -151,7 +123,7 @@ FROM tail,
          'g') AS m
 UNION ALL
 SELECT NULL::bigint, NULL::double precision, '" + PgLoggingCollectorOffException.Marker + @"'
-WHERE pg_catalog.current_setting('logging_collector') <> 'on'
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 LIMIT 2000";
 
     public override string Name => "pg_plan_capture";

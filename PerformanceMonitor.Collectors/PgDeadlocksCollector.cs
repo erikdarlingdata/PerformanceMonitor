@@ -62,20 +62,15 @@ public sealed class PgDeadlocksCollector : PostgresCollectorDefinitionBase<PgDea
         string GraphText);
 
     /* Same tail size as plan capture, for the same reason and with the same trade: large enough that a busy
-       server's reports survive between cycles, small enough not to move the whole file every time. */
-    private const string TailBytesLiteral = "4194304";
+       server's reports survive between cycles, small enough not to move the whole file every time. ONE
+       spelling, PgServerLogTail's, shared by every pg_read_file reader (#3601). */
+    private const string TailBytesLiteral = PgServerLogTail.TailBytesLiteral;
 
-    /* pg_ls_logdir() for the CURRENT file rather than a configured name — log_filename is a strftime
-       pattern, so the real name is only knowable by asking.
-
-       The DIRECTORY is asked for on the same grounds. pg_ls_logdir() returns bare names relative to
-       log_directory, and pg_read_file resolves a relative path against the data directory, so
-       current_setting('log_directory') is right in both regimes: a relative setting concatenates to a path
-       under the data directory, and an absolute one — which some installers pick, to keep logs on their own
-       volume — resolves as itself and is readable, because pg_read_file admits an absolute path under
-       log_directory even when log_directory sits outside the data directory. Hardcoding 'log/' is correct
-       only where log_directory holds its default, and elsewhere raises 58P01 for the file this same query
-       just listed (#3410). StoreLogSweep.ReadFileSql builds the store's own log path the same way.
+    /* The tailer — pg_ls_logdir() for the CURRENT file, current_setting('log_directory') for where it is
+       (#3410), the logging_collector gate — is PgServerLogTail.TailCteSql, shared byte-for-byte with
+       PgPlanCaptureCollector and PgLogEventsCollector (#3601); its header carries the full argument, and
+       StoreLogSweep.ReadFileSql builds the store's own log path the same way. What is THIS collector's is
+       everything after the CTEs:
 
        The extraction mirrors PgPlanCaptureCollector's: regexp_matches over the tail rather than a
        line-by-line walk, because the block is recognisable as a unit. Two things in this pattern are load
@@ -108,22 +103,9 @@ public sealed class PgDeadlocksCollector : PostgresCollectorDefinitionBase<PgDea
        either, because everything in it is stale. The marker row is what stops off from reading as a quiet
        server: ReadAsync recognises it and throws PgLoggingCollectorOffException, which the runner records
        as a named non-fatal skip — the same not-collected-with-reason answer the store's own log read gives
-       for an empty directory, rather than a failure or a silent zero. */
-    private const string QueryText = @"
-WITH newest AS (
-    SELECT name, size
-    FROM pg_catalog.pg_ls_logdir()
-    WHERE pg_catalog.current_setting('logging_collector') = 'on'
-    ORDER BY modification DESC
-    LIMIT 1
-),
-tail AS (
-    SELECT pg_catalog.pg_read_file(
-               pg_catalog.current_setting('log_directory') || '/' || n.name,
-               greatest(n.size - " + TailBytesLiteral + @", 0),
-               " + TailBytesLiteral + @") AS body
-    FROM newest AS n
-)
+       for an empty directory, rather than a failure or a silent zero. The marker is spelled here in this
+       query's own four columns, because a UNION ALL arm has to match the column list it joins. */
+    private const string QueryText = PgServerLogTail.TailCteSql + @"
 SELECT
     m[1]    AS occurred_at_text,
     m[2]    AS log_zone_text,
@@ -136,7 +118,7 @@ FROM tail,
          'gn') AS m
 UNION ALL
 SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL, NULL, NULL
-WHERE pg_catalog.current_setting('logging_collector') <> 'on'
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 LIMIT 500";
 
     public override string Name => "pg_deadlocks";

@@ -74,11 +74,16 @@ public static class PgPlanLogParser
         "Sort Key", "Presorted Key", "Hash Key", "Conflict Filter", "Repeatable Seed",
     };
 
-    private static readonly Regex s_quotedLiteral = new("'(?:[^']|'')*'", RegexOptions.Compiled);
+    /* INTERNAL rather than private, and that is the sharing mechanism (#3601): PgLogTextRedactor applies
+       these same two instances to every text column the log-event pipeline stores. The redaction MUST NOT
+       be duplicated across the plan route and the log-event route any more than across the two plan
+       transports — a second spelling of the literal pattern is the one that eventually disagrees, and the
+       cost of that disagreement is a customer's data. */
+    internal static readonly Regex s_quotedLiteral = new("'(?:[^']|'')*'", RegexOptions.Compiled);
 
     /* Bare numbers NOT glued to an identifier character, so 'transactionitems1' survives and '(id > 100)'
        does not. */
-    private static readonly Regex s_bareNumber = new(
+    internal static readonly Regex s_bareNumber = new(
         @"(?<![A-Za-z0-9_])\d+(?:\.\d+)?(?![A-Za-z0-9_])", RegexOptions.Compiled);
 
     /// <summary>

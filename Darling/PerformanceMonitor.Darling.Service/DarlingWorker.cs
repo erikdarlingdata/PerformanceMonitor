@@ -7253,13 +7253,14 @@ LIMIT 1";
               + $"so run CREATE EXTENSION in '{connectedDatabase}'. ";
 
     /// <summary>
-    /// The self-hosted log readers (#3239). Their dispatch entries send Aurora and RDS to the log-API
-    /// ingestors, so a target-side PostgresException under either name comes from the pg_read_file route.
+    /// The self-hosted log readers (#3239; three since #3601). Their dispatch entries send Aurora and RDS to
+    /// the log-API ingestors, so a target-side PostgresException under any of the names comes from the
+    /// pg_read_file route.
     /// Consulted by two arms: the 42501 grant-pair sentence (#3239) and the 58P01 missing-file sentence
     /// (#3410), which is why it names the ROUTE rather than either fault.
     /// </summary>
     private static bool ReadsServerLogWithPgReadFile(string collectorName)
-        => collectorName is "pg_deadlocks" or "pg_plan_capture";
+        => collectorName is "pg_deadlocks" or "pg_plan_capture" or "pg_log_events";
 
     /// <summary>
     /// Where the pg_read_file grants have to be issued, named when we know it (#3239) — function ACLs are
@@ -8229,6 +8230,13 @@ LIMIT 1";
             s.Target.IsAurora || s.Target.IsAwsRds
                 ? r.IngestRdsDeadlocksAsync(s, ct)
                 : r.RunAsync(PgDeadlocksCollector.Instance, s, ct),
+        /* TWO TRANSPORTS, one table, the third time (#3601): the classified log-event pipeline reads the
+           same server log by the same two roads as its two siblings above and below, and the classifier
+           both roads feed is one instance, so the rows are the same whichever road the text took. */
+        ["pg_log_events"] = (r, s, ct) =>
+            s.Target.IsAurora || s.Target.IsAwsRds
+                ? r.IngestRdsLogEventsAsync(s, ct)
+                : r.RunAsync(PgLogEventsCollector.Instance, s, ct),
         ["pg_xmin_horizon"] = (r, s, ct) => r.RunAsync(PgXminHorizonCollector.Instance, s, ct),
         ["pg_replication_slots"] = (r, s, ct) => r.RunAsync(PgReplicationSlotsCollector.Instance, s, ct),
         ["pg_autovacuum_stats"] = (r, s, ct) => r.RunAsync(PgAutovacuumStatsCollector.Instance, s, ct),

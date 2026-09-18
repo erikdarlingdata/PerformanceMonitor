@@ -90,6 +90,7 @@ public sealed class ServerPageTabsTests
         ["get_pg_io_trend"] = "pg_io_stats",
         ["get_pg_database_trend"] = "pg_database_stats",
         ["get_pg_deadlock_detail"] = "pg_deadlocks",
+        ["get_pg_log_events"] = "pg_log_events",
         ["get_pg_server_config_changes"] = "pg_server_config",
         ["get_pg_replication_stats"] = "pg_replication_stats",
             ["get_pg_top_queries"] = "pg_statement_stats",

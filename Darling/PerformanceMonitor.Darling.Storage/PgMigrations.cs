@@ -208,6 +208,7 @@ public static class PgMigrations
             V128Sql + "\n" + V54Sql + "\n"
             + PgSchemaGenerator.GenerateQueryStatsPayloadColumnPreAdds() + "\n"
             + PgSchemaGenerator.GenerateQueryStatsResolvingView()),
+        new Migration(129, "pg-log-events", V129Sql),
     };
 
     /// <summary>
@@ -853,6 +854,65 @@ CREATE OR REPLACE VIEW collect.v_memory_grant_stats AS SELECT * FROM collect.mem
    columns — mid-list, which CREATE OR REPLACE VIEW refuses. Dropped here; the ladder entry concatenates
    the regenerated resolving definition after the pre-adds, the V51/V121 idiom. */
 DROP VIEW IF EXISTS collect.v_query_stats;";
+
+    /// <summary>
+    /// V129 — <c>collect.pg_log_events</c>, the classified PostgreSQL server-log events (#3601): errors,
+    /// connections, lock waits, and the recognised-only spill / autovacuum / checkpoint shapes, out of the
+    /// same log the deadlock (V103) and plan (V99) readers already tail. The keystone for #3602 and #3603,
+    /// which each add one parser family on the pipeline this table stores.
+    ///
+    /// <para><b>The identity column is the point, for V103's reason.</b> The <c>pg_read_file</c> transport
+    /// re-reads an OVERLAPPING tail every cycle on purpose, so without <c>raw_line_hash</c> the same event
+    /// is stored once per cycle for as long as it stays inside the window; every read dedupes on it as the
+    /// deadlock reads do on <c>deadlock_hash</c>. Over the RAW entry text rather than the redacted columns,
+    /// because two events that redact alike — the same error for two values, same millisecond, same pid —
+    /// are two events, and the hash must keep them apart. A hash of the raw text discloses nothing about
+    /// it.</para>
+    ///
+    /// <para><b>Every text column is REDACTED before it reaches this table, and the statement itself is
+    /// never stored.</b> <c>message</c> and <c>detail</c> have had quoted literals and unique-violation key
+    /// values stripped by <c>PgLogTextRedactor</c>, the plan parser's own patterns applied to prose;
+    /// <c>statement_fingerprint</c> is a hash of the REDACTED <c>STATEMENT</c> companion, so one statement
+    /// shape recurs to one fingerprint and no literal from the user's SQL exists anywhere in the store. The
+    /// issue's scope note — the log pipeline must not become where parameter values leak into the store —
+    /// is enforced at the row constructor rather than by convention.</para>
+    ///
+    /// <para><b>Retention is thirty days, not the deadlock table's ninety</b> (<c>CollectorScheduleDefaults</c>
+    /// carries the argument): a deadlock is rare by construction and a log event is as common as the
+    /// target's settings let it be — <c>log_connections</c> on a reconnect-per-statement pool writes three
+    /// rows per query. Hypertable conversion, one-day chunks, compression segmented by <c>server_id</c> and
+    /// the retention policy all follow from the catalog entry, as for every collector table.</para>
+    ///
+    /// <para><b>One index, the generated one.</b> The read filters on <c>(server_id, collection_time)</c>
+    /// first — chunk exclusion — and on family and severity within that window; a <c>(server_id, family,
+    /// collection_time)</c> index would help a family-filtered read over a long window on a loud target,
+    /// and it is a SEPARATE rung when it comes, for V104's reason: <c>PgSchemaGeneratorTests</c> requires a
+    /// collector's rung to be exactly what the generator emits, and the generator emits one index, so a
+    /// second one in this rung would give the upgraded store an index the fresh store never gets. All
+    /// value columns nullable, matching the generated schema this must be identical to.</para>
+    /// </summary>
+    private const string V129Sql = @"
+CREATE TABLE IF NOT EXISTS collect.pg_log_events (
+    collection_id bigint NOT NULL,
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    server_name text NOT NULL,
+    occurred_at timestamp,
+    family text,
+    severity text,
+    sqlstate text,
+    database_name text,
+    user_name text,
+    application_name text,
+    pid integer,
+    message text,
+    detail text,
+    statement_fingerprint text,
+    raw_line_hash text
+);
+
+CREATE INDEX IF NOT EXISTS idx_pg_log_events_time
+    ON collect.pg_log_events(server_id, collection_time);";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

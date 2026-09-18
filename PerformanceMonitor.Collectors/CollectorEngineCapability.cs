@@ -174,6 +174,9 @@ public static class CollectorEngineCapability
             ["pg_write_stats"] = "the checkpoint and WAL write counters",
             ["pg_server_config"] = "the server's pg_settings configuration snapshot",
             ["pg_deadlocks"] = "the deadlock reports PostgreSQL writes to its server log",
+            /* Named for the LOG, like its two siblings: the events live nowhere else, and on a managed
+               target the gap - when there is one - is the log API rather than a view (#3601). */
+            ["pg_log_events"] = "the classified error, connection and lock-wait events PostgreSQL writes to its server log",
             ["pg_replication_stats"] = "the pg_stat_replication connected-replica states",
             /* Named for the LOG, because that is where the gap actually is: auto_explain writes
                plans nowhere else, and on Aurora and RDS there is no filesystem to read them from

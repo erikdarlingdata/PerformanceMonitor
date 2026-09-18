@@ -1712,6 +1712,21 @@ export const POSTGRES_TABS = [
         ctx.label + ", newest first; Sightings counts re-reads of the same report, not repeats",
         "No deadlock was reported in this window. That is the healthy answer - but it is the same shape as a server whose log cannot be read, which the Plan Capture Readiness panel above reports on because it reads the same file. pg_stat_database's deadlock counter is the independent check."
       ),
+      /* #3601 the log, classified. Under the deadlocks because the two are the same log read two ways:
+         the deadlock grid is one ERROR line's DETAIL graph parsed out whole, this is every classified line
+         around it - the errors before it, the lock waits that preceded it, the connection churn beside it.
+         The "check the error log" panel. Newest 50 across every family; the MCP read carries the family and
+         severity filters, and total_events on its payload is the window's count, so the panel note says
+         which of the two this grid is. */
+      table(
+        "Log Events",
+        "get_pg_log_events",
+        { server, hours: ctx.hours, limit: 50 },
+        "events",
+        PG_LOG_EVENT_COLUMNS,
+        ctx.label + ", newest 50 across every family; message and detail are redacted at the collector, the statement is never stored; Sightings counts re-reads of the same line, not repeats",
+        "No classified log event was stored in this window. That is the healthy answer for the error and lock-wait families - and it is also what a target with the relevant log_* setting off looks like (log_connections, log_lock_waits, log_temp_files, log_autovacuum_min_duration), or one whose log cannot be read, is not stamped UTC, or is not written in English: the Plan Capture Readiness panel above reads the same file and reports those three."
+      ),
       /* #2663 the regression read: what ONE execution of the busiest statement cost, interval by interval.
          The statement grid above ranks by total time across the window, which hides a step change - a query
          that doubled halfway through still ranks where its average puts it. */
@@ -3268,6 +3283,23 @@ const PG_DEADLOCK_COLUMNS = [
   { key: "lock_modes", label: "Lock Modes" },
   { key: "resources", label: "Resources" },
   { key: "victim_statement", label: "Victim Statement" },
+  { key: "times_seen", label: "Sightings", format: "int", small: true },
+];
+
+/* #3601 the classified log events. No column for statement text, because none is stored: the fingerprint
+   is the statement's identity and get_pg_top_queries carries the shape's normalised text. */
+const PG_LOG_EVENT_COLUMNS = [
+  { key: "occurred_at", label: "When", format: "time" },
+  { key: "family", label: "Family", small: true },
+  { key: "severity", label: "Severity", small: true },
+  { key: "sqlstate", label: "SQLSTATE", small: true },
+  { key: "database_name", label: "Database" },
+  { key: "user_name", label: "User" },
+  { key: "application_name", label: "Application" },
+  { key: "pid", label: "PID", format: "int", small: true },
+  { key: "message", label: "Message" },
+  { key: "detail", label: "Detail" },
+  { key: "statement_fingerprint", label: "Statement Fingerprint", small: true },
   { key: "times_seen", label: "Sightings", format: "int", small: true },
 ];
 

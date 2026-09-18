@@ -111,8 +111,8 @@ public sealed class PgServerLogPathPinTests
     }
 
     /// <summary>
-    /// The two collectors' SHIPPED SQL — what <c>BuildQuery</c> hands the driver, not what the file says
-    /// about itself.
+    /// The three collectors' SHIPPED SQL — what <c>BuildQuery</c> hands the driver, not what the file says
+    /// about itself. Three since #3601: the log-event pipeline opens with the same tailer.
     /// </summary>
     [Fact]
     public void BothServerLogCollectorsAskWhereTheLogDirectoryIs()
@@ -123,6 +123,8 @@ public sealed class PgServerLogPathPinTests
              Sql: PgDeadlocksCollector.Instance.BuildQuery(MakeContext()).Text),
             (Collector: PgPlanCaptureCollector.Instance.Name,
              Sql: PgPlanCaptureCollector.Instance.BuildQuery(MakeContext()).Text),
+            (Collector: PgLogEventsCollector.Instance.Name,
+             Sql: PgLogEventsCollector.Instance.BuildQuery(MakeContext()).Text),
         };
 
         var offenders = new List<string>();
@@ -168,8 +170,12 @@ public sealed class PgServerLogPathPinTests
 
         var (files, faults) = Sweep(sources);
 
+        /* ONE file since #3601, where there were two: the tailer the three log readers open with is spelled
+           once, in PgServerLogTail, and the collectors splice its constant. A collector file re-appearing
+           here means somebody copied the CTE back inline — the drift this pin's "third log reader" clause
+           was written to force into the list is now a drift it forces OUT of it. */
         Assert.Equal(
-            new[] { "PgDeadlocksCollector.cs", "PgPlanCaptureCollector.cs" },
+            new[] { "PgServerLogTail.cs" },
             files);
 
         Assert.True(
