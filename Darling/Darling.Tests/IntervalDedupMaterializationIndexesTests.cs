@@ -38,6 +38,12 @@ namespace Darling.Tests;
 /// <c>server_id</c>, by <c>query_hash</c>), and the day-grain L2 refreshes once a day and was not measured.
 /// A second aggregate wanting <c>create_group_indexes = false</c> should arrive with its own rig figures and
 /// move the scope pin deliberately.</para>
+///
+/// <para><b>#1776 own-store</b> — the gated arm mints a scratch database (it creates the continuous
+/// aggregates the shared fixture deliberately leaves to the tests, plants and drops an index on one of
+/// their materializations, and refreshes over seeded rows), so it cannot race the shared store and is not
+/// serialized against the <c>live-postgres</c> collection. The same shape as
+/// <see cref="QueryStoreTrendRoutingLiveTests"/> and <c>QueryStoreCorrectedRollupLiveTests</c>.</para>
 /// </summary>
 public sealed class IntervalDedupMaterializationIndexesTests
 {
