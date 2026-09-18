@@ -527,6 +527,82 @@ public class SlackDetailsSizeTests
     }
 
     /// <summary>
+    /// The review catch on the first cut: a body detail that is the LAST detail is offered the whole
+    /// remainder — the omission item is owed only when something after it drops, and nothing is after it
+    /// — so it shrinks into two more blocks than a boundary body with trailers gets, states its own line
+    /// omission, and the page carries NO omission item. The first cut reserved the item's two blocks
+    /// anyway and then emitted a false "0 more details did not fit" — the mirror image of the bug this PR
+    /// fixes. The message lands exactly on the cap.
+    /// </summary>
+    [Fact]
+    public void ALastBodyDetailPastTheBudget_ShrinksIntoTheWholeRemainder_WithNoOmissionItem()
+    {
+        var context = new AlertContext();
+        var small = new AlertDetailItem { Heading = "Small" };
+        small.Fields.Add(("Dedup Key", "k"));
+        context.Details.Add(small);
+
+        var lines = Enumerable.Range(0, 5000).Select(i => string.Create(CultureInfo.InvariantCulture, $"advice-line-{i:D4} {new string('x', 40)}"));
+        context.Details.Add(new AlertDetailItem { Heading = "Long advice", Body = string.Join('\n', lines) });
+
+        /* Head 2 + footer 1 leave 47; Small costs 2; the body is offered all 45 (one divider, 44 sections). */
+        var payload = Payload(context);
+        using var doc = JsonDocument.Parse(payload);
+        var blocks = Blocks(doc);
+
+        Assert.Equal(BlockLimit, blocks.Count);
+        AssertInsideEveryCeiling(blocks);
+        Assert.DoesNotContain(OmissionHeading, payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("0 more details", payload, StringComparison.Ordinal);
+
+        var texts = AllTexts(blocks);
+        Assert.Contains("*Small*", texts);
+        Assert.Contains(texts, t => t.StartsWith("*Long advice*\nadvice-line-0000", StringComparison.Ordinal));
+        Assert.Contains(texts, t => t.Contains("first omitted: \"advice-line-", StringComparison.Ordinal));
+        Assert.Equal(44, blocks.Count(b => SectionText(b)?.Contains("advice-line-", StringComparison.Ordinal) == true));
+    }
+
+    /// <summary>
+    /// The same reclaim from the other side: a boundary body with exactly ONE small detail behind it. The
+    /// body shrinks into the remainder less the reserve; the last detail then fits in the two blocks the
+    /// reserve held; it is kept, and the page carries no omission item — dropping it to make room for an
+    /// announcement of the same cost would have told the reader less for the same blocks.
+    /// </summary>
+    [Fact]
+    public void ALastSmallDetail_FitsInTheReclaimedReserve_AndIsKeptRatherThanAnnounced()
+    {
+        var context = new AlertContext();
+        for (var i = 0; i < 20; i++)
+        {
+            var item = new AlertDetailItem { Heading = string.Create(CultureInfo.InvariantCulture, $"Incident {i + 1} of 21") };
+            item.Fields.Add(("Dedup Key", "k"));
+            context.Details.Add(item);
+        }
+
+        var lines = Enumerable.Range(0, 5000).Select(i => string.Create(CultureInfo.InvariantCulture, $"advice-line-{i:D4} {new string('x', 40)}"));
+        context.Details.Add(new AlertDetailItem { Heading = "Long advice", Body = string.Join('\n', lines) });
+
+        var lastItem = new AlertDetailItem { Heading = "Incident 21 of 21" };
+        lastItem.Fields.Add(("Dedup Key", "k"));
+        context.Details.Add(lastItem);
+
+        /* Head 2 + 20×2 = 42; footer 1; budget 47. The body (not last) gets 47 − 40 − 2 = 5 blocks; the
+           last incident is offered 47 − 45 = 2 and fits. Nothing dropped; exactly 50. */
+        var payload = Payload(context);
+        using var doc = JsonDocument.Parse(payload);
+        var blocks = Blocks(doc);
+
+        Assert.Equal(BlockLimit, blocks.Count);
+        AssertInsideEveryCeiling(blocks);
+        Assert.DoesNotContain(OmissionHeading, payload, StringComparison.Ordinal);
+
+        var texts = AllTexts(blocks);
+        Assert.Contains("*Incident 21 of 21*", texts);
+        Assert.Contains(texts, t => t.Contains("first omitted: \"advice-line-", StringComparison.Ordinal));
+        Assert.Equal(4, blocks.Count(b => SectionText(b)?.Contains("advice-line-", StringComparison.Ordinal) == true));
+    }
+
+    /// <summary>
     /// The prose and the details cannot collide into a fifty-first block: when both are heavy the details
     /// hold one block back for the prose, the prose packs into what remains, both state their omissions,
     /// and the message lands exactly on the cap. Before #3612 the prose's floor of one block was applied

@@ -1109,7 +1109,11 @@ public class WebhookAlertService
     /// detail that reaches the boundary is not dropped whole: it takes the blocks that remain and states
     /// its own line omission, because the advice is the finding and a shortened advice beats a missing
     /// one. No detail is skipped to make room for a smaller one behind it; a reader who sees
-    /// "Incident 6 of 11" and then the omission item knows exactly where the message stopped.</para>
+    /// "Incident 6 of 11" and then the omission item knows exactly where the message stopped. The
+    /// omission item's two blocks are held back only while something can still be dropped: the LAST
+    /// detail is offered the whole remainder, so a page whose only degradation is a shortened body
+    /// carries no omission item — the body's own line omission is the whole truth of it — and no item is
+    /// dropped to make room for an announcement that costs what the item did.</para>
     ///
     /// <para><b>The omission is stated, and it names the items.</b> The final run is a divider and one
     /// section naming how many details were dropped and listing their headings — the headings ARE the
@@ -1157,13 +1161,24 @@ public class WebhookAlertService
         /* Over budget: keep the longest prefix whose runs fit beside the omission item. A body detail at
            the boundary is re-rendered into whatever remains rather than dropped — see the doc block. The
            omission item's cost is bounded by the budget itself so a degenerate budget (one block) still
-           states the omission rather than overflowing; the real budgets are in the forties. */
+           states the omission rather than overflowing; the real budgets are in the forties. A budget of
+           zero or less leaves no block to state anything in, so nothing is appended — the only honest
+           rendering of a budget that cannot exist: the head is two blocks and the footer at most two, so
+           the caller hands in forty-five or more, and a change to that composition is what this comment
+           is for. */
         var omissionCost = Math.Min(SlackDetailOmissionCost, Math.Max(0, blockBudget));
         var spent = 0;
         var kept = 0;
         while (kept < details.Count)
         {
-            var remaining = blockBudget - omissionCost - spent;
+            /* The omission item is only owed when something AFTER this detail is dropped, so the last
+               detail is offered the whole remainder, reserve included: a last body shrinks into two more
+               blocks, and a last small item that fits in the reclaimed two is kept instead of being
+               replaced by an omission item of the same cost that would announce it (review catch on
+               #3618). For every other detail the reserve stands, and a body shrunk into it fills the
+               remainder exactly, so the detail after it necessarily drops and the item is earned. */
+            var last = kept == details.Count - 1;
+            var remaining = blockBudget - spent - (last ? 0 : omissionCost);
             var run = runs[kept];
             if (run.Count > remaining)
             {
@@ -1186,12 +1201,14 @@ public class WebhookAlertService
             kept++;
         }
 
-        if (omissionCost == 0)
+        /* Nothing dropped — the boundary body's own line omission already states its cut — or no block
+           to state a drop in: either way an omission item here would be a false statement. */
+        var dropped = details.Count - kept;
+        if (dropped == 0 || omissionCost == 0)
         {
             return;
         }
 
-        var dropped = details.Count - kept;
         var list = new StringBuilder();
         for (var i = kept; i < details.Count; i++)
         {
