@@ -574,6 +574,42 @@ WHERE server_id = $1";
             return 0;
         }
     }
+
+    /// <summary>
+    /// The read-time forcing/automatic-plan-correction state for a set of findings' force-plan targets
+    /// (#3652), through the analysis service's own DuckDB handle because the MCP analysis tools hold this
+    /// service and no <c>LocalDataService</c>. One statement for every target across the findings
+    /// (<see cref="ForcePlanTargetStateReader"/>), keyed for <c>FactRemediation.BuildStructuredRemediation</c>.
+    /// Returns the dictionary and a null reason on success; on ANY failure returns null and the reason, so
+    /// the caller can put "state unavailable: why" on every target rather than fail the read or — worse —
+    /// let the verdict read as eligible by silence. An abandonment is not swallowed (#2443).
+    /// </summary>
+    public async Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> TryGetForcePlanTargetStatesAsync(
+        int serverId, IEnumerable<AnalysisFinding> findings, CancellationToken cancellationToken = default)
+    {
+        var targets = new List<ForcePlanTarget>();
+        foreach (var finding in findings)
+        {
+            if (finding.Remediation?.Targets is { Count: > 0 } ts)
+                targets.AddRange(ts);
+        }
+
+        if (targets.Count == 0)
+            return (new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer), null);
+
+        try
+        {
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+            using var command = connection.CreateCommand();
+            return (await ForcePlanTargetStateReader.ReadAsync(command, serverId, targets, DateTime.UtcNow, cancellationToken), null);
+        }
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, cancellationToken))
+        {
+            return (null, $"the forcing and automatic-plan-correction state read failed ({ex.GetType().Name}: {ex.Message}); eligible reflects only the finding's own evidence. Check get_plan_corrections and sys.query_store_plan before forcing.");
+        }
+    }
 }
 
 /// <summary>

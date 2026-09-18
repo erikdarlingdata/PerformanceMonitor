@@ -930,9 +930,25 @@ public static class FactRemediation
     /// THE force-plan policy gate (#2138): the named reasons this target must not be force-planned
     /// without a human. Fills <see cref="StructuredForcePlanTarget.Blockers"/> on the MCP surfaces
     /// today, and is the function the Phase 1+ auto-force bot consults before acting — one
-    /// implementation, so what agents inspect is what the bot enforces. Deliberately built ONLY from
-    /// fields the persisted target carries; a gate that re-derives evidence at judgment time can
-    /// disagree with the evidence the finding displayed.
+    /// implementation, so what agents inspect is what the bot enforces.
+    ///
+    /// <para><b>The arc (#3652).</b> This overload is the ORIGINAL gate, built only from fields the
+    /// persisted target carries, on the reasoning that a gate re-deriving evidence at judgment time can
+    /// disagree with the evidence the finding displayed. That reasoning was right about the finding's
+    /// own evidence (regression factor, hashes, replica) and wrong about everything the finding never
+    /// carried: two blockers meant <c>eligible</c> read as "not PSP, not on a secondary", and on one
+    /// production store a live PLAN_REGRESSION incident handed a reader five <c>eligible: true,
+    /// blockers: []</c> force statements that were five-for-five contraindicated — two plans automatic
+    /// plan correction was mid-verification on (<c>forcing_type AUTO</c>, <c>last_good_plan_is_forced</c>,
+    /// state <c>Verifying</c>), one a known forcing failure on that plan (<c>Reverted / ForcingFailed</c>),
+    /// one the engine had withdrawn (<c>Expired / TempTableChanged</c>), one already resolved through a
+    /// different plan (<c>Success</c>). The store knew all of it, one surface over: <c>query_store_stats</c>
+    /// (the same <c>force_failure_count</c> the Forced Plan Failing family pages on, #2157/#3579) and
+    /// <c>plan_correction</c> (#1952). So the verdict now has two halves: this one, from the target, and
+    /// <see cref="ForcePlanBlockers(ForcePlanTarget, ForcePlanTargetState?)"/>, from a read-time
+    /// <see cref="ForcePlanTargetState"/> — the pure function stays pure and pinnable, the caller reads the
+    /// state. This overload remains for the bot (<c>PlanForceBot</c>), which does not yet read the state
+    /// and must not auto-force until it does — see #3654.</para>
     /// <list type="bullet">
     /// <item><b>parameter_sensitivity_cofired</b> — the query's plan-cache history shows the PSP
     /// signature (#2140); forcing pins ONE shape for every parameter value, so the "best" plan may be
@@ -952,23 +968,210 @@ public static class FactRemediation
         var blockers = new List<string>();
         if (target.ParameterSensitivityCoFired)
         {
-            blockers.Add("parameter_sensitivity_cofired");
+            blockers.Add(ForcePlanBlockerNames.ParameterSensitivityCoFired);
         }
 
         if (IsNonPrimaryReplicaRow(target.ReplicaRole))
         {
-            blockers.Add("secondary_replica_evidence");
+            blockers.Add(ForcePlanBlockerNames.SecondaryReplicaEvidence);
         }
 
         return blockers;
     }
 
     /// <summary>
+    /// The whole gate (#3652): the two target-carried blockers above, then the five the store's forcing
+    /// and automatic-plan-correction state adds, each WITH the evidence and snapshot time it was built
+    /// from. Pure — the caller reads the state (<c>ForcePlanTargetStateReader</c> on Lite,
+    /// <c>DarlingForcePlanTargetStateReader</c> on Darling) and passes it in; a null state yields exactly
+    /// the #2138 verdict, and the projection says the state was unavailable rather than letting silence
+    /// read as eligible.
+    ///
+    /// <para>The five, in evaluation order, with what each fires on. Every comparison is against OBSERVED
+    /// values: a null <c>plan_is_forced</c> (no <c>query_store_stats</c> row for the target plan inside the
+    /// lookback — the normal shape for a best plan that is not the one executing) fires nothing.</para>
+    /// <list type="bullet">
+    /// <item><b>apc_owns_it</b> — the target plan is forced with <c>plan_forcing_type = AUTO</c>; or the
+    /// engine's recommendation names the target as <c>last_good_plan_id</c> and is <c>Verifying</c> or
+    /// <c>Success</c>; or a DIFFERENT plan of the query is AUTO-forced (evidence names it). A manual force
+    /// replaces AUTO forcing and removes the engine's revert path.</item>
+    /// <item><b>already_forced</b> — the target plan is forced and not AUTO (nothing to do); or a different
+    /// plan is forced and not AUTO (one forced plan per query — forcing the target replaces it).</item>
+    /// <item><b>forcing_failed_on_this_plan</b> — <c>force_failure_count &gt; 0</c> on the target plan
+    /// (reason quoted); or the recommendation on the target plan is <c>Reverted</c>, or its reason is
+    /// <c>ForcingFailed</c>, or the collector recorded a <c>last_good_plan_force_failure_reason</c> on
+    /// it.</item>
+    /// <item><b>apc_withdrew_it</b> — the recommendation on the target plan is <c>Expired</c>; the
+    /// engine's <c>state.reason</c> (<c>TempTableChanged</c>, <c>SchemaChanged</c>,
+    /// <c>StatisticsChanged</c>, <c>VerificationAborted</c>, ...) is quoted verbatim. Evaluated after the
+    /// failure arm so an <c>Expired / ForcingFailed</c> row is named a failure, which is what it is.</item>
+    /// <item><b>apc_resolved_differently</b> — the recommendation is <c>Success</c> and its
+    /// <c>last_good_plan_id</c> is a different plan; the evidence says which.</item>
+    /// </list>
+    /// <para>An <c>Active</c> recommendation (FORCE_LAST_GOOD_PLAN off, the engine offering the script)
+    /// blocks nothing: when it names the target plan the manual force is exactly what the engine
+    /// suggests, and when it names another plan the disagreement is stated in the target's guidance
+    /// rather than as a blocker — the operator has two candidate plans and the evidence for both.</para>
+    /// </summary>
+    public static IReadOnlyList<ForcePlanBlocker> ForcePlanBlockers(ForcePlanTarget target, ForcePlanTargetState? state)
+    {
+        if (target is null)
+        {
+            return Array.Empty<ForcePlanBlocker>();
+        }
+
+        var blockers = new List<ForcePlanBlocker>();
+        if (target.ParameterSensitivityCoFired)
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ForcePlanBlockerNames.ParameterSensitivityCoFired,
+                "the query also carries the PARAMETER_SENSITIVITY detector's plan-cache signature in the same analysis window; forcing pins one shape for every parameter value"));
+        }
+
+        if (IsNonPrimaryReplicaRow(target.ReplicaRole))
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ForcePlanBlockerNames.SecondaryReplicaEvidence,
+                $"the regression was measured on the {target.ReplicaRole} replica; sp_query_store_force_plan without @replica_group_id forces on the PRIMARY"));
+        }
+
+        if (state is null || state.IsEmpty)
+        {
+            return blockers;
+        }
+
+        var planForcedAuto = state.PlanIsForced == true && IsAutoForcing(state.PlanForcingType);
+        var planForcedManual = state.PlanIsForced == true && !IsAutoForcing(state.PlanForcingType);
+        var apcOnTarget = state.ApcLastGoodPlanId is long lastGood && lastGood == target.PlanId;
+        var apcOnOther = state.ApcLastGoodPlanId is long other && other != target.PlanId;
+        var apcState = state.ApcState ?? string.Empty;
+        var apcReason = state.ApcStateReason;
+
+        /* apc_owns_it — three shapes, one blocker: the engine is doing this, on this plan or on this query. */
+        if (planForcedAuto)
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ForcePlanBlockerNames.ApcOwnsIt,
+                $"query_store_stats: plan {target.PlanId} is_forced_plan = true, plan_forcing_type = {state.PlanForcingType} at {Stamp(state.PlanObservedAtUtc)} — automatic plan correction placed this force; a manual force would replace it and remove the engine's revert path"));
+        }
+        else if (apcOnTarget && (Is(apcState, "Verifying") || Is(apcState, "Success")))
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ForcePlanBlockerNames.ApcOwnsIt,
+                $"plan_correction: recommendation state {apcState}{Reason(apcReason)} with last_good_plan_id = {target.PlanId}" +
+                $"{ForcedClause(state.ApcLastGoodPlanIsForced, state.ApcLastGoodPlanForcingType)} at {Stamp(state.ApcObservedAtUtc)} — the engine is already forcing exactly this plan"));
+        }
+        else if (state.OtherForcedPlanId is long otherAuto && IsAutoForcing(state.OtherForcedPlanForcingType))
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ForcePlanBlockerNames.ApcOwnsIt,
+                $"query_store_stats: plan {otherAuto} of this query is forced with plan_forcing_type = {state.OtherForcedPlanForcingType} at {Stamp(state.OtherForcedPlanObservedAtUtc)} — automatic plan correction is handling this query through a different plan; forcing {target.PlanId} would take it over"));
+        }
+        else if (apcOnOther && Is(apcState, "Verifying"))
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ForcePlanBlockerNames.ApcOwnsIt,
+                $"plan_correction: recommendation state Verifying{Reason(apcReason)} with last_good_plan_id = {state.ApcLastGoodPlanId} (not {target.PlanId}) at {Stamp(state.ApcObservedAtUtc)} — the engine is mid-verification on a different plan for this query"));
+        }
+
+        /* already_forced — by hand, here or on a sibling plan. */
+        if (planForcedManual)
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ForcePlanBlockerNames.AlreadyForced,
+                $"query_store_stats: plan {target.PlanId} is_forced_plan = true, plan_forcing_type = {state.PlanForcingType ?? "(unknown)"} at {Stamp(state.PlanObservedAtUtc)} — this plan is already forced; there is nothing to force"));
+        }
+        else if (state.OtherForcedPlanId is long otherManual && !IsAutoForcing(state.OtherForcedPlanForcingType))
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ForcePlanBlockerNames.AlreadyForced,
+                $"query_store_stats: plan {otherManual} of this query is forced (plan_forcing_type = {state.OtherForcedPlanForcingType ?? "(unknown)"}) at {Stamp(state.OtherForcedPlanObservedAtUtc)} — SQL Server keeps one forced plan per query, so forcing {target.PlanId} silently replaces it; decide that on purpose"));
+        }
+
+        /* forcing_failed_on_this_plan — the counter the alert family pages on, and the engine's own verdict. */
+        if (state.ForceFailureCount is > 0)
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ForcePlanBlockerNames.ForcingFailedOnThisPlan,
+                $"query_store_stats: plan {target.PlanId} force_failure_count = {state.ForceFailureCount}, last_force_failure_reason = {state.LastForceFailureReason ?? "(none recorded)"} at {Stamp(state.PlanObservedAtUtc)} — forcing this plan is already failing on this server"));
+        }
+        else if (apcOnTarget && (Is(apcState, "Reverted") || Is(apcReason, "ForcingFailed") || !string.IsNullOrEmpty(state.ApcLastGoodPlanForceFailureReason)))
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ForcePlanBlockerNames.ForcingFailedOnThisPlan,
+                $"plan_correction: recommendation state {apcState}{Reason(apcReason)} on last_good_plan_id = {target.PlanId}" +
+                (string.IsNullOrEmpty(state.ApcLastGoodPlanForceFailureReason) ? string.Empty : $", last_good_plan_force_failure_reason = {state.ApcLastGoodPlanForceFailureReason}") +
+                $" at {Stamp(state.ApcObservedAtUtc)} — the engine already tried this plan and " +
+                (Is(apcState, "Reverted") && !Is(apcReason, "ForcingFailed") ? "reverted it for no significant gain" : "could not force it")));
+        }
+        /* apc_withdrew_it — after the failure arm, so Expired/ForcingFailed is named a failure. */
+        else if (apcOnTarget && Is(apcState, "Expired"))
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ForcePlanBlockerNames.ApcWithdrewIt,
+                $"plan_correction: recommendation state Expired{Reason(apcReason)} on last_good_plan_id = {target.PlanId} at {Stamp(state.ApcObservedAtUtc)} — the engine recommended this plan and withdrew the recommendation for the reason quoted"));
+        }
+
+        /* apc_resolved_differently — Success through another plan. */
+        if (apcOnOther && Is(apcState, "Success"))
+        {
+            blockers.Add(new ForcePlanBlocker(
+                ForcePlanBlockerNames.ApcResolvedDifferently,
+                $"plan_correction: recommendation state Success{Reason(apcReason)} with last_good_plan_id = {state.ApcLastGoodPlanId} (not {target.PlanId})" +
+                $"{ForcedClause(state.ApcLastGoodPlanIsForced, state.ApcLastGoodPlanForcingType)} at {Stamp(state.ApcObservedAtUtc)} — the engine already resolved this query's regression through plan {state.ApcLastGoodPlanId}"));
+        }
+
+        return blockers;
+
+        static bool Is(string? value, string expected) =>
+            string.Equals(value, expected, StringComparison.OrdinalIgnoreCase);
+
+        static string Reason(string? reason) =>
+            string.IsNullOrEmpty(reason) ? string.Empty : $" / {reason}";
+
+        static string ForcedClause(bool? isForced, string? forcingType) =>
+            isForced is null
+                ? string.Empty
+                : $", last_good_plan_is_forced = {(isForced.Value ? "true" : "false")}" +
+                  (string.IsNullOrEmpty(forcingType) ? string.Empty : $", last_good_plan_forcing_type = {forcingType}");
+    }
+
+    private static bool IsAutoForcing(string? forcingType) =>
+        string.Equals(forcingType, ForcePlanTargetState.ForcingTypeAuto, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The snapshot stamp every blocker's evidence ends with — ISO-8601 UTC, or a stated
+    /// absence, never an empty string that could read as "now".</summary>
+    private static string Stamp(DateTime? observedAtUtc) =>
+        observedAtUtc is DateTime t
+            ? DateTime.SpecifyKind(t, DateTimeKind.Utc).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture)
+            : "(no snapshot time)";
+
+    /// <summary>
     /// The machine-first remediation projection (#2138) — see <see cref="StructuredRemediation"/> for
     /// why it exists and why it is built at read time rather than persisted. Null when the action is
     /// null or carries no force-plan targets (other verbs can gain shapes when a consumer needs them).
+    ///
+    /// <para>This overload carries NO store state and exists for callers that have none (tests, the
+    /// bot's journal rendering). Every target it produces says so in <c>state_note</c> — since #3652 a
+    /// projection without the forcing/APC state is an incomplete verdict, and an incomplete verdict that
+    /// reads <c>eligible: true</c> without a note is exactly the lie the issue recorded.</para>
     /// </summary>
-    public static StructuredRemediation? BuildStructuredRemediation(RemediationAction? action)
+    public static StructuredRemediation? BuildStructuredRemediation(RemediationAction? action) =>
+        BuildStructuredRemediation(action, states: null, stateUnavailableReason: null);
+
+    /// <summary>
+    /// The projection WITH the read-time forcing/APC state (#3652). <paramref name="states"/> is what the
+    /// SKU's state reader returned for this action's targets, keyed by <see cref="ForcePlanTargetKey"/>;
+    /// null when the read did not happen or failed, in which case <paramref name="stateUnavailableReason"/>
+    /// (or a default sentence) becomes every target's <c>state_note</c>. A target the dictionary lacks, or
+    /// whose state is <see cref="ForcePlanTargetState.IsEmpty"/>, gets a note saying no snapshot was found
+    /// inside the lookback. The note is never a blocker — absence of evidence is not evidence — but it is
+    /// never silent either.
+    /// </summary>
+    public static StructuredRemediation? BuildStructuredRemediation(
+        RemediationAction? action,
+        IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? states,
+        string? stateUnavailableReason = null)
     {
         if (action?.Targets is not { Count: > 0 } targets)
         {
@@ -976,9 +1179,39 @@ public static class FactRemediation
         }
 
         var structured = new List<StructuredForcePlanTarget>(targets.Count);
+        var anyApcOn = false;
         foreach (var t in targets)
         {
-            var blockers = ForcePlanBlockers(t);
+            ForcePlanTargetState? state = null;
+            string? note;
+            if (states is null)
+            {
+                note = "unknown: " + (string.IsNullOrWhiteSpace(stateUnavailableReason)
+                    ? "the forcing and automatic-plan-correction state was not read for this target; eligible reflects only the finding's own evidence (parameter sensitivity, replica). Check get_plan_corrections and sys.query_store_plan before forcing."
+                    : stateUnavailableReason.Trim());
+            }
+            else if (!states.TryGetValue(ForcePlanTargetKey.Of(t), out state) || state is null || state.IsEmpty)
+            {
+                state = null;
+                note = $"unknown: no query_store_stats or plan_correction row for this target within the last {ForcePlanTargetState.Lookback.TotalHours:0} hours; eligible reflects only the finding's own evidence. Check get_plan_corrections and sys.query_store_plan before forcing.";
+            }
+            else
+            {
+                note = null;
+            }
+
+            var detailed = ForcePlanBlockers(t, state);
+            var names = new List<string>(detailed.Count);
+            foreach (var b in detailed)
+            {
+                names.Add(b.Name);
+            }
+
+            var apcMode = state?.ForceLastGoodPlanActualState is null
+                ? null
+                : state.ApcIsOn ? "on" : "off";
+            anyApcOn |= state?.ApcIsOn == true;
+
             structured.Add(new StructuredForcePlanTarget(
                 t.Database,
                 t.QueryId,
@@ -986,8 +1219,8 @@ public static class FactRemediation
                 t.LatestPlanHash,
                 t.BestPlanHash,
                 string.IsNullOrEmpty(t.ReplicaRole) ? null : t.ReplicaRole,
-                Eligible: blockers.Count == 0,
-                blockers,
+                Eligible: names.Count == 0,
+                names,
                 new StructuredForcePlanEvidence(
                     t.RegressionFactor,
                     t.LatestCpuPerExecUs,
@@ -997,26 +1230,94 @@ public static class FactRemediation
                     $"EXEC sys.sp_query_store_force_plan @query_id = {t.QueryId}, @plan_id = {t.PlanId};",
                 UnforceSql: $"USE {QuoteName(t.Database)};{Environment.NewLine}" +
                     $"EXEC sys.sp_query_store_unforce_plan @query_id = {t.QueryId}, @plan_id = {t.PlanId};",
-                VerifySql: BuildForcePlanVerifySql(t)));
+                VerifySql: BuildForcePlanVerifySql(t),
+                BlockerEvidence: detailed,
+                ForcingState: state,
+                StateNote: note,
+                ApcMode: apcMode,
+                Guidance: BuildForcePlanGuidance(t, state)));
         }
 
-        return new StructuredRemediation(action.FactKey, action.Action, structured);
+        var guidance = anyApcOn
+            ? "Automatic plan correction (FORCE_LAST_GOOD_PLAN) is ON for at least one of these databases: the engine forces and verifies its own last-good plan there and reverts it if it does not help. Read each target's guidance and blockers before forcing by hand — a manual force replaces AUTO forcing and removes the engine's revert path. Intervene only where a recommendation has reverted or expired, or where the engine has none."
+            : null;
+
+        return new StructuredRemediation(action.FactKey, action.Action, structured, guidance);
+    }
+
+    /// <summary>
+    /// The per-target verb (#3652): when FORCE_LAST_GOOD_PLAN is ON for the database the remediation is no
+    /// longer "run this" but "the engine is doing X for this query; intervene only if it reverts or
+    /// expires" — stated with the engine's own state and reason. When the enablement is OFF or unknown,
+    /// the only guidance is the non-blocking disagreement case (an <c>Active</c> recommendation naming a
+    /// different plan). Null when there is nothing to add to the blockers.
+    /// </summary>
+    private static string? BuildForcePlanGuidance(ForcePlanTarget t, ForcePlanTargetState? state)
+    {
+        if (state is null)
+        {
+            return null;
+        }
+
+        var apcState = state.ApcState;
+        var reason = string.IsNullOrEmpty(state.ApcStateReason) ? string.Empty : $" ({state.ApcStateReason})";
+
+        if (state.ApcIsOn)
+        {
+            var sb = new StringBuilder();
+            sb.Append($"Automatic plan correction is ON for {QuoteName(t.Database)}");
+            if (string.IsNullOrEmpty(apcState))
+            {
+                sb.Append($" and the engine has no open recommendation for query {t.QueryId} as of {Stamp(state.EnablementObservedAtUtc)}; a manual force here is yours to decide, and the engine may later revert or replace it.");
+            }
+            else
+            {
+                var via = state.ApcLastGoodPlanId is long lg
+                    ? (lg == t.PlanId ? $" via plan {lg} (the plan proposed here)" : $" via plan {lg} (not the plan proposed here, {t.PlanId})")
+                    : string.Empty;
+                sb.Append($" and is currently {apcState}{reason} for query {t.QueryId}{via} as of {Stamp(state.ApcObservedAtUtc)}; intervene only if it reverts or expires.");
+            }
+
+            return sb.ToString();
+        }
+
+        if (string.Equals(apcState, "Active", StringComparison.OrdinalIgnoreCase) &&
+            state.ApcLastGoodPlanId is long activePlan && activePlan != t.PlanId)
+        {
+            return $"The engine's own open recommendation{reason} for query {t.QueryId} names plan {activePlan}, not {t.PlanId}, as of {Stamp(state.ApcObservedAtUtc)} — two candidate plans; compare both before forcing either.";
+        }
+
+        return null;
     }
 
     /// <summary>
     /// The post-force verification an agent (or the future bot's self-review window) runs: did the force
-    /// STICK (<c>is_forced_plan</c>, <c>force_failure_count</c>, and the failure reason when it did not),
-    /// and what has the per-interval cost looked like SINCE — the same two questions the #2141 arc's
-    /// "re-check the spread, not just the average" advice asks, as runnable statements.
+    /// STICK (<c>is_forced_plan</c>, <c>plan_forcing_type_desc</c>, <c>force_failure_count</c>, and the
+    /// failure reason when it did not), what does the engine's own automatic plan correction say about
+    /// the query, and what has the per-interval cost looked like SINCE — the first two are the same facts
+    /// the eligibility half now reads from the store (#3652: <c>apc_owns_it</c> reads
+    /// <c>plan_forcing_type = AUTO</c>, <c>forcing_failed_on_this_plan</c> reads <c>force_failure_count</c>,
+    /// the APC blockers read <c>state.currentValue</c> / <c>state.reason</c> / <c>recommendedPlanId</c>),
+    /// so "verify after forcing" and "eligible before forcing" speak one vocabulary; the third is the
+    /// #2141 arc's "re-check the spread, not just the average", as runnable statements. Column aliases
+    /// are the store's spellings where the DMV's differ (<c>plan_forcing_type</c>,
+    /// <c>apc_state</c> / <c>apc_state_reason</c> / <c>apc_last_good_plan_id</c>) so a reader can lay the
+    /// live result beside <c>forcing_state</c> field for field.
     /// </summary>
     private static string BuildForcePlanVerifySql(ForcePlanTarget t)
     {
         var nl = Environment.NewLine;
         return
             $"USE {QuoteName(t.Database)};{nl}" +
-            $"SELECT qsp.plan_id, qsp.is_forced_plan, qsp.force_failure_count, qsp.last_force_failure_reason_desc{nl}" +
+            $"SELECT qsp.plan_id, qsp.is_forced_plan, plan_forcing_type = qsp.plan_forcing_type_desc, qsp.force_failure_count, qsp.last_force_failure_reason_desc{nl}" +
             $"FROM sys.query_store_plan AS qsp{nl}" +
             $"WHERE qsp.query_id = {t.QueryId};{nl}" +
+            $"{nl}" +
+            $"SELECT apc_state = JSON_VALUE(dtr.state, '$.currentValue'), apc_state_reason = JSON_VALUE(dtr.state, '$.reason'),{nl}" +
+            $"       apc_regressed_plan_id = JSON_VALUE(dtr.details, '$.planForceDetails.regressedPlanId'), apc_last_good_plan_id = JSON_VALUE(dtr.details, '$.planForceDetails.recommendedPlanId'),{nl}" +
+            $"       dtr.execute_action_initiated_by, dtr.last_refresh{nl}" +
+            $"FROM sys.dm_db_tuning_recommendations AS dtr{nl}" +
+            $"WHERE TRY_CAST(JSON_VALUE(dtr.details, '$.planForceDetails.queryId') AS bigint) = {t.QueryId};{nl}" +
             $"{nl}" +
             $"SELECT TOP (24) rs.plan_id, rs.runtime_stats_interval_id, rs.count_executions, rs.avg_cpu_time, rs.avg_duration, rs.max_cpu_time{nl}" +
             $"FROM sys.query_store_runtime_stats AS rs{nl}" +
