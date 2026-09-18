@@ -24,7 +24,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins Darling's Phase-5 slice-D pieces. Ungated: <see cref="DarlingAlertSettings"/> mirrors
-/// Lite's App defaults member-for-member (cpu 80/Total, blocking 1, deadlock 1, poison 500,
+/// Lite's App defaults member-for-member (cpu 80/Total, blocking 1, deadlock 1, poison 500 [retired as a threshold by #3539, still a default],
 /// LRQ 30 + the hardcoded 5/all-filters read shape, tempdb 80, low disk 10%/5GB, multiplier 3,
 /// lookback 60, cooldown 5, email cooldown 15) with Lite's load-time clamps, and the V3
 /// "alerting-stores" migration creates the three Lite-twin tables. Gated on DARLING_TEST_PG:
@@ -232,9 +232,12 @@ public sealed class DarlingAlertingTests
                 1L, collectionTime, TestServerId, TestServerName, utcNow.AddMinutes(-4),
                 "process1", "UPDATE Users SET Reputation = 1", DeadlockGraphXml);
 
+            /* #3539 A4: 36,000 THREADPOOL waits averaging 20 ms — 720 s of worker starvation inside the
+               ten-minute window, over the shared Warning bar (600 s). The storm shape the retired
+               avg-ms-per-wait read could not fire on; a 20 ms average was invisible to it. */
             await InsertAsync(connection,
                 "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                1L, collectionTime, TestServerId, TestServerName, "THREADPOOL", 50L, 100000L);
+                1L, collectionTime, TestServerId, TestServerName, "THREADPOOL", 36000L, 720000L);
 
             AlertEngine BuildEngine(RecordingDeliverer deliverer, MuteRuleService muteRuleService)
             {

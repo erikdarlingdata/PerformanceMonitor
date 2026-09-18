@@ -112,7 +112,18 @@ public interface IAlertEngineSettings
     /// <summary>Fire when the rolling-window deadlock count reaches this value (count-based; see class remarks).</summary>
     int DeadlockCountThreshold { get; }
 
-    /// <summary>Fire when a poison wait type's average ms-per-wait is at/above this value.</summary>
+    /// <summary>
+    /// <b>Retired as a threshold by #3539 A4; kept as a shipped setting.</b> Until then: fire when a poison
+    /// wait type's average ms-per-wait on ONE collector delta was at/above this value. The Poison Wait alert
+    /// now grades accumulated wait over a ten-minute window against the fleet-calibrated bars on
+    /// <see cref="PoisonWaitEvaluator"/> (shared with the PostgreSQL twin, which never consulted this knob),
+    /// and <c>AlertEngine.CheckPoisonWaitsAsync</c> no longer reads this member. It stays on the contract
+    /// because it is persisted on both SKUs (Lite's settings JSON, Darling's darling.json / store
+    /// control-plane row) and surfaced by their Settings windows and <c>get_alert_settings</c>; removing it
+    /// would need a schema rung and a UI change for a value nothing evaluates, and a per-wait average has no
+    /// honest meaning to repurpose it to. An operator who tuned it gets the new shape regardless — the
+    /// knob's readers report it, the engine ignores it, and this comment is the record of why.
+    /// </summary>
     int PoisonWaitThresholdMs { get; }
 
     /// <summary>Fire when a query's elapsed time is at/above this many minutes.</summary>

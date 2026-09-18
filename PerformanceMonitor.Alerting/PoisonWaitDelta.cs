@@ -11,9 +11,13 @@ using System;
 namespace PerformanceMonitor.Alerting;
 
 /// <summary>
-/// One poison wait type's delta since the previous collection, used by the poison-wait alert.
-/// Canonical shared copy (Phase-5 A0) — Lite and the Dashboard previously carried member-identical
-/// local twins; both apps now alias this type via a global using so call sites are unchanged.
+/// One poison wait type's delta since the previous collection. Canonical shared copy (Phase-5 A0) —
+/// Lite and the Dashboard previously carried member-identical local twins; both apps alias this type via
+/// a global using so call sites are unchanged.
+/// <para>Since #3539 A4 the shared <see cref="AlertEngine"/> no longer consumes this type: its Poison Wait
+/// alert reads <see cref="PoisonWaitAccumulation"/> (a window sum per wait type) through
+/// <see cref="IAlertReadAdapter.GetPoisonWaitAccumulationAsync"/>. The deprecated Dashboard's own alert
+/// loop and <see cref="AlertContextBuilders.BuildPoisonWaitContext"/> still use it, which is why it stays.</para>
 /// </summary>
 public class PoisonWaitDelta
 {

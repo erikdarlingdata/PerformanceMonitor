@@ -74,15 +74,29 @@ public interface IAlertReadAdapter
         string serverKey, int hoursBack, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// The poison-wait deltas at or above <paramref name="thresholdMs"/> average ms/wait. Mirrors
-    /// Lite's read exactly: the newest wait_stats rows (max 3, collected within the last 10
-    /// minutes) for THREADPOOL / RESOURCE_SEMAPHORE / RESOURCE_SEMAPHORE_QUERY_COMPILE with
-    /// delta_waiting_tasks &gt; 0, THEN the threshold filter applied client-side — the row window
-    /// is selected BEFORE thresholding, so a sub-threshold poison wait still occupies its slot,
-    /// exactly like the pre-extraction loop's fetch-then-FindAll.
+    /// Accumulated wait per poison wait type over the last <paramref name="windowMinutes"/> of collector
+    /// rows (#3539 A4) — one <see cref="PoisonWaitAccumulation"/> per THREADPOOL / RESOURCE_SEMAPHORE /
+    /// RESOURCE_SEMAPHORE_QUERY_COMPILE type that has ANY wait_stats row inside the window, whatever its
+    /// sum. An ACCUMULATION, the one departure from this interface's "current state" convention, for the
+    /// reason <see cref="IPostgresAlertReadAdapter.GetPoisonWaitPressureAsync"/> gives: the poison
+    /// condition is defined by recent accrual, not a level.
+    /// <para>
+    /// <b>Dumb by contract.</b> No threshold is applied here and no row filter beyond the wait-type list
+    /// and the window: the engine grades against <see cref="PoisonWaitEvaluator"/>'s shared bars, and it
+    /// needs the under-bar rows too, because "observed and quiet" and "not observed" are different answers
+    /// (an empty list holds a standing alert open; a row summing under the bar clears it). In particular
+    /// the old read's <c>delta_waiting_tasks &gt; 0</c> filter is GONE — a task still waiting across an
+    /// interval boundary accrues time with no completed task, and that time is evidence.
+    /// </para>
+    /// <para>
+    /// <paramref name="windowMinutes"/> is passed rather than read from the constant so the read's cutoff
+    /// and the engine's denominator are the same number by construction: the window IS what the bars
+    /// normalize against, and a read over a different span would make "average tasks stuck" silently mean
+    /// something else.
+    /// </para>
     /// </summary>
-    Task<List<PoisonWaitDelta>> GetPoisonWaitDeltasAsync(
-        string serverKey, double thresholdMs, CancellationToken cancellationToken = default);
+    Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(
+        string serverKey, int windowMinutes, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Currently-running queries over <paramref name="thresholdMinutes"/> elapsed, longest first,

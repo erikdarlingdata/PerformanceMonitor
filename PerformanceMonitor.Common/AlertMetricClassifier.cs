@@ -158,7 +158,10 @@ namespace PerformanceMonitor.Common
                more; it is kept solely so already-stored rows format like the new ones. */
             "High CPU" or "tempdb Space" or "TempDB Space" or "Volume Free Space" or "Long-Running Job" => $"{value:F1}%",
 
-            /* Poison wait carries an average ms/wait; long-running query carries elapsed minutes. */
+            /* Poison wait carries milliseconds — since #3539 A4 the wait ACCUMULATED over the ten-minute
+               window on both engines (before that, SQL Server's average ms per wait; rows from then still
+               render in the same unit, which is why the arm did not change). Long-running query carries
+               elapsed minutes. */
             "Poison Wait" => $"{value:F0} ms",
             "Long-Running Query" => $"{value:F0} m",
 

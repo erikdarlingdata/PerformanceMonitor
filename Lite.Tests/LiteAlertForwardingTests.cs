@@ -104,7 +104,7 @@ public class LiteAlertForwardingTests : IDisposable
     {
         public List<BlockedProcessAlertRow> Blocking { get; } = new();
         public List<DeadlockAlertRow> Deadlocks { get; } = new();
-        public List<PoisonWaitDelta> PoisonWaits { get; } = new();
+        public List<PoisonWaitAccumulation> PoisonWaits { get; } = new();
         public List<LongRunningQueryInfo> LongRunning { get; } = new();
         public List<VolumeFreeSpaceInfo> Volumes { get; } = new();
         public TempDbSpaceInfo? TempDb { get; set; }
@@ -122,8 +122,8 @@ public class LiteAlertForwardingTests : IDisposable
         public Task<List<DeadlockAlertRow>> GetRecentDeadlocksAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<DeadlockAlertRow>(Deadlocks));
 
-        public Task<List<PoisonWaitDelta>> GetPoisonWaitDeltasAsync(string serverKey, double thresholdMs, CancellationToken cancellationToken = default) =>
-            Task.FromResult(PoisonWaits.FindAll(w => w.AvgMsPerWait >= thresholdMs));
+        public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<PoisonWaitAccumulation>(PoisonWaits));
 
         public Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(
             string serverKey, int thresholdMinutes, int maxResults,
@@ -779,22 +779,37 @@ public class LiteAlertForwardingTests : IDisposable
         Assert.Equal("1 deadlock(s) in the last hour", fired.ShortMessage);   /* :244 toast body */
     }
 
+    /// <summary>
+    /// #3539 A4: the toast body is the worst wait type's accumulated-wait sentence, and "worst" is graded
+    /// by the shared bars (severity, then accumulated ms) rather than by avg-ms-per-wait. Two types over the
+    /// bar: THREADPOOL at 900 s in the window (1.5 avg tasks stuck, Warning) leads RESOURCE_SEMAPHORE at
+    /// 600 s (exactly the Warning bar). The retired knob's value is set to a number that would have changed
+    /// the OLD outcome (999 ms would have silenced both rows' 30 ms / 60 ms averages) to pin that it is no
+    /// longer consulted.
+    /// </summary>
     [Fact]
-    public async Task PoisonWait_ToastBody_UsesTheWorstWait()
+    public async Task PoisonWait_ToastBody_UsesTheWorstWait_GradedByAccumulation_NotTheRetiredKnob()
     {
         DisableAllChecks();
         App.AlertPoisonWaitEnabled = true;
+        App.AlertPoisonWaitThresholdMs = 999;
         var h = new Harness();
-        h.Adapter.PoisonWaits.Add(new PoisonWaitDelta { WaitType = "THREADPOOL", AvgMsPerWait = 750, DeltaMs = 15000, DeltaTasks = 20 });
-        h.Adapter.PoisonWaits.Add(new PoisonWaitDelta { WaitType = "RESOURCE_SEMAPHORE", AvgMsPerWait = 600, DeltaMs = 6000, DeltaTasks = 10 });
+        var collected = new DateTime(2026, 9, 18, 12, 0, 0, DateTimeKind.Unspecified);
+        h.Adapter.PoisonWaits.Add(new PoisonWaitAccumulation("RESOURCE_SEMAPHORE", 600_000, 10_000, 10, collected));
+        h.Adapter.PoisonWaits.Add(new PoisonWaitAccumulation("THREADPOOL", 900_000, 30_000, 10, collected));
 
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
-        Assert.Equal("THREADPOOL (750ms), RESOURCE_SEMAPHORE (600ms)", fired.CurrentValue); /* :288/:315 */
-        Assert.Equal("500ms avg", fired.ThresholdValue);                                    /* :316 */
-        Assert.Equal("THREADPOOL avg 750ms/wait", fired.ShortMessage);                      /* :302 toast body */
-        Assert.Equal(750, fired.NumericCurrentValue);
+        Assert.Equal("THREADPOOL (900s in 10m), RESOURCE_SEMAPHORE (600s in 10m)", fired.CurrentValue);
+        Assert.Equal("600s accumulated over 10m (an average of 1 task(s) continuously waiting)", fired.ThresholdValue);
+        Assert.Equal(
+            "[THREADPOOL] 900s of wait accumulated in the last 10 minutes across 30,000 waits — on average 1.5 task(s) continuously stuck",
+            fired.ShortMessage);
+        Assert.Equal(900_000d, fired.NumericCurrentValue);
+        Assert.Equal(600_000d, fired.NumericThresholdValue);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Context!.SeverityOverride);
     }
 
     [Fact]
@@ -927,7 +942,7 @@ public class LiteAlertForwardingTests : IDisposable
            long-running job (:596), failed job (:691). Title == metric name in every branch. */
         await deliverer.DeliverAsync(Outcome("High CPU", shortMessage: "Total CPU at 92% (threshold: 80%)"));
         await deliverer.DeliverAsync(Outcome("Deadlocks Detected", shortMessage: "1 deadlock(s) in the last hour"));
-        await deliverer.DeliverAsync(Outcome("Poison Wait", shortMessage: "THREADPOOL avg 750ms/wait"));
+        await deliverer.DeliverAsync(Outcome("Poison Wait", shortMessage: "[THREADPOOL] 900s of wait accumulated in the last 10 minutes across 30,000 waits — on average 1.5 task(s) continuously stuck"));
         await deliverer.DeliverAsync(Outcome("Volume Free Space", shortMessage: "D:\\ 8% free (64.0 GB)"));
 
         Assert.Equal(4, toasts.Count);

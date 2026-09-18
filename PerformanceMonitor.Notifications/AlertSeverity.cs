@@ -53,6 +53,13 @@ internal static class AlertSeverity
             // so it must not render INFO-blue like an unmapped metric (mirrors the #1136 gap fix).
             "Capture Down" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "High CPU" => ("#F59E0B", "WARNING", "\U0001F7E1"),
+            /* #3539 A4: GRADED at both engines' fire sites now — Warning at one task/backend continuously
+               stuck across the ten-minute window, Critical at ten (PoisonWaitEvaluator's shared bars; the
+               PostgreSQL twin has graded since #2711, SQL Server fired presence-flat CRITICAL until #3539).
+               Every live fire carries the tier on Context.SeverityOverride, so this arm styles only the
+               override-less render — the alert-history replay of a row written BEFORE #3539, and every
+               such SQL Server row WAS a CRITICAL fire. CRITICAL is therefore the faithful replay, not a
+               default for the metric; a new fire site for this name must pass its grade explicitly. */
             "Poison Wait" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Long-Running Query" => ("#D97706", "WARNING", "\U0001F7E0"),
             "tempdb Space" => ("#D97706", "WARNING", "\U0001F7E0"),

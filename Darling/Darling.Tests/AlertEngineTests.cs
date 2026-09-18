@@ -93,7 +93,10 @@ public sealed class AlertEngineTests
     {
         public List<BlockedProcessAlertRow> Blocking { get; } = new();
         public List<DeadlockAlertRow> Deadlocks { get; } = new();
-        public List<PoisonWaitDelta> PoisonWaits { get; } = new();
+        /* #3539 A4: the accumulation rows the engine grades. Whatever a test puts here comes back
+           unfiltered — the seam contract is a dumb window sum; the engine does the thresholding. */
+        public List<PoisonWaitAccumulation> PoisonWaits { get; } = new();
+        public int PoisonWaitWindowMinutesAsked { get; private set; }
         public List<LongRunningQueryInfo> LongRunning { get; } = new();
         public List<VolumeFreeSpaceInfo> Volumes { get; } = new();
         public List<PvsPressureInfo> PvsDatabases { get; } = new();
@@ -127,9 +130,11 @@ public sealed class AlertEngineTests
             return Task.FromResult(new List<DeadlockAlertRow>(Deadlocks));
         }
 
-        public Task<List<PoisonWaitDelta>> GetPoisonWaitDeltasAsync(string serverKey, double thresholdMs, CancellationToken cancellationToken = default) =>
-            /* The seam contract: fetch-then-filter client-side, like Lite's loop. */
-            Task.FromResult(PoisonWaits.FindAll(w => w.AvgMsPerWait >= thresholdMs));
+        public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default)
+        {
+            PoisonWaitWindowMinutesAsked = windowMinutes;
+            return Task.FromResult(new List<PoisonWaitAccumulation>(PoisonWaits));
+        }
 
         /* #3495's degrade arm: the CPU card's fire-time maintenance probe rides this same seam, and the
            pin that a failed probe costs the annotation and never the alert needs a read that faults. */
@@ -340,6 +345,10 @@ public sealed class AlertEngineTests
         public List<FailedJobInfo> FailedJobs { get; } = new();
         public int FailedJobFetches { get; private set; }
         public bool Muted { get; set; }
+
+        /* #3539: an optional mute PROBE for pins that need to see which AlertMuteContext the engine asked
+           about (the poison-wait mute keys on the worst wait type); null keeps the flat Muted answer. */
+        public Func<AlertMuteContext, bool>? IsMuted { get; set; }
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
         /* #3013: the swallowed-read counter is an OPTIONAL harness input, defaulting to null, so every
@@ -356,7 +365,7 @@ public sealed class AlertEngineTests
 
         public AlertEngine Build(bool withFailedJobsFetcher = false, bool withAgentJobResolver = false) => new(
             Settings, Adapter, StateStore, Deliverer,
-            isAlertMuted: _ => Muted,
+            isAlertMuted: ctx => IsMuted?.Invoke(ctx) ?? Muted,
             failedJobsFetcher: withFailedJobsFetcher
                 ? (_, _, _) => { FailedJobFetches++; return Task.FromResult(new List<FailedJobInfo>(FailedJobs)); }
                 : null,
@@ -1368,76 +1377,285 @@ public sealed class AlertEngineTests
         Assert.Equal("1", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
     }
 
-    /* ---------------- poison waits ---------------- */
+    /* ---------------- poison waits (#3539 A4: the accumulation shape) ---------------- */
 
+    private static readonly DateTime PoisonCollected = new(2026, 9, 18, 12, 0, 0, DateTimeKind.Unspecified);
+
+    private static PoisonWaitAccumulation Poison(
+        long accumulatedMs, string waitType = "THREADPOOL", long waits = 1, long observed = 10, DateTime? collected = null)
+        => new(waitType, accumulatedMs, waits, observed, collected ?? PoisonCollected);
+
+    /// <summary>
+    /// The storm the retired shape could not see, in the engine: 300,000 THREADPOOL waits of 2 ms each is
+    /// 600 seconds of worker starvation inside ten minutes — one task continuously starved for the whole
+    /// window — and the old avg-ms-per-wait bar (500) read it as 2 ms and slept. It fires Warning, with the
+    /// PostgreSQL twin's exact numeric pair (accumulated ms against the breached bar in ms), the severity on
+    /// BOTH the outcome and the context override, one detail item carrying the remedy, and no incidents (the
+    /// metric-level cooldown shape IncidentDeliveryFilter documents for this metric).
+    /// </summary>
     [Fact]
-    public async Task PoisonWait_FiresWithWorstWaitNumerics_AndResolvesWhenGone()
+    public async Task PoisonWait_FiresOnAccumulatedStarvation_NotPerWaitAverage()
     {
-        /* Lite AlertEngine.cs:274-333. */
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        h.Settings.PoisonWaitThresholdMs = 500;
+        var engine = h.Build();
+
+        h.Adapter.PoisonWaits.Add(Poison(600_000, waits: 300_000));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(PoisonWaitEvaluator.WindowMinutes, h.Adapter.PoisonWaitWindowMinutesAsked);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Poison Wait", fired.MetricName);
+        Assert.Equal("THREADPOOL (600s in 10m)", fired.CurrentValue);
+        Assert.Equal("600s accumulated over 10m (an average of 1 task(s) continuously waiting)", fired.ThresholdValue);
+        Assert.Equal(600_000d, fired.NumericCurrentValue);
+        Assert.Equal(600_000d, fired.NumericThresholdValue);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        Assert.Equal(
+            "[THREADPOOL] 600s of wait accumulated in the last 10 minutes across 300,000 waits — on average 1.0 task(s) continuously stuck",
+            fired.ShortMessage);
+
+        Assert.NotNull(fired.Context);
+        Assert.Equal(AlertSeverityLevel.Warning, fired.Context!.SeverityOverride);
+        Assert.Null(fired.Context.Incidents);
+        var detail = Assert.Single(fired.Context.Details);
+        Assert.Equal("THREADPOOL", detail.Heading);
+        Assert.Contains(detail.Fields, f => f.Item1 == "Remedy" && f.Item2 == PoisonWaitEvaluator.SqlServerRemedyFor("THREADPOOL"));
+        Assert.Contains(detail.Fields, f => f.Item1 == "Accumulated wait" && f.Item2 == "600 s over the last 10 min");
+        Assert.NotNull(fired.DetailText);
+        Assert.Contains("Remedy", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The false page the retired shape produced: ONE wait of 600 ms is 600 ms of accumulated wait — 0.001
+    /// average tasks stuck — and the old bar (avg 600 &gt;= 500) paged CRITICAL on it. Silent now, and so is
+    /// every shape the 43-server fleet measurement actually produced: the worst ten-minute bucket anywhere
+    /// (5,795 ms of THREADPOOL), the 703-task 8.2 ms row (5,779 ms), and the daily compile burst just under
+    /// the old bar (8 tasks, 3,154 ms at 394 ms average).
+    /// </summary>
+    [Theory]
+    [InlineData(600, 1)]
+    [InlineData(5_795, 703)]
+    [InlineData(5_779, 703)]
+    [InlineData(3_154, 8)]
+    [InlineData(599_999, 100_000)]
+    public async Task PoisonWait_OneSlowWait_AndEveryMeasuredFleetBucket_StaySilent(long accumulatedMs, long waits)
+    {
         var h = new Harness();
         h.Settings.PoisonWaitEnabled = true;
         var engine = h.Build();
 
-        h.Adapter.PoisonWaits.Add(new PoisonWaitDelta { WaitType = "THREADPOOL", DeltaMs = 100000, DeltaTasks = 50, AvgMsPerWait = 2000 });
+        h.Adapter.PoisonWaits.Add(Poison(accumulatedMs, waits: waits));
         await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+    }
+
+    /// <summary>
+    /// Graded, matching the PostgreSQL twin's boundaries exactly: Critical at ten tasks continuously stuck
+    /// (6,000,000 ms), and the threshold text names the bar that was crossed rather than always the Warning
+    /// one. The map arm for "Poison Wait" is CRITICAL for override-less renders (pre-#3539 history rows,
+    /// which WERE presence-flat critical); a live Critical fire agrees with it, a live Warning fire overrides
+    /// it through the context.
+    /// </summary>
+    [Fact]
+    public async Task PoisonWait_GradesCritical_AtTenTasksContinuouslyStuck()
+    {
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.PoisonWaits.Add(Poison(6_000_000, waitType: "RESOURCE_SEMAPHORE", waits: 4_000));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
         var fired = Assert.Single(h.Deliverer.Outcomes);
-        Assert.Equal("Poison Wait", fired.MetricName);
-        Assert.Equal("THREADPOOL (2000ms)", fired.CurrentValue);              /* :286 */
-        Assert.Equal("500ms avg", fired.ThresholdValue);                      /* :314 */
-        Assert.Equal(2000d, fired.NumericCurrentValue);                       /* :317 */
-        Assert.Equal(500d, fired.NumericThresholdValue);                      /* :318 */
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Context!.SeverityOverride);
+        Assert.Equal("6,000s accumulated over 10m (an average of 10 task(s) continuously waiting)", fired.ThresholdValue);
+        Assert.Equal(6_000_000d, fired.NumericThresholdValue);
+        Assert.Contains(fired.Context.Details.Single().Fields, f => f.Item1 == "Severity" && f.Item2 == "CRITICAL");
+    }
+
+    /// <summary>
+    /// Per wait type, worst-first: a Critical RESOURCE_SEMAPHORE (10.0 avg tasks stuck) leads a Warning
+    /// THREADPOOL (9.8 — just under the Critical bar), the mute key follows the worst type (Lite's documented
+    /// limitation, unchanged), the alert's severity is the worst type's, and a third type under the Warning
+    /// bar neither fires nor rides along — it is not in CurrentValue and has no detail item.
+    /// </summary>
+    [Fact]
+    public async Task PoisonWait_JudgesEachWaitTypeIndependently_WorstFirst_MutesOnTheWorst()
+    {
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        AlertMuteContext? muteAsked = null;
+        h.IsMuted = ctx => { muteAsked = ctx; return false; };
+        var engine = h.Build();
+
+        h.Adapter.PoisonWaits.Add(Poison(5_900_000, waitType: "THREADPOOL", waits: 1_000_000));          /* Warning */
+        h.Adapter.PoisonWaits.Add(Poison(6_000_000, waitType: "RESOURCE_SEMAPHORE", waits: 100));         /* Critical */
+        h.Adapter.PoisonWaits.Add(Poison(5_795, waitType: "RESOURCE_SEMAPHORE_QUERY_COMPILE", waits: 8)); /* under the bar */
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("RESOURCE_SEMAPHORE (6,000s in 10m), THREADPOOL (5,900s in 10m)", fired.CurrentValue);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.Equal("RESOURCE_SEMAPHORE", muteAsked!.WaitType);
+        Assert.Equal("Poison Wait", muteAsked.MetricName);
+        Assert.Equal(2, fired.Context!.Details.Count);
+        Assert.DoesNotContain("RESOURCE_SEMAPHORE_QUERY_COMPILE", fired.CurrentValue, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The clear arm needs an OBSERVATION. Active, then a sweep whose read returns a row under the bar
+    /// (the window has aged the wait out — "observed and quiet") clears with the windowed message. But
+    /// FIRST, a sweep whose read returns NO rows at all (the collector delivered nothing in ten minutes)
+    /// neither clears nor fires: an absent measurement is not evidence of quiet (#3282's rule for CPU),
+    /// where the retired shape announced "Poison Waits Cleared" on that same silence.
+    /// </summary>
+    [Fact]
+    public async Task PoisonWait_HoldsOnAnEmptyRead_AndClearsOnlyOnAnObservedQuietWindow()
+    {
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.PoisonWaits.Add(Poison(900_000, waits: 30_000));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* Collector silent: no wait_stats rows for any poison type inside the window. Hold. */
+        h.Adapter.PoisonWaits.Clear();
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+
+        /* Rows again, summing to zero across ten observed intervals — the window aged the storm out. A
+           zero sum is what a genuinely idle window AND a window of the calculator's (0, 0) "unknowable"
+           markers both read as; the sum treats them identically (nothing added either way), and the
+           observation that lets the flag clear is the collector delivering rows, not the zero itself. */
+        h.Adapter.PoisonWaits.Add(Poison(0, waits: 0, observed: 10, collected: PoisonCollected.AddMinutes(12)));
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        var resolution = Assert.Single(h.Resolutions);
+        Assert.Equal("Poison Waits Cleared", resolution.Title);
+        Assert.Equal("SRV-A: Poison wait accumulated over the last 10 minutes back below threshold", resolution.Message);
+
+        /* Cleared is an edge: the next quiet sweep says nothing more. */
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Resolutions);
+    }
+
+    /// <summary>
+    /// A sub-bar row that is not zero also clears — the measured fleet's own worst bucket (5,795 ms) is
+    /// "quiet" by this alert's definition — and the retired knob plays no part in that judgement either:
+    /// a threshold of 1 ms, which under the old shape made every row a poison wait, changes nothing.
+    /// </summary>
+    [Fact]
+    public async Task PoisonWait_ClearsOnASubBarWindow_RegardlessOfTheRetiredKnob()
+    {
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        h.Settings.PoisonWaitThresholdMs = 1;
+        var engine = h.Build();
+
+        h.Adapter.PoisonWaits.Add(Poison(600_000, waits: 300_000));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
 
         h.Adapter.PoisonWaits.Clear();
+        h.Adapter.PoisonWaits.Add(Poison(5_795, waits: 703, collected: PoisonCollected.AddMinutes(11)));
+        h.Now = h.Now.AddMinutes(11);
         await engine.EvaluateServerAsync(Harness.Snapshot());
-        var resolution = Assert.Single(h.Resolutions);
-        Assert.Equal("Poison Waits Cleared", resolution.Title);               /* :329 */
-        Assert.Equal("SRV-A: Poison wait avg below threshold", resolution.Message); /* :330 */
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Single(h.Resolutions);
     }
 
     [Fact]
     public async Task PoisonWait_DoesNotRefire_OnTheSameCollectionTime_EvenAfterCooldownElapses()
     {
-        /* The read adapter's own "newest row within 10 minutes" window can hand back the SAME
-           wait_stats row across multiple sweeps when the collector's delivered cadence lags the
-           alert cooldown — observed live as byte-identical "Poison Wait" alerts ~5-7 minutes
-           apart on the same server. Cooldown elapsing is not proof a fresh observation exists;
-           re-firing on an unrefreshed collection_time reports the same event twice. */
+        /* #2704, unchanged in substance by the accumulation shape: the read adapter's window can hand
+           back the SAME newest row across multiple sweeps when the collector's delivered cadence lags
+           the alert cooldown — observed live as byte-identical "Poison Wait" alerts ~5-7 minutes apart
+           on the same server. Cooldown elapsing is not proof a fresh observation exists; re-firing on an
+           unrefreshed collection_time reports the same window twice. */
         var h = new Harness();
         h.Settings.PoisonWaitEnabled = true;
         var engine = h.Build();
 
         var firstCollection = new DateTime(2026, 8, 31, 6, 0, 0, DateTimeKind.Utc);
-        h.Adapter.PoisonWaits.Add(new PoisonWaitDelta
-        {
-            WaitType = "RESOURCE_SEMAPHORE_QUERY_COMPILE",
-            DeltaMs = 113997,
-            DeltaTasks = 134,
-            AvgMsPerWait = 850.7,
-            CollectionTime = firstCollection
-        });
+        h.Adapter.PoisonWaits.Add(Poison(700_000, waitType: "RESOURCE_SEMAPHORE_QUERY_COMPILE", waits: 134, collected: firstCollection));
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Single(h.Deliverer.Outcomes);
 
         /* Cooldown (5 min default) elapses, but the collector has not produced a new row yet —
-           the adapter still hands back the identical collection_time. Must NOT re-fire. */
+           the adapter still hands back the identical newest collection_time. Must NOT re-fire. */
         h.Now = h.Now.AddMinutes(6);
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Single(h.Deliverer.Outcomes);
 
-        /* A genuinely new collection — even with the identical wait-type/value shape — is a
-           fresh observation of the condition and must fire. */
+        /* A genuinely new collection — even with the identical wait-type/value shape — is a fresh
+           observation of the standing condition and must fire. */
         h.Now = h.Now.AddMinutes(6);
         h.Adapter.PoisonWaits.Clear();
-        h.Adapter.PoisonWaits.Add(new PoisonWaitDelta
-        {
-            WaitType = "RESOURCE_SEMAPHORE_QUERY_COMPILE",
-            DeltaMs = 113997,
-            DeltaTasks = 134,
-            AvgMsPerWait = 850.7,
-            CollectionTime = firstCollection.AddMinutes(7)
-        });
+        h.Adapter.PoisonWaits.Add(Poison(700_000, waitType: "RESOURCE_SEMAPHORE_QUERY_COMPILE", waits: 134, collected: firstCollection.AddMinutes(7)));
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    /// <summary>
+    /// The freshness stamp is taken over the FIRING types only: a quiet type's newer row is not a new
+    /// observation of the type that is over the bar, so it cannot unlock a re-fire on an unrefreshed sum.
+    /// </summary>
+    [Fact]
+    public async Task PoisonWait_FreshnessFollowsTheFiringTypes_NotAQuietSibling()
+    {
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.PoisonWaits.Add(Poison(700_000, waitType: "THREADPOOL", collected: PoisonCollected));
+        h.Adapter.PoisonWaits.Add(Poison(100, waitType: "RESOURCE_SEMAPHORE", collected: PoisonCollected));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(6);
+        h.Adapter.PoisonWaits.Clear();
+        h.Adapter.PoisonWaits.Add(Poison(700_000, waitType: "THREADPOOL", collected: PoisonCollected));
+        h.Adapter.PoisonWaits.Add(Poison(100, waitType: "RESOURCE_SEMAPHORE", collected: PoisonCollected.AddMinutes(5)));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    /// <summary>
+    /// Suppression (acknowledged / silenced server) evaluates but does not deliver, and it tracks the
+    /// condition: the active flag still rises, so the later clear is still an edge; and a suppressed clear
+    /// is silent too — exactly the shape every other family in this engine has.
+    /// </summary>
+    [Fact]
+    public async Task PoisonWait_Suppressed_TracksTheConditionWithoutDelivering()
+    {
+        var h = new Harness();
+        h.Settings.PoisonWaitEnabled = true;
+        var engine = h.Build();
+
+        h.Adapter.PoisonWaits.Add(Poison(700_000));
+        await engine.EvaluateServerAsync(Harness.Snapshot(suppressed: true));
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        h.Adapter.PoisonWaits.Clear();
+        h.Adapter.PoisonWaits.Add(Poison(0, waits: 0, collected: PoisonCollected.AddMinutes(11)));
+        await engine.EvaluateServerAsync(Harness.Snapshot(suppressed: true));
+        Assert.Empty(h.Resolutions);
+
+        /* Unsuppressed and still quiet: the flag already fell, so nothing is announced late. */
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Resolutions);
+        Assert.Empty(h.Deliverer.Outcomes);
     }
 
     /* ---------------- long-running queries ---------------- */
@@ -2350,7 +2568,7 @@ public sealed class AlertEngineTests
             throw new InvalidOperationException("store down");
         public Task<List<DeadlockAlertRow>> GetRecentDeadlocksAsync(string serverKey, int hoursBack, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
-        public Task<List<PoisonWaitDelta>> GetPoisonWaitDeltasAsync(string serverKey, double thresholdMs, CancellationToken cancellationToken = default) =>
+        public Task<List<PoisonWaitAccumulation>> GetPoisonWaitAccumulationAsync(string serverKey, int windowMinutes, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");
         public Task<List<LongRunningQueryInfo>> GetLongRunningQueriesAsync(string serverKey, int thresholdMinutes, int maxResults, bool excludeSpServerDiagnostics, bool excludeWaitFor, bool excludeBackups, bool excludeMiscWaits, bool excludeCdc, IReadOnlyList<string> excludedDatabases, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("store down");

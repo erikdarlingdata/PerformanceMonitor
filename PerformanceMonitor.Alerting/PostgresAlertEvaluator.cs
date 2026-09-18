@@ -128,35 +128,38 @@ public static class PostgresAlertEvaluator
        that no other alert covers. The other candidate there, Lock/Relation, was rejected because a
        relation-level lock wait IS blocking and the #2713 Blocking alert already owns that ground.
 
-       The THRESHOLD SHAPE is deliberately not the SQL Server one. That research also showed why: these
-       events average 1-2 ms per wait at six-figure volumes, so SQL Server's avg-ms-per-wait bar
-       (PoisonWaitThresholdMs) is meaningless against them — high-volume tiny waits never move an average.
-       What identifies the poison state is TOTAL accumulated wait time crossing a bar, normalized to the
-       window so the number reads as "how many backends were continuously stuck, on average". */
+       The THRESHOLD SHAPE was deliberately not the SQL Server one of the time. That research also showed
+       why: these events average 1-2 ms per wait at six-figure volumes, so the avg-ms-per-wait bar SQL
+       Server then used (PoisonWaitThresholdMs) is meaningless against them — high-volume tiny waits never
+       move an average. What identifies the poison state is TOTAL accumulated wait time crossing a bar,
+       normalized to the window so the number reads as "how many backends were continuously stuck, on
+       average".
+
+       #3539 A4 ported this shape BACK to SQL Server — the per-wait average had the mirror-image failure
+       there (one 600 ms wait paged, a storm of short waits slept) — and the three constants below are now
+       ALIASES of the shared definitions on PoisonWaitEvaluator, kept under their old names so the read
+       adapter, the host and the tests that cite them keep compiling. One alert name under one mute key
+       means one thing on both engines; both engines' calibration margins are documented on the shared
+       constants. */
 
     /// <summary>
-    /// The evaluation window, matching the SQL Server poison-wait read's own 10-minute recency window so
-    /// the two engines' alerts answer over the same horizon. The read side sums deltas whose
-    /// collection_time falls inside it; partial coverage (service just started, collector gap) undercounts
-    /// and therefore under-fires — the correct failure direction for an alert that pages.
+    /// The evaluation window — shared with SQL Server; see <see cref="PoisonWaitEvaluator.WindowMinutes"/>
+    /// for the coverage/under-fire reasoning. The read side sums deltas whose collection_time falls inside it.
     /// </summary>
-    public const int PoisonWaitWindowMinutes = 10;
+    public const int PoisonWaitWindowMinutes = PoisonWaitEvaluator.WindowMinutes;
 
     /// <summary>
-    /// Warning fires when accumulated wait time averages one backend continuously stuck across the whole
-    /// window (600 seconds of wait per 10 minutes). Calibrated against the #2711 fleet data: the WORST
-    /// server observed averaged ~0.006 concurrently-waiting backends on IPC:BtreePage over 24h
-    /// (538,850 ms / 86,400 s), so this bar sits ~160x above the worst healthy baseline seen anywhere on
-    /// the fleet — nothing measured to date would have fired it, which is the point: these events are
-    /// near-zero when healthy, and a full backend pinned for ten straight minutes is categorically not that.
+    /// Warning at one backend continuously stuck across the whole window (600 seconds of wait per 10
+    /// minutes) — shared with SQL Server; both engines' measured margins (~160x here, ~100x there) are on
+    /// <see cref="PoisonWaitEvaluator.WarningAvgWaiters"/>.
     /// </summary>
-    public const double PoisonWaitWarningAvgWaiters = 1.0;
+    public const double PoisonWaitWarningAvgWaiters = PoisonWaitEvaluator.WarningAvgWaiters;
 
     /// <summary>
-    /// Critical at ten backends continuously stuck on average — an active contention collapse, where the
-    /// pile-up itself is throttling throughput rather than merely taxing it.
+    /// Critical at ten backends continuously stuck on average — shared with SQL Server; see
+    /// <see cref="PoisonWaitEvaluator.CriticalAvgWaiters"/>.
     /// </summary>
-    public const double PoisonWaitCriticalAvgWaiters = 10.0;
+    public const double PoisonWaitCriticalAvgWaiters = PoisonWaitEvaluator.CriticalAvgWaiters;
 
     /// <summary>
     /// #3444 (V122): the shipped default for <c>deadlocks.pg_count_threshold</c> — how many distinct

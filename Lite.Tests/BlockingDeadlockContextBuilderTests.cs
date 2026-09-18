@@ -517,6 +517,53 @@ public class BlockingDeadlockContextBuilderTests
         Assert.True(typeof(IAlertReadAdapter).IsAssignableFrom(typeof(LiteAlertReadAdapter)));
     }
 
+    /// <summary>
+    /// #3539 A4: Lite's DuckDB poison read is the Darling text in another dialect — same wait types, same
+    /// aggregates in the same column order, same GROUP BY, same parameter positions, and the same three
+    /// ABSENCES (no <c>delta_waiting_tasks &gt; 0</c> filter, no LIMIT, no threshold). Read from source on
+    /// both sides through <see cref="Lite.Tests.ParitySource"/> because Lite.Tests does not reference the Darling
+    /// service project; the Darling-side pins in Darling.Tests hold the same clauses, so a drift on either
+    /// SKU reds one suite or the other.
+    /// </summary>
+    [Fact]
+    public void PoisonWaitAccumulationSql_IsTheDarlingTextInDuckDbDialect()
+    {
+        var lite = LocalDataService.PoisonWaitAccumulationSql;
+        var darling = Lite.Tests.ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Service/DarlingAlertReadAdapter.cs");
+        var darlingSql = darling[darling.IndexOf("public const string PoisonWaitsSql", StringComparison.Ordinal)..];
+        darlingSql = darlingSql[..darlingSql.IndexOf("\";", StringComparison.Ordinal)];
+
+        foreach (var clause in new[]
+        {
+            "wait_type IN ('THREADPOOL', 'RESOURCE_SEMAPHORE', 'RESOURCE_SEMAPHORE_QUERY_COMPILE')",
+            "SUM(delta_wait_time_ms)",
+            "SUM(delta_waiting_tasks)",
+            "COUNT(*)",
+            "MAX(collection_time) AS newest_collection_time",
+            "server_id = $1",
+            "collection_time >= $2",
+            "GROUP BY wait_type",
+            "ORDER BY accumulated_wait_ms DESC",
+        })
+        {
+            Assert.Contains(clause, lite, StringComparison.Ordinal);
+            Assert.Contains(clause, darlingSql, StringComparison.Ordinal);
+        }
+
+        foreach (var absent in new[] { "delta_waiting_tasks > 0", "LIMIT", "avg_ms_per_wait", "sample_interval" })
+        {
+            Assert.DoesNotContain(absent, lite, StringComparison.Ordinal);
+            Assert.DoesNotContain(absent, darlingSql, StringComparison.Ordinal);
+        }
+
+        /* The dialect differences, and only these: Lite reads the v_ view and CASTs DuckDB's HUGEINT sums
+           back to BIGINT; Darling reads the raw table and uses the ::bigint form. */
+        Assert.Contains("FROM v_wait_stats", lite, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(delta_wait_time_ms) AS BIGINT)", lite, StringComparison.Ordinal);
+        Assert.Contains("FROM wait_stats", darlingSql, StringComparison.Ordinal);
+        Assert.Contains("SUM(delta_wait_time_ms)::bigint", darlingSql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void LiteAlertReadAdapter_ExposesAllSevenCollectedFeeds()
     {
@@ -526,8 +573,9 @@ public class BlockingDeadlockContextBuilderTests
             typeof(LiteAlertReadAdapter).GetMethod("GetRecentBlockedProcessReportsAsync")!.ReturnType);
         Assert.Equal(typeof(Task<List<DeadlockAlertRow>>),
             typeof(LiteAlertReadAdapter).GetMethod("GetRecentDeadlocksAsync")!.ReturnType);
-        Assert.Equal(typeof(Task<List<PoisonWaitDelta>>),
-            typeof(LiteAlertReadAdapter).GetMethod("GetPoisonWaitDeltasAsync")!.ReturnType);
+        /* #3539 A4: the poison feed is a window ACCUMULATION per wait type now, not the newest deltas. */
+        Assert.Equal(typeof(Task<List<PoisonWaitAccumulation>>),
+            typeof(LiteAlertReadAdapter).GetMethod("GetPoisonWaitAccumulationAsync")!.ReturnType);
         Assert.Equal(typeof(Task<List<LongRunningQueryInfo>>),
             typeof(LiteAlertReadAdapter).GetMethod("GetLongRunningQueriesAsync")!.ReturnType);
         Assert.Equal(typeof(Task<List<VolumeFreeSpaceInfo>>),
