@@ -432,7 +432,11 @@ public sealed class ForcePlanTargetStateTests : IClassFixture<SharedDuckDbFixtur
         /* The VALUES rows: Postgres needs the casts, DuckDB does not; the ordinals are the same. */
         Assert.Equal("($3, $4, $5)", ForcePlanTargetStateReader.ValuesRow(0));
         Assert.Equal("($6, $7, $8)", ForcePlanTargetStateReader.ValuesRow(1));
-        Assert.Contains("($3::text, $4::bigint, $5::bigint)", darling, StringComparison.Ordinal);
+        /* The Darling row is built by interpolation, so the source reads `${3 + index * 3}::text` — pin the
+           cast spellings as written rather than a rendered row the source never contains. */
+        Assert.Contains("}::text, ${", darling, StringComparison.Ordinal);
+        Assert.Contains("}::bigint, ${", darling, StringComparison.Ordinal);
+        Assert.Contains("}::bigint)\"", darling, StringComparison.Ordinal);
         Assert.Contains("VALUES ($3, $4, $5), ($6, $7, $8)", ForcePlanTargetStateReader.BuildSql(2), StringComparison.Ordinal);
 
         /* Both scans are bounded by the bound $2, never now(). */
