@@ -88,17 +88,19 @@ public class FactScorer
         // (thread exhaustion), SOS_SCHEDULER_YIELD (CPU starvation), or RESOURCE_SEMAPHORE (grant
         // starvation) — because then the parallelism genuinely IS driving an outage and CRITICAL is
         // earned. "Co-fired" must mean SIGNIFICANT, not merely present. Only THREADPOOL's base is
-        // self-gating: ScoreWaitFact requires >= 1hr total AND >= 1s avg before THREADPOOL scores at
-        // all, so BaseSeverity > 0 there already means real exhaustion — keep the presence check.
-        // SOS_SCHEDULER_YIELD (0.75, null) and RESOURCE_SEMAPHORE (0.01, null) have NO minimum guard,
-        // so their BaseSeverity > 0 fires on ANY trace of the wait; and SOS physically co-occurs with
+        // self-gating: ScoreWaitFact requires >= 15 min per observed hour AND >= 1s avg before THREADPOOL
+        // scores at all, so BaseSeverity > 0 there already means real exhaustion — keep the presence
+        // check. SOS_SCHEDULER_YIELD (0.75, null) and RESOURCE_SEMAPHORE (0.01, 0.10) have NO minimum
+        // guard, so their BaseSeverity > 0 fires on ANY trace of the wait; and SOS physically co-occurs with
         // high CXPACKET (parallel workers yield -> SOS) and is emitted for any delta_wait_time_ms > 0,
         // so a trivial SOS (e.g. 500ms over an hour) would release the cap on exactly the busy servers
         // the cap targets — re-admitting the CXPACKET=CRITICAL noise the cap exists to kill. Gate
         // SOS/RS on SIGNIFICANCE (fraction of period) via the same HasSignificantWait helper the
         // amplifiers use, not on mere presence: SOS at 0.25 (matches the CXPACKET SOS amplifier bar);
         // RS at 0.10 (RESOURCE_SEMAPHORE has no HasSignificantWait amplifier bar, so pick a bar here —
-        // 0.10 of period is meaningful grant starvation). Caps numeric Severity only — SeverityBand is
+        // 0.10 of period is meaningful grant starvation, and since #3538 A5 it is also the wait's own
+        // CRITICAL bar in GetWaitThresholds, so "significant enough to release the cap" and "saturated"
+        // are one number). Caps numeric Severity only — SeverityBand is
         // derived from it downstream, so a capped fact stays in WARNING without a separate band edit
         // and Lite parity is preserved.
         var impactPeerCoFired =
@@ -133,7 +135,8 @@ public class FactScorer
 
     /// <summary>
     /// Scores a wait fact using the fraction-of-period formula.
-    /// Some waits have absolute minimum thresholds to filter out background noise.
+    /// Two waits (THREADPOOL, PAGELATCH_UP) carry a minimum-wait gate expressed PER OBSERVED HOUR so the
+    /// same server reads the same at every <c>hours_back</c> (#3538 A7).
     /// </summary>
     private static double ScoreWaitFact(Fact fact)
     {
@@ -141,32 +144,63 @@ public class FactScorer
         if (fraction <= 0) return 0.0;
 
         // THREADPOOL: require both meaningful total wait time AND meaningful average.
-        // Tiny amounts are normal thread pool grow/shrink housekeeping, not exhaustion.
+        // Tiny amounts are normal thread pool grow/shrink housekeeping, not exhaustion. The total is
+        // judged per observed hour (ThreadpoolMinWaitMsPerObservedHour) — see the constant for why
+        // the pre-#3538 absolute 1 h bar meant "a quarter of the window" at 4 h, "the whole window" at
+        // 1 h and "0.6% of the window" at 168 h.
         if (fact.Key == "THREADPOOL")
         {
             var waitTimeMs = fact.Metadata.GetValueOrDefault("wait_time_ms");
             var avgMs = fact.Metadata.GetValueOrDefault("avg_ms_per_wait");
-            if (waitTimeMs < 3_600_000 || avgMs < 1_000) return 0.0;
+            if (waitTimeMs / ObservedHours(fact) < ThreadpoolMinWaitMsPerObservedHour
+                || avgMs < ThreadpoolMinAvgMsPerWait) return 0.0;
         }
 
-        // PAGELATCH_UP (tempdb allocation contention) is scored on ABSOLUTE wait_time_ms, not
+        // PAGELATCH_UP (tempdb allocation contention) is scored on wait_time_ms PER OBSERVED HOUR, not
         // fraction-of-period, because its source — the Dashboard's report.tempdb_contention_analysis
-        // contention_level CASE — trips on an absolute PAGELATCH_UP total (install/47:2515:
-        // pagelatch_up_ms > 10000 -> "MEDIUM - PAGELATCH_UP contention"). PAGELATCH_UP is the canonical
-        // PFS/GAM/SGAM allocation-page latch (the fix is add tempdb data files / TF 1118), and the source
-        // reads the SAME server-wide wait_stats this fact is built from, so scoring the wait total is a
-        // faithful port. Flat 0.5 (MEDIUM) at the source's single PAGELATCH_UP tier — there is no higher
-        // band for it there; the view's CRITICAL "allocation contention" comes from a tempdb-scoped
-        // dm_os_waiting_tasks flag (allocation_contention_warning, install/47:2503) that is NOT carried in
-        // this fact. Absolute-ms is consistent with the THREADPOOL gate just above (the analysis window is
-        // hours-scale; the source's window is 1 hour).
+        // contention_level CASE — trips on a PAGELATCH_UP total over the last hour (install/47:2411 reads
+        // collect.wait_stats WHERE collection_time >= DATEADD(HOUR, -1, ...); :2515: pagelatch_up_ms >
+        // 10000 -> "MEDIUM - PAGELATCH_UP contention"). PAGELATCH_UP is the canonical PFS/GAM/SGAM
+        // allocation-page latch (the fix is add tempdb data files / TF 1118), and the source reads the
+        // SAME server-wide wait_stats this fact is built from, so scoring the hourly wait total is a
+        // faithful port — the pre-#3538 form applied the source's one-hour bar to the WHOLE analysis
+        // window and so was 4x more sensitive than its source at the default 4 h and 168x at a week
+        // (PagelatchUpMinWaitMsPerObservedHour has the measurement). Flat 0.5 (MEDIUM) at the source's
+        // single PAGELATCH_UP tier — there is no higher band for it there; the view's CRITICAL
+        // "allocation contention" comes from a tempdb-scoped dm_os_waiting_tasks flag
+        // (allocation_contention_warning, install/47:2503) that is NOT carried in this fact.
         if (fact.Key == "PAGELATCH_UP")
-            return fact.Metadata.GetValueOrDefault("wait_time_ms") > 10_000 ? 0.5 : 0.0;
+            return fact.Metadata.GetValueOrDefault("wait_time_ms") / ObservedHours(fact) > PagelatchUpMinWaitMsPerObservedHour
+                ? 0.5 : 0.0;
 
         var thresholds = GetWaitThresholds(fact.Key);
         if (thresholds == null) return 0.0;
 
         return ApplyThresholdFormula(fraction, thresholds.Value.concerning, thresholds.Value.critical);
+    }
+
+    /// <summary>
+    /// The hours the collector actually observed inside the window a wait fact was summed over — the
+    /// divisor for the per-hour gates above (#3538 A7). Read from the fact's own metadata rather than
+    /// from <see cref="AnalysisContext"/>, which the scorer never sees: every wait fact carries
+    /// <c>period_duration_ms</c> (the nominal window) and, from a collector that stamps coverage (#3538
+    /// A2), <c>coverage_fraction</c>; their product is the observed time (see
+    /// <see cref="FactCollectorHelpers.AddCoverageFraction"/> for why the divisor travels under that
+    /// name). A collector that stamps no coverage — the frozen Dashboard twin — divides by its nominal
+    /// window, which is exactly what its own fractions do.
+    ///
+    /// <para>A fact with no <c>period_duration_ms</c> at all is read as a ONE-HOUR window. Every collector
+    /// stamps the period, so only a hand-built fact lacks it; reading it as one hour makes the per-hour
+    /// bars read as plain totals (10 s of PAGELATCH_UP, 15 min of THREADPOOL), which is the one reading a
+    /// fact with no window can honestly have.</para>
+    /// </summary>
+    private static double ObservedHours(Fact fact)
+    {
+        var periodMs = fact.Metadata.GetValueOrDefault("period_duration_ms");
+        if (periodMs <= 0) return 1.0;
+        var coverage = fact.Metadata.GetValueOrDefault("coverage_fraction", 1.0);
+        var observedMs = coverage > 0 ? periodMs * coverage : periodMs;
+        return observedMs / 3_600_000.0;
     }
 
     /// <summary>
@@ -179,10 +213,27 @@ public class FactScorer
 
         return fact.Key switch
         {
-            // Blocking: concerning >10/hr, critical >50/hr
+            // Blocking: concerning >10/hr, critical >50/hr. Inherited, not measured here. The alerting
+            // layer's blocking band (ServerHealthThresholds.BlockingWarnPerHour / BlockingCriticalPerHour
+            // in PerformanceMonitor.Common/ServerHealthBands.cs, #3539 A3) measured 14 days of
+            // blocked_process_reports on the same 43-server fleet and placed its WARNING at 5/hr and
+            // CRITICAL at 20/hr; this pair sits 2-2.5x above it and was deliberately NOT moved in the
+            // #3538 A5 pass — the scorer's blocking story reaches CRITICAL through its amplifiers
+            // (sleeping head blocker, lock waits, deadlocks) rather than on the count alone, so the two ladders
+            // are not the same instrument and aligning them is a decision on its own evidence.
             "BLOCKING_EVENTS" => ApplyThresholdFormula(value, 10, 50),
-            // Deadlocks: concerning >5/hr (no critical — any sustained deadlocking is bad)
-            "DEADLOCKS" => ApplyThresholdFormula(value, 5, null),
+            // Deadlocks: 5/hr concerning, 20/hr critical — the SAME pair the alerting layer derived from
+            // 14 days of collect.deadlocks on the 43-server dogfood fleet (2,722 deadlocks over 14,448
+            // server-hours; ServerHealthThresholds.DeadlockWarnPerHourDefault /
+            // DeadlockCriticalPerHourDefault in PerformanceMonitor.Common/ServerHealthBands.cs, #3368):
+            // 5/hr is the 99.94th percentile of server-hours (99.1% hold at most two), and 20/hr sits
+            // inside the measured empty interval [16, 89] between the routine mode (which tops out at 15)
+            // and the storms (90, 102). The pre-#3538 pair was (5, null) — base saturated at 1.0 the moment
+            // the WARNING bar was reached, so 5/hr and 90/hr scored identically and the CRITICAL band was
+            // reachable only through amplifiers. Now 5/hr roots a story at 0.5 and the storm mode
+            // saturates at 1.0. The literals are repeated rather than bound because this assembly does
+            // not reference PerformanceMonitor.Common; FactScorerTests pins the two pairs equal.
+            "DEADLOCKS" => ApplyThresholdFormula(value, 5, 20),
             // Blocking chain: scored by structural magnitude. Value = worst-chain depth >= 1
             // for any emitted chain, so the value<=0 guard above never trips this arm.
             "BLOCKING_CHAIN" => ScoreBlockingChain(fact),
@@ -600,7 +651,13 @@ public class FactScorer
     }
 
     // Wait-profile severity ramp (see the ANOMALY_WAIT_PROFILE arm). Floor matches the detectors'
-    // DefaultRatioThreshold; these are HONEST per-second-scale starting values — CALIBRATE ON SQL2025/HAMMERDB.
+    // DefaultRatioThreshold; these are HONEST per-second-scale starting values. UNCALIBRATED as of the
+    // 2026-09 dogfood measurement (#3538 A5): that pass measured each wait TYPE's fraction of a 4-hour
+    // window (the statistic GetWaitThresholds grades) over 1,075 server-windows, not the all-types
+    // ms/sec PEAK-over-baseline-mean ratio this ramp grades, so none of its figures transfers here.
+    // Calibrating this ramp needs the wait-profile detector's own ratio distribution over the fleet —
+    // per server-window, peak ms/sec ÷ the hour-of-week baseline mean — which is one more column on the
+    // same read, not a different instrument; until it is read, 4x/12x stand as reasoned values.
     private const double WaitProfileRatioFloor = 4.0;
     private const double WaitProfileRatioSpan = 8.0;
 
@@ -608,8 +665,58 @@ public class FactScorer
     // on a thin baseline (baseline_low_quality=1) the stored deviation_sigma is the real (small) z that the
     // 2σ gate would zero out — so grade off the absolute exceedance (peak ÷ the absolute-fallback bar, which
     // is >= 1.0 on a fire) instead: floor 0.5 AT the bar (clears InferenceEngine's 0.5 entry-point), ramping
-    // to 1.0 at 2× the bar. Sensible default — CALIBRATE ON SQL2025/HAMMERDB.
+    // to 1.0 at 2× the bar. UNCALIBRATED as of the 2026-09 dogfood measurement, which read wait fractions
+    // and never the fallback exceedance: this path grades a store whose baseline is too thin to trust,
+    // which is a fresh install's first days, and the measured fleet is not that. The 2x-the-bar span is
+    // a reasoned shape (the same 2x every deviation ramp saturates at), not a measured one, and the
+    // measurement that would calibrate it is a young store's exceedance distribution, not more fleet.
     private const double LowQualityFallbackSpan = 1.0;
+
+    /* #3538 A7: the per-observed-hour gates two wait facts carry before their fraction is graded. Both
+       were absolute totals before — THREADPOOL >= 3,600,000 ms, PAGELATCH_UP > 10,000 ms — applied to
+       whatever window the caller asked for, so hours_back changed the verdict on an unchanged server:
+       a THREADPOOL total that is a quarter of a 4 h window (the shipped default, where these were tuned)
+       is the WHOLE of a 1 h window and 0.6% of a 168 h one, while a PAGELATCH_UP bar meant for one hour
+       of wait_stats was met by 42x the exposure at a week. Dividing by ObservedHours(fact) makes the
+       same per-hour rate score the same at every window; dividing by OBSERVED rather than nominal hours
+       (#3538 A2) keeps collector downtime from deflating the rate the way it deflated the fractions. */
+
+    /// <summary>
+    /// THREADPOOL: the wait total per observed hour below which the fact is thread-pool housekeeping,
+    /// not exhaustion. 15 min/hr is the pre-#3538 absolute 1 h bar expressed at the 4 h default window it
+    /// was tuned on — identical behaviour there, window-invariant everywhere else. In fraction terms it
+    /// is 0.25 of observed time (the numerator sums concurrent waiters, so this is "a quarter of the
+    /// schedulers' worth of tasks parked for want of a worker"), which is why THREADPOOL's
+    /// GetWaitThresholds pair (0.01, null) is dominated by this gate: any fact that clears it has already
+    /// saturated its fraction ramp. Fleet lineage (2026-09, 43 servers, 4 days, 405 non-zero server-hours):
+    /// THREADPOOL per hour p50 6 ms, p99 488 ms, max 5,801 ms — the worst hour measured is 0.6% of this
+    /// bar, and no hour reached the old 3,600,000 ms either. The bar is set by what exhaustion IS, not by
+    /// where the healthy fleet sits; the measurement says only that nothing routine approaches it.
+    /// </summary>
+    private const double ThreadpoolMinWaitMsPerObservedHour = 900_000;
+
+    /// <summary>
+    /// THREADPOOL: the minimum average wait per task. A one-second average means tasks are genuinely
+    /// queued for a worker, not briefly parked during pool growth. Unchanged from the pre-#3538 gate and
+    /// not a rate, so it needs no window scaling. Fleet lineage: max avg_ms_per_wait on any THREADPOOL
+    /// row in the 4-day pass was 247.5 ms.
+    /// </summary>
+    private const double ThreadpoolMinAvgMsPerWait = 1_000;
+
+    /// <summary>
+    /// PAGELATCH_UP: the wait total per observed hour above which the fact scores its flat 0.5. 10 s/hr is
+    /// the ported source's own bar at the ported source's own window — report.tempdb_contention_analysis
+    /// sums PAGELATCH_UP over collect.wait_stats for the LAST HOUR (install/47:2411) and trips at
+    /// &gt; 10000 ms (:2515) — so this is the port made faithful, not a re-derivation. Fleet lineage (2026-09,
+    /// 1,075 server-4h-windows): PAGELATCH_UP per 4 h p50 35.5 ms, p90 1,091 ms, p99 5,830 ms, max
+    /// 14,274 ms; the old absolute &gt; 10,000 ms fired on 2 of those windows (0.19%), both of them under 3.6 s
+    /// per hour — they fired only because the bar meant for one hour was being applied to four. Under the
+    /// hourly form no measured window reaches it. The alternative — 2.5 s/hr, which would have kept the
+    /// 4 h default firing on exactly those two windows — was rejected because that sensitivity was an
+    /// accident of the default window length, never a calibrated choice. What this cannot see: a 10 s
+    /// burst inside one hour of a longer window averages out (the per-sample-vs-window class, #3538 A8).
+    /// </summary>
+    private const double PagelatchUpMinWaitMsPerObservedHour = 10_000;
 
     // Layer-3 tuning-class severity ceiling (see ScoreAll). Parallelism/anomaly signals describe a tuning
     // opportunity, not an outage — their FINAL severity is capped here (bands are >= 1.5 CRITICAL) unless an
@@ -776,7 +883,8 @@ public class FactScorer
         // (peak window all-types ms/sec ÷ baseline mean), so the ramp is far smaller than the old
         // 5×/20× that was calibrated to a ~240×-inflated per-hour-vs-per-interval input: 4× → 0.5,
         // saturating to 1.0 at 12×. Starting values matching the detectors' DefaultRatioThreshold;
-        // CALIBRATE ON THE SQL2025/HAMMERDB BOX.
+        // still uncalibrated — see WaitProfileRatioFloor for what the 2026-09 fleet pass did and did not
+        // measure, and which read would calibrate this ramp.
         if (fact.Key.StartsWith("ANOMALY_WAIT_PROFILE", StringComparison.OrdinalIgnoreCase))
         {
             /* #1743: detectors with robust baselines fire this fact on the MODIFIED z-score, and
@@ -1660,56 +1768,167 @@ public class FactScorer
     }
 
     /// <summary>
-    /// Default thresholds for wait types (fraction of examined period).
-    /// Returns null for unrecognized waits — they get severity 0.
+    /// Thresholds for wait types: (concerning, critical) as a FRACTION of the observed period, graded by
+    /// <see cref="ApplyThresholdFormula"/> — 0.5 at concerning (the InferenceEngine root entry point),
+    /// 1.0 at critical; a null critical saturates at concerning. Returns null for a wait type with no
+    /// entry — the fact scores 0, stays a context fact, and can never root a story.
+    ///
+    /// <para><b>Every entry carries its measurement lineage (#3538 A5).</b> The population is the
+    /// 2026-09 dogfood read: 43 SQL Server primaries on one production store class, 4 days of
+    /// <c>wait_stats</c> bucketed into 1,075 server-4-hour windows, each wait type's
+    /// <c>SUM(delta_wait_time_ms) ÷ (4 h)</c> — the same fraction-of-period this method grades, divided by
+    /// the NOMINAL window; the collectors now divide by OBSERVED time (#3538 A2), so the fleet figures are
+    /// the lower-bound reading of what a fully-collected window shows the scorer, and a partly-collected
+    /// one reads higher. Percentiles are over the non-zero windows; "fires on N of 1,075" counts every
+    /// window. Where the fleet does not exhibit a wait, the entry says "unmeasured" — an honest lineage
+    /// includes what the data could not calibrate, and a bar on an absent wait is set by what the wait
+    /// MEANS, not by where a fleet that never sees it sits.</para>
+    ///
+    /// <para><b>The method, from the alerting layer's bands (ServerHealthBands.cs, #3368):</b> the
+    /// concerning bar sits at the top of the routine mode (≈ p99 of windows), so a typical window bands
+    /// nothing and about one window in a hundred roots a story; the critical bar sits inside a measured
+    /// empty interval — above every window measured — so nothing routine can saturate. A pair with a null
+    /// critical is one the method did not need to ramp: either the bar is already at p99.9 (SOS), or the
+    /// fleet never approaches it (the PAGEIOLATCH / CXPACKET / LCK_M_S / LCK_M_IS family), and lowering a
+    /// bar on one fleet's silence would be calibrating to an absence.</para>
+    ///
+    /// <para><b>What the fraction is, and is not.</b> The numerator sums the wait time of every CONCURRENT
+    /// task, so a fraction above 1.0 is legal and the same 0.25 means different things on 4 schedulers and
+    /// on 64 (the measurement lane's A3 note, documented on the collectors). The bars here are calibrated
+    /// on the fleet's RAW fraction — normalising by scheduler count would re-scale every measured figure
+    /// and needs its own read, so it is deliberately not done here.</para>
+    ///
+    /// <para><b>The one measurably over-firing constant was WRITELOG.</b> Its inherited (0.10, null)
+    /// saturated base 1.0 in 339 of 1,075 windows (31.5%) — a third of routine windows on a commit-heavy
+    /// OLTP fleet read as a saturated log-flush finding. Nothing else in the table fired on more than 2
+    /// windows in 1,075.</para>
     /// </summary>
     private static (double concerning, double? critical)? GetWaitThresholds(string waitType)
     {
         return waitType switch
         {
-            // CPU pressure
+            // ── CPU pressure ──
+            // Measured: p50 0.088, p90 0.335, p99 0.603, p99.9 0.744, max 0.835; 1 of 1,075 windows
+            // reaches 0.75. The inherited bar sits at the 99.9th percentile of the fleet — kept as is.
+            // No critical: SOS is the CPU story's root and reaches CRITICAL through its amplifiers
+            // (CPU %, CXPACKET, THREADPOOL), not on its own fraction.
             "SOS_SCHEDULER_YIELD" => (0.75, null),
+            // Dominated by the ScoreWaitFact gate (ThreadpoolMinWaitMsPerObservedHour = 0.25 of observed
+            // time + 1 s average): any THREADPOOL fact that clears the gate has fraction >= 0.25 and
+            // saturates here, so THREADPOOL's base is effectively 0 or 1.0 — deliberately: exhaustion is
+            // an outage, not a gradient. Measured: max fraction 4.1e-4 (295 non-zero windows); the gate's
+            // own lineage is on the constant. Not ramped with the other 0.01 entries because the gate
+            // already refuses to let a trace score at all.
             "THREADPOOL"          => (0.01, null),
 
-            // Memory pressure
+            // ── Memory pressure ──
+            // Measured: SH p50 0.012, p90 0.047, p99 0.098, max 0.154 (10 windows >= 0.10, 0 >= 0.25);
+            // EX p99 0.046, max 0.093. Neither reaches the inherited bar on this fleet — a buffer pool
+            // that fits its working set. Conservative, not wrong; lineage only, not lowered on silence.
             "PAGEIOLATCH_SH"      => (0.25, null),
             "PAGEIOLATCH_EX"      => (0.25, null),
-            "RESOURCE_SEMAPHORE"  => (0.01, null),
-            // Query-compile memory pressure — ramped: healthy servers see some compile-gateway
-            // waits, so 1% of period is concerning but 10% is critical.
+            // Unmeasured: RESOURCE_SEMAPHORE accrued ZERO wait time in 4 days on 43 servers, so the fleet
+            // cannot place its concerning bar; it can only say what the inherited (0.01, null) did — base
+            // 1.0 at 36 s of grant queueing per hour, on ANY trace — and that the ramp shape RS_QUERY_COMPILE
+            // already carries is the honest one: 1% of observed time queued for a grant roots a story at
+            // 0.5, and 10% (the Layer-3 cap-release bar in ScoreAll, "meaningful grant starvation")
+            // saturates. The 0.01 floor is kept because a trace of RESOURCE_SEMAPHORE IS abnormal on a
+            // healthy server (the fleet's zero says so); the ramp stops a trace from reading as a storm.
+            "RESOURCE_SEMAPHORE"  => (0.01, 0.10),
+            // Query-compile memory pressure — ramped: healthy servers see some compile-gateway waits, so
+            // 1% of period is concerning but 10% is critical. Measured: 4 non-zero windows on 1 server,
+            // max 2.2e-4 (a scheduled compile burst, ~3 s at the same hour daily) — under the floor.
             "RESOURCE_SEMAPHORE_QUERY_COMPILE" => (0.01, 0.10),
 
-            // Parallelism (CXCONSUMER is grouped into CXPACKET by collector)
+            // ── Parallelism (every CX* wait is grouped into CXPACKET by the collector) ──
+            // Measured: 25 non-zero windows, max 0.0187 (CXPACKET) / 0.068 (CXCONSUMER) — this fleet runs
+            // little parallelism, so the bar is unmeasured in the sense that matters. Inherited; the
+            // Layer-3 tuning-class cap, not this bar, is what keeps parallelism out of the CRITICAL band.
             "CXPACKET"            => (0.25, null),
 
-            // Log I/O
-            "WRITELOG"            => (0.10, null),
+            // ── Log I/O ──
+            // RE-DERIVED (#3538 A5). Inherited (0.10, null) saturated base 1.0 on 339 of 1,075 windows
+            // (31.5%): p50 0.065, p90 0.163, p99 0.243, p99.9 0.302, max 0.313 — WRITELOG is this OLTP
+            // fleet's steady-state commit cost, present in every window, and the bar sat below its median
+            // times two. Concerning 0.25 ≈ p99: 10 of 1,075 windows (0.9%) reach 0.5 and root a story —
+            // the top of the routine mode, the method's WARNING placement. Critical 0.50: above every
+            // window measured (1.6x the max), and half of observed time spent in log-flush waits summed
+            // across committers is a log that is genuinely not keeping up. The fleet's worst window
+            // (0.313) scores 0.63 — a WARNING that roots, not a CRITICAL. The IO_WRITE_LATENCY_MS
+            // amplifier's corroboration bar (HasSignificantWait 0.05) is a different question — "is
+            // WRITELOG present enough to confirm a write-latency finding" — and is not moved by this.
+            "WRITELOG"            => (0.25, 0.50),
 
-            // Lock waits — serializable/repeatable read lock modes
-            "LCK_M_RS_S"  => (0.01, null),
-            "LCK_M_RS_U"  => (0.01, null),
-            "LCK_M_RIn_NL" => (0.01, null),
-            "LCK_M_RIn_S" => (0.01, null),
-            "LCK_M_RIn_U" => (0.01, null),
-            "LCK_M_RIn_X" => (0.01, null),
-            "LCK_M_RX_S"  => (0.01, null),
-            "LCK_M_RX_U"  => (0.01, null),
-            "LCK_M_RX_X"  => (0.01, null),
+            // ── Availability-group synchronous commit ──
+            // NEW (#3538 A5). The second-largest wait on the fleet and, before this entry, invisible to the
+            // engine: measured in 1,050 of 1,075 windows, p50 0.045, p90 0.129, p99 0.288, p99.9 0.474,
+            // max 0.591; 14 windows >= 0.25. HADR_SYNC_COMMIT is the primary waiting for a synchronous
+            // secondary to harden the log before a commit can return — the AG sibling of WRITELOG, and on
+            // an AG fleet the larger half of commit latency. Concerning 0.30 ≈ p99 (≈ 1% of windows root);
+            // critical 0.50 sits between p99.9 (0.474) and the max (0.591), so only the single worst
+            // window measured saturates. Ramped, because every window carries some of it and a null
+            // critical would make a routine 0.30 read the same as a 0.59 replica stall. The advice is
+            // evidence-gated and names the counter-objective (FactAdvice): synchronous commit is a
+            // durability policy, and the remediation is never "switch to async".
+            "HADR_SYNC_COMMIT"    => (0.30, 0.50),
 
-            // Reader/writer blocking locks
+            // ── Lock waits: serializable / repeatable-read range-lock modes ──
+            // RAMPED (#3538 A5) from the inherited (0.01, null), which saturated base 1.0 on any trace — 36 s
+            // of range-lock waiting per hour read as a saturated finding. A range lock IS abnormal (it
+            // means SERIALIZABLE, which nothing should be running by accident), so the 0.01 floor stays;
+            // the ramp to 0.10 lets a trace root at 0.5 while only sustained range-locking saturates.
+            // Measured: RS_U max 0.00118 (553 non-zero windows), RS_S max 0.00032 (14 windows) — both
+            // under the floor; RIn_* and RX_* did not reach the measurement's top-70 cut, so their bars
+            // are unmeasured and inherited by shape from RS_*.
+            "LCK_M_RS_S"  => (0.01, 0.10),
+            "LCK_M_RS_U"  => (0.01, 0.10),
+            "LCK_M_RIn_NL" => (0.01, 0.10),
+            "LCK_M_RIn_S" => (0.01, 0.10),
+            "LCK_M_RIn_U" => (0.01, 0.10),
+            "LCK_M_RIn_X" => (0.01, 0.10),
+            "LCK_M_RX_S"  => (0.01, 0.10),
+            "LCK_M_RX_U"  => (0.01, 0.10),
+            "LCK_M_RX_X"  => (0.01, 0.10),
+
+            // ── Reader/writer blocking locks (the RCSI signal) ──
+            // Measured: LCK_M_S max 8.6e-4 (971 windows), LCK_M_IS max 0.0117 (104 windows) — never within
+            // 4x of the inherited bar. Conservative; lineage only.
             "LCK_M_S"  => (0.05, null),
             "LCK_M_IS" => (0.05, null),
 
-            // General lock contention (grouped X, U, IX, SIX, BU, etc.)
+            // ── General lock contention (X, U, IX, SIX, BU, ... grouped into LCK by the collector) ──
+            // Measured per constituent, not as the grouped sum the scorer sees: LCK_M_U max 0.129 (1 window
+            // >= 0.10), LCK_M_IX max 0.048, LCK_M_X max 0.020. The grouped fraction is their sum, so at most
+            // a handful of windows reach 0.10 on this fleet. Inherited; lineage only.
             "LCK" => (0.10, null),
 
-            // Schema locks — DDL operations, index rebuilds
-            "SCH_M" => (0.01, null),
+            // ── Schema locks — DDL, index rebuilds ──
+            // RAMPED (#3538 A5) from (0.01, null) for the same reason as the range locks: a trace of SCH_M
+            // during maintenance saturated a finding. Unmeasured: below the measurement's top-70 cut
+            // (< 1.7e-4 in every window).
+            "SCH_M" => (0.01, 0.10),
 
-            // Latch contention — page latch (not I/O latch) indicates
-            // in-memory contention, often TempDB allocation or hot pages
+            // ── Latch contention (page latch, not I/O latch — in-memory hot pages, tempdb allocation) ──
+            // Measured: LATCH_EX p99 0.0051, p99.9 0.351, max 0.378 — 2 of 1,075 windows (0.19%) reach the
+            // inherited 0.25, a heavy tail on an otherwise silent wait. At the bar already; kept. LATCH_SH
+            // did not reach the top-70 cut: unmeasured, inherited.
             "LATCH_EX" => (0.25, null),
             "LATCH_SH" => (0.25, null),
+
+            // ── Benign by measurement: no bar, spelled out so nobody adds one ──
+            // PREEMPTIVE_OS_QUERYREGISTRY is the fleet's #7 wait by fraction (present in ALL 1,075 windows,
+            // p50 0.016, p90 0.067, p99 0.114, max 0.175) and is fleet-UNIFORM: ~152,881 waiting tasks per
+            // hour per server (min 10,011, max 293,171), ~1 ms each — about 42 registry queries a second on
+            // every server around the clock, unrelated to workload and not this product's collectors (the
+            // agent-status collector's dm_server_services reads are ~36/hr, 0.02% of it). Uniformity at
+            // that rate is the managed platform's own service/state polling. A bar on it either never
+            // fires or fires on platform noise, so it has NO threshold — the same outcome the default arm
+            // below gives every unlisted wait, written as an entry so the measurement travels with the
+            // decision. (This is the scorer's benign tier; it is unrelated to sp_HealthParser's
+            // #ignore_waits copy in SystemHealthSignificance, which gates discrete >= 500 ms XE wait_info
+            // events that a 1 ms registry call can never produce, and to the collector-side
+            // IgnoredWaitDefaults, which decides what is STORED and is a collection-policy list.)
+            "PREEMPTIVE_OS_QUERYREGISTRY" => null,
 
             _ => null
         };

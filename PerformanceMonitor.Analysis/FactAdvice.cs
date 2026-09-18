@@ -172,7 +172,7 @@ public static class FactAdvice
             "MEMORY_GRANT_PENDING" => ComposeMemoryGrantPending(factsByKey),
             "QUERY_SPILLS" => ComposeQuerySpills(factsByKey),
             // Simple wait-type blocks: each states its own wait totals, with a clean concept + fix.
-            "RESOURCE_SEMAPHORE" or "RESOURCE_SEMAPHORE_QUERY_COMPILE" or "WRITELOG"
+            "RESOURCE_SEMAPHORE" or "RESOURCE_SEMAPHORE_QUERY_COMPILE" or "WRITELOG" or "HADR_SYNC_COMMIT"
                 or "LATCH_EX" or "LATCH_SH" or "PAGELATCH_UP" or "LCK_M_S" or "LCK_M_IS"
                 => ComposeWaitByKey(rootFactKey, factsByKey),
             // Query-level: state the cost-swing ratio / regression factor / tempdb driver the engine
@@ -913,6 +913,10 @@ public static class FactAdvice
             "Transaction log flushes are slow — WRITELOG",
             "WRITELOG is time spent waiting for the transaction log to harden to disk on commit. Sustained WRITELOG points at slow log storage or a commit-heavy workload doing many tiny transactions, each forcing its own flush.",
             "Put the transaction log on the fastest storage available — write latency matters far more than throughput here — and batch tiny transactions where the application allows, so fewer, larger commits flush less often. Confirm the log is not autogrowing in small increments under load."),
+        "HADR_SYNC_COMMIT" => ComposeSimpleWait(facts, key, "Synchronous-commit waits",
+            "Commits are waiting on a synchronous availability-group secondary — HADR_SYNC_COMMIT",
+            "HADR_SYNC_COMMIT is the time a committing transaction on the primary spends waiting for a synchronous-commit secondary to acknowledge that it has hardened the log block. It is the availability-group half of commit latency — the local log flush is WRITELOG — so on a synchronous AG every commit pays both. Sustained HADR_SYNC_COMMIT means the round trip to the secondary is slow: the secondary's own log write, the network between the replicas, or a secondary that is busy with redo or with readable-secondary queries and is slow to harden.",
+            "Measure the replica side before touching the primary: the secondary's transaction-log write latency and its redo queue, and the network latency between the replicas. A secondary whose log sits on slower storage than the primary's, or in another region, sets the primary's commit latency — fix that, not the primary. Then review which databases actually need synchronous commit: it is a durability and failover-readiness POLICY (zero data loss on failover), and only the databases whose recovery-point objective requires it should carry it; the rest can be asynchronous by design, not as a performance shortcut. Do NOT switch a database from synchronous to asynchronous commit to make this wait disappear — that trades away the guarantee the setting exists for, and the decision belongs to whoever owns the recovery-point objective, not to a wait-stats finding."),
         "LATCH_EX" => ComposeSimpleWait(facts, key, "Exclusive latch waits",
             "Exclusive latch contention — often last-page insert hotspots (LATCH_EX)",
             "LATCH_EX is contention on in-memory structures, not row locks. The most common cause is last-page insert contention: many sessions inserting into an index with an ever-increasing key (an identity or a datetime) all fight for the latch on the final page.",
@@ -2187,6 +2191,19 @@ public static class FactAdvice
                 "WRITELOG is the wait at COMMIT: every transaction blocks until its log records are durably written to disk. Two independent causes — slow log storage, or too many small commits. When an I/O finding co-fired, the log file's write latency is attached. Open File I/O → File I/O Latency to see the log series over the window. If log latency is low but WRITELOG is still high, the workload is committing too frequently — chatty client code with one tiny transaction per call. Open the Perfmon tab and add Transactions/sec to see the commit rate.",
             Remediation:
                 "Storage fix: log file on its own low-latency device (NVMe, dedicated log-tier SAN), with no contention from data files or tempdb. Workload fix: batch many small writes into fewer larger transactions where the consistency model allows — turning 1000 single-row inserts per second into ten 100-row batches collapses WRITELOG dramatically. `ALTER DATABASE ... SET DELAYED_DURABILITY = FORCED` trades durability for latency and is appropriate when losing the last few committed transactions on a crash is acceptable; not appropriate for financial or audit workloads.");
+
+        // #3538 A5: the availability-group half of commit latency. Advise-only and evidence-gated
+        // (ComposeWaitByKey prepends the measured totals); the remediation names the counter-objective
+        // out loud — synchronous commit is a recovery-point policy, and the OtterTune doctrine the
+        // engine review graded against forbids advising a durability trade for speed — so the block
+        // points at the replica and at which databases NEED the guarantee, never at flipping the mode.
+        t["HADR_SYNC_COMMIT"] = new AdviceBlock(
+            Headline:
+                "HADR_SYNC_COMMIT waits — commits are waiting on a synchronous availability-group secondary",
+            Investigation:
+                "HADR_SYNC_COMMIT is the time a committing transaction on the primary waits for a synchronous-commit secondary to acknowledge that it has hardened the log block. It is the availability-group half of commit latency (the local log flush is WRITELOG), so on a synchronous AG every commit pays both. Sustained HADR_SYNC_COMMIT means the round trip to the secondary is slow — its own log write, the network between the replicas, or a secondary busy with redo or readable-secondary queries. Open the Wait Stats tab for the HADR_SYNC_COMMIT series over the window and compare it with WRITELOG: if WRITELOG is low and HADR_SYNC_COMMIT high, the primary's log is fine and the replica path is the cost.",
+            Remediation:
+                "Measure the replica side first: the secondary's transaction-log write latency and redo queue, and the network latency between the replicas — a secondary on slower storage or in another region sets the primary's commit latency, and that is where the fix is. Then review which databases actually need synchronous commit: it is a durability and failover-readiness POLICY (zero data loss on failover), so only the databases whose recovery-point objective requires it should carry it, and the rest can be asynchronous by design. Do NOT switch a database to asynchronous commit to make this wait disappear — that trades away the guarantee the setting exists for, and the decision belongs to whoever owns the recovery-point objective, not to a wait-stats finding.");
 
         // ─────────────────────────────────────────────────────────────────
         // Latch contention
