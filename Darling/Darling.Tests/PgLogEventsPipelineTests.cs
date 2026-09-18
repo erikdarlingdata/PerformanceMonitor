@@ -259,6 +259,11 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal(new[] { "temp_file", "autovacuum", "checkpoint" }, PgLogFamilies.RecognisedOnly);
         Assert.Equal(new[] { "error", "connection", "lock_wait" }, PgLogFamilies.Parsed);
         Assert.Equal(PgLogFamilies.Parsed.Concat(PgLogFamilies.RecognisedOnly).Append(PgLogFamilies.Other), PgLogFamilies.All);
+        /* The reserved word is in the vocabulary and NOT askable: no parser emits it, so a filter on it would
+           be the silent zero a typo is refused for (review note on the first head). */
+        Assert.False(PgLogFamilies.IsKnown(PgLogFamilies.Other));
+        Assert.All(PgLogFamilies.Parsed.Concat(PgLogFamilies.RecognisedOnly), f => Assert.True(PgLogFamilies.IsKnown(f)));
+        Assert.False(PgLogFamilies.IsKnown("nonsense"));
 
         /* And the seam has exactly the registration order the interface documents: severity first, then
            the LOG-level shapes, then the recognised-only arm LAST so a sibling's parser goes before it. */

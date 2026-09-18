@@ -99,10 +99,16 @@ public static class PgLogFamilies
     /// <summary>The families recognised by message shape and stored generic, awaiting their sibling issue.</summary>
     public static IReadOnlyList<string> RecognisedOnly { get; } = new[] { TempFile, Autovacuum, Checkpoint };
 
-    /// <summary>Whether a caller-supplied family name is one of ours. Ordinal, lower-case: the column is.</summary>
+    /// <summary>
+    /// Whether a caller-supplied family name is one a reader can ask for. Ordinal, lower-case: the column
+    /// is. <see cref="Other"/> is deliberately NOT known here even though it is in <see cref="All"/>: no
+    /// parser emits it, so a filter on it would answer "no events" for a family that cannot have any, which
+    /// is the silent shape a typo gets refused for — review caught the asymmetry with the read's own error
+    /// message, which lists the six askable families and not this one.
+    /// </summary>
     public static bool IsKnown(string? family)
     {
-        if (string.IsNullOrWhiteSpace(family))
+        if (string.IsNullOrWhiteSpace(family) || string.Equals(family, Other, StringComparison.Ordinal))
         {
             return false;
         }
