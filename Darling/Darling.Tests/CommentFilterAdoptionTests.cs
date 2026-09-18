@@ -61,7 +61,7 @@ namespace Darling.Tests;
 /// <c>.github/darling-paths-filter.yml</c>, which names <c>Darling/**</c>, the shared libraries Darling
 /// compiles against, and the gate's own inputs — so no entry added to the build job's filter can stand up
 /// its throwaway cluster. <c>CrossAppGuardCiGateTests</c> does see the
-/// two <c>Lite.Tests</c> keys below — #3067 widened its anchor past the app directory, since
+/// three <c>Lite.Tests</c> keys below — #3067 widened its anchor past the app directory, since
 /// <c>Lite.Tests</c> is a sibling of <c>Lite</c> rather than a directory inside it — and exempts them on
 /// this same reasoning, under the same bound.</para>
 /// </summary>

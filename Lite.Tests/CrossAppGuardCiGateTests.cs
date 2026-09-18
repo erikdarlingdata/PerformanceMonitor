@@ -198,6 +198,10 @@ public class CrossAppGuardCiGateTests
         [$"{LiteTestsDir}/LiteSidebarDotRendersTheCardStatusTests.cs"] =
             "WHOLE-TREE READ. The second key of that same bounded set, same sweep, same reason.",
 
+        [$"{LiteTestsDir}/FactScorerTests.cs"] =
+            "WHOLE-TREE READ. The third key of that same bounded set (#3538 A5: its lineage census collects "
+            + "the // run above each GetWaitThresholds entry), same sweep, same reason.",
+
         [$"{LiteTestsDir} (directory)"] =
             "WHOLE-TREE READ, and the one #3076 made visible. ControlPlaneReloadDurabilityTests' "
             + "NeitherFixHasALiteTwinToDriftFrom sweeps { \"Lite\", \"Lite.Tests\", "
@@ -1702,7 +1706,7 @@ public class CrossAppGuardCiGateTests
     ///
     /// <para>Read where the exemptions are HONOURED and not only by the pin below, so an exemption
     /// cannot outlive the thing it rests on: narrow that job to a class filter, or lose its
-    /// <c>skipped</c> gate, and all four entries turn back into failures on the next run.</para>
+    /// <c>skipped</c> gate, and every entry turns back into a failure on the next run.</para>
     ///
     /// <para>Sliced from the consumer onward so the build job's own identical invocation cannot satisfy
     /// it — the job that reads the outcome is the job that has to run the suite.</para></summary>
