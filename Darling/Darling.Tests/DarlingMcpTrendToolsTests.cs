@@ -614,9 +614,16 @@ public sealed class DurationTrendTierRoutingTests
     /// a statement is resolved at parse time and because nothing drops raw on such a store anyway. The
     /// per-grain flag is the one consulted — a store whose PROCEDURE rollup failed its ensure sweep keeps
     /// the query trend on the hourly tier and drops only the procedure trend to raw.
+    ///
+    /// <para>And <c>RawRetentionApplies</c> follows the SAME grain, not the store: the #1680 arming gate arms
+    /// each raw table's purge only once that table's own rollup covers it, so on that partially-built store
+    /// <c>procedure_stats</c> keeps every row while <c>query_stats</c> is being dropped. A store-wide "any
+    /// rollup exists" answer would have told the procedure trend's caller that rows were dropped and widening
+    /// cannot help — the false-and-harmful narrative this route removes, reintroduced (review finding on the
+    /// first cut of this change).</para>
     /// </summary>
     [Fact]
-    public void AStoreWithoutTheRollup_RoutesToRaw_PerGrain()
+    public void AStoreWithoutTheRollup_RoutesToRaw_AndKeepsRawComplete_PerGrain()
     {
         var start = Now.AddHours(-168);
 
@@ -625,9 +632,17 @@ public sealed class DurationTrendTierRoutingTests
         Assert.False(DarlingTrendReader.ResolveQueryDurationTrendRoute(start, RollupAvailability.None, NoCoverage, Now).RawRetentionApplies);
 
         var noProcedureRollup = RollupAvailability.All with { ProcedureGrainHourly = false };
-        Assert.Equal(RetentionTier.Hourly, DarlingTrendReader.ResolveQueryDurationTrendRoute(start, noProcedureRollup, NoCoverage, Now).Tier);
-        Assert.Equal(RetentionTier.Raw, DarlingTrendReader.ResolveProcedureDurationTrendRoute(start, noProcedureRollup, NoCoverage, Now).Tier);
-        Assert.True(DarlingTrendReader.ResolveProcedureDurationTrendRoute(start, noProcedureRollup, NoCoverage, Now).RawRetentionApplies);
+        var queryRoute = DarlingTrendReader.ResolveQueryDurationTrendRoute(start, noProcedureRollup, NoCoverage, Now);
+        var procedureRoute = DarlingTrendReader.ResolveProcedureDurationTrendRoute(start, noProcedureRollup, NoCoverage, Now);
+
+        Assert.Equal(RetentionTier.Hourly, queryRoute.Tier);
+        Assert.True(queryRoute.RawRetentionApplies);
+
+        Assert.Equal(RetentionTier.Raw, procedureRoute.Tier);
+        Assert.False(procedureRoute.RawRetentionApplies);
+
+        /* Fully built: both grains' purges can be armed, so both routes carry the flag. */
+        Assert.True(DarlingTrendReader.ResolveProcedureDurationTrendRoute(start, RollupAvailability.All, NoCoverage, Now).RawRetentionApplies);
     }
 
     /// <summary>

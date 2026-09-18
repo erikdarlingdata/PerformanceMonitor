@@ -893,9 +893,11 @@ public sealed class DarlingMcpTrendTools
             sits at or before the start the window is fully served and quiet is the truth. Where it is later,
             the head is unserved for one of two reasons the reader must not confuse: the window predates the
             store's own history (a young store, any engine — nothing was dropped, nothing ever existed), or
-            retention dropped it (a TimescaleDB store, window past the raw horizon, and the rollup that
-            would serve it absent or shallower — the only way a past-horizon window routes to raw). Unmeasured
-            (an empty table), the horizon decides, and only where retention applies at all.
+            retention dropped it (this grain's rollup exists, so its raw purge can be armed; the window is past
+            the raw horizon; and coverage routed here because the rollup has materialized LESS than raw holds
+            — the only way a past-horizon window routes to raw when the rollup exists). Unmeasured (an empty
+            table), the horizon decides, and only where retention applies to this grain at all: a grain whose
+            rollup is missing has its purge held by the arming gate, so raw is complete there.
         */
         var pastRawHorizon = route.RawRetentionApplies && startUtc < route.ResolvedAtUtc - TimescaleSupport.RawRetentionSpan;
         var rawReaches = route.RawReaches(startUtc) ?? !pastRawHorizon;
@@ -912,16 +914,16 @@ public sealed class DarlingMcpTrendTools
                 disclosure);
         }
 
+        /* Past the horizon on the raw route with the rollup present: coverage put the read here because the
+           rollup has materialized less than raw holds (the #1759 held-purge shape), so raw's reach is the
+           store's reach and the rollup is the remedy. */
         var oldest = route.Coverage.RawOldestUtc is DateTime o
             ? $"The raw tier's oldest row for any server is {o:o}"
             : $"The raw tier keeps about {TimescaleSupport.RawRetentionSpan.TotalDays:0} days";
-        var why = route.HourlyAvailable
-            ? $"the hourly rollup ({route.HourlyView}) that would serve deeper history has materialized less than raw holds"
-            : $"the hourly rollup ({route.HourlyView}) that would serve deeper history is not present on this store";
 
         return EmptyStatus(
             "empty",
-            $"No {what} samples were recorded for {serverName} in the part of the last {hours_back} hour(s) that the raw tier still holds. {oldest}, and the window as requested starts at {startUtc:o} — the part before raw's reach is UNSERVED rather than quiet, because {why}. This server HAS been sampled before. Widening hours_back reaches further into what raw no longer holds and cannot help; run --backfill-rollups to materialize the rollup, which is what serves deeper history.",
+            $"No {what} samples were recorded for {serverName} in the part of the last {hours_back} hour(s) that the raw tier still holds. {oldest}, and the window as requested starts at {startUtc:o} — the part before raw's reach is UNSERVED rather than quiet, because the hourly rollup ({route.HourlyView}) that would serve deeper history has materialized less than raw holds. This server HAS been sampled before. Widening hours_back reaches further into what raw no longer holds and cannot help; run --backfill-rollups to materialize the rollup, which is what serves deeper history.",
             disclosure);
     }
 

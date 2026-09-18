@@ -476,10 +476,17 @@ internal static class DarlingTrendReader
     /// has materialized nothing and a rollup whose floor sits above the window's start are different facts
     /// with different remedies, and both differ from a quiet server.</para>
     ///
-    /// <para><see cref="RawRetentionApplies"/> is false on a store with no rollups at all — plain PostgreSQL,
-    /// or a failed availability probe — where no retention policy ever drops raw, so raw holds the complete
-    /// answer and "quiet, widen the window" is honest there (#1665). On a TimescaleDB store it is true, and
-    /// the empty branch has to consider that the rows were DROPPED, not absent.</para>
+    /// <para><see cref="RawRetentionApplies"/> is whether THIS grain's raw table can have had rows dropped,
+    /// and it is scoped to the grain rather than to the store on purpose. Retention is armed per raw table by
+    /// the #1680 gate, which arms a table's purge only once that table's OWN rollup covers everything the
+    /// table holds — so a grain whose rollup does not exist (plain PostgreSQL, a failed availability probe, or
+    /// #1664's failure-isolated partial build where one grain's aggregate failed its ensure sweep while the
+    /// others built) has its purge held paused and its raw rows intact, whatever the other grains' rollups
+    /// are doing. A store-wide "any rollup exists" test would have told the caller of the un-rolled grain that
+    /// its rows were dropped and that widening cannot help — the exact false-and-harmful narrative this route
+    /// exists to remove, wearing the fix's own clothes. Where it is false, raw holds the complete answer and
+    /// "quiet, widen the window" is honest (#1665); where it is true, the empty branch has to consider that
+    /// the rows were DROPPED, not absent.</para>
     ///
     /// <para><see cref="ResolvedAtUtc"/> is the wall clock the age decision was measured against. It rides on
     /// the route so the tool that consumes it never names the clock itself: an <c>as_of</c>-anchored tool's
@@ -545,7 +552,8 @@ internal static class DarlingTrendReader
         return new DurationTrendRoute(
             ResolveTier(startUtc, nowUtc, hourlyAvailable, tierCoverage),
             rawTable, hourlyView, hourlyAvailable, tierCoverage,
-            RawRetentionApplies: rollups != RollupAvailability.None,
+            /* Grain-scoped, not rollups != None — see the record's remarks: the arming gate is per table. */
+            RawRetentionApplies: hourlyAvailable,
             ResolvedAtUtc: nowUtc);
     }
 
