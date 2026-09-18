@@ -936,10 +936,11 @@ public sealed class ViewerQueriesLivePostgresTests
             /* ── the duration trend, LEGACY arm ── this whole seed is pre-tier-2 (no interval identity),
                   so it exercises the fallback: un-deduped, one point per COLLECTION, still overstating.
                   That is deliberate and it is what a store holding pre-upgrade history must keep doing —
-                  nothing can reconstruct an interval start for these rows. Four points, exactly as before
-                  tier 2. The corrected arm has its own live test below. */
+                  nothing can reconstruct an interval start for these rows. Four collections, exactly as
+                  before tier 2 — three plotted, because the first has no predecessor to rate against and is
+                  no longer drawn as a fabricated 0 (#3653). The corrected arm has its own live test below. */
             var trend = await viewer.GetQueryStoreDurationTrendAsync(DedupServerId, start, end);
-            Assert.Equal(4, trend.Count);
+            Assert.Equal(3, trend.Count);
 
             /* ── the slicer overlay ── one point for the one interval, at its final values, so the overlay
                   agrees with the deduped bars it is drawn over instead of showing a rising staircase. */
@@ -1117,15 +1118,14 @@ public sealed class ViewerQueriesLivePostgresTests
             Assert.Equal(12.0, buckets[0].TotalCpu, 3);
             Assert.Equal(1.0, buckets[1].TotalCpu, 3);     /* 5 x 200us */
 
-            /* ── the duration trend ── one point per interval, at its start. The first has no predecessor
-                  so its rate is 0 (the same convention the delta trends use); the second divides interval
+            /* ── the duration trend ── one point per interval, at its start. The first has no predecessor,
+                  so its rate is UNKNOWABLE and it is not plotted (#3653; the fabricated 0 it used to carry is
+                  #3642's class) — the same convention the delta trends now use; the second divides interval
                   2's true total (5 x 2,000us = 10 ms) by the 3,600s between interval starts. */
             var trend = await viewer.GetQueryStoreDurationTrendAsync(IntervalIdentityServerId, start, end);
-            Assert.Equal(2, trend.Count);
-            Assert.Equal(h0, trend[0].CollectionTime);
-            Assert.Equal(h1, trend[1].CollectionTime);
-            Assert.Equal(0d, trend[0].Value);
-            Assert.Equal(10.0 / 3600.0, trend[1].Value, 9);
+            var placed = Assert.Single(trend);
+            Assert.Equal(h1, placed.CollectionTime);
+            Assert.Equal(10.0 / 3600.0, placed.Value, 9);
 
             /* ── the slicer OVERLAY (#1921, Erik's option 1) ── the point sits at the hour the work RAN, the
                   same h0 the bar above is drawn at, NOT at h1+10m where the collector observed it. That is

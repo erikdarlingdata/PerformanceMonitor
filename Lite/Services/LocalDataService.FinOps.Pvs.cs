@@ -297,7 +297,7 @@ public class PvsStatsRow
 }
 
 /// <summary>One PVS trend point (#1984 stage 2): a database's off-row PVS size at one collection,
-/// with the same %-of-database ratio the grid computes (null when the denominator was zero).</summary>
-/// <summary>One point on the PVS top-5 trend. <see cref="PvsSizeMb"/> is null for an UNMEASURED collection
-/// (#3653) — the DMV reported no size that pass — never coerced to 0.</summary>
+/// with the same %-of-database ratio the grid computes (null when the denominator was zero).
+/// <see cref="PvsSizeMb"/> is null for an UNMEASURED collection (#3653) — the DMV reported no size that
+/// pass — never coerced to 0.</summary>
 public sealed record PvsTrendPoint(string DatabaseName, DateTime CollectionTime, double? PvsSizeMb, double? PctOfDatabase);
