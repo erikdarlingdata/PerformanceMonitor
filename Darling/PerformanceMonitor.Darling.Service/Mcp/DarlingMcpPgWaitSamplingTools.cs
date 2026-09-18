@@ -235,8 +235,11 @@ public sealed class DarlingMcpPgWaitSamplingTools
                  + "returned_samples is what the rows returned add up to."
                  + (serviceTier
                      ? " backend_count on this tier is the distinct backends seen in the LAST window, not "
-                       + "since the profile started; a series' counter also resets when the service restarts, "
-                       + "which the counter_reset flag reports the same way it reports an extension reset."
+                       + "since the profile started. The tally behind these counts is kept in the monitoring "
+                       + "store's own collector_state and reloaded every cycle, so it SURVIVES a service restart; "
+                       + "a series starts over only when the tally's 500-key cap evicted it as least-sampled and "
+                       + "it was seen again, or when the target moved to the extension tier and back — and "
+                       + "counter_reset reports either the same way it reports an extension reset."
                      : string.Empty)
                  + (resetInWindow
                      ? " At least one series was RESET inside this window, so its figures cover only "

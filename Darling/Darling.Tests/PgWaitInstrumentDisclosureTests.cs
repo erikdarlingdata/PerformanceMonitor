@@ -52,6 +52,14 @@ public sealed class PgWaitInstrumentDisclosureTests
         Assert.Contains("FLOOR", root.GetProperty("instrument_note").GetString(), StringComparison.Ordinal);
         Assert.Contains("distinct backends seen in the LAST window", root.GetProperty("note").GetString(), StringComparison.Ordinal);
         Assert.Equal(T0, root.GetProperty("instrument_recorded_at").GetDateTime().ToUniversalTime());
+
+        /* #3645 review: the tally is persisted collector state, reloaded every cycle, so a SERVICE restart does
+           not reset the series — the note must say what does (cap eviction, arm reversion) and not claim what
+           does not. Head 3 shipped the false claim; this is what stops it coming back. */
+        var note = root.GetProperty("note").GetString()!;
+        Assert.Contains("SURVIVES a service restart", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("resets when the service restarts", note, StringComparison.Ordinal);
+        Assert.Contains("500-key cap", note, StringComparison.Ordinal);
     }
 
     [Fact]
