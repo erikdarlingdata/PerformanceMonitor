@@ -1103,7 +1103,9 @@ public partial class SettingsWindow : Window
             && !string.Equals(AlertPgBlockingThresholdBox.Text, AlertBlockingThresholdBox.Text, StringComparison.Ordinal))
             parts.Add($"pg blocking >= {AlertPgBlockingThresholdBox.Text}");
         if (AlertPoisonWaitCheckBox.IsChecked == true)
-            parts.Add($"poison waits >= {AlertPoisonWaitThresholdBox.Text}ms avg");
+            /* #3539 A4: the live bar, from the shared constants — not the retired ms box, which nothing reads. */
+            parts.Add(string.Create(CultureInfo.InvariantCulture,
+                $"poison waits >= {PoisonWaitEvaluator.WarningAvgWaiters * PoisonWaitEvaluator.WindowMinutes * 60:N0}s accumulated in {PoisonWaitEvaluator.WindowMinutes}min"));
         if (AlertLongRunningQueryCheckBox.IsChecked == true)
             parts.Add($"queries > {AlertLongRunningQueryThresholdBox.Text}min");
         if (AlertTempDbSpaceCheckBox.IsChecked == true)

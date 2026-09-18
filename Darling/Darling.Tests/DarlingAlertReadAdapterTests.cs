@@ -345,7 +345,13 @@ public sealed class DarlingAlertReadAdapterTests
             Assert.Equal(600_083L, poison[0].AccumulatedWaitMs);
             Assert.Equal(30_403L, poison[0].AccumulatedWaits);
             Assert.Equal(4L, poison[0].ObservedIntervals);
-            Assert.Equal(collectionTime, poison[0].NewestCollectionTime);
+            /* PostgreSQL's timestamp is microsecond-precision and .NET's DateTime carries 100 ns ticks, so
+               the seeded instant round-trips truncated to the microsecond (CI: 15:39:48.9353066 stored as
+               .9353060). Compare at the store's precision; the point of the pin is that the NEWEST in-window
+               row's clock came back, not the out-of-window one's — asserted separately below. */
+            Assert.Equal(collectionTime.Ticks / 10, poison[0].NewestCollectionTime.Ticks / 10);
+            Assert.True(poison[0].NewestCollectionTime > collectionTime.AddMinutes(-2),
+                "the newest collection_time must be the in-window row's, not the -30 minute row's");
             Assert.Equal("RESOURCE_SEMAPHORE", poison[1].WaitType);
             Assert.Equal(3_154L, poison[1].AccumulatedWaitMs);
             Assert.Equal(1L, poison[1].ObservedIntervals);
