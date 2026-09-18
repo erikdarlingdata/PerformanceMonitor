@@ -107,17 +107,56 @@ LIMIT 5";
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
 
+        /* #3648: max_dop here is sys.dm_exec_query_stats.max_dop — a PER-PLAN high-water mark since the
+           plan entered the cache, not a per-execution reading and not a per-statement one. This read
+           groups by (database, query_hash), so the old MAX(max_dop) folded every plan the statement
+           text had inside the window into one number and kept the largest: the highest DOP ANY plan for
+           the hash ever ran at, with nothing saying which plan, when, or whether that plan still exists.
+           Live consequence: a High CPU card read 16 for the #1 query on an instance whose MAXDOP had
+           been 1 across its whole 14-day config history and whose stored plan for that hash was serial
+           (NonParallelPlanReason="MaxDOPSetToOne") — a plan compiled before the pin, still cached with
+           its old counter. A reader recommended a MAXDOP 1 Query Store hint from the field and had to
+           retract it after reading the plan. The same card's row #3 said 1, honestly, for a hash with
+           one serial plan — so the field was self-consistent and wrong.
+
+           Now: max_dop is the NEWEST plan's reading (the row with the latest collection_time among the
+           rows that spent CPU in the window; ties broken by compile time, then by CPU spent), because
+           the card's question is what the query is doing to the CPU at this moment. The cross-plan
+           maximum survives as max_dop_any_plan with max_dop_any_plan_last_seen and plan_count beside
+           it — a history with provenance — and the reader coerces NULL to null, not 0: the DMV never
+           reports 0, so 0 was "no reading" rendered as a degree of parallelism. dop_note is the
+           shared sentence (PerformanceMonitor.Common.QueryDopProvenance) a renderer prints verbatim
+           when the history disagrees with the headline. New columns are appended after the old ones so
+           the existing ordinals are untouched; the SQL is byte-identical to Darling's TopCpuQueriesSql. */
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
+WITH windowed AS
+(
+    -- #3648: rank each hash's rows newest-first and carry the hash-wide maximum onto every row, so the
+    -- outer aggregate can name WHICH reading is current and WHEN the maximum was last seen. Explicit
+    -- NULLS LAST on the tie-breakers: DuckDB and Postgres default DESC null placement differently.
+    SELECT database_name, query_hash, query_plan_hash, collection_time, max_dop,
+           delta_worker_time, delta_execution_count, delta_spills, query_text,
+           ROW_NUMBER() OVER
+           (
+               PARTITION BY database_name, query_hash
+               ORDER BY collection_time DESC, creation_time DESC NULLS LAST, delta_worker_time DESC NULLS LAST
+           ) AS newest_rn,
+           MAX(max_dop) OVER (PARTITION BY database_name, query_hash) AS max_dop_any_plan
+    FROM v_query_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    AND   delta_worker_time > 0
+)
 SELECT database_name, query_hash,
        SUM(delta_worker_time)::BIGINT AS total_cpu_us,
        SUM(delta_execution_count)::BIGINT AS exec_count,
-       MAX(max_dop) AS max_dop,
+       MAX(CASE WHEN newest_rn = 1 THEN max_dop END) AS max_dop,
        SUM(delta_spills)::BIGINT AS spills,
-       LEFT(MAX(query_text), 500) AS query_text
-FROM v_query_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-AND   delta_worker_time > 0
+       LEFT(MAX(query_text), 500) AS query_text,
+       COUNT(DISTINCT query_plan_hash) AS plan_count,
+       MAX(max_dop_any_plan) AS max_dop_any_plan,
+       MAX(CASE WHEN max_dop = max_dop_any_plan THEN collection_time END) AS max_dop_any_plan_last_seen
+FROM windowed
 GROUP BY database_name, query_hash
 ORDER BY total_cpu_us DESC
 LIMIT 5";
@@ -130,15 +169,24 @@ LIMIT 5";
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
+            var maxDop = reader.IsDBNull(4) ? (int?)null : Convert.ToInt32(reader.GetValue(4));
+            var planCount = reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7));
+            var maxDopAnyPlan = reader.IsDBNull(8) ? (int?)null : Convert.ToInt32(reader.GetValue(8));
+            var maxDopAnyPlanLastSeen = reader.IsDBNull(9) ? (DateTime?)null : reader.GetDateTime(9);
             items.Add(new
             {
                 database = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 query_hash = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 total_cpu_ms = reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2)) / 1000.0,
                 execution_count = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3)),
-                max_dop = reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4)),
+                /* #3648: newest plan's reading, null when unknown — never 0. History fields follow. */
+                max_dop = maxDop,
                 spills = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
-                query_text = reader.IsDBNull(6) ? "" : reader.GetString(6)
+                query_text = reader.IsDBNull(6) ? "" : reader.GetString(6),
+                plan_count = planCount,
+                max_dop_any_plan = maxDopAnyPlan,
+                max_dop_any_plan_last_seen = maxDopAnyPlanLastSeen?.ToString("o"),
+                dop_note = QueryDopProvenance.Note(maxDop, maxDopAnyPlan, maxDopAnyPlanLastSeen, planCount)
             });
         }
 
@@ -567,8 +615,30 @@ LIMIT 5";
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
 
+        /* #3648: the same per-plan max_dop provenance as CollectTopCpuQueries — see the essay there. This
+           read is one hash, unfiltered by CPU spent, so the newest-plan tie-break (compile time, then CPU
+           spent) is what separates a stale parallel plan still sitting in the cache from the serial one
+           doing the work at the same collection_time. Byte-identical to Darling's BadActorDetailSql. */
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
+WITH windowed AS
+(
+    -- #3648: see CollectTopCpuQueries' windowed CTE; same ranking, same hash-wide maximum.
+    SELECT database_name, query_hash, query_plan_hash, collection_time, max_dop,
+           delta_worker_time, delta_execution_count, delta_elapsed_time, delta_logical_reads, delta_spills,
+           query_text,
+           ROW_NUMBER() OVER
+           (
+               PARTITION BY database_name, query_hash
+               ORDER BY collection_time DESC, creation_time DESC NULLS LAST, delta_worker_time DESC NULLS LAST
+           ) AS newest_rn,
+           MAX(max_dop) OVER (PARTITION BY database_name, query_hash) AS max_dop_any_plan
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   query_hash = $4
+)
 SELECT database_name, query_hash,
        LEFT(MAX(query_text), 500) AS query_text,
        SUM(delta_execution_count)::BIGINT AS exec_count,
@@ -584,12 +654,11 @@ SELECT database_name, query_hash,
        SUM(delta_worker_time)::BIGINT AS total_cpu_us,
        SUM(delta_logical_reads)::BIGINT AS total_reads,
        SUM(delta_spills)::BIGINT AS total_spills,
-       MAX(max_dop) AS max_dop
-FROM v_query_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-AND   query_hash = $4
+       MAX(CASE WHEN newest_rn = 1 THEN max_dop END) AS max_dop,
+       COUNT(DISTINCT query_plan_hash) AS plan_count,
+       MAX(max_dop_any_plan) AS max_dop_any_plan,
+       MAX(CASE WHEN max_dop = max_dop_any_plan THEN collection_time END) AS max_dop_any_plan_last_seen
+FROM windowed
 GROUP BY database_name, query_hash";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -600,6 +669,10 @@ GROUP BY database_name, query_hash";
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         if (await reader.ReadAsync(context.CancellationToken))
         {
+            var maxDop = reader.IsDBNull(10) ? (int?)null : Convert.ToInt32(reader.GetValue(10));
+            var planCount = reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11));
+            var maxDopAnyPlan = reader.IsDBNull(12) ? (int?)null : Convert.ToInt32(reader.GetValue(12));
+            var maxDopAnyPlanLastSeen = reader.IsDBNull(13) ? (DateTime?)null : reader.GetDateTime(13);
             finding.DrillDown!["bad_actor_query"] = new
             {
                 database = reader.IsDBNull(0) ? "" : reader.GetString(0),
@@ -612,7 +685,12 @@ GROUP BY database_name, query_hash";
                 total_cpu_ms = reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)) / 1000.0,
                 total_reads = reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
                 total_spills = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
-                max_dop = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10))
+                /* #3648: newest plan's reading, null when unknown — never 0. History fields follow. */
+                max_dop = maxDop,
+                plan_count = planCount,
+                max_dop_any_plan = maxDopAnyPlan,
+                max_dop_any_plan_last_seen = maxDopAnyPlanLastSeen?.ToString("o"),
+                dop_note = QueryDopProvenance.Note(maxDop, maxDopAnyPlan, maxDopAnyPlanLastSeen, planCount)
             };
         }
     }
