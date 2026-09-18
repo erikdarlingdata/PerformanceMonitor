@@ -423,7 +423,7 @@ sentence the data can support if both are sampled on the same grain.
 ## 8. Read it
 
 Through MCP — a read per collector, plus the trend, detail and config-diff readers that sit on top of
-them; 34 `get_pg_*` tools in all, registered by the same service:
+them; 35 `get_pg_*` tools in all, registered by the same service:
 
 | Tool | Answers |
 |---|---|

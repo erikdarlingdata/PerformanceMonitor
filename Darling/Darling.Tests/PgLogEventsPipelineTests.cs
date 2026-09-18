@@ -507,7 +507,7 @@ public sealed class PgLogEventsPipelineTests
 
         /* The instructions' census moved with the tool. */
         var instructions = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpInstructions.cs");
-        Assert.Contains("thirty-four are the PostgreSQL reads", instructions, StringComparison.Ordinal);
+        Assert.Contains("thirty-five are the PostgreSQL reads", instructions, StringComparison.Ordinal);
     }
 
     /* ---- the RDS transport --------------------------------------------------------------------------- */
