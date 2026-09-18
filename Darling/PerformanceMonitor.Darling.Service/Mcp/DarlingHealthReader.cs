@@ -172,6 +172,12 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
         long BlockingEvents, long HighCpuEvents, long CollectionErrors, long MemoryPressureEvents,
         long MemoryCriticalEvents, long AlertCount, long MaxBlockDurationMs, bool HasData)
     {
+        /// <summary>The store's deadlock-rate tiers (#3368/#3525) — stamped by the calendar-day reads so
+        /// <see cref="HealthBand"/> bands on the pair <c>get_alert_settings</c> reports rather than the
+        /// shipped defaults. The default is the shipped pair, which is what a store at its V120 column
+        /// defaults holds anyway.</summary>
+        public DeadlockRateThresholds RateTiers { get; init; } = DeadlockRateThresholds.Default;
+
         public DailyHealthSignals ToSignals() => new()
         {
             HasData = HasData,
@@ -182,9 +188,14 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
             MemoryPressureEvents = MemoryPressureEvents,
             MemoryCriticalEvents = MemoryCriticalEvents,
             AlertCount = AlertCount,
+            /* #3525: a calendar day is the 24-hour window these counts were aggregated over — the
+               denominator the deadlock rate bands on. The fleet sweep does NOT read this projection: it
+               sums this row type's raw counts into signals windowed to its own span. */
+            Window = TimeSpan.FromDays(1),
         };
 
-        public DailyHealthBand HealthBand => DailyHealthBandCalculator.Classify(ToSignals());
+        public DailyHealthBand HealthBand =>
+            DailyHealthBandCalculator.Classify(ToSignals(), new DailyHealthThresholds { DeadlockRates = RateTiers });
 
         /// <summary>Human label for the band ("Healthy" / "Warning" / "Critical" / "No Data").</summary>
         public string OverallHealth => DailyHealthBandCalculator.Label(HealthBand);
@@ -220,6 +231,11 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
             DateTime.UtcNow, fromDate, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
             coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
+        /* #3525: the deadlock-rate tiers the day band evaluates, read ONCE per range rather than per row —
+           DarlingFleetReader's own hoist argument: a settings write mid-read must not band some days on the
+           old pair and the rest on the new one. */
+        var rateTiers = await ReadDeadlockRateThresholdsAsync(postgres, cancellationToken);
+
         var results = new List<DailySummaryReadRow>();
         await using var command = postgres.CreateCommand(DailySummarySql.RangeSqlFor(tier));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -230,10 +246,28 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            results.Add(ReadDailySummaryRow(reader));
+            results.Add(ReadDailySummaryRow(reader) with { RateTiers = rateTiers });
         }
 
         return results;
+    }
+
+    /// <summary>The deadlock band's tiers from the store's singleton settings row (#3368, V120), or the
+    /// shipped pair when the row is absent — <c>DarlingFleetReader.ReadDeadlockRateThresholdsAsync</c>'s
+    /// read, off the same published SQL, for the DAY surfaces (#3525). Values come back RAW;
+    /// <see cref="DeadlockRateThresholds"/> clamps on read.</summary>
+    private static async Task<DeadlockRateThresholds> ReadDeadlockRateThresholdsAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        await using var command = postgres.CreateCommand(DarlingFleetReader.FleetDeadlockRateThresholdSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            return new DeadlockRateThresholds(reader.GetDouble(0), reader.GetDouble(1));
+        }
+
+        return DeadlockRateThresholds.Default;
     }
 
     /// <summary>

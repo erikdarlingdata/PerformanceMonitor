@@ -41,11 +41,17 @@ public sealed class FleetSweepEngineTests
     private static FleetSweepInstrumentCounters SteadyInstruments(long passes = 500) =>
         new(StartedLongAgo, passes, AlertReadFailuresTotal: 0);
 
-    private static FleetSweepServerReading Healthy(int id, string name) =>
-        new(id, name, new DailyHealthSignals { HasData = true }, 0, null);
+    /* Every fixture's signals carry the sweep span ComposeSimple declares (1h) — the deadlock band is a
+       RATE over that window (#3525), so a fixture omitting the window would take the unrateable arm and
+       max out at Warning. */
+    private static readonly TimeSpan FixtureSpan = TimeSpan.FromHours(1);
 
-    private static FleetSweepServerReading CriticalDeadlocks(int id, string name, long deadlocks = 3) =>
-        new(id, name, new DailyHealthSignals { HasData = true, Deadlocks = deadlocks }, 0, null);
+    private static FleetSweepServerReading Healthy(int id, string name) =>
+        new(id, name, new DailyHealthSignals { HasData = true, Window = FixtureSpan }, 0, null);
+
+    /* 25 deadlocks over the 1-hour span = 25/hr, past the shipped Critical tier (20/hr). */
+    private static FleetSweepServerReading CriticalDeadlocks(int id, string name, long deadlocks = 25) =>
+        new(id, name, new DailyHealthSignals { HasData = true, Deadlocks = deadlocks, Window = FixtureSpan }, 0, null);
 
     private static FleetSweepServerReading NoData(int id, string name) =>
         new(id, name, default, 0, null);
@@ -57,7 +63,8 @@ public sealed class FleetSweepEngineTests
         IReadOnlyList<FleetSweepServerVerdict>? previousVerdicts = null,
         IReadOnlyList<FleetSweepWatchItem>? activeItems = null,
         FleetSweepInstrumentCounters? instruments = null,
-        DateTime? now = null)
+        DateTime? now = null,
+        DeadlockRateThresholds? deadlockTiers = null)
     {
         return FleetSweepEngine.Compose(
             now ?? Now,
@@ -68,7 +75,8 @@ public sealed class FleetSweepEngineTests
             previousRun,
             previousVerdicts ?? Array.Empty<FleetSweepServerVerdict>(),
             activeItems ?? Array.Empty<FleetSweepWatchItem>(),
-            instruments ?? SteadyInstruments());
+            instruments ?? SteadyInstruments(),
+            deadlockTiers ?? DeadlockRateThresholds.Default);
     }
 
     /* ─────────────────────── verdicts: the shared scorer, unforked ─────────────────────── */
@@ -103,9 +111,13 @@ public sealed class FleetSweepEngineTests
         Assert.Null(verdictB.BandReason);
 
         /* Verdict beside its inputs: the evidence payload carries the signals, so a reader can
-           disagree with the band rather than believe it. */
+           disagree with the band rather than believe it — including, since #3525, the rate the deadlock
+           signal banded on and the window it was normalised over, without which the deadlock count is
+           unfalsifiable. */
         Assert.NotNull(verdictA.VerdictJson);
-        Assert.Contains("\"deadlocks\":3", verdictA.VerdictJson, StringComparison.Ordinal);
+        Assert.Contains("\"deadlocks\":25", verdictA.VerdictJson, StringComparison.Ordinal);
+        Assert.Contains("\"deadlock_rate_per_hour\":25", verdictA.VerdictJson, StringComparison.Ordinal);
+        Assert.Contains("\"window_minutes\":60", verdictA.VerdictJson, StringComparison.Ordinal);
     }
 
     /* ─────────────────────── the diff: sweep N against sweep N−1's rows ─────────────────────── */
@@ -365,9 +377,10 @@ public sealed class FleetSweepEngineTests
             new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
             {
                 HasData = true,
-                Deadlocks = 2,
+                Deadlocks = 25, // 25/hr over the 1h span — past the Critical tier (#3525)
                 HighCpuEvents = 10,
                 BlockingEvents = 20,
+                Window = FixtureSpan,
             }, 1500, null),
             Healthy(2, "server-b"),
         };
@@ -396,6 +409,98 @@ public sealed class FleetSweepEngineTests
         var unmuted = ComposeSimple(readings, alertsEnabled: true);
         Assert.Empty(unmuted.WouldHavePaged);
         Assert.True(unmuted.Run.AlertsEnabled);
+    }
+
+    /* ─────────────────────── the deadlock family is the RATE's, not the count's (#3525) ─────────────────────── */
+
+    /// <summary>
+    /// The would-have-paged deadlock family fires on the RATE the shared scorer banded Critical with —
+    /// never on a bare count. A day Critical from another trigger, carrying deadlocks below the Critical
+    /// tier, writes no deadlock row: under the old count trigger its threshold was literally 1, so every
+    /// sweep span containing any deadlock claimed a page the new banding does not stand behind.
+    /// </summary>
+    [Fact]
+    public void TheDeadlockFamily_FiresOnTheRate_NotTheCount()
+    {
+        /* Critical via heavy blocking; 3 deadlocks over the 1h span is 3/hr — Healthy on the deadlock
+           band, so the ledger must not name the family. */
+        var subRate = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        {
+            HasData = true,
+            Deadlocks = 3,
+            BlockingEvents = 20,
+            Window = FixtureSpan,
+        }, 0, null);
+
+        var families = ComposeSimple(new[] { subRate }, alertsEnabled: false)
+            .WouldHavePaged.Select(w => w.AlertFamily).ToList();
+        Assert.Contains(FleetSweepEngine.FamilyBlocking, families);
+        Assert.DoesNotContain(FleetSweepEngine.FamilyDeadlocks, families);
+
+        /* And when the family DOES fire, its evidence names the rate as the value, the Critical tier as
+           the threshold, and the raw count beside them — figures an operator can audit against
+           get_alert_settings and the deadlock grid. */
+        var paged = ComposeSimple(new[] { CriticalDeadlocks(1, "server-a") }, alertsEnabled: false)
+            .WouldHavePaged.Single(w => w.AlertFamily == FleetSweepEngine.FamilyDeadlocks);
+        using var evidence = JsonDocument.Parse(paged.EvidenceJson);
+        Assert.Equal("deadlocks per hour over the sweep span", evidence.RootElement.GetProperty("trigger").GetString());
+        Assert.Equal(25.0, evidence.RootElement.GetProperty("value").GetDouble());
+        Assert.Equal(
+            ServerHealthThresholds.DeadlockCriticalPerHourDefault,
+            evidence.RootElement.GetProperty("threshold").GetDouble());
+        Assert.Equal(25, evidence.RootElement.GetProperty("deadlock_count").GetInt64());
+    }
+
+    /// <summary>
+    /// A sub-hour sweep span is not rateable (#3368's arm), so deadlocks alone cannot band the span
+    /// Critical — and even when ANOTHER trigger makes the day Critical, the deadlock family stays out of
+    /// the ledger: 10,000 deadlocks in 15 minutes is 40,000/hr arithmetically, and declining to claim it
+    /// is the honest reading the whole rate band is built on.
+    /// </summary>
+    [Fact]
+    public void ASubHourSpan_NeverPagesTheDeadlockFamily()
+    {
+        var reading = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        {
+            HasData = true,
+            Deadlocks = 10_000,
+            CollectionErrors = 1,
+            Window = TimeSpan.FromMinutes(15),
+        }, 0, null);
+
+        var composition = ComposeSimple(new[] { reading }, alertsEnabled: false);
+
+        Assert.Equal("Critical", composition.Verdicts.Single().Band);
+        var families = composition.WouldHavePaged.Select(w => w.AlertFamily).ToList();
+        Assert.Contains(FleetSweepEngine.FamilyCollectionErrors, families);
+        Assert.DoesNotContain(FleetSweepEngine.FamilyDeadlocks, families);
+
+        /* Deadlocks alone on the same span: Warning, not Critical — the unrateable arm. */
+        var alone = new FleetSweepServerReading(1, "server-a", new DailyHealthSignals
+        {
+            HasData = true,
+            Deadlocks = 10_000,
+            Window = TimeSpan.FromMinutes(15),
+        }, 0, null);
+        Assert.Equal("Warning", ComposeSimple(new[] { alone }).Verdicts.Single().Band);
+    }
+
+    /// <summary>
+    /// The tiers handed to <c>Compose</c> are the tiers the verdicts band on (#3525) — the store's pair
+    /// travels into the shared scorer, so a fleet whose knobs were raised sweeps on the raised pair
+    /// rather than the shipped one while <c>get_alert_settings</c> reports the raised numbers.
+    /// </summary>
+    [Fact]
+    public void TheVerdicts_BandOnTheTiersHandedIn()
+    {
+        var reading = CriticalDeadlocks(1, "server-a"); // 25/hr: Critical on the shipped pair
+
+        Assert.Equal("Critical", ComposeSimple(new[] { reading }).Verdicts.Single().Band);
+
+        var raised = new DeadlockRateThresholds(100.0, 500.0);
+        var onRaised = ComposeSimple(new[] { reading }, alertsEnabled: false, deadlockTiers: raised);
+        Assert.Equal("Healthy", onRaised.Verdicts.Single().Band);
+        Assert.Empty(onRaised.WouldHavePaged);
     }
 
     /// <summary>

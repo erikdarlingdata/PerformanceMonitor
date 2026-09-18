@@ -158,10 +158,20 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
     {
         var date = new DateTime(2026, 7, 9, 0, 0, 0, DateTimeKind.Unspecified);
 
-        /* A deadlock day is Critical (the shared calculator's rule). */
-        var critical = new Reader.DailySummaryReadRow(date, 0m, "", 0, DeadlockCount: 1, 0, 0, 0, 0, 0, 0, 0, HasData: true);
+        /* A day at a critical deadlock RATE is Critical (#3525): 480 over the row's 24-hour window is
+           20/hr, the card band's Critical tier. One deadlock in a day is 0.04/hr and no longer paints the
+           cell red — the count trigger this replaced read 87.9% of production days Critical. */
+        var critical = new Reader.DailySummaryReadRow(date, 0m, "", 0, DeadlockCount: 480, 0, 0, 0, 0, 0, 0, 0, HasData: true);
         Assert.Equal(DailyHealthBand.Critical, critical.HealthBand);
         Assert.Equal("Critical", critical.OverallHealth);
+
+        var oneDeadlock = new Reader.DailySummaryReadRow(date, 0m, "", 0, DeadlockCount: 1, 0, 0, 0, 0, 0, 0, 0, HasData: true);
+        Assert.Equal(DailyHealthBand.Healthy, oneDeadlock.HealthBand);
+
+        /* And the band honours the tiers the read stamped from the store (#3368's knobs): the same 20/hr
+           day under raised tiers is not Critical. */
+        var raised = critical with { RateTiers = new DeadlockRateThresholds(100.0, 500.0) };
+        Assert.Equal(DailyHealthBand.Healthy, raised.HealthBand);
 
         /* A collected-but-quiet day is Healthy. */
         var healthy = new Reader.DailySummaryReadRow(date, 12m, "CXPACKET", 3, 0, 0, 0, 0, 0, 0, 0, 0, HasData: true);

@@ -254,5 +254,8 @@ public class DailySummaryRow
         MemoryPressureEvents = MemoryPressureEvents,
         MemoryCriticalEvents = MemoryCriticalEvents,
         AlertCount = AlertCount,
+        /* #3525: a calendar day is the 24-hour window these counts were aggregated over — the denominator
+           the deadlock rate bands on. */
+        Window = TimeSpan.FromDays(1),
     };
 }
