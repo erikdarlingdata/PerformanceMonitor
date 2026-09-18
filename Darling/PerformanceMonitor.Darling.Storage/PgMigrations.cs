@@ -515,7 +515,11 @@ DROP VIEW IF EXISTS v_query_stats;";
     /// Server deadlock figure is agreement with <c>deadlock_warn_per_hour</c> (V120), and a PostgreSQL
     /// server has no deadlock band to agree with — <c>v_deadlocks</c> is the extended-event capture and is
     /// structurally zero for a PostgreSQL server (#3017), and the reading is nulled again by
-    /// <c>ServerMetricSources.DmvSourced</c> before it reaches the band. On the blocking side the
+    /// <c>ServerMetricSources.DmvSourced</c> before it reaches the band (superseded by #3638, which gave the
+    /// PostgreSQL card a measured band from its own <c>pg_stat_database.deadlocks</c> counter differenced
+    /// over the window, through the SAME <c>health_bands</c> tiers — so the #3444 move of raising a fire gate
+    /// to meet the band's Warning bar is now available on this column too; the columns stay separate for
+    /// the first reason, the instruments differ). On the blocking side the
     /// denominators differ outright: the SQL Server count is engine-recorded blocked-process reports, the
     /// PostgreSQL one is distinct root blockers in a periodic SAMPLE of <c>pg_stat_activity</c>. Reusing
     /// the columns would also make the upgrade behaviour a function of store state — a store whose
@@ -4233,9 +4237,12 @@ CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collect
     /// constraint that shapes this, since <c>config_alert_settings</c> is a single global row and an absolute MB
     /// threshold is unusable when normal tempdb sizes differ by an order of magnitude: set it low enough for the
     /// small instances and the large ones alert constantly. The RISE gate is primary (this file grew N MB inside
-    /// the window), following #2157's reasoning that a level alone pages forever about a size that has been true
-    /// since Tuesday; the LEVEL gate is the file as a share of its VOLUME, which self-scales to each server's
-    /// disk layout whether or not the file has a dedicated one.</para>
+    /// the window — superseded by #3631, which made <c>file_growth_rise_mb</c> a RATE, megabytes per HOUR
+    /// averaged over the lookback, so the same 10240 means 10 GB/hr on any lookback rather than 10 GB per
+    /// window; the column and its default are unchanged, only what the number means), following #2157's
+    /// reasoning that a level alone pages forever about a size that has been true since Tuesday; the LEVEL
+    /// gate is the file as a share of its VOLUME, which self-scales to each server's disk layout whether or
+    /// not the file has a dedicated one.</para>
     ///
     /// <para>Ships OFF. A new alert that starts firing on upgrade is a bad citizen, and the right thresholds are
     /// a property of the fleet rather than of the product.</para>

@@ -973,6 +973,21 @@ internal static class ToolRecommendations
             new("get_file_io_trend", "Track log I/O latency over time"),
             new("get_perfmon_trend", "Check Transactions/sec to see commit rate driving log flush pressure", new() { ["counter_name"] = "Transactions/sec" })
         ],
+        /* #3653 (from #3538 A5): the scorer has graded HADR_SYNC_COMMIT since #3616 and this table had no entry,
+           so the finding arrived with next_tools empty — the one wait on the table whose card told the agent
+           nothing to do next. The AG sibling of WRITELOG: the primary waiting for a synchronous secondary to
+           harden the log before a commit can return. Lite has no AG-health MCP read (Darling's get_ag_health
+           has no twin here; the AG family reaches Lite only as alerts), so the health half points at
+           get_alert_history, where AgAlertPolicy's rows — 'AG Sync Fell Behind', 'AG Replica Disconnected' —
+           are the stored evidence that a secondary was the cause. The remediation is never "switch to async":
+           synchronous commit is a durability policy (FactAdvice), so every tool here is a read. */
+        ["HADR_SYNC_COMMIT"] =
+        [
+            new("get_wait_trend", "Track synchronous-commit wait over time — does it track commit volume, or step up when a secondary falls behind", new() { ["wait_type"] = "HADR_SYNC_COMMIT" }),
+            new("get_alert_history", "Look for 'AG Sync Fell Behind' / 'AG Replica Disconnected' rows in the same window — the secondary-side cause this wait is the primary-side symptom of"),
+            new("get_perfmon_trend", "Check Transactions/sec: a commit-rate rise raises this wait without any replica fault", new() { ["counter_name"] = "Transactions/sec" }),
+            new("get_file_io_stats", "Check log-file write latency — a slow log on either replica shows up here as commit latency")
+        ],
         ["LCK"] =
         [
             new("get_blocked_process_reports", "Get detailed blocking event reports"),
@@ -1152,6 +1167,11 @@ internal static class ToolRecommendations
             new("get_tempdb_trend", "Check TempDB growth on the volume")
         ]
     };
+
+    /// <summary>The fact keys this table answers for — the population <c>ToolRecommendationsTests</c> sweeps
+    /// (#3653), so a recommendation naming a tool or a parameter this SKU does not serve fails there rather
+    /// than sending an agent to a call that returns an error.</summary>
+    internal static IReadOnlyCollection<string> FactKeys => ByFactKey.Keys;
 
     /// <summary>
     /// Returns tool recommendations for all fact keys in a story path.

@@ -292,6 +292,118 @@ public sealed class DarlingPgReadSqlParsesLiveTests
         + @"\b(?:const|static[ \t]+readonly|readonly[ \t]+static)[ \t]+string[ \t]+",
         RegexOptions.Compiled);
 
+    /// <summary>
+    /// #3653 (from #3541): no shipped read orders by an INTEGER EXPRESSION. <c>ORDER BY 3 + 4 DESC</c> reads as
+    /// "ordinal 3 plus ordinal 4" and is nothing of the kind: PostgreSQL treats a bare integer in ORDER BY as an
+    /// output-column ordinal but an expression as an expression, so <c>3 + 4</c> is the constant 7 and the sort
+    /// is no sort — #3613 found <c>get_pg_kernel_stats</c> had never been ranked, and returned whatever the
+    /// hash join emitted first, under a LIMIT. DuckDB folds the same way, so Lite's readers are swept too.
+    ///
+    /// <para><b>Parse analysis cannot see this.</b> The statement is valid; it means the wrong thing. That is
+    /// why this sits beside <see cref="EveryShippedPostgreSqlReadPassesParseAnalysis"/> rather than inside it,
+    /// and why it needs no server: the defect is a textual shape, and the fix is always the same — name the
+    /// columns (<c>ORDER BY user_ms + system_ms DESC</c>) or alias the sum and order by the alias.</para>
+    ///
+    /// <para><b>Two populations, two instruments.</b> Darling's readers are reflected (every <c>*Reader</c>
+    /// type in the Storage assembly, not only <c>DarlingPg*</c> — SQL Server-side reads fold identically),
+    /// which reads the composed text of a <c>static readonly</c> as well as a literal; Lite's DuckDB SQL lives
+    /// inline in <c>LocalDataService.*.cs</c> command strings, so it is read from SOURCE. SQL comments are
+    /// blanked first so a rationale that QUOTES the defect (the kernel reader's does, in C#, but a SQL comment
+    /// could) is not a hit. Both populations carry a floor, and the two matchers are witnessed on a
+    /// defect/fixed pair, because a sweep that matched nothing would pass for free.</para>
+    /// </summary>
+    [Fact]
+    public void NoShippedRead_OrdersByAnIntegerExpression_OnEitherSku()
+    {
+        /* The leading item, and any later item of the same clause — `ORDER BY x, 3 + 4` is the same fold one
+           comma in. Tolerant of the ASC/DESC and NULLS that follow. */
+        var hits = new List<string>();
+
+        var darlingFields = typeof(DarlingPgStatementReader).Assembly.GetTypes()
+            .Where(t => t.Namespace == typeof(DarlingPgStatementReader).Namespace
+                        && t.Name.EndsWith("Reader", StringComparison.Ordinal))
+            .SelectMany(t => t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
+                .Where(f => f.FieldType == typeof(string) && (f.IsLiteral || f.IsInitOnly))
+                .Select(f => (Name: t.Name + "." + f.Name, Sql: FieldText(f))))
+            .Where(p => OrderByClause.IsMatch(p.Sql))
+            .OrderBy(p => p.Name, StringComparer.Ordinal)
+            .ToList();
+
+        /* 48 fields and 225 Lite clauses when this was written, measured by executing this exact sweep against
+           the built assemblies and the tree; the floors sit under those with room for a read to leave. */
+        Assert.True(
+            darlingFields.Count >= 40,
+            $"only {darlingFields.Count} Darling reader fields carry an ORDER BY (expected at least 40); the "
+            + "reflection filter has stopped matching and a sweep over nothing proves nothing");
+
+        foreach (var (name, sql) in darlingFields)
+        {
+            if (IntegerExpressionOrderBy.IsMatch(WithoutSqlComments(sql)))
+            {
+                hits.Add("Darling " + name);
+            }
+        }
+
+        var liteDir = Path.Combine(RepoFile.Root, "Lite", "Services");
+        var liteFiles = Directory.EnumerateFiles(liteDir, "*.cs", SearchOption.TopDirectoryOnly)
+            .OrderBy(f => f, StringComparer.Ordinal)
+            .ToList();
+        var liteOrderBys = 0;
+
+        foreach (var file in liteFiles)
+        {
+            var text = WithoutSqlComments(File.ReadAllText(file));
+            liteOrderBys += OrderByClause.Matches(text).Count;
+            if (IntegerExpressionOrderBy.IsMatch(text))
+            {
+                hits.Add("Lite " + Path.GetFileName(file));
+            }
+        }
+
+        Assert.True(
+            liteOrderBys >= 150,
+            $"only {liteOrderBys} ORDER BY clauses were found under Lite/Services (expected at least 150); the "
+            + "directory glob has broken and the Lite half of this sweep is empty");
+
+        Assert.True(
+            hits.Count == 0,
+            "these reads order by an integer EXPRESSION, which PostgreSQL and DuckDB fold to a constant — the "
+            + "rows come back in no order at all (#3613's get_pg_kernel_stats class). Name the columns: "
+            + string.Join(", ", hits));
+
+        /* The matcher, witnessed: the shipped defect in both of its positions, and the fixed shapes beside it
+           — a plain ordinal list, a named-column sum, a negative literal, and a numeric literal inside a
+           function — which must NOT match, or the sweep would red every legitimate read. */
+        Assert.Matches(IntegerExpressionOrderBy, "ORDER BY 3 + 4 DESC");
+        Assert.Matches(IntegerExpressionOrderBy, "ORDER BY\n    3+4 DESC, database_name");
+        Assert.Matches(IntegerExpressionOrderBy, "ORDER BY database_name, 3 * 4 DESC NULLS LAST");
+        Assert.DoesNotMatch(IntegerExpressionOrderBy, "ORDER BY 3 DESC, 4 DESC");
+        Assert.DoesNotMatch(IntegerExpressionOrderBy, "ORDER BY user_ms + system_ms DESC");
+        Assert.DoesNotMatch(IntegerExpressionOrderBy, "ORDER BY coalesce(c.sourceline, 0) DESC, c.name");
+        Assert.DoesNotMatch(IntegerExpressionOrderBy, "ORDER BY total_ms * 1.5 DESC");
+        Assert.DoesNotMatch(IntegerExpressionOrderBy, "ORDER BY collection_time DESC LIMIT 20");
+        Assert.DoesNotMatch(IntegerExpressionOrderBy, WithoutSqlComments("ORDER BY x /* was ORDER BY 3 + 4 */ DESC"));
+    }
+
+    /// <summary>Any ORDER BY, for the population floors.</summary>
+    private static readonly Regex OrderByClause = new(@"\bORDER\s+BY\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// An ORDER BY whose leading item, or any later comma-separated item on the same clause, is two integer
+    /// literals joined by an arithmetic operator. The later-item arm stays on one line (<c>[^\n;]*</c>) so it
+    /// cannot run from one statement's ORDER BY into the next statement's text.
+    /// </summary>
+    private static readonly Regex IntegerExpressionOrderBy = new(
+        @"\bORDER\s+BY\s+(?:\d+\s*[-+*/]\s*\d+\b|[^\n;]*,\s*\d+\s*[-+*/]\s*\d+\b)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>Blanks <c>/* … */</c> and <c>-- …</c> SQL comments, keeping the newlines, so quoted prose
+    /// about the defect cannot register as an instance of it.</summary>
+    private static string WithoutSqlComments(string sql) =>
+        Regex.Replace(
+            Regex.Replace(sql, @"/\*.*?\*/", m => Regex.Replace(m.Value, @"[^\n]", " "), RegexOptions.Singleline),
+            @"--[^\n]*", string.Empty);
+
     [Fact]
     public async Task EveryShippedPostgreSqlReadPassesParseAnalysis()
     {

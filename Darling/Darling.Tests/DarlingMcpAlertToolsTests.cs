@@ -321,6 +321,79 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         Assert.Contains("file_growth.rise_mb is megabytes per HOUR", ToolDescription("update_alert_settings"), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3653 (from #3541): <c>poison_wait.threshold_ms</c> is reported and accepted but consulted by nothing
+    /// since #3593 moved the alert to accumulated wait over a window. The key STAYS (a published field), the
+    /// note sits beside it on every read, and the writer accepts the value with a warning rather than either
+    /// refusing it (which would break the round-trip the tool's own description prescribes) or storing it in
+    /// silence (which would let an operator believe they had tuned an alert).
+    ///
+    /// <para>The premise is pinned too: the shared engine and the PostgreSQL host must not read the member.
+    /// A doc-comment mention is allowed (the member's own summary explains why it survives); a CODE read is
+    /// the day this note becomes a lie, and this is where that day fails.</para>
+    /// </summary>
+    [Fact]
+    public void PoisonWaitThresholdMs_IsReportedWithItsRetirementNote_AndWrittenWithAWarning()
+    {
+        var payload = SerializedSettingsPayload(SampleSettingsRow());
+        var poison = payload["poison_wait"]!;
+        Assert.Equal(1000, poison["threshold_ms"]!.GetValue<int>());
+        Assert.Equal(DarlingMcpAlertTools.PoisonWaitThresholdMsNote, poison["threshold_ms_note"]!.GetValue<string>());
+        Assert.StartsWith("retired by #3593", DarlingMcpAlertTools.PoisonWaitThresholdMsNote, StringComparison.Ordinal);
+
+        /* Setting the value: stored under its old bounds, named in the targets, and warned about. */
+        var (targets, error, warnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
+            "{\"poison_wait\":{\"threshold_ms\":700}}")!);
+        Assert.Null(error);
+        Assert.Equal(new[] { (DarlingMcpAlertTools.AlertSettingsTable, "poison_wait_threshold_ms") }, targets.ToArray());
+        var warning = Assert.Single(warnings);
+        Assert.Contains("poison_wait.threshold_ms", warning, StringComparison.Ordinal);
+        Assert.Contains(DarlingMcpAlertTools.PoisonWaitThresholdMsNote, warning, StringComparison.Ordinal);
+
+        /* The bound still runs FIRST: a value that was never valid is refused, not stored-with-a-warning. */
+        var (_, boundError, boundWarnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
+            "{\"poison_wait\":{\"threshold_ms\":0}}")!);
+        Assert.NotNull(boundError);
+        Assert.Empty(boundWarnings);
+
+        /* A field nothing here retires carries no warning, so warnings is empty rather than absent-or-noisy. */
+        var (_, enabledError, enabledWarnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
+            "{\"poison_wait\":{\"enabled\":false}}")!);
+        Assert.Null(enabledError);
+        Assert.Empty(enabledWarnings);
+
+        /* The note handed back (a whole-payload round-trip) is accepted, claims no column, and is not a warning:
+           it is the tool's own text coming home. The full round-trip is
+           EveryColumnRead_IsEmittedByThePayload_AndAcceptedByTheWriter's; this is the one key it could not see
+           the reason for. */
+        var (noteTargets, noteError, noteWarnings) = ParseAsPartialUpdateWithWarnings((JsonObject)JsonNode.Parse(
+            "{\"poison_wait\":{\"threshold_ms_note\":\"anything\"}}")!);
+        Assert.Null(noteError);
+        Assert.Empty(noteTargets);
+        Assert.Empty(noteWarnings);
+
+        /* Both descriptions say it, in the same words, where an agent reads before calling. */
+        Assert.Contains("poison_wait.threshold_ms is RETIRED (#3593)", ToolDescription("get_alert_settings"), StringComparison.Ordinal);
+        Assert.Contains("threshold_ms_note", ToolDescription("get_alert_settings"), StringComparison.Ordinal);
+        Assert.Contains("poison_wait.threshold_ms is RETIRED (#3593)", ToolDescription("update_alert_settings"), StringComparison.Ordinal);
+        Assert.Contains("warnings:[...]", ToolDescription("update_alert_settings"), StringComparison.Ordinal);
+
+        /* The premise. Comments and strings blanked, so the member's own summary and the two engines' rationale
+           paragraphs do not count as reads; the Lite/Darling settings CLASSES that implement the property are
+           deliberately outside this population — they must keep implementing it for the contract to compile. */
+        foreach (var path in new[]
+        {
+            System.IO.Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"),
+            System.IO.Path.Combine("PerformanceMonitor.Alerting", "PostgresAlertEvaluator.cs"),
+            System.IO.Path.Combine("PerformanceMonitor.Alerting", "PoisonWaitEvaluator.cs"),
+            System.IO.Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"),
+        })
+        {
+            var code = CSharpSourceWalker.StripCommentsAndStrings(ReadRepoFile(path));
+            Assert.DoesNotContain("PoisonWaitThresholdMs", code, StringComparison.Ordinal);
+        }
+    }
+
     private static string ToolDescription(string toolName) =>
         ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == toolName)
             .GetCustomAttribute<DescriptionAttribute>()!.Description;
@@ -795,6 +868,21 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
             return ((string)t.GetProperty("Table")!.GetValue(u)!, (string)t.GetProperty("Column")!.GetValue(u)!);
         }).ToList();
         return (targets, (string?)type.GetField("Item2")!.GetValue(result));
+    }
+
+    /// <summary><see cref="ParseAsPartialUpdate"/> plus the third element the parser returns since #3653: the
+    /// warnings for fields that were written but are consulted by nothing. Read off <c>Item3</c> the same
+    /// reflective way, so the two-element callers above did not have to change.</summary>
+    private static (IReadOnlyList<(string Table, string Column)> Targets, string? Error, IReadOnlyList<string> Warnings)
+        ParseAsPartialUpdateWithWarnings(JsonObject body)
+    {
+        var (targets, error) = ParseAsPartialUpdate(body);
+        var build = typeof(DarlingMcpAlertTools).GetMethod(
+            "BuildAlertSettingsUpdate", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var result = build.Invoke(null, new object[] { body })!;
+        var warnings = ((System.Collections.IEnumerable)result.GetType().GetField("Item3")!.GetValue(result)!)
+            .Cast<string>().ToList();
+        return (targets, error, warnings);
     }
 
     /// <summary>The columns the parser would write to one table.</summary>

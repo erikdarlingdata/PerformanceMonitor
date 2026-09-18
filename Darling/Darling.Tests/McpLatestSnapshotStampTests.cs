@@ -145,10 +145,19 @@ public sealed class McpLatestSnapshotStampTests
     /// <c>pg_server_config</c> snapshot; Lite has no PostgreSQL target, so there is no twin for the roster to
     /// pair it with. The same architectural boundary <c>CrossAppMcpToolInventoryPinTests</c> records for every
     /// <c>get_pg_*</c> read.</para>
+    ///
+    /// <para><c>get_pg_server_config</c> (#3653, the #3541 A10 residual) reads the SAME newest snapshot through
+    /// <c>DarlingPgServerConfigReader.GetCurrentConfigAsync</c>. It sat OUTSIDE this census because
+    /// <see cref="LatestReaderCall"/> did not match a <c>GetCurrent*Async</c> reader — the gap the sibling lane
+    /// that added this list recorded rather than closed. The regex now names the family and the tool carries
+    /// the row's own <c>collection_time</c> as <c>captured_at</c>; <c>ConfigChangesSql</c>'s caller
+    /// (<c>get_pg_server_config_changes</c>) is a windowed history read, not a latest read, and the pattern
+    /// does not reach it.</para>
     /// </summary>
     public static readonly (Type Tools, string ToolName)[] DarlingOnlyStamped =
     [
         (typeof(DarlingMcpPgLoggingAuditTools), "get_pg_logging_audit"),
+        (typeof(DarlingMcpPgServerStateTools), "get_pg_server_config"),
     ];
 
     /* ───────────────────────── the discriminators ───────────────────────── */
@@ -481,10 +490,12 @@ public sealed class McpLatestSnapshotStampTests
     /// A tool body's call into a latest-snapshot reader. The readers name themselves: <c>GetLatest*Async</c>,
     /// <c>*LatestAsync</c>, <c>*SnapshotAsync</c>, the plan-cache / scheduler pair, the server summary, and the
     /// object-stats trio (<c>GetIndexUsageAsync</c> / <c>GetIndexLockingAsync</c> / <c>GetObjectSizeGrowthAsync</c>,
-    /// each keyed on a correlated <c>MAX(collection_time)</c>).
+    /// each keyed on a correlated <c>MAX(collection_time)</c>), and since #3653 the <c>GetCurrent*Async</c>
+    /// family (<c>DarlingPgServerConfigReader.GetCurrentConfigAsync</c>, anchored on <c>MAX(collection_time)</c>
+    /// for the server) — a "current" read IS a latest read, and the name had kept it out of the sweep.
     /// </summary>
     private static readonly Regex LatestReaderCall = new(
-        @"\.(GetLatest\w+Async|Get\w+LatestAsync|Get\w+SnapshotAsync|GetPlanCacheBloatAsync|GetCpuSchedulerPressureAsync|GetServerSummaryAsync|GetIndexUsageAsync|GetIndexLockingAsync|GetObjectSizeGrowthAsync|GetRunningJobsAsync)\(",
+        @"\.(GetLatest\w+Async|Get\w+LatestAsync|Get\w+SnapshotAsync|GetCurrent\w+Async|GetPlanCacheBloatAsync|GetCpuSchedulerPressureAsync|GetServerSummaryAsync|GetIndexUsageAsync|GetIndexLockingAsync|GetObjectSizeGrowthAsync|GetRunningJobsAsync)\(",
         RegexOptions.Compiled);
 
     /* ───────────────────────── the readers ───────────────────────── */
@@ -501,6 +512,7 @@ public sealed class McpLatestSnapshotStampTests
     [InlineData(nameof(DarlingConfigHistoryReader.DatabaseScopedConfigSql), "capture_time")]
     [InlineData(nameof(DarlingConfigHistoryReader.QueryStoreHealthSql), "capture_time")]
     [InlineData(nameof(DarlingPgLoggingAuditReader.NewestSnapshotSql), "collection_time")]
+    [InlineData(nameof(DarlingPgServerConfigReader.CurrentConfigSql), "collection_time")]
     public void EveryStampedRead_SelectsItsStampColumn_OnTheRowStatement(string sqlName, string column)
     {
         var sql = ReaderSql(sqlName);
@@ -603,6 +615,10 @@ public sealed class McpLatestSnapshotStampTests
         Assert.Matches(LatestReaderCall, "            var rows = await DarlingMemoryGrantReader.GetResourceSemaphoreLatestAsync(");
         Assert.Matches(LatestReaderCall, "            var rows = await dataService.GetLatchStatsSnapshotAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);");
         Assert.DoesNotMatch(LatestReaderCall, "            var rows = await DarlingDataReader.GetTempDbTrendAsync(postgres, resolved.ServerId, a, b);");
+        /* #3653: the GetCurrent*Async arm — the exact call that sat outside the census — and the history read
+           beside it in the same reader, which must stay outside. */
+        Assert.Matches(LatestReaderCall, "            var rows = await DarlingPgServerConfigReader.GetCurrentConfigAsync(");
+        Assert.DoesNotMatch(LatestReaderCall, "            var rows = await DarlingPgServerConfigReader.GetConfigChangesAsync(");
     }
 
     /* ───────────────────────── plumbing ───────────────────────── */
@@ -638,6 +654,7 @@ public sealed class McpLatestSnapshotStampTests
         nameof(DarlingMemoryGrantReader.ResourceSemaphoreWindowSql) => DarlingMemoryGrantReader.ResourceSemaphoreWindowSql,
         nameof(DarlingMemoryGrantReader.MemoryGrantsWindowSql) => DarlingMemoryGrantReader.MemoryGrantsWindowSql,
         nameof(DarlingPgLoggingAuditReader.NewestSnapshotSql) => DarlingPgLoggingAuditReader.NewestSnapshotSql,
+        nameof(DarlingPgServerConfigReader.CurrentConfigSql) => DarlingPgServerConfigReader.CurrentConfigSql,
         _ => throw new ArgumentOutOfRangeException(nameof(sqlName), sqlName, "not a read this census names"),
     };
 
