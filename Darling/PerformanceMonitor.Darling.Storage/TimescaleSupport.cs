@@ -1402,9 +1402,32 @@ WITH NO DATA";
     /// (<see cref="IntervalRetentionInterval"/>): nothing reads it, so it only has to outlive raw for the
     /// arming gate and outlive its consumers' refresh windows (<see cref="HourlyRefreshStartOffset"/> for
     /// the corrected hourly, <see cref="DailyRefreshStartOffset"/> for the corrected daily).</para>
+    ///
+    /// <para><b><c>create_group_indexes = false</c> (#3597) — no per-column index on the materialization,
+    /// because nothing reads one and every refresh paid for eleven.</b> TimescaleDB's default builds one btree
+    /// per GROUP BY column, <c>(column, bucket DESC)</c>, on a continuous aggregate's materialization hypertable;
+    /// here that was eleven of them beside the bucket index — twelve indexes on the one materialization in this
+    /// file whose row count is near-raw. Nothing reads this relation by any of those columns: its three
+    /// consumers (<see cref="CreateQueryStoreStatsCorrectedHourlySql"/>,
+    /// <see cref="CreateQueryStoreStatsCorrectedDailySql"/>, <see cref="CreateQueryStoreStatsIntervalDailySql"/>)
+    /// refresh over it by <c>bucket</c> range, the coverage probe and the arming gate read <c>min(bucket)</c>,
+    /// and retention drops whole chunks. What the eleven indexes DID do was tax the refresh: the hourly policy
+    /// re-materializes a bucket by DELETE + INSERT, and every inserted row cost twelve index inserts. Measured
+    /// on a rig at one tenth of the largest production store's scale (PostgreSQL 18.4 / TimescaleDB 2.28.1, the
+    /// production pair), <c>EXPLAIN (ANALYZE, BUFFERS, WAL)</c> of one bucket's materialization INSERT
+    /// (36,121 rows from 216,721 raw): with the group indexes 45.5 MB of WAL over 483,689 records,
+    /// 1.64 M buffer touches, 6,040 buffers dirtied; with only the bucket index 10.7 MB over 72,735 records,
+    /// 447 K buffer touches, 56 dirtied — the indexes were 4.3x the WAL and 1.19 M of the buffer touches per
+    /// bucket. On the rig those touches are memory hits and the wall clock barely moves; on a store whose
+    /// materialization is 71.5 GiB they are the leaf pages of eleven cold indexes, which is the I/O the issue's
+    /// alert-read victims were starved by. <see cref="EnsureIntervalDedupMaterializationIndexesAsync"/> brings
+    /// an existing store to the same shape — this option only speaks at CREATE. Scoped to THIS aggregate on
+    /// purpose: the composer-grain rollups are read by <c>server_id</c> and <c>query_hash</c> through exactly
+    /// these indexes, and <see cref="CreateQueryStoreStatsIntervalDailySql"/> refreshes once a day and was not
+    /// measured — the option is earned by a measurement, not applied for symmetry.</para>
     /// </summary>
     public const string CreateQueryStoreStatsIntervalHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_interval_hourly
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.create_group_indexes = false) AS
 SELECT
     server_id,
     server_name,
@@ -5733,6 +5756,187 @@ WHERE ca.view_schema = 'collect' AND ca.view_name = '{view}'";
 
         return changed;
     }
+
+    /* ─────────────── interval-dedup materialization indexes (#3597) ─────────────── */
+
+    /// <summary>
+    /// The per-GROUP-BY-column indexes TimescaleDB's default <c>create_group_indexes</c> built on
+    /// <see cref="QueryStoreStatsIntervalHourlyView"/>'s materialization hypertable, resolved from the catalog
+    /// by SHAPE rather than by name: a btree on the materialization whose key is exactly one column followed by
+    /// <c>bucket DESC</c>. The bucket index (<c>(bucket DESC)</c> alone) does not match and stays — the refresh's
+    /// DELETE, the coverage probe's <c>min(bucket)</c> and the children's bucket-range reads all use it. The
+    /// materialization's schema and name are TimescaleDB's (<c>_timescaledb_internal._materialized_hypertable_N</c>),
+    /// never stable across stores, so the statement resolves them from the view name, the same rule as
+    /// <see cref="SetMaterializationChunkIntervalSql"/>. Hypertable-level indexes only (<c>pg_indexes</c> on the
+    /// parent): dropping the parent drops every chunk's copy, so the per-chunk names never need to be known —
+    /// they are read here only to SIZE what a drop releases, and for that the naming convention is the only
+    /// map 2.28.1 offers (no catalog row and no <c>pg_inherits</c>/<c>pg_depend</c> edge ties a chunk's copy to
+    /// its parent index): a copy is named <c>&lt;chunk&gt;_&lt;parent index&gt;</c> truncated to 63 characters.
+    /// A copy TimescaleDB had to suffix to keep unique after truncation is missed by that join, which
+    /// understates the logged figure and changes nothing else.
+    /// </summary>
+    public static string IntervalDedupMaterializationGroupIndexesSql =>
+        $@"
+SELECT
+    i.schemaname,
+    i.indexname,
+    i.indexdef,
+    pg_relation_size(format('%I.%I', i.schemaname, i.indexname)::regclass)
+      + COALESCE((SELECT sum(pg_relation_size(format('%I.%I', ci.schemaname, ci.indexname)::regclass))
+                  FROM timescaledb_information.chunks AS ch
+                  JOIN pg_indexes AS ci
+                    ON  ci.schemaname = ch.chunk_schema
+                    AND ci.tablename = ch.chunk_name
+                    AND ci.indexname = left(ch.chunk_name || '_' || i.indexname, 63)
+                  WHERE ch.hypertable_schema = ca.materialization_hypertable_schema
+                  AND   ch.hypertable_name = ca.materialization_hypertable_name), 0) AS bytes
+FROM timescaledb_information.continuous_aggregates AS ca
+JOIN pg_indexes AS i
+  ON  i.schemaname = ca.materialization_hypertable_schema
+  AND i.tablename = ca.materialization_hypertable_name
+WHERE ca.view_schema = 'collect'
+AND   ca.view_name = '{QueryStoreStatsIntervalHourlyView}'
+AND   i.indexdef ~ 'USING btree \([a-z_]+, bucket DESC\)$'
+ORDER BY i.indexname";
+
+    /// <summary>
+    /// The lock wait the index drops below will tolerate before giving the start back, as a PostgreSQL
+    /// <c>lock_timeout</c> literal. <c>DROP INDEX</c> takes <c>AccessExclusiveLock</c> on the materialization and
+    /// its chunks, and the hourly refresh that this exists to lighten holds <c>RowExclusiveLock</c> on the same
+    /// relation for its whole run — up to fifteen minutes on the largest store. A drop that queued behind it
+    /// would not merely wait: a QUEUED exclusive request blocks every later shared request too (the convoy
+    /// <see cref="HourlyRefreshStartOffset"/> documents), so the three child aggregates' refreshes and the
+    /// coverage probe would pile up behind a lock that was only requested. Ten seconds is long enough for the
+    /// lock to be free whenever no refresh is running and short enough that a running refresh costs this start
+    /// nothing but a warning; the next start retries. Set with <c>SET LOCAL</c> inside each drop's own
+    /// transaction, so it never outlives the statement it guards.
+    /// </summary>
+    public const string IntervalDedupIndexDropLockTimeout = "10s";
+
+    /// <summary>
+    /// Drops the per-column group indexes an earlier build's <c>CREATE MATERIALIZED VIEW</c> left on
+    /// <see cref="QueryStoreStatsIntervalHourlyView"/>'s materialization (#3597), so an existing store reaches
+    /// the shape <see cref="CreateQueryStoreStatsIntervalHourlySql"/>'s <c>create_group_indexes = false</c> gives
+    /// a fresh one. Idempotent under the catalog — a settled store reads <c>pg_indexes</c> once and issues
+    /// nothing — and failure-isolated per index. Returns the number of indexes dropped this start.
+    ///
+    /// <para><b>What was measured and what was not, stated apart because the lever is licensed by the first
+    /// and not the second.</b> The refresh's cost per re-materialized bucket was measured with and without
+    /// these indexes on a rig at one tenth of the largest store's scale (the figures are on
+    /// <see cref="CreateQueryStoreStatsIntervalHourlySql"/>): 4.3x the WAL, 1.19 M extra buffer touches and
+    /// 108x the dirtied buffers per bucket with them, from twelve index inserts per row where one suffices.
+    /// That is the write amplification, and it is a property of the statement, not of the rig. What the rig
+    /// could NOT reproduce is the production I/O regime — its indexes fit in shared buffers, so its wall clock
+    /// barely moved — and so this file does not claim a refresh-duration figure for the largest store. The
+    /// issue's own <c>job_history</c> series after this lands is that measurement; the trough value
+    /// (276–286 s at the quietest hours, when only the newly-closed bucket is dirty) is the per-bucket floor
+    /// this should lower.</para>
+    ///
+    /// <para><b>Why a drop at startup rather than a recreate.</b> The option that keeps a fresh store from
+    /// building these speaks only at CREATE, and recreating the aggregate would discard seven days of
+    /// materialization the corrected tiers are gated on. <c>DROP INDEX</c> on the parent hypertable is
+    /// transactional, propagates to every chunk, and is measured harmless to what remains: the hourly refresh,
+    /// the three child aggregates' refreshes, <c>compress_chunk</c> on a materialization chunk and
+    /// <c>decompress_chunk</c> all ran unchanged on the rig with the bucket index alone.</para>
+    ///
+    /// <para><b>Ordering.</b> After <see cref="EnsureContinuousAggregatesAsync"/> (the aggregate must exist)
+    /// and before <see cref="EnsureAggregateCompressionAsync"/> (so the nightly compression pass compresses a
+    /// relation that is already smaller). Under a <see cref="IntervalDedupIndexDropLockTimeout"/> so a refresh
+    /// in flight at startup is yielded to rather than convoyed — that arm logs at Warning and the next start
+    /// retries, which on an hourly grid is at most one refresh away from succeeding.</para>
+    /// </summary>
+    public static async Task<int> EnsureIntervalDedupMaterializationIndexesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var indexes = new List<(string Schema, string Name, string Definition, long Bytes)>();
+        try
+        {
+            using var probe = new NpgsqlCommand(IntervalDedupMaterializationGroupIndexesSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                indexes.Add((
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "TimescaleDB: could not read {View}'s materialization indexes, so none was dropped this start — its hourly refresh keeps paying twelve index inserts per re-materialized row until the next start reads it (#3597): {Message}",
+                QueryStoreStatsIntervalHourlyView, ex.Message);
+            return 0;
+        }
+
+        if (indexes.Count == 0)
+        {
+            logger?.LogInformation(
+                "TimescaleDB: {View}'s materialization carries no per-column group index — the bucket index alone, the shape its refresh is cheapest in (#3597)",
+                QueryStoreStatsIntervalHourlyView);
+            return 0;
+        }
+
+        var dropped = 0;
+        long freed = 0;
+        foreach (var (schema, name, definition, bytes) in indexes)
+        {
+            /* One transaction per index, each with its own lock timeout: a drop that cannot get its lock leaves
+               the others untried THIS start rather than half-done, because the convoy argument on the timeout
+               constant applies to every one of them equally — if the first is blocked by a refresh, so are the
+               rest, and eleven ten-second waits is a startup stalled for two minutes behind a lock it decided
+               not to wait for. */
+            try
+            {
+                await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+                using (var timeout = new NpgsqlCommand($"SET LOCAL lock_timeout = '{IntervalDedupIndexDropLockTimeout}'", connection, transaction) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    await timeout.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                using (var drop = new NpgsqlCommand($"DROP INDEX IF EXISTS {QuoteIdentifier(schema)}.{QuoteIdentifier(name)}", connection, transaction) { CommandTimeout = SetupTimeoutSeconds })
+                {
+                    await drop.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                await transaction.CommitAsync(cancellationToken);
+                dropped++;
+                freed += bytes;
+                logger?.LogInformation(
+                    "TimescaleDB: dropped {Index} ({SizeMiB:0.#} MiB across the materialization and its chunks) from {View}'s materialization — a per-column group index nothing read, whose maintenance every hourly refresh paid on every re-materialized row (#3597). Definition was: {Definition}",
+                    name, bytes / 1048576d, QueryStoreStatsIntervalHourlyView, definition);
+            }
+            catch (PostgresException ex) when (string.Equals(ex.SqlState, PostgresErrorCodes.LockNotAvailable, StringComparison.Ordinal))
+            {
+                logger?.LogWarning(
+                    "TimescaleDB: {Index} on {View}'s materialization could not be dropped within {Timeout} — its hourly refresh is holding the relation, and waiting would queue every reader behind this drop; the remaining {Remaining} group index(es) are left for the next start rather than each waiting its own turn (#3597).",
+                    name, QueryStoreStatsIntervalHourlyView, IntervalDedupIndexDropLockTimeout, indexes.Count - dropped);
+                break;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "TimescaleDB: could not drop {Index} from {View}'s materialization — its refresh keeps maintaining it until the next restart retries (often a permission issue: the store login must own the materialization) (#3597): {Message}",
+                    name, QueryStoreStatsIntervalHourlyView, ex.Message);
+            }
+        }
+
+        logger?.LogInformation(
+            "TimescaleDB: {Dropped}/{Found} per-column group index(es) dropped from {View}'s materialization this start, {FreedMiB:0.#} MiB released; {Remaining} remain (#3597)",
+            dropped, indexes.Count, QueryStoreStatsIntervalHourlyView, freed / 1048576d, indexes.Count - dropped);
+
+        return dropped;
+    }
+
+    /// <summary>Double-quotes one SQL identifier, doubling any embedded quote — the catalog names the
+    /// drops above interpolate are TimescaleDB's own, but a name is a name and gets quoted.</summary>
+    private static string QuoteIdentifier(string identifier)
+        => "\"" + identifier.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
 
     /// <summary>
     /// Puts every continuous aggregate this product owns on the compression ladder (#3581): enables columnar
