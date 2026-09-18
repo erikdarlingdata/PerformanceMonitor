@@ -4527,7 +4527,9 @@
                     </DataGrid.RowStyle>
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="130"/>
-                        <DataGridTextColumn Header="Table" Binding="{Binding TableName}" Width="160"/>
+                        <!-- #3576: schema.table, not the bare table name - the same table name in two schemas read
+                             as one here, while every other table-naming grid on this tab already shows the schema. -->
+                        <DataGridTextColumn Header="Table" Binding="{Binding FullName}" Width="200"/>
                         <DataGridTextColumn Header="Index" Binding="{Binding IndexName}" Width="200"/>
                         <DataGridTextColumn Header="Size" Binding="{Binding IndexSize}" Width="100"/>
                         <DataGridTextColumn Header="Scans in Window" Binding="{Binding ScansInWindow}" ElementStyle="{StaticResource NumericCell}" Width="130"/>

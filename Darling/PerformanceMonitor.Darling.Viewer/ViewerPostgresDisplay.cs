@@ -746,7 +746,20 @@ internal static class PgDisplay
     internal sealed class IndexUsageRow
     {
         public string DatabaseName { get; init; } = "";
+        public string SchemaName { get; init; } = "";
         public string TableName { get; init; } = "";
+
+        /// <summary>
+        /// <c>schema.table</c> for the grid's Table column (#3576, the Postgres sibling of the FinOps Locking
+        /// grid's defect). The store's reader carried <c>SchemaName</c> from the start, but this display row
+        /// never took it and the grid showed the bare table name, so <c>public.events</c> and
+        /// <c>archive.events</c> read as one table. The other Postgres grids on this tab show Schema as its own
+        /// column; this one names the table qualified instead, the same shape as the FinOps Locking grid's
+        /// <c>IndexLockingRow.FullName</c> and <c>ProcedureStatsRow.FullName</c>, so it sorts as one string.
+        /// Falls back to the bare name when the schema is empty.
+        /// </summary>
+        public string FullName => string.IsNullOrEmpty(SchemaName) ? TableName : $"{SchemaName}.{TableName}";
+
         public string IndexName { get; init; } = "";
         public string IndexSize { get; init; } = "";
         public string ScansInWindow { get; init; } = "";
@@ -796,6 +809,7 @@ internal static class PgDisplay
         return new IndexUsageRow
         {
             DatabaseName = row.DatabaseName ?? "",
+            SchemaName = row.SchemaName ?? "",
             TableName = row.TableName ?? "",
             IndexName = row.IndexName ?? "",
             IndexSize = Bytes(row.IndexBytes),
