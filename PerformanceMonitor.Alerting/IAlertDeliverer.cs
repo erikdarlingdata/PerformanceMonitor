@@ -91,4 +91,33 @@ public interface IAlertDeliverer
     /// must not throw for channel failures — a dead SMTP server must not abort the engine's sweep.
     /// </summary>
     Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// <see cref="DeliverAsync"/>, and then SAYS what the channels did (#3580): the
+    /// <see cref="AlertDelivery"/> the deliverer recorded on the alert's history row, or <c>null</c> when it
+    /// has no single answer to give.
+    ///
+    /// <para><b>Why a second method rather than a return value on the first.</b> The never-throws contract
+    /// above is deliberate and stays: a channel fault is the deliverer's to record, not the engine's to
+    /// handle, and every condition-class alert wants exactly that. The two DOCUMENT-class self-alerts (the
+    /// collector-cost digest and the fleet-sweep rollup) are the exception, because their once-a-day gate
+    /// has to answer "was one delivered today" and not "did this process fire one today" — on the v3.8.0
+    /// install night three service restarts re-announced both documents on every store, six re-posts among
+    /// ~23 channel posts, while the one pair whose delivery had genuinely FAILED was correctly re-attempted
+    /// after the restart. Distinguishing those two cases needs the disposition at the fire site, and
+    /// nothing else on the engine's side does; so the report rides a separate method that the two askers
+    /// call and every other caller ignores.</para>
+    ///
+    /// <para><b>The default reports nothing.</b> A deliverer that has not been taught to report delivers
+    /// exactly as before and returns <c>null</c>, which the askers treat the way every fire before #3580
+    /// was treated: as delivered. That keeps Lite's deliverer and every test fake compiling and behaving
+    /// unchanged, and it means <c>null</c> is "unreported", never "failed" — a deliverer that KNOWS a send
+    /// failed reports <see cref="AlertDelivery.ChannelFailed"/>, which is the one disposition the askers
+    /// withhold their delivered-today stamp on.</para>
+    /// </summary>
+    async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+    {
+        await DeliverAsync(outcome, cancellationToken);
+        return null;
+    }
 }

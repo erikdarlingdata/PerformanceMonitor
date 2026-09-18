@@ -704,12 +704,20 @@ public sealed class AlertReadFailureCounter
     /// performs that read, Lite swallows its failure, and Lite's call site therefore records it here too.
     /// A read this constant names on a SKU that cannot increment it would be this class's own defect — a
     /// confident zero — reproduced in its documentation.</para>
+    ///
+    /// <para>#3580 added one more Darling-only member: the daily documents' DELIVERY-STAMP read, the gate
+    /// that decides whether the digest or the rollup was already delivered today. It is one read site
+    /// serving both documents (so one name here), and it is counted rather than exempt because its
+    /// swallowed failure is the gate falling back to process memory — which re-announces the document once
+    /// per restart until the store answers, the very behaviour #3580 retired. A nonzero count naming it
+    /// says the store could not be asked "was one delivered today", not that a document was lost.</para>
     /// </summary>
     public const string FleetScopedReads =
         "the collector-cost regression self-alert and its two #3443 companions (the collector-cost census "
         + "read that decides paging-versus-digest routing, and the collector-cost digest read behind the "
         + "daily report), the mute-rule reload, the fleet-sweep rollup read behind the daily sweep report "
-        + "(#3466), and the store background-job "
+        + "(#3466), the daily documents' delivery-stamp read that gates the digest and the rollup on "
+        + "delivered-today (#3580), and the store background-job "
         + "health reads behind compression-job health, store-job cadence and retention holds";
 
     /// <summary>

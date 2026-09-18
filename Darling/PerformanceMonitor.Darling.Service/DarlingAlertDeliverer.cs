@@ -74,7 +74,24 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
         _core = new EmailSendCore(settings, historyStore, webhookAlertService, s_branding, logger);
     }
 
-    public async Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+    public Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default) =>
+        DeliverAndReportAsync(outcome, cancellationToken);
+
+    /// <summary>
+    /// The delivery, reporting its disposition (#3580). Every send goes through here —
+    /// <see cref="DeliverAsync"/> is this with the answer discarded — so there is one delivery path and
+    /// not a reporting one beside a silent one.
+    ///
+    /// <para><b>What comes back.</b> On the combined send (Summary mode, or any alert without incidents,
+    /// which is every self-alert) the exact <see cref="AlertDelivery"/> the history row was written with.
+    /// On a Per-event split there are N sends and N rows and no single disposition describes them, so this
+    /// returns <c>null</c> — "unreported" — rather than electing one; the two callers that read the
+    /// answer (the digest and the rollup) fire with <c>Context: null</c> and never take that path. The
+    /// belt-and-suspenders catch below also answers <c>null</c>: both <c>TrySendAsync</c> and
+    /// <c>RecordAlertAsync</c> are failure-isolated themselves, so a throw here is something outside the
+    /// channels and says nothing about whether they delivered.</para>
+    /// </summary>
+    public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
     {
         if (outcome is null)
         {
@@ -102,11 +119,11 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
                         deliveryMode: mode);
                 }
 
-                return;
+                return null;
             }
 
             /* Summary mode, or an alert with no incidents (CPU/low-disk/jobs): one combined send+row, unchanged. */
-            await SendAndRecordAsync(
+            return await SendAndRecordAsync(
                 outcome, outcome.CurrentValue, outcome.Context, outcome.DetailText,
                 outcome.NumericCurrentValue, outcome.NumericThresholdValue,
                 deliveryMode: mode);
@@ -119,6 +136,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
         {
             _logger.LogError("Alert delivery failed for {Metric} on {Server}: {Message}",
                 outcome.MetricName, outcome.ServerName, ex.Message);
+            return null;
         }
     }
 
@@ -130,12 +148,14 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
     /// still record (flagged muted).
     /// </summary>
     /// <param name="deliveryMode">
-    /// The mode <see cref="DeliverAsync"/> resolved for this server, forwarded to the shared send core for
-    /// #3430's per-metric repeat ceiling. Passed rather than re-resolved so one alert's two channels and its
-    /// history row all describe the same decision, and passed FAITHFULLY on the Per-event split — those
-    /// messages must not be aggregated, which is that mode's own contract.
+    /// The mode <see cref="DeliverAndReportAsync"/> resolved for this server, forwarded to the shared send
+    /// core for #3430's per-metric repeat ceiling. Passed rather than re-resolved so one alert's two channels
+    /// and its history row all describe the same decision, and passed FAITHFULLY on the Per-event split —
+    /// those messages must not be aggregated, which is that mode's own contract.
     /// </param>
-    private async Task SendAndRecordAsync(
+    /// <returns>The disposition the history row was written with — the same value, so what the caller is
+    /// told and what the operator later reads in the alert log cannot disagree (#3580).</returns>
+    private async Task<AlertDelivery> SendAndRecordAsync(
         AlertOutcome outcome, string currentValue, AlertContext? context, string? detailText,
         double? numericCurrentValue, double? numericThresholdValue, AlertNotificationMode deliveryMode)
     {
@@ -175,5 +195,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
             numericCurrentValue, numericThresholdValue,
             delivery,
             outcome.Muted, detailText, contextJson));
+
+        return delivery;
     }
 }
