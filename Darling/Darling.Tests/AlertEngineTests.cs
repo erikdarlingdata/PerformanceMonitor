@@ -69,6 +69,7 @@ public sealed class AlertEngineTests
         public int DiskCriticalFreePercent { get; set; } = 3;
         public int DiskCriticalFreeGb { get; set; } = 2;
         public int SelfDiskFreeWarnPercent { get; set; } = 10;
+        public int SelfDiskFreeWarnGb { get; set; } = 50;
         public int CollectionStaleMinutes { get; set; } = 30;
         public int CollectionFailureThreshold { get; set; } = 10;
         /* #1984: DarlingConfig defaults (40% / 1 GB); enable stays the class's opt-in OFF. */

@@ -94,14 +94,21 @@ internal sealed class DarlingSelfAlertEvaluator
        cycle. 10 spans a couple of minutes of total failure across the frequently-scheduled collectors. */
     internal const int ConsecutiveFailureThreshold = 10;
 
-    /* Store Disk Pressure fires when the store volume drops below this percent free — a percentage (not an
-       absolute floor) so it scales from a small managed box to a large fleet disk; 10% is the universal DBA
-       "act now" threshold for a database volume, and mirrors the shared engine's target-server low-disk
-       percent (LowDiskThresholdPercent). Percent-only by design (defaults over speculative config — a GB
-       floor is a trivial follow-up if an operator ever wants one). The condition no-ops when free space is
-       undeterminable (a remote BYO store), so it never false-alarms; the managed store's own volume is the
-       case it exists to protect. */
+    /* Store Disk Pressure fires when the store volume drops below this percent free — a percentage so it
+       scales from a small managed box to a large fleet disk; 10% is the universal DBA "act now" threshold
+       for a database volume, and mirrors the shared engine's target-server low-disk percent
+       (LowDiskThresholdPercent). The condition no-ops when free space is undeterminable (a remote BYO
+       store), so it never false-alarms; the managed store's own volume is the case it exists to protect. */
     internal const double DiskFreeWarnPercent = 10.0;
+
+    /* #3528: the percent's GB floor — pressure additionally requires free space BELOW this many GB, an AND
+       qualifier so a big volume at a low percent (400 GB free on a 4 TB store) never pages CRITICAL. This
+       was "percent-only by design (a GB floor is a trivial follow-up if an operator ever wants one)"; #3528
+       is that want. The composition is PvsFloorGb's (percent triggers, the floor keeps it honest, 0 removes
+       the floor), deliberately NOT the target-volume pair's OR — there the GB dimension ADDS fires, which
+       would make this alert noisier, the opposite of the complaint. 50 puts the crossover at a 500 GB
+       volume: below that the percent governs exactly as before; above it, 50 GB free is the line. */
+    internal const double DiskFreeWarnFloorGb = 50.0;
 
     private readonly IAlertEngineSettings _settings;
     private readonly IAlertDeliverer _deliverer;
@@ -2697,10 +2704,11 @@ internal sealed class DarlingSelfAlertEvaluator
     /* ---------------- store disk pressure (fleet-level, polled) ---------------- */
 
     /// <summary>
-    /// Pure disk-pressure decision: the store volume is under pressure when its FREE space is below
-    /// <see cref="DiskFreeWarnPercent"/> of the volume total. No I/O, so it pins directly. A non-positive
-    /// total is treated as "can't tell" (false — the caller also guards this). The percentage scales across
-    /// disk sizes; see the constant for why it is percent-only.
+    /// Pure disk-pressure decision at the SHIPPED defaults: the store volume is under pressure when its
+    /// FREE space is below <see cref="DiskFreeWarnPercent"/> of the volume total AND below
+    /// <see cref="DiskFreeWarnFloorGb"/> absolute (#3528 — see the floor constant for the composition).
+    /// No I/O, so it pins directly. A non-positive total is treated as "can't tell" (false — the caller
+    /// also guards this).
     /// <para><paramref name="percentFree"/> is the measurement the alert is ABOUT, handed back so the fire
     /// site can store it as a real numeric instead of leaving the history store to find it again by
     /// scanning <paramref name="reason"/> for digits (#1881). It is computed whenever the total is usable,
@@ -2709,12 +2717,16 @@ internal sealed class DarlingSelfAlertEvaluator
     /// the one dangerous ambiguity this metric must never have back into the signature.</para>
     /// </summary>
     internal static bool IsDiskPressure(long freeBytes, long totalBytes, out string reason, out double percentFree)
-        => IsDiskPressure(freeBytes, totalBytes, DiskFreeWarnPercent, out reason, out percentFree);
+        => IsDiskPressure(freeBytes, totalBytes, DiskFreeWarnPercent, DiskFreeWarnFloorGb, out reason, out percentFree);
 
-    /// <summary>#2107: the configurable form — the sweep passes the store-backed
-    /// <c>SelfDiskFreeWarnPercent</c>; the constant-threshold overload keeps the shipped default
-    /// for the tests pinning it.</summary>
+    /// <summary>#2107: the percent-only form — floor disabled, kept for the tests that pin the percent
+    /// edge on its own. The sweep calls the two-knob overload below.</summary>
     internal static bool IsDiskPressure(long freeBytes, long totalBytes, double warnPercent, out string reason, out double percentFree)
+        => IsDiskPressure(freeBytes, totalBytes, warnPercent, 0.0, out reason, out percentFree);
+
+    /// <summary>#3528: the configurable form — the sweep passes the store-backed
+    /// <c>SelfDiskFreeWarnPercent</c> AND <c>SelfDiskFreeWarnGb</c> (0 = no floor).</summary>
+    internal static bool IsDiskPressure(long freeBytes, long totalBytes, double warnPercent, double floorGb, out string reason, out double percentFree)
     {
         if (totalBytes <= 0)
         {
@@ -2724,7 +2736,8 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         percentFree = (double)freeBytes / totalBytes * 100.0;
-        if (percentFree < warnPercent)
+        double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
+        if (percentFree < warnPercent && (floorGb <= 0 || freeGb < floorGb))
         {
             reason = $"The monitor store's disk volume has only {percentFree.ToString("0.#", CultureInfo.InvariantCulture)}% free ({FormatGb(freeBytes)} of {FormatGb(totalBytes)}).";
             return true;
@@ -2791,10 +2804,11 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         var now = _utcNow();
-        /* #2107: store-backed threshold (clamped on read); the constant remains only as the
-           shipped default. */
+        /* #2107/#3528: store-backed thresholds (clamped on read); the constants remain only as the
+           shipped defaults. */
         double warnPercent = _settings.SelfDiskFreeWarnPercent;
-        bool pressure = IsDiskPressure(free, total, warnPercent, out var reason, out var percentFree);
+        double floorGb = _settings.SelfDiskFreeWarnGb;
+        bool pressure = IsDiskPressure(free, total, warnPercent, floorGb, out var reason, out var percentFree);
 
         if (pressure)
         {
@@ -2827,7 +2841,11 @@ internal sealed class DarlingSelfAlertEvaluator
                     : "";
                 await FireAsync(
                     StoreKey(DiskKey), _storeLabel, DiskPressureMetric, reason,
-                    $"{warnPercent.ToString("0.#", CultureInfo.InvariantCulture)}% free",
+                    /* #3528: the threshold string names BOTH gates when the floor is active, so the history
+                       row's threshold column states the condition that actually fired. */
+                    floorGb > 0
+                        ? $"{warnPercent.ToString("0.#", CultureInfo.InvariantCulture)}% free and under {floorGb.ToString("0.#", CultureInfo.InvariantCulture)} GB"
+                        : $"{warnPercent.ToString("0.#", CultureInfo.InvariantCulture)}% free",
                     detail: reason + storeText + " When the store volume fills, collection and every write stop " +
                         "for the WHOLE fleet, and a headless service has no dashboard to warn you. Free space on the " +
                         "store volume, shorten retention (config_collector_schedules), enable TimescaleDB compression, " +

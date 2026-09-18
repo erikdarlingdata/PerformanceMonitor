@@ -257,6 +257,10 @@ public sealed class DarlingMcpAlertTools
         self_alerts = new
         {
             disk_free_warn_percent = s.SelfDiskFreeWarnPercent,
+            /* #3528 (V126): the percent's GB floor — pressure requires BOTH the percent above breached
+               AND free space below this many GB (0 removes the floor), so a large store volume at a low
+               percent stops paging CRITICAL. The pvs.floor_gb composition, not low_disk's OR pair. */
+            disk_free_warn_gb = s.SelfDiskFreeWarnGb,
             collection_stale_minutes = s.CollectionStaleMinutes,
             collection_failure_threshold = s.CollectionFailureThreshold,
             /* #2136: the Store Job Over Cadence warning percent (Critical is fixed at 100). */
@@ -1317,7 +1321,10 @@ public sealed class DarlingMcpAlertTools
                         switch (k)
                         {
                             case "enabled": AddBool("blocking_enabled", n, "blocking.enabled"); break;
-                            case "count_threshold": AddInt("blocking_count_threshold", n, "blocking.count_threshold", 1, int.MaxValue); break;
+                            /* #3528: the floor is the named constant rather than the literal 1 it always
+                               was, because the read side now clamps to it — the same structural parity the
+                               pg twin below has held since V122. */
+                            case "count_threshold": AddInt("blocking_count_threshold", n, "blocking.count_threshold", PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue); break;
                             /* #2417: get_alert_settings has emitted this key since #1839 and the writer
                                never took it, so handing a whole read payload back -- the round trip this
                                tool's own description tells the caller to perform -- was rejected with
@@ -1328,8 +1335,7 @@ public sealed class DarlingMcpAlertTools
                             /* #3444 (V122): the PostgreSQL count gate. The floor is the SAME named
                                constant DarlingAlertSettings clamps to, not a retyped 1, so this writer
                                cannot ACCEPT a value the read-side clamp then rewrites. The twin above
-                               takes the identical bound and has no read-side clamp; that gap is named on
-                               DarlingAlertSettings rather than reproduced here. */
+                               holds the identical bound-and-clamp pair since #3528. */
                             case "pg_count_threshold": AddInt("pg_blocking_count_threshold", n, "blocking.pg_count_threshold", PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue); break;
                             default: error = $"Unknown field 'blocking.{k}'."; break;
                         }
@@ -1342,7 +1348,8 @@ public sealed class DarlingMcpAlertTools
                         switch (k)
                         {
                             case "enabled": AddBool("deadlock_enabled", n, "deadlocks.enabled"); break;
-                            case "count_threshold": AddInt("deadlock_count_threshold", n, "deadlocks.count_threshold", 1, int.MaxValue); break;
+                            /* #3528: the named constant for its blocking sibling's reason. */
+                            case "count_threshold": AddInt("deadlock_count_threshold", n, "deadlocks.count_threshold", PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue); break;
                             /* #3444 (V122): the PostgreSQL count gate — same bound sourcing as its
                                blocking sibling. */
                             case "pg_count_threshold": AddInt("pg_deadlock_count_threshold", n, "deadlocks.pg_count_threshold", PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue); break;
@@ -1443,6 +1450,9 @@ public sealed class DarlingMcpAlertTools
                         switch (k)
                         {
                             case "disk_free_warn_percent": AddInt("self_disk_free_warn_percent", n, "self_alerts.disk_free_warn_percent", 0, 100); break;
+                            /* #3528: bound mirrors DarlingAlertSettings' Math.Max(0, ...) — 0 is IN range
+                               because it removes the floor (the pvs.floor_gb reading), not nonsense. */
+                            case "disk_free_warn_gb": AddInt("self_disk_free_warn_gb", n, "self_alerts.disk_free_warn_gb", 0, int.MaxValue); break;
                             case "collection_stale_minutes": AddInt("collection_stale_minutes", n, "self_alerts.collection_stale_minutes", 5, 1440); break;
                             case "collection_failure_threshold": AddInt("collection_failure_threshold", n, "self_alerts.collection_failure_threshold", 1, 1000); break;
                             case "store_job_cadence_warn_percent": AddInt("store_job_cadence_warn_percent", n, "self_alerts.store_job_cadence_warn_percent", 5, 100); break;

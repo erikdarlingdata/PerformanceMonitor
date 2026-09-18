@@ -80,6 +80,7 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
     public int DiskCriticalFreePercent => App.AlertDiskCriticalFreePercent;
     public int DiskCriticalFreeGb => App.AlertDiskCriticalFreeGb;
     public int SelfDiskFreeWarnPercent => 10;
+    public int SelfDiskFreeWarnGb => 50;
     public int CollectionStaleMinutes => ServerHealthThresholds.CollectionStoppedMinutesDefault;
     public int CollectionFailureThreshold => 10;
     public int PvsThresholdPercent => App.AlertPvsThresholdPercent;

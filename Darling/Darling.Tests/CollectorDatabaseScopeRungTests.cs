@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using Npgsql;
@@ -36,18 +35,20 @@ namespace Darling.Tests;
 /// because the composed predicate is scoped-in AND NOT excluded. New databases stay OUT of a
 /// non-empty scope until named — the allow-list-not-deny-list argument the issue was won on.</para>
 ///
-/// <para>This file carries the "I am the top rung" claims that moved off
-/// <see cref="FleetSweepCadenceKnobRungTests"/> (V124) when this rung landed, the same handoff that
-/// file received from <see cref="FleetSweepStateRungTests"/> (V123) — a fully-migrated store must map
-/// to EXACTLY this version, or the viewer's connect-time gate refuses a store that is actually
-/// current.</para>
+/// <para>The "I am the top rung" claims have moved ON to <see cref="SelfDiskWarnGbFloorRungTests"/>
+/// (V126), the same handoff this file received from <see cref="FleetSweepCadenceKnobRungTests"/>
+/// (V124) and that file received from <see cref="FleetSweepStateRungTests"/> (V123). What stays here
+/// is everything true of this rung wherever it sits in the ladder; what left is every claim that was
+/// really about being NEWEST — keeping a copy of those would assert this rung is still the top,
+/// which is how the NEXT rung's build goes red.</para>
 /// </summary>
 public sealed class CollectorDatabaseScopeRungTests
 {
     private const int RungVersion = 125;
     private const int PreviousVersion = 124;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V126
+    /// appended its own — so this is a position within the signature rather than its end.</summary>
     private const int ProbeOrdinal = 100;
 
     private const string ScopeColumn = "databases";
@@ -55,7 +56,7 @@ public sealed class CollectorDatabaseScopeRungTests
     /* ---- the rung ------------------------------------------------------------------------------------ */
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
@@ -65,7 +66,11 @@ public sealed class CollectorDatabaseScopeRungTests
 
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+
+        /* Not `RungVersion == SchemaVersion` any more: that asserted this rung is the newest, which
+           stopped being true when V126 landed. The invariant that outlives the handoff is that the
+           LADDER's top and the declared version agree, which the two lines above already say. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
 
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
@@ -113,15 +118,15 @@ public sealed class CollectorDatabaseScopeRungTests
     /* ---- the probe (three sites, top arm) ------------------------------------------------------------- */
 
     /// <summary>
-    /// The viewer probe's three sites carry this rung's sentinel, and the map treats it as the TOP arm.
+    /// The viewer probe's three sites carry this rung's sentinel, and its arm still answers.
     ///
     /// <para>The probe asks the question, the caller reads the answer, the map has the parameter — three
     /// sites, and a sentinel present at only some of them shifts every LATER ordinal onto the wrong column.
-    /// Miss all three and a fully-migrated store probes one rung short, so the connect-time gate refuses a
-    /// store that is in fact current — permanently, because no later upgrade changes the answer.</para>
+    /// The top-arm claims (last argument, textual newest-first ordering) moved to
+    /// <see cref="SelfDiskWarnGbFloorRungTests"/> with the V126 handoff.</para>
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeCarriesThisRungsSentinel_AndAFullyMigratedStoreMapsToTheLaddersTop()
     {
         Assert.Contains($"column_name = '{ScopeColumn}'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
         Assert.Contains("table_name = 'config_collector_schedules'", ViewerDataService.StoreSchemaProbeSql, StringComparison.Ordinal);
@@ -136,8 +141,10 @@ public sealed class CollectorDatabaseScopeRungTests
             .GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* The ordinal has to be a position that exists, and one that is no longer the last: `arity - 1`
+           asserted this rung is the NEWEST sentinel, which stopped being true the moment V126 appended
+           its own. Strictly-less is the form every other non-top rung's test here uses. */
+        Assert.True(ProbeOrdinal < arity - 1);
 
         /* Every sentinel true = a fully-migrated store, which must map to exactly this version. Built by
            reflection so the arity tracks the signature. */
@@ -154,19 +161,6 @@ public sealed class CollectorDatabaseScopeRungTests
         var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
-
-        /* And in the source, the arm sits ABOVE V124's — newest-first is the whole contract of that method —
-           and returns this build's version rather than a literal that could drift from it. This is the
-           textual half of the top-arm claim, inherited from FleetSweepCadenceKnobRungTests the way that
-           file inherited it from FleetSweepStateRungTests. */
-        var v125 = viewer.IndexOf("if (hasCollectorScheduleDatabases)", StringComparison.Ordinal);
-        var v124 = viewer.IndexOf("if (hasFleetSweepCadenceKnobs)", StringComparison.Ordinal);
-        Assert.True(v125 >= 0, "the viewer has no V125 sentinel arm — a fully-migrated store would map to 124");
-        Assert.True(v124 >= 0, "the V124 arm is gone, so this pin is comparing against nothing");
-        Assert.True(v125 < v124, "the V125 arm sits below V124's, so a current store maps one rung low");
-        Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
-            viewer[v125..], StringComparison.Ordinal);
     }
 
     /* ---- every schedule-row surface handles the column ------------------------------------------------ */

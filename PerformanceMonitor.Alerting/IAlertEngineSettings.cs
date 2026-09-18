@@ -169,6 +169,16 @@ public interface IAlertEngineSettings
     /// </summary>
     int SelfDiskFreeWarnPercent { get; }
 
+    /// <summary>
+    /// The store warning's GB floor (#3528): the percent above additionally requires free space
+    /// below this many GB before Store Disk Pressure fires — an AND qualifier so a large volume at
+    /// a low percent (400 GB free on a 4 TB store) never pages CRITICAL; 0 removes the floor and
+    /// restores the percent-only condition. The PVS floor's composition, deliberately NOT the
+    /// target-volume pair's OR: there the GB dimension ADDS fires, here it keeps them honest. On
+    /// the engine surface for the reason its percent sibling is.
+    /// </summary>
+    int SelfDiskFreeWarnGb { get; }
+
     /// <summary>How long collection may go quiet before Collection Stopped / Agent Not Running
     /// fire (#2107; was a compile-time 30 minutes). Lite returns the default.</summary>
     int CollectionStaleMinutes { get; }

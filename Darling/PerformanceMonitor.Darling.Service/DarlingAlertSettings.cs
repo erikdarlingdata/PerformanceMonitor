@@ -56,12 +56,26 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool ForcePlanFailureEnabled => true;
 
     public int CpuThresholdPercent => _config.Alerts.CpuThresholdPercent;
-    public int BlockingCountThreshold => _config.Alerts.BlockingCountThreshold;
+
+    /// <summary>#3528: floored at the same named constant as its PostgreSQL twin below, for the identical
+    /// reason — a store row hand-edited to 0 makes the gate's <c>count &gt;= threshold</c> test true for a
+    /// count of zero and fires on a server with no blocking. The floor is also the
+    /// <c>update_alert_settings</c> lower write bound and the Settings window's save gate, so no value any
+    /// writer accepts is a value this clamp then rewrites.</summary>
+    public int BlockingCountThreshold => Math.Max(
+        PostgresAlertEvaluator.CountThresholdFloor,
+        _config.Alerts.BlockingCountThreshold);
 
     /* #1839: floored at 0 (= off) so a negative in darling.json or the store can't make the
        "is it above threshold" test true for every snapshot. */
     public int BlockingWaitSecondsThreshold => Math.Max(0, _config.Alerts.BlockingWaitSecondsThreshold);
-    public int DeadlockCountThreshold => _config.Alerts.DeadlockCountThreshold;
+
+    /// <summary>#3528: floored like <see cref="BlockingCountThreshold"/> above and
+    /// <see cref="PgDeadlockCountThreshold"/> below — the constant lives on
+    /// <see cref="PostgresAlertEvaluator"/> only by birthplace; the failure it closes is engine-neutral.</summary>
+    public int DeadlockCountThreshold => Math.Max(
+        PostgresAlertEvaluator.CountThresholdFloor,
+        _config.Alerts.DeadlockCountThreshold);
     public int PoisonWaitThresholdMs => _config.Alerts.PoisonWaitThresholdMs;
     public int LongRunningQueryThresholdMinutes => _config.Alerts.LongRunningQueryThresholdMinutes;
     public int TempDbSpaceThresholdPercent => _config.Alerts.TempDbSpaceThresholdPercent;
@@ -75,6 +89,12 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public int DiskCriticalFreePercent => Math.Clamp(_config.Alerts.DiskCriticalFreePercent, 0, 100);
     public int DiskCriticalFreeGb => Math.Max(0, _config.Alerts.DiskCriticalFreeGb);
     public int SelfDiskFreeWarnPercent => Math.Clamp(_config.Alerts.SelfDiskFreeWarnPercent, 0, 100);
+
+    /// <summary>#3528: the store warning's GB floor — Store Disk Pressure fires only when the percent above
+    /// is breached AND free space is below this many GB, so a large volume at a low percent (400 GB free on
+    /// a 4 TB store) stops paging CRITICAL. Zero removes the floor (the percent-only pre-#3528 condition);
+    /// the 0-floor GB shape is <see cref="PvsFloorGb"/>'s, whose AND-qualifier composition this mirrors.</summary>
+    public int SelfDiskFreeWarnGb => Math.Max(0, _config.Alerts.SelfDiskFreeWarnGb);
     public int CollectionStaleMinutes => Math.Clamp(_config.Alerts.CollectionStaleMinutes, 5, 1440);
 
     /// <summary>#2136: the Store Job Over Cadence warning percent. Clamped [5, 100].
@@ -122,16 +142,13 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
         TimescaleSupport.RetentionHoldRatioFloor,
         TimescaleSupport.RetentionHoldRatioCeiling);
 
-    /// <summary>#3444 (V122): the PostgreSQL Deadlocks alert's rolling-window count threshold.
-    ///
-    /// <para><b>Floored, where its SQL Server twin is not.</b> <see cref="DeadlockCountThreshold"/> passes
-    /// <c>_config.Alerts</c> through raw, so a store row hand-edited to 0 makes the gate's
-    /// <c>count &gt;= threshold</c> test true for a count of zero and fires on a server with no deadlocks.
-    /// That is a pre-existing gap on the twin rather than a shape to copy: the floor here matches
-    /// <see cref="BlockingWaitSecondsThreshold"/> two screens up, which floors for the identical reason.
-    /// The floor is also the <c>update_alert_settings</c> lower write bound, so no value the write path
-    /// accepts is a value this clamp then rewrites — the "setting did not stick" failure the write-bound
-    /// parity pins exist for.</para></summary>
+    /// <summary>#3444 (V122): the PostgreSQL Deadlocks alert's rolling-window count threshold, floored so a
+    /// store row hand-edited to 0 cannot make the gate's <c>count &gt;= threshold</c> test true for a count
+    /// of zero and fire on a server with no deadlocks. Its SQL Server twin
+    /// (<see cref="DeadlockCountThreshold"/>) floors at the same constant since #3528, so the two engines'
+    /// gates are now the one shape. The floor is also the <c>update_alert_settings</c> lower write bound,
+    /// so no value the write path accepts is a value this clamp then rewrites — the "setting did not stick"
+    /// failure the write-bound parity pins exist for.</summary>
     public int PgDeadlockCountThreshold => Math.Max(
         PostgresAlertEvaluator.CountThresholdFloor,
         _config.Alerts.PgDeadlockCountThreshold);

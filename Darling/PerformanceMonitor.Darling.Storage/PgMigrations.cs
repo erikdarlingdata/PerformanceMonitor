@@ -198,6 +198,7 @@ public static class PgMigrations
         new Migration(123, "fleet-sweep-state", V123Sql),
         new Migration(124, "fleet-sweep-cadence-knobs", V124Sql),
         new Migration(125, "collector-database-scope", V125Sql),
+        new Migration(126, "self-disk-warn-gb-floor", V126Sql),
     };
 
     /// <summary>
@@ -650,6 +651,33 @@ ALTER TABLE config.config_alert_settings
     private const string V125Sql = @"
 ALTER TABLE config.config_collector_schedules
     ADD COLUMN IF NOT EXISTS databases text[];";
+
+    /// <summary>
+    /// V126 — the Store Disk Pressure warning's GB floor on the singleton <c>config_alert_settings</c>
+    /// row (#3528): the self-alert's percent trigger additionally requires free space below this many
+    /// GB before it fires, an AND qualifier so a large volume at a low percent (400 GB free on a 4 TB
+    /// store) stops paging CRITICAL. 0 removes the floor and restores the percent-only condition —
+    /// the <c>pvs_floor_gb</c> composition, deliberately not the target-volume pair's OR, whose GB
+    /// dimension ADDS fires.
+    ///
+    /// <para><b>The column default IS the shipped constant</b>
+    /// (<c>DarlingSelfAlertEvaluator.DiskFreeWarnFloorGb</c> — restated as a literal here only because
+    /// a rung is a SQL string, and pinned equal by <c>SelfDiskWarnGbFloorRungTests</c>). Non-zero on
+    /// upgrade DELIBERATELY, unlike the V122 knobs: their acceptance was "an untouched store fires
+    /// exactly where it did", while #3528's is that the untouched firing IS the defect — the issue's
+    /// own example is a default-configured store paging "act now" with 400 GB of runway. 50 puts the
+    /// crossover at a 500 GB volume, so any store volume at or under that keeps the exact pre-#3528
+    /// percent behaviour.</para>
+    ///
+    /// <para>No CHECK enforcing the bound, matching V119/V120/V122/V124: the floor-at-0 is enforced as
+    /// the <c>update_alert_settings</c> write bound and <c>DarlingAlertSettings</c>' read-side clamp —
+    /// the raw-in/clamped-out split every knob on this table uses. No reload beacon of its own: V17's
+    /// statement-level <c>trg_bump_alert_settings</c> already bumps <c>config_service.config_version</c>
+    /// on any write here. No GRANT: this table carries table-level grants with no column carve.</para>
+    /// </summary>
+    private const string V126Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS self_disk_free_warn_gb integer NOT NULL DEFAULT 50;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

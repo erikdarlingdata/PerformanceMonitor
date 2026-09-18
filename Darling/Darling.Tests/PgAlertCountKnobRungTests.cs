@@ -230,17 +230,20 @@ public sealed class PgAlertCountKnobRungTests
         var window = RepoFile.ReadRepoFile(
             "Darling", "PerformanceMonitor.Darling.Viewer", "SettingsWindow.xaml.cs");
 
-        /* The floor appears TWICE per surface — once per knob. ONE is what a half-migration looks like:
-           the deadlock knob bounded by the constant and the blocking knob by a literal beside it. The
-           surface name rides in the failure message so a count mismatch does not send the reader to
-           three files. */
-        foreach (var (what, text) in new[]
+        /* The floor appears once per knob per surface — FEWER is what a half-migration looks like: one
+           knob bounded by the constant and its sibling by a literal beside it. #3528 floored the two SQL
+           Server twins with the same constant, so the engine clamp and the MCP write bound now reach it
+           four times (pg + SQL, blocking + deadlocks) while the Settings window still gates its SQL boxes
+           with the numerically-identical `> 0` — the viewer pass is deliberately deferred (backend-first),
+           and the window's two constant references remain the PG boxes'. The surface name rides in the
+           failure message so a count mismatch does not send the reader to three files. */
+        foreach (var (what, text, perSurface) in new[]
                  {
-                     ("engine clamp", settings), ("mcp write bound", tools), ("settings window gate", window),
+                     ("engine clamp", settings, 4), ("mcp write bound", tools, 4), ("settings window gate", window, 2),
                  })
         {
             Assert.True(
-                CountOf(text, "PostgresAlertEvaluator.CountThresholdFloor") == 2,
+                CountOf(text, "PostgresAlertEvaluator.CountThresholdFloor") == perSurface,
                 $"the {what} must reach the shared floor constant once per knob, not a literal");
         }
 
@@ -367,8 +370,8 @@ public sealed class PgAlertCountKnobRungTests
     /// <summary>
     /// The clamp floors a hand-edited store row, so the gate cannot fire on a count of zero — the failure
     /// the floor exists for, stated on <see cref="PostgresAlertEvaluator.CountThresholdFloor"/>'s own doc.
-    /// The SQL Server twins take the same write bound and have no read-side floor; that asymmetry is named
-    /// on <c>DarlingAlertSettings</c> rather than copied here.
+    /// Since #3528 the SQL Server twins floor at the same constant, so all four count gates are asserted
+    /// together — the asymmetry this doc used to record is gone.
     /// </summary>
     [Theory]
     [InlineData(0)]
@@ -378,10 +381,16 @@ public sealed class PgAlertCountKnobRungTests
         var config = new DarlingConfig();
         config.Alerts.PgDeadlockCountThreshold = stored;
         config.Alerts.PgBlockingCountThreshold = stored;
+        config.Alerts.DeadlockCountThreshold = stored;
+        config.Alerts.BlockingCountThreshold = stored;
         var settings = new DarlingAlertSettings(config);
 
         Assert.Equal(PostgresAlertEvaluator.CountThresholdFloor, settings.PgDeadlockCountThreshold);
         Assert.Equal(PostgresAlertEvaluator.CountThresholdFloor, settings.PgBlockingCountThreshold);
+        /* #3528: the SQL Server twins, floored at the same constant — a store row hand-edited to 0 no
+           longer makes count >= threshold true on a deadlock-free (or blocking-free) server. */
+        Assert.Equal(PostgresAlertEvaluator.CountThresholdFloor, settings.DeadlockCountThreshold);
+        Assert.Equal(PostgresAlertEvaluator.CountThresholdFloor, settings.BlockingCountThreshold);
 
         Assert.False(RollingCountAlertGate.Evaluate(
             0, settings.PgDeadlockCountThreshold, watermark: 0, cooldownElapsed: true, suppressed: false).Fire);

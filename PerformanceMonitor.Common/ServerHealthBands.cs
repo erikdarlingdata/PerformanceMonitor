@@ -850,6 +850,30 @@ namespace PerformanceMonitor.Common
         }
 
         /// <summary>
+        /// How many of the six card metrics carry a real reading (#3528): measured = severities that are
+        /// not <see cref="HealthSeverity.Unknown"/>, out of the per-metric total. The worst-of fold above
+        /// SKIPS Unknown — deliberately, so an unmeasured metric can never escalate — which means an online
+        /// server with five of six metrics structurally Unknown still folds to Healthy. These counts let a
+        /// consumer say so ("Healthy — 1 of 6 measured") instead of rendering that fold as an unqualified
+        /// green. Rank-neutrality is untouched: nothing here feeds <see cref="FleetHealthScore"/>.
+        /// </summary>
+        public static (int Measured, int Total) MeasuredMetricCounts(in ServerHealthMetrics m)
+        {
+            var measured = 0;
+            var total = 0;
+            foreach (var s in MetricSeverities(m))
+            {
+                total++;
+                if (s != HealthSeverity.Unknown)
+                {
+                    measured++;
+                }
+            }
+
+            return (measured, total);
+        }
+
+        /// <summary>
         /// Collapses a server's health to one fleet band, mirroring the card border: offline collection -> Offline;
         /// a never-collected (queued-during-bootstrap) server -> Warning (attention-worthy but not the red overlay);
         /// else the card's worst metric band, with a stale collection also Warning.
