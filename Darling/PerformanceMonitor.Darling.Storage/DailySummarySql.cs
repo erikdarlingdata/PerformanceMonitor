@@ -77,8 +77,12 @@ public static class DailySummarySql
             GROUP BY 1
         ),
         cpu AS (
-            /* Total host CPU = SQL + other-process (NULL on Linux -> 0), matching the alert engine and the
-               Overview headline; sustained >= 80 samples drive the day's band. */
+            /* Total host CPU = SQL + other-process (NULL on Linux -> 0), matching the Overview headline. The
+               80 is ServerHealthThresholds.CpuWarningPercent, the card band's Warning bar, restated as a
+               literal because this is a SQL string and pinned equal by both suites (#3539 A2). Deliberately
+               NOT the alert engine's configurable CPU threshold: this statement re-counts at read time, so
+               binding it to a knob would recolour every past day the moment the knob moved. The count feeds
+               a bar that scales with the window (DailyHealthThresholds.HighCpuCriticalSamplesFor). */
             SELECT date_trunc('day', collection_time) AS d,
                    COUNT(*) FILTER (WHERE (sqlserver_cpu_utilization + COALESCE(other_process_cpu_utilization, 0)) >= 80) AS c
             FROM v_cpu_utilization_stats
@@ -87,7 +91,8 @@ public static class DailySummarySql
         ),
         coll AS (
             /* Any run (all statuses) marks the day as collected -> it appears even if every metric is quiet
-               (a quiet monitored day is Healthy/green, not No-Data/grey). errs feeds the Critical band. */
+               (a quiet monitored day is Healthy/green, not No-Data/grey). runs is also the denominator the
+               error SHARE bands on (#3539 A2); errs alone used to make the day Critical on presence. */
             SELECT date_trunc('day', collection_time) AS d,
                    COUNT(*) AS runs,
                    COUNT(*) FILTER (WHERE status = 'ERROR') AS errs
@@ -147,7 +152,10 @@ public static class DailySummarySql
             /* Peak block wait (ms) from the SAME source the blocking count came from (BPR preferred, DMV-snapshot
                fallback), so the day-detail blocking reason ('N blocking events (peak block X)') reconciles with
                the count. 0 when the blocking came from a source without a wait time. */
-            COALESCE(CASE WHEN COALESCE(b.c, 0) > 0 THEN b.max_wait_ms ELSE dm.max_wait_ms END, 0) AS peak_block_wait_ms
+            COALESCE(CASE WHEN COALESCE(b.c, 0) > 0 THEN b.max_wait_ms ELSE dm.max_wait_ms END, 0) AS peak_block_wait_ms,
+            /* Every collector run in the window (#3539 A2): the denominator that turns collection_errors
+               into a share. Appended LAST so every existing ordinal read stays where it was. */
+            COALESCE(cl.runs, 0) AS collection_runs
         FROM day_spine s
         LEFT JOIN waits w ON w.d = s.d
         LEFT JOIN queries q ON q.d = s.d

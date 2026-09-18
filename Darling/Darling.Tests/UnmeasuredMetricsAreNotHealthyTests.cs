@@ -22,7 +22,7 @@ namespace Darling.Tests;
 /// <para><b>The defect.</b> A PostgreSQL target has no row in <c>v_memory_grant_stats</c>,
 /// <c>v_blocked_process_reports</c> / <c>v_dmv_blocking_snapshots</c> or <c>v_deadlocks</c>, so the
 /// per-metric reads handed its card zeros — and <c>MemorySeverity(bool)</c>,
-/// <c>BlockingSeverity(int, double)</c> and <c>DeadlockSeverity(int)</c> took non-nullable parameters, so
+/// <c>BlockingSeverity(int, double)</c> and <c>DeadlockSeverity(int)</c> (their signatures at the time) took non-nullable parameters, so
 /// there was no way for a zero to mean "absent" rather than "calm". All three answered Healthy and painted a
 /// green dot. That is a positive claim of health, which is worse than the null beside it, and worse than
 /// what <see cref="ServerHealthClassifier.CpuSeverity"/> and
@@ -90,6 +90,7 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
                subject is Postgres-vs-SQL-Server, so the window must not be the thing producing the
                Unknown. */
             DeadlockWindow = TimeSpan.FromHours(1),
+            BlockingWindow = TimeSpan.FromHours(1),
             IsPostgres = MonitoredEngineKind.IsPostgres(engineKind),
             IsAurora = MonitoredEngineKind.IsAurora(engineKind),
             LastCollectionTime = Now.AddSeconds(-30),
@@ -178,11 +179,14 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
     [InlineData(false, 0, 0L, 0, HealthSeverity.Healthy, HealthSeverity.Healthy, HealthSeverity.Healthy, FleetHealthBand.Healthy)]
     /* memory pressure -> Critical */
     [InlineData(true, 0, 0L, 0, HealthSeverity.Critical, HealthSeverity.Healthy, HealthSeverity.Healthy, FleetHealthBand.Critical)]
-    /* one blocking event -> Warning */
-    [InlineData(false, 1, 0L, 0, HealthSeverity.Healthy, HealthSeverity.Warning, HealthSeverity.Healthy, FleetHealthBand.Warning)]
-    /* two events -> Warning; five -> Critical */
-    [InlineData(false, 2, 0L, 0, HealthSeverity.Healthy, HealthSeverity.Warning, HealthSeverity.Healthy, FleetHealthBand.Warning)]
-    [InlineData(false, 5, 0L, 0, HealthSeverity.Healthy, HealthSeverity.Critical, HealthSeverity.Healthy, FleetHealthBand.Critical)]
+    /* The blocking COUNT arm bands on a RATE as of #3539 A3, so these rows track the CURRENT band the way
+       the deadlock rows below do. Both helpers window one hour, so the count IS the per-hour rate: one or
+       two reports is the measured quiet mode and Healthy by count, five is the Warning tier, twenty the
+       Critical one — where the old count ladder called one Warning and five Critical. */
+    [InlineData(false, 1, 0L, 0, HealthSeverity.Healthy, HealthSeverity.Healthy, HealthSeverity.Healthy, FleetHealthBand.Healthy)]
+    [InlineData(false, 2, 0L, 0, HealthSeverity.Healthy, HealthSeverity.Healthy, HealthSeverity.Healthy, FleetHealthBand.Healthy)]
+    [InlineData(false, 5, 0L, 0, HealthSeverity.Healthy, HealthSeverity.Warning, HealthSeverity.Healthy, FleetHealthBand.Warning)]
+    [InlineData(false, 20, 0L, 0, HealthSeverity.Healthy, HealthSeverity.Critical, HealthSeverity.Healthy, FleetHealthBand.Critical)]
     /* a long wait alone -> Warning at 10s, Critical at 60s, with a count of 1 */
     [InlineData(false, 1, 10_000L, 0, HealthSeverity.Healthy, HealthSeverity.Warning, HealthSeverity.Healthy, FleetHealthBand.Warning)]
     [InlineData(false, 1, 60_000L, 0, HealthSeverity.Healthy, HealthSeverity.Critical, HealthSeverity.Healthy, FleetHealthBand.Critical)]
@@ -227,19 +231,24 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
         Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.MemorySeverity(true));
         Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.MemorySeverity(null));
 
-        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.BlockingSeverity(0, 0));
-        Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.BlockingSeverity(1, 0));
-        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.BlockingSeverity(5, 0));
-        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.BlockingSeverity(null, 0));
+        /* #3539 A3 re-banded the blocking COUNT arm on a RATE, so, as for deadlocks below, "unchanged"
+           holds for the null arm this file is about and the measured arms are asserted at their
+           post-#3539 values over a rateable hour: 0/hr Healthy, 5/hr Warning, 20/hr Critical. */
+        var hour = TimeSpan.FromHours(1);
+        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.BlockingSeverity(0, 0, hour));
+        Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.BlockingSeverity(5, 0, hour));
+        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.BlockingSeverity(20, 0, hour));
+        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.BlockingSeverity(null, 0, hour));
         /* A max wait with no population is still Unknown - the count is the only spelling of "unmeasured",
-           so a stray duration cannot smuggle a band back in. */
-        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.BlockingSeverity(null, 600));
+           so a stray duration cannot smuggle a band back in — at any window length, including none. */
+        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.BlockingSeverity(null, 600, hour));
+        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.BlockingSeverity(null, 600, TimeSpan.Zero));
+        Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.BlockingSeverity(null, 600, TimeSpan.FromHours(168)));
 
         /* #3368 re-banded this one on a RATE, so "unchanged" holds only for the null arm this file is
            about. The measured arms are asserted at their post-#3368 values, over a window a rate can be
            computed on: 0/hr Healthy, 30/hr Critical. That the NULL arm still answers Unknown at every
            window length is the claim that belongs here. */
-        var hour = TimeSpan.FromHours(1);
         Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.DeadlockSeverity(0, hour, DeadlockRateThresholds.Default));
         Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.DeadlockSeverity(30, hour, DeadlockRateThresholds.Default));
         Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.DeadlockSeverity(null, hour, DeadlockRateThresholds.Default));
@@ -275,6 +284,7 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
             HasMemoryPressure = false,
             BlockingCount = blocking,
             MaxBlockedSeconds = maxWaitMs / 1000.0,
+            BlockingWindow = TimeSpan.FromHours(1),
             DeadlockCount = 0,
             TotalThreads = 512,
             AvailableThreads = 500,

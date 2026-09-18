@@ -11,6 +11,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -58,14 +59,26 @@ public sealed class ViewerDailySummarySqlTests
         Assert.Contains("MAX(wait_time_ms) AS max_wait_ms", sql, StringComparison.Ordinal);
         Assert.Contains("CASE WHEN COALESCE(b.c, 0) > 0 THEN b.max_wait_ms ELSE dm.max_wait_ms END", sql, StringComparison.Ordinal);
 
-        /* High-CPU count uses total host CPU = SQL + other-process (Linux NULL → 0), threshold 80, via FILTER. */
+        /* High-CPU count uses total host CPU = SQL + other-process (Linux NULL → 0), threshold 80, via FILTER.
+           The 80 is the card band's Warning bar restated as a SQL literal (#3539 A2) — pinned against the
+           constant so the day cell and the card cannot drift on what "high CPU" means, and NOT against the
+           alert engine's knob, which would recolour every past day when retuned. */
         Assert.Contains("(sqlserver_cpu_utilization + COALESCE(other_process_cpu_utilization, 0)) >= 80", sql, StringComparison.Ordinal);
+        Assert.Equal(80.0, ServerHealthThresholds.CpuWarningPercent);
+        Assert.Contains(
+            ">= " + ServerHealthThresholds.CpuWarningPercent.ToString("0", System.Globalization.CultureInfo.InvariantCulture) + ")",
+            sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_cpu_utilization_stats", sql, StringComparison.Ordinal);
         Assert.Contains("FILTER (WHERE", sql, StringComparison.Ordinal);
 
-        /* Collect errors off the collection_log ERROR rows; all-status runs mark the day collected. */
+        /* Collect errors off the collection_log ERROR rows; all-status runs mark the day collected AND are
+           projected as the error share's denominator (#3539 A2), appended last so no ordinal moved. */
         Assert.Contains("status = 'ERROR'", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_collection_log", sql, StringComparison.Ordinal);
+        Assert.Contains("COALESCE(cl.runs, 0) AS collection_runs", sql, StringComparison.Ordinal);
+        Assert.True(
+            sql.IndexOf("AS peak_block_wait_ms", StringComparison.Ordinal) < sql.IndexOf("AS collection_runs", StringComparison.Ordinal),
+            "collection_runs must be the trailing column so the eleven positional reads before it stay put");
 
         /* Memory pressure (process OR system indicator >= 2) and the severe escalation (process >= 3). */
         Assert.Contains("FROM v_memory_pressure_events", sql, StringComparison.Ordinal);
@@ -482,7 +495,12 @@ public sealed class ViewerDailyHealthLivePostgresTests
             Assert.Equal(1, summary.BlockingEvents);               // XE report count (fallback not used)
             Assert.Equal(1, summary.HighCpuEvents);                // only the 90% sample
             Assert.Equal(1, summary.CollectionErrors);
-            Assert.Equal("Critical", summary.OverallHealth);       // deadlocks -> Critical composite band
+            Assert.Equal(1, summary.CollectionRuns);               // #3539 A2: the trailing collection_runs column
+            /* The composite band, on a finished 24-hour day (#3525, #3539 A2): one deadlock is 0.04/hr and
+               one blocking event 0.04/hr (both Healthy by rate), one hot sample is under the day's six, and
+               the one collector run that ERRORED is a 100% error share — past the 20% bar, which is the
+               Warning arm and never Critical. */
+            Assert.Equal("Warning", summary.OverallHealth);
 
             bodySucceeded = true;
         }
@@ -514,8 +532,10 @@ public sealed class ViewerDailyHealthLivePostgresTests
             var inDay = day.AddHours(9);
 
             /* No XE blocked-process reports; two DMV snapshots → the COALESCE(NULLIF(...)) falls back to
-               the DMV count. No deadlocks / sustained CPU / heavy blocking, but 2 blocking events is
-               "some blocking" → the composite band is Warning. */
+               the DMV count. Two snapshots over a finished 24-hour day is 0.08/hr — under the 5/hr Warning
+               tier (#3539 A2/A3) — and the rows carry no wait time for the wait arm, so the day bands
+               Healthy with the blocking still counted; "any blocking is a Warning day" was the count
+               trigger this replaced. */
             await InsertDmvBlockingAsync(connection, SummaryServerId, inDay);
             await InsertDmvBlockingAsync(connection, SummaryServerId, inDay);
 
@@ -524,7 +544,8 @@ public sealed class ViewerDailyHealthLivePostgresTests
             Assert.NotNull(summary);
             Assert.Equal(2, summary!.BlockingEvents);
             Assert.Equal(0, summary.DeadlockCount);
-            Assert.Equal("Warning", summary.OverallHealth);
+            Assert.Equal("Healthy", summary.OverallHealth);
+            Assert.Contains("2 blocking events (0.1/hr)", summary.SignalsTooltip, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

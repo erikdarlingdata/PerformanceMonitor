@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using PerformanceMonitor.Common;
 using Xunit;
 
@@ -71,35 +72,152 @@ public sealed class ServerHealthClassifierTests
     public void MemorySeverity_CriticalOnPressure(bool pressure, HealthSeverity expected) =>
         Assert.Equal(expected, ServerHealthClassifier.MemorySeverity(pressure));
 
-    [Theory]
-    [InlineData(0, 0.0, HealthSeverity.Healthy)]
-    [InlineData(1, 0.0, HealthSeverity.Warning)]   // any blocking is Warning
-    [InlineData(2, 0.0, HealthSeverity.Warning)]
-    [InlineData(5, 0.0, HealthSeverity.Critical)]  // >= 5 events Critical
-    [InlineData(0, 10.0, HealthSeverity.Warning)]  // >= 10s max wait Warning
-    [InlineData(0, 60.0, HealthSeverity.Critical)] // >= 60s max wait Critical
-    public void BlockingSeverity_BandsOnCountAndWait(int count, double maxSeconds, HealthSeverity expected) =>
-        Assert.Equal(expected, ServerHealthClassifier.BlockingSeverity(count, maxSeconds));
+    private static readonly TimeSpan Hour = TimeSpan.FromHours(1);
+    private static readonly TimeSpan Day = TimeSpan.FromHours(24);
+    private static readonly TimeSpan Week = TimeSpan.FromHours(168);
+
+    /* ── the blocking RATE band (#3539 A3) ── */
 
     /// <summary>
-    /// #3368: the count ladder has ONE Warning arm, so every count that is not Critical and not zero lands
-    /// on the same severity. A second arm at <c>&gt;= 2</c> existed above it returning the same Warning and
-    /// decided nothing.
-    ///
-    /// <para>Stated as a PROPERTY over the whole non-Critical range rather than as the old pair of
-    /// <c>InlineData</c> rows: the rows above happened to cover 1 and 2 and would have kept passing if a
-    /// third indistinguishable arm were added, where this cannot.</para>
+    /// The three arms over a one-hour window, where a count and a per-hour rate coincide: the 60 s wait arm
+    /// is Critical; the count arm is Critical at 20/hr and Warning at 5/hr; the 10 s wait arm is Warning;
+    /// the quiet mode (1–4 reports) is Healthy by count.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 0.0, HealthSeverity.Healthy)]
+    [InlineData(1, 0.0, HealthSeverity.Healthy)]    // the quiet mode: 51 of 88 measured active hours hold 1–4
+    [InlineData(4, 0.0, HealthSeverity.Healthy)]
+    [InlineData(5, 0.0, HealthSeverity.Warning)]    // 5/hr, the top of the quiet mode
+    [InlineData(19, 0.0, HealthSeverity.Warning)]   // inside the measured trough
+    [InlineData(20, 0.0, HealthSeverity.Critical)]  // 20/hr, the lower edge of the storm mode
+    [InlineData(232, 0.0, HealthSeverity.Critical)] // the worst measured hour
+    [InlineData(1, 10.0, HealthSeverity.Warning)]   // the 10 s wait arm, whatever the rate
+    [InlineData(1, 60.0, HealthSeverity.Critical)]  // the 60 s wait arm, whatever the rate
+    public void BlockingSeverity_BandsOnRateAndWait_OverAnHour(int count, double maxSeconds, HealthSeverity expected) =>
+        Assert.Equal(expected, ServerHealthClassifier.BlockingSeverity(count, maxSeconds, Hour));
+
+    /// <summary>
+    /// #3539 A3's headline: the SAME per-hour rate bands identically over an hour, a day and a week, so the
+    /// count no longer means something different on every surface that windows it. Counts are
+    /// integer-rate-times-whole-hours so the asserted rate is exactly the one the band sees.
+    /// </summary>
+    [Theory]
+    [InlineData(4, HealthSeverity.Healthy)]
+    [InlineData(5, HealthSeverity.Warning)]
+    [InlineData(19, HealthSeverity.Warning)]
+    [InlineData(20, HealthSeverity.Critical)]
+    public void BlockingSeverity_TheSameRate_BandsTheSame_OverAnHourADayAndAWeek(long ratePerHour, HealthSeverity expected)
+    {
+        Assert.Equal(expected, ServerHealthClassifier.BlockingSeverity(ratePerHour, 0.0, Hour));
+        Assert.Equal(expected, ServerHealthClassifier.BlockingSeverity(ratePerHour * 24, 0.0, Day));
+        Assert.Equal(expected, ServerHealthClassifier.BlockingSeverity(ratePerHour * 168, 0.0, Week));
+    }
+
+    /// <summary>
+    /// The defect as filed: five reports were Critical at a 168-hour read and Healthy at a one-hour read
+    /// of the same server under <c>count &gt;= 5 → Critical</c>. Now five reports in a WEEK is 0.03/hr and
+    /// Healthy by count, five in an HOUR is the Warning tier, and the same count over the two windows bands
+    /// differently — which a count trigger cannot do at all, so this is the pin that goes red on a revert
+    /// to counting.
     /// </summary>
     [Fact]
-    public void BlockingSeverity_HasOneWarningArmOnTheCount()
+    public void BlockingSeverity_FiveReportsAWeek_IsNoLongerCritical()
     {
-        for (var count = 1; count < 5; count++)
+        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.BlockingSeverity(5, 0.0, Week));
+        Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.BlockingSeverity(5, 0.0, Hour));
+        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.BlockingSeverity(20, 0.0, Hour));
+        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.BlockingSeverity(20, 0.0, Day)); // 0.8/hr
+    }
+
+    /// <summary>The wait arms are per-event magnitude claims and do NOT normalise: a 60-second block is
+    /// Critical over a week exactly as over an hour, and a 10-second one is Warning — the rate has no say.</summary>
+    [Fact]
+    public void BlockingSeverity_TheWaitArms_AreRateIndependent()
+    {
+        foreach (var window in new[] { Hour, Day, Week })
         {
-            Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.BlockingSeverity(count, 0.0));
+            Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.BlockingSeverity(1, 60.0, window));
+            Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.BlockingSeverity(1, 10.0, window));
+            Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.BlockingSeverity(1, 59.9, window));
+        }
+    }
+
+    /// <summary>
+    /// The unrateable arm — a window under an hour or undeclared — fails away from Healthy and never into
+    /// Critical by count (#3368's rule, one metric over): the wait arms still decide (they need no
+    /// denominator), past them a non-zero count reads Warning even at 10,000 reports in 15 minutes, and a
+    /// zero count reads Unknown, not Healthy.
+    /// </summary>
+    [Fact]
+    public void BlockingSeverity_ASubHourOrUndeclaredWindow_FallsToWarning_NeverCriticalByCount()
+    {
+        foreach (var window in new[] { default, TimeSpan.FromMinutes(15), TimeSpan.FromMinutes(59) })
+        {
+            Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.BlockingSeverity(1, 0.0, window));
+            Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.BlockingSeverity(10_000, 0.0, window));
+            Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.BlockingSeverity(0, 0.0, window));
+            Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.BlockingSeverity(1, 60.0, window));
+            Assert.Null(ServerHealthClassifier.BlockingRatePerHour(1, window));
         }
 
-        Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.BlockingSeverity(0, 0.0));
-        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.BlockingSeverity(5, 0.0));
+        Assert.Equal(1.0, ServerHealthClassifier.BlockingRatePerHour(24, Day));
+        Assert.Equal(ServerHealthThresholds.DeadlockRateMinimumWindow, ServerHealthThresholds.BlockingRateMinimumWindow);
+    }
+
+    /// <summary>
+    /// The tiers sit where the 14-day measurement puts them (MEASUREMENTS for #3539, 43 SQL Server
+    /// primaries, 14,448 server-hours): 88 active hours, of which 51 hold 1–4 reports, 5 hold 5–10, 9 hold
+    /// 11–19 and 23 hold 20 or more. Restated here as the count-per-hour histogram so a moved constant has
+    /// to argue with the distribution rather than with a literal.
+    /// </summary>
+    [Fact]
+    public void BlockingTiers_SitAtTheTopOfTheQuietMode_AndTheFootOfTheStormMode()
+    {
+        Assert.Equal(5.0, ServerHealthThresholds.BlockingWarnPerHour);
+        Assert.Equal(20.0, ServerHealthThresholds.BlockingCriticalPerHour);
+        Assert.Equal(60.0, ServerHealthThresholds.BlockingCriticalWaitSeconds);
+        Assert.Equal(10.0, ServerHealthThresholds.BlockingWarnWaitSeconds);
+
+        /* (reports in the hour, server-hours measured at that count) — the histogram's bands, at their
+           upper edges. The quiet mode ends at 4 and bands Healthy by count; the storm mode begins at 20. */
+        var quietMode = new (int Count, int Hours)[] { (1, 35), (2, 11), (4, 5) };
+        foreach (var (count, _) in quietMode)
+        {
+            Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.BlockingSeverity(count, 0.0, Hour));
+        }
+
+        Assert.Equal(51, quietMode.Sum(b => b.Hours));                 // of 88 active hours
+        Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.BlockingSeverity(10, 0.0, Hour));   // 5–10: 5 hours
+        Assert.Equal(HealthSeverity.Warning, ServerHealthClassifier.BlockingSeverity(19, 0.0, Hour));   // 11–19: 9 hours
+        Assert.Equal(HealthSeverity.Critical, ServerHealthClassifier.BlockingSeverity(20, 0.0, Hour));  // 20+: 23 hours
+    }
+
+    /* ── the collector SHARE band (#3539 A8d) ── */
+
+    /// <summary>
+    /// One failing of forty and forty of forty no longer band alike: any FAILING collector is Warning, and a
+    /// FAILING share past the collector-health classifier's own 20% bar is Critical. Nothing failing is
+    /// Healthy whatever the denominator; no denominator with something failing is Warning and never
+    /// Critical — a share nobody computed cannot escalate.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 40, HealthSeverity.Healthy)]
+    [InlineData(0, 0, HealthSeverity.Healthy)]
+    [InlineData(1, 40, HealthSeverity.Warning)]     // 2.5%
+    [InlineData(8, 40, HealthSeverity.Warning)]     // exactly 20% — the bar is strict, as the classifier's is
+    [InlineData(9, 40, HealthSeverity.Critical)]    // 22.5%
+    [InlineData(40, 40, HealthSeverity.Critical)]
+    [InlineData(1, 0, HealthSeverity.Warning)]      // no denominator declared
+    [InlineData(40, 0, HealthSeverity.Warning)]
+    public void CollectorSeverity_GradesOnTheFailingShare(int failing, int total, HealthSeverity expected) =>
+        Assert.Equal(expected, ServerHealthClassifier.CollectorSeverity(failing, total));
+
+    [Fact]
+    public void CollectorSeverity_TheBar_IsTheCollectorHealthClassifiersOwn()
+    {
+        Assert.Equal(20.0, CollectorHealthClassifier.WarningFailureRatePercent);
+        Assert.Equal(22.5, ServerHealthClassifier.FailingCollectorSharePercent(9, 40));
+        Assert.Null(ServerHealthClassifier.FailingCollectorSharePercent(9, 0));
     }
 
     /// <summary>
@@ -160,12 +278,6 @@ public sealed class ServerHealthClassifierTests
     public void ThreadsSeverity_Ample_IsHealthy() =>
         Assert.Equal(HealthSeverity.Healthy, ServerHealthClassifier.ThreadsSeverity(512, 400, 0, 0));
 
-    [Theory]
-    [InlineData(0, HealthSeverity.Healthy)]
-    [InlineData(1, HealthSeverity.Warning)]
-    public void CollectorSeverity_AnyFailingWarning(int failing, HealthSeverity expected) =>
-        Assert.Equal(expected, ServerHealthClassifier.CollectorSeverity(failing));
-
     /* ── overall reduce ── */
 
     [Fact]
@@ -210,6 +322,7 @@ public sealed class ServerHealthClassifierTests
             AvailableThreads = 400,
             HasMemoryPressure = false,
             BlockingCount = 0,
+            BlockingWindow = TimeSpan.FromHours(1),      // #3539 A3: a zero count is measured only over a window
             DeadlockCount = 0,
             DeadlockWindow = TimeSpan.FromHours(1),
         };
@@ -248,6 +361,7 @@ public sealed class ServerHealthClassifierTests
             AvailableThreads = 400,
             HasMemoryPressure = false,
             BlockingCount = 0,
+            BlockingWindow = TimeSpan.FromHours(1),
             DeadlockCount = 0,
             DeadlockWindow = TimeSpan.FromHours(1),
         };

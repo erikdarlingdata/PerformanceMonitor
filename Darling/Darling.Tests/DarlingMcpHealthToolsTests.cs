@@ -333,6 +333,17 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
 VALUES ($1,$2,$3,$4,$5,$6,$7)",
                 CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(when), ServerId, ServerName, DarlingMcpTestData.Naive(when), 85, 10);
 
+            /* One 15-second blocked-process report (#3539 A2/A3): the day's Warning has to come from a signal
+               whose band does not depend on the time of day this test runs. The high-CPU bar scales with the
+               still-forming day's elapsed portion (one sample is Warning below four hours and Healthy past
+               them; six is Critical below 4.8 hours and Warning past them), so no hot-sample count is
+               Warning at every hour of the day. The blocking WAIT arm is rate-independent: 15 s is Warning
+               over any window, and nothing here can reach Critical. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms)
+VALUES ($1,$2,$3,$4,$5,$6)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(when), ServerId, ServerName, DarlingMcpTestData.Naive(when), 15_000L);
+
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 @"INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name, total_physical_memory_mb, available_physical_memory_mb, total_server_memory_mb, target_server_memory_mb, buffer_pool_mb, plan_cache_mb, system_memory_state, sql_memory_model)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
@@ -368,10 +379,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
                 postgres, ServerName, when.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
             DarlingMcpTestData.AssertEnvelope(daily, ServerName, "overall_health");
             /* #3525: one deadlock is 0.04/hr against a 24h day — below the rate tiers, so it no longer
-               makes the day Critical. The 85% CPU sample trips the HighCpuWarningSamples=1 tier, so the
-               day reads Warning, and the planted deadlock stays visible as evidence. */
+               makes the day Critical. The 15 s block is the blocking band's Warning wait arm at any elapsed
+               window (#3539 A2/A3), so the day reads Warning whatever the clock says, and the planted
+               deadlock stays visible as evidence — as does the run total the error share divides by. */
             Assert.Contains("\"deadlock_count\":1", daily, StringComparison.Ordinal);
-            Assert.Contains("Warning", daily, StringComparison.Ordinal);
+            Assert.Contains("\"overall_health\":\"Warning\"", daily, StringComparison.Ordinal);
+            Assert.Contains("\"collection_runs\":1", daily, StringComparison.Ordinal);
+            Assert.Contains("\"max_block_duration_ms\":15000", daily, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }
@@ -384,7 +398,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
-        var sql = string.Join(" ", new[] { "cpu_utilization_stats", "memory_stats", "wait_stats", "deadlocks", "collection_log" }
+        var sql = string.Join(" ", new[] { "cpu_utilization_stats", "memory_stats", "wait_stats", "deadlocks", "blocked_process_reports", "collection_log" }
             .Select(tbl => $"DELETE FROM {tbl} WHERE server_id = {ServerId};"))
             + $" DELETE FROM servers WHERE server_id = {ServerId};";
         using var cleanup = new NpgsqlCommand(sql, connection);

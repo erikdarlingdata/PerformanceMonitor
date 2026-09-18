@@ -522,6 +522,9 @@ GROUP BY server_id, collector_name";
             HasMemoryPressure = memoryPressureForBand,
             BlockingCount = blockingForBand,
             MaxBlockedSeconds = maxBlockedSeconds,
+            /* #3539 A3: the blocking count's own denominator — the same card window the deadlock count was
+               read over, because one pair of bounds windowed both reads. */
+            BlockingWindow = deadlockWindow,
             DeadlockCount = deadlocksForBand,
             /* #3368: the count's own denominator and the store's tiers travel WITH it, because the band is
                a rate. Omitting either would leave the deadlock dot banded on one pair of numbers while the
@@ -534,6 +537,8 @@ GROUP BY server_id, collector_name";
             ThreadsWaitingForCpu = threads.RunnableTasks,
             RequestsWaitingForThreads = threads.WorkQueue,
             FailedCollectorCount = collectors.Failing,
+            /* #3539 A8d: the denominator that grades the failing count into a share. */
+            CollectorCount = collectors.Total,
         };
 
         /* Freshness -> the card's collection state, through the SAME mapping the WPF card and the sidebar
@@ -595,7 +600,14 @@ GROUP BY server_id, collector_name";
             MemorySeverity = ServerHealthClassifier.MemorySeverity(memoryPressureForBand),
             BlockingCount = blockingCount,
             MaxBlockingWaitMs = maxBlockingWaitMs,
-            BlockingSeverity = ServerHealthClassifier.BlockingSeverity(blockingForBand, maxBlockedSeconds),
+            /* blockingForBand, not the raw count, for the reason DeadlockRatePerHour below gives: a
+               PostgreSQL target's raw count is a structural zero, and a rate derived from it would publish
+               0.0/hr against a severity that reads Unknown (#3539 A3). */
+            BlockingRatePerHour = blockingForBand.HasValue
+                ? ServerHealthClassifier.BlockingRatePerHour(blockingForBand.Value, deadlockWindow)
+                : null,
+            BlockingWindow = deadlockWindow,
+            BlockingSeverity = ServerHealthClassifier.BlockingSeverity(blockingForBand, maxBlockedSeconds, deadlockWindow),
             DeadlockCount = deadlockCount,
             DeadlockLastSeen = deadlock.LastSeen,
             /* deadlocksForBand, not the raw count, for the same reason DeadlockSeverity below takes it: on a
@@ -620,7 +632,8 @@ GROUP BY server_id, collector_name";
             ThreadsSeverity = ServerHealthClassifier.ThreadsSeverity(threads.TotalThreads, availableThreads, threads.RunnableTasks, threads.WorkQueue),
             HealthyCollectorCount = collectors.Healthy,
             FailedCollectorCount = collectors.Failing,
-            CollectorSeverity = ServerHealthClassifier.CollectorSeverity(collectors.Failing),
+            CollectorCount = collectors.Total,
+            CollectorSeverity = ServerHealthClassifier.CollectorSeverity(collectors.Failing, collectors.Total),
             OverallMetricSeverity = overall,
             MeasuredMetricCount = measuredMetrics,
             MetricCount = totalMetrics,
@@ -785,7 +798,11 @@ GROUP BY server_id, collector_name";
 
         if (c.BlockingSeverity >= HealthSeverity.Warning && c.BlockingCount > 0)
         {
-            parts.Add($"Blocking {c.BlockingCount}");
+            /* #3539 A3: the deadlock line's rule, one metric over — the count is the countable fact, the
+               rate is the banded one, and an unrateable window prints the count alone. */
+            parts.Add(c.BlockingRatePerHour.HasValue
+                ? $"Blocking {c.BlockingCount} ({c.BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr)"
+                : $"Blocking {c.BlockingCount}");
         }
 
         if (c.DeadlockSeverity >= HealthSeverity.Warning && c.DeadlockCount > 0)
@@ -802,7 +819,11 @@ GROUP BY server_id, collector_name";
 
         if (c.CollectorSeverity >= HealthSeverity.Warning)
         {
-            parts.Add($"{c.FailedCollectorCount} collector{(c.FailedCollectorCount == 1 ? "" : "s")} failing");
+            /* #3539 A8d: the share is what grades the band, so the denominator is named when there is one
+               — "3 of 40 collectors failing" — and the bare count stands when none was declared. */
+            parts.Add(c.CollectorCount > 0
+                ? $"{c.FailedCollectorCount} of {c.CollectorCount} collectors failing"
+                : $"{c.FailedCollectorCount} collector{(c.FailedCollectorCount == 1 ? "" : "s")} failing");
         }
 
         if (c.CollectionStale)
@@ -1124,6 +1145,8 @@ GROUP BY server_id, collector_name";
             counts[serverId] = new CollectorCounts(
                 existing.Healthy + (status == "HEALTHY" ? 1 : 0),
                 existing.Failing + (status == "FAILING" ? 1 : 0),
+                /* #3539 A8d: every banded row, whatever its band — the share's denominator. */
+                existing.Total + 1,
                 /* #3017: the ONE collector whose band the deadlock total's coverage turns on, kept
                    alongside the Healthy/Failing tallies because it comes out of the same aggregate — no
                    extra round trip, which is what keeps this reader's fan-out bounded. Named from the
@@ -1165,7 +1188,11 @@ GROUP BY server_id, collector_name";
     /// <see cref="CollectorHealthClassifier.NeverRun"/> mean the same thing to a reader and take the same
     /// action, but they arrive differently: null is the absent GROUP, NEVER_RUN would be a present group with
     /// no runs in it.</param>
-    internal readonly record struct CollectorCounts(int Healthy, int Failing, string? DeadlockBand = null);
+    /// <param name="Total">Every collector banded for this server in the health window, on any band (#3539
+    /// A8d) — the denominator <see cref="ServerHealthClassifier.CollectorSeverity"/> grades the failing count
+    /// against. Healthy + Failing is NOT it: STALE, WARNING, STOPPED, NO_PERMISSIONS and EXTENSION_MISSING rows
+    /// are all banded collectors that are neither.</param>
+    internal readonly record struct CollectorCounts(int Healthy, int Failing, int Total, string? DeadlockBand = null);
 }
 
 /// <summary>
@@ -1337,7 +1364,16 @@ public sealed class FleetServerCard
 
     [JsonPropertyName("blocking_count")] public int BlockingCount { get; init; }
     [JsonPropertyName("max_blocking_wait_ms")] public long MaxBlockingWaitMs { get; init; }
+    /// <summary>Blocking events per HOUR over the card's window — the figure the count arm of
+    /// <c>blocking_severity</c> banded on (#3539 A3), or null when the window was too short to normalise.
+    /// Published beside the raw count for <see cref="DeadlockRatePerHour"/>'s reason.</summary>
+    [JsonPropertyName("blocking_rate_per_hour")] public double? BlockingRatePerHour { get; init; }
     [JsonPropertyName("blocking_severity")] public HealthSeverity BlockingSeverity { get; init; }
+
+    /// <summary>The window <c>blocking_count</c> covers (#3539 A3) — carried, not serialized, for the reason
+    /// <see cref="DeadlockWindow"/> is; the roll-up already publishes the bounds once.</summary>
+    [JsonIgnore]
+    public TimeSpan BlockingWindow { get; init; }
 
     [JsonPropertyName("deadlock_count")] public int DeadlockCount { get; init; }
     [JsonPropertyName("deadlock_last_seen")] public DateTime? DeadlockLastSeen { get; init; }
@@ -1391,6 +1427,11 @@ public sealed class FleetServerCard
 
     [JsonPropertyName("healthy_collector_count")] public int HealthyCollectorCount { get; init; }
     [JsonPropertyName("failed_collector_count")] public int FailedCollectorCount { get; init; }
+    /// <summary>Every collector banded for this server in the health window, on any band (#3539 A8d) — the
+    /// denominator <c>collector_severity</c> grades <c>failed_collector_count</c> against. Not
+    /// healthy + failed: STALE, WARNING, STOPPED and the permission bands are banded collectors that are
+    /// neither.</summary>
+    [JsonPropertyName("collector_count")] public int CollectorCount { get; init; }
     [JsonPropertyName("collector_severity")] public HealthSeverity CollectorSeverity { get; init; }
 
     [JsonPropertyName("overall_metric_severity")] public HealthSeverity OverallMetricSeverity { get; init; }
@@ -1426,6 +1467,8 @@ public sealed class FleetServerCard
         HasMemoryPressure = ServerMetricSources.DmvSourced(HasMemoryPressure, IsPostgres),
         BlockingCount = ServerMetricSources.DmvSourced(BlockingCount, IsPostgres),
         MaxBlockedSeconds = MaxBlockingWaitMs / 1000.0,
+        /* #3539 A3: the count's denominator, for the same reason the deadlock window travels below. */
+        BlockingWindow = BlockingWindow,
         DeadlockCount = ServerMetricSources.DmvSourced(DeadlockCount, IsPostgres),
         /* #3368: the three travel together for the reason the CPU trio above does. Without the window the
            re-band would have no denominator and the worst-first score would rank every deadlocking server
@@ -1438,6 +1481,8 @@ public sealed class FleetServerCard
         ThreadsWaitingForCpu = ThreadsWaitingForCpu,
         RequestsWaitingForThreads = RequestsWaitingForThreads,
         FailedCollectorCount = FailedCollectorCount,
+        /* #3539 A8d: the share's denominator, or the re-band would grade presence-flat again. */
+        CollectorCount = CollectorCount,
     };
 }
 

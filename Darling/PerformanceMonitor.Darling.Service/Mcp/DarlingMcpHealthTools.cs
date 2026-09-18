@@ -119,7 +119,13 @@ public sealed class DarlingMcpHealthTools
                 memory_critical_events = row.MemoryCriticalEvents,
                 collection_errors = row.CollectionErrors,
                 alert_count = row.AlertCount,
-                max_block_duration_ms = row.MaxBlockDurationMs
+                max_block_duration_ms = row.MaxBlockDurationMs,
+                /* #3539 A2/A3, additive: the figures the band read that the counts alone cannot show — the
+                   run total the error share is a share OF, and the blocking rate over the day's window (null
+                   when the window was too short to normalise). The window is the row's own clamp against
+                   its ReferenceUtc, so an anchored read rates against its as_of, not the process clock. */
+                collection_runs = row.CollectionRuns,
+                blocking_rate_per_hour = ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window),
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -220,6 +226,9 @@ public sealed class DarlingMcpHealthTools
                     collection_errors = row.CollectionErrors,
                     alert_count = row.AlertCount,
                     max_block_duration_ms = row.MaxBlockDurationMs,
+                    /* #3539 A2/A3, additive — see get_daily_summary's members of the same names. */
+                    collection_runs = row.CollectionRuns,
+                    blocking_rate_per_hour = ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window),
                 }),
             }, McpHelpers.JsonOptions);
         }

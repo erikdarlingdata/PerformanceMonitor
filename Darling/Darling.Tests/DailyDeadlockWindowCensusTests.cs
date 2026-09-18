@@ -26,7 +26,7 @@ public sealed class DailyDeadlockWindowCensusTests
 {
     /// <summary>
     /// Every production <see cref="DailyHealthSignals"/> bundle that assigns <c>Deadlocks</c> also assigns
-    /// <c>Window</c>.
+    /// <c>Window</c> — and, since #3539 A2, <c>CollectionRuns</c> and <c>PeakBlockWaitMs</c>.
     ///
     /// <para><b>Keyed on <c>Deadlocks</c> AND <c>HasData</c> assigned in the same initializer</b> — the
     /// rung census's own lesson about member names shared across types, met the way it met it: two other
@@ -53,7 +53,13 @@ public sealed class DailyDeadlockWindowCensusTests
             {
                 found++;
 
-                if (!AssignsMember(initializer, "Window"))
+                /* #3539 A2 widened the census to the two members that landed beside the window: the
+                   collection-run denominator (without it the error share cannot form and every erroring
+                   window is Warning on presence) and the peak block (without it the day's blocking band has
+                   no wait arm and a 60-second block cannot redden a cell). */
+                if (!AssignsMember(initializer, "Window")
+                    || !AssignsMember(initializer, "CollectionRuns")
+                    || !AssignsMember(initializer, "PeakBlockWaitMs"))
                 {
                     offenders.Add(System.IO.Path.GetFileName(file));
                 }
@@ -69,8 +75,9 @@ public sealed class DailyDeadlockWindowCensusTests
 
         Assert.True(
             offenders.Count == 0,
-            "these production DailyHealthSignals bundles carry a deadlock count with no window beside it, "
-          + "so the day band's deadlock signal falls to the unrateable arm and can never read Critical: "
+            "these production DailyHealthSignals bundles omit a denominator or the peak block (Window, "
+          + "CollectionRuns or PeakBlockWaitMs), so a rate or share cannot form and the band falls to its "
+          + "presence arm: "
           + string.Join(", ", offenders.Distinct().OrderBy(f => f, StringComparer.Ordinal)));
     }
 

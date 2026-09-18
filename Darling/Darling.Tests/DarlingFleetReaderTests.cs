@@ -230,12 +230,14 @@ public sealed class DarlingFleetDtoJsonTests
             CpuSeverity = HealthSeverity.Critical,
             MemorySeverity = HealthSeverity.Healthy,
             BlockingCount = 4,
+            BlockingRatePerHour = 4.0,
             BlockingSeverity = HealthSeverity.Warning,
             DeadlockCount = 1,
             DeadlockLastSeen = new DateTime(2026, 7, 18, 3, 15, 0, DateTimeKind.Unspecified),
             DeadlockSeverity = HealthSeverity.Critical,
             ThreadsSeverity = HealthSeverity.Unknown,
             FailedCollectorCount = 0,
+            CollectorCount = 40,
             CollectorSeverity = HealthSeverity.Healthy,
             OverallMetricSeverity = HealthSeverity.Critical,
             /* #3528: deliberately measured < total, so the value pins below cannot pass off a card that
@@ -251,10 +253,11 @@ public sealed class DarlingFleetDtoJsonTests
             "\"server_id\"", "\"display_name\"", "\"server_name\"", "\"engine_edition\"",
             "\"is_azure_sql_db\"", "\"is_azure_mi\"", "\"is_silenced\"", "\"tags\"", "\"band\"", "\"status\"",
             "\"is_online\"", "\"last_collection\"", "\"cpu_percent\"", "\"total_cpu_percent\"",
-            "\"cpu_severity\"", "\"memory_severity\"", "\"blocking_count\"", "\"blocking_severity\"",
+            "\"cpu_severity\"", "\"memory_severity\"", "\"blocking_count\"", "\"blocking_rate_per_hour\"",
+            "\"blocking_severity\"",
             "\"deadlock_count\"", "\"deadlock_last_seen\"", "\"deadlock_rate_per_hour\"",
             "\"deadlock_severity\"", "\"threads_severity\"",
-            "\"failed_collector_count\"", "\"collector_severity\"", "\"overall_metric_severity\"",
+            "\"failed_collector_count\"", "\"collector_count\"", "\"collector_severity\"", "\"overall_metric_severity\"",
             "\"measured_metric_count\"", "\"metric_count\"",
         })
         {
@@ -685,9 +688,15 @@ public sealed class DarlingFleetReaderLivePostgresTests
             await InsertServerAsync(connection, XeServerId, XeName, 5, ct);
             await InsertServerAsync(connection, DmvServerId, DmvName, 3, ct);
 
-            /* XE server: 2 XE reports + 1 DMV snapshot -> fallback prefers XE (count 2). */
-            await InsertBlockedProcessAsync(connection, XeServerId, XeName, at, ct);
-            await InsertBlockedProcessAsync(connection, XeServerId, XeName, at.AddMinutes(1), ct);
+            /* XE server: 5 XE reports + 1 DMV snapshot -> fallback prefers XE (count 5). Five inside the
+               one-hour card window is 5/hr, the blocking band's Warning tier exactly (#3539 A3) — two
+               would be the measured quiet mode and Healthy by count, and this server has to sit in the
+               WARNING band for the cross-band ordering assertion below. */
+            for (var i = 0; i < 5; i++)
+            {
+                await InsertBlockedProcessAsync(connection, XeServerId, XeName, at.AddSeconds(i), ct);
+            }
+
             await InsertDmvBlockingAsync(connection, XeServerId, XeName, at, ct);
 
             /* DMV-only server: 3 DMV snapshots (fallback), and enough deadlocks to clear the rate tier. */
@@ -712,8 +721,12 @@ public sealed class DarlingFleetReaderLivePostgresTests
             var xe = result.Cards.Single(c => c.ServerId == XeServerId);
             var dmv = result.Cards.Single(c => c.ServerId == DmvServerId);
 
-            /* XE preferred: 2 events, no deadlock -> Warning band. */
-            Assert.Equal(2, xe.BlockingCount);
+            /* XE preferred: 5 events (5.0/hr over the card's hour, the Warning tier), no deadlock ->
+               Warning band, and the rate rides the card beside the count (#3539 A3). */
+            Assert.Equal(5, xe.BlockingCount);
+            Assert.Equal(5.0, xe.BlockingRatePerHour);
+            Assert.Equal(TimeSpan.FromHours(1), xe.BlockingWindow);
+            Assert.Equal(HealthSeverity.Warning, xe.BlockingSeverity);
             Assert.Equal(0, xe.DeadlockCount);
             Assert.Equal(FleetHealthBand.Warning, xe.Band);
             Assert.True(xe.IsOnline);
@@ -723,9 +736,11 @@ public sealed class DarlingFleetReaderLivePostgresTests
             Assert.True(xe.IsAzureSqlDb);
             Assert.False(xe.IsAzureManagedInstance);
 
-            /* DMV fallback: 3 events -> Warning on the blocking axis, 25 deadlocks/hr -> Critical on the
-               deadlock axis, and worst-wins makes the card Critical. */
+            /* DMV fallback: 3 snapshots (3/hr, Healthy by count — the fallback's unit is coarser and the
+               rows carry no wait), 25 deadlocks/hr -> Critical on the deadlock axis, and worst-wins makes
+               the card Critical. */
             Assert.Equal(3, dmv.BlockingCount);
+            Assert.Equal(HealthSeverity.Healthy, dmv.BlockingSeverity);
             Assert.Equal(25, dmv.DeadlockCount);
             Assert.Equal(FleetHealthBand.Critical, dmv.Band);
 
