@@ -4497,6 +4497,17 @@ public sealed class DarlingWorker : BackgroundService
     /// <para>No query-text preview: <c>pg_session_states</c> deliberately stores none (see the collector's
     /// class remarks), so the message identifies the session by pid/database/command tag instead of the
     /// statement text SQL Server's equivalent shows.</para>
+    ///
+    /// <para><b>The noise opt-outs ride the SAME switches SQL Server's read takes</b> (#3539): the shared
+    /// <c>longRunningQueryExcludeBackups</c> drops the dump/restore utilities' sessions, and the shared
+    /// <c>excludedDatabases</c> list is applied after the read exactly as <c>DarlingAlertReadAdapter</c>
+    /// applies it. The unconditional ones — non-client backends (autovacuum, walsender), the
+    /// VACUUM/ANALYZE/REINDEX/CLUSTER statements, idle-in-transaction — live in the read's SQL; see
+    /// <see cref="DarlingPgSessionStatesReader.CurrentLongRunningSessionsSqlTemplate"/> for each one's SQL
+    /// Server sibling and for why the three remaining SQL Server switches have no honest reading here. What
+    /// is still reported carries its <c>command_tag</c> on the incident line, so a <c>CREATE</c> that is an
+    /// index build reads as what it is rather than being dropped on a guess — the annotate-never-suppress
+    /// posture SQL Server's Agent-job name (#3497) takes on its card.</para>
     /// </summary>
     private async Task EvaluatePgLongRunningQueryAsync(
         ServerRuntime runtime, AlertServerSnapshot snapshot, DarlingConfig config, CancellationToken cancellationToken)
@@ -4524,7 +4535,10 @@ public sealed class DarlingWorker : BackgroundService
 
             var rows = await DarlingPgSessionStatesReader.GetCurrentLongRunningSessionsAsync(
                 _postgres, runtime.ServerId, thresholdMs: thresholdMinutes * 60_000L, now,
-                PgLongRunningQueryRecencyMinutes, limit: alertSettings.LongRunningQueryMaxResults, cancellationToken);
+                PgLongRunningQueryRecencyMinutes, limit: alertSettings.LongRunningQueryMaxResults,
+                excludeBackups: alertSettings.LongRunningQueryExcludeBackups,
+                excludedDatabases: alertSettings.ExcludedDatabases,
+                cancellationToken);
             readClock.Restart();
 
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));

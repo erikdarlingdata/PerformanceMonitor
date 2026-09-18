@@ -611,13 +611,34 @@ namespace PerformanceMonitor.Common
     /// engine (#3272) — the ONE place that decision is made, so the service's fleet card and the viewer's
     /// Overview card cannot disagree about whether a zero means anything.
     ///
-    /// <para><b>Why these three travel together.</b> The memory-pressure, blocking and deadlock rows on a
-    /// card come from <c>v_memory_grant_stats</c>, <c>v_blocked_process_reports</c> /
-    /// <c>v_dmv_blocking_snapshots</c> and <c>v_deadlocks</c> — all SQL Server captures, none of which a
-    /// PostgreSQL target has a single row in. The per-metric reads therefore hand the card zeros, and a zero
-    /// is indistinguishable from a genuinely calm SQL Server. Threads already escaped this because its
-    /// ceiling is nullable and CPU escaped it in #3267; these three had no way to say "not measured" at all.
-    /// </para>
+    /// <para><b>Why these travel together.</b> The memory-pressure and blocking rows on a card come from
+    /// <c>v_memory_grant_stats</c> and <c>v_blocked_process_reports</c> / <c>v_dmv_blocking_snapshots</c> —
+    /// SQL Server captures, neither of which a PostgreSQL target has a single row in. The per-metric reads
+    /// therefore hand the card zeros, and a zero is indistinguishable from a genuinely calm SQL Server.
+    /// Threads already escaped this because its ceiling is nullable and CPU escaped it in #3267; these had
+    /// no way to say "not measured" at all. Deadlocks were the third member until #3539 gave the PostgreSQL
+    /// card its own count (the <c>pg_stat_database.deadlocks</c> counter, differenced over the window), at
+    /// which point the reading has a source on both engines and no longer passes through here. That arm
+    /// carries its own measured/not-measured test instead — whether at least one difference was taken in
+    /// the window — because a difference of fewer than two samples is not a zero, where a <c>COUNT(*)</c>
+    /// over an event table is; the two fleet readers hold that decision beside the read.</para>
+    ///
+    /// <para><b>Blocking stays here on purpose, and the reason is the shape of the evidence, not its
+    /// absence.</b> A PostgreSQL target's blocking IS collected (<c>pg_blocking</c>, <c>pg_lock_stats</c>),
+    /// but as per-minute SAMPLES of <c>pg_stat_activity</c>: a waiter seen in three consecutive captures is
+    /// one wait observed three times, where SQL Server's blocked-process report is one engine-recorded event
+    /// per threshold crossing. <see cref="ServerHealthClassifier.BlockingSeverity"/>'s count tiers were
+    /// measured in reports per server-hour on that engine-recorded shape (#3596), and a sampled sighting
+    /// count fed through them would band on a denominator the tiers were never measured against — three
+    /// sightings of one 3-minute wait is not three reports. An honest PostgreSQL band needs its own
+    /// sampled-shape tiers (share of captures holding a waiter, longest observed wait) measured on that
+    /// fleet, which is a distribution nobody has taken yet; until then Unknown is the reading, and the
+    /// alert (<c>DarlingWorker.EvaluatePgBlockingAsync</c>, root blockers per rolling window) is the
+    /// surface that speaks for PostgreSQL blocking. Tiering pending: #3601's <c>lock_wait</c> log-event
+    /// family (<c>log_lock_waits</c> "still waiting" lines) is the EVENT-grain evidence a report-rate band
+    /// would read — one line per wait past <c>deadlock_timeout</c>, the shape the SQL Server tiers were
+    /// measured on — and is the join point for a future PostgreSQL arm here; nothing reads it yet. The
+    /// Darling README's engine-coverage table states this beside the band.</para>
     ///
     /// <para><b>It names the ENGINE, not the collector state.</b> A SQL Server whose deadlock collector is
     /// permission-denied also reads zero, and that stays Healthy here on purpose: #3017 routed that case to
@@ -629,9 +650,8 @@ namespace PerformanceMonitor.Common
     {
         /// <summary>
         /// The reading as measured, or <c>null</c> when this target's engine has no source behind it.
-        /// Generic over the reading's own type because the three metrics are a <c>bool</c> and two
-        /// <c>int</c>s, and the DECISION is the same for all three — one function rather than three that
-        /// could drift.
+        /// Generic over the reading's own type because the metrics are a <c>bool</c> and an <c>int</c>,
+        /// and the DECISION is the same for both — one function rather than two that could drift.
         /// </summary>
         /// <param name="reading">What the SQL Server metric read produced (a zero, for a target with no rows).</param>
         /// <param name="isPostgres">Whether the store SAYS this target is PostgreSQL. Absence of an engine
@@ -915,14 +935,19 @@ namespace PerformanceMonitor.Common
         /// green dot for an unmeasured metric is the failure <see cref="MemorySeverity"/>'s Unknown arm and
         /// <see cref="CpuSeverity"/>'s exist to avoid.</para>
         ///
-        /// <para><b>The null arm completes #3017 rather than reversing it.</b> That issue established that a
-        /// PostgreSQL target's zero is structural — <c>v_deadlocks</c> is the SQL Server extended-event
-        /// capture and nothing joins <c>pg_deadlocks</c> into it — and gave the CARD
-        /// <see cref="FleetDeadlockSource"/> plus the fleet total a coverage denominator to say so. It
-        /// deliberately added no band to the FLEET ROLLUP, so that a quiet, fully-covered SQL Server fleet
-        /// keeps reading healthy; that reasoning is untouched here. A PostgreSQL target has no
-        /// SQL-Server-deadlock reading at any rate, so it bands off none.</para></summary>
-        /// <param name="deadlockCount">Deadlocks counted in the window, or null where the engine has no
+        /// <para><b>The null arm is for a path with no source, and since #3539 neither engine's card is
+        /// one.</b> #3017 established that a PostgreSQL target's <c>v_deadlocks</c> zero was structural and
+        /// gave the CARD <see cref="FleetDeadlockSource"/> plus the fleet total a coverage denominator to
+        /// say so; the card then passed null here and banded Unknown. #3539 feeds that card the engine's own
+        /// count instead — <c>pg_stat_database.deadlocks</c>, a server-maintained counter differenced per
+        /// database over the window and summed — through THIS band and THESE tiers, because a deadlock per
+        /// hour is the same quantity whichever engine recorded it and the tiers were set on the
+        /// rate, not on the instrument. The null arm remains for the PostgreSQL card whose window held no
+        /// two samples to difference (a difference of nothing is not a zero), for any caller that genuinely
+        /// reads no source, and for the daily classifier's day cells before a count exists. #3017's own rule
+        /// is untouched: no band was added to the FLEET ROLLUP, and a quiet, fully-covered fleet keeps
+        /// reading healthy.</para></summary>
+        /// <param name="deadlockCount">Deadlocks counted in the window, or null where the caller has no
         /// source behind the reading. A <c>long</c> for <see cref="DeadlockRatePerHour"/>'s reason (#3525):
         /// the shared daily classifier routes its day-scale <c>Deadlocks</c> roll-up through this same band,
         /// so the calendar, <c>get_daily_summary</c>, the fleet sweep and the Overview card cannot disagree

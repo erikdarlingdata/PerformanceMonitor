@@ -193,6 +193,7 @@ public sealed class DarlingFleetReaderSqlTests
     [InlineData(nameof(DarlingFleetReader.FleetThreadsSql))]
     [InlineData(nameof(DarlingFleetReader.FleetBlockingSql))]
     [InlineData(nameof(DarlingFleetReader.FleetDeadlockSql))]
+    [InlineData(nameof(DarlingFleetReader.FleetPgDeadlockSql))]
     [InlineData(nameof(DarlingFleetReader.FleetLastCollectionSql))]
     [InlineData(nameof(DarlingFleetReader.FleetCollectionHealthSql))]
     public void EveryFleetSql_IsPgDialect_NoTSql(string constName)
@@ -415,19 +416,36 @@ public sealed class DarlingFleetDeadlockCoverageTests
         => Assert.Equal(expected, FleetDeadlockCoverage.ClassifyDeadlockSource(isPostgres: false, band));
 
     /// <summary>
-    /// The issue's own case: a PostgreSQL target is never covered, and its collector's band cannot change
-    /// that. <c>pg_deadlocks</c> can be perfectly HEALTHY on all fifty targets and this total still counts
-    /// none of it — the rows are in a different table. That is why PostgreSQL is asked before any band.
+    /// #3539 reversed #3017's PostgreSQL arm: a PostgreSQL target IS covered when its deadlock-source
+    /// collector (<c>pg_database_stats</c>) read, on exactly the terms a SQL Server's <c>deadlocks</c>
+    /// collector is — degraded still counts, silent and denied do not — and the covered arm is
+    /// <c>PostgresTarget</c> rather than <c>Read</c> only because the instrument differs (a counter
+    /// difference, not a graph). The pre-#3539 answer, <c>PostgresTarget</c> on the engine alone, would now
+    /// call a server whose collector never ran "counted".
     /// </summary>
     [Theory]
-    [InlineData(CollectorHealthClassifier.Healthy)]
-    [InlineData(CollectorHealthClassifier.NoPermissions)]
-    [InlineData(CollectorHealthClassifier.Stopped)]
-    [InlineData(null)]
-    public void APostgresTarget_IsNeverCovered_WhateverItsCollectorSays(string? band)
-        => Assert.Equal(
-            FleetDeadlockSource.PostgresTarget,
-            FleetDeadlockCoverage.ClassifyDeadlockSource(isPostgres: true, band));
+    [InlineData(CollectorHealthClassifier.Healthy, FleetDeadlockSource.PostgresTarget)]
+    [InlineData(CollectorHealthClassifier.Warning, FleetDeadlockSource.PostgresTarget)]
+    [InlineData(CollectorHealthClassifier.Stale, FleetDeadlockSource.PostgresTarget)]
+    [InlineData(CollectorHealthClassifier.Failing, FleetDeadlockSource.PostgresTarget)]
+    [InlineData(CollectorHealthClassifier.NoPermissions, FleetDeadlockSource.CollectorDenied)]
+    [InlineData(CollectorHealthClassifier.Stopped, FleetDeadlockSource.CollectorSilent)]
+    [InlineData(CollectorHealthClassifier.NeverRun, FleetDeadlockSource.CollectorSilent)]
+    [InlineData(null, FleetDeadlockSource.CollectorSilent)]
+    public void APostgresTarget_IsCoveredOnItsOwnCollectorsTerms(string? band, FleetDeadlockSource expected)
+        => Assert.Equal(expected, FleetDeadlockCoverage.ClassifyDeadlockSource(isPostgres: true, band));
+
+    /// <summary>The one predicate both roll-ups reduce <c>servers_read</c> with: the two covered arms and
+    /// nothing else. Enumerated over the whole enum so a value added later lands uncovered by default.</summary>
+    [Fact]
+    public void ExactlyTheTwoCoveredArmsCount()
+    {
+        Assert.True(FleetDeadlockCoverage.IsCovered(FleetDeadlockSource.Read));
+        Assert.True(FleetDeadlockCoverage.IsCovered(FleetDeadlockSource.PostgresTarget));
+        Assert.False(FleetDeadlockCoverage.IsCovered(FleetDeadlockSource.CollectorSilent));
+        Assert.False(FleetDeadlockCoverage.IsCovered(FleetDeadlockSource.CollectorDenied));
+        Assert.Equal(2, Enum.GetValues<FleetDeadlockSource>().Count(FleetDeadlockCoverage.IsCovered));
+    }
 
     /// <summary>
     /// A card that sets nothing reads as UNCOVERED, and that is the load-bearing default. <c>DeadlockSource</c>
@@ -464,57 +482,97 @@ public sealed class DarlingFleetDeadlockCoverageTests
             {
                 Card(1, band: CollectorHealthClassifier.Healthy),
                 Card(2, band: CollectorHealthClassifier.Failing),
-                Card(3, isPostgres: true),
-                Card(4, isPostgres: true),
+                Card(3, isPostgres: true, band: CollectorHealthClassifier.Healthy),
+                Card(4, isPostgres: true, band: CollectorHealthClassifier.Stale),
                 Card(5, band: CollectorHealthClassifier.Stopped),
                 Card(6, band: CollectorHealthClassifier.NoPermissions),
                 Card(7, band: null),
+                /* #3539: a PostgreSQL target whose pg_database_stats collector left no band is SILENT, not
+                   a PostgreSQL bucket entry - the engine no longer answers on its own. */
+                Card(8, isPostgres: true, band: null),
             },
             Now, Now.AddHours(-1), Now);
 
         var coverage = rollup.DeadlockCoverage;
 
-        Assert.Equal(2, coverage.ServersRead);
-        Assert.Equal(7, coverage.ServersTotal);
+        /* Four read: two SQL Servers through their deadlocks collector, two PostgreSQL targets through
+           pg_database_stats (#3539). */
+        Assert.Equal(4, coverage.ServersRead);
+        Assert.Equal(8, coverage.ServersTotal);
+        /* The PostgreSQL sub-count names the instrument for two of the four read. */
         Assert.Equal(2, coverage.PostgresServers);
-        Assert.Equal(2, coverage.ServersCollectorSilent);   // STOPPED + the null band
+        Assert.Equal(3, coverage.ServersCollectorSilent);   // STOPPED + the null band + the bandless PostgreSQL target
         Assert.Equal(1, coverage.ServersCollectorDenied);
 
         /* Every server is accounted for exactly once — an unattributed server would mean coverage that
-           reports a gap it cannot explain, which is the same shape as a total that reports no denominator. */
+           reports a gap it cannot explain, which is the same shape as a total that reports no denominator.
+           Three terms, not four: postgres_servers is a SUBSET of servers_read since #3539, and a consumer
+           still summing it in would over-count the fleet by every PostgreSQL target. */
         Assert.Equal(
             coverage.ServersTotal,
-            coverage.ServersRead + coverage.PostgresServers
-                + coverage.ServersCollectorSilent + coverage.ServersCollectorDenied);
+            coverage.ServersRead + coverage.ServersCollectorSilent + coverage.ServersCollectorDenied);
+        Assert.True(coverage.PostgresServers <= coverage.ServersRead);
 
         /* And it agrees with the field the fleet already reported. */
         Assert.Equal(rollup.TotalServers, coverage.ServersTotal);
     }
 
     /// <summary>
-    /// The measured case, end to end: a PostgreSQL-only fleet reports <c>total_deadlocks: 0</c> with zero
-    /// coverage beside it, and the note sends the reader to the tool that can actually answer.
+    /// The measured case, end to end (#3539 reversed its direction): a PostgreSQL-only fleet whose
+    /// <c>pg_database_stats</c> collectors are running reports FULL coverage, its deadlocks summed into
+    /// <c>total_deadlocks</c>, and the note names the instrument and the tool that has the graphs — the
+    /// pre-#3539 sentence, "cannot count at all", is gone.
     /// </summary>
     [Fact]
-    public void APostgresOnlyFleet_ReportsZeroCoverage_AndNamesTheToolThatCanAnswer()
+    public void APostgresOnlyFleet_IsCovered_AndTheNoteNamesTheInstrument()
     {
         var rollup = DarlingFleetReader.BuildRollup(
-            new[] { Card(1, isPostgres: true), Card(2, isPostgres: true), Card(3, isPostgres: true) },
+            new[]
+            {
+                Card(1, isPostgres: true, band: CollectorHealthClassifier.Healthy, deadlockCount: 2),
+                Card(2, isPostgres: true, band: CollectorHealthClassifier.Healthy),
+                Card(3, isPostgres: true, band: CollectorHealthClassifier.Failing, deadlockCount: 1),
+            },
             Now, Now.AddHours(-1), Now);
 
-        Assert.Equal(0, rollup.TotalDeadlocks);
-        Assert.Equal(0, rollup.DeadlockCoverage.ServersRead);
+        Assert.Equal(3, rollup.TotalDeadlocks);
+        Assert.Equal(3, rollup.DeadlockCoverage.ServersRead);
         Assert.Equal(3, rollup.DeadlockCoverage.PostgresServers);
 
         var note = rollup.DeadlockCoverage.Note;
 
-        Assert.Contains("read a deadlock source for 0 of 3", note, StringComparison.Ordinal);
+        Assert.Contains("read a deadlock source for 3 of 3", note, StringComparison.Ordinal);
+        Assert.Contains("3 of those are PostgreSQL targets counted from the server's own pg_stat_database.deadlocks counter", note, StringComparison.Ordinal);
         Assert.Contains("get_pg_deadlocks", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("cannot count", note, StringComparison.Ordinal);
 
         /* The two causes that do not apply are absent, so a reader is not handed three actions when one is
            called for. */
         Assert.DoesNotContain("get_collection_health", note, StringComparison.Ordinal);
         Assert.DoesNotContain("needs a grant", note, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The cross-server PostgreSQL deadlock read is a per-series counter DIFFERENCE, clamped, summed —
+    /// pinned on the SQL's text because the alternative, <c>SUM(deadlocks)</c>, is a plausible-looking
+    /// one-liner that returns a lifetime counter multiplied by the sample count (measured: eight million
+    /// "deadlocks" on a store with none in the window). The live test runs it; this stops a rewrite from
+    /// quietly reintroducing the sum.
+    /// </summary>
+    [Fact]
+    public void ThePostgresDeadlockRead_DifferencesTheCounterPerDatabaseSeries_AndNeverSumsTheColumn()
+    {
+        var sql = DarlingFleetReader.FleetPgDeadlockSql;
+
+        Assert.Contains("FROM pg_database_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("deadlocks - LAG(deadlocks) OVER (PARTITION BY server_id, database_name ORDER BY collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(GREATEST(raw_delta, 0))", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(collection_time) FILTER (WHERE raw_delta > 0)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SUM(deadlocks)", sql, StringComparison.Ordinal);
+        /* Windowed on the partitioning column, both bounds, like the SQL Server twin. */
+        Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -562,7 +620,7 @@ public sealed class DarlingFleetDeadlockCoverageTests
     {
         var json = JsonSerializer.Serialize(
             DarlingFleetReader.BuildRollup(
-                new[] { Card(1, isPostgres: true), Card(2, band: CollectorHealthClassifier.Healthy) },
+                new[] { Card(1, isPostgres: true, band: CollectorHealthClassifier.Healthy), Card(2, band: CollectorHealthClassifier.Healthy) },
                 Now, Now.AddHours(-1), Now),
             DarlingFleetReader.JsonOptions);
 
@@ -578,12 +636,17 @@ public sealed class DarlingFleetDeadlockCoverageTests
 
         JsonAssert.Contains("\"deadlock_source\": \"PostgresTarget\"", json);
         JsonAssert.Contains("\"deadlock_source\": \"Read\"", json);
-        JsonAssert.Contains("\"servers_read\": 1", json);
+        /* Both covered (#3539): servers_read counts the PostgreSQL target, and postgres_servers names it
+           as the counter-read one of the two. */
+        JsonAssert.Contains("\"servers_read\": 2", json);
+        JsonAssert.Contains("\"postgres_servers\": 1", json);
     }
 
     private static readonly DateTime Now = new(2026, 9, 5, 12, 0, 0, DateTimeKind.Unspecified);
 
-    private static FleetServerCard Card(int id, bool isPostgres = false, string? band = null) =>
+    /// <param name="band">The ENGINE'S deadlock-source collector band — <c>deadlocks</c> on a SQL Server,
+    /// <c>pg_database_stats</c> on a PostgreSQL target (#3539); the card carries one field for it.</param>
+    private static FleetServerCard Card(int id, bool isPostgres = false, string? band = null, int deadlockCount = 0) =>
         new()
         {
             ServerId = id,
@@ -591,6 +654,7 @@ public sealed class DarlingFleetDeadlockCoverageTests
             ServerName = "target-" + id.ToString(CultureInfo.InvariantCulture),
             IsPostgres = isPostgres,
             DeadlockCollectorBand = band,
+            DeadlockCount = deadlockCount,
         };
 }
 

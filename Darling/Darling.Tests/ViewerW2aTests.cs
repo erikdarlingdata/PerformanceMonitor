@@ -111,6 +111,25 @@ public sealed class ViewerOverviewSqlTests
         Assert.Contains("MAX(deadlock_time)", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3539: the PostgreSQL arm of the same card read — the server's own <c>pg_stat_database.deadlocks</c>
+    /// counter differenced per database over the window, clamped at zero across a reset, summed, with the
+    /// sample that first showed the newest step as "last". Never <c>SUM(deadlocks)</c>: the column is a
+    /// lifetime counter repeated in every sample. Per-server, so partitioned by database only.
+    /// </summary>
+    [Fact]
+    public void SummaryPgDeadlockSql_DifferencesTheCounterPerDatabase_OverTheWindow()
+    {
+        var sql = ViewerDataService.ServerSummaryPgDeadlockSql;
+        Assert.Contains("FROM pg_database_stats", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("deadlocks - LAG(deadlocks) OVER (PARTITION BY database_name ORDER BY collection_time)", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(GREATEST(sampled.raw_delta, 0))", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(sampled.collection_time) FILTER (WHERE sampled.raw_delta > 0)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("SUM(deadlocks)", sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void SummaryLastCollectionSql_TakesTheNewestCollectionTime()
     {
@@ -131,6 +150,7 @@ public sealed class ViewerOverviewSqlTests
             ViewerDataService.ServerSummaryThreadsSql,
             ViewerDataService.ServerSummaryBlockingSql,
             ViewerDataService.ServerSummaryDeadlockSql,
+            ViewerDataService.ServerSummaryPgDeadlockSql,
             ViewerDataService.ServerSummaryLastCollectionSql,
         })
         {

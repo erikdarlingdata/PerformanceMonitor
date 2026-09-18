@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -383,9 +384,56 @@ public static class DarlingPgSessionStatesReader
     /// <c>sys.dm_exec_requests</c> — a table of requests actually executing, where an idle session has no
     /// row at all.</para>
     ///
-    /// <para>$1 server_id, $2 threshold (ms), $3 recency floor (naive UTC), $4 row limit.</para>
+    /// <para><b>The noise opt-outs, and which SQL Server sibling each mirrors (#3539).</b> SQL Server's
+    /// <c>CheckLongRunningQueriesAsync</c> reads <c>sys.dm_exec_requests</c> through five switchable noise
+    /// filters plus an unconditional <c>session_id &gt; 50</c>; this read had none, so <c>autovacuum</c> at
+    /// minute 31, a nightly <c>pg_dump</c>, or a manual <c>VACUUM</c> on a large relation paged with a mute as
+    /// the only remedy — and the mute is weaker here than on SQL Server, because this table stores no query
+    /// text (see the collector) and so a mute rule cannot match a statement. What the row DOES carry is
+    /// <c>backend_type</c>, <c>application_name</c> and the whitelisted <c>command_tag</c>, which are the
+    /// three handles below.</para>
+    /// <list type="bullet">
+    /// <item><b>Non-client backends</b> (unconditional): <c>backend_type &lt;&gt; 'client backend'</c> —
+    /// autovacuum workers, walsenders (streaming replication, <c>pg_basebackup</c>), logical replication
+    /// workers, background workers. Mirrors SQL Server's unconditional <c>session_id &gt; 50</c>: a system
+    /// process is not a query. NULL-safe in the INCLUDING direction — <c>backend_type</c> is in the
+    /// privileged column set and comes back NULL without <c>pg_monitor</c>, and dropping every row on a
+    /// redacted target would make the alert silently never fire exactly where the collector has already
+    /// stamped <c>state_is_redacted</c>.</item>
+    /// <item><b>Maintenance statements</b> (unconditional): <c>command_tag</c> in <c>VACUUM</c>,
+    /// <c>ANALYZE</c>, <c>REINDEX</c>, <c>CLUSTER</c> — a manual vacuum of a large table runs for an hour by
+    /// design, and the alert asks about QUERIES. SQL Server has no statement-shape sibling because it needs
+    /// none: its row carries the text and an operator mutes <c>ALTER INDEX</c> by pattern; here the tag is
+    /// the only handle, so the exclusion has to live in the read. <c>CREATE</c> is deliberately NOT in the
+    /// list: the tag cannot tell <c>CREATE INDEX CONCURRENTLY</c> (maintenance) from <c>CREATE TABLE AS
+    /// SELECT</c> (a query), and the honest side of that ambiguity is to report — the incident line shows
+    /// the tag so a reader can see which it was.</item>
+    /// <item><b>Dump and restore utilities</b> (the <c>{0}</c> placeholder, on the SHARED
+    /// <c>longRunningQueryExcludeBackups</c> switch): <c>application_name</c> in <c>pg_dump</c>,
+    /// <c>pg_dumpall</c>, <c>pg_restore</c>, <c>pg_basebackup</c> — the names libpq's
+    /// <c>fallback_application_name</c> gives those tools, so a dump's <c>COPY ... TO STDOUT</c> sessions
+    /// carry them without operator configuration. Mirrors <c>BackupsFilter</c> (<c>BACKUPTHREAD</c> /
+    /// <c>BACKUPIO</c>) on the SAME knob, the way <c>longRunningQueryEnabled</c> and the threshold are already
+    /// shared: "do not page me for backups" is one preference, not one per engine. <c>psql</c> is NOT
+    /// excluded — an operator's ad-hoc statement running long is precisely a long-running query, and SQL
+    /// Server does not exclude SSMS either.</item>
+    /// <item><b>Idle in transaction</b> (unconditional, pre-existing): its own condition — see the
+    /// paragraph above.</item>
+    /// </list>
+    /// <para>The other three SQL Server switches have no honest PostgreSQL reading and are not faked:
+    /// <c>sp_server_diagnostics</c> and <c>XE_LIVE_TARGET_TVF</c> name SQL Server internals with no
+    /// counterpart, and <c>WAITFOR</c>'s twin (<c>pg_sleep</c>) is invisible here because the row carries
+    /// no text and <c>SELECT pg_sleep(...)</c> tags as <c>SELECT</c>. CDC's nearest relative — logical
+    /// replication workers — is already out through <c>backend_type</c>. <c>excludedDatabases</c> is applied
+    /// after the read, exactly as the SQL Server adapter applies it.</para>
+    ///
+    /// <para>$1 server_id, $2 threshold (ms), $3 recency floor (naive UTC), $4 row limit; <c>{0}</c> is
+    /// the switchable filter block. A PROPERTY rather than a string field on purpose: the shipped-read
+    /// parse census (<c>DarlingPgReadSqlParsesLiveTests</c>) parse-checks every static string field on a
+    /// reader, and a template with a placeholder in it cannot parse. The two RENDERINGS below are the
+    /// fields, so both texts that can actually reach the store are the ones parse-checked.</para>
     /// </summary>
-    public const string CurrentLongRunningSessionsSql = """
+    public static string CurrentLongRunningSessionsSqlTemplate => """
         WITH recent AS (
             SELECT max(collection_time) AS latest_capture
             FROM pg_session_states
@@ -406,18 +454,50 @@ public static class DarlingPgSessionStatesReader
         WHERE s.server_id = $1
         AND   s.query_duration_ms >= $2
         AND   s.is_idle_in_transaction = false
+        AND   coalesce(s.backend_type, 'client backend') = 'client backend'
+        AND   coalesce(s.command_tag, '') NOT IN ('VACUUM', 'ANALYZE', 'REINDEX', 'CLUSTER')
+        {0}
         ORDER BY s.query_duration_ms DESC, s.pid
         LIMIT $4
         """;
 
+    /// <summary>The switchable dump/restore opt-out — the PostgreSQL reading of
+    /// <c>longRunningQueryExcludeBackups</c>. A constant rather than inline so a test can pin the list and
+    /// the read can be asserted to include it exactly when the switch is on.</summary>
+    public const string BackupUtilitiesFilter =
+        "AND   coalesce(s.application_name, '') NOT IN ('pg_dump', 'pg_dumpall', 'pg_restore', 'pg_basebackup')";
+
+    /// <summary>The read as it runs with the backups opt-out ON — the shipped default, and what the
+    /// pre-#3539 constant name meant. Kept under the old name so pins on the shape keep pointing at the
+    /// text that actually executes on an untouched store. A <c>static readonly</c> field, not a property,
+    /// so the parse census sees it; <see cref="BackupUtilitiesFilter"/> is a <c>const</c>, so this
+    /// initializer cannot read it before it exists.</summary>
+    public static readonly string CurrentLongRunningSessionsSql = BuildCurrentLongRunningSessionsSql(excludeBackups: true);
+
+    /// <summary>The read as it runs with the backups opt-out OFF — the other text that can reach the store,
+    /// held as a field for the same parse-census reason. The host does not read this; it calls
+    /// <see cref="BuildCurrentLongRunningSessionsSql"/> with the setting.</summary>
+    public static readonly string CurrentLongRunningSessionsSqlBackupsIncluded = BuildCurrentLongRunningSessionsSql(excludeBackups: false);
+
+    /// <summary>Renders <see cref="CurrentLongRunningSessionsSqlTemplate"/> for one setting of the shared
+    /// backups switch. Public so the host's call and a test's pin are the same text.</summary>
+    public static string BuildCurrentLongRunningSessionsSql(bool excludeBackups) =>
+        CurrentLongRunningSessionsSqlTemplate.Replace("{0}", excludeBackups ? BackupUtilitiesFilter : "");
+
+    /// <param name="excludeBackups">The shared <c>longRunningQueryExcludeBackups</c> switch — drops the
+    /// dump/restore utilities' sessions (see the SQL's doc comment).</param>
+    /// <param name="excludedDatabases">The shared <c>excludedDatabases</c> list, applied after the read
+    /// case-insensitively exactly as the SQL Server adapter applies it; a row with no database name is
+    /// kept. Null or empty excludes nothing.</param>
     public static async Task<List<LongRunningSessionRow>> GetCurrentLongRunningSessionsAsync(
         NpgsqlDataSource postgres, int serverId, long thresholdMs, DateTime nowUtc, int recencyMinutes, int limit,
+        bool excludeBackups, IReadOnlyList<string>? excludedDatabases,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
         var rows = new List<LongRunningSessionRow>();
-        await using var command = postgres.CreateCommand(CurrentLongRunningSessionsSql);
+        await using var command = postgres.CreateCommand(BuildCurrentLongRunningSessionsSql(excludeBackups));
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(thresholdMs);
@@ -439,7 +519,27 @@ public static class DarlingPgSessionStatesReader
                 reader.IsDBNull(6) ? -1 : reader.GetInt64(6)));
         }
 
-        return rows;
+        return FilterExcludedDatabases(rows, excludedDatabases);
+    }
+
+    /// <summary>The <c>excludedDatabases</c> arm, pulled out so it is pinnable without a store: the SQL
+    /// Server adapter's exact rule (ordinal-ignore-case on the name; a row with no database name is kept,
+    /// because an exclusion list names databases and a session on none of them is not on an excluded
+    /// one). Applied AFTER the row limit, as the SQL Server adapter applies it, so an excluded database's
+    /// sessions can crowd the cap — the same known shape on both engines rather than a quiet divergence
+    /// where one engine's cap counts excluded rows and the other's does not.</summary>
+    public static List<LongRunningSessionRow> FilterExcludedDatabases(
+        List<LongRunningSessionRow> rows, IReadOnlyList<string>? excludedDatabases)
+    {
+        if (excludedDatabases is not { Count: > 0 })
+        {
+            return rows;
+        }
+
+        return rows
+            .Where(r => string.IsNullOrEmpty(r.DatabaseName)
+                || !excludedDatabases.Any(e => string.Equals(e, r.DatabaseName, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
     }
 
     public static async Task<PgSessionStatesCaptureCounts> GetPgSessionStatesCaptureCountsAsync(

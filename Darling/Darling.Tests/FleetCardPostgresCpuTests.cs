@@ -64,6 +64,7 @@ public sealed class FleetCardPostgresCpuTests
             default,
             default,
             default,
+            default,
             Now.AddSeconds(-30),
             default,
             null,

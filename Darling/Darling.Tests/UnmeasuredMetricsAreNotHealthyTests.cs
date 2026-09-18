@@ -28,6 +28,13 @@ namespace Darling.Tests;
 /// what <see cref="ServerHealthClassifier.CpuSeverity"/> and
 /// <see cref="ServerHealthClassifier.ThreadsSeverity"/> already did by taking nullable inputs.
 ///
+/// <para><b>Deadlocks left the unmeasured set in #3539.</b> A PostgreSQL target's deadlocks are now
+/// counted from its own <c>pg_stat_database.deadlocks</c> counter (differenced over the window) and banded
+/// through the shared rate tiers, so that row is a MEASUREMENT on both engines and this file asserts it
+/// bands — Healthy at zero, Warning and Critical at the tiers — rather than reading Unknown. Memory pressure
+/// and blocking stay unmeasured on PostgreSQL for the reasons <see cref="ServerMetricSources"/> gives, and
+/// those two are what the Unknown pins below are about.</para>
+///
 /// <para><b>The invariant this is held to.</b> A MEASURED metric must band exactly as it does today. That is
 /// the real constraint, and it is not the same as "leave the SQL Server path alone": the fix necessarily
 /// edits functions every SQL Server surface calls. <see cref="AMeasuredCardBandsExactlyAsItDidBefore"/> is
@@ -56,13 +63,25 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
     /// <param name="bandedCollectors">Collectors banded for this server, none failing — forty by default so
     /// the card's collectors row is a MEASURED calm reading and the DMV metrics stay this file's only
     /// variable. Zero is the #3539 A6 shape: nothing banded, nothing measured.</param>
+    /// <param name="deadlocks">The SQL Server extended-event count — what a SQL Server card believes.</param>
+    /// <param name="pgDeadlocks">The PostgreSQL counter-difference count (#3539) — what a PostgreSQL card
+    /// believes. Both are always handed in so a test can assert the card took the ENGINE'S row and ignored
+    /// the other engine's structural zero.</param>
+    /// <param name="pgDeadlockIntervals">How many differences that count was summed over — the PostgreSQL
+    /// arm's measured/not-measured test. Zero by default: a PostgreSQL card is UNMEASURED unless a test
+    /// says a difference was taken, which is the direction a forgotten argument must fail in.</param>
+    /// <param name="pgDeadlockBand">The <c>pg_database_stats</c> collector's band, for the coverage
+    /// arm.</param>
     private static FleetServerCard Card(
         string? engineKind,
         bool memoryPressure = false,
         int blocking = 0,
         long maxBlockingWaitMs = 0,
         int deadlocks = 0,
-        int bandedCollectors = 40) =>
+        int bandedCollectors = 40,
+        int pgDeadlocks = 0,
+        long pgDeadlockIntervals = 0,
+        string? pgDeadlockBand = null) =>
         DarlingFleetReader.BuildCard(
             new DarlingFleetReader.FleetServerRow(1, "t", "t", null, engineKind, false),
             default,
@@ -72,8 +91,9 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
             default,
             new DarlingFleetReader.BlockingRow(blocking, maxBlockingWaitMs, 0, 0),
             new DarlingFleetReader.DeadlockRow(deadlocks, deadlocks > 0 ? Now.AddMinutes(-5) : null),
+            new DarlingFleetReader.PgDeadlockRow(pgDeadlocks, pgDeadlocks > 0 ? Now.AddMinutes(-7) : null, pgDeadlockIntervals),
             Now.AddSeconds(-30),
-            new DarlingFleetReader.CollectorCounts(bandedCollectors, 0, bandedCollectors),
+            new DarlingFleetReader.CollectorCounts(bandedCollectors, 0, bandedCollectors, null, pgDeadlockBand),
             null,
             Now,
             /* #3368: a real one-hour window and the shipped tiers. This file's subject is the
@@ -117,8 +137,12 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
     /* ─────────────────────────── the defect ─────────────────────────── */
 
     /// <summary>
-    /// A PostgreSQL card's three DMV-sourced metrics read Unknown, not Healthy. Red against the unfixed
-    /// classifiers, which had no arm that could return anything else for a zero.
+    /// A PostgreSQL card's two DMV-sourced metrics read Unknown, not Healthy. Red against the unfixed
+    /// classifiers, which had no arm that could return anything else for a zero. Deadlocks read Unknown
+    /// here too, but for #3539's OWN reason rather than #3272's: the helper hands this card no counter
+    /// difference (zero intervals), and a difference of nothing is not a zero. The measured case — a
+    /// difference taken, zero deadlocks — is Healthy with a published 0.0/hr, and is asserted beside it so
+    /// the two readings of the same card cannot be confused.
     /// </summary>
     [Theory]
     [InlineData(MonitoredEngineKind.Postgres)]
@@ -130,20 +154,26 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
         Assert.Equal(HealthSeverity.Unknown, card.MemorySeverity);
         Assert.Equal(HealthSeverity.Unknown, card.BlockingSeverity);
         Assert.Equal(HealthSeverity.Unknown, card.DeadlockSeverity);
-
-        /* And the RATE says the same thing the severity says. A rate of 0.0/hr on a target with no deadlock
-           source is a fabricated measurement, and both the card chip and the viewer detail line render this
-           field on non-null alone - so a structural zero here would contradict the Unknown above on the very
-           same card. */
         Assert.Null(card.DeadlockRatePerHour);
+        Assert.False(card.DeadlockMeasured);
 
         /* Threads already reached Unknown on its own (a null ceiling), and CPU does since #3267. So after
            this the card makes NO unearned claim on any metric row - which is the property worth asserting,
-           rather than three separate arms that happen to agree today. */
+           rather than separate arms that happen to agree today. */
         Assert.Equal(HealthSeverity.Unknown, card.ThreadsSeverity);
         Assert.DoesNotContain(
             HealthSeverity.Healthy,
             new[] { card.MemorySeverity, card.BlockingSeverity, card.DeadlockSeverity, card.ThreadsSeverity, card.CpuSeverity });
+
+        /* #3539: ONE difference taken and the same zero is a measurement. Healthy is EARNED here - a zero
+           counter difference over a rateable hour - and the rate is published beside it, because the chip
+           and the viewer detail render the rate on non-null alone and a band with no rate beside it is the
+           #3368 defect. */
+        var measured = Card(engineKind, pgDeadlockIntervals: 1);
+        Assert.True(measured.DeadlockMeasured);
+        Assert.Equal(HealthSeverity.Healthy, measured.DeadlockSeverity);
+        Assert.Equal(0.0, measured.DeadlockRatePerHour);
+        Assert.Equal(0, measured.DeadlockCount);
     }
 
     /// <summary>The viewer's card, same server, same answer — the #2473 rule.</summary>
@@ -156,16 +186,24 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
 
         Assert.Equal(HealthSeverity.Unknown, card.MemorySeverity);
         Assert.Equal(HealthSeverity.Unknown, card.BlockingSeverity);
+        /* No difference taken (the helper leaves PgDeadlockIntervals at zero), so Unknown - and one
+           difference makes the same zero Healthy, as on the fleet card. */
         Assert.Equal(HealthSeverity.Unknown, card.DeadlockSeverity);
         Assert.Null(card.DeadlockRatePerHour);
+
+        var measured = ViewerCard(engineKind);
+        measured.PgDeadlockIntervals = 1;
+        Assert.Equal(HealthSeverity.Healthy, measured.DeadlockSeverity);
+        Assert.Equal(0.0, measured.DeadlockRatePerHour);
     }
 
     /// <summary>
-    /// The published COUNTS are deliberately unchanged, and #3017's disclosure still reads the same. The
-    /// fleet's <c>total_deadlocks</c> is summed from those zeros and <c>deadlock_coverage</c> is what
-    /// explains it; nulling them would leave that denominator describing nothing. So the band stopped
-    /// claiming health while the count kept saying what it counted — and the two now AGREE, where before
-    /// <c>deadlock_source: PostgresTarget</c> sat beside <c>deadlock_severity: Healthy</c>.
+    /// The published COUNTS are deliberately unchanged, and #3017's disclosure reads the collector state on
+    /// this engine too since #3539. The fleet's <c>total_deadlocks</c> is summed from the cards and
+    /// <c>deadlock_coverage</c> is what explains it; nulling the counts would leave that denominator
+    /// describing nothing. A PostgreSQL card whose <c>pg_database_stats</c> collector left no band is
+    /// UNCOVERED (silent), exactly as a SQL Server card with no <c>deadlocks</c> band is — the pre-#3539
+    /// answer, <c>PostgresTarget</c> on the engine alone, would have called a server nothing read "counted".
     /// </summary>
     [Fact]
     public void TheCountsAndTheCoverageDisclosureAreUntouched()
@@ -175,7 +213,86 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
         Assert.Equal(0, card.BlockingCount);
         Assert.Equal(0, card.DeadlockCount);
         Assert.False(card.HasMemoryPressure);
+        Assert.Equal(FleetDeadlockSource.CollectorSilent, card.DeadlockSource);
+
+        var counted = Card(MonitoredEngineKind.AuroraPostgres, pgDeadlockBand: CollectorHealthClassifier.Healthy);
+        Assert.Equal(FleetDeadlockSource.PostgresTarget, counted.DeadlockSource);
+    }
+
+    /* ─────────────────────────── the PostgreSQL deadlock band (#3539) ─────────────────────────── */
+
+    /// <summary>
+    /// The PostgreSQL card bands its OWN count through the SAME tiers the SQL Server card uses: over the
+    /// helper's one-hour window the count is the rate, so 4 is under the shipped 5/hr Warning bar, 5 is
+    /// Warning, and 20 is the shipped Critical bar. The SQL Server row handed in alongside is a
+    /// structural zero for this engine and must be IGNORED — a card that summed the two would be right by
+    /// accident here and wrong the moment either read produced a non-zero for the wrong engine.
+    /// </summary>
+    [Theory]
+    [InlineData(0, HealthSeverity.Healthy)]
+    [InlineData(4, HealthSeverity.Healthy)]
+    [InlineData(5, HealthSeverity.Warning)]
+    [InlineData(19, HealthSeverity.Warning)]
+    [InlineData(20, HealthSeverity.Critical)]
+    public void APostgresCard_BandsItsCounterDifferenceThroughTheSharedTiers(int pgDeadlocks, HealthSeverity expected)
+    {
+        var card = Card(MonitoredEngineKind.Postgres, deadlocks: 999, pgDeadlocks: pgDeadlocks,
+            pgDeadlockIntervals: 59, pgDeadlockBand: CollectorHealthClassifier.Healthy);
+
+        Assert.Equal(pgDeadlocks, card.DeadlockCount);
+        Assert.True(card.DeadlockMeasured);
+        Assert.Equal(expected, card.DeadlockSeverity);
+        Assert.Equal(pgDeadlocks, card.DeadlockRatePerHour);
+        Assert.Equal(pgDeadlocks > 0 ? Now.AddMinutes(-7) : null, card.DeadlockLastSeen);
         Assert.Equal(FleetDeadlockSource.PostgresTarget, card.DeadlockSource);
+
+        /* The overall band follows, so the fleet's worst-first ranking sees a deadlocking PostgreSQL
+           server the way it sees a deadlocking SQL Server. */
+        Assert.Equal(expected == HealthSeverity.Healthy ? FleetHealthBand.Healthy
+            : expected == HealthSeverity.Warning ? FleetHealthBand.Warning : FleetHealthBand.Critical, card.Band);
+    }
+
+    /// <summary>The mirror image: a SQL Server card takes the extended-event row and ignores the PostgreSQL
+    /// row, and its collector band is the <c>deadlocks</c> collector's, not <c>pg_database_stats</c>'.</summary>
+    [Fact]
+    public void ASqlServerCard_IgnoresThePostgresRow()
+    {
+        var card = Card(MonitoredEngineKind.SqlServer, deadlocks: 2, pgDeadlocks: 999, pgDeadlockIntervals: 59, pgDeadlockBand: CollectorHealthClassifier.Healthy);
+
+        Assert.Equal(2, card.DeadlockCount);
+        /* A SQL Server count is a measurement whatever the PostgreSQL row's interval count says - and
+           whatever its own collector band says, which is #3272's engine-not-collector rule. */
+        Assert.True(card.DeadlockMeasured);
+        Assert.True(Card(MonitoredEngineKind.SqlServer).DeadlockMeasured);
+        Assert.Equal(Now.AddMinutes(-5), card.DeadlockLastSeen);
+        Assert.Equal(HealthSeverity.Healthy, card.DeadlockSeverity);
+        /* No deadlocks-collector band was handed in, so a SQL Server is silent whatever pg_database_stats
+           says about it. */
+        Assert.Equal(FleetDeadlockSource.CollectorSilent, card.DeadlockSource);
+    }
+
+    /// <summary>
+    /// #3528's label counts the row as measured on a PostgreSQL card now: the fold over the six metric
+    /// severities finds one more non-Unknown than it did, so "Healthy — N of 6 measured" moves by one on
+    /// every PostgreSQL card. The re-scoring bundle carries the count as a reading too, so the worst-first
+    /// rank sees the same measurement the dot does.
+    /// </summary>
+    [Fact]
+    public void ThePostgresCardsMeasuredMetricCountIncludesDeadlocks()
+    {
+        var card = Card(MonitoredEngineKind.Postgres, pgDeadlocks: 1, pgDeadlockIntervals: 59);
+
+        /* CPU (no source), Threads, Memory and Blocking are Unknown; Deadlocks and Collectors (the
+           helper's forty) are measured. Written as the two numbers rather than "one more than before" so
+           a regression that un-measured a different row could not pass by coincidence. */
+        Assert.Equal(2, card.MeasuredMetricCount);
+        Assert.Equal(6, card.MetricCount);
+        Assert.Equal((long?)1L, card.ToHealthMetricsValue.DeadlockCount);
+
+        /* And with no difference taken the re-band bundle carries null, the way the card banded - so the
+           worst-first score cannot see a measurement the dot did not. */
+        Assert.Null(Card(MonitoredEngineKind.Postgres).ToHealthMetricsValue.DeadlockCount);
+        Assert.Equal(1, Card(MonitoredEngineKind.Postgres).MeasuredMetricCount);
     }
 
     /* ─────────────────────────── the invariant ─────────────────────────── */

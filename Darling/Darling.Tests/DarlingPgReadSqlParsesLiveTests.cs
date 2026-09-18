@@ -74,8 +74,8 @@ public sealed class DarlingPgReadSqlParsesLiveTests
     /// explicitly rather than inferred, because every rule for inferring it reads the field's VALUE — which
     /// is reflection, the very thing the census exists to check independently.
     ///
-    /// <para>Two of the three are SQL FRAGMENTS interpolated into a query rather than queries themselves,
-    /// and the third is the trap that makes a name-shaped rule useless here:
+    /// <para>All but one are SQL FRAGMENTS interpolated into a query rather than queries themselves,
+    /// and the one is the trap that makes a name-shaped rule useless here:
     /// <c>StaleStatisticsChurnRatioSql</c> is spelled like a query and holds <c>"0.2"</c>. Keyed per SITE
     /// rather than per name, so the same name on a different reader is not excused by inheritance from
     /// this one — and the unused-entry clause below makes a move show up as an edit here rather than as
@@ -90,6 +90,12 @@ public sealed class DarlingPgReadSqlParsesLiveTests
            population, so the fragment is verified where it is used rather than left unverified. */
         "DarlingPgIndexBloatReader.EvidenceStatusList",
         "DarlingPgServerConfigReader.SessionScopedSources",
+        /* #3539: the PostgreSQL Long-Running Query read's switchable dump/restore opt-out - one AND
+           predicate spliced into CurrentLongRunningSessionsSqlTemplate by BuildCurrentLongRunningSessionsSql.
+           Not a statement; both renderings of the template it is spliced into
+           (CurrentLongRunningSessionsSql with it, CurrentLongRunningSessionsSqlBackupsIncluded without) ARE
+           in the parse-checked population, so the fragment is verified where it is used. */
+        "DarlingPgSessionStatesReader.BackupUtilitiesFilter",
         "DarlingPgTableBloatReader.StaleStatisticsChurnRatioSql",
     };
 
