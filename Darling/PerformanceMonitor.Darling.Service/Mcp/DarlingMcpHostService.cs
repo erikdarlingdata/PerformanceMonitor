@@ -695,6 +695,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                 /* get_pg_deadlocks / get_pg_deadlock_detail (#2661) - the reports themselves, out of the
                    server log, rather than pg_stat_database's count. */
                 .WithGeminiCompatibleTools<DarlingMcpPgDeadlockTools>()
+                /* get_pg_log_events (#3601) - the classified log-event pipeline's read: errors, connections,
+                   lock waits and the recognised-only families, out of the same server log. */
+                .WithGeminiCompatibleTools<DarlingMcpPgLogEventTools>()
                 /* get_pg_wait_trend / get_pg_query_duration_trend / get_pg_io_trend /
                    get_pg_database_trend (#2663) - the PostgreSQL time series. Fourteen trend reads shipped
                    and none worked on this engine. All four live on one tools class, so this line covers

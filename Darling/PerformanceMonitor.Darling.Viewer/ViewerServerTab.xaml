@@ -3795,6 +3795,8 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" x:Name="PgBlockingNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                                        Foreground="{DynamicResource ForegroundMutedBrush}"/>
@@ -3871,6 +3873,39 @@
                                     <DataGridTextColumn Header="Victim Statement" Binding="{Binding VictimStatement}" Width="*"/>
                                     <!-- Re-reads of the SAME report, not repeats: the collector re-reads an overlapping
                                          log tail on purpose, and a genuinely repeated deadlock is its own row. -->
+                                    <DataGridTextColumn Header="Sightings" Binding="{Binding TimesSeen}" Width="80"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <!-- #3601 log events, under the deadlocks because the two are the same log read two
+                                 ways: the deadlock grid is one ERROR line's DETAIL graph parsed out whole, this is
+                                 every classified line - the errors around it, the lock waits that preceded it, the
+                                 connection churn beside it. The "check the error log" grid. Bounded at 220 like its
+                                 two neighbours and for the same reason; the MCP read (get_pg_log_events) is where
+                                 the family and severity filters live, this shows the window's newest 200.
+
+                                 LoadPgActivityAsync is the only caller of LoadPgLogEventsAsync. -->
+                            <TextBlock Grid.Row="5" x:Name="PgLogEventsNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                            <DataGrid Grid.Row="6" x:Name="PgLogEventsGrid" Style="{StaticResource DarkGrid}" MaxHeight="220"
+                                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="When" Binding="{Binding OccurredAtUtc, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="150"/>
+                                    <DataGridTextColumn Header="Family" Binding="{Binding Family}" Width="90"/>
+                                    <DataGridTextColumn Header="Severity" Binding="{Binding Severity}" Width="80"/>
+                                    <DataGridTextColumn Header="SQLSTATE" Binding="{Binding SqlState}" Width="80"/>
+                                    <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="110"/>
+                                    <DataGridTextColumn Header="User" Binding="{Binding UserName}" Width="100"/>
+                                    <DataGridTextColumn Header="Application" Binding="{Binding ApplicationName}" Width="120"/>
+                                    <DataGridTextColumn Header="PID" Binding="{Binding Pid}" Width="70"/>
+                                    <!-- Redacted at the collector: quoted literals and key values are gone before
+                                         the row exists. -->
+                                    <DataGridTextColumn Header="Message" Binding="{Binding Message}" Width="*"/>
+                                    <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" Width="220"/>
+                                    <!-- The CONTEXT companion: for a lock wait, the tuple and relation. -->
+                                    <DataGridTextColumn Header="Context" Binding="{Binding Context}" Width="200"/>
+                                    <DataGridTextColumn Header="Statement Fingerprint" Binding="{Binding StatementFingerprint}" Width="150"/>
+                                    <!-- Re-reads of the SAME line, not repeats - the deadlock grid's Sightings, same
+                                         mechanism. -->
                                     <DataGridTextColumn Header="Sightings" Binding="{Binding TimesSeen}" Width="80"/>
                                 </DataGrid.Columns>
                             </DataGrid>

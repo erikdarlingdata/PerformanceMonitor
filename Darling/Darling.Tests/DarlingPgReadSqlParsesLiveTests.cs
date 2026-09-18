@@ -97,6 +97,10 @@ public sealed class DarlingPgReadSqlParsesLiveTests
            in the parse-checked population, so the fragment is verified where it is used. */
         "DarlingPgSessionStatesReader.BackupUtilitiesFilter",
         "DarlingPgTableBloatReader.StaleStatisticsChurnRatioSql",
+        /* #3601: the severity CASE expression, spliced into EventsSql so the read and the tool's label-to-rank
+           mapping share one spelling. A fragment, not a statement; the query it is spliced into IS in the
+           parse-checked population, so the fragment is verified where it is used. */
+        "DarlingPgLogEventReader.SeverityRankSql",
     };
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");

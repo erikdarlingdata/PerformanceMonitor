@@ -368,6 +368,16 @@ public sealed partial class ViewerDataService
         CancellationToken cancellationToken = default) =>
         DarlingPgDeadlockReader.GetDeadlocksAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 
+    /// <summary>Activity tab - the classified log events in the window (#3601), newest first, one row per
+    /// distinct entry, every family, no severity floor: the grid is the glance and the MCP read carries the
+    /// filters. Windowed on when the line was WRITTEN for the deadlock read's reason. 200 is the grid's cap,
+    /// stated on the note beside the window's distinct count so a full grid is not read as the window.</summary>
+    public Task<DarlingPgLogEventReader.PgLogEventsPage> GetPgLogEventsAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int limit = 200,
+        CancellationToken cancellationToken = default) =>
+        DarlingPgLogEventReader.GetEventsAsync(
+            _dataSource, serverId, startUtc, endUtc, family: null, minSeverityRank: 0, limit, cancellationToken);
+
     /// <summary>Overview tab - which extensions this target has, could have, or cannot have (#2545). Latest
     /// state per extension rather than the history: installing one is a rare deliberate act, so the window
     /// holds the same answer repeated daily. Monitoring-relevant extensions sort first, and within them the

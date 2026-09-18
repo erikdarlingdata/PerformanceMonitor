@@ -165,8 +165,10 @@ public sealed class CollectionSweepCommandTimeoutTests
     /// </summary>
     private const int ExpectedSweepCommandSites = 13;
 
-    /// <summary>The four COPY writers, counted for the same reason.</summary>
-    private const int ExpectedCopyWriterSites = 4;
+    /// <summary>The five COPY writers, counted for the same reason. Five since #3601: RdsLogEventIngestor is
+    /// RdsDeadlockIngestor's write over the log-event definition, and it was looked at by a person — the same
+    /// shared start deadline, the same sweep constant on the importer, the same phase stamp.</summary>
+    private const int ExpectedCopyWriterSites = 5;
 
     /// <summary>
     /// Every command shape the landed pins know about, with the type name allowed to carry its namespace:

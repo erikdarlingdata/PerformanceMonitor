@@ -72,11 +72,12 @@ public sealed class ConsumedTimestampFrameDisciplineTests
 
     /* Floors, so a broken walk cannot report a clean bill of health. Measured on dev at cb208f6a4:
        66 Timestamp columns over 69 catalog definitions, 49 of them on SqlServer definitions and 17 on
-       PostgreSql ones. Pinned exactly rather than as a floor because the whole point is a closed census —
-       a floor would let a column vanish. */
-    private const int TimestampColumnCount = 66;
+       PostgreSql ones; #3601 added pg_log_events.occurred_at, so 67 over 70, 18 PostgreSql. Pinned exactly
+       rather than as a floor because the whole point is a closed census — a floor would let a column
+       vanish. */
+    private const int TimestampColumnCount = 67;
     private const int SqlServerTimestampColumnCount = 49;
-    private const int PostgresTimestampColumnCount = 17;
+    private const int PostgresTimestampColumnCount = 18;
 
     private static IReadOnlyList<(string Table, string Column, string Collector, CollectorTargetEngine Engine)>
         TimestampColumns() =>
@@ -92,13 +93,14 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// The census is the catalog's own <see cref="CollectorColumnType.Timestamp"/> columns, and the engine
     /// split is <see cref="ICollectorSchemaInfo.TargetEngine"/> rather than a name prefix or a hand list.
     ///
-    /// <para>The T-SQL classifier below reaches the SqlServer arm ONLY. The 17 PostgreSQL columns are a
+    /// <para>The T-SQL classifier below reaches the SqlServer arm ONLY. The 18 PostgreSQL columns are a
     /// different provenance mechanism, not a shortfall of this one: PostgreSQL has no
     /// <c>column = expression</c> alias form at all (there it is a boolean comparison), so those collectors
     /// write <c>expression AS column</c>, and their timestamps arrive as <c>timestamptz</c> normalised in
     /// four different spellings — <c>AT TIME ZONE 'UTC'</c> inline, the same inside an interpolated SQL
-    /// fragment, a bare <c>min()</c> handled in the reader, and two computed entirely in C#
-    /// (<c>pg_cpu_utilization.sample_time</c>, <c>pg_deadlocks.occurred_at</c>). Counting them here is what
+    /// fragment, a bare <c>min()</c> handled in the reader, and three computed entirely in C#
+    /// (<c>pg_cpu_utilization.sample_time</c>, <c>pg_deadlocks.occurred_at</c>, <c>pg_log_events.occurred_at</c>
+    /// — the last through the same zone check as the deadlock one, #3601). Counting them here is what
     /// makes the T-SQL arm's reach a measured fact instead of an implied one.</para>
     /// </summary>
     [Fact]

@@ -169,6 +169,25 @@ public static class CollectorScheduleDefaults
            every consumer. */
         ["pg_deadlocks"] = new(5, 90),
 
+        /* #3601: the classified log-event pipeline. Five minutes over the 4 MB tail, which is pg_deadlocks'
+           cadence over pg_deadlocks' tail, and for its reason - errors, connections and lock waits are EVENTS, and an
+           event has to still be inside the 4 MB window when the read comes round; the ~14 KB/s overlap
+           arithmetic above applies unchanged, and so does the per-server remedy on a target that logs
+           harder than that.
+
+           THIRTY days of retention, not the deadlock table's ninety, and the difference is volume rather
+           than value. A deadlock is rare by construction; a log event is as common as the target's
+           configuration lets it be. log_connections on a pool that reconnects per statement writes
+           three rows per query, a FATAL storm from a misconfigured client writes thousands an hour, and
+           log_lock_waits on a contended table writes one per waiter per timeout. Ninety days of that on
+           a fleet is the store's largest table for a question - "what did the log say" - that is asked
+           about last night, not last quarter; the retrospective question about deadlocks ("we had a
+           spike last month") does not have a log-event twin, because a spike of errors is an incident
+           somebody already opened. Operator-tunable per store like every entry here; a fleet that wants
+           ninety sets ninety. Repeats are expected on the self-hosted route and cheap: raw_line_hash
+           carries the identity and every read dedupes on it, as the deadlock reads do on theirs. */
+        ["pg_log_events"] = new(5, 30),
+
         /* Per-minute, unlike its wraparound sibling: an xmin holder is the FAST-moving leading
            indicator, and the thing an operator wants is the session or slot that appeared minutes
            ago, before it has cost anything. At most five rows a cycle. 30 days matches the other

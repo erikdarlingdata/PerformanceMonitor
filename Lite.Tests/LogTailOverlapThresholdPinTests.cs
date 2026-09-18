@@ -53,14 +53,21 @@ public sealed class LogTailOverlapThresholdPinTests
     private static string Collectors(string fileName) =>
         File.ReadAllText(RepoFile(Path.Combine("PerformanceMonitor.Collectors", fileName)));
 
-    /* The literal spliced into each collector's SQL. Read from source rather than referenced, because
-       both are private consts - and reading them is the point: the pin is that the two agree. */
+    /* The literal spliced into each collector's SQL. Since #3601 the number is spelled ONCE, in
+       PgServerLogTail, and each collector's private const REFERENCES it - so the pin that the collectors
+       agree is now a pin that each one points at the shared spelling rather than carrying a digit string of
+       its own, and the arithmetic below reads the one spelling. Read from source rather than referenced,
+       because the collectors' consts are private and the reference is what is being asserted. */
     private static int TailBytesIn(string fileName)
     {
         var source = Collectors(fileName);
-        var match = Regex.Match(source, @"TailBytesLiteral\s*=\s*""(\d+)""");
-        Assert.True(match.Success, $"No TailBytesLiteral found in {fileName} — the tail is no longer spelled the way this pin reads it, so its arithmetic is unverified rather than satisfied.");
-        return int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
+        var reference = Regex.Match(source, @"TailBytesLiteral\s*=\s*PgServerLogTail\.TailBytesLiteral\s*;");
+        Assert.True(reference.Success, $"{fileName} no longer splices PgServerLogTail.TailBytesLiteral — either it carries its own digit string again (the drift #3601 ended) or the tail is spelled some third way this pin cannot read, so its arithmetic is unverified rather than satisfied.");
+        Assert.DoesNotMatch(@"TailBytesLiteral\s*=\s*""\d+""", source);
+
+        var shared = Regex.Match(Collectors("PgServerLogTail.cs"), @"TailBytesLiteral\s*=\s*""(\d+)""");
+        Assert.True(shared.Success, "No digit-string TailBytesLiteral in PgServerLogTail.cs — the shared spelling has moved.");
+        return int.Parse(shared.Groups[1].Value, CultureInfo.InvariantCulture);
     }
 
     /// <summary>
@@ -78,6 +85,14 @@ public sealed class LogTailOverlapThresholdPinTests
 
         Assert.Equal(4 * 1024 * 1024, deadlocks);
         Assert.Equal(deadlocks, plans);
+
+        /* The third reader opens with the shared CTE and carries no tail spelling of its own, and the shared
+           spelling agrees with the shared number: the string is what the SQL carries, the int is what the
+           C# reasons with, and PgServerLogTail is the one place they can disagree. */
+        Assert.Contains("PgServerLogTail.TailCteSql", Collectors("PgLogEventsCollector.cs"), StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"TailBytesLiteral\s*=\s*""\d+""", Collectors("PgLogEventsCollector.cs"));
+        Assert.Equal(PgServerLogTail.TailBytes, deadlocks);
+        Assert.Equal(PgServerLogTail.TailBytes.ToString(CultureInfo.InvariantCulture), PgServerLogTail.TailBytesLiteral);
     }
 
     [Fact]

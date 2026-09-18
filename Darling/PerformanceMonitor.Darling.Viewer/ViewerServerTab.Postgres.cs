@@ -335,6 +335,41 @@ public partial class ViewerServerTab
         await LoadPgKernelStatsAsync(startUtc, endUtc);
         await LoadPgPlanCaptureAsync(startUtc, endUtc);
         await LoadPgDeadlocksAsync(startUtc, endUtc);
+        await LoadPgLogEventsAsync(startUtc, endUtc);
+    }
+
+    /// <summary>
+    /// The classified log events (#3601), under the deadlocks grid on the Blocking sub-tab: the window's
+    /// newest 200 distinct entries across every family. The family and severity filters are the MCP read's
+    /// (<c>get_pg_log_events</c>); this grid is the glance, and the note names which setting a quiet family
+    /// depends on, because an all-off target looks exactly like a quiet one here.
+    /// </summary>
+    private async Task LoadPgLogEventsAsync(DateTime startUtc, DateTime endUtc)
+    {
+        if (PgCollectorIsGatedOff("pg_log_events"))
+        {
+            PgLogEventsGrid.ItemsSource = null;
+            PgLogEventsNote.Text = PanelNote("pg_log_events", 0, string.Empty);
+            return;
+        }
+
+        var page = await _dataService.GetPgLogEventsAsync(_server.ServerId, startUtc, endUtc);
+
+        PgLogEventsGrid.ItemsSource = page.Rows;
+
+        PgLogEventsNote.Text = PanelNote("pg_log_events", page.Rows.Count,
+            "No classified log event was stored in this window. That is the healthy answer for the error "
+            + "and lock-wait families, and it is also what a target with the relevant settings off looks "
+            + "like: connection lines need log_connections / log_disconnections, lock waits need "
+            + "log_lock_waits, spills need log_temp_files, autovacuum runs need log_autovacuum_min_duration. "
+            + "It is also what an unreadable log, a non-UTC log_timezone or a non-English lc_messages looks "
+            + "like — the Vacuum tab's plan-capture readiness panel reads the same file and reports those.")
+            + (page.Rows.Count == 0
+                ? string.Empty
+                : $"  Showing {page.Rows.Count} of {page.WindowTotal} distinct entries in the window, newest "
+                  + "first; message and detail are redacted at the collector and the statement text is never "
+                  + "stored, only fingerprinted. Sightings counts how often the collector saw the SAME line "
+                  + "while it stayed inside the log tail it re-reads.");
     }
 
     /// <summary>

@@ -72,6 +72,10 @@ public static class CollectorCatalog
         PgWraparoundStatsCollector.Instance,
         PgServerConfigCollector.Instance,
         PgDeadlocksCollector.Instance,
+        /* #3601: the classified log-event pipeline, third reader of the same server log and the first to
+           carry more than one family. Its table is generated from PgLogEventsCollector.PayloadColumns like
+           every other, and V129 is pinned to be identical to that generation. */
+        PgLogEventsCollector.Instance,
         PgXminHorizonCollector.Instance,
         PgReplicationSlotsCollector.Instance,
         PgAutovacuumStatsCollector.Instance,
