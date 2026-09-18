@@ -279,7 +279,9 @@ public class SlackProseSplitTests
     /// pair; before the base letter when it falls between a letter and its combining accent; before a
     /// four-unit emoji at every interior offset; and — the one case a whole-element cut cannot serve — a
     /// single element wider than the limit falls back to the code-point boundary, so a caller that must
-    /// advance always can.
+    /// advance always can. The rows with a long combining run pin the segmenter's window: the helper hands
+    /// it two units past the limit rather than the whole text, and the answer must be the full text's
+    /// whether the element ends inside that window or runs through its end.
     /// </summary>
     [Theory]
     [InlineData("abc", 5, 3)]                       // fits: the whole text
@@ -291,6 +293,10 @@ public class SlackProseSplitTests
     [InlineData("ab\U0001F44D\U0001F3FDcd", 4, 2)] // ...after its first pair
     [InlineData("ab\U0001F44D\U0001F3FDcd", 5, 2)] // ...after its third unit
     [InlineData("ab\U0001F44D\U0001F3FDcd", 6, 6)] // ...after the whole emoji: the limit
+    [InlineData("ab\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301cd", 3, 1)]   // b + eight accents runs through the window: before b
+    [InlineData("ab\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301cd", 9, 1)]   // ...one unit short of fitting: still before b
+    [InlineData("ab\u0301\u0301\u0301\u0301\u0301\u0301\u0301\u0301cd", 10, 10)] // ...fits exactly: after the last accent
+    [InlineData("a\U0001F44D\U0001F3FDcd", 2, 1)]     // window ends mid-pair inside the emoji: before it
     [InlineData("\u0301\u0301\u0301\u0301", 2, 2)]  // one element wider than the limit: code point
     [InlineData("\U0001F525\u0301\u0301\u0301", 3, 3)] // ...the limit itself when it is a code-point boundary
     [InlineData("\U0001F44D\U0001F3FD\u0301\u0301", 3, 2)] // ...and one earlier when it is mid-pair

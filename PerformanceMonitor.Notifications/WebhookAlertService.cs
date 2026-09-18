@@ -1326,6 +1326,11 @@ public class WebhookAlertService
         }
 
         var keep = SlackCutLength(value, Math.Max(0, SlackFieldTextLimit - prefix.Length - Note(value.Length).Length));
+        /* Counting the omitted characters IS a walk of the omitted tail — the pre-#3622 subtraction counted
+           units, which is the thing that was wrong — so this costs the tail's length, once, on the
+           truncation path only. Every producer bounds its values upstream (the analysis formatter cuts
+           drill-down text at 300 characters; the longest measured field is 318), so the tail is short in
+           practice and the cost is the value's own length in the worst case (review note on #3625). */
         var note = Note(new StringInfo(value[keep..]).LengthInTextElements);
         return prefix + value[..keep] + note;
     }
@@ -1353,8 +1358,9 @@ public class WebhookAlertService
     /// (<see cref="SlackFieldText"/>) cuts and counts in the same unit. The recommendation on #3622 was a
     /// code-point cut at the two long-prose sites on cost grounds, and that trade does not exist: the walk
     /// is bounded by <paramref name="limit"/>, not by the text — it stops at the first element that would
-    /// cross the limit — so it costs the same at a 120-character fragment as at a 3,000-character section,
-    /// and one rule at six sites is cheaper to keep true than two. The one input a whole-element cut cannot
+    /// cross the limit, and the window it hands the segmenter ends two units past the limit rather than at
+    /// the end of the text (see the loop) — so it costs the same at a 120-character fragment as at a
+    /// 3,000-character section, and one rule at six sites is cheaper to keep true than two. The one input a whole-element cut cannot
     /// serve is a single element wider than the whole limit — a run of combining marks with no base, the
     /// "Zalgo text" a query comment can carry — where keeping whole elements would keep nothing and the
     /// hard-split loop would never advance; there the cut falls back to the code-point boundary (one unit
@@ -1374,12 +1380,23 @@ public class WebhookAlertService
             return 0;
         }
 
-        /* text.Length > limit here, so text[cut..] is never empty while cut <= limit, and every element
-           is at least one unit wide, so the walk terminates at the first element that would cross. */
+        /* text.Length > limit here, so the window is never empty while cut <= limit, and every element is
+           at least one unit wide, so the walk terminates at the first element that would cross.
+
+           The window handed to the segmenter ends two units past the limit, not at the end of the text.
+           Two units hold any scalar that straddles the limit whole, and grapheme boundaries are decided
+           between one scalar and the next (every rule's context is to the LEFT), so every boundary
+           decision at or before the limit is the one the full text would make: an element that ends
+           inside the window ends where the full text ends it, and an element that reaches the window's
+           end has crossed the limit however the full text would segment the rest of it. That is what
+           makes the cost claim in the doc block true — without the window, one run of combining marks
+           makes this call scan to the end of the text before concluding that it crosses (review note on
+           #3625). */
         var cut = 0;
         while (true)
         {
-            var element = StringInfo.GetNextTextElementLength(text[cut..]);
+            var window = text.Slice(cut, Math.Min(text.Length - cut, limit - cut + 2));
+            var element = StringInfo.GetNextTextElementLength(window);
             if (cut + element > limit)
             {
                 break;
