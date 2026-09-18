@@ -350,7 +350,7 @@ public sealed class DarlingMcpToolsTests
                    including the #2000 occurrence stats. */
                 foreach (var field in new[]
                 {
-                    "finding_id", "analysis_time", "severity", "confidence", "category",
+                    "finding_id", "analysis_time", "severity", "confidence", "confidence_basis", "category",
                     "root_fact", "leaf_fact", "story_path", "story_path_hash", "fact_count",
                     "incident_id", "occurrences", "first_seen", "last_seen", "peak_severity",
                     "co_fired", "time_range", "advice", "remediation_command", "structured_remediation"
@@ -368,6 +368,9 @@ public sealed class DarlingMcpToolsTests
                 Assert.Equal(TestStoryHash, finding.GetProperty("story_path_hash").GetString());
                 Assert.Equal(2.5, finding.GetProperty("severity").GetDouble());
                 Assert.Equal(0.9, finding.GetProperty("confidence").GetDouble());
+                /* #3538 A6: 0.9 on a two-node path is not the legacy (n-1)/n = 0.5, so the basis reads as
+                   corroboration-derived; the legacy label is pinned on Lite's twin with a real 1.0/1 row. */
+                Assert.StartsWith("corroboration (#3538)", finding.GetProperty("confidence_basis").GetString(), StringComparison.Ordinal);
                 Assert.Equal("cpu", finding.GetProperty("category").GetString());
                 Assert.Equal("an4-incident-1", finding.GetProperty("incident_id").GetString());
                 Assert.Equal("SOS_SCHEDULER_YIELD", finding.GetProperty("root_fact").GetProperty("key").GetString());

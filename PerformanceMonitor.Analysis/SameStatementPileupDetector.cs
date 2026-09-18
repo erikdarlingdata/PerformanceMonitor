@@ -496,8 +496,12 @@ public static class SameStatementPileupDetector
                concurrent sessions in the pack. The pack's minimum elapsed rides as the leaf value. */
             RootFactValue = sessions,
             Severity = severity,
-            /* Single-observation story — the symptom is directly measured, no traversal to dilute
-               (the InferenceEngine convention: single-node paths carry confidence 1.0). */
+            /* 1.0 BY CONSTRUCTION, not by the engine's formula: the convoy is observed directly — N
+               concurrent sessions on one statement, each past that statement's own duration baseline —
+               so there is no corroboration left to look for. Since #3538 A6 the InferenceEngine scores a
+               lone symptom LOW (StoryConfidence: 0.20 uncorroborated), and StoryConfidence.DescribeBasis
+               names this root key so the MCP basis string says "detector-measured" rather than reading
+               this 1.0 as a legacy path-shape value. */
             Confidence = 1.0,
             Category = "queries",
             Path = [RootFactKey],
