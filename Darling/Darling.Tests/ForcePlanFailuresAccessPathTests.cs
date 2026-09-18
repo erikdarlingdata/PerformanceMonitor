@@ -115,6 +115,31 @@ public sealed class ForcePlanFailuresAccessPathTests
     }
 
     /// <summary>
+    /// #3579: the observation stamp is the LAST column of the shipped read and is <c>n.collection_time</c> — the
+    /// newer sighting's collector clock — not a new <c>qs.</c> reference. Last, because the reader binds ordinals
+    /// 0–6 to the seven pre-#3579 columns and an inserted column would silently shift every one of them onto
+    /// its neighbour's type (a string read as a bigint fails; a bigint read as a bigint from the wrong column
+    /// does not). Not a <c>qs.</c> reference, because the covering pin above re-derives the index list from
+    /// exactly those references and a new one would demand a new INCLUDE column on the largest table in the
+    /// store; <c>collection_time</c> is already in the key.
+    /// </summary>
+    [Fact]
+    public void TheObservationStamp_IsTheLastColumn_AndIsTheNewerSightingsCollectionTime()
+    {
+        var sql = DarlingAlertReadAdapter.ForcePlanFailuresSql;
+        var selectList = sql[sql.LastIndexOf("SELECT", StringComparison.Ordinal)..sql.IndexOf("FROM ranked AS n", StringComparison.Ordinal)];
+        var columns = selectList.Replace("SELECT", "", StringComparison.Ordinal)
+            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+        Assert.Equal(8, columns.Length);
+        Assert.Equal("n.failures AS total_failures", columns[6]);
+        Assert.Equal("n.collection_time AS observed_at", columns[7]);
+
+        /* The set of scan columns did not grow — the same nine the index carried before #3579. */
+        Assert.Equal(PgTableTuning.ForcePlanFailuresIndexColumns.Count, ColumnsTheReadReferences().Count);
+    }
+
+    /// <summary>
     /// The evidence no string pin can give: that the planner TAKES the index for the shipped statement. The
     /// production failure was a plan choice, not a missing object \u2014 the right composite was in the catalog and
     /// the plan walked past it \u2014 so a test that only checked <c>pg_indexes</c> would have passed on the broken
@@ -210,6 +235,11 @@ public sealed class ForcePlanFailuresAccessPathTests
             Assert.Equal(10L, failure.PlanId);
             Assert.Equal(1L, failure.FailureDelta);
             Assert.Equal(7L, failure.TotalFailures);
+            /* #3579: the observation's identity is the NEWEST sighting's collection_time (pass 0, two minutes
+               ago), read back through the real Npgsql path and stamped Utc. Ticks-equal to what was seeded:
+               the store holds naive UTC and the adapter only names the Kind, never shifts the value. */
+            Assert.Equal((DateTime?)utcNow.AddMinutes(-2), failure.ObservedAtUtc);
+            Assert.Equal(DateTimeKind.Utc, failure.ObservedAtUtc!.Value.Kind);
 
             bodySucceeded = true;
         }

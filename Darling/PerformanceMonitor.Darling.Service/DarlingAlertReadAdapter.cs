@@ -1136,6 +1136,15 @@ ORDER BY l.database_name";
     /// <para>The <c>&gt;</c> comparison is what makes this a delta read: equal counters are silence, and a
     /// LOWER counter (unforce/re-force reset) is silence too rather than a negative delta.</para>
     ///
+    /// <para><b>The newer sighting's <c>collection_time</c> travels with the row (#3579)</b> as
+    /// <c>observed_at</c>, the last column. The delta is a fact about two COLLECTIONS and stays byte-identical
+    /// on every alert pass until the next collection lands — "every row here is a live failure" is true at the
+    /// collection instant and stale for the rest of the interval — so the engine needs the observation's
+    /// identity to fire once per collection instead of once per cooldown. Appended rather than inserted so
+    /// the seven ordinals the reader already binds do not move. It is <c>n.collection_time</c>, already in
+    /// <c>per_collection</c>'s GROUP BY and already carried by the covering index: no new <c>qs.</c> column,
+    /// so the access path below is untouched (the access-path pins re-derive the list from this text).</para>
+    ///
     /// <para><b>The access path is a covering index, and the column list here is what it covers (#3573).</b>
     /// <c>PgTableTuning.ForcePlanFailuresIndexName</c> is <c>(server_id, collection_time DESC) INCLUDE</c>
     /// every other column this statement touches, so it runs as an Index Only Scan over one server's two
@@ -1179,7 +1188,8 @@ SELECT
     n.forcing_type,
     n.reason,
     n.failures - p.failures AS failure_delta,
-    n.failures AS total_failures
+    n.failures AS total_failures,
+    n.collection_time AS observed_at
 FROM ranked AS n
 JOIN ranked AS p
   ON  p.database_name = n.database_name
@@ -1213,7 +1223,12 @@ ORDER BY n.database_name, n.query_id, n.plan_id";
                 ForcingType = reader.IsDBNull(3) ? "" : reader.GetString(3),
                 FailureReason = reader.IsDBNull(4) ? "" : reader.GetString(4),
                 FailureDelta = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                TotalFailures = reader.IsDBNull(6) ? 0 : reader.GetInt64(6)
+                TotalFailures = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+                /* #3579: the stored value is naive UTC (see the window-bound remarks above), read back with
+                   Kind Unspecified; stamped Utc because that is what it IS and what the property's name says.
+                   The engine only ever compares one plan's stamps with each other, so the Kind is honesty
+                   rather than arithmetic. */
+                ObservedAtUtc = reader.IsDBNull(7) ? null : DateTime.SpecifyKind(reader.GetDateTime(7), DateTimeKind.Utc)
             });
         }
 

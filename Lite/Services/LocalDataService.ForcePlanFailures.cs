@@ -44,6 +44,13 @@ public sealed partial class LocalDataService
     /// takes from the host — and the window silently widens west of UTC and narrows to nothing east of it.
     /// Darling's twin carries the same bound for the same reason; keeping the two shape-for-shape is what
     /// stops the apps disagreeing about what counts as a new failure.</para>
+    ///
+    /// <para>The newer sighting's <c>collection_time</c> rides along as <c>observed_at</c>, the last column
+    /// (#3579): the delta is a fact about two collections that reads identically on every alert pass until
+    /// the next collection lands, and the engine needs the observation's identity to fire once per
+    /// collection rather than once per cooldown. Appended so the seven ordinals already bound do not move;
+    /// Darling's twin carries the same column at the same position, and the Lite.Tests parity pin holds the
+    /// two texts equal but for the view name.</para>
     /// </summary>
     public const string ForcePlanFailuresSql = @"
 WITH per_collection AS (
@@ -74,7 +81,8 @@ SELECT
     n.forcing_type,
     n.reason,
     n.failures - p.failures AS failure_delta,
-    n.failures AS total_failures
+    n.failures AS total_failures,
+    n.collection_time AS observed_at
 FROM ranked AS n
 JOIN ranked AS p
   ON  p.database_name = n.database_name
@@ -107,7 +115,10 @@ ORDER BY n.database_name, n.query_id, n.plan_id";
                 ForcingType = reader.IsDBNull(3) ? "" : reader.GetString(3),
                 FailureReason = reader.IsDBNull(4) ? "" : reader.GetString(4),
                 FailureDelta = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                TotalFailures = reader.IsDBNull(6) ? 0 : reader.GetInt64(6)
+                TotalFailures = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+                /* #3579: a naive-UTC TIMESTAMP read back Kind-Unspecified, stamped Utc because that is what it
+                   is. The engine compares one plan's stamps only with each other. */
+                ObservedAtUtc = reader.IsDBNull(7) ? null : DateTime.SpecifyKind(reader.GetDateTime(7), DateTimeKind.Utc)
             });
         }
 
