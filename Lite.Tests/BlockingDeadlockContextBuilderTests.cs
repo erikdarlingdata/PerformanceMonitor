@@ -564,6 +564,38 @@ public class BlockingDeadlockContextBuilderTests
         Assert.Contains("SUM(delta_wait_time_ms)::bigint", darlingSql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #2157/#3579: Lite's forced-plan-failures read is Darling's text with ONE substitution — the dedup view
+    /// <c>v_query_store_stats</c> for the raw table — and nothing else. Both files say "shape-for-shape"; this
+    /// is the sentence as an assertion, held as whole-text equality rather than a clause list because the two
+    /// texts ARE equal today and any drift, in either direction, is the disagreement about "what counts as a
+    /// new failure" the files promise cannot happen. Read from source on the Darling side through
+    /// <see cref="Lite.Tests.ParitySource"/> for the reason the poison pin above gives.
+    ///
+    /// <para>Also pins the #3579 column: the newer sighting's <c>collection_time</c> travels as
+    /// <c>observed_at</c>, LAST, so the seven ordinals both readers already bind do not move.</para>
+    /// </summary>
+    [Fact]
+    public void ForcePlanFailuresSql_IsTheDarlingText_ReadingTheDedupView()
+    {
+        var lite = LocalDataService.ForcePlanFailuresSql;
+        var darling = Lite.Tests.ParitySource.ReadFile("Darling/PerformanceMonitor.Darling.Service/DarlingAlertReadAdapter.cs");
+        var darlingSql = darling[(darling.IndexOf("public const string ForcePlanFailuresSql = @\"", StringComparison.Ordinal) + "public const string ForcePlanFailuresSql = @\"".Length)..];
+        darlingSql = darlingSql[..darlingSql.IndexOf("\";", StringComparison.Ordinal)];
+
+        Assert.Contains("FROM v_query_store_stats AS qs", lite, StringComparison.Ordinal);
+        Assert.Contains("FROM query_store_stats AS qs", darlingSql, StringComparison.Ordinal);
+        Assert.Equal(
+            darlingSql.ReplaceLineEndings("\n"),
+            lite.Replace("FROM v_query_store_stats AS qs", "FROM query_store_stats AS qs", StringComparison.Ordinal).ReplaceLineEndings("\n"));
+
+        /* #3579: the observation stamp, last. */
+        Assert.EndsWith(
+            "n.failures AS total_failures,\n    n.collection_time AS observed_at\nFROM ranked AS n",
+            lite[..(lite.IndexOf("FROM ranked AS n", StringComparison.Ordinal) + "FROM ranked AS n".Length)].ReplaceLineEndings("\n"),
+            StringComparison.Ordinal);
+    }
+
     [Fact]
     public void LiteAlertReadAdapter_ExposesAllSevenCollectedFeeds()
     {

@@ -2707,6 +2707,210 @@ public sealed class AlertEngineTests
         Assert.Contains("plan 22", resolution.Message, StringComparison.Ordinal);
     }
 
+    /* ---------------- #3579: one observation, one card ---------------- */
+
+    /// <summary>The production series' collection instants (#3579), so the pins below replay the shape that
+    /// was measured rather than an invented one: the 04:02→04:18 rise, six cooldowns of re-reads, the 04:50
+    /// collection with the counter back at zero.</summary>
+    private static readonly DateTime Collection0402 = new(2026, 9, 18, 4, 2, 0, DateTimeKind.Utc);
+    private static readonly DateTime Collection0418 = new(2026, 9, 18, 4, 18, 0, DateTimeKind.Utc);
+    private static readonly DateTime Collection0450 = new(2026, 9, 18, 4, 50, 0, DateTimeKind.Utc);
+
+    private static ForcePlanFailureInfo ForcePlanRow(DateTime? observedAt, long delta = 1, long total = 1) => new()
+    {
+        DatabaseName = "Sales", QueryId = 11, PlanId = 22, ForcingType = "AUTO", FailureReason = "NONE",
+        FailureDelta = delta, TotalFailures = total, ObservedAtUtc = observedAt
+    };
+
+    [Fact]
+    public async Task ForcePlanFailure_SameObservationAcrossSixCooldowns_FiresOnce_ThenResolvesOnTheNextCollection()
+    {
+        /* #3579's measured shape: one plan's counter went 0 → 1 at the 04:18 collection and back to 0 at
+           04:50. Between those two collections the adapter returned the SAME row (newest = 04:18, previous =
+           04:02) on every ~30 s pass, and the pre-#3579 engine fired at 04:18:53, 04:24:31, 04:30:04,
+           04:35:33, 04:40:49 and 04:46:03 — six cards, every one reading New 1 / Total 1, for a force that
+           failed once. The cooldown elapsing is not proof a new observation exists. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = Collection0418.AddSeconds(53);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The five re-reads that each fired before. Every one is past the cooldown; none is a new observation. */
+        foreach (var refire in new[] { "04:24:31", "04:30:04", "04:35:33", "04:40:49", "04:46:03" })
+        {
+            h.Now = DateTime.SpecifyKind(DateTime.Parse("2026-09-18 " + refire, System.Globalization.CultureInfo.InvariantCulture), DateTimeKind.Utc);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
+        Assert.Single(h.Deliverer.Outcomes);
+        /* And the read still happened on every pass — the guard is on the FIRE, never on the fetch, so the
+           recovery arm keeps seeing fresh evidence. */
+        Assert.Equal(6, h.Adapter.ForcePlanFetches);
+
+        /* 04:50: APC released the forcing and the counter reset. The adapter's '>' filter drops the row, and
+           the recovery is announced exactly as before #3579. */
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Now = Collection0450.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Single(h.Deliverer.Outcomes);
+        var resolution = Assert.Single(h.Resolutions, r => r.MetricName == ForcePlanTokens.MetricName);
+        Assert.Contains("plan 22 no longer failing to force", resolution.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_NewerObservationWithARise_FiresAgain_CarryingItsOwnNumbers()
+    {
+        /* A plan that keeps failing across successive collections is still a standing condition: each
+           collection is a NEW observation with a new rise, and it re-fires — the guard removes repeats of
+           one observation, not the second card for a second failure. The card carries the new observation's
+           delta and total, not the first one's. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = Collection0402.AddSeconds(30);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0402, delta: 1, total: 1));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The next collection: the counter rose again (1 → 3). Same plan key, newer stamp. */
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418, delta: 2, total: 3));
+        h.Now = Collection0418.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        var second = h.Deliverer.Outcomes[1];
+        Assert.Equal(2, second.NumericCurrentValue);
+        Assert.Contains("failed to force 2x", second.ShortMessage, StringComparison.Ordinal);
+        Assert.Contains("Total Failures: 3", second.DetailText, StringComparison.Ordinal);
+
+        /* And that observation, re-read past another cooldown, is one card too. */
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_NewObservationInsideTheCooldown_FiresOnceTheCooldownElapses()
+    {
+        /* The memory is 'last ALERTED observation', not 'last SEEN': a collection that lands while the
+           cooldown from the previous card is still running has not been reported, so when the cooldown
+           elapses and the row is still that observation, it fires. Folding the two memories into one
+           'last seen' stamp would record it as seen on the quiet pass and then never fire it — the guard
+           would have been silencing a real second failure, which is worse than the repeat it replaces. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = Collection0402.AddSeconds(30);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0402));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* A fast collection: the next observation lands two minutes later, inside the five-minute cooldown. */
+        var quickCollection = Collection0402.AddMinutes(2);
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(quickCollection, delta: 1, total: 2));
+        h.Now = quickCollection.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes); /* cooldown holds it — rate limiting is still the cooldown's job */
+
+        /* Cooldown elapsed, same not-yet-reported observation: it fires now. */
+        h.Now = Collection0402.AddMinutes(5).AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+
+        /* And only once. */
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_MutedFire_StampsTheObservation_SoUnmutingDoesNotReplayIt()
+    {
+        /* A muted fire is still a fire: it is delivered flagged Muted, it stamps the cooldown, and since
+           #3579 it stamps the observation. A mute rule lifted mid-interval must not turn the same 04:18
+           rise into a fresh card — the operator muted the plan, not the engine's memory of it. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Muted = true;
+        h.Now = Collection0418.AddSeconds(53);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var muted = Assert.Single(h.Deliverer.Outcomes);
+        Assert.True(muted.Muted);
+
+        h.Muted = false;
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_RecoveryForgetsTheObservation_SoANewEpisodeFires()
+    {
+        /* The falling edge clears the memory with the plan (the #2166 lesson, at plan grain): a plan that
+           recovers and later fails again is a new episode and its first rise fires, whatever the stamp. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = Collection0418.AddSeconds(53);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Now = Collection0450.AddSeconds(40);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Resolutions, r => r.MetricName == ForcePlanTokens.MetricName);
+
+        /* Hours later, forced again and failing again. */
+        var laterCollection = Collection0450.AddHours(3);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(laterCollection, delta: 1, total: 1));
+        h.Now = laterCollection.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task ForcePlanFailure_StamplessRow_KeepsThePre3579CooldownRepeat()
+    {
+        /* The stated fallback for an adapter that supplies no observation stamp (the shipped two always do):
+           a null never matches a remembered stamp, so every read counts as new and the cooldown alone
+           rate-limits it — the pre-#3579 behaviour, degraded towards repetition rather than silence, the
+           same direction IAlertStateStore's no-op fallbacks degrade. Pinned so the fallback is a decision
+           and not an accident of null comparison. */
+        var h = new Harness();
+        h.Settings.ForcePlanFailureEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Now = Collection0418.AddSeconds(53);
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(observedAt: null));
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
     [Fact]
     public async Task ForcePlanFailure_ExcludedDatabase_IsNeverAlerted()
     {

@@ -222,9 +222,44 @@ public sealed class AlertEngine
        two plans failing on the same database are independent conditions that resolve independently.
        Keyed by the internal plan key but VALUED with the plan's identity, because the resolution has to
        name the plan in an operator-readable way: a bare key set left the recovery message reading
-       'forceplan:Sales:11:22 no longer failing to force' in every email and webhook (review catch). */
-    private readonly ConcurrentDictionary<string, Dictionary<string, ForcePlanFailureInfo>> _activeForcePlanAlerts = new();
+       'forceplan:Sales:11:22 no longer failing to force' in every email and webhook (review catch).
+
+       #3579: the value also remembers the OBSERVATION each plan was last alerted on (the newer sighting's
+       collection_time), beside the identity rather than in a third dictionary, so the condition keeps one
+       per-plan state and one cooldown clock. The two are different memories: LastSeen is overwritten on
+       every pass the plan appears (it exists for the recovery message), LastAlertedObservedAtUtc only when
+       the plan actually fires (it exists so the same observation cannot fire twice). Folding them into one
+       stamp was the tempting shortcut and would have been wrong in the direction of silence: a new
+       collection landing INSIDE the cooldown would have been recorded as seen and then never fired.
+
+       In-memory only, like the rest of this family: a restart empties it, so the first pass after one may
+       re-fire once for an observation still in the window — which is exactly what the cooldown clock,
+       also emptied, already did before #3579, so the guard never makes a restart noisier than it was. */
+    private readonly ConcurrentDictionary<string, Dictionary<string, ForcePlanActivePlan>> _activeForcePlanAlerts = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastForcePlanAlert = new();
+
+    /// <summary>
+    /// One forced plan the engine currently holds active (#2157), with the #3579 observation memory. Mutable
+    /// by design: the pass updates it in place under the per-server evaluation gate, the same way the
+    /// database-state family mutates its per-server HashSet.
+    /// </summary>
+    private sealed class ForcePlanActivePlan
+    {
+        public ForcePlanActivePlan(ForcePlanFailureInfo lastSeen)
+        {
+            LastSeen = lastSeen;
+        }
+
+        /// <summary>The row most recently returned for this plan — the identity the recovery message is
+        /// named from. Refreshed every pass the plan appears.</summary>
+        public ForcePlanFailureInfo LastSeen { get; set; }
+
+        /// <summary>The <see cref="ForcePlanFailureInfo.ObservedAtUtc"/> of the row this plan last FIRED on
+        /// (#3579), or null when it has not fired since it entered the active set or the adapter supplied no
+        /// stamp. Set on fire only — including a muted fire, which stamps it exactly as it stamps the
+        /// cooldown — never on a pass that merely saw the plan.</summary>
+        public DateTime? LastAlertedObservedAtUtc { get; set; }
+    }
 
     /// <param name="settings">Live threshold surface — read every sweep, never cached.</param>
     /// <param name="readAdapter">The collected alert feeds (slice B seam).</param>
@@ -2238,8 +2273,29 @@ public sealed class AlertEngine
     /// the optimizer picks. Nothing else in the product witnesses that — the operator's mitigation is
     /// silently not in effect, and the only trace is a counter climbing inside Query Store.</para>
     ///
-    /// <para>Standing condition with per-plan resolution, mirroring the database-state family: while a plan
-    /// keeps failing it re-fires on the cooldown, and when it stops appearing it announces a recovery.</para>
+    /// <para><b>Standing condition with per-plan resolution, firing once per OBSERVATION (#3579).</b> The
+    /// original contract read "while a plan keeps failing it re-fires on the cooldown, mirroring the
+    /// database-state family", and that is the right contract for a condition whose input is re-measured
+    /// every pass. This condition's input is not: it is a stored delta between the two newest COLLECTIONS,
+    /// which changes only when the collector lands a row (the query_store cadence, 5 minutes by default and
+    /// ~15 on the store that found this), while the engine re-asks every ~30 s and the cooldown is 5 minutes.
+    /// Cooldown shorter than cadence means the cooldown expires several times against the SAME two rows, and
+    /// at pass granularity "still failing" and "no new data yet" are indistinguishable — the pre-#3579 loop
+    /// took the second for the first. Measured on one production store, one plan: the raw series was
+    /// 0, 0, 1 (forced AUTO), 0, 0 across five collections at 03:47 / 04:02 / 04:18 / 04:50 / 05:01, and the
+    /// engine fired SIX times between the 04:18 and 04:50 collections — 04:18:53, 04:24:31, 04:30:04,
+    /// 04:35:33, 04:40:49, 04:46:03, one per cooldown — every card honestly reading New 1 / Total 1, because
+    /// every pass re-read the same 04:02→04:18 rise. The arithmetic was right; the repetition was the defect.
+    /// The channel saw two of the six only because webhook-side throttling ate the rest.</para>
+    ///
+    /// <para>The contract now: <b>a plan fires once per new observation that shows a rise</b> — the engine
+    /// remembers, per plan, the <see cref="ForcePlanFailureInfo.ObservedAtUtc"/> it last fired on and
+    /// declines to fire the same stamp again regardless of cooldown; a newer stamp with a rise fires (a plan
+    /// failing across successive collections still re-fires, each collection being a new observation), the
+    /// cooldown still rate-limits those, and a plan that stops appearing announces a recovery exactly as
+    /// before. The poison-wait family took the same guard for the same shape under #2704; this is that
+    /// guard at plan grain. A row without a stamp falls back to the pre-#3579 cooldown-repeat rather than
+    /// to silence.</para>
     /// </summary>
     private async Task CheckForcePlanFailuresAsync(
         string key, string serverName, DateTime now, TimeSpan alertCooldown, bool suppressed, CancellationToken ct)
@@ -2289,13 +2345,34 @@ public sealed class AlertEngine
             current[ForcePlanTokens.PlanKey(failure.DatabaseName, failure.QueryId, failure.PlanId)] = failure;
         }
 
-        var active = _activeForcePlanAlerts.GetOrAdd(key, _ => new Dictionary<string, ForcePlanFailureInfo>(StringComparer.Ordinal));
+        var active = _activeForcePlanAlerts.GetOrAdd(key, _ => new Dictionary<string, ForcePlanActivePlan>(StringComparer.Ordinal));
 
         foreach (var (planKey, failure) in current)
         {
-            active[planKey] = failure;
+            if (active.TryGetValue(planKey, out var plan))
+            {
+                plan.LastSeen = failure;
+            }
+            else
+            {
+                plan = new ForcePlanActivePlan(failure);
+                active[planKey] = plan;
+            }
+
+            /* #3579: the observation guard. The row's stamp is the collection that produced the rise; if it
+               is not NEWER than the one this plan last fired on, this pass is re-reading an observation the
+               operator already has a card for, and no amount of elapsed cooldown makes it a second event.
+               "Not newer" rather than "equal" so the contract reads as stated — fire once per NEW
+               observation — and an older stamp (nothing produces one today; a deleted newest row or a clock
+               step would) is not mistaken for news. A null on either side never matches: a stampless row
+               keeps the cooldown-repeat, and a plan that has not fired yet is always eligible. */
+            bool sameObservation =
+                failure.ObservedAtUtc is { } observedAt
+                && plan.LastAlertedObservedAtUtc is { } lastAlertedAt
+                && observedAt <= lastAlertedAt;
+
             var cooldownKey = key + "|" + planKey;
-            if (!suppressed && CooldownElapsed(_lastForcePlanAlert, cooldownKey, now, alertCooldown))
+            if (!suppressed && !sameObservation && CooldownElapsed(_lastForcePlanAlert, cooldownKey, now, alertCooldown))
             {
                 var reasonText = ForcePlanTokens.HumanizeReason(failure.FailureReason);
                 var forcingText = string.IsNullOrWhiteSpace(failure.ForcingType) ? "unknown" : failure.ForcingType.Trim();
@@ -2307,6 +2384,7 @@ public sealed class AlertEngine
                 };
                 bool isMuted = _isAlertMuted(muteCtx);
                 _lastForcePlanAlert[cooldownKey] = now; /* stamped even when muted, like the others */
+                plan.LastAlertedObservedAtUtc = failure.ObservedAtUtc; /* #3579: and so is the observation */
 
                 /* #2109 discipline: the same facts the prose carries, as discrete fields, so a consumer
                    never has to parse the title to learn which plan this is about.
@@ -2350,8 +2428,12 @@ public sealed class AlertEngine
         if (active.Count > 0)
         {
             var recovered = active.Where(p => !current.ContainsKey(p.Key)).ToList();
-            foreach (var (planKey, lastSeen) in recovered)
+            foreach (var (planKey, recoveredPlan) in recovered)
             {
+                var lastSeen = recoveredPlan.LastSeen;
+                /* Removing the plan drops its #3579 observation memory with it, deliberately: a plan that
+                   recovers and later fails again is a new episode and starts with no memory, exactly as the
+                   cooldown clock beside it does. */
                 active.Remove(planKey);
                 _lastForcePlanAlert.TryRemove(key + "|" + planKey, out _);
                 if (!suppressed)
