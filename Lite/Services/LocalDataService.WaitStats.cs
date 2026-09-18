@@ -22,10 +22,20 @@ public partial class LocalDataService
        surface in the tab/picker — copying the JSON only stops new collection, not existing rows. */
     private readonly Lazy<HashSet<string>> _ignoredWaitTypes = new(IgnoredWaitTypes.Load);
 
+    /// <summary>The Wait Stats grid's row cap — the default <paramref name="limit"/> of
+    /// <see cref="GetWaitStatsAsync"/>, so every grid caller reads exactly what it always read.</summary>
+    public const int WaitStatsGridCap = 50;
+
     /// <summary>
-    /// Gets aggregated wait stats for a server over a time period, sorted by delta wait time.
+    /// Gets aggregated wait stats for a server over a time period, sorted by delta wait time, capped at
+    /// <paramref name="limit"/> wait types.
+    ///
+    /// <para>The cap is a PARAMETER with the grid's value as its default (#3541 A3). It was <c>LIMIT 50</c>
+    /// while <c>get_wait_stats</c> advertised a <c>limit</c> up to 1,000 and applied it with <c>Take(limit)</c>,
+    /// so a caller asking for every wait type on a server that had observed 80 silently got 50. The MCP tool
+    /// passes <c>limit + 1</c> and reads the extra row as truncation; the grids pass nothing.</para>
     /// </summary>
-    public async Task<List<WaitStatsRow>> GetWaitStatsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    public async Task<List<WaitStatsRow>> GetWaitStatsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, int limit = WaitStatsGridCap)
     {
         using var _q = TimeQuery("GetWaitStatsAsync", "v_wait_stats top by delta");
         using var connection = await OpenConnectionAsync();
@@ -48,11 +58,12 @@ AND   collection_time <= $3
 {exclude}
 GROUP BY wait_type
 ORDER BY SUM(delta_wait_time_ms) DESC
-LIMIT 50";
+LIMIT $4";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = limit });
 
         var items = new List<WaitStatsRow>();
         using var reader = await command.ExecuteReaderAsync();

@@ -15,6 +15,10 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    /// <summary>The Plan Corrections grid's row cap — the default <paramref name="limit"/> of
+    /// <see cref="GetPlanCorrectionsAsync"/>, so every grid caller reads exactly what it always read.</summary>
+    public const int PlanCorrectionGridCap = 200;
+
     /// <summary>
     /// The engine's automatic plan correction recommendations (#1952) from <c>v_plan_correction</c> (the
     /// archive union view), for the Plan Corrections grid. <c>recommendation_name IS NOT NULL</c> drops the
@@ -22,14 +26,22 @@ public partial class LocalDataService
     /// that half of the payload feeds <see cref="GetLatestAutomaticTuningAsync"/> instead. The grid applies
     /// a view-only DESCENDING-by-score sort, so the SQL keeps the chronological ORDER BY (mirrors the
     /// long-query reader).
+    ///
+    /// <para>The cap is a PARAMETER with the grid's value as its default (#3541 A3). It was <c>LIMIT 200</c>
+    /// under an MCP tool that advertised <c>limit</c> and took that many off the top — and this table is the
+    /// one where a fixed cap most misrepresents a window, because the collector RE-CAPTURES every open
+    /// recommendation on every cycle: a handful of recommendations on a five-minute cadence fills 200 rows in
+    /// roughly sixteen hours, so a week-long request was answered from its newest sixteen and nothing said
+    /// so. The MCP tool passes <c>limit + 1</c> and publishes the page's reach; the grids pass nothing.</para>
     /// </summary>
-    public async Task<List<PlanCorrectionRow>> GetPlanCorrectionsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+    public async Task<List<PlanCorrectionRow>> GetPlanCorrectionsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = PlanCorrectionGridCap)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        /* $4 is the row cap, so the optional database list starts at $5. */
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
 
         command.CommandText = @"
 SELECT
@@ -66,11 +78,12 @@ AND   collection_time >= $2
 AND   collection_time <= $3
 AND   recommendation_name IS NOT NULL" + dbClause + @"
 ORDER BY collection_time DESC, score DESC, recommendation_name
-LIMIT 200";
+LIMIT $4";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = limit });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 

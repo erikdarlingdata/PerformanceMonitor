@@ -42,10 +42,16 @@ internal static class DarlingPlanCorrectionReader
 {
     /// <summary>
     /// The engine's automatic plan correction recommendations for one server over the window, newest first.
-    /// <c>recommendation_name IS NOT NULL</c> drops the enablement-only rows. LIMIT 200 mirrors the Viewer's
-    /// grid read; the tool applies its own smaller take on top. The four lifecycle times are projected as
-    /// stored, because the DMV reports them in UTC (see the class remarks). $1 server_id, $2 window start,
-    /// $3 window end (naive UTC).
+    /// <c>recommendation_name IS NOT NULL</c> drops the enablement-only rows. The four lifecycle times are
+    /// projected as stored, because the DMV reports them in UTC (see the class remarks). $1 server_id,
+    /// $2 window start, $3 window end (naive UTC), $4 row cap.
+    ///
+    /// <para>The cap is a PARAMETER, not a literal (#3541 A3). It was <c>LIMIT 200</c> mirroring the Viewer's
+    /// grid, with the tool taking <c>limit</c> of those on top — and this table is the one where a fixed row
+    /// cap most misrepresents a window, because the collector RE-CAPTURES every open recommendation on every
+    /// cycle. A handful of recommendations on a five-minute cadence fills 200 rows in roughly sixteen hours,
+    /// so a 168-hour request was answered from its newest sixteen and nothing said so. The tool now passes
+    /// <c>limit + 1</c> and publishes the page's actual time reach beside the window it was asked for.</para>
     /// </summary>
     public const string PlanCorrectionsSql = @"
 SELECT
@@ -79,7 +85,7 @@ AND   collection_time >= $2
 AND   collection_time <= $3
 AND   recommendation_name IS NOT NULL
 ORDER BY collection_time DESC, score DESC
-LIMIT 200";
+LIMIT $4";
 
     /// <summary>
     /// The latest FORCE_LAST_GOOD_PLAN enablement snapshot per database. The enablement columns repeat on
@@ -133,8 +139,10 @@ ORDER BY database_name";
         string? Reason,
         DateTime CollectionTime);
 
+    /// <summary>The newest <paramref name="cap"/> recommendation rows over the window. Callers detecting
+    /// truncation pass <c>limit + 1</c> and read the extra row as the signal.</summary>
     public static async Task<List<PlanCorrectionRow>> GetPlanCorrectionsAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, CancellationToken cancellationToken = default)
     {
         var rows = new List<PlanCorrectionRow>();
         await using var command = postgres.CreateCommand(PlanCorrectionsSql);
@@ -142,6 +150,7 @@ ORDER BY database_name";
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(cap);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

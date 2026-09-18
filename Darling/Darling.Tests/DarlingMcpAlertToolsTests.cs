@@ -90,7 +90,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     }
 
     [Theory]
-    [InlineData("get_alert_history", "server_name,hours_back,limit,as_of")]
+    [InlineData("get_alert_history", "server_name,hours_back,limit,as_of,include_dismissed")]
     [InlineData("get_mute_rules", "enabled_only")]
     [InlineData("update_alert_settings", "settings_json")]
     [InlineData("create_mute_rule", "server_name,metric_name,database_pattern,query_text_pattern,wait_type_pattern,job_name_pattern,reason,expires_at")]
@@ -137,11 +137,15 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     /* ---------------- read SQL pins ---------------- */
 
     [Fact]
-    public void AlertHistorySql_ReadsLog_ExcludesDismissed_ServerScoped()
+    public void AlertHistorySql_ReadsLog_ExcludesDismissedByDefault_ServerScoped()
     {
         var sql = Reader.AlertHistorySql;
         Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
-        Assert.Contains("dismissed = FALSE", sql, StringComparison.Ordinal);
+        /* #3541 A3: the exclusion is the DEFAULT arm of a caller's choice, not a hidden constant — $5 lifts
+           it. The literal stays so the grid's read and this one keep saying the same words. */
+        Assert.Contains("(dismissed = FALSE OR $5)", sql, StringComparison.Ordinal);
+        /* And the row SAYS which population it belongs to, so an include-dismissed page can label each row. */
+        Assert.Contains("dismissed\n", sql.Replace("\r\n", "\n"), StringComparison.Ordinal);
         /* #2495: BOTH window edges are bound, so server_id and the cap moved up one ordinal each. */
         Assert.Contains("alert_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("alert_time <= $2", sql, StringComparison.Ordinal);
@@ -151,14 +155,59 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void AlertHistoryAllServersSql_ReadsLog_ExcludesDismissed_NoServerFilter()
+    public void AlertHistoryAllServersSql_ReadsLog_ExcludesDismissedByDefault_NoServerFilter()
     {
         var sql = Reader.AlertHistoryAllServersSql;
         Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
-        Assert.Contains("dismissed = FALSE", sql, StringComparison.Ordinal);
+        Assert.Contains("(dismissed = FALSE OR $4)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("server_id =", sql, StringComparison.Ordinal);   /* fleet-wide */
         Assert.Contains("alert_time <= $2", sql, StringComparison.Ordinal);       /* #2495 upper edge */
         Assert.Contains("LIMIT $3", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3541 A3: the hidden filter is MEASURED, not just disclosed. The count reads the same table over the
+    /// same window and scope as the history read, with the predicate inverted, so it is exactly the rows the
+    /// default read removed — and it must NOT carry a LIMIT, or a busy window would under-count what it hid.
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(Reader.DismissedAlertCountSql), true)]
+    [InlineData(nameof(Reader.DismissedAlertCountAllServersSql), false)]
+    public void DismissedAlertCountSql_CountsTheRowsTheDefaultReadHides_Unbounded(string sqlName, bool serverScoped)
+    {
+        var sql = sqlName == nameof(Reader.DismissedAlertCountSql) ? Reader.DismissedAlertCountSql : Reader.DismissedAlertCountAllServersSql;
+
+        Assert.Contains("SELECT COUNT(*)", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM config_alert_log", sql, StringComparison.Ordinal);
+        Assert.Contains("alert_time >= $1", sql, StringComparison.Ordinal);
+        Assert.Contains("alert_time <= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("dismissed = TRUE", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT", sql, StringComparison.Ordinal);
+        Assert.Equal(serverScoped, sql.Contains("server_id = $3", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// <c>include_dismissed</c> is an APPENDED optional, after <c>as_of</c>, defaulting to the grid's own read
+    /// — a caller who never sends it reads what they always read, the /api/read dispatch (which passes
+    /// <c>as_of</c> by name) is untouched, and no positional C# caller is re-bound. The description must name
+    /// the filter in both directions: what it hides and how to lift it.
+    /// </summary>
+    [Fact]
+    public void GetAlertHistory_IncludeDismissed_IsAnAppendedOptional_AndTheDescriptionNamesTheFilter()
+    {
+        var method = typeof(DarlingMcpAlertTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "get_alert_history");
+        var names = McpParams("get_alert_history").Select(p => p.Name).ToArray();
+
+        var flag = method.GetParameters().Single(p => p.Name == "include_dismissed");
+        Assert.True(flag.HasDefaultValue);
+        Assert.False((bool)flag.DefaultValue!);
+        Assert.True(Array.IndexOf(names, "include_dismissed") > Array.IndexOf(names, "as_of"));
+
+        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+        Assert.Contains("EXCLUDES DISMISSED ALERTS", description, StringComparison.Ordinal);
+        Assert.Contains("dismissed_excluded_count", description, StringComparison.Ordinal);
+        Assert.Contains("include_dismissed", description, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -768,6 +817,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     [Theory]
     [InlineData(nameof(Reader.AlertHistorySql))]
     [InlineData(nameof(Reader.AlertHistoryAllServersSql))]
+    [InlineData(nameof(Reader.DismissedAlertCountSql))]
+    [InlineData(nameof(Reader.DismissedAlertCountAllServersSql))]
     [InlineData(nameof(Reader.AlertSettingsSelectSql))]
     public void Reads_ArePostgresDialect_NoTsqlIsms(string sqlName)
     {
@@ -775,6 +826,8 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         {
             nameof(Reader.AlertHistorySql) => Reader.AlertHistorySql,
             nameof(Reader.AlertHistoryAllServersSql) => Reader.AlertHistoryAllServersSql,
+            nameof(Reader.DismissedAlertCountSql) => Reader.DismissedAlertCountSql,
+            nameof(Reader.DismissedAlertCountAllServersSql) => Reader.DismissedAlertCountAllServersSql,
             _ => Reader.AlertSettingsSelectSql,
         };
         var lower = sql.ToLowerInvariant();
@@ -1856,6 +1909,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             var scoped = await DarlingMcpAlertTools.GetAlertHistory(postgres, ServerName);
             DarlingMcpTestData.AssertEnvelope(scoped, ServerName, "alerts");
             Assert.Contains("High CPU", scoped, StringComparison.Ordinal);
+            /* #3541 A3: one planted, undismissed row — the page says so, says the filter applied and hid
+               nothing, and carries no `total_` key. */
+            JsonAssert.Contains("\"alerts_returned\": 1", scoped);
+            JsonAssert.Contains("\"truncated\": false", scoped);
+            JsonAssert.Contains("\"dismissed_excluded\": true", scoped);
+            JsonAssert.Contains("\"dismissed_excluded_count\": 0", scoped);
+            Assert.DoesNotContain("total_alerts", scoped, StringComparison.Ordinal);
 
             var fleet = await DarlingMcpAlertTools.GetAlertHistory(postgres);
             Assert.False(fleet.StartsWith("Error during", StringComparison.Ordinal), fleet);

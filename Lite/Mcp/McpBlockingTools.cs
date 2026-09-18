@@ -9,13 +9,13 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpBlockingTools
 {
-    [McpServerTool(Name = "get_deadlocks"), Description("Gets recent deadlock events with victim process info. Deadlocks occur when two or more sessions permanently block each other. Use get_deadlock_detail for the full deadlock graph XML.")]
+    [McpServerTool(Name = "get_deadlocks"), Description("Gets recent deadlock events with victim process info, NEWEST FIRST. Deadlocks occur when two or more sessions permanently block each other. Use get_deadlock_detail for the full deadlock graph XML. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: deadlocks_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_deadlock_time / newest_returned_deadlock_time bound the page — under the newest-first ordering the oldest stamp IS how far back this read reached, so a truncated page says nothing about the earlier part of the window. Raise limit or narrow hours_back when truncated is true; widening hours_back cannot help, because the cap is on rows.")]
     public static async Task<string> GetDeadlocks(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows. Default 20.")] int limit = 20,
+        [Description("Maximum rows to return, newest first. Default 20. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
@@ -29,7 +29,11 @@ public sealed class McpBlockingTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await dataService.GetRecentDeadlocksAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the OBSERVED truncation signal
+               — comparing count to the cap cannot tell a window holding exactly `limit` deadlocks from one
+               holding more. The reader's own LIMIT 50 was invisible to the caller, and `total_deadlocks`
+               published it as the window's count. Same shape as Darling's twin. */
+            var rows = await dataService.GetRecentDeadlocksAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "deadlocks")
@@ -41,7 +45,10 @@ public sealed class McpBlockingTools
                     ?? McpHelpers.Status("empty", "No deadlocks found in the specified time range.");
             }
 
-            var result = rows.Take(limit).Select(r => new
+            var truncated = rows.Count > limit;
+            var page = truncated ? rows.Take(limit).ToList() : rows;
+
+            var result = page.Select(r => new
             {
                 collection_time = r.CollectionTime.ToString("o"),
                 deadlock_time = r.DeadlockTime?.ToString("o"),
@@ -55,7 +62,13 @@ public sealed class McpBlockingTools
             {
                 server = resolved.ServerName,
                 hours_back,
-                total_deadlocks = rows.Count,
+                /* #3541 A3: the page described as a page, on Darling's field names. The ORDER BY is
+                   deadlock_time, so the bounds are on that stamp; Min/Max over DateTime? skip a null. */
+                deadlocks_returned = page.Count,
+                truncated,
+                oldest_returned_deadlock_time = page.Min(r => r.DeadlockTime)?.ToString("o"),
+                newest_returned_deadlock_time = page.Max(r => r.DeadlockTime)?.ToString("o"),
+                order = "deadlock_time_desc",
                 deadlocks = result
             }, McpHelpers.JsonOptions);
         }
@@ -65,13 +78,13 @@ public sealed class McpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_deadlock_detail"), Description("Gets the full deadlock graph XML for a specific time range. Returns the raw XML that can be analyzed for lock resources, process details, and deadlock chains.")]
+    [McpServerTool(Name = "get_deadlock_detail"), Description("Gets the full deadlock graph XML for a specific time range, NEWEST FIRST. Returns the raw XML that can be analyzed for lock resources, process details, and deadlock chains. Only deadlocks that CARRY a graph are counted against limit, so the page is limit graphs rather than limit rows; deadlocks_returned, truncated and oldest_returned_deadlock_time / newest_returned_deadlock_time describe the page the same way get_deadlocks does, and truncated means the window held more graphs than limit.")]
     public static async Task<string> GetDeadlockDetail(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum deadlocks to return. Default 5.")] int limit = 5,
+        [Description("Maximum deadlocks WITH a graph to return, newest first. Default 5. Read truncated to know whether the window held more.")] int limit = 5,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
@@ -85,8 +98,14 @@ public sealed class McpBlockingTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await dataService.GetRecentDeadlocksAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
-            var withXml = rows.Where(r => r.HasDeadlockXml).Take(limit).ToList();
+            /* #3541 A3: the graph predicate moved INTO the SQL (graphOnly), so the fetch can be the caller's
+               limit + 1 over exactly the rows this tool can return. It used to Where() the reader's fixed
+               50 for XML in C#, so a caller asking for five graphs had at most fifty rows to find them in,
+               and a run of graph-less rows at the newest end read as "no deadlock XML in the window" while
+               older graphs sat behind the cap. */
+            var candidates = await dataService.GetRecentDeadlocksAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1, graphOnly: true);
+            var truncated = candidates.Count > limit;
+            var withXml = truncated ? candidates.Take(limit).ToList() : candidates;
             if (withXml.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "deadlocks")
@@ -105,6 +124,13 @@ public sealed class McpBlockingTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #3541 A3: the page bounds, on get_deadlocks' names. The page is graphs, so truncated means
+                   "more deadlocks WITH a graph than limit". */
+                deadlocks_returned = withXml.Count,
+                truncated,
+                oldest_returned_deadlock_time = withXml.Min(r => r.DeadlockTime)?.ToString("o"),
+                newest_returned_deadlock_time = withXml.Max(r => r.DeadlockTime)?.ToString("o"),
+                order = "deadlock_time_desc",
                 deadlocks = result
             }, McpHelpers.JsonOptions);
         }
@@ -114,13 +140,13 @@ public sealed class McpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_blocked_process_reports"), Description("Gets detailed blocked process reports from extended events (parsed via sp_HumanEventsBlockViewer). Provides detailed blocked/blocking session info: isolation levels, transaction names, full query text for both sessions. Use for deep analysis of prolonged blocking. Every timestamp here is UTC: event_time already was, and the six blocked_/blocking_ last_tran/last_batch stamps are de-skewed from the monitored server's local clock by this read, so comparing them against event_time to see whether a transaction predates the block is direct.")]
+    [McpServerTool(Name = "get_blocked_process_reports"), Description("Gets detailed blocked process reports from extended events (parsed via sp_HumanEventsBlockViewer) plus the always-on DMV blocking-snapshot fallback, NEWEST FIRST. Provides detailed blocked/blocking session info: isolation levels, transaction names, full query text for both sessions. Use for deep analysis of prolonged blocking. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: hours_back is the window you ASKED for, reports_returned is how many rows you GOT, truncated says the window held more than limit, and oldest_returned_event_time / newest_returned_event_time bound the page you are looking at. Because the page is a contiguous newest-first slice, oldest_returned_event_time IS how far back this read reached — on a server blocking steadily, a 24-hour request at the default limit is answered by the newest few minutes, and nothing in the rows themselves says so. When truncated is true, raise limit or narrow hours_back (or anchor as_of) before drawing a conclusion about the window; widening hours_back cannot help, because the cap is on rows, not time. Every timestamp here is UTC: event_time already was, and the six blocked_/blocking_ last_tran/last_batch stamps are de-skewed from the monitored server's local clock by this read, so comparing them against event_time to see whether a transaction predates the block is direct.")]
     public static async Task<string> GetBlockedProcessReports(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows. Default 30.")] int limit = 30,
+        [Description("Maximum rows to return, newest first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
@@ -142,14 +168,20 @@ public sealed class McpBlockingTools
                one by breaking the other. */
             var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
 
-            var rows = await dataService.GetRecentBlockedProcessReportsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the OBSERVED truncation
+               signal. The reader capped at 200 newest-first whatever `limit` said, so a 24-hour request on a
+               server blocking steadily was answered from its newest few minutes with nothing saying so. */
+            var rows = await dataService.GetRecentBlockedProcessReportsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "blocked_process_report")
-                    ?? McpHelpers.Status("empty", "No blocked process reports found.");
+                    ?? McpHelpers.Status("empty", "No blocked process reports found in the specified time range.");
             }
 
-            var result = rows.Take(limit).Select(r => new
+            var truncated = rows.Count > limit;
+            var page = truncated ? rows.Take(limit).ToList() : rows;
+
+            var result = page.Select(r => new
             {
                 event_time = r.EventTime?.ToString("o"),
                 database_name = r.DatabaseName,
@@ -189,7 +221,17 @@ public sealed class McpBlockingTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                /* The span REQUESTED. Kept under its shipped name, and no longer the only span on the page. */
                 hours_back,
+                /* #3541 A3: the page described as a page, on the names Darling's get_blocking uses. Newest-first
+                   makes the page a contiguous slice of the window's tail, so oldest_returned_event_time IS the
+                   reach of this read — the #3287 figure, and the field a caller has to read before believing
+                   that a quiet page describes a quiet window. */
+                reports_returned = page.Count,
+                truncated,
+                oldest_returned_event_time = page.Min(r => r.EventTime)?.ToString("o"),
+                newest_returned_event_time = page.Max(r => r.EventTime)?.ToString("o"),
+                order = "event_time_desc",
                 reports = result
             }, McpHelpers.JsonOptions);
         }
@@ -199,13 +241,13 @@ public sealed class McpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_blocked_process_xml"), Description("Gets the raw blocked process report XML from extended events. Contains full detail about both the blocked and blocking sessions for deep analysis.")]
+    [McpServerTool(Name = "get_blocked_process_xml"), Description("Gets the raw blocked process report XML from extended events, NEWEST FIRST. Contains full detail about both the blocked and blocking sessions for deep analysis. Only rows that CARRY a report (the XE capture; the DMV fallback never has one) are counted against limit; reports_returned, truncated and oldest_returned_event_time / newest_returned_event_time describe the page the same way get_blocked_process_reports does, and truncated means the window held more reports than limit.")]
     public static async Task<string> GetBlockedProcessXml(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum reports to return. Default 5.")] int limit = 5,
+        [Description("Maximum reports WITH XML to return, newest first. Default 5. Read truncated to know whether the window held more.")] int limit = 5,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
@@ -219,8 +261,13 @@ public sealed class McpBlockingTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await dataService.GetRecentBlockedProcessReportsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
-            var withXml = rows.Where(r => r.HasReportXml).Take(limit).ToList();
+            /* #3541 A3: the report-XML predicate is in the SQL (xmlOnly), the XE arm alone is read, and the
+               fetch is the caller's limit + 1. It used to Where() the merged 200-row page for XML in C#, so a
+               caller asking for five reports had at most the newest 200 merged rows to find them in, DMV
+               rows included, and nothing said so. */
+            var candidates = await dataService.GetRecentBlockedProcessReportsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1, xmlOnly: true);
+            var truncated = candidates.Count > limit;
+            var withXml = truncated ? candidates.Take(limit).ToList() : candidates;
             if (withXml.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "blocked_process_report")
@@ -244,6 +291,13 @@ public sealed class McpBlockingTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #3541 A3: the page bounds, on get_blocked_process_reports' names. truncated means "more
+                   reports WITH XML in the window than limit". */
+                reports_returned = withXml.Count,
+                truncated,
+                oldest_returned_event_time = withXml.Min(r => r.EventTime)?.ToString("o"),
+                newest_returned_event_time = withXml.Max(r => r.EventTime)?.ToString("o"),
+                order = "event_time_desc",
                 reports = result
             }, McpHelpers.JsonOptions);
         }

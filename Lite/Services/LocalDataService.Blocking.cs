@@ -70,15 +70,36 @@ GROUP BY collection_time";
             reader.IsDBNull(2) ? 0 : reader.GetInt32(2));
     }
 
+    /// <summary>The Deadlocks grid's row cap — the default <paramref name="limit"/> of
+    /// <see cref="GetRecentDeadlocksAsync"/>, so every grid caller reads exactly what it always read.</summary>
+    public const int DeadlockGridCap = 50;
+
     /// <summary>
-    /// Gets recent deadlock events for a server.
+    /// Gets recent deadlock events for a server, newest first, capped at <paramref name="limit"/>.
+    ///
+    /// <para>The cap is a PARAMETER with the grid's value as its default (#3541 A3). It was <c>LIMIT 50</c>
+    /// under an MCP tool that advertised <c>limit</c> and applied it with <c>Take(limit)</c>, so a caller
+    /// asking for 100 deadlocks silently got 50 and a payload that called them <c>total_deadlocks</c>. The
+    /// MCP tools now pass <c>limit + 1</c> and read the extra row as the truncation signal; the grids pass
+    /// nothing and keep their 50.</para>
+    ///
+    /// <para><paramref name="graphOnly"/> restricts the read to rows that CARRY a graph, in SQL, so
+    /// <c>get_deadlock_detail</c>'s <c>limit</c> counts graphs rather than rows it would have to discard —
+    /// filtering for XML in C# after a capped fetch was the shape of the defect, where a run of graph-less rows
+    /// at the newest end read as "no XML in the window" while older graphs sat behind the cap.</para>
     /// </summary>
-    public async Task<List<DeadlockRow>> GetRecentDeadlocksAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    public async Task<List<DeadlockRow>> GetRecentDeadlocksAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, int limit = DeadlockGridCap, bool graphOnly = false)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+
+        var graphClause = graphOnly
+            ? @"
+AND   deadlock_graph_xml IS NOT NULL
+AND   deadlock_graph_xml <> ''"
+            : string.Empty;
 
         command.CommandText = @"
 SELECT
@@ -90,13 +111,14 @@ SELECT
 FROM v_deadlocks
 WHERE server_id = $1
 AND   collection_time >= $2
-AND   collection_time <= $3
+AND   collection_time <= $3" + graphClause + @"
 ORDER BY deadlock_time DESC
-LIMIT 50";
+LIMIT $4";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = limit });
 
         var items = new List<DeadlockRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -324,15 +346,36 @@ SELECT
     }
 
     /// <summary>
-    /// Gets recent blocked process reports from the XE-based collector.
+    /// Gets recent blocked process reports from the XE-based collector plus the always-on DMV fallback,
+    /// newest first, merged and re-capped at <paramref name="limit"/>.
+    ///
+    /// <para>The cap is a PARAMETER with the grid's value as its default (#3541 A3): it was <c>LIMIT 200</c> on
+    /// both arms and in the merge, under an MCP tool that advertised <c>limit</c> and took that many off the
+    /// top. The MCP tools pass <c>limit + 1</c> and read the extra row as truncation; the grids pass nothing.
+    /// The two arms are fetched so a merged result larger than the cap stays OBSERVABLE: the XE arm fetches
+    /// the cap, the DMV arm fetches the cap PLUS the XE rows in hand, because the merge drops one DMV row per
+    /// (pair, minute) an XE row already covers — fetched at the bare cap, a surplus made of XE-covered rows
+    /// would vanish in the merge and a full page would read as complete. Darling's
+    /// <c>DarlingBlockingReader</c> does the same, for the same reason.</para>
+    ///
+    /// <para><paramref name="xmlOnly"/> restricts the read to XE rows that CARRY a report, in SQL, and skips the
+    /// DMV arm entirely (a DMV snapshot never has one) — the population <c>get_blocked_process_xml</c> pages
+    /// over, so its <c>limit</c> counts reports rather than rows it would have to discard.</para>
     /// </summary>
-    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportMerge.DefaultCap, bool xmlOnly = false)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        /* $4 is the row cap, so the optional database list starts at $5. */
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+
+        var xmlClause = xmlOnly
+            ? @"
+AND   blocked_process_report_xml IS NOT NULL
+AND   blocked_process_report_xml <> ''"
+            : string.Empty;
 
         command.CommandText = @"
 SELECT
@@ -376,13 +419,14 @@ SELECT
 FROM v_blocked_process_reports
 WHERE server_id = $1
 AND   collection_time >= $2
-AND   collection_time <= $3" + dbClause + @"
+AND   collection_time <= $3" + xmlClause + dbClause + @"
 ORDER BY event_time DESC
-LIMIT 200";
+LIMIT $4";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = limit });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
@@ -436,23 +480,26 @@ LIMIT 200";
 
         // Always-on DMV blocking snapshot: surface its rows in the grid too, so the block-chain viewer is
         // reachable when the blocked-process-report XE captured nothing (AWS RDS). Same connection/lock.
-        await AppendDmvBlockedProcessGridRowsAsync(connection.CreateCommand, items, serverId, startTime, endTime, databaseNames);
+        // Skipped under xmlOnly: a DMV snapshot never carries a report, so it has nothing to add to that page.
+        if (!xmlOnly)
+            await AppendDmvBlockedProcessGridRowsAsync(connection.CreateCommand, items, serverId, startTime, endTime, databaseNames, limit);
 
         return items;
     }
 
     /// <summary>
     /// Fetches always-on DMV blocking-snapshot rows for the blocked-process grid and merges them into the
-    /// BPR list — BPR preferred (dedup by blocked/blocker SPID within a minute), re-capped to 200 newest
-    /// first. Runs on the caller's connection/lock (the read lock is non-recursive, so a second connection
-    /// can't be opened). v_dmv_blocking_snapshots is created by DuckDbInitializer, so it always exists.
+    /// BPR list — BPR preferred (dedup by blocked/blocker SPID within a minute), re-capped to the newest
+    /// <paramref name="cap"/>. Runs on the caller's connection/lock (the read lock is non-recursive, so a
+    /// second connection can't be opened). v_dmv_blocking_snapshots is created by DuckDbInitializer, so it
+    /// always exists. The DMV fetch is <paramref name="cap"/> plus the XE rows already in
+    /// <paramref name="items"/> — see <see cref="GetRecentBlockedProcessReportsAsync"/> for why.
     /// </summary>
     private static async Task AppendDmvBlockedProcessGridRowsAsync(
-        Func<DuckDBCommand> createCommand, List<BlockedProcessReportRow> items, int serverId, DateTime startTime, DateTime endTime, IReadOnlyList<string>? databaseNames = null)
+        Func<DuckDBCommand> createCommand, List<BlockedProcessReportRow> items, int serverId, DateTime startTime, DateTime endTime, IReadOnlyList<string>? databaseNames, int cap)
     {
-        const int gridCap = 200;
         var dmvItems = new List<BlockedProcessReportRow>();
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
         using (var command = createCommand())
         {
             command.CommandText = @"
@@ -467,10 +514,11 @@ SELECT
 FROM v_dmv_blocking_snapshots
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3" + dbClause + @"
 ORDER BY event_time DESC
-LIMIT 200";
+LIMIT $4";
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
             command.Parameters.Add(new DuckDBParameter { Value = startTime });
             command.Parameters.Add(new DuckDBParameter { Value = endTime });
+            command.Parameters.Add(new DuckDBParameter { Value = cap + items.Count });
             foreach (var db in dbValues)
                 command.Parameters.Add(new DuckDBParameter { Value = db });
 
@@ -510,7 +558,7 @@ LIMIT 200";
 
         /* Dedup + re-cap moved verbatim to the shared BlockedProcessReportMerge (Phase-5 slice B)
            so the Darling Postgres adapter reproduces EXACTLY these XE-preferred fallback semantics. */
-        BlockedProcessReportMerge.AppendDmvFallbackRows(items, dmvItems, gridCap);
+        BlockedProcessReportMerge.AppendDmvFallbackRows(items, dmvItems, cap);
     }
 
     /// <summary>

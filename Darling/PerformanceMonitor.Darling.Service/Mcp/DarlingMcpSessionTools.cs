@@ -164,12 +164,12 @@ public sealed class DarlingMcpSessionTools
         }
     }
 
-    [McpServerTool(Name = "get_waiting_tasks"), Description("Gets recently captured waiting tasks — queries that were actively waiting on a resource at collection time. Shows session ID, wait type, duration, blocking session, and database. Complements get_wait_stats by showing individual waiting queries rather than aggregated stats.")]
+    [McpServerTool(Name = "get_waiting_tasks"), Description("Gets recently captured waiting tasks — queries that were actively waiting on a resource at collection time — NEWEST CAPTURE FIRST, longest wait first within a capture. Shows session ID, wait type, duration, blocking session, and database. Complements get_wait_stats by showing individual waiting queries rather than aggregated stats. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: tasks_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_collection_time / newest_returned_collection_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached, and one busy capture can fill the whole page by itself. Raise limit or narrow hours_back when truncated is true.")]
     public static async Task<string> GetWaitingTasks(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 1.")] int hours_back = 1,
-        [Description("Maximum rows. Default 30.")] int limit = 30,
+        [Description("Maximum rows to return, newest capture first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
@@ -183,13 +183,18 @@ public sealed class DarlingMcpSessionTools
         try
         {
             var now = windowEnd;
+            /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
+               signal. The reader's LIMIT 500 was invisible, and the envelope stated no bound at all. */
             var rows = await DarlingSessionReader.GetWaitingTasksAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1);
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks")
                     ?? McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.");
 
-            var result = rows.Take(limit).Select(r => new
+            var truncated = rows.Count > limit;
+            var page = truncated ? rows.Take(limit).ToList() : rows;
+
+            var result = page.Select(r => new
             {
                 session_id = r.SessionId,
                 wait_type = r.WaitType,
@@ -203,6 +208,14 @@ public sealed class DarlingMcpSessionTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                /* #3541 A3: the envelope was bare — server and rows, no window, no count, no bound. Now the
+                   span requested, the page described as a page, and the span the page covers. */
+                hours_back,
+                tasks_returned = page.Count,
+                truncated,
+                oldest_returned_collection_time = page.Min(r => r.CollectionTime).ToString("o"),
+                newest_returned_collection_time = page.Max(r => r.CollectionTime).ToString("o"),
+                order = "collection_time_desc",
                 tasks = result
             }, McpHelpers.JsonOptions);
         }

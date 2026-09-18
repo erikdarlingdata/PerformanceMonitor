@@ -335,7 +335,12 @@ internal static class DarlingDataReader
     /// wait_type, heaviest first. The SUMs CAST to bigint for the typed GetInt64 reader (Postgres
     /// <c>SUM(bigint)</c> is numeric). Lite's per-user IgnoredWaitTypes exclusion is dropped (headless
     /// has no per-user ignore config — the viewer's wait reads drop it the same way). $1 server_id, $2/$3
-    /// window (naive UTC).
+    /// window (naive UTC), $4 row cap.
+    ///
+    /// <para>The cap is a PARAMETER, not a literal (#3541 A3). It was <c>LIMIT 50</c> while the tool advertised
+    /// a <c>limit</c> up to 1,000 and applied it with <c>Take(limit)</c>, so a caller asking for every wait
+    /// type on a server that had observed 80 silently got 50 — the same shape <c>DarlingPgWaitReader</c> fixed
+    /// for the PostgreSQL twin. The tool passes <c>limit + 1</c> and reads the extra row as truncation.</para>
     /// </summary>
     public const string WaitStatsSql = """
         SELECT
@@ -349,16 +354,19 @@ internal static class DarlingDataReader
         AND   collection_time <= $3
         GROUP BY wait_type
         ORDER BY SUM(delta_wait_time_ms) DESC
-        LIMIT 50
+        LIMIT $4
         """;
 
+    /// <summary>The <paramref name="cap"/> heaviest wait types over the window. Callers detecting truncation
+    /// pass <c>limit + 1</c> and read the extra row as the signal.</summary>
     public static async Task<List<WaitStatRow>> GetWaitStatsAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, CancellationToken cancellationToken = default)
     {
         var rows = new List<WaitStatRow>();
         await using var command = postgres.CreateCommand(WaitStatsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
+        AddInt(command, cap);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

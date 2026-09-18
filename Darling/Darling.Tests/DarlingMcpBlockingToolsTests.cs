@@ -189,6 +189,33 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         Assert.Contains("blocking_spid", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY event_time DESC", sql, StringComparison.Ordinal);
+        /* #3541 A3: the cap is the CALLER'S ($4), not the 200 the reader used to hide under a tool that
+           advertised `limit`. */
+        Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 200", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3541 A3: <c>get_blocked_process_xml</c> pages over rows that CARRY a report, and the predicate is in
+    /// the SQL — filtering for XML in C# after a capped fetch was the defect (a run of graph-less rows at the
+    /// newest end read as "no XML in the window"). Pinned as the SAME projection as the unfiltered read plus
+    /// exactly the predicate, so the two consts cannot drift a column apart.
+    /// </summary>
+    [Fact]
+    public void BlockedProcessReportsWithXmlSql_IsTheUnfilteredRead_PlusTheXmlPredicate_InSql()
+    {
+        var plain = DarlingBlockingReader.BlockedProcessReportsSql;
+        var withXml = DarlingBlockingReader.BlockedProcessReportsWithXmlSql;
+
+        Assert.Contains("AND   blocked_process_report_xml IS NOT NULL", withXml, StringComparison.Ordinal);
+        Assert.Contains("AND   blocked_process_report_xml <> ''", withXml, StringComparison.Ordinal);
+        Assert.DoesNotContain("blocked_process_report_xml IS NOT NULL", plain, StringComparison.Ordinal);
+
+        /* Everything up to the window predicate is byte-identical. */
+        const string Cut = "AND   collection_time <= $3";
+        Assert.Equal(plain[..(plain.IndexOf(Cut, StringComparison.Ordinal) + Cut.Length)],
+                     withXml[..(withXml.IndexOf(Cut, StringComparison.Ordinal) + Cut.Length)]);
+        Assert.EndsWith("ORDER BY event_time DESC\nLIMIT $4", withXml.Replace("\r\n", "\n"), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -199,6 +226,8 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         Assert.DoesNotContain("blocked_process_report_xml", sql, StringComparison.Ordinal);  /* the DMV snapshot has no report XML */
         Assert.Contains("contentious_object", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 200", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -210,6 +239,40 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         Assert.Contains("deadlock_graph_xml", sql, StringComparison.Ordinal);
         Assert.Contains("victim_process_id", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY deadlock_time DESC", sql, StringComparison.Ordinal);
+        /* #3541 A3: the cap is the caller's, not the 50 a caller asking for 100 deadlocks never saw. */
+        Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT 50", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>Same shape as the blocked-process pair: <c>get_deadlock_detail</c>'s <c>limit</c> counts graphs
+    /// because the graph predicate is in the SQL, and the two consts share one body.</summary>
+    [Fact]
+    public void RecentDeadlocksWithGraphSql_IsTheUnfilteredRead_PlusTheGraphPredicate_InSql()
+    {
+        var plain = DarlingBlockingReader.RecentDeadlocksSql;
+        var withGraph = DarlingBlockingReader.RecentDeadlocksWithGraphSql;
+
+        Assert.Contains("AND   deadlock_graph_xml IS NOT NULL", withGraph, StringComparison.Ordinal);
+        Assert.Contains("AND   deadlock_graph_xml <> ''", withGraph, StringComparison.Ordinal);
+        Assert.DoesNotContain("deadlock_graph_xml IS NOT NULL", plain, StringComparison.Ordinal);
+
+        const string Cut = "AND   collection_time <= $3";
+        Assert.Equal(plain[..(plain.IndexOf(Cut, StringComparison.Ordinal) + Cut.Length)],
+                     withGraph[..(withGraph.IndexOf(Cut, StringComparison.Ordinal) + Cut.Length)]);
+        Assert.EndsWith("ORDER BY deadlock_time DESC\nLIMIT $4", withGraph.Replace("\r\n", "\n"), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The fingerprint scan ceiling (#3541 A3): #2159 promised the dedup_key filter runs over the window
+    /// BEFORE limit, and a hidden 200-row cap was quietly breaking it. The ceiling has to be materially
+    /// wider than that cap or the promise is still hollow, and bounded because a scan row carries the graph
+    /// or both SQL texts; 5,000 is what the analysis pair-row readers fetch WITHOUT the XML.
+    /// </summary>
+    [Fact]
+    public void FingerprintScanCeiling_IsWiderThanTheOldHiddenCap_AndBounded()
+    {
+        Assert.True(DarlingBlockingReader.FingerprintScanCeiling >= 1000, "the scan ceiling is not materially wider than the 200-row cap #2159's promise was hollow under");
+        Assert.True(DarlingBlockingReader.FingerprintScanCeiling <= 5000, "the scan carries XML per row; the analysis readers fetch 5,000 WITHOUT it");
     }
 
     [Fact]
@@ -280,14 +343,18 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
 
     [Theory]
     [InlineData(nameof(DarlingBlockingReader.BlockedProcessReportsSql))]
+    [InlineData(nameof(DarlingBlockingReader.BlockedProcessReportsWithXmlSql))]
     [InlineData(nameof(DarlingBlockingReader.DmvBlockingSnapshotsSql))]
     [InlineData(nameof(DarlingBlockingReader.RecentDeadlocksSql))]
+    [InlineData(nameof(DarlingBlockingReader.RecentDeadlocksWithGraphSql))]
     public void Reads_ArePostgresDialect_NoTsqlIsms(string sqlName)
     {
         var sql = sqlName switch
         {
             nameof(DarlingBlockingReader.BlockedProcessReportsSql) => DarlingBlockingReader.BlockedProcessReportsSql,
+            nameof(DarlingBlockingReader.BlockedProcessReportsWithXmlSql) => DarlingBlockingReader.BlockedProcessReportsWithXmlSql,
             nameof(DarlingBlockingReader.DmvBlockingSnapshotsSql) => DarlingBlockingReader.DmvBlockingSnapshotsSql,
+            nameof(DarlingBlockingReader.RecentDeadlocksWithGraphSql) => DarlingBlockingReader.RecentDeadlocksWithGraphSql,
             _ => DarlingBlockingReader.RecentDeadlocksSql,
         };
         var lower = sql.ToLowerInvariant();
@@ -397,6 +464,11 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             var blocking = await DarlingMcpBlockingTools.GetBlocking(postgres, ServerName);
             DarlingMcpTestData.AssertEnvelope(blocking, ServerName, "events");
             Assert.Contains("dbo.Posts", blocking, StringComparison.Ordinal);
+            /* #3541 A3: two planted rows (one XE, one DMV on a different pair) merge to a two-row page well
+               under the default limit, so the page says so — and no `total_` key is on it. */
+            JsonAssert.Contains("\"events_returned\": 2", blocking);
+            JsonAssert.Contains("\"truncated\": false", blocking);
+            Assert.DoesNotContain("total_events", blocking, StringComparison.Ordinal);
 
             DarlingMcpTestData.AssertEnvelope(await DarlingMcpBlockingTools.GetDeadlocks(postgres, ServerName), ServerName, "deadlocks");
             var detail = await DarlingMcpBlockingTools.GetDeadlockDetail(postgres, ServerName);

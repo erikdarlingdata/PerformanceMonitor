@@ -101,12 +101,12 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_wait_stats"), Description("Gets the top SQL Server wait types aggregated over a time period. Wait stats reveal what SQL Server spends time waiting on — high signal waits indicate CPU pressure, high resource waits indicate I/O or lock contention. Use this first to identify the dominant wait category, then drill into specific tools based on the wait type.")]
+    [McpServerTool(Name = "get_wait_stats"), Description("Gets the top SQL Server wait types aggregated over a time period, heaviest total wait first. Wait stats reveal what SQL Server spends time waiting on — high signal waits indicate CPU pressure, high resource waits indicate I/O or lock contention. Use this first to identify the dominant wait category, then drill into specific tools based on the wait type. THE PAGE IS BOUNDED BY limit: wait_types_returned is how many wait types you got and truncated says the window observed more than limit — the rows you have are the heaviest, and the ones past the cap are lighter, but a sum over the page is a sum over the page rather than over the server.")]
     public static async Task<string> GetWaitStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows to return. Default 20.")] int limit = 20,
+        [Description("Maximum wait types to return, heaviest first. Default 20. This is what bounds the page — read truncated to know whether the window observed more.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
@@ -120,12 +120,17 @@ public sealed class DarlingMcpDataTools
         try
         {
             var now = windowEnd;
-            var rows = await DarlingDataReader.GetWaitStatsAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+            /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
+               signal. The reader's LIMIT 50 sat under a limit the tool accepts up to 1,000. */
+            var rows = await DarlingDataReader.GetWaitStatsAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1);
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats")
                     ?? McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.");
 
-            var result = rows.Take(limit).Select(r =>
+            var truncated = rows.Count > limit;
+            var page = truncated ? rows.Take(limit).ToList() : rows;
+
+            var result = page.Select(r =>
             {
                 var signalPct = r.TotalWaitTimeMs > 0 ? (double)r.TotalSignalWaitTimeMs / r.TotalWaitTimeMs * 100 : 0;
                 return new
@@ -143,6 +148,11 @@ public sealed class DarlingMcpDataTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #3541 A3: the page described as a page. No time bounds here — the rows are per-type
+                   aggregates over the whole window, so there is no page reach to report, only a cap. */
+                wait_types_returned = page.Count,
+                truncated,
+                order = "total_wait_time_ms_desc",
                 waits = result
             }, McpHelpers.JsonOptions);
         }

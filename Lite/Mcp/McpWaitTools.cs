@@ -9,13 +9,13 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpWaitTools
 {
-    [McpServerTool(Name = "get_wait_stats"), Description("Gets the top SQL Server wait types aggregated over a time period. Wait stats reveal what SQL Server spends time waiting on — high signal waits indicate CPU pressure, high resource waits indicate I/O or lock contention. Use this first to identify the dominant wait category, then drill into specific tools based on the wait type.")]
+    [McpServerTool(Name = "get_wait_stats"), Description("Gets the top SQL Server wait types aggregated over a time period, heaviest total wait first. Wait stats reveal what SQL Server spends time waiting on — high signal waits indicate CPU pressure, high resource waits indicate I/O or lock contention. Use this first to identify the dominant wait category, then drill into specific tools based on the wait type. THE PAGE IS BOUNDED BY limit: wait_types_returned is how many wait types you got and truncated says the window observed more than limit — the rows you have are the heaviest, and the ones past the cap are lighter, but a sum over the page is a sum over the page rather than over the server.")]
     public static async Task<string> GetWaitStats(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows to return. Default 20.")] int limit = 20,
+        [Description("Maximum wait types to return, heaviest first. Default 20. This is what bounds the page — read truncated to know whether the window observed more.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
@@ -29,14 +29,19 @@ public sealed class McpWaitTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await dataService.GetWaitStatsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
+               signal. The reader's LIMIT 50 sat under a limit this tool accepts up to 1,000. */
+            var rows = await dataService.GetWaitStatsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "wait_stats")
                     ?? McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.");
             }
 
-            var result = rows.Take(limit).Select(r => new
+            var truncated = rows.Count > limit;
+            var page = truncated ? rows.Take(limit).ToList() : rows;
+
+            var result = page.Select(r => new
             {
                 wait_type = r.WaitType,
                 total_wait_time_ms = r.TotalWaitTimeMs,
@@ -50,6 +55,12 @@ public sealed class McpWaitTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #3541 A3: the page described as a page, on Darling's names. No time bounds here — the rows
+                   are per-type aggregates over the whole window, so there is no page reach to report, only a
+                   cap. */
+                wait_types_returned = page.Count,
+                truncated,
+                order = "total_wait_time_ms_desc",
                 waits = result
             }, McpHelpers.JsonOptions);
         }
@@ -179,13 +190,13 @@ public sealed class McpWaitTools
         }
     }
 
-    [McpServerTool(Name = "get_waiting_tasks"), Description("Gets recently captured waiting tasks — queries that were actively waiting on a resource at collection time. Shows session ID, wait type, duration, blocking session, and database. Complements get_wait_stats by showing individual waiting queries rather than aggregated stats.")]
+    [McpServerTool(Name = "get_waiting_tasks"), Description("Gets recently captured waiting tasks — queries that were actively waiting on a resource at collection time — NEWEST CAPTURE FIRST, longest wait first within a capture. Shows session ID, wait type, duration, blocking session, and database. Complements get_wait_stats by showing individual waiting queries rather than aggregated stats. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: tasks_returned is how many rows you got, truncated says the window held more than limit, and oldest_returned_collection_time / newest_returned_collection_time bound the page — under newest-first ordering the oldest stamp IS how far back this read reached, and one busy capture can fill the whole page by itself. Raise limit or narrow hours_back when truncated is true.")]
     public static async Task<string> GetWaitingTasks(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 1.")] int hours_back = 1,
-        [Description("Maximum rows. Default 30.")] int limit = 30,
+        [Description("Maximum rows to return, newest capture first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
@@ -199,14 +210,19 @@ public sealed class McpWaitTools
             var limitError = McpHelpers.ValidateTop(limit);
             if (limitError != null) return limitError;
 
-            var rows = await dataService.GetWaitingTasksAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
+               signal. The read was UNBOUNDED with a Take(limit) on top, and the envelope stated no bound. */
+            var rows = await dataService.GetWaitingTasksAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "waiting_tasks")
-                    ?? McpHelpers.Status("empty", "No waiting tasks found.");
+                    ?? McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.");
             }
 
-            var result = rows.Take(limit).Select(r => new
+            var truncated = rows.Count > limit;
+            var page = truncated ? rows.Take(limit).ToList() : rows;
+
+            var result = page.Select(r => new
             {
                 session_id = r.SessionId,
                 wait_type = r.WaitType,
@@ -220,6 +236,15 @@ public sealed class McpWaitTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                /* #3541 A3: the envelope was bare — server and rows, no window, no count, no bound. Now the
+                   span requested, the page described as a page, and the span the page covers, on Darling's
+                   names. */
+                hours_back,
+                tasks_returned = page.Count,
+                truncated,
+                oldest_returned_collection_time = page.Min(r => r.CollectionTime).ToString("o"),
+                newest_returned_collection_time = page.Max(r => r.CollectionTime).ToString("o"),
+                order = "collection_time_desc",
                 tasks = result
             }, McpHelpers.JsonOptions);
         }

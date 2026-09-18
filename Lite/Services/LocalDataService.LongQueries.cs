@@ -20,6 +20,12 @@ public partial class LocalDataService
     /// union view), for the Long Queries grid. Reads the most recent completions in the window; the grid
     /// applies a view-only DESCENDING-by-duration sort, so the SQL keeps the chronological ORDER BY
     /// (mirrors the blocked-process reader).
+    ///
+    /// <para>The GRID's read, and no longer the MCP tool's (#3541 A3). <c>get_long_query_completions</c>
+    /// used to take these 200 NEWEST rows and re-rank them by duration in C#, which is a different population
+    /// from the window's slowest: on a busy trace the slowest run of the window could sit outside the newest
+    /// 200 and be omitted entirely, while Darling's twin — ranked by duration in SQL — kept it. Same tool
+    /// name, different truth per SKU. The tool now reads <see cref="GetSlowestLongQueryCompletionsAsync"/>.</para>
     /// </summary>
     public async Task<List<LongQueryCompletionRow>> GetRecentLongQueryCompletionsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
@@ -29,7 +35,56 @@ public partial class LocalDataService
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
-        command.CommandText = @"
+        command.CommandText = LongQueryCompletionsSelect + @"
+FROM v_long_query_completions
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3" + dbClause + @"
+ORDER BY event_time DESC
+LIMIT 200";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
+
+        return await ReadLongQueryCompletionsAsync(command);
+    }
+
+    /// <summary>
+    /// The <paramref name="limit"/> SLOWEST completions in the window — the MCP tool's read (#3541 A3),
+    /// ranked in SQL by <c>duration_microseconds DESC NULLS LAST</c> so attentions (whose duration is NULL)
+    /// follow the ranked completions, exactly as Darling's <c>DarlingLongQueryReader</c> orders it. Every row in
+    /// the window is a candidate, so a page cut here still holds the window's slowest; the grid read above
+    /// cannot promise that. Callers detecting truncation pass <c>limit + 1</c> and read the extra row as the
+    /// signal. Windowed on the UTC helper (offset 0) because the caller is the MCP tool, whose window is UTC.
+    /// </summary>
+    public async Task<List<LongQueryCompletionRow>> GetSlowestLongQueryCompletionsAsync(int serverId, int hoursBack, DateTime? asOfUtc, int limit)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+
+        command.CommandText = LongQueryCompletionsSelect + @"
+FROM v_long_query_completions
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+ORDER BY duration_microseconds DESC NULLS LAST, event_time DESC
+LIMIT $4";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = limit });
+
+        return await ReadLongQueryCompletionsAsync(command);
+    }
+
+    /// <summary>The projection both long-query reads share, so the two cannot drift a column apart.</summary>
+    private const string LongQueryCompletionsSelect = @"
 SELECT
     collection_time,
     event_time,
@@ -50,20 +105,10 @@ SELECT
     row_count,
     result,
     statement_text,
-    object_name
-FROM v_long_query_completions
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3" + dbClause + @"
-ORDER BY event_time DESC
-LIMIT 200";
+    object_name";
 
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = startTime });
-        command.Parameters.Add(new DuckDBParameter { Value = endTime });
-        foreach (var db in dbValues)
-            command.Parameters.Add(new DuckDBParameter { Value = db });
-
+    private static async Task<List<LongQueryCompletionRow>> ReadLongQueryCompletionsAsync(DuckDBCommand command)
+    {
         var items = new List<LongQueryCompletionRow>();
         using (var reader = await command.ExecuteReaderAsync())
         {
