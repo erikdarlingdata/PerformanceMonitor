@@ -93,7 +93,9 @@ public sealed class DarlingMcpMemoryGrantToolsSurfaceAndSqlTests
            it rides LAST so every ordinal the reader indexes is unchanged. */
         var interval = sql.IndexOf("sample_interval_seconds", StringComparison.Ordinal);
         Assert.True(interval > sql.IndexOf("forced_grant_count_delta,", StringComparison.Ordinal), "the interval must be selected after the last pre-V128 column");
-        Assert.True(interval < sql.IndexOf("FROM v_memory_grant_stats", StringComparison.Ordinal), "the interval must be in the SELECT list");
+        /* LastIndexOf: the CTE's MAX(collection_time) probe reads the view first; the select list sits ahead
+           of the SECOND FROM. */
+        Assert.True(interval < sql.LastIndexOf("FROM v_memory_grant_stats", StringComparison.Ordinal), "the interval must be in the SELECT list");
         Assert.Equal(1, sql.Split("sample_interval_seconds").Length - 1);
     }
 

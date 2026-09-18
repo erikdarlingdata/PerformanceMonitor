@@ -796,6 +796,17 @@ CREATE OR REPLACE VIEW collect.v_spinlock_stats AS SELECT * FROM collect.spinloc
     /// because the collector's delta key is <c>$"{sql_handle}:{start}:{end}:{plan_handle}"</c> over the raw
     /// ints and the seed has to spell the same string byte for byte.</para>
     ///
+    /// <para><b>The PostgreSQL pair's columns are added in TWO places and both are required</b> — the V101
+    /// rule. A store's tables come from one of two texts depending on when it was created: a fresh store
+    /// builds every table from V1's generated schema, walked from the collector catalog, while a store that
+    /// predates V63/V64 has whatever those rungs built. So the <c>pg_wait_stats</c> and
+    /// <c>pg_statement_stats</c> CREATE TABLE rungs gain the column for the population that first meets them
+    /// (<c>PgSchemaGeneratorTests</c> enforces the rung text against the generator, column for column) and
+    /// THIS rung's ALTER carries the existing one. Neither is redundant: the CREATE is <c>IF NOT EXISTS</c>
+    /// and never re-runs on a store that already has the table, and the ALTER is <c>ADD COLUMN IF NOT
+    /// EXISTS</c> and is a no-op wherever the column already exists. The three SQL Server tables need no
+    /// second site: they are generated at V1 and only ever ALTERed.</para>
+    ///
     /// <para><b>Two view treatments.</b> <c>v_memory_grant_stats</c> is a <c>SELECT *</c> passthrough
     /// and is refreshed here for the V14/V80/V81/V127 reason (Postgres freezes the column list at CREATE;
     /// appending is the one alteration <c>CREATE OR REPLACE VIEW</c> permits). <c>procedure_stats</c>,
@@ -2007,7 +2018,8 @@ CREATE TABLE IF NOT EXISTS collect.pg_wait_stats (
     waits bigint,
     wait_time_us bigint,
     delta_waits bigint,
-    delta_wait_time_us bigint
+    delta_wait_time_us bigint,
+    sample_interval_seconds integer
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_wait_stats_time
@@ -2070,7 +2082,8 @@ CREATE TABLE IF NOT EXISTS collect.pg_statement_stats (
     max_exec_peakmem_bytes bigint,
     delta_calls bigint,
     delta_total_exec_time_ms bigint,
-    delta_rows bigint
+    delta_rows bigint,
+    sample_interval_seconds integer
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_statement_stats_time

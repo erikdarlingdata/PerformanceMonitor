@@ -236,15 +236,30 @@ public sealed class DeltaFamilyIntervalCompletionRungTests
             Assert.Contains($"ALTER TABLE query_stats ADD COLUMN IF NOT EXISTS {column} integer;", preAdds, StringComparison.Ordinal);
         }
 
+        /* Every rung that emits the RESOLVING view (V38, V51, V54, V121, V128) names f.<offset>; V4 and V14
+           define the passthrough and name neither, so they are skipped on `use < 0` the way
+           MigrationLadderPins skips them. The resolving definers must pre-add first: presence, then order. */
+        var resolvingDefiners = 0;
         foreach (var rung in PgMigrations.Scripts.Where(m => m.Sql.Contains("VIEW v_query_stats AS", StringComparison.Ordinal)))
         {
             foreach (var column in OffsetColumns)
             {
-                var guard = rung.Sql.IndexOf($"ADD COLUMN IF NOT EXISTS {column} ", StringComparison.Ordinal);
                 var use = rung.Sql.IndexOf($"f.{column}", StringComparison.Ordinal);
-                Assert.True(guard >= 0 && guard < use, $"V{rung.Version} names f.{column} before establishing it");
+                if (use < 0)
+                {
+                    continue;
+                }
+
+                resolvingDefiners++;
+                var guard = rung.Sql.IndexOf($"ADD COLUMN IF NOT EXISTS {column} ", StringComparison.Ordinal);
+                Assert.True(guard >= 0, $"V{rung.Version} names f.{column} and never adds it");
+                Assert.True(guard < use, $"V{rung.Version} adds {column} AFTER the view uses it");
             }
         }
+
+        /* Two offsets × the five resolving definers: a scan that skipped everything would pass while asserting
+           nothing. */
+        Assert.Equal(10, resolvingDefiners);
     }
 
     /* ---- the probe (three sites, top arm) ------------------------------------------------------------- */

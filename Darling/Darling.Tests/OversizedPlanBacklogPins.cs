@@ -903,19 +903,23 @@ public sealed class OversizedPlanBacklogPins
     }
 
     [Fact]
-    public void TheQueryStatsFallback_KeysOnTheHash_BecauseTheFactRowCarriesNoOffsets()
+    public void TheQueryStatsFallback_KeysOnTheHash_TheGrainItsReadersAskAt()
     {
-        /* This is the REASON, pinned. query_stats reads the statement offsets for its delta key and never
-           stores them, so a join from a stored fact row could only match plan_handle + sql_handle — which
-           for a multi-statement plan is several backlog rows describing DIFFERENT statements' plans. Serving
-           one of those as "the plan for this query" is worse than serving nothing. If the offsets ever DO
-           become stored columns, this pin fails and the fallback can become an exact join. */
+        /* This was "…BecauseTheFactRowCarriesNoOffsets" and pinned the absence of the two offset columns,
+           with the note that the day they became stored columns the pin would fail and the fallback could
+           become an exact join. V128 (#3540) stored them, the pin failed as designed, and the decision is
+           recorded here rather than taken silently: the fallback STAYS keyed on query_hash. Two reasons,
+           both in the SQL's own doc — the readers ask at the query_hash grain, which the backlog row serves
+           directly; and every row written before V128 carries NULL offsets, so an exact join would go dark
+           on an upgraded store for a raw retention's worth of history. The offsets are asserted PRESENT and
+           trailing so this record cannot drift back into the old claim. */
         var stored = QueryStatsCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
-        Assert.DoesNotContain("statement_start_offset", stored);
-        Assert.DoesNotContain("statement_end_offset", stored);
+        Assert.Equal("statement_start_offset", stored[^2]);
+        Assert.Equal("statement_end_offset", stored[^1]);
 
         Assert.Contains("query_hash = $2", OversizedPlanBacklog.QueryStatsFallbackSql, StringComparison.Ordinal);
         Assert.DoesNotContain("plan_handle", OversizedPlanBacklog.QueryStatsFallbackSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("statement_start_offset", OversizedPlanBacklog.QueryStatsFallbackSql, StringComparison.Ordinal);
 
         /* procedure_stats CAN join exactly, and does: its three DMVs expose no offsets at all, so the plan
            apply passes fixed literals and every backlog row for it carries that same pair. */
