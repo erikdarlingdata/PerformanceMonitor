@@ -367,8 +367,10 @@ public partial class ServerTab : UserControl
             "AvgCpuTimeMs" => ("AvgCpu", "Avg CPU (ms)"),
             "TotalDurationMs" => ("TotalElapsed", "Total Duration (ms)"),
             "AvgDurationMs" => ("AvgElapsed", "Avg Duration (ms)"),
-            "AvgLogicalReads" => ("TotalReads", "Avg Reads"),
-            "AvgLogicalWrites" => ("TotalWrites", "Avg Writes"),
+            /* #3556: the plotted bucket values are execution-weighted slice TOTALS, so the old "Avg"
+               labels under-claimed what the bars showed. Total labels, matching the physical arm below. */
+            "AvgLogicalReads" => ("TotalReads", "Total Reads"),
+            "AvgLogicalWrites" => ("TotalWrites", "Total Writes"),
             /* #3547: this arm mapped physical to the LOGICAL series while the reader dropped the physical
                column; #3530 populates TotalPhysicalReads, so the label and the series finally agree. */
             "AvgPhysicalReads" => ("TotalPhysReads", "Total Physical Reads"),
@@ -418,7 +420,10 @@ public partial class ServerTab : UserControl
             "AvgElapsedMs" => ("AvgElapsed", "Avg Duration (ms)"),
             "TotalLogicalReads" or "AvgReads" => ("TotalReads", "Total Reads"),
             "TotalLogicalWrites" => ("TotalWrites", "Total Writes"),
-            "TotalPhysicalReads" => ("TotalReads", "Total Physical Reads"),
+            /* #3556: the #3547 bug one grid over — this arm mapped the physical sort to the LOGICAL
+               series while the slicer reader dropped its SELECT's total_physical_reads column on the
+               floor. The reader maps ordinal 6 now, so the label and the series agree here too. */
+            "TotalPhysicalReads" => ("TotalPhysReads", "Total Physical Reads"),
             _ => ("TotalCpu", "Total CPU (ms)"),
         };
 
@@ -436,6 +441,7 @@ public partial class ServerTab : UserControl
                 "AvgElapsed" => bucket.TotalElapsed / n,
                 "TotalReads" => bucket.TotalReads,
                 "TotalWrites" => bucket.TotalWrites,
+                "TotalPhysReads" => bucket.TotalPhysicalReads,
                 _ => bucket.TotalCpu,
             };
         }
