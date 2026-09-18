@@ -84,7 +84,15 @@ internal static class DarlingTrendReader
     /// break; new readers should take <c>ExecutionsPerSecond</c>.</para>
     /// </summary>
     public sealed record QueryDurationTrendPoint(
-        DateTime CollectionTime, double Value, long ExecutionCount, double ExecutionsPerSecond);
+        DateTime CollectionTime, double? Value, long? ExecutionCount, double? ExecutionsPerSecond)
+    {
+        /// <summary>
+        /// Whether this point carries a rate at all (#3541 A12). False for the window's first differenced
+        /// collection — no previous collection to difference against — and for a collection landing in the
+        /// same second as its predecessor; both have no denominator, and neither is 0.
+        /// </summary>
+        public bool HasRate => Value.HasValue;
+    }
 
     /// <summary>One point of a single query's per-collection history (Lite's <c>QueryStatsHistoryRow</c>,
     /// the columns get_query_trend surfaces): the interval deltas + DOP spread + the plan hash. Time metrics
@@ -382,11 +390,24 @@ internal static class DarlingTrendReader
     /// <c>GetQueryDurationTrendAsync</c>): per collection, the summed <c>delta_elapsed_time</c> (→ ms) and
     /// <c>delta_execution_count</c> divided by the seconds since the previous collection (the truncate-then-
     /// diff LAG epoch idiom proven value-identical DuckDB↔Postgres) for an elapsed-ms/sec + executions/sec
-    /// rate. The first row's LAG is NULL → interval NULL → the CASE yields 0 (Lite's behaviour). Reads the
-    /// base <c>query_stats</c> table because it projects no text — a read that wanted <c>query_text</c> or
-    /// <c>query_plan_xml</c> would have to go through <c>v_query_stats</c> to resolve the #1767 payload
-    /// dimensions. Summed bigints come back as numeric, so the reads Convert tolerantly. $1 server_id,
-    /// $2/$3 window (naive UTC).
+    /// rate. Reads the base <c>query_stats</c> table because it projects no text — a read that wanted
+    /// <c>query_text</c> or <c>query_plan_xml</c> would have to go through <c>v_query_stats</c> to resolve the
+    /// #1767 payload dimensions. Summed bigints come back as numeric, so the reads Convert tolerantly.
+    /// $1 server_id, $2/$3 window (naive UTC).
+    ///
+    /// <para><b>The first collection in the window has no rate (#3541 A12, #3540 A8).</b> Its LAG is NULL
+    /// — there is no previous collection inside the window to difference against — so its rate is
+    /// unknowable, and the shape this replaced (<c>CASE ... ELSE 0 END</c>, Lite's original behaviour)
+    /// published that unknowable as a measured 0.0: every duration series began with a fabricated quiet
+    /// instant, which an agent charting the window read as "idle, then busy" and which dragged every
+    /// first-bucket average toward zero. Contract rule 5 — zero is a measurement — so the CASE has no ELSE
+    /// and the rate columns are NULL for that row (and for the degenerate two-collections-in-one-second
+    /// case, whose denominator is 0 and whose rate is equally undefined). The row is KEPT rather than
+    /// filtered, deliberately: the collection happened, <c>effective_start</c> is truthfully its instant,
+    /// and a window holding exactly one collection is "one collection, no rate yet" rather than an empty
+    /// series the empty ladder would mis-describe as a quiet window. The reader carries the nulls through
+    /// (<see cref="QueryDurationTrendPoint"/>) and the tool publishes them with the reason. The hourly
+    /// twin below has no such row: its denominator is the bucket width, known for every bucket.</para>
     /// </summary>
     public const string QueryDurationTrendSql = """
         WITH raw AS
@@ -404,8 +425,8 @@ internal static class DarlingTrendReader
         )
         SELECT
             collection_time,
-            CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds ELSE 0 END AS elapsed_ms_per_second,
-            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS executions_per_second
+            CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
+            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
         FROM raw
         ORDER BY collection_time
         """;
@@ -430,7 +451,8 @@ internal static class DarlingTrendReader
     /// from the gap to the previous collection because a per-sweep row carries no shared interval (the
     /// measurement lane's A11a); an hour bucket's width is KNOWN, so this read divides by
     /// <see cref="HourlyBucketSecondsSql"/> and every bucket has a real denominator — the LAG idiom's first
-    /// point, whose interval is NULL and whose rate is therefore a fabricated 0, does not exist here. The
+    /// collection, whose interval is NULL and whose rate is therefore unknowable (published as NULL by the raw
+    /// read since #3541 A12; as a fabricated 0 before it), does not exist here. The
     /// trade is stated in the payload rather than hidden: an hour the collector covered only partly (a
     /// service restart mid-hour, a gap past the delta policy) reads LOW, never high, because its summed work is
     /// still spread over the full 3,600 seconds.</para>
@@ -597,10 +619,11 @@ internal static class DarlingTrendReader
     /// <para>#3540 (V128): the interval is the collection's STORED one where the rows have it — <c>MAX</c>
     /// over the collection's rows, because a plan first seen in an otherwise steady pass carries 0 beside
     /// its siblings' real interval and contributes 0 to the sums; MAX is 0 only when EVERY row was
-    /// unknowable (a restart), and that 0 becomes NULL through <c>NULLIF</c> so the rates are NULL and the
-    /// reader drops the point rather than rendering 0.00 ms/sec. NULL (a pre-V128 collection) falls back to
-    /// the LAG this read always used. No <c>ELSE 0</c>. Verbatim from the viewer's copy apart from the
-    /// database filter, as before.</para>
+    /// unknowable (a restart), and that 0 becomes NULL through <c>NULLIF</c> so the rates are NULL — an
+    /// UNRATED point the reader keeps rather than rendering 0.00 ms/sec (#3541 A12; see
+    /// <see cref="QueryDurationTrendSql"/> for why the row stays). NULL (a pre-V128 collection) falls back to
+    /// the LAG this read always used, whose first row is likewise unrated, never a fabricated 0. No
+    /// <c>ELSE 0</c>. Verbatim from the viewer's copy apart from the database filter, as before.</para>
     /// </summary>
     public const string ProcedureDurationTrendSql = """
         WITH raw AS
@@ -638,7 +661,9 @@ internal static class DarlingTrendReader
     /// interval start exists for them and none can be reconstructed. The arms split on
     /// <c>interval_start_time_utc IS NULL</c>, so they partition the rows with no overlap and no gap.
     /// Rewriting either arm here would make the browser and the desktop viewer disagree about the same
-    /// hour. $1 server_id, $2/$3 window (naive UTC).</para>
+    /// hour. The first placed interval in the window carries NULL rates, not 0 — see
+    /// <see cref="QueryDurationTrendSql"/> (#3541 A12); the rollup route's builder applies the same rule to
+    /// its first bucket. $1 server_id, $2/$3 window (naive UTC).</para>
     /// <para><b>#2736: this is now the FALLBACK, not the read.</b> The rank-over-raw below costs the whole
     /// slab regardless of the window, which exceeds the mcp role's statement_timeout on a large store —
     /// so on stores with a materialized <c>query_store_stats_corrected_hourly</c> the tool routes through
@@ -707,8 +732,8 @@ internal static class DarlingTrendReader
         )
         SELECT
             point_time AS collection_time,
-            CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds ELSE 0 END AS duration_ms_per_second,
-            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS executions_per_second
+            CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second,
+            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
         FROM raw
         ORDER BY point_time
         """;
@@ -806,19 +831,14 @@ internal static class DarlingTrendReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            /* A NULL rate is an unknowable interval (#3540, V128): the point is dropped, not read as 0. Only
-               the procedure trend emits one today (its query-stats and Query Store siblings keep ELSE 0), so
-               this is a no-op for them and the missing-sample posture for it. */
-            if (reader.IsDBNull(1))
-            {
-                continue;
-            }
-
-            var executionsPerSecond = reader.IsDBNull(2) ? 0 : Convert.ToDouble(reader.GetValue(2));
+            /* NULL stays NULL (#3541 A12): no rate for the window's first collection, or for a collection whose
+               stored interval was unknowable (a restart pass, #3540 V128) — either way the point is kept as
+               UNRATED rather than dropped or coerced to the fabricated quiet the SQL stopped producing. */
+            var executionsPerSecond = reader.IsDBNull(2) ? (double?)null : Convert.ToDouble(reader.GetValue(2));
             items.Add(new QueryDurationTrendPoint(
                 reader.GetDateTime(0),
-                Convert.ToDouble(reader.GetValue(1)),
-                (long)executionsPerSecond,
+                reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1)),
+                executionsPerSecond is { } eps ? (long)eps : null,
                 executionsPerSecond));
         }
 

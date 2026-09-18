@@ -285,8 +285,12 @@ rated AS
 )
 SELECT
     point_time AS collection_time,
-    CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds ELSE 0 END AS duration_ms_per_second,
-    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS executions_per_second
+    /* No ELSE: the first united point's LAG is NULL and its rate unknowable, so the rate is NULL — never a
+       fabricated 0 (#3541 A12). Shared by the MCP reader and the viewer, so both surfaces see the same
+       first bucket the same way: the MCP payload publishes it as an unrated point, the viewer's chart
+       reader skips it (a chart has nowhere to draw "unknown"). */
+    CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second,
+    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
 FROM rated
 ORDER BY point_time
 """;

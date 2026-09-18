@@ -1106,15 +1106,18 @@ public partial class ServerTab : UserControl
         ClearChart(QueryDurationTrendChart);
         ApplyTheme(QueryDurationTrendChart);
 
-        if (data.Count == 0) { RefreshEmptyChart(QueryDurationTrendChart, "Query Duration", "Duration (ms/sec)"); return; }
+        /* #3541 A12: the window's first collection carries a null rate (nothing to difference against) and
+           a chart has nowhere to draw "unknown" — it is skipped, not plotted as the 0 it used to be. */
+        var rated = data.Where(d => d.HasRate).ToList();
+        if (rated.Count == 0) { RefreshEmptyChart(QueryDurationTrendChart, "Query Duration", "Duration (ms/sec)"); return; }
 
         DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
         DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        var times = data.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
-        var values = data.Select(d => d.Value).ToArray();
+        var times = rated.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var values = rated.Select(d => d.Value!.Value).ToArray();
 
         _queryDurationTrendHover?.Clear();
         var plot = QueryDurationTrendChart.Plot.Add.TimeSeries(times, values);
@@ -1137,15 +1140,18 @@ public partial class ServerTab : UserControl
         ClearChart(ProcDurationTrendChart);
         ApplyTheme(ProcDurationTrendChart);
 
-        if (data.Count == 0) { RefreshEmptyChart(ProcDurationTrendChart, "Procedure Duration", "Duration (ms/sec)"); return; }
+        /* #3541 A12: the window's first collection carries a null rate (nothing to difference against) and
+           a chart has nowhere to draw "unknown" — it is skipped, not plotted as the 0 it used to be. */
+        var rated = data.Where(d => d.HasRate).ToList();
+        if (rated.Count == 0) { RefreshEmptyChart(ProcDurationTrendChart, "Procedure Duration", "Duration (ms/sec)"); return; }
 
         DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
         DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        var times = data.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
-        var values = data.Select(d => d.Value).ToArray();
+        var times = rated.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var values = rated.Select(d => d.Value!.Value).ToArray();
 
         _procDurationTrendHover?.Clear();
         var plot = ProcDurationTrendChart.Plot.Add.TimeSeries(times, values);
@@ -1168,15 +1174,18 @@ public partial class ServerTab : UserControl
         ClearChart(QueryStoreDurationTrendChart);
         ApplyTheme(QueryStoreDurationTrendChart);
 
-        if (data.Count == 0) { RefreshEmptyChart(QueryStoreDurationTrendChart, "Query Store Duration", "Duration (ms/sec)"); return; }
+        /* #3541 A12: the window's first collection carries a null rate (nothing to difference against) and
+           a chart has nowhere to draw "unknown" — it is skipped, not plotted as the 0 it used to be. */
+        var rated = data.Where(d => d.HasRate).ToList();
+        if (rated.Count == 0) { RefreshEmptyChart(QueryStoreDurationTrendChart, "Query Store Duration", "Duration (ms/sec)"); return; }
 
         DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
         DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        var times = data.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
-        var values = data.Select(d => d.Value).ToArray();
+        var times = rated.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var values = rated.Select(d => d.Value!.Value).ToArray();
 
         _queryStoreDurationTrendHover?.Clear();
         var plot = QueryStoreDurationTrendChart.Plot.Add.TimeSeries(times, values);
@@ -1199,15 +1208,18 @@ public partial class ServerTab : UserControl
         ClearChart(ExecutionCountTrendChart);
         ApplyTheme(ExecutionCountTrendChart);
 
-        if (data.Count == 0) { RefreshEmptyChart(ExecutionCountTrendChart, "Executions", "Executions/sec"); return; }
+        /* #3541 A12: the window's first collection carries a null rate (nothing to difference against) and
+           a chart has nowhere to draw "unknown" — it is skipped, not plotted as the 0 it used to be. */
+        var rated = data.Where(d => d.HasRate).ToList();
+        if (rated.Count == 0) { RefreshEmptyChart(ExecutionCountTrendChart, "Executions", "Executions/sec"); return; }
 
         DateTime rangeEnd = toDate ?? DateTime.UtcNow.AddMinutes(UtcOffsetMinutes);
         DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
-        var times = data.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
-        var values = data.Select(d => d.Value).ToArray();
+        var times = rated.Select(d => d.CollectionTime.AddMinutes(UtcOffsetMinutes).ToOADate()).ToArray();
+        var values = rated.Select(d => d.Value!.Value).ToArray();
 
         _executionCountTrendHover?.Clear();
         var plot = ExecutionCountTrendChart.Plot.Add.TimeSeries(times, values);

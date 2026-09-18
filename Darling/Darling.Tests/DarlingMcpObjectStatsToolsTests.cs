@@ -110,8 +110,12 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
             "GROUP BY database_name, schema_name, table_name",
             sql,
             "the rollup is no longer per table");
-        Assert.Contains("growth_7d_mb", sql, StringComparison.Ordinal);
-        Assert.Contains("growth_30d_mb", sql, StringComparison.Ordinal);
+        /* #3541 A12: the growth figures are no longer derived in SQL — the raw baselines come back as their own
+           nullable columns and ObjectSizeGrowthRow derives each figure from exactly the baseline it names
+           (McpZeroIsAMeasurementTests pins the fold's absence and the derivations). */
+        Assert.Contains("reserved_mb_7d_ago", sql, StringComparison.Ordinal);
+        Assert.Contains("reserved_mb_30d_ago", sql, StringComparison.Ordinal);
+        Assert.Contains("reserved_mb_oldest", sql, StringComparison.Ordinal);
         SqlTextPin.AssertExpresses("ORDER BY l.current_reserved_mb DESC", sql, "the biggest table no longer sorts first");
     }
 

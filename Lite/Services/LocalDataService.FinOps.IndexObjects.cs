@@ -22,10 +22,20 @@ public partial class LocalDataService
     // ============================================
 
     /// <summary>
-    /// Per-table size and growth (indexes rolled up per table) for a server, comparing the
-    /// latest snapshot to 7d/30d ago, with a daily growth rate over the available history.
+    /// Per-table size and growth (indexes rolled up per table) for a server: the latest snapshot's sizes
+    /// beside the same table's reserved size at the newest snapshot at/older than 7 and 30 days and at the
+    /// store's earliest snapshot, projected RAW (#3541 A12). The growth figures are derived on
+    /// <see cref="ObjectSizeGrowthBaselineRow"/>, where each can refuse when its baseline does not exist.
+    /// <para>The SQL this replaced derived them here through <c>COALESCE(p30, p7, oldest, current)</c>, which
+    /// is three lies in one expression: with ten days of history "30-day growth" was growth since the
+    /// SEVEN-day snapshot; with two days it was growth since the oldest snapshot, still labelled 30d; and a
+    /// table absent from every baseline (created this week) fell through to <c>current - current = 0</c>,
+    /// "not growing", for the one table that is nothing BUT growth. The two cutoff snapshots are resolved
+    /// once in <c>boundaries</c> with <c>FILTER</c> so the baseline CTEs and the projected snapshot times
+    /// cannot disagree about which capture was used. Darling's <c>DarlingObjectStatsReader.ObjectSizeGrowthSql</c>
+    /// is the twin.</para>
     /// </summary>
-    public async Task<List<ObjectSizeGrowthRow>> GetObjectSizeGrowthAsync(int serverId, int topN = 100)
+    public async Task<List<ObjectSizeGrowthBaselineRow>> GetObjectSizeGrowthAsync(int serverId, int topN = 100)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -39,7 +49,9 @@ WITH boundaries AS (
     SELECT
         MAX(collection_time) AS latest_time,
         MIN(collection_time) AS earliest_time,
-        CAST(MAX(collection_time) AS DATE) - CAST(MIN(collection_time) AS DATE) AS days_of_data
+        CAST(MAX(collection_time) AS DATE) - CAST(MIN(collection_time) AS DATE) AS days_of_data,
+        MAX(collection_time) FILTER (WHERE collection_time <= $2) AS snapshot_7d_time,
+        MAX(collection_time) FILTER (WHERE collection_time <= $3) AS snapshot_30d_time
     FROM v_index_object_stats
     WHERE server_id = $1
 ),
@@ -56,15 +68,13 @@ latest AS (
 past_7d AS (
     SELECT database_name, schema_name, table_name, SUM(reserved_mb) AS reserved_mb
     FROM v_index_object_stats
-    WHERE server_id = $1 AND collection_time = (
-        SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1 AND collection_time <= $2)
+    WHERE server_id = $1 AND collection_time = (SELECT snapshot_7d_time FROM boundaries)
     GROUP BY database_name, schema_name, table_name
 ),
 past_30d AS (
     SELECT database_name, schema_name, table_name, SUM(reserved_mb) AS reserved_mb
     FROM v_index_object_stats
-    WHERE server_id = $1 AND collection_time = (
-        SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1 AND collection_time <= $3)
+    WHERE server_id = $1 AND collection_time = (SELECT snapshot_30d_time FROM boundaries)
     GROUP BY database_name, schema_name, table_name
 ),
 oldest AS (
@@ -81,15 +91,14 @@ SELECT
     l.current_used_mb,
     l.total_rows,
     l.index_count,
-    l.current_reserved_mb - COALESCE(p7.reserved_mb, o.reserved_mb, l.current_reserved_mb) AS growth_7d_mb,
-    l.current_reserved_mb - COALESCE(p30.reserved_mb, p7.reserved_mb, o.reserved_mb, l.current_reserved_mb) AS growth_30d_mb,
-    CASE WHEN b.days_of_data >= 1
-         THEN (l.current_reserved_mb - COALESCE(o.reserved_mb, l.current_reserved_mb)) / CAST(b.days_of_data AS DOUBLE PRECISION)
-         ELSE 0 END AS daily_growth_rate_mb,
-    CASE WHEN COALESCE(p30.reserved_mb, p7.reserved_mb, o.reserved_mb) > 0
-         THEN (l.current_reserved_mb - COALESCE(p30.reserved_mb, p7.reserved_mb, o.reserved_mb)) * 100.0
-              / COALESCE(p30.reserved_mb, p7.reserved_mb, o.reserved_mb)
-         ELSE 0 END AS growth_pct_30d
+    p7.reserved_mb AS reserved_mb_7d_ago,
+    p30.reserved_mb AS reserved_mb_30d_ago,
+    o.reserved_mb AS reserved_mb_oldest,
+    b.snapshot_7d_time,
+    b.snapshot_30d_time,
+    b.earliest_time,
+    b.latest_time,
+    b.days_of_data
 FROM latest l
 CROSS JOIN boundaries b
 LEFT JOIN past_7d p7 ON p7.database_name = l.database_name AND p7.schema_name = l.schema_name AND p7.table_name = l.table_name
@@ -102,11 +111,11 @@ LIMIT {topN}";
         command.Parameters.Add(new DuckDBParameter { Value = cutoff7d });
         command.Parameters.Add(new DuckDBParameter { Value = cutoff30d });
 
-        var items = new List<ObjectSizeGrowthRow>();
+        var items = new List<ObjectSizeGrowthBaselineRow>();
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            items.Add(new ObjectSizeGrowthRow
+            items.Add(new ObjectSizeGrowthBaselineRow
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 SchemaName = reader.IsDBNull(1) ? "" : reader.GetString(1),
@@ -115,10 +124,15 @@ LIMIT {topN}";
                 CurrentUsedMb = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
                 TotalRows = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
                 IndexCount = reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6)),
-                Growth7dMb = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)),
-                Growth30dMb = reader.IsDBNull(8) ? 0m : Convert.ToDecimal(reader.GetValue(8)),
-                DailyGrowthRateMb = reader.IsDBNull(9) ? 0m : Convert.ToDecimal(reader.GetValue(9)),
-                GrowthPct30d = reader.IsDBNull(10) ? 0m : Convert.ToDecimal(reader.GetValue(10))
+                /* The baselines stay NULL when the store has none — a missing baseline is not a 0 baseline. */
+                ReservedMb7dAgo = reader.IsDBNull(7) ? null : Convert.ToDecimal(reader.GetValue(7)),
+                ReservedMb30dAgo = reader.IsDBNull(8) ? null : Convert.ToDecimal(reader.GetValue(8)),
+                ReservedMbOldest = reader.IsDBNull(9) ? null : Convert.ToDecimal(reader.GetValue(9)),
+                Snapshot7dTime = reader.IsDBNull(10) ? null : reader.GetDateTime(10),
+                Snapshot30dTime = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+                EarliestSnapshotTime = reader.GetDateTime(12),
+                LatestSnapshotTime = reader.GetDateTime(13),
+                DaysOfData = Convert.ToInt32(reader.GetValue(14)),
             });
         }
         return items;
@@ -547,6 +561,61 @@ public class ObjectSizeGrowthRow
     public decimal Growth30dMb { get; set; }
     public decimal DailyGrowthRateMb { get; set; }
     public decimal GrowthPct30d { get; set; }
+}
+
+/// <summary>
+/// One per-table size + growth row for the MCP read, carrying the raw baselines the growth figures derive
+/// from (#3541 A12, contract rule 5): a nominal window the store cannot reach is not a smaller window, it is
+/// no measurement, and each derived property below refuses (null) rather than substituting a nearer baseline
+/// or a 0. A separate class from <see cref="ObjectSizeGrowthRow"/> because that one is the FinOps heatmap
+/// drill's grid row (#1138), whose growth is a single window it sets directly. Darling's
+/// <c>DarlingObjectStatsReader.ObjectSizeGrowthRow</c> derives the same figures by the same rules.
+/// </summary>
+public class ObjectSizeGrowthBaselineRow
+{
+    public string DatabaseName { get; set; } = "";
+    public string SchemaName { get; set; } = "";
+    public string TableName { get; set; } = "";
+    public decimal CurrentReservedMb { get; set; }
+    public decimal CurrentUsedMb { get; set; }
+    public long TotalRows { get; set; }
+    public int IndexCount { get; set; }
+
+    /// <summary>Reserved MB at the newest snapshot at/before the 7-day cutoff; null when no such snapshot exists or the table was not in it.</summary>
+    public decimal? ReservedMb7dAgo { get; set; }
+    /// <summary>Same for the 30-day cutoff.</summary>
+    public decimal? ReservedMb30dAgo { get; set; }
+    /// <summary>Reserved MB at the store's EARLIEST snapshot; null when the table was not in it (created since).</summary>
+    public decimal? ReservedMbOldest { get; set; }
+    /// <summary>The snapshot the 7-day baseline was read from; null when the store holds nothing that old.</summary>
+    public DateTime? Snapshot7dTime { get; set; }
+    /// <summary>Same for 30 days.</summary>
+    public DateTime? Snapshot30dTime { get; set; }
+    public DateTime EarliestSnapshotTime { get; set; }
+    public DateTime LatestSnapshotTime { get; set; }
+    /// <summary>Whole calendar days between the earliest and latest snapshots. 0 means one day of snapshots: no growth is knowable.</summary>
+    public int DaysOfData { get; set; }
+
+    /// <summary>Growth since the 7-day baseline; null when there is no such baseline for this table.</summary>
+    public decimal? Growth7dMb => ReservedMb7dAgo is { } b ? CurrentReservedMb - b : null;
+
+    /// <summary>Growth since the 30-day baseline; null when there is no such baseline for this table.</summary>
+    public decimal? Growth30dMb => ReservedMb30dAgo is { } b ? CurrentReservedMb - b : null;
+
+    /// <summary>Percent growth over the 30-day baseline; null without a baseline, and null on a 0 baseline
+    /// (no denominator — a table that was empty 30 days ago has no ratio, not an infinite one).</summary>
+    public decimal? GrowthPct30d => ReservedMb30dAgo is > 0 ? (CurrentReservedMb - ReservedMb30dAgo.Value) * 100m / ReservedMb30dAgo.Value : null;
+
+    /// <summary>Growth since the store's earliest snapshot — the honest figure when the nominal windows are out
+    /// of reach. Null when the store holds a single day (no span) or the table was not in the earliest snapshot.</summary>
+    public decimal? GrowthOverAvailableHistoryMb => DaysOfData >= 1 && ReservedMbOldest is { } o ? CurrentReservedMb - o : null;
+
+    /// <summary>Percent form of <see cref="GrowthOverAvailableHistoryMb"/>; null on a 0 baseline.</summary>
+    public decimal? GrowthOverAvailableHistoryPct =>
+        DaysOfData >= 1 && ReservedMbOldest is > 0 ? (CurrentReservedMb - ReservedMbOldest.Value) * 100m / ReservedMbOldest.Value : null;
+
+    /// <summary>MB per day over the available span; null when there is no span to divide by.</summary>
+    public decimal? DailyGrowthRateMb => GrowthOverAvailableHistoryMb is { } g ? g / DaysOfData : null;
 }
 
 /// <summary>Per-index usage with unused/write-only classification.</summary>

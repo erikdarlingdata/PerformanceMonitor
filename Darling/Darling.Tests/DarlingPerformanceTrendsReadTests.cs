@@ -125,9 +125,11 @@ public sealed class DarlingPerformanceTrendsReadTests
                 This is the whole reason executions_per_second exists.
 
                 These rows carry no sample_interval_seconds (the pre-V128 shape), so the read LAG-derives
-                the interval — and since V128 (#3540) the FIRST snapshot, which has nothing to LAG against,
-                is absent rather than a fabricated 0.0 point (the correction V127 made for the wait trends).
-                One point comes back: the second snapshot, whose rate is the thing under test.
+                the interval — and the FIRST snapshot, which has nothing to LAG against, is UNRATED: two
+                points come back, the first with null rates (#3541 A12 — kept, not dropped, so a lone
+                collection is never an empty series and effective_start is the first collection the store
+                held; never the fabricated 0.0 it was before #3540), the envelope counting it and saying
+                why, and the second carrying the rate under test.
             */
             await SeedProcedureAsync(connection, ct, MinutesAgo(20), executions: 0, elapsedUs: 0);
             await SeedProcedureAsync(connection, ct, MinutesAgo(15), executions: 2, elapsedUs: 600_000);
@@ -135,9 +137,17 @@ public sealed class DarlingPerformanceTrendsReadTests
             var procs = JsonDocument.Parse(
                 await DarlingMcpTrendTools.GetProcedureDurationTrend(postgres, ServerName, 4)).RootElement;
             var procTrend = procs.GetProperty("trend");
-            Assert.Equal(1, procTrend.GetArrayLength());
+            Assert.Equal(2, procTrend.GetArrayLength());
 
-            var second = procTrend[0];
+            var first = procTrend[0];
+            Assert.Equal(JsonValueKind.Null, first.GetProperty("value").ValueKind);
+            Assert.Equal(JsonValueKind.Null, first.GetProperty("elapsed_ms_per_second").ValueKind);
+            Assert.Equal(JsonValueKind.Null, first.GetProperty("execution_count").ValueKind);
+            Assert.Equal(JsonValueKind.Null, first.GetProperty("executions_per_second").ValueKind);
+            Assert.Equal(1, procs.GetProperty("unrated_points").GetInt32());
+            Assert.Contains("no previous one inside the window", procs.GetProperty("unrated_note").GetString()!, StringComparison.Ordinal);
+
+            var second = procTrend[1];
             Assert.True(second.GetProperty("value").GetDouble() > 0, "elapsed ms/sec must be a real rate");
             Assert.Equal(0, second.GetProperty("execution_count").GetInt64());
             Assert.True(
@@ -151,11 +161,11 @@ public sealed class DarlingPerformanceTrendsReadTests
             /*
                 #3541 A2: the disclosure block. A 4-hour window anchored at now sits inside the raw horizon
                 (the shared fixture carries no continuous aggregates — every test that builds them mints a
-                ScratchPostgres — so raw is also the only tier here), and the series the read SERVED begins
-                at its first point — the 15-minutes-ago seed, since V128 dropped the prior-less first
-                snapshot: effective_start says so, and the head sits three-plus hours past the requested
-                start, which is what `truncated` means. The point is that the label matches the data rather
-                than the request.
+                ScratchPostgres — so raw is also the only tier here), and the series the store held begins
+                at the 20-minutes-ago seed — the unrated first collection, kept since #3541 A12 exactly so
+                effective_start can say so — and the head sits three-plus hours past the requested start,
+                which is what `truncated` means. The point is that the label matches the data rather than
+                the request.
             */
             Assert.Equal("raw", procs.GetProperty("source").GetString());
             Assert.Equal("per-collection", procs.GetProperty("bucket").GetString());
@@ -187,10 +197,13 @@ public sealed class DarlingPerformanceTrendsReadTests
                 await DarlingMcpTrendTools.GetQueryStoreDurationTrend(postgres, ServerName, 6)).RootElement;
             var storeTrend = store.GetProperty("trend");
 
-            /* Four rows in, two points out — one per interval, not one per fetch. */
+            /* Four rows in, two points out — one per interval, not one per fetch. The first interval has no
+               predecessor to difference against, so its rates are null, not 0 (#3541 A12). */
             Assert.Equal(2, storeTrend.GetArrayLength());
             Assert.StartsWith(intervalA.ToString("o")[..16], storeTrend[0].GetProperty("time").GetString()!, StringComparison.Ordinal);
+            Assert.Equal(JsonValueKind.Null, storeTrend[0].GetProperty("executions_per_second").ValueKind);
             Assert.StartsWith(intervalB.ToString("o")[..16], storeTrend[1].GetProperty("time").GetString()!, StringComparison.Ordinal);
+            Assert.Equal(1, store.GetProperty("unrated_points").GetInt32());
 
             /*
                 The surviving snapshot is the FINAL one (25 executions over the 3600 seconds between the two
@@ -284,7 +297,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
 ///
 /// <para>Live rather than a string pin because the load-bearing claims are about which RELATION answered
 /// and what it computed: that the rollup-served point is the hour's summed work over the bucket width
-/// (no LAG, so no fabricated first-point zero), that the payload's <c>source</c> / <c>effective_start</c> /
+/// (no LAG, so no first-point question at all), that the payload's <c>source</c> / <c>effective_start</c> /
 /// <c>truncated</c> describe the served series rather than the request, and that the empty branch on this
 /// route names an unserved head instead of a quiet window. The raw-only read of the SAME fixture is
 /// asserted beside it as the revert-proof: put the raw-only read back and the rates, the point count and
@@ -397,18 +410,24 @@ public sealed class DarlingPerformanceTrendsTierRoutingLiveTests
         Assert.Equal(0.1, procedureTrend[1].GetProperty("value").GetDouble(), 9);
 
         /* ── the raw-only read of the SAME fixture: the estimator this replaced, and the revert-proof.
-              Three per-collection points, the first rated ZERO because the LAG idiom has no previous
-              collection to difference against — the fabricated quiet the bucket-width denominator does not
-              produce. Restoring the raw-only read unconditionally fails the count, the rates and the
-              `source` word above, not just a routing flag. ── */
+              Three per-collection points, the first UNRATED (null) because the LAG idiom has no previous
+              collection to difference against — before #3541 A12 that point was published as a fabricated
+              0.0, the quiet instant the bucket-width denominator never produced. Restoring the raw-only
+              read unconditionally fails the count, the rates and the `source` word above, not just a
+              routing flag; restoring the ELSE 0 fails the null here. ── */
         var rawRoute = route with { Tier = RetentionTier.Raw };
         var raw = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, ServerId, hour10.AddHours(-4), hour12, rawRoute, ct);
 
         Assert.Equal(3, raw.Points.Count);
         Assert.Equal(hour10.AddMinutes(5), raw.Points[0].CollectionTime);
-        Assert.Equal(0, raw.Points[0].Value);
-        Assert.Equal(8.0, raw.Points[1].Value, 9);                 /* 7,200 ms over the 900 s since 10:05 */
-        Assert.Equal(1800d / 3300d, raw.Points[2].Value, 9);      /* 1,800 ms over the 3,300 s since 10:20 */
+        Assert.False(raw.Points[0].HasRate);
+        Assert.Null(raw.Points[0].Value);
+        Assert.Null(raw.Points[0].ExecutionCount);
+        Assert.Null(raw.Points[0].ExecutionsPerSecond);
+        Assert.Equal(8.0, raw.Points[1].Value!.Value, 9);                 /* 7,200 ms over the 900 s since 10:05 */
+        Assert.Equal(1800d / 3300d, raw.Points[2].Value!.Value, 9);      /* 1,800 ms over the 3,300 s since 10:20 */
+        /* The unrated point is KEPT, so the series still says truthfully where the store's data begins. */
+        Assert.Equal(hour10.AddMinutes(5), raw.EffectiveStartUtc);
         Assert.Equal("raw", rawRoute.Source);
 
         /* ── never sampled on this route: not an empty window. The raw probe finds nothing and so does the

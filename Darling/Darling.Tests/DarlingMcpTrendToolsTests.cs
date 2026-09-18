@@ -206,9 +206,13 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
 
     /// <summary>
     /// #3540 (V128): the procedure trend reads the collection's STORED interval — MAX over the collection's
-    /// rows, 0 → NULL through NULLIF so a restart's marker collection drops rather than plotting 0.00 — and
-    /// falls back to the LAG derivation only for a pre-V128 collection. No ELSE 0. Byte-identical to the
-    /// viewer's copy apart from the database filter, as the pair always were.
+    /// rows, 0 → NULL through NULLIF so a restart's marker collection has no rate rather than plotting 0.00 —
+    /// and falls back to the LAG derivation only for a pre-V128 collection. No ELSE 0. Byte-identical to the
+    /// viewer's copy apart from the database filter, as the pair always were. The C# half: since #3541 A12
+    /// the MCP reader KEEPS the NULL-rate row as an unrated point (<c>QueryDurationTrendPoint.HasRate</c>
+    /// false) rather than dropping it — a lone collection must not become an empty series the empty ladder
+    /// mislabels as quiet, and <c>effective_start</c> must be the first collection the store held. The viewer's
+    /// chart reader is the one that drops, because a chart has nowhere to draw "unknown".
     /// </summary>
     [Fact]
     public void ProcedureDurationTrendSql_PrefersTheStoredInterval_NeverFabricatesZero_AndMirrorsTheViewer()
@@ -228,13 +232,15 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         var mcp = string.Join('\n', sql.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n').Select(l => l.Trim()));
         Assert.Equal(viewer, mcp);
 
-        /* And the shared reader DROPS a NULL-rate row rather than reading it as 0 — the C# half of the idiom. */
+        /* And the shared reader KEEPS a NULL-rate row as an unrated point rather than reading it as 0 or
+           dropping it — the C# half of the idiom (#3541 A12). */
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingTrendReader.cs");
         var reader = source[source.IndexOf("private static async Task<List<QueryDurationTrendPoint>> ReadDurationPointsAsync(", StringComparison.Ordinal)..];
         reader = reader[..reader.IndexOf("return items;", StringComparison.Ordinal)];
-        Assert.Contains("if (reader.IsDBNull(1))", reader, StringComparison.Ordinal);
-        Assert.Contains("continue;", reader, StringComparison.Ordinal);
+        Assert.Contains("reader.IsDBNull(1) ? null", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("continue;", reader, StringComparison.Ordinal);
         Assert.DoesNotContain("reader.IsDBNull(1) ? 0", reader, StringComparison.Ordinal);
+        Assert.Equal(typeof(double?), typeof(DarlingTrendReader.QueryDurationTrendPoint).GetProperty("Value")!.PropertyType);
     }
 
     /// <summary>

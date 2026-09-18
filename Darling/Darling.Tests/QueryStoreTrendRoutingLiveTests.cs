@@ -130,18 +130,20 @@ public sealed class QueryStoreTrendRoutingLiveTests
         /* 10:00 — rollup bucket: interval P only (21, once). Interval M ran at 10:00 but was FETCHED at
            11:00, so the rollup charges it to 11:00 — the collection-hour placement the payload discloses. */
         Assert.Equal(hour10, points[0].CollectionTime);
+        /* The first united point has no predecessor to difference against: null, not 0 (#3541 A12). */
+        Assert.False(points[0].HasRate);
 
         /* 11:00 — rollup bucket: M's final snapshot (40) + N's (25) = 65 executions over the 3,600 seconds
            since the previous point. Un-deduped this hour would be 10+40+5+25 = 80 — the rank the rollup
            already did. */
         Assert.Equal(hour11, points[1].CollectionTime);
-        Assert.Equal(65d / 3600d, points[1].ExecutionsPerSecond, 6);
-        Assert.Equal(((40d * 100d + 25d * 200d) / 1000d) / 3600d, points[1].Value, 6);
+        Assert.Equal(65d / 3600d, points[1].ExecutionsPerSecond!.Value, 6);
+        Assert.Equal(((40d * 100d + 25d * 200d) / 1000d) / 3600d, points[1].Value!.Value, 6);
 
         /* 12:00 — the raw tail: interval T deduped to its final snapshot (9, not 3+9), placed at its
            interval start, rated over the seam to the last rollup bucket. */
         Assert.Equal(hour12, points[2].CollectionTime);
-        Assert.Equal(9d / 3600d, points[2].ExecutionsPerSecond, 6);
+        Assert.Equal(9d / 3600d, points[2].ExecutionsPerSecond!.Value, 6);
 
         /* ── the raw-only route on the SAME fixture: the estimator this replaced. Interval M lands at its
               interval START (10:00 — so that hour reads 21+40=61) and the 11:00 point carries only N. This
@@ -152,9 +154,11 @@ public sealed class QueryStoreTrendRoutingLiveTests
 
         Assert.Equal(3, rawPoints.Count);
         Assert.Equal(hour10, rawPoints[0].CollectionTime);
+        /* The first united point has no predecessor to difference against: null, not 0 (#3541 A12). */
+        Assert.False(rawPoints[0].HasRate);
         Assert.Equal(hour11, rawPoints[1].CollectionTime);
-        Assert.Equal(25d / 3600d, rawPoints[1].ExecutionsPerSecond, 6);
-        Assert.Equal(9d / 3600d, rawPoints[2].ExecutionsPerSecond, 6);
+        Assert.Equal(25d / 3600d, rawPoints[1].ExecutionsPerSecond!.Value, 6);
+        Assert.Equal(9d / 3600d, rawPoints[2].ExecutionsPerSecond!.Value, 6);
 
         /* ── the MCP payload discloses the routing: which relation served which region, and that the
               window's head reaches below the rollup's floor ── */
@@ -223,9 +227,13 @@ public sealed class QueryStoreTrendRoutingLiveTests
         Assert.Equal("rollup+raw", tailOnly.GetProperty("source").GetString());
         Assert.StartsWith("2026-03-04T12:00:00", tailOnly.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
         Assert.False(tailOnly.GetProperty("truncated").GetBoolean());
-        Assert.Equal(
-            tailOnly.GetProperty("trend")[0].GetProperty("value").GetDouble(),
-            tailOnly.GetProperty("trend")[0].GetProperty("elapsed_ms_per_second").GetDouble());
+        /* #3541 A12: a lone point has nothing to difference against, so it is UNRATED — `value` and its named
+           twin are both null (this assertion used to compare two fabricated zeros), the point is still
+           there (so effective_start above is truthful), and the envelope says why. */
+        Assert.Equal(JsonValueKind.Null, tailOnly.GetProperty("trend")[0].GetProperty("value").ValueKind);
+        Assert.Equal(JsonValueKind.Null, tailOnly.GetProperty("trend")[0].GetProperty("elapsed_ms_per_second").ValueKind);
+        Assert.Equal(1, tailOnly.GetProperty("unrated_points").GetInt32());
+        Assert.Contains("Unknowable is not 0", tailOnly.GetProperty("unrated_note").GetString()!, StringComparison.Ordinal);
     }
 
     /// <summary>

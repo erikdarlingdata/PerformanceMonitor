@@ -286,10 +286,16 @@ public sealed partial class ViewerDataService
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* #3541 A12: the shared builder returns NULL rates for the window's first united point (its LAG
+               has nothing to difference against). A chart has nowhere to draw "unknown", so the point is
+               skipped here rather than coerced to the 0 it used to be plotted as. */
+            if (reader.IsDBNull(1))
+                continue;
+
             items.Add(new QueryTrendPoint
             {
                 CollectionTime = reader.GetDateTime(0),
-                Value = reader.IsDBNull(1) ? 0 : Convert.ToDouble(reader.GetValue(1)),
+                Value = Convert.ToDouble(reader.GetValue(1)),
                 ExecutionCount = reader.IsDBNull(2) ? 0 : (long)Convert.ToDouble(reader.GetValue(2)),
             });
         }
