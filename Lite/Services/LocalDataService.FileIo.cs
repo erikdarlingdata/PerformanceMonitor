@@ -35,7 +35,8 @@ SELECT
     delta_write_bytes,
     delta_stall_read_ms,
     delta_stall_write_ms,
-    sample_interval_seconds
+    sample_interval_seconds,
+    collection_time
 FROM v_file_io_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM v_file_io_stats WHERE server_id = $1)
@@ -60,7 +61,8 @@ ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC";
                 DeltaWriteBytes = reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
                 DeltaStallReadMs = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
                 DeltaStallWriteMs = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
-                SampleIntervalSeconds = reader.IsDBNull(11) ? null : reader.GetInt32(11)
+                SampleIntervalSeconds = reader.IsDBNull(11) ? null : reader.GetInt32(11),
+                CollectionTime = reader.GetDateTime(12)
             });
         }
 
@@ -313,6 +315,9 @@ public class FileIoThroughputPoint
 
 public class FileIoRow
 {
+    /// <summary>The snapshot this row belongs to (#3541 A10); the deltas cover the
+    /// <see cref="SampleIntervalSeconds"/> ending here.</summary>
+    public DateTime CollectionTime { get; set; }
     public string DatabaseName { get; set; } = "";
     public string FileName { get; set; } = "";
     public string FileType { get; set; } = "";

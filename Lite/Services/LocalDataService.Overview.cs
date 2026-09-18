@@ -27,7 +27,9 @@ public partial class LocalDataService
         double? cpuPercent = null;
         double? otherProcessCpuPercent = null;
         DateTime? cpuSampleTime = null;
+        DateTime? cpuCollectionTime = null;
         double? memoryMb = null;
+        DateTime? memoryCollectionTime = null;
         int blockingCount = 0;
         int deadlockCount = 0;
         DateTime? lastCollection = null;
@@ -37,7 +39,7 @@ public partial class LocalDataService
         using (var cmd = connection.CreateCommand())
         {
             cmd.CommandText = @"
-SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time
+SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time, collection_time
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 ORDER BY sample_time DESC
@@ -54,6 +56,11 @@ LIMIT 1";
                    this one is the CPU persistence gate's observation identity and must stay the instant of
                    the CPU reading these percentages came from. */
                 cpuSampleTime = lastCollection;
+                /* #3541 A10: the store's UTC clock for the same row — the stamp get_server_summary publishes
+                   as cpu_captured_at. sample_time above is the monitored server's local wall clock and the
+                   gate's identity; collection_time is the instant the monitor stored it, comparable with every
+                   other captured_at on the MCP surface. */
+                cpuCollectionTime = reader.IsDBNull(3) ? null : reader.GetDateTime(3);
             }
         }
 
@@ -61,7 +68,7 @@ LIMIT 1";
         using (var cmd = connection.CreateCommand())
         {
             cmd.CommandText = @"
-SELECT total_server_memory_mb
+SELECT total_server_memory_mb, collection_time
 FROM v_memory_stats
 WHERE server_id = $1
 ORDER BY collection_time DESC
@@ -71,6 +78,7 @@ LIMIT 1";
             if (await reader.ReadAsync())
             {
                 memoryMb = reader.IsDBNull(0) ? null : ToDouble(reader.GetValue(0));
+                memoryCollectionTime = reader.GetDateTime(1);
             }
         }
 
@@ -124,7 +132,9 @@ WHERE server_id = $1";
             CpuPercent = cpuPercent,
             OtherProcessCpuPercent = otherProcessCpuPercent,
             CpuSampleTime = cpuSampleTime,
+            CpuCollectionTime = cpuCollectionTime,
             MemoryMb = memoryMb,
+            MemoryCollectionTime = memoryCollectionTime,
             BlockingCount = blockingCount,
             DeadlockCount = deadlockCount,
             LastCollectionTime = lastCollection
@@ -284,6 +294,15 @@ public class ServerSummaryItem
     /// freshness band is computed from.
     /// </summary>
     public DateTime? CpuSampleTime { get; set; }
+
+    /// <summary>The store's <c>collection_time</c> for the CPU row <see cref="CpuPercent"/> came from (#3541
+    /// A10) — the stamp get_server_summary publishes as <c>cpu_captured_at</c>. UTC, comparable with every other
+    /// captured_at; <see cref="CpuSampleTime"/> is the monitored server's local clock and the gate's identity.</summary>
+    public DateTime? CpuCollectionTime { get; set; }
+
+    /// <summary>The store's <c>collection_time</c> for the memory row <see cref="MemoryMb"/> came from (#3541
+    /// A10) — get_server_summary's <c>memory_captured_at</c>.</summary>
+    public DateTime? MemoryCollectionTime { get; set; }
     /// <summary>Total non-idle CPU on the host = sql_server + other_process. Tracks closer to OS user+system counters.</summary>
     public double? TotalCpuPercent =>
         CpuPercent.HasValue ? CpuPercent.Value + (OtherProcessCpuPercent ?? 0) : null;

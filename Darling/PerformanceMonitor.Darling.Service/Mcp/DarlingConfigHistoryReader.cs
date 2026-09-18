@@ -200,19 +200,21 @@ internal static class DarlingConfigHistoryReader
     /* ─────────────────────────── database scoped config (latest snapshot) ─────────────────────────── */
 
     /// <summary>The latest sys.database_scoped_configurations snapshot — the viewer's
-    /// <c>DatabaseScopedConfigSql</c>. $1 server_id.</summary>
+    /// <c>DatabaseScopedConfigSql</c> plus the trailing <c>capture_time</c> (#3541 A10: captured on connect, so
+    /// the tool must be able to say how old "current" is). $1 server_id.</summary>
     public const string DatabaseScopedConfigSql = """
-        SELECT database_name, configuration_name, value, value_for_secondary
+        SELECT database_name, configuration_name, value, value_for_secondary, capture_time
         FROM v_database_scoped_config
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_database_scoped_config WHERE server_id = $1)
         ORDER BY database_name, configuration_name
         """;
 
-    public static async Task<List<DatabaseScopedConfigReadRow>> GetLatestDatabaseScopedConfigAsync(
+    public static async Task<LatestSnapshot<DatabaseScopedConfigReadRow>> GetLatestDatabaseScopedConfigAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         var rows = new List<DatabaseScopedConfigReadRow>();
+        DateTime? capturedAt = null;
         await using var command = postgres.CreateCommand(DatabaseScopedConfigSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
@@ -224,9 +226,10 @@ internal static class DarlingConfigHistoryReader
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetString(2),
                 reader.IsDBNull(3) ? null : reader.GetString(3)));
+            capturedAt ??= reader.GetDateTime(4);
         }
 
-        return rows;
+        return new LatestSnapshot<DatabaseScopedConfigReadRow>(capturedAt, rows);
     }
 
     /* ─────────────────────────── query store health (latest snapshot) ─────────────────────────── */
@@ -236,17 +239,18 @@ internal static class DarlingConfigHistoryReader
     /// scoped-config read above). Unlike the config-family reads this table is HOURLY, not on-connect,
     /// so "latest" here is at most an hour old on a healthy schedule. $1 server_id.</summary>
     public const string QueryStoreHealthSql = """
-        SELECT database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes
+        SELECT database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, capture_time
         FROM v_query_store_health
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)
         ORDER BY database_name
         """;
 
-    public static async Task<List<QueryStoreHealthReadRow>> GetLatestQueryStoreHealthAsync(
+    public static async Task<LatestSnapshot<QueryStoreHealthReadRow>> GetLatestQueryStoreHealthAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         var rows = new List<QueryStoreHealthReadRow>();
+        DateTime? capturedAt = null;
         await using var command = postgres.CreateCommand(QueryStoreHealthSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
@@ -264,8 +268,9 @@ internal static class DarlingConfigHistoryReader
                 reader.IsDBNull(7) ? 0L : reader.GetInt64(7),
                 reader.IsDBNull(8) ? 0L : reader.GetInt64(8),
                 reader.IsDBNull(9) ? 0L : reader.GetInt64(9)));
+            capturedAt ??= reader.GetDateTime(10);
         }
 
-        return rows;
+        return new LatestSnapshot<QueryStoreHealthReadRow>(capturedAt, rows);
     }
 }

@@ -158,7 +158,8 @@ WITH latest AS
 SELECT
     COALESCE(SUM(total_plans), 0) AS total_plans,
     COALESCE(SUM(single_use_plans), 0) AS single_use_plans,
-    MIN(oldest_plan_create_time) AS oldest_plan_create_time
+    MIN(oldest_plan_create_time) AS oldest_plan_create_time,
+    (SELECT mx FROM latest) AS collection_time
 FROM v_plan_cache_stats
 WHERE server_id = $1
 AND   collection_time = (SELECT mx FROM latest)";
@@ -177,7 +178,10 @@ AND   collection_time = (SELECT mx FROM latest)";
         {
             TotalPlans = reader.IsDBNull(0) ? 0 : ToInt64(reader.GetValue(0)),
             SingleUsePlans = reader.IsDBNull(1) ? 0 : ToInt64(reader.GetValue(1)),
-            OldestPlanCreateTime = reader.IsDBNull(2) ? null : reader.GetDateTime(2)
+            OldestPlanCreateTime = reader.IsDBNull(2) ? null : reader.GetDateTime(2),
+            /* #3541 A10: the snapshot's own stamp, from the same `latest` CTE the totals are keyed on. NULL
+               (no snapshot in the window) is the (0, 0, null) empty case the summary already returns. */
+            CollectionTime = reader.IsDBNull(3) ? null : reader.GetDateTime(3)
         };
     }
 
@@ -238,6 +242,8 @@ public class PlanCacheSnapshotRow
 /// and the oldest cached plan's create time.</summary>
 public class PlanCacheSummary
 {
+    /// <summary>The snapshot the totals are of (#3541 A10); null when the window held none.</summary>
+    public DateTime? CollectionTime { get; set; }
     public long TotalPlans { get; set; }
     public long SingleUsePlans { get; set; }
     public DateTime? OldestPlanCreateTime { get; set; }

@@ -284,7 +284,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_memory_stats"), Description("Gets the latest memory statistics snapshot: physical memory, buffer pool size, plan cache size, memory utilization %, and SQL Server memory model. Use this for a quick memory health check; use get_memory_clerks to see detailed breakdown by component.")]
+    [McpServerTool(Name = "get_memory_stats"), Description("Gets the latest memory statistics snapshot: physical memory, buffer pool size, plan cache size, memory utilization %, and SQL Server memory model. Use this for a quick memory health check; use get_memory_clerks to see detailed breakdown by component. LATEST IS A TIME: this reads one snapshot, not a window, and captured_at is the instant that snapshot was collected - read it before treating any figure as current, because the newest row a store holds can be minutes or days old.")]
     public static async Task<string> GetMemoryStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null)
@@ -306,7 +306,8 @@ public sealed class DarlingMcpDataTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                collection_time = stats.CollectionTime.ToString("o"),
+                /* #3541 A10: the one stamp every latest-snapshot read publishes, under the one name. */
+                captured_at = stats.CollectionTime.ToString("o"),
                 total_physical_memory_mb = stats.TotalPhysicalMemoryMb,
                 available_physical_memory_mb = stats.AvailablePhysicalMemoryMb,
                 memory_utilization_pct = Math.Round(utilization, 1),
@@ -324,7 +325,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_memory_clerks"), Description("Gets the top memory consumers by memory clerk type — shows which SQL Server components are using the most memory.")]
+    [McpServerTool(Name = "get_memory_clerks"), Description("Gets the top memory consumers by memory clerk type — shows which SQL Server components are using the most memory. LATEST IS A TIME: this reads the newest clerk snapshot, not a window, and captured_at is the instant it was collected.")]
     public static async Task<string> GetMemoryClerks(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null)
@@ -334,9 +335,9 @@ public sealed class DarlingMcpDataTools
 
         try
         {
-            var rows = await DarlingDataReader.GetLatestMemoryClerksAsync(postgres, resolved.ServerId);
+            var snapshot = await DarlingDataReader.GetLatestMemoryClerksAsync(postgres, resolved.ServerId);
 
-            if (rows.Count == 0)
+            if (snapshot.IsEmpty)
                 /*
                     ONE branch here, deliberately, and it is the reason this read gets no existence probe.
                     The read is "every clerk at MAX(collection_time)", so zero rows back is logically the
@@ -350,7 +351,7 @@ public sealed class DarlingMcpDataTools
                         "unavailable",
                         $"No memory-clerk snapshot is available for {resolved.ServerName}. This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks. It means nothing the memory_clerks collector stored is still retained, either because it has not run for this server or because its rows have aged out. Check get_collection_health and get_collection_log for the memory_clerks collector.");
 
-            var result = rows.Select(r => new
+            var result = snapshot.Rows.Select(r => new
             {
                 clerk_type = r.ClerkType,
                 memory_mb = Math.Round(r.MemoryMb, 2)
@@ -359,6 +360,7 @@ public sealed class DarlingMcpDataTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                captured_at = snapshot.CapturedAt!.Value.ToString("o"),
                 clerks = result
             }, McpHelpers.JsonOptions);
         }
@@ -368,7 +370,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_file_io_stats"), Description("Gets the latest file I/O statistics per database file: read/write counts, bytes, stall times, and calculated latency. High read latency (>20ms) or write latency (>10ms for data, >2ms for log) often indicates storage bottlenecks. Each row carries sample_interval_seconds, the measured seconds its deltas accrued over; a 0 means no delta was knowable for that file at this collection (first sighting, counter reset, or a gap past the delta policy — typically a restart) and its latencies are null rather than 0.")]
+    [McpServerTool(Name = "get_file_io_stats"), Description("Gets the latest file I/O statistics per database file: read/write counts, bytes, stall times, and calculated latency. High read latency (>20ms) or write latency (>10ms for data, >2ms for log) often indicates storage bottlenecks. Each row carries sample_interval_seconds, the measured seconds its deltas accrued over; a 0 means no delta was knowable for that file at this collection (first sighting, counter reset, or a gap past the delta policy — typically a restart) and its latencies are null rather than 0. LATEST IS A TIME: this reads the newest file-I/O snapshot, not a window, and captured_at is the instant it was collected; the deltas cover the sample_interval_seconds ending there.")]
     public static async Task<string> GetFileIoStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null)
@@ -378,12 +380,12 @@ public sealed class DarlingMcpDataTools
 
         try
         {
-            var rows = await DarlingDataReader.GetLatestFileIoStatsAsync(postgres, resolved.ServerId);
-            if (rows.Count == 0)
+            var snapshot = await DarlingDataReader.GetLatestFileIoStatsAsync(postgres, resolved.ServerId);
+            if (snapshot.IsEmpty)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats")
                     ?? McpHelpers.Status("unavailable", "No file I/O stats available.");
 
-            var result = rows.Select(r => new
+            var result = snapshot.Rows.Select(r => new
             {
                 database_name = r.DatabaseName,
                 file_name = r.FileName,
@@ -409,6 +411,7 @@ public sealed class DarlingMcpDataTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                captured_at = snapshot.CapturedAt!.Value.ToString("o"),
                 files = result
             }, McpHelpers.JsonOptions);
         }
@@ -464,7 +467,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_perfmon_stats"), Description("Gets the latest SQL Server performance counter values: batch requests/sec, compilations/sec, deadlocks/sec, and more. Provides throughput context to distinguish a busy server from a sick one. Use counter_name or instance_name to filter results.")]
+    [McpServerTool(Name = "get_perfmon_stats"), Description("Gets the latest SQL Server performance counter values: batch requests/sec, compilations/sec, deadlocks/sec, and more. Provides throughput context to distinguish a busy server from a sick one. Use counter_name or instance_name to filter results. LATEST IS A TIME: this reads the newest counter snapshot, not a window, and captured_at is the instant it was collected; use get_perfmon_trend for a counter over time.")]
     public static async Task<string> GetPerfmonStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -476,12 +479,12 @@ public sealed class DarlingMcpDataTools
 
         try
         {
-            var rows = await DarlingDataReader.GetLatestPerfmonStatsAsync(postgres, resolved.ServerId);
-            if (rows.Count == 0)
+            var snapshot = await DarlingDataReader.GetLatestPerfmonStatsAsync(postgres, resolved.ServerId);
+            if (snapshot.IsEmpty)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "perfmon_stats")
                     ?? McpHelpers.Status("unavailable", "No perfmon stats available.");
 
-            IEnumerable<DarlingDataReader.PerfmonRow> filtered = rows;
+            IEnumerable<DarlingDataReader.PerfmonRow> filtered = snapshot.Rows;
             if (!string.IsNullOrEmpty(counter_name))
                 filtered = filtered.Where(r => r.CounterName.Contains(counter_name, StringComparison.OrdinalIgnoreCase));
             if (!string.IsNullOrEmpty(instance_name))
@@ -498,6 +501,7 @@ public sealed class DarlingMcpDataTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                captured_at = snapshot.CapturedAt!.Value.ToString("o"),
                 counters = result
             }, McpHelpers.JsonOptions);
         }

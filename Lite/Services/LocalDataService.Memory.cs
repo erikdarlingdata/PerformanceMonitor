@@ -268,8 +268,10 @@ ORDER BY sample_time";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
+        /* #3541 A10: collection_time rides on the row (same statement as the values), so get_memory_clerks
+           can publish captured_at — every clerk of one snapshot shares it by construction. */
         command.CommandText = @"
-SELECT clerk_type, memory_mb
+SELECT clerk_type, memory_mb, collection_time
 FROM v_memory_clerks
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM v_memory_clerks WHERE server_id = $1)
@@ -284,7 +286,8 @@ ORDER BY memory_mb DESC";
             items.Add(new MemoryClerkRow
             {
                 ClerkType = reader.GetString(0),
-                MemoryMb = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1))
+                MemoryMb = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
+                CollectionTime = reader.GetDateTime(2)
             });
         }
 
@@ -321,6 +324,8 @@ public class MemoryTrendPoint
 
 public class MemoryClerkRow
 {
+    /// <summary>The snapshot this clerk row belongs to (#3541 A10); every row of one snapshot shares it.</summary>
+    public DateTime CollectionTime { get; set; }
     public string ClerkType { get; set; } = "";
     public double MemoryMb { get; set; }
     public string MemoryFormatted => MemoryMb >= 1024 ? $"{MemoryMb / 1024:F1} GB" : $"{MemoryMb:F1} MB";

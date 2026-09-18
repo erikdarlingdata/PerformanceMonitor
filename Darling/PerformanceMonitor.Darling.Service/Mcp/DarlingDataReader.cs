@@ -568,19 +568,22 @@ internal static class DarlingDataReader
     /// <summary>
     /// The latest memory-clerk breakdown — Lite's <c>GetLatestMemoryClerksAsync</c>: every clerk at the
     /// newest collection, heaviest first. memory_mb is <c>numeric(18,2)</c> → double precision. $1 server_id.
+    /// <c>collection_time</c> rides along on every row (#3541 A10) so the tool can say WHEN the snapshot it
+    /// serves was taken — the same statement as the rows, never a second read that could stamp the next one.
     /// </summary>
     public const string LatestMemoryClerksSql = """
-        SELECT clerk_type, CAST(memory_mb AS double precision)
+        SELECT clerk_type, CAST(memory_mb AS double precision), collection_time
         FROM v_memory_clerks
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_memory_clerks WHERE server_id = $1)
         ORDER BY memory_mb DESC
         """;
 
-    public static async Task<List<MemoryClerkRow>> GetLatestMemoryClerksAsync(
+    public static async Task<LatestSnapshot<MemoryClerkRow>> GetLatestMemoryClerksAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         var rows = new List<MemoryClerkRow>();
+        DateTime? capturedAt = null;
         await using var command = postgres.CreateCommand(LatestMemoryClerksSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
@@ -590,9 +593,10 @@ internal static class DarlingDataReader
             rows.Add(new MemoryClerkRow(
                 reader.GetString(0),
                 reader.IsDBNull(1) ? 0 : reader.GetDouble(1)));
+            capturedAt ??= reader.GetDateTime(2);
         }
 
-        return rows;
+        return new LatestSnapshot<MemoryClerkRow>(capturedAt, rows);
     }
 
     /* ─────────────────────────── file I/O ─────────────────────────── */
@@ -600,7 +604,8 @@ internal static class DarlingDataReader
     /// <summary>
     /// The latest file-I/O snapshot per database file — Lite's <c>GetLatestFileIoStatsAsync</c>, ordered
     /// by total stall descending; avg latency (stall/op) is computed by the tool. size_mb is
-    /// <c>numeric</c> → double precision; the delta columns are bigint. $1 server_id.
+    /// <c>numeric</c> → double precision; the delta columns are bigint. $1 server_id. <c>collection_time</c>
+    /// is the trailing column (#3541 A10): the snapshot's stamp, read once and published as <c>captured_at</c>.
     /// </summary>
     public const string LatestFileIoStatsSql = """
         SELECT
@@ -615,17 +620,19 @@ internal static class DarlingDataReader
             delta_write_bytes,
             delta_stall_read_ms,
             delta_stall_write_ms,
-            sample_interval_seconds
+            sample_interval_seconds,
+            collection_time
         FROM v_file_io_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_file_io_stats WHERE server_id = $1)
         ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC
         """;
 
-    public static async Task<List<FileIoRow>> GetLatestFileIoStatsAsync(
+    public static async Task<LatestSnapshot<FileIoRow>> GetLatestFileIoStatsAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         var rows = new List<FileIoRow>();
+        DateTime? capturedAt = null;
         await using var command = postgres.CreateCommand(LatestFileIoStatsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
@@ -645,9 +652,10 @@ internal static class DarlingDataReader
                 reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
                 reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
                 reader.IsDBNull(11) ? null : reader.GetInt32(11)));
+            capturedAt ??= reader.GetDateTime(12);
         }
 
-        return rows;
+        return new LatestSnapshot<FileIoRow>(capturedAt, rows);
     }
 
     /* ─────────────────────────── tempdb ─────────────────────────── */
@@ -706,24 +714,27 @@ internal static class DarlingDataReader
 
     /// <summary>
     /// The latest perfmon counters — Lite's <c>GetLatestPerfmonStatsAsync</c>: counter_name /
-    /// instance_name / cntr_value / delta_cntr_value at the newest collection. $1 server_id.
+    /// instance_name / cntr_value / delta_cntr_value at the newest collection, with that collection's
+    /// <c>collection_time</c> trailing (#3541 A10, published once as <c>captured_at</c>). $1 server_id.
     /// </summary>
     public const string LatestPerfmonStatsSql = """
         SELECT
             counter_name,
             instance_name,
             cntr_value,
-            delta_cntr_value
+            delta_cntr_value,
+            collection_time
         FROM v_perfmon_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_perfmon_stats WHERE server_id = $1)
         ORDER BY counter_name
         """;
 
-    public static async Task<List<PerfmonRow>> GetLatestPerfmonStatsAsync(
+    public static async Task<LatestSnapshot<PerfmonRow>> GetLatestPerfmonStatsAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         var rows = new List<PerfmonRow>();
+        DateTime? capturedAt = null;
         await using var command = postgres.CreateCommand(LatestPerfmonStatsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
@@ -735,9 +746,10 @@ internal static class DarlingDataReader
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 reader.IsDBNull(3) ? 0 : reader.GetInt64(3)));
+            capturedAt ??= reader.GetDateTime(4);
         }
 
-        return rows;
+        return new LatestSnapshot<PerfmonRow>(capturedAt, rows);
     }
 
     /* ─────────────────────────── top queries ─────────────────────────── */

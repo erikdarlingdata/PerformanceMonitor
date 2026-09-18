@@ -143,7 +143,7 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
         Assert.Contains("MAX(capture_time)", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY database_name", sql, StringComparison.Ordinal);
         Assert.Contains(
-            "database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes",
+            "database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, capture_time",
             sql, StringComparison.Ordinal);
     }
 

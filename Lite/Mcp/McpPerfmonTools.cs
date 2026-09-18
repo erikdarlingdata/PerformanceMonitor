@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpPerfmonTools
 {
-    [McpServerTool(Name = "get_perfmon_stats"), Description("Gets the latest SQL Server performance counter values: batch requests/sec, compilations/sec, deadlocks/sec, and more. Provides throughput context to distinguish a busy server from a sick one. Use counter_name or instance_name to filter results.")]
+    [McpServerTool(Name = "get_perfmon_stats"), Description("Gets the latest SQL Server performance counter values: batch requests/sec, compilations/sec, deadlocks/sec, and more. Provides throughput context to distinguish a busy server from a sick one. Use counter_name or instance_name to filter results. LATEST IS A TIME: this reads the newest counter snapshot, not a window, and captured_at is the instant it was collected; use get_perfmon_trend for a counter over time.")]
     public static async Task<string> GetPerfmonStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -46,6 +46,8 @@ public sealed class McpPerfmonTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                /* #3541 A10: taken from the unfiltered snapshot, so a filter that matches nothing still says when. */
+                captured_at = rows[0].CollectionTime.ToString("o"),
                 counters = result
             }, McpHelpers.JsonOptions);
         }

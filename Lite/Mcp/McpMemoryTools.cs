@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpMemoryTools
 {
-    [McpServerTool(Name = "get_memory_stats"), Description("Gets the latest memory statistics snapshot: physical memory, buffer pool size, plan cache size, memory utilization %, and SQL Server memory model. Use this for a quick memory health check; use get_memory_clerks to see detailed breakdown by component.")]
+    [McpServerTool(Name = "get_memory_stats"), Description("Gets the latest memory statistics snapshot: physical memory, buffer pool size, plan cache size, memory utilization %, and SQL Server memory model. Use this for a quick memory health check; use get_memory_clerks to see detailed breakdown by component. LATEST IS A TIME: this reads one snapshot, not a window, and captured_at is the instant that snapshot was collected - read it before treating any figure as current, because the newest row a store holds can be minutes or days old.")]
     public static async Task<string> GetMemoryStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -30,7 +30,8 @@ public sealed class McpMemoryTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                collection_time = stats.CollectionTime.ToString("o"),
+                /* #3541 A10: the one stamp every latest-snapshot read publishes, under the one name. */
+                captured_at = stats.CollectionTime.ToString("o"),
                 total_physical_memory_mb = stats.TotalPhysicalMemoryMb,
                 available_physical_memory_mb = stats.AvailablePhysicalMemoryMb,
                 memory_utilization_pct = Math.Round(stats.MemoryUtilizationPercent, 1),
@@ -181,7 +182,7 @@ public sealed class McpMemoryTools
         return aligned;
     }
 
-    [McpServerTool(Name = "get_memory_clerks"), Description("Gets the top memory consumers by memory clerk type — shows which SQL Server components are using the most memory.")]
+    [McpServerTool(Name = "get_memory_clerks"), Description("Gets the top memory consumers by memory clerk type — shows which SQL Server components are using the most memory. LATEST IS A TIME: this reads the newest clerk snapshot, not a window, and captured_at is the instant it was collected.")]
     public static async Task<string> GetMemoryClerks(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -217,6 +218,8 @@ public sealed class McpMemoryTools
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
+                /* Every row shares this stamp by construction (the read is every clerk at MAX(collection_time)). */
+                captured_at = rows[0].CollectionTime.ToString("o"),
                 clerks = result
             }, McpHelpers.JsonOptions);
         }
@@ -278,12 +281,12 @@ Not available on Azure SQL DB (ring buffer not exposed). For actionable interpre
         }
     }
 
-    [McpServerTool(Name = "get_resource_semaphore"), Description("Gets resource semaphore statistics from the latest snapshot: granted vs available workspace memory against the target/max-target ceiling, per resource semaphore, with waiter counts and cumulative + per-interval timeout/forced-grant pressure indicators. High waiter counts or rising timeout/forced deltas indicate memory grant pressure affecting query performance. sample_interval_seconds is the measured seconds the two deltas accrued over; it is null with interval_known false when the row is a restart marker (no delta was knowable, so the zero deltas beside it are not 'no timeouts') or predates the column.")]
+    [McpServerTool(Name = "get_resource_semaphore"), Description("Gets resource semaphore statistics showing granted vs available workspace memory against the target/max-target ceiling, waiter counts, and timeout/forced grant pressure indicators. High waiter counts or rising timeout/forced deltas indicate memory grant pressure affecting query performance. TWO READS UNDER ONE WINDOW: grants[] is the NEWEST snapshot in the window (one row per resource semaphore and pool), stamped once as captured_at with age_seconds against the window's end - it is a moment, not the window. window[] aggregates EVERY snapshot in the window per (resource_semaphore_id, pool_id): peak_waiter_count and peak_waiters_at (the most sessions ever seen waiting for a grant and when), peak_granted_memory_mb, min_available_memory_mb, and timeout_errors_in_window / forced_grants_in_window (the SUM of the per-interval deltas across the window). A calm grants[] beside a window[] with waiters or timeouts is a grant storm that has passed; read window[] first for 'was there pressure', grants[] for 'is there pressure now'. Each grants[] row also carries sample_interval_seconds, the measured seconds its two deltas accrued over; it is null with interval_known false when the row is a restart marker (no delta was knowable, so the zero deltas beside it are not 'no timeouts') or predates the column.")]
     public static async Task<string> GetResourceSemaphore(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history to search for the latest snapshot. Default 24.")] int hours_back = 24,
+        [Description("Hours of history. Default 24. window[] aggregates every snapshot in these hours; grants[] is the newest snapshot in them.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
@@ -300,6 +303,10 @@ Not available on Azure SQL DB (ring buffer not exposed). For actionable interpre
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "memory_grant_stats")
                     ?? McpHelpers.Status("unavailable", "No memory grant data available.");
             }
+
+            /* #3541 A10: the window half, over the SAME window the latest read searched — its last_snapshot_at
+               IS captured_at, so the two halves describe one span of the same rows. Same shape as Darling's. */
+            var window = await dataService.GetResourceSemaphoreWindowAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             var result = rows.Select(r => new
             {
@@ -330,7 +337,13 @@ Not available on Azure SQL DB (ring buffer not exposed). For actionable interpre
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                grants = result
+                hours_back,
+                window_start = windowEnd.AddHours(-hours_back).ToString("o"),
+                window_end = windowEnd.ToString("o"),
+                captured_at = rows[0].CollectionTime.ToString("o"),
+                age_seconds = McpLatestSnapshotStamp.AgeSeconds(rows[0].CollectionTime, windowEnd),
+                grants = result,
+                window = window.Select(WindowShape)
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -339,12 +352,12 @@ Not available on Azure SQL DB (ring buffer not exposed). For actionable interpre
         }
     }
 
-    [McpServerTool(Name = "get_memory_grants"), Description("Gets resource semaphore statistics showing granted vs available workspace memory per resource pool, waiter counts, and timeout/forced grant deltas. High waiter counts or rising timeout deltas indicate memory grant pressure affecting query performance.")]
+    [McpServerTool(Name = "get_memory_grants"), Description("Gets resource semaphore statistics showing granted vs available workspace memory per resource pool, waiter counts, and timeout/forced grant deltas. High waiter counts or rising timeout deltas indicate memory grant pressure affecting query performance. TWO READS UNDER ONE WINDOW: grants[] is the NEWEST snapshot in the window (one row per pool, summed across its semaphores), stamped once as captured_at with age_seconds against the window's end - it is a moment, not the window. window[] aggregates EVERY snapshot in the window per pool: peak_waiter_count and peak_waiters_at (the most sessions ever seen waiting on the pool at one instant and when), peak_granted_memory_mb, min_available_memory_mb, and timeout_errors_in_window / forced_grants_in_window (the SUM of the per-interval deltas across the window). A calm grants[] beside a window[] with waiters or timeouts is a grant storm that has passed; read window[] first for 'was there pressure', grants[] for 'is there pressure now'.")]
     public static async Task<string> GetMemoryGrants(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history. Default 1.")] int hours_back = 1,
+        [Description("Hours of history. Default 1. window[] aggregates every snapshot in these hours; grants[] is the newest snapshot in them.")] int hours_back = 1,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
@@ -362,9 +375,10 @@ Not available on Azure SQL DB (ring buffer not exposed). For actionable interpre
                     ?? McpHelpers.Status("unavailable", "No memory grant data available.");
             }
 
-            /* Return latest snapshot */
+            /* grants[] is the latest snapshot in the window; window[] is the whole window (#3541 A10). */
             var latestTime = rows.Max(r => r.CollectionTime);
             var latest = rows.Where(r => r.CollectionTime == latestTime);
+            var window = await dataService.GetMemoryGrantsWindowAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
             var result = latest.Select(r => new
             {
@@ -382,7 +396,13 @@ Not available on Azure SQL DB (ring buffer not exposed). For actionable interpre
             return JsonSerializer.Serialize(new
             {
                 server = resolved.ServerName,
-                grants = result
+                hours_back,
+                window_start = windowEnd.AddHours(-hours_back).ToString("o"),
+                window_end = windowEnd.ToString("o"),
+                captured_at = latestTime.ToString("o"),
+                age_seconds = McpLatestSnapshotStamp.AgeSeconds(latestTime, windowEnd),
+                grants = result,
+                window = window.Select(WindowShape)
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
@@ -390,4 +410,25 @@ Not available on Azure SQL DB (ring buffer not exposed). For actionable interpre
             return McpHelpers.FormatError("get_memory_grants", ex);
         }
     }
+
+    /// <summary>
+    /// The window half's payload shape, shared by both lenses so the same key set describes a semaphore's
+    /// window and a pool's window (the pool lens carries a null <c>resource_semaphore_id</c>, which
+    /// <see cref="McpHelpers.JsonOptions"/> writes rather than drops — the key is present on both so a caller
+    /// can read one shape). Twin of Darling's <c>DarlingMcpMemoryGrantTools.WindowShape</c>.
+    /// </summary>
+    private static object WindowShape(MemoryGrantWindowRow w) => new
+    {
+        resource_semaphore_id = w.ResourceSemaphoreId,
+        pool_id = w.PoolId,
+        snapshots_in_window = w.SnapshotsInWindow,
+        first_snapshot_at = w.FirstSnapshotAt.ToString("o"),
+        last_snapshot_at = w.LastSnapshotAt.ToString("o"),
+        peak_waiter_count = w.PeakWaiterCount,
+        peak_waiters_at = w.PeakWaitersAt.ToString("o"),
+        peak_granted_memory_mb = Math.Round(w.PeakGrantedMemoryMb, 2),
+        min_available_memory_mb = Math.Round(w.MinAvailableMemoryMb, 2),
+        timeout_errors_in_window = w.TimeoutErrorsInWindow,
+        forced_grants_in_window = w.ForcedGrantsInWindow
+    };
 }
