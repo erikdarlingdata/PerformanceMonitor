@@ -985,7 +985,10 @@ public partial class SettingsWindow : Window
         AlertDeadlockCheckBox.IsEnabled = enabled;
         AlertDeadlockThresholdBox.IsEnabled = enabled;
         AlertPoisonWaitCheckBox.IsEnabled = enabled;
-        AlertPoisonWaitThresholdBox.IsEnabled = enabled;
+        /* #3539 A4: the poison-wait ms box is retired (nothing reads it) and stays disabled regardless of the
+           master switch — the XAML sets IsEnabled="False", and this loop must not re-enable it on load or
+           on toggle, or the operator is back to tuning a number the engine ignores. */
+        AlertPoisonWaitThresholdBox.IsEnabled = false;
         AlertLongRunningQueryCheckBox.IsEnabled = enabled;
         AlertLongRunningQueryThresholdBox.IsEnabled = enabled;
         AlertLongRunningQueryMaxResultsBox.IsEnabled = enabled;
