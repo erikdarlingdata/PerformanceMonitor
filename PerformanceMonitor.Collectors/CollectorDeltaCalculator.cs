@@ -308,7 +308,7 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
                        remaining delta families persist no interval: procedure_stats and memory_grant_stats
                        take CalculateDelta's bare long, and the PostgreSQL pair asks for the interval only
                        to skip idle rows at the write. A delta-family census in Lite.Tests
-                       (SharedCollectorDefaultsPinTests) names those four so the naked list shrinks
+                       (DeltaFamilyIntervalColumnTests) names those four so the naked list shrinks
                        deliberately rather than growing by accident. */
                     delta = 0;
                     interval = 0;
