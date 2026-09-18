@@ -3901,6 +3901,8 @@
                                          the row exists. -->
                                     <DataGridTextColumn Header="Message" Binding="{Binding Message}" Width="*"/>
                                     <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" Width="220"/>
+                                    <!-- The CONTEXT companion: for a lock wait, the tuple and relation. -->
+                                    <DataGridTextColumn Header="Context" Binding="{Binding Context}" Width="200"/>
                                     <DataGridTextColumn Header="Statement Fingerprint" Binding="{Binding StatementFingerprint}" Width="150"/>
                                     <!-- Re-reads of the SAME line, not repeats - the deadlock grid's Sightings, same
                                          mechanism. -->

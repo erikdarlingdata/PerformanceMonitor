@@ -870,8 +870,9 @@ DROP VIEW IF EXISTS collect.v_query_stats;";
     /// it.</para>
     ///
     /// <para><b>Every text column is REDACTED before it reaches this table, and the statement itself is
-    /// never stored.</b> <c>message</c> and <c>detail</c> have had quoted literals and unique-violation key
-    /// values stripped by <c>PgLogTextRedactor</c>, the plan parser's own patterns applied to prose;
+    /// never stored.</b> <c>message</c>, <c>detail</c> and <c>context</c> have had quoted literals, quoted values
+    /// and unique-violation key values stripped by <c>PgLogTextRedactor</c>, the plan parser's own patterns
+    /// applied to prose;
     /// <c>statement_fingerprint</c> is a hash of the REDACTED <c>STATEMENT</c> companion, so one statement
     /// shape recurs to one fingerprint and no literal from the user's SQL exists anywhere in the store. The
     /// issue's scope note — the log pipeline must not become where parameter values leak into the store —
@@ -907,6 +908,7 @@ CREATE TABLE IF NOT EXISTS collect.pg_log_events (
     pid integer,
     message text,
     detail text,
+    context text,
     statement_fingerprint text,
     raw_line_hash text
 );

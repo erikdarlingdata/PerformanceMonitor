@@ -236,6 +236,10 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal(2, waits.Count);
         Assert.Equal("process 4102 still waiting for ShareLock on transaction 809 after 1000.123 ms", waits[0].Message);
         Assert.Equal("Process holding the lock: 4099. Wait queue: 4102.", waits[0].Detail);
+        /* The CONTEXT is STORED — review caught the first draft parsing it and dropping it while the parser's
+           doc claimed it survived. Identifiers after a noun stay; the tuple's numbers stay. */
+        Assert.Equal("while updating tuple (0,7) in relation \"orders\"", waits[0].Context);
+        Assert.Contains(PgLogEventsCollector.Instance.PayloadColumns, c => c.Name == "context");
         Assert.Equal("process 4102 acquired ShareLock on transaction 809 after 2345.678 ms", waits[1].Message);
 
         /* The same statement under both lines fingerprints alike — that is the pairing key beside the pid. */
@@ -318,12 +322,13 @@ public sealed class PgLogEventsPipelineTests
 
         foreach (var e in events)
         {
-            Assert.DoesNotContain("secret-order-ref", e.Message + e.Detail + e.StatementFingerprint, StringComparison.Ordinal);
-            Assert.DoesNotContain("host all all", e.Message + e.Detail, StringComparison.Ordinal);
-            Assert.DoesNotContain("someone@example.com", e.Message + e.Detail + e.StatementFingerprint, StringComparison.Ordinal);
-            Assert.DoesNotContain("O'Brien", e.Message + e.Detail, StringComparison.Ordinal);
-            Assert.DoesNotContain("shipped", e.Message + e.Detail, StringComparison.Ordinal);
-            Assert.DoesNotContain("gift", e.Message + e.Detail, StringComparison.Ordinal);
+            var stored = e.Message + e.Detail + e.Context + e.StatementFingerprint;
+            Assert.DoesNotContain("secret-order-ref", stored, StringComparison.Ordinal);
+            Assert.DoesNotContain("host all all", stored, StringComparison.Ordinal);
+            Assert.DoesNotContain("someone@example.com", stored, StringComparison.Ordinal);
+            Assert.DoesNotContain("O'Brien", stored, StringComparison.Ordinal);
+            Assert.DoesNotContain("shipped", stored, StringComparison.Ordinal);
+            Assert.DoesNotContain("gift", stored, StringComparison.Ordinal);
         }
 
         /* The unique-violation DETAIL's value tuple is the one unquoted value shape in PostgreSQL's prose. */
@@ -378,6 +383,14 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal("invalid value for parameter \"work_mem\": \"?\"", PgLogTextRedactor.RedactMessage("invalid value for parameter \"work_mem\": \"lots\""));
         Assert.Equal("Failing row contains (?).", PgLogTextRedactor.RedactMessage("Failing row contains (1, someone@example.com, Acme (USA) Inc., null)."));
         Assert.Equal("something odd \"?\" mid-sentence", PgLogTextRedactor.RedactMessage("something odd \"value\" mid-sentence"));
+        /* Review's second look: a quote after bare whitespace or at the head of a tab-continuation line has no
+           noun before it and must be evaluated (and redacted), not skipped. An inner SQL statement in a
+           CONTEXT goes whole for the same reason: `statement` is not an identifier noun. */
+        Assert.Equal("two spaces  \"?\" here", PgLogTextRedactor.RedactMessage("two spaces  \"value\" here"));
+        Assert.Equal("line one\n\"?\" on a continuation", PgLogTextRedactor.RedactMessage("line one\n\"value\" on a continuation"));
+        Assert.Equal("\"?\" at the start", PgLogTextRedactor.RedactMessage("\"value\" at the start"));
+        Assert.Equal("SQL statement \"?\"", PgLogTextRedactor.RedactMessage("SQL statement \"UPDATE orders SET v = 1 WHERE id = 42\""));
+        Assert.Equal("COPY t, line 3, column c: \"?\"", PgLogTextRedactor.RedactMessage("COPY t, line 3, column c: \"someone@example.com\""));
         Assert.Equal("Connection matched file \"/etc/postgresql/pg_hba.conf\" line 117: \"?\"", PgLogTextRedactor.RedactMessage("Connection matched file \"/etc/postgresql/pg_hba.conf\" line 117: \"host all all 0.0.0.0/0 scram-sha-256\""));
 
         /* Identifiers, by the noun before them: the diagnostic value of the message is the name. */
@@ -455,7 +468,7 @@ public sealed class PgLogEventsPipelineTests
         Assert.False(definition.RunsPerDatabase(new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql }));
 
         Assert.Equal(
-            new[] { "occurred_at", "family", "severity", "sqlstate", "database_name", "user_name", "application_name", "pid", "message", "detail", "statement_fingerprint", "raw_line_hash" },
+            new[] { "occurred_at", "family", "severity", "sqlstate", "database_name", "user_name", "application_name", "pid", "message", "detail", "context", "statement_fingerprint", "raw_line_hash" },
             definition.PayloadColumns.Select(c => c.Name));
 
         var context = TestContext();
@@ -474,7 +487,7 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal(PgLogFamilies.Connection, writer.Values[1]);
         Assert.Equal("LOG", writer.Values[2]);
         Assert.Equal(4102, writer.Values[7]);
-        Assert.Equal(rows[0].RawLineHash, writer.Values[11]);
+        Assert.Equal(rows[0].RawLineHash, writer.Values[12]);
     }
 
     [Fact]
@@ -720,6 +733,7 @@ public sealed class PgLogEventsRungTests
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.pg_log_events (", sql, StringComparison.Ordinal);
         Assert.Contains("raw_line_hash text", sql, StringComparison.Ordinal);
         Assert.Contains("statement_fingerprint text", sql, StringComparison.Ordinal);
+        Assert.Contains("context text", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("statement text", sql, StringComparison.Ordinal);
         Assert.Single(Regex.Matches(sql, "CREATE INDEX"));
         Assert.Contains("ON collect.pg_log_events(server_id, collection_time);", sql, StringComparison.Ordinal);

@@ -31,6 +31,10 @@ namespace PerformanceMonitor.Collectors;
 /// <param name="Pid">The backend that wrote the line.</param>
 /// <param name="Message">REDACTED prose.</param>
 /// <param name="Detail">REDACTED prose, or null.</param>
+/// <param name="Context">REDACTED prose, or null — the <c>CONTEXT:</c> companion: for a lock wait the tuple
+/// and relation the waiter was on (<c>while updating tuple (0,7) in relation "orders"</c>), for an error
+/// inside a function the frame (<c>PL/pgSQL function f() line 3 at RAISE</c>). Review caught the first
+/// draft parsing it and dropping it while a doc comment claimed it was stored.</param>
 /// <param name="StatementFingerprint">Hash of the REDACTED statement, or null where the entry had none.</param>
 /// <param name="RawLineHash">Identity across sightings. See <see cref="PgLogTextRedactor.RawLineHash"/>.</param>
 public readonly record struct PgLogEvent(
@@ -44,6 +48,7 @@ public readonly record struct PgLogEvent(
     int Pid,
     string Message,
     string? Detail,
+    string? Context,
     string? StatementFingerprint,
     string RawLineHash)
 {
@@ -80,6 +85,11 @@ public readonly record struct PgLogEvent(
             Pid: entry.Pid,
             Message: PgLogTextRedactor.RedactMessage(entry.Message) ?? string.Empty,
             Detail: PgLogTextRedactor.RedactMessage(entry.Detail),
+            /* Prose-strength redaction, like Detail: a CONTEXT can carry an inner statement — `SQL statement
+               "UPDATE … WHERE id = 42"` — and that double-quoted run follows no identifier noun, so the
+               allowlist takes it whole. The HINT companion is deliberately NOT stored: it is advice text,
+               never evidence, and nothing here claims otherwise. */
+            Context: PgLogTextRedactor.RedactMessage(entry.Context),
             StatementFingerprint: PgLogTextRedactor.Fingerprint(redactedStatement),
             RawLineHash: PgLogTextRedactor.RawLineHash(entry.RawText));
     }

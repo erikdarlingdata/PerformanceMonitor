@@ -105,6 +105,8 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql;
         new CollectorColumn("message", CollectorColumnType.Varchar),
         /* REDACTED. */
         new CollectorColumn("detail", CollectorColumnType.Varchar),
+        /* REDACTED. The CONTEXT companion — for a lock wait, the tuple and relation. */
+        new CollectorColumn("context", CollectorColumnType.Varchar),
         /* Hash of the REDACTED statement; the statement itself is never stored. */
         new CollectorColumn("statement_fingerprint", CollectorColumnType.Varchar),
         /* Identity across sightings — this route re-reads the tail every cycle, so the reads dedupe on it
@@ -149,6 +151,7 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql;
             .Value(row.Pid)
             .Value(row.Message)
             .Value(row.Detail)
+            .Value(row.Context)
             .Value(row.StatementFingerprint)
             .Value(row.RawLineHash);
     }

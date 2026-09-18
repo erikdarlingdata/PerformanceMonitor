@@ -49,6 +49,7 @@ public static class DarlingPgLogEventReader
         int? Pid,
         string Message,
         string? Detail,
+        string? Context,
         string? StatementFingerprint,
         string RawLineHash,
         int TimesSeen);
@@ -92,6 +93,7 @@ public static class DarlingPgLogEventReader
                 e.pid,
                 e.message,
                 e.detail,
+                e.context,
                 e.statement_fingerprint,
                 e.raw_line_hash,
                 /* Sightings of the SAME entry, never a count of events -- see the class remarks. Evaluated
@@ -118,6 +120,7 @@ public static class DarlingPgLogEventReader
             d.pid,
             d.message,
             d.detail,
+            d.context,
             d.statement_fingerprint,
             d.raw_line_hash,
             d.times_seen,
@@ -172,11 +175,12 @@ public static class DarlingPgLogEventReader
                 Pid: reader.IsDBNull(7) ? null : reader.GetInt32(7),
                 Message: reader.IsDBNull(8) ? string.Empty : reader.GetString(8),
                 Detail: reader.IsDBNull(9) ? null : reader.GetString(9),
-                StatementFingerprint: reader.IsDBNull(10) ? null : reader.GetString(10),
-                RawLineHash: reader.GetString(11),
-                TimesSeen: reader.GetInt32(12)));
+                Context: reader.IsDBNull(10) ? null : reader.GetString(10),
+                StatementFingerprint: reader.IsDBNull(11) ? null : reader.GetString(11),
+                RawLineHash: reader.GetString(12),
+                TimesSeen: reader.GetInt32(13)));
 
-            windowTotal = reader.GetInt32(13);
+            windowTotal = reader.GetInt32(14);
         }
 
         return new PgLogEventsPage(rows, windowTotal);

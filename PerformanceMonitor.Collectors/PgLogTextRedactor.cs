@@ -109,10 +109,15 @@ public static class PgLogTextRedactor
         @"\bFailing row contains \(.*\)(?=[^)]*$)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
 
-    /* Every remaining double-quoted run, with what precedes it captured so the allowlist can be asked. */
+    /* Every remaining double-quoted run, with what precedes it captured so the allowlist can be asked. The
+       word-and-space lead is tried first so `relation "x"` reaches the allowlist with its noun; the fallback
+       is ANY single character — a bare space, a newline at the head of a tab-continuation, punctuation — so
+       every double-quoted run is evaluated and one preceded by nothing recognisable is redacted rather than
+       skipped. Review found the first draft's fallback matched non-space only, which left a quote after two
+       spaces or after a newline neither redacted nor allowlisted. */
     private static readonly Regex s_doubleQuoted = new(
-        @"(?<lead>(?:[A-Za-z_]+=|\b[A-Za-z_]+\s|^|\S))(?<quoted>""[^""]*"")",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        @"(?<lead>(?:[A-Za-z_]+=|\b[A-Za-z_]+\s|^|.))(?<quoted>""[^""]*"")",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
 
     /* The words PostgreSQL puts before a double-quoted IDENTIFIER. A run preceded by one of these is a
        name and stays; a run preceded by anything else is treated as a value. Enumerated rather than

@@ -120,8 +120,10 @@ public sealed class PgConnectionEventParser : IPgLogFamilyParser
 /// rearranging queue order after N ms</c>, and <c>detected deadlock while waiting for ... after N ms</c>.
 /// The <c>DETAIL</c> names the holder and the queue (<c>Process holding the lock: 4321. Wait queue:
 /// 1234.</c>), the <c>STATEMENT</c> is the waiter's SQL, and the <c>CONTEXT</c> — where present — names the
-/// tuple and relation. All of that survives redaction because it is pids, modes and identifiers; the
-/// statement is fingerprinted.</para>
+/// tuple and relation (<c>while updating tuple (0,7) in relation "orders"</c>). The message, detail and
+/// context are stored redacted, and survive it because they are pids, modes and identifiers after a noun;
+/// the statement is fingerprinted and never stored. (The first draft claimed the context survived while
+/// the row had no column for it — review caught the gap, and the column exists because of it.)</para>
 ///
 /// <para><b>What this is beside <c>pg_blocking</c>.</b> That collector SAMPLES <c>pg_blocking_pids()</c> on
 /// a cadence and can miss a wait that starts and ends between samples; this is the server's own record of
