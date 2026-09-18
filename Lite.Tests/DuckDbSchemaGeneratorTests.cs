@@ -62,7 +62,8 @@ public sealed class DuckDbSchemaGeneratorTests
             "    signal_wait_time_ms BIGINT,\n" +
             "    delta_waiting_tasks BIGINT,\n" +
             "    delta_wait_time_ms BIGINT,\n" +
-            "    delta_signal_wait_time_ms BIGINT\n" +
+            "    delta_signal_wait_time_ms BIGINT,\n" +
+            "    sample_interval_seconds INTEGER\n" +
             ")",
             ddl);
     }
