@@ -89,6 +89,17 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- #3577: the three theme dictionaries a SECOND time, as plain text, under Themes/{Name}Theme.xaml.
+         The compiled BAML (the default Page item for the same files) stays the load path for a theme
+         with no color overrides. A theme WITH overrides is regenerated from this text: ThemeManager
+         rewrites the overridden <Color> declarations and parses the result, so every brush and every
+         style setter inside the dictionary - all declared with {StaticResource} and resolved at load,
+         which is why a merged override dictionary cannot reach them - takes the operator's value.
+         See ThemeXamlRewriter's header for the full reasoning. ~150 KB of text in a 277 MB tree. -->
+    <EmbeddedResource Include="Themes\*.xaml" LogicalName="Themes/%(Filename).xaml" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- #2489/#2501: the .NET runtime prerequisites, shipped beside the exe. As of #2501 there
          are none: BOTH Lite publishes are pinned to win-x64 and self-contained, so the file now
          says "nothing to install" rather than listing downloads. It still ships, for two reasons.

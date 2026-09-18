@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.IO;
 using System.Reflection;
 using System.Threading.Tasks;
 using System.Windows;
@@ -67,6 +68,17 @@ public partial class App : Application
            failure. */
         ViewerLogger.Initialize();
 
+        /* #3577: the operator's per-theme color overrides live beside viewer-settings.json, in the viewer's
+           own per-user directory - LOCAL to this machine, never in the store or the control plane, because
+           a color is a preference of the person at this screen and not a fact about the fleet. The path
+           and the log hooks go in BEFORE the first Apply so the very first paint carries them (the same
+           no-flash reasoning as the theme itself); the watcher that re-applies an outside edit starts
+           right after. */
+        ThemeManager.OverridesFilePath = Path.Combine(
+            Path.GetDirectoryName(ViewerAppSettingsStore.DefaultFilePath())!, ThemeColorOverrides.FileName);
+        ThemeManager.LogWarning = message => ViewerLogger.Warn("Theme", message);
+        ThemeManager.LogInfo = message => ViewerLogger.Info("Theme", message);
+
         /* Apply the saved color theme through ThemeManager (App.xaml merges Dark as the design-time
            default) so ThemeManager owns the app-level merged dictionary at runtime, before StartupUri
            creates MainWindow. Reads the viewer-local settings directly (cheap JSON read) so the very
@@ -80,6 +92,8 @@ public partial class App : Application
         {
             ThemeManager.Apply("Dark");
         }
+
+        ThemeManager.WatchOverridesFile();
 
         /* #1050 (companion to the ported tray's WindowResumeGuard): WPF's GPU render thread can zombie its
            surface across sleep/wake or RDP, leaving a live-but-blank window — now reachable in the viewer
