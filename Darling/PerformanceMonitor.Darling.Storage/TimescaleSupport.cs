@@ -5548,6 +5548,192 @@ WHERE j.job_id = $1::integer";
         return staged;
     }
 
+    /* ─────────────── materialization chunk width (#3620) ─────────────── */
+
+    /// <summary>
+    /// The chunk interval every continuous aggregate's materialization hypertable is held at: ONE raw chunk,
+    /// <see cref="ChunkIntervalDays"/>, as a span. Derived from the constant rather than written as a day so the
+    /// raw tables and their rollups cannot disagree — a store whose raw tier moved to a different width would
+    /// move its materializations with it on the next start.
+    /// </summary>
+    public static TimeSpan MaterializationChunkIntervalSpan => TimeSpan.FromDays(ChunkIntervalDays);
+
+    /// <summary>The interval literal <see cref="SetMaterializationChunkIntervalSql(string)"/> interpolates, rendered
+    /// through the same whole-days renderer the compression windows use.</summary>
+    public static string MaterializationChunkInterval => WholeDaysInterval(MaterializationChunkIntervalSpan);
+
+    /// <summary>
+    /// Every registered aggregate's CURRENT materialization chunk interval, in seconds, keyed by view name.
+    /// <c>timescaledb_information.dimensions</c> carries one <c>time_interval</c> per hypertable dimension; a
+    /// materialization has exactly one, its time dimension, and the join is on the materialization identity
+    /// because that is the only name the dimensions view knows an aggregate by (the same rule as the chunk
+    /// counts in <see cref="AggregateCompressionStateSql"/>). Seconds rather than the interval itself so the
+    /// comparison is an integer equality in C# against <see cref="MaterializationChunkIntervalSpan"/>, and a
+    /// session setting cannot change how the interval renders.
+    /// </summary>
+    public static string MaterializationChunkIntervalStateSql =>
+        @"
+SELECT
+    ca.view_name,
+    EXTRACT(EPOCH FROM d.time_interval)::bigint AS chunk_interval_seconds
+FROM timescaledb_information.continuous_aggregates AS ca
+JOIN timescaledb_information.dimensions AS d
+  ON  d.hypertable_schema = ca.materialization_hypertable_schema
+  AND d.hypertable_name = ca.materialization_hypertable_name
+  AND d.dimension_type = 'Time'
+WHERE ca.view_schema = 'collect'";
+
+    /// <summary>
+    /// Moves ONE aggregate's materialization hypertable onto <see cref="MaterializationChunkInterval"/>. The
+    /// materialization is resolved from the catalog inside the statement — its schema and name are TimescaleDB's
+    /// (<c>_timescaledb_internal._materialized_hypertable_N</c>), never stable across stores, so the view name
+    /// from the registry is the only identity this file should carry. <c>set_chunk_time_interval</c> affects
+    /// chunks created AFTER the call and nothing else — measured on 2.28.1: existing chunks keep their range,
+    /// the aggregate's refresh, compression and retention jobs read back byte-identical, and re-running with the
+    /// interval the hypertable already has is a no-op — but the ensure still gates it on the catalog so a
+    /// settled store issues no statement at all.
+    /// </summary>
+    public static string SetMaterializationChunkIntervalSql(string view)
+    {
+        _ = AggregateCompressionTargetFor(view);
+        return $@"SELECT set_chunk_time_interval(
+    format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)::regclass,
+    INTERVAL '{MaterializationChunkInterval}')
+FROM timescaledb_information.continuous_aggregates AS ca
+WHERE ca.view_schema = 'collect' AND ca.view_name = '{view}'";
+    }
+
+    /// <summary>
+    /// Holds every registered aggregate's materialization at one raw chunk of width (#3620). Idempotent under
+    /// the catalog — a settled store reads <c>timescaledb_information.dimensions</c> once and issues nothing —
+    /// and failure-isolated per aggregate. Returns the number of materializations whose interval this call
+    /// changed. Called first thing by <see cref="EnsureAggregateCompressionAsync"/>, so the order the worker
+    /// sees is: aggregates exist → chunk width set → compression enabled and scheduled.
+    ///
+    /// <para><b>The default this overrides, measured on 2.28.1.</b> TimescaleDB sizes a first-level continuous
+    /// aggregate's materialization chunks at TEN TIMES the raw hypertable's chunk interval as it stands at
+    /// creation (1-day raw → 10-day, 2-day → 20-day, 3-day → 30-day), and a hierarchical aggregate's at exactly
+    /// its PARENT materialization's interval as it stands at creation (a parent set to 5 days yields a 5-day
+    /// daily; a parent at 1 day yields a 1-day daily). On an untouched store the two rules agree — the parent is
+    /// already root × 10 — which is why the #3581 rig read the dailies as inheriting from the root. Nothing in
+    /// this file ever set the materializations' interval, so every one of the twenty aggregates on every store
+    /// carries 10-day chunks: on the largest production store all twenty read <c>10 days</c>, the interval-dedup
+    /// tiers in two chunks spanning twenty days and the rest in four spanning forty.</para>
+    ///
+    /// <para><b>The two consequences, with that store's numbers.</b> First, retention over-holds:
+    /// <c>drop_chunks</c> removes a chunk only once its WHOLE range is past the horizon, so a 7-day tier on
+    /// 10-day chunks holds between 7 and 17 days of rows at any moment (the 7-day
+    /// <see cref="QueryStoreStatsIntervalHourlyView"/> was holding Sep 4 → Sep 24 in two chunks, ~14 days) and
+    /// the 10-day tier between 10 and 20 — tiers that are "internal plumbing sized only to outlive what gates on
+    /// them" (#1958) holding roughly double their design, and a per-day ingest figure derived from their size at
+    /// the assumed width reading ~2× high. Second, compression reaches less than #3581 projected: a policy
+    /// compresses a chunk only once its whole range is past <c>compress_after</c>, so with a 10-day head chunk
+    /// the newest ~10 days of every aggregate stay uncompressed regardless of a 2-day window — ~11% of a 90-day
+    /// tier, but most of a 7-day one, whose only compressible chunk is the one already past the horizon's edge.
+    /// Both were reasoned about as if the chunks were a day wide.</para>
+    ///
+    /// <para><b>Why one raw chunk.</b> It is the granularity every raw table already has
+    /// (<see cref="ChunkIntervalDays"/>), the granularity retention and compression both act at (chunks close at
+    /// UTC midnight; eligibility flips at UTC midnight), and the unit the whole compression derivation on
+    /// <see cref="AggregateCompressMarginSpan"/> is stated in. It does not touch the disjointness argument #3581
+    /// pinned: a chunk compresses only when its whole range is past <c>compress_after</c>, which holds at any
+    /// width, and the daily tier's 3-day refresh <c>start_offset</c> reads hourly rows by bucket, not by chunk.
+    /// The cost is ten times as many materialization chunks — a few hundred rather than a few dozen, inside
+    /// what the raw tier already carries across ~70 hypertables — and one more job-free catalog read per start.</para>
+    ///
+    /// <para><b>The honest side-effect: convergence is gradual, not immediate.</b> Existing 10-day chunks keep
+    /// their range and age out on their own schedule; only chunks created after this runs are a day wide. So the
+    /// interval tiers' VISIBLE hold tightens toward its designed 7 / 10 days over roughly two weeks as the old
+    /// chunks drop — a one-time ~5–10 GiB reclaim on the largest store, spread over that fortnight — and
+    /// #3581's compression reaches everything older than <c>compress_after</c> + 1 day instead of + 10 on the
+    /// same timetable. Modest movement on the first nights after this ships is the expected shape, not evidence
+    /// against either change.</para>
+    ///
+    /// <para><b>All twenty, every start, under the catalog check</b> — not only the first-level aggregates.
+    /// The creation sweep (<see cref="EnsureContinuousAggregatesAsync"/>) builds every aggregate BEFORE this
+    /// runs, so on a fresh store the hierarchical dailies inherit 10 days from hourlies that have not been
+    /// narrowed yet; on an existing store they already carry it. Setting each one directly is correct under
+    /// either inheritance rule and costs nothing on a settled store.</para>
+    /// </summary>
+    public static async Task<int> EnsureMaterializationChunkIntervalAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var currentSeconds = new Dictionary<string, long>(StringComparer.Ordinal);
+        try
+        {
+            using var probe = new NpgsqlCommand(MaterializationChunkIntervalStateSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var view = reader.GetString(0);
+                if (!IsAggregateCompressionTarget(view) || reader.IsDBNull(1))
+                {
+                    continue;
+                }
+
+                currentSeconds[view] = Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "TimescaleDB: could not read the continuous aggregates' materialization chunk intervals, so none was changed this start — new materialization chunks keep whatever width the store gives them (ten raw chunks, by default) until the next start reads it: {Message}",
+                ex.Message);
+            return 0;
+        }
+
+        var wantedSeconds = (long)MaterializationChunkIntervalSpan.TotalSeconds;
+        var atTarget = 0;
+        var changed = 0;
+        var absent = new List<string>();
+
+        foreach (var (_, view, _) in AggregateCompressionTargets)
+        {
+            if (!currentSeconds.TryGetValue(view, out var seconds))
+            {
+                /* The creation sweep is failure-isolated per aggregate and has already warned about this one. */
+                absent.Add(view);
+                continue;
+            }
+
+            if (seconds == wantedSeconds)
+            {
+                atTarget++;
+                continue;
+            }
+
+            try
+            {
+                using var set = new NpgsqlCommand(SetMaterializationChunkIntervalSql(view), connection) { CommandTimeout = SetupTimeoutSeconds };
+                await set.ExecuteNonQueryAsync(cancellationToken);
+                atTarget++;
+                changed++;
+
+                logger?.LogInformation(
+                    "TimescaleDB: continuous aggregate {View}'s materialization now chunks at {Interval} (was {WasDays:0.#} days) — existing chunks keep their range and age out on their own schedule; only chunks created from now on are one raw chunk wide, so its retention tier converges to its designed hold and its compression policy reaches its newest days over the next couple of weeks, not tonight (#3620).",
+                    view, MaterializationChunkInterval, seconds / 86400d);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not set continuous aggregate {View}'s materialization chunk interval to {Interval} — its new chunks keep the store's default width ({WasDays:0.#} days), so its retention tier keeps over-holding and its compression policy keeps missing its newest chunk, until the next restart retries (often a permission issue: the store login must own the materialization): {Message}",
+                    view, MaterializationChunkInterval, seconds / 86400d, ex.Message);
+            }
+        }
+
+        /* The #1958 shape: the count that matters (how many are at the designed width), what this start did about
+           it, and the interval interpolated rather than restated. */
+        logger?.LogInformation(
+            "TimescaleDB: {AtTarget}/{Total} materializations chunked at {Interval} (one raw chunk, ChunkIntervalDays), {Changed} changed this start, {Absent} aggregate(s) absent: {AbsentViews}",
+            atTarget, AggregateCompressionTargets.Count, MaterializationChunkInterval, changed, absent.Count, absent.Count == 0 ? "none" : string.Join(", ", absent));
+
+        return changed;
+    }
+
     /// <summary>
     /// Puts every continuous aggregate this product owns on the compression ladder (#3581): enables columnar
     /// compression on each materialization, attaches a once-a-day compression policy on the daily band, stages
@@ -5575,28 +5761,28 @@ WHERE j.job_id = $1::integer";
     /// start and contends for nothing on the migration ladder.</para>
     ///
     /// <para><b>Ordering.</b> MUST run AFTER <see cref="EnsureContinuousAggregatesAsync"/> — the aggregates have
-    /// to exist, and compression has to be enabled on a materialization BEFORE a policy is attached to it (the
+    /// to exist; it then sets their materializations' chunk width (<see cref="EnsureMaterializationChunkIntervalAsync"/>)
+    /// before anything else, and compression has to be enabled on a materialization BEFORE a policy is attached to it (the
     /// ALTER precedes the <c>add_compression_policy</c> inside each aggregate's own try, so a failed ALTER costs
     /// that aggregate its policy too rather than attaching a policy to an uncompressible relation). It runs
     /// BEFORE <see cref="EnsureRetentionPoliciesAsync"/> only because that is where the raw tier's compression
     /// sits relative to its retention; nothing here depends on the retention sweep either way.</para>
     ///
-    /// <para><b>The materialization chunk width, which the issue's arithmetic and the rig disagree on, and
-    /// which this design is correct at either value of.</b> TimescaleDB sizes a continuous aggregate's
-    /// materialization chunks at ten times the ROOT raw hypertable's chunk interval — measured on 2.28.1: a
-    /// 1-day raw table yields 10-day materialization chunks on every aggregate built over it, hierarchical
-    /// ones included (a 7-day raw yields 70-day, a 1-hour raw 10-hour). #3581's staging note describes the
-    /// production backlog as "~60 1-day chunks" per aggregate; a store whose raw tables were created with
-    /// <see cref="ChunkIntervalDays"/> = 1 has 10-day materialization chunks instead, and one whose raw tables
-    /// predate that constant has 70-day ones. The separation argument on
+    /// <para><b>The materialization chunk width, which this design is correct at either value of and which
+    /// <see cref="EnsureMaterializationChunkIntervalAsync"/> now holds at one raw chunk (#3620).</b> Left to
+    /// TimescaleDB, a materialization's chunks are ten times the raw hypertable's interval — measured on 2.28.1:
+    /// a 1-day raw table yields 10-day materialization chunks, hierarchical aggregates take their parent's width
+    /// (see that method for the exact rule). #3581's staging note describes the production backlog as "~60 1-day
+    /// chunks" per aggregate; a store whose raw tables were created with <see cref="ChunkIntervalDays"/> = 1 had
+    /// 10-day materialization chunks instead. The separation argument on
     /// <see cref="AggregateCompressMarginSpan"/> holds at any width, because a chunk compresses only when its
     /// whole range is past <c>compress_after</c>. What changes with the width is the SHAPE of the work: at 1-day
     /// chunks each aggregate compresses one day's chunk every night and the 7-day interval tier spends five of
     /// its seven days compressed; at 10-day chunks each aggregate compresses one 10-day chunk every tenth
     /// night, a 10-day chunk of the 7-day tier lives seventeen days and is compressed for the last five of
-    /// them, and the 90-day tiers hold up to 100 days. The width on a given store is one catalog read
-    /// (<c>range_end - range_start</c> over <c>timescaledb_information.chunks</c> for a materialization), and
-    /// narrowing new materialization chunks to a day is a separate decision this ensure does not take.</para>
+    /// them, and the 90-day tiers hold up to 100 days. This ensure therefore narrows the width FIRST, so every
+    /// chunk the policies it attaches will ever see created is a day wide; the 10-day chunks a store already
+    /// holds keep their range and compress on the tenth-night shape until they age out.</para>
     ///
     /// <para><b>Concurrency with the rest of the store.</b> A compression run holds <c>AccessShareLock</c> on
     /// the materialization and escalates only on the chunk it rewrites
@@ -5626,6 +5812,12 @@ WHERE j.job_id = $1::integer";
         {
             throw new ArgumentNullException(nameof(connection));
         }
+
+        /* Width before policies (#3620): the chunk interval governs only chunks created from now on, so the
+           earlier it is set the fewer 10-day chunks the compression policies below ever have to wait out. Its own
+           read, its own per-aggregate isolation, its own summary line; a failure there costs no aggregate its
+           compression. */
+        await EnsureMaterializationChunkIntervalAsync(connection, logger, cancellationToken);
 
         var states = new Dictionary<string, AggregateCompressionState>(StringComparer.Ordinal);
         try
