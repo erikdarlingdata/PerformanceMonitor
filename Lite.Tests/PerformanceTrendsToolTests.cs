@@ -135,7 +135,11 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
     {
         var service = new LocalDataService(_duckDb);
 
-        /* Two snapshots five minutes apart, two executions between them: 0.0067/sec. */
+        /* Two snapshots five minutes apart, two executions between them: 0.0067/sec. The rows carry no
+           sample_interval_seconds (the pre-v61 shape), so the read LAG-derives the interval — and since v61
+           (#3540) the FIRST snapshot, which has nothing to LAG against, is absent rather than a fabricated
+           0.0 point (the correction v60 made for the wait trends). One point comes back: the second snapshot,
+           whose rate is the thing under test. */
         var baseNow = Truncate(DateTime.UtcNow);
         await SeedProcedureAsync(baseNow.AddMinutes(-20), executions: 0, elapsedUs: 0);
         await SeedProcedureAsync(baseNow.AddMinutes(-15), executions: 2, elapsedUs: 600_000);
@@ -143,9 +147,9 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         var hit = await McpQueryTools.GetProcedureDurationTrend(service, _serverManager, ServerName, 4);
         var root = JsonDocument.Parse(hit).RootElement;
         var trend = root.GetProperty("trend");
-        Assert.Equal(2, trend.GetArrayLength());
+        Assert.Equal(1, trend.GetArrayLength());
 
-        var second = trend[1];
+        var second = trend[0];
         Assert.True(second.GetProperty("value").GetDouble() > 0, "elapsed ms/sec must be a real rate");
 
         /* The shipped integer field rounds this to an idle server. The double is why it is here. */
@@ -160,9 +164,10 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
 
         /*
             #3541 A2: the disclosure block, with Lite's truth. One tier (raw, per-collection, no aggregate
-            note), and the series the store held begins at the 20-minutes-ago seed — effective_start says so,
-            and because that head sits three-plus hours past the requested 4-hour start, `truncated` is true.
-            The label describes the data, not the request; that is the whole contract.
+            note), and the series the read SERVED begins at its first point — the 15-minutes-ago seed, since
+            v61 dropped the prior-less first snapshot — effective_start says so, and because that head sits
+            three-plus hours past the requested 4-hour start, `truncated` is true. The label describes the
+            data, not the request; that is the whole contract.
         */
         AssertDisclosureBlock(root);
         Assert.Equal("raw", root.GetProperty("source").GetString());
@@ -192,7 +197,9 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
 
         var root = JsonDocument.Parse(await McpQueryTools.GetProcedureDurationTrend(service, _serverManager, ServerName, 1)).RootElement;
 
-        Assert.Equal(2, root.GetProperty("trend").GetArrayLength());
+        /* One point, not two: these pre-v61 rows LAG-derive, and the prior-less first snapshot is absent since
+           v61 (#3540). The head is the 50-minutes-ago point, inside the slack — the property under test. */
+        Assert.Equal(1, root.GetProperty("trend").GetArrayLength());
         Assert.False(root.GetProperty("truncated").GetBoolean());
         Assert.Equal(root.GetProperty("trend")[0].GetProperty("time").GetString(), root.GetProperty("effective_start").GetString());
         Assert.InRange(root.GetProperty("effective_hours_back").GetDouble(), 0.8, 1.0);
