@@ -251,20 +251,32 @@ public sealed class PgLogEventsPipelineTests
     }
 
     [Fact]
-    public void TheRecognisedOnlyFamilies_AreStoredUnderTheirOwnName_WithNothingLifted()
+    public void TheRecognisedOnlyFamily_IsStoredUnderItsOwnName_WithNothingLifted()
     {
         var events = Classify(SelfHostedLog);
+
+        /* The two families that were recognised-only in #3601 are PARSED now (#3602, #3603): the line is
+           still stored under its own name, and its numbers are in the metrics — the per-family pins are in
+           PgLogEventMetricsParserTests; here the point is that nothing was relabelled. */
         var spill = events.Single(e => e.Family == PgLogFamilies.TempFile);
         Assert.StartsWith("temporary file: path \"base/pgsql_tmp/pgsql_tmp4102.0\", size 4294967296", spill.Message, StringComparison.Ordinal);
         Assert.NotNull(spill.StatementFingerprint);
+        Assert.Equal(4294967296L, spill.Metrics.Bytes);
 
         var vacuum = events.Single(e => e.Family == PgLogFamilies.Autovacuum);
         Assert.StartsWith("automatic vacuum of table \"app_db.public.orders\"", vacuum.Message, StringComparison.Ordinal);
+        Assert.Equal("public.orders", vacuum.Metrics.RelationName);
+        Assert.Equal("app_db", vacuum.DatabaseName);
 
-        /* The recognised-only list is exactly the three, and the parsed list exactly the three, and
-           together with the reserved word they are the vocabulary. */
-        Assert.Equal(new[] { "temp_file", "autovacuum", "checkpoint" }, PgLogFamilies.RecognisedOnly);
-        Assert.Equal(new[] { "error", "connection", "lock_wait" }, PgLogFamilies.Parsed);
+        /* Checkpoint is the one left in the recognised-only arm: stored, nothing lifted, every metric null. */
+        var checkpoints = events.Where(e => e.Family == PgLogFamilies.Checkpoint).ToList();
+        Assert.Equal(2, checkpoints.Count);
+        Assert.All(checkpoints, c => Assert.Equal(PgLogEventMetrics.None, c.Metrics));
+
+        /* The recognised-only list is exactly the one, the parsed list exactly the five, and together with
+           the reserved word they are the vocabulary. */
+        Assert.Equal(new[] { "checkpoint" }, PgLogFamilies.RecognisedOnly);
+        Assert.Equal(new[] { "error", "connection", "lock_wait", "temp_file", "autovacuum" }, PgLogFamilies.Parsed);
         Assert.Equal(PgLogFamilies.Parsed.Concat(PgLogFamilies.RecognisedOnly).Append(PgLogFamilies.Other), PgLogFamilies.All);
         /* The reserved word is in the vocabulary and NOT askable: no parser emits it, so a filter on it would
            be the silent zero a typo is refused for (review note on the first head). */
@@ -273,35 +285,49 @@ public sealed class PgLogEventsPipelineTests
         Assert.False(PgLogFamilies.IsKnown("nonsense"));
 
         /* And the seam has exactly the registration order the interface documents: severity first, then
-           the LOG-level shapes, then the recognised-only arm LAST so a sibling's parser goes before it. */
+           the LOG-level shapes — #3601's two, then #3602's and #3603's — then the recognised-only arm LAST
+           so a sibling's parser goes before it. */
         Assert.Equal(
-            new[] { typeof(PgErrorEventParser), typeof(PgConnectionEventParser), typeof(PgLockWaitEventParser), typeof(PgRecognisedFamilyParser) },
+            new[]
+            {
+                typeof(PgErrorEventParser), typeof(PgConnectionEventParser), typeof(PgLockWaitEventParser),
+                typeof(PgTempFileEventParser), typeof(PgAutovacuumEventParser), typeof(PgRecognisedFamilyParser),
+            },
             PgLogEventClassifier.DefaultParsers.Select(p => p.GetType()));
         Assert.Equal(typeof(PgRecognisedFamilyParser), PgLogEventClassifier.DefaultParsers[^1].GetType());
+        /* Each shipped parser names the family it emits, and the recognised arm names the reserved word. */
+        Assert.Equal(PgLogFamilies.TempFile, PgLogEventClassifier.DefaultParsers[3].Family);
+        Assert.Equal(PgLogFamilies.Autovacuum, PgLogEventClassifier.DefaultParsers[4].Family);
+        Assert.Equal(PgLogFamilies.Other, PgLogEventClassifier.DefaultParsers[5].Family);
     }
 
-    /// <summary>A sibling family parser registers ahead of the recognised-only arm and takes its lines out of it — the #3602 / #3603 shape, proven with a stand-in.</summary>
+    /// <summary>
+    /// A sibling family parser registers ahead of the recognised-only arm and takes its lines out of it —
+    /// the shape #3602 / #3603 landed by, proven again here with a stand-in for the family that is STILL
+    /// recognised-only, so the seam stays demonstrated for the next issue.
+    /// </summary>
     [Fact]
     public void ASiblingParser_RegisteredAheadOfTheRecognisedArm_TakesItsFamilysLines()
     {
         var parsers = PgLogEventClassifier.DefaultParsers.ToList();
-        parsers.Insert(parsers.Count - 1, new StandInTempFileParser());
+        parsers.Insert(parsers.Count - 1, new StandInCheckpointParser());
         var classifier = new PgLogEventClassifier(parsers);
 
         var events = classifier.Classify(SelfHostedLog);
-        var spill = events.Single(e => e.Family == PgLogFamilies.TempFile);
-        /* The stand-in lifted the database from the statement's context; the generic arm would have left it null. */
-        Assert.Equal("from-sibling", spill.DatabaseName);
+        var checkpoints = events.Where(e => e.Family == PgLogFamilies.Checkpoint).ToList();
+        /* The stand-in lifted a database of its own; the generic arm would have left it null. */
+        Assert.Equal(2, checkpoints.Count);
+        Assert.All(checkpoints, c => Assert.Equal("from-sibling", c.DatabaseName));
         Assert.Equal(15, events.Count);
     }
 
-    private sealed class StandInTempFileParser : IPgLogFamilyParser
+    private sealed class StandInCheckpointParser : IPgLogFamilyParser
     {
-        public string Family => PgLogFamilies.TempFile;
+        public string Family => PgLogFamilies.Checkpoint;
 
         public bool TryParse(in PgLogEntry entry, out PgLogEvent logEvent)
         {
-            if (entry.Severity != "LOG" || !entry.Message.StartsWith("temporary file: ", StringComparison.Ordinal))
+            if (entry.Severity != "LOG" || !entry.Message.StartsWith("checkpoint ", StringComparison.Ordinal))
             {
                 logEvent = default;
                 return false;
@@ -467,9 +493,18 @@ public sealed class PgLogEventsPipelineTests
         Assert.True(definition.AppliesTo(new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql, IsAurora = true }));
         Assert.False(definition.RunsPerDatabase(new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql }));
 
+        /* V129's thirteen, then V130's thirteen (#3602, #3603) APPENDED after the identity column — so the
+           positions the V129 rows were written at are the positions they still have. */
         Assert.Equal(
-            new[] { "occurred_at", "family", "severity", "sqlstate", "database_name", "user_name", "application_name", "pid", "message", "detail", "context", "statement_fingerprint", "raw_line_hash" },
+            new[]
+            {
+                "occurred_at", "family", "severity", "sqlstate", "database_name", "user_name", "application_name", "pid", "message", "detail", "context", "statement_fingerprint", "raw_line_hash",
+                "relation_name", "bytes", "duration_ms", "pages_removed", "pages_remaining", "tuples_removed", "tuples_remaining", "buffer_hits", "buffer_misses", "buffer_dirtied", "wal_records", "wal_bytes", "is_analyze",
+            },
             definition.PayloadColumns.Select(c => c.Name));
+        Assert.All(definition.PayloadColumns.Skip(14).Take(11), c => Assert.Equal(CollectorColumnType.BigInt, c.Type));
+        Assert.Equal(CollectorColumnType.Varchar, definition.PayloadColumns[13].Type);
+        Assert.Equal(CollectorColumnType.Boolean, definition.PayloadColumns[^1].Type);
 
         var context = TestContext();
 
@@ -488,6 +523,22 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal("LOG", writer.Values[2]);
         Assert.Equal(4102, writer.Values[7]);
         Assert.Equal(rows[0].RawLineHash, writer.Values[12]);
+        /* A connection row writes every V130 column null; the spill writes its bytes at the `bytes` position
+           and null everywhere else; the autovacuum writes its figures and a false is_analyze. */
+        Assert.All(writer.Values.Skip(13), v => Assert.Null(v));
+
+        var spillWriter = new RecordingWriter();
+        definition.WritePayload(rows.Single(r => r.Family == PgLogFamilies.TempFile), spillWriter, context);
+        Assert.Equal(4294967296L, spillWriter.Values[14]);
+        Assert.Null(spillWriter.Values[13]);
+        Assert.Null(spillWriter.Values[^1]);
+
+        var vacuumWriter = new RecordingWriter();
+        definition.WritePayload(rows.Single(r => r.Family == PgLogFamilies.Autovacuum), vacuumWriter, context);
+        Assert.Equal("public.orders", vacuumWriter.Values[13]);
+        Assert.Equal(12345L, vacuumWriter.Values[17]);
+        Assert.Equal(4567L, vacuumWriter.Values[18]);
+        Assert.Equal(false, vacuumWriter.Values[^1]);
     }
 
     [Fact]
@@ -701,16 +752,20 @@ public sealed class PgLogEventsPipelineTests
 }
 
 /// <summary>
-/// V129 (#3601): <c>collect.pg_log_events</c>, and the "I am the top rung" claims handed off from
-/// <see cref="DeltaFamilyIntervalCompletionRungTests"/> (V128) — a fully-migrated store must map to EXACTLY
-/// this version, or the viewer's connect-time gate refuses a store that is actually current.
+/// V129 (#3601): <c>collect.pg_log_events</c>. The "I am the top rung" claims this class carried moved to
+/// <c>PgLogEventMetricsRungTests</c> (V130) when that rung landed, the same handoff this class received from
+/// <see cref="DeltaFamilyIntervalCompletionRungTests"/> (V128). What stays here is the one-rung-behind
+/// half: a store carrying this and not V130 maps to 129, which is the honest answer for it and what makes
+/// the upgrade banner correct in both directions — and the V101 pairing: V129's CREATE now carries V130's
+/// columns for the fresh population, because the generator does.
 /// </summary>
 public sealed class PgLogEventsRungTests
 {
     private const int RungVersion = 129;
     private const int PreviousVersion = 128;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V130 appended
+    /// its own — so the invariant that outlives the handoff is that the ordinal is FIXED.</summary>
     private const int ProbeOrdinal = 104;
 
     [Fact]
@@ -721,7 +776,9 @@ public sealed class PgLogEventsRungTests
         Assert.Equal("pg-log-events", PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        /* One below the top since V130 landed; the "RungVersion == StorageVersion.SchemaVersion" half of
+           the top-arm claim moved to PgLogEventMetricsRungTests with the top. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion, "V129 is expected to sit below the ladder's top now that V130 has landed");
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
@@ -737,6 +794,15 @@ public sealed class PgLogEventsRungTests
         Assert.DoesNotContain("statement text", sql, StringComparison.Ordinal);
         Assert.Single(Regex.Matches(sql, "CREATE INDEX"));
         Assert.Contains("ON collect.pg_log_events(server_id, collection_time);", sql, StringComparison.Ordinal);
+
+        /* The V101 rule, in the V130 direction: this CREATE carries V130's thirteen columns for the store
+           that builds the table fresh, AFTER raw_line_hash, in the generator's order — because
+           PgSchemaGeneratorTests requires this text to BE the generator's output, and the generator emits
+           the collector's current columns. The ALTER for the existing population is V130's. */
+        var afterHash = sql[sql.IndexOf("raw_line_hash text,", StringComparison.Ordinal)..];
+        Assert.Contains("relation_name text,", afterHash, StringComparison.Ordinal);
+        Assert.Contains("wal_bytes bigint,", afterHash, StringComparison.Ordinal);
+        Assert.Contains("is_analyze boolean\n);", afterHash.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
 
         /* The V104 argument for the missing family index is in the rung doc, so the next author knows it is
            a separate rung rather than an omission. */
@@ -761,7 +827,6 @@ public sealed class PgLogEventsRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasPgLogEvents", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
@@ -769,11 +834,9 @@ public sealed class PgLogEventsRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
-
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
+        /* This rung's sentinel sits strictly BELOW the last argument now that V130 has appended its own; the
+           "is the last argument" claim moved to PgLogEventMetricsRungTests with the top. */
+        Assert.True(ProbeOrdinal < arity - 1, "V129's sentinel is expected to sit below the top rung's now that V130 has landed");
 
         var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
@@ -784,10 +847,10 @@ public sealed class PgLogEventsRungTests
 
         var thisArm = viewer.IndexOf("if (hasPgLogEvents)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasDeltaFamilyIntervalCompletion)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V129 sentinel arm — a fully-migrated store would map one rung low");
+        Assert.True(thisArm >= 0, "the viewer has no V129 sentinel arm — a store at this rung would map one rung low");
         Assert.True(previousArm >= 0);
-        Assert.True(thisArm < previousArm, "the V129 arm sits below the previous rung's, so a current store maps one rung low");
-        Assert.Contains("return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";", viewer[thisArm..previousArm], StringComparison.Ordinal);
+        Assert.True(thisArm < previousArm, "the V129 arm sits below the previous rung's, so a store at this rung maps one rung low");
+        Assert.Contains("return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";", viewer[thisArm..previousArm], StringComparison.Ordinal);
     }
 
     /// <summary>The CI cluster workflows carry the product's formula for the new hypertable count — the pin CiClusterWorkerSizingTests holds, restated as the two numbers this rung moved.</summary>
@@ -880,6 +943,24 @@ public sealed class PgLogEventsLivePostgresTests
             var fatal = await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, "error", "FATAL", 100);
             JsonAssert.Contains("\"events_returned\": 1", fatal);
             JsonAssert.Contains("\"user_name\": \"intruder\"", fatal);
+
+            /* V130 (#3602, #3603): the lifted numbers survive COPY and come back on the family that carries
+               them, and NOT on the ones that do not. */
+            var spills = await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, "temp_file", null, 100);
+            JsonAssert.Contains("\"events_returned\": 1", spills);
+            JsonAssert.Contains("\"bytes\": 4294967296", spills);
+            JsonAssert.Contains("\"mb\": 4096", spills);
+            JsonAssert.Contains("\"autovacuum\": null", spills);
+            var vacuums = await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, "autovacuum", null, 100);
+            JsonAssert.Contains("\"relation_name\": \"public.orders\"", vacuums);
+            JsonAssert.Contains("\"database_name\": \"app_db\"", vacuums);
+            JsonAssert.Contains("\"kind\": \"vacuum\"", vacuums);
+            JsonAssert.Contains("\"pages_remaining\": 12345", vacuums);
+            JsonAssert.Contains("\"tuples_removed\": 4567", vacuums);
+            /* The fixture's line stops after the tuples clause, so the run has no duration — null, not 0. */
+            JsonAssert.Contains("\"duration_ms\": null", vacuums);
+            JsonAssert.Contains("\"temp_file\": null", vacuums);
+            Assert.DoesNotContain("\"bytes\":", locks, StringComparison.Ordinal);
 
             var none = await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, "connection", "PANIC", 100);
             JsonAssert.Contains("\"status\": \"no_events\"", none);

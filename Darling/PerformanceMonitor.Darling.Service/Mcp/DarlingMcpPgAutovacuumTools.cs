@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
@@ -19,11 +20,27 @@ using PerformanceMonitor.Darling.Storage;
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
-/// The MCP surface for autovacuum health, paired with the <c>pg_autovacuum_stats</c> collector.
+/// The MCP surface for autovacuum health, paired with the <c>pg_autovacuum_stats</c> collector — and, since
+/// #3603, with the <c>autovacuum</c> family of <c>pg_log_events</c>, which is where each run's COST lives.
+///
+/// <para><b>Two sources, one page, by design.</b> <c>pg_stat_user_tables</c> says whether autovacuum is
+/// keeping up: dead tuples against the table's own threshold, last-run stamps, run counts. It cannot say
+/// what a run cost — that a hot table's every run takes forty minutes of I/O landing in the business peak
+/// is invisible in a catalog that records only that it ran. <c>log_autovacuum_min_duration</c>'s completion
+/// report carries exactly that (duration, pages and tuples removed, buffers read and dirtied, WAL), and the
+/// log-event pipeline lifts it into columns (V130). This tool sets the two beside each other per table, so
+/// "is it keeping up" and "what does it cost when it does" answer from one read, and the recommendation to
+/// change a table's cost limit or naptime has the run history as its evidence rather than folklore.</para>
 /// </summary>
 [McpServerToolType]
 public sealed class DarlingMcpPgAutovacuumTools
 {
+    /// <summary>How many runs per table the history is READ over (the aggregates' denominator) and how many
+    /// are PUBLISHED in detail. Twenty-five bounds the read on a table that ran every naptime for a day;
+    /// five is what a reader looks at before asking for the log itself.</summary>
+    internal const int RunsReadPerTable = 25;
+    internal const int RunsShownPerTable = 5;
+
     /// <summary>
     /// Classifies a table by how far past its OWN threshold it is, not by its dead-tuple count. The same
     /// count is routine on a large table and urgent on a small one, so the ratio is the only comparable
@@ -62,7 +79,7 @@ public sealed class DarlingMcpPgAutovacuumTools
         };
     }
 
-    [McpServerTool(Name = "get_pg_autovacuum_health"), Description("Gets PostgreSQL per-table autovacuum health: which tables are behind on vacuum or analyze, ranked by how far past each table's OWN trigger threshold it is. This ratio is the point of the tool - a dead-tuple count alone is not actionable, because autovacuum fires at autovacuum_vacuum_threshold + scale_factor * reltuples, so 500,000 dead tuples is routine on a 50-million-row table and urgent on a 10,000-row one. Thresholds honour per-table reloptions overrides, not just the server settings, since ALTER TABLE SET (autovacuum_*) is common on exactly the big hot tables where the global default is wrong. Also reports tables with autovacuum switched off entirely, whether dead tuples are still growing (autovacuum losing a race) or flat (autovacuum blocked or not running), and the analyze backlog that drives bad row estimates. Works on any PostgreSQL target; collected per database.")]
+    [McpServerTool(Name = "get_pg_autovacuum_health"), Description("Gets PostgreSQL per-table autovacuum health: which tables are behind on vacuum or analyze, ranked by how far past each table's OWN trigger threshold it is. This ratio is the point of the tool - a dead-tuple count alone is not actionable, because autovacuum fires at autovacuum_vacuum_threshold + scale_factor * reltuples, so 500,000 dead tuples is routine on a 50-million-row table and urgent on a 10,000-row one. Thresholds honour per-table reloptions overrides, not just the server settings, since ALTER TABLE SET (autovacuum_*) is common on exactly the big hot tables where the global default is wrong. Also reports tables with autovacuum switched off entirely, whether dead tuples are still growing (autovacuum losing a race) or flat (autovacuum blocked or not running), and the analyze backlog that drives bad row estimates. Each table also carries recent_runs - what its automatic vacuums and analyzes COST, from the log_autovacuum_min_duration completion reports the log-event pipeline stores (pg_log_events, family autovacuum): per run the duration_ms, pages_removed / pages_remaining, tuples_removed / tuples_remaining, buffer_hits / buffer_misses / buffer_dirtied (read_mb / written_mb at the default 8 kB block), wal_records / wal_bytes, plus window aggregates (runs_counted, vacuum_runs, analyze_runs, total_duration_ms, max_duration_ms, total_read_mb, total_wal_bytes) over the newest 25 runs in the window with the newest 5 shown - so 'is it keeping up' (the catalog half) and 'what does each run cost' (the log half) answer from one place, and a table that is green here but takes forty minutes of I/O per run in the business peak is visible. recent_runs is null for a table with no run event in the window: the target's log_autovacuum_min_duration is -1 (off) or above the runs' durations, the log is not being read (get_pg_plan_capture_readiness judges readability), or the table simply did not run - run_history_note says which of those this read can tell. A null figure INSIDE a run means that PostgreSQL version did not print the clause on that line (an analyze has no pages or tuples; 16/17 print no WAL clause on an analyze), never zero. Works on any PostgreSQL target; collected per database.")]
     public static async Task<string> GetPgAutovacuumHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -107,8 +124,27 @@ public sealed class DarlingMcpPgAutovacuumTools
                 }, McpHelpers.JsonOptions);
             }
 
+            /* #3603: the cost half, read once for every table on the page and attached per table below. The
+               relation key is the parser's `schema.table`; the database rides along because one relation
+               name can exist in several databases and the log names the database on every run. */
+            var runs = await DarlingPgLogEventReader.GetAutovacuumRunsAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now,
+                rows.Select(r => $"{r.SchemaName}.{r.TableName}").Distinct(StringComparer.Ordinal).ToList(),
+                RunsReadPerTable);
+            var runsByTable = runs
+                .GroupBy(r => (Database: r.DatabaseName, Relation: r.RelationName))
+                .ToDictionary(g => g.Key, g => g.OrderByDescending(r => r.OccurredAtUtc).ToList());
+
             var tables = rows.Select(r =>
             {
+                var relation = $"{r.SchemaName}.{r.TableName}";
+                /* Exact (database, relation) first; a run whose database the log did not name (a V129-era row
+                   stored before the parser lifted it) matches on the relation alone rather than vanishing. */
+                if (!runsByTable.TryGetValue((r.DatabaseName, relation), out var tableRuns))
+                {
+                    runsByTable.TryGetValue((null, relation), out tableRuns);
+                }
+
                 /* -1 is the collector's not-applicable sentinel, and a 0 threshold happens on a table that
                    has never been analyzed. Neither can produce a ratio, and inventing one would rank a
                    table we know nothing about above tables we have measured. */
@@ -174,9 +210,14 @@ public sealed class DarlingMcpPgAutovacuumTools
                        is preventing it, rather than that it has not got round to this table yet. */
                     never_autovacuumed = r.LastAutovacuum is null && r.AutovacuumCount == 0,
                     measured_at = r.MeasuredAt,
+                    /* #3603: what this table's runs COST, from the log. Null when the window holds no run
+                       event for it — run_history_note at the top says what that can mean. */
+                    recent_runs = RecentRuns(tableRuns),
                 };
             })
             .ToList();
+
+            var tablesWithRuns = tables.Count(t => t.recent_runs is not null);
 
             return JsonSerializer.Serialize(new
             {
@@ -194,6 +235,22 @@ public sealed class DarlingMcpPgAutovacuumTools
                 limit_reached = tables.Count >= limit,
                 worst_table = tables[0].table_name,
                 worst_severity = tables[0].severity,
+                /* #3603: how much of the page the cost half could speak for, and — when it is none — the
+                   reasons this read can and cannot separate. Said once here rather than per table. */
+                tables_with_run_history = tablesWithRuns,
+                run_history_note = tablesWithRuns > 0
+                    ? $"recent_runs on {tablesWithRuns} of {tables.Count} tables is from the log_autovacuum_min_duration "
+                      + "completion reports stored in pg_log_events (family autovacuum) over the same window; a "
+                      + "table without it did not complete an automatic vacuum or analyze that the target logged "
+                      + "in the window. Aggregates cover the newest " + RunsReadPerTable + " runs per table; runs "
+                      + "lists the newest " + RunsShownPerTable + "."
+                    : "No table on this page has an autovacuum run event in the window. Three things produce "
+                      + "that and this read cannot tell them apart: log_autovacuum_min_duration is -1 (off) or "
+                      + "higher than any run's duration on the target (get_pg_server_config carries it; "
+                      + "get_pg_logging_audit judges it); the server log is not being read (get_pg_log_events "
+                      + "with family autovacuum is the direct check, and its empty branch names the reason the "
+                      + "collector recorded); or nothing on this page was vacuumed in the window, which for a "
+                      + "table far past its threshold is itself the finding.",
                 tables,
             }, McpHelpers.JsonOptions);
         }
@@ -201,5 +258,68 @@ public sealed class DarlingMcpPgAutovacuumTools
         {
             return McpHelpers.Status("error", $"Reading PostgreSQL autovacuum health failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// The <c>recent_runs</c> block for one table (#3603): aggregates over the runs read (newest
+    /// <see cref="RunsReadPerTable"/> in the window) and the newest <see cref="RunsShownPerTable"/> in
+    /// detail, in the same per-run shape <c>get_pg_log_events</c> publishes. Null for no runs — the
+    /// caller's note explains the null once, at the top.
+    /// <para>Sums skip null members rather than treating them as zero, and say how many runs carried the
+    /// figure: an analyze run has no tuples clause, so <c>total_tuples_removed</c> over a mixed history is
+    /// a sum over the vacuum runs and <c>runs_with_tuples</c> says so.</para>
+    /// </summary>
+    internal static object? RecentRuns(IReadOnlyList<DarlingPgLogEventReader.PgAutovacuumRunRow>? runs)
+    {
+        if (runs is null || runs.Count == 0)
+        {
+            return null;
+        }
+
+        static long? Sum(IEnumerable<long?> values)
+        {
+            long total = 0;
+            var any = false;
+            foreach (var v in values)
+            {
+                if (v is null) continue;
+                total += v.Value;
+                any = true;
+            }
+            return any ? total : null;
+        }
+
+        var durations = runs.Where(r => r.DurationMs is not null).Select(r => r.DurationMs!.Value).ToList();
+        var totalMisses = Sum(runs.Select(r => r.BufferMisses));
+        var totalDirtied = Sum(runs.Select(r => r.BufferDirtied));
+
+        return new
+        {
+            /* The denominator of every aggregate here — capped at RunsReadPerTable, and history_capped says
+               when the cap bit, so "25 runs" on a table that ran 200 times reads as a sample, not a count. */
+            runs_counted = runs.Count,
+            history_capped = runs.Count >= RunsReadPerTable,
+            vacuum_runs = runs.Count(r => !r.IsAnalyze),
+            analyze_runs = runs.Count(r => r.IsAnalyze),
+            newest_run_at = runs[0].OccurredAtUtc,
+            oldest_counted_run_at = runs[^1].OccurredAtUtc,
+            total_duration_ms = durations.Count > 0 ? durations.Sum() : (long?)null,
+            max_duration_ms = durations.Count > 0 ? durations.Max() : (long?)null,
+            avg_duration_ms = durations.Count > 0 ? (long?)Math.Round(durations.Average()) : null,
+            total_tuples_removed = Sum(runs.Select(r => r.TuplesRemoved)),
+            runs_with_tuples = runs.Count(r => r.TuplesRemoved is not null),
+            total_pages_removed = Sum(runs.Select(r => r.PagesRemoved)),
+            total_read_mb = totalMisses is null ? null : (double?)Math.Round(totalMisses.Value * 8192.0 / 1024.0 / 1024.0, 2),
+            total_written_mb = totalDirtied is null ? null : (double?)Math.Round(totalDirtied.Value * 8192.0 / 1024.0 / 1024.0, 2),
+            total_wal_bytes = Sum(runs.Select(r => r.WalBytes)),
+            runs = runs.Take(RunsShownPerTable).Select(r => new
+            {
+                occurred_at = r.OccurredAtUtc,
+                database_name = r.DatabaseName,
+                run = DarlingMcpPgLogEventTools.AutovacuumRunShape(new DarlingPgLogEventReader.PgLogEventMetricsRow(
+                    r.RelationName, null, r.DurationMs, r.PagesRemoved, r.PagesRemaining, r.TuplesRemoved, r.TuplesRemaining,
+                    r.BufferHits, r.BufferMisses, r.BufferDirtied, r.WalRecords, r.WalBytes, r.IsAnalyze)),
+            }),
+        };
     }
 }

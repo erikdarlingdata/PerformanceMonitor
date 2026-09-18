@@ -36,8 +36,8 @@ namespace PerformanceMonitor.Collectors;
 /// families over it, so there is one identity per entry (<see cref="PgLogEvent.RawLineHash"/>) and one
 /// overlap to dedupe rather than one per family. A per-family cursor would let a slow family lag a fast one
 /// and would need per-family resume markers on the RDS side, for no reader that asks per family. The
-/// sibling tables (#3602, #3603) ride the same entries by registering a parser here and writing to their
-/// own table off the same cycle's events.</para>
+/// sibling families (#3602, #3603) ride the same entries by registering a parser here; their numbers are
+/// nullable columns on the same row (V130), so there is still one table, one identity and one dedupe.</para>
 /// </summary>
 public sealed class PgLogEventClassifier
 {
@@ -45,13 +45,17 @@ public sealed class PgLogEventClassifier
     /// The registration order, and the order is the rule (see <see cref="IPgLogFamilyParser"/>): severity
     /// first, then the LOG-level families by message shape, then the recognised-only shapes. A sibling
     /// issue's parser goes BEFORE <see cref="PgRecognisedFamilyParser"/> so it takes its family's lines out
-    /// of the generic arm.
+    /// of the generic arm — which is exactly what #3602 (<see cref="PgTempFileEventParser"/>) and #3603
+    /// (<see cref="PgAutovacuumEventParser"/>) did: two lines here, two families out of the generic arm,
+    /// no stored row relabelled.
     /// </summary>
     public static IReadOnlyList<IPgLogFamilyParser> DefaultParsers { get; } = new IPgLogFamilyParser[]
     {
         new PgErrorEventParser(),
         new PgConnectionEventParser(),
         new PgLockWaitEventParser(),
+        new PgTempFileEventParser(),
+        new PgAutovacuumEventParser(),
         new PgRecognisedFamilyParser(),
     };
 
