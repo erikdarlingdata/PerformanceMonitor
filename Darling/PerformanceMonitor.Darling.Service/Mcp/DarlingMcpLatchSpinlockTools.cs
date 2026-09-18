@@ -70,8 +70,9 @@ public sealed class DarlingMcpLatchSpinlockTools
                 avg_wait_ms_per_request = r.TotalDeltaWaitingRequests > 0
                     ? Math.Round((double)r.TotalDeltaWaitTimeMs / r.TotalDeltaWaitingRequests, 2)
                     : (double?)null,
-                waits_per_second = Math.Round(r.WaitsPerSecond, 2),
-                wait_ms_per_second = Math.Round(r.WaitMsPerSecond, 2),
+                /* null when the latest interval was unknowable (#3540) — a restart, not a quiet latch. */
+                waits_per_second = r.WaitsPerSecond is double waits ? Math.Round(waits, 2) : (double?)null,
+                wait_ms_per_second = r.WaitMsPerSecond is double waitMs ? Math.Round(waitMs, 2) : (double?)null,
                 severity = DarlingLatchSpinlockReader.LatchSeverity(r.LatestDeltaWaitTimeMs),
                 description = DarlingLatchSpinlockReader.LatchDescription(r.LatchClass),
                 recommendation = DarlingLatchSpinlockReader.LatchRecommendation(r.LatchClass),
@@ -126,8 +127,9 @@ public sealed class DarlingMcpLatchSpinlockTools
                 spins_per_collision = r.TotalDeltaCollisions > 0
                     ? Math.Round((double)r.TotalDeltaSpins / r.TotalDeltaCollisions, 1)
                     : (double?)null,
-                collisions_per_second = Math.Round(r.CollisionsPerSecond, 2),
-                spins_per_second = Math.Round(r.SpinsPerSecond, 2),
+                /* null when the latest interval was unknowable (#3540) — a restart, not a quiet spinlock. */
+                collisions_per_second = r.CollisionsPerSecond is double collisions ? Math.Round(collisions, 2) : (double?)null,
+                spins_per_second = r.SpinsPerSecond is double spins ? Math.Round(spins, 2) : (double?)null,
                 description = DarlingLatchSpinlockReader.SpinlockDescription(r.SpinlockName),
                 latest_collection_time = r.LatestCollectionTime.ToString("o")
             });

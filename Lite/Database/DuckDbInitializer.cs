@@ -271,7 +271,7 @@ public class DuckDbInitializer
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 59;
+    internal const int CurrentSchemaVersion = 60;
 
     private readonly string _archivePath;
 
@@ -1603,6 +1603,49 @@ public class DuckDbInitializer
                 catch (Exception ex)
                 {
                     _logger?.LogWarning("Migration to v59 on {Table} encountered an error (non-fatal): {Error}", table, ex.Message);
+                }
+            }
+        }
+
+        if (fromVersion < 60)
+        {
+            /* v60 (#3540): wait_stats, file_io_stats, latch_stats and spinlock_stats gain sample_interval_seconds
+               — the measured seconds each row's deltas accrued over, twinning Darling's V127. The shared delta
+               calculator reports (delta 0, interval 0) when no delta is knowable (first sighting, counter
+               reset, a gap past the 3600 s policy) and (0, n) when the interval was genuinely idle, and the
+               interval is the ONLY thing that tells those apart. These four collectors discarded it at the
+               write, so a restart's fabricated zero survived as a measured one and every per-second reader
+               LAG-divided it into a confident 0.00 ms/sec. perfmon_stats and query_stats have carried the
+               column from the start; this gives the other four the same column in the same type.
+
+               Appended at the end of each PayloadColumns list, so the positional appender and old parquet
+               are unaffected. Nothing to backfill and nothing that COULD be: a row collected before the
+               upgrade never recorded its interval, so NULL is the honest value — the readers treat NULL as
+               "pre-v60, derive the interval from the previous collection_time" (exactly what they always
+               did) and 0 as "unknowable, render nothing". A backfilled 0 would stamp all of history as
+               unknowable and blank every rate chart for 30 days.
+
+               REQUIRED on this side even though Lite collects the same DMVs Darling does: the appender writes
+               one value per declared payload column, so a database without the column fails EndRow() on the
+               first batch of any of these four collectors — the whole batch, not the column. Fresh installs
+               get it from DuckDbSchemaGenerator; this ALTER is for an existing database and is idempotent.
+               The v_ passthrough views need no work here: Lite rebuilds every v_ view on start
+               (CreateArchiveViewsAsync, called after this), which is the difference from Darling, where the
+               view's SELECT * column list is frozen at CREATE and the rung has to refresh it.
+
+               Non-fatal per table, matching v59's posture. */
+            _logger?.LogInformation("Running migration to v60: the four naked delta families gain sample_interval_seconds");
+
+            foreach (var table in new[] { "wait_stats", "file_io_stats", "latch_stats", "spinlock_stats" })
+            {
+                try
+                {
+                    await ExecuteNonQueryAsync(connection,
+                        $"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS sample_interval_seconds INTEGER");
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning("Migration to v60 on {Table} encountered an error (non-fatal): {Error}", table, ex.Message);
                 }
             }
         }

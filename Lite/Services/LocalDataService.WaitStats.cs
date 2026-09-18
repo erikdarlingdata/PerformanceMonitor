@@ -151,7 +151,15 @@ WITH raw AS
         delta_wait_time_ms,
         delta_signal_wait_time_ms,
         delta_waiting_tasks,
-        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
+        /* #3540: the STORED interval where the row has one. 0 is the calculator's no-delta-knowable
+           marker (first sighting, counter reset, a gap past the policy) and becomes NULL through NULLIF,
+           so the rates below are NULL and the reader drops the row — a missing sample, never the confident
+           0.00 ms/sec a restart used to render. NULL (a pre-v60 row that never recorded one) falls back to
+           the LAG over collection_time this read always used, so history renders exactly as it did. */
+        CASE WHEN sample_interval_seconds IS NULL
+             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+             ELSE NULLIF(sample_interval_seconds, 0)
+        END AS interval_seconds
     FROM v_wait_stats
     WHERE server_id = $1
     AND   wait_type = $2
@@ -160,9 +168,9 @@ WITH raw AS
 )
 SELECT
     collection_time,
-    CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS wait_time_ms_per_second,
-    CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS signal_wait_time_ms_per_second,
-    CASE WHEN delta_waiting_tasks > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / delta_waiting_tasks ELSE 0 END AS avg_ms_per_wait
+    CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second,
+    CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS signal_wait_time_ms_per_second,
+    CASE WHEN interval_seconds > 0 AND delta_waiting_tasks > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / delta_waiting_tasks WHEN interval_seconds > 0 THEN 0 END AS avg_ms_per_wait
 FROM raw
 ORDER BY collection_time";
 
@@ -175,10 +183,16 @@ ORDER BY collection_time";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
+            if (reader.IsDBNull(1))
+            {
+                continue;
+            }
+
             items.Add(new WaitStatsTrendPoint
             {
                 CollectionTime = reader.GetDateTime(0),
-                WaitTimeMsPerSecond = reader.IsDBNull(1) ? 0 : reader.GetDouble(1),
+                WaitTimeMsPerSecond = reader.GetDouble(1),
                 SignalWaitTimeMsPerSecond = reader.IsDBNull(2) ? 0 : reader.GetDouble(2),
                 AvgMsPerWait = reader.IsDBNull(3) ? 0 : reader.GetDouble(3)
             });
@@ -213,7 +227,11 @@ WITH raw AS
         delta_wait_time_ms,
         delta_signal_wait_time_ms,
         delta_waiting_tasks,
-        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time)))) AS interval_seconds
+        /* #3540: stored interval first, LAG only for pre-v60 rows — see GetWaitStatsTrendAsync. */
+        CASE WHEN sample_interval_seconds IS NULL
+             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time))))
+             ELSE NULLIF(sample_interval_seconds, 0)
+        END AS interval_seconds
     FROM v_wait_stats
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -223,9 +241,9 @@ WITH raw AS
 SELECT
     wait_type,
     collection_time,
-    CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS wait_time_ms_per_second,
-    CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS signal_wait_time_ms_per_second,
-    CASE WHEN delta_waiting_tasks > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / delta_waiting_tasks ELSE 0 END AS avg_ms_per_wait
+    CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second,
+    CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS signal_wait_time_ms_per_second,
+    CASE WHEN interval_seconds > 0 AND delta_waiting_tasks > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / delta_waiting_tasks WHEN interval_seconds > 0 THEN 0 END AS avg_ms_per_wait
 FROM raw
 ORDER BY wait_type, collection_time";
 
@@ -238,6 +256,12 @@ ORDER BY wait_type, collection_time";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
+            if (reader.IsDBNull(2))
+            {
+                continue;
+            }
+
             var wt = reader.GetString(0);
             if (!result.TryGetValue(wt, out var list))
             {
@@ -247,7 +271,7 @@ ORDER BY wait_type, collection_time";
             list.Add(new WaitStatsTrendPoint
             {
                 CollectionTime = reader.GetDateTime(1),
-                WaitTimeMsPerSecond = reader.IsDBNull(2) ? 0 : reader.GetDouble(2),
+                WaitTimeMsPerSecond = reader.GetDouble(2),
                 SignalWaitTimeMsPerSecond = reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
                 AvgMsPerWait = reader.IsDBNull(4) ? 0 : reader.GetDouble(4)
             });
@@ -275,7 +299,15 @@ WITH per_collection AS
     SELECT
         collection_time,
         SUM(delta_wait_time_ms) AS total_delta_ms,
-        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
+        /* #3540: the collection's STORED interval — MAX over its rows, because a wait type first seen in
+           an otherwise steady pass carries 0 beside its siblings' real interval and contributes 0 to the
+           sum; MAX is 0 only when EVERY row was unknowable (a restart), and that 0 becomes NULL through
+           NULLIF so the point is dropped rather than rendered as 0.00. NULL (pre-v60 rows) falls back to
+           the LAG this read always used. */
+        CASE WHEN MAX(sample_interval_seconds) IS NULL
+             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+             ELSE NULLIF(MAX(sample_interval_seconds), 0)
+        END AS interval_seconds
     FROM v_wait_stats
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -285,7 +317,7 @@ WITH per_collection AS
 )
 SELECT
     collection_time,
-    CASE WHEN interval_seconds > 0 THEN CAST(total_delta_ms AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS wait_time_ms_per_second
+    CASE WHEN interval_seconds > 0 THEN CAST(total_delta_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second
 FROM per_collection
 ORDER BY collection_time";
 
@@ -297,10 +329,16 @@ ORDER BY collection_time";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
+            if (reader.IsDBNull(1))
+            {
+                continue;
+            }
+
             items.Add(new WaitStatsTrendPoint
             {
                 CollectionTime = reader.GetDateTime(0),
-                WaitTimeMsPerSecond = reader.IsDBNull(1) ? 0 : reader.GetDouble(1)
+                WaitTimeMsPerSecond = reader.GetDouble(1)
             });
         }
 

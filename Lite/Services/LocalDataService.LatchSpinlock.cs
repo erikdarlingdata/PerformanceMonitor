@@ -24,7 +24,8 @@ public partial class LocalDataService
 
     /// <summary>
     /// The Latch Stats trend: the per-second wait rate for the TOP 5 latch classes (by total delta wait
-    /// time over the window), normalized to ms/sec via the per-class LAG interval.
+    /// time over the window), normalized to ms/sec via each row's stored sample_interval_seconds (the
+    /// per-class LAG interval only for pre-v60 rows that never recorded one, #3540).
     /// </summary>
     public async Task<List<LatchStatsTrendPoint>> GetLatchStatsTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
@@ -52,7 +53,12 @@ raw AS
         latch_class,
         collection_time,
         delta_wait_time_ms,
-        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY latch_class ORDER BY collection_time)))) AS interval_seconds
+        /* #3540: the STORED interval where the row has one; 0 (no delta knowable) becomes NULL through NULLIF
+           and the reader drops the row rather than reading 0.00. NULL (a pre-v60 row) falls back to the LAG. */
+        CASE WHEN sample_interval_seconds IS NULL
+             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY latch_class ORDER BY collection_time))))
+             ELSE NULLIF(sample_interval_seconds, 0)
+        END AS interval_seconds
     FROM v_latch_stats
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -62,7 +68,7 @@ raw AS
 SELECT
     latch_class,
     collection_time,
-    CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS wait_time_ms_per_second
+    CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second
 FROM raw
 ORDER BY latch_class, collection_time";
 
@@ -74,11 +80,17 @@ ORDER BY latch_class, collection_time";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
+            if (reader.IsDBNull(2))
+            {
+                continue;
+            }
+
             items.Add(new LatchStatsTrendPoint
             {
                 LatchClass = reader.GetString(0),
                 CollectionTime = reader.GetDateTime(1),
-                WaitTimeMsPerSecond = reader.IsDBNull(2) ? 0 : reader.GetDouble(2)
+                WaitTimeMsPerSecond = reader.GetDouble(2)
             });
         }
 
@@ -172,7 +184,12 @@ raw AS
         spinlock_name,
         collection_time,
         delta_collisions,
-        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY spinlock_name ORDER BY collection_time)))) AS interval_seconds
+        /* #3540: the STORED interval where the row has one; 0 (no delta knowable) becomes NULL through NULLIF
+           and the reader drops the row rather than reading 0.00. NULL (a pre-v60 row) falls back to the LAG. */
+        CASE WHEN sample_interval_seconds IS NULL
+             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY spinlock_name ORDER BY collection_time))))
+             ELSE NULLIF(sample_interval_seconds, 0)
+        END AS interval_seconds
     FROM v_spinlock_stats
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -182,7 +199,7 @@ raw AS
 SELECT
     spinlock_name,
     collection_time,
-    CASE WHEN interval_seconds > 0 THEN CAST(delta_collisions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS collisions_per_second
+    CASE WHEN interval_seconds > 0 THEN CAST(delta_collisions AS DOUBLE PRECISION) / interval_seconds END AS collisions_per_second
 FROM raw
 ORDER BY spinlock_name, collection_time";
 
@@ -194,11 +211,17 @@ ORDER BY spinlock_name, collection_time";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
+            if (reader.IsDBNull(2))
+            {
+                continue;
+            }
+
             items.Add(new SpinlockStatsTrendPoint
             {
                 SpinlockName = reader.GetString(0),
                 CollectionTime = reader.GetDateTime(1),
-                CollisionsPerSecond = reader.IsDBNull(2) ? 0 : reader.GetDouble(2)
+                CollisionsPerSecond = reader.GetDouble(2)
             });
         }
 

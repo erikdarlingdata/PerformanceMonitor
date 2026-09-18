@@ -313,6 +313,13 @@ WITH clean AS (
 
             // Cumulative counter, multiple rows per collection (per wait type) —
             // aggregate to total wait ms per collection first, then QUALIFY for restart exclusion
+            /* #3540: sample_interval_seconds IS DISTINCT FROM 0 drops the calculator's unknowable rows (a
+               stored 0: first sighting, counter reset, gap past the policy) BEFORE the sum, so a restart
+               collection whose every row is (0, 0) produces no per-collection row at all rather than a
+               total_wait_ms = 0 sample that drags the mean down and the stddev up. Pre-v60 rows (NULL,
+               interval never recorded) are kept, and for them the QUALIFY restart signature below remains
+               the guard it always was. Darling's twin reads the wait_stats_baseline continuous aggregate,
+               which cannot carry this filter without a rebuild — see V127's rung note. */
             MetricNames.WaitStats => @"
 WITH per_collection AS (
     SELECT collection_time,
@@ -320,6 +327,7 @@ WITH per_collection AS (
     FROM v_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_wait_time_ms >= 0
+    AND   sample_interval_seconds IS DISTINCT FROM 0
     GROUP BY collection_time
     QUALIFY NOT (total_wait_ms = 0
         AND COALESCE(LAG(total_wait_ms) OVER (ORDER BY collection_time), 0) > 10000)
@@ -413,11 +421,17 @@ WITH clean AS (
             // ── Chart-unit baselines (for UI bands — units match what the chart displays) ──
 
             // Wait ms per second (chart shows this, not total ms per collection)
+            /* #3540: the collection's STORED interval (MAX over its rows) where it has one, the LAG only for
+               pre-v60 collections; a restart collection's 0 becomes NULL and the with_rate WHERE drops it
+               exactly as it always dropped the window's first row. */
             MetricNames.WaitMsPerSec => @"
 WITH per_collection AS (
     SELECT collection_time,
            SUM(delta_wait_time_ms)::DOUBLE PRECISION AS total_wait_ms,
-           extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_sec
+           CASE WHEN MAX(sample_interval_seconds) IS NULL
+                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                ELSE NULLIF(MAX(sample_interval_seconds), 0)
+           END AS interval_sec
     FROM v_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_wait_time_ms >= 0
@@ -425,9 +439,9 @@ WITH per_collection AS (
 ),
 with_rate AS (
     SELECT collection_time,
-           CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec ELSE 0 END AS ms_per_sec
+           total_wait_ms / interval_sec AS ms_per_sec
     FROM per_collection
-    WHERE interval_sec IS NOT NULL
+    WHERE interval_sec IS NOT NULL AND interval_sec > 0
     QUALIFY NOT (ms_per_sec = 0
         AND COALESCE(LAG(ms_per_sec) OVER (ORDER BY collection_time), 0) > 100)
 ),

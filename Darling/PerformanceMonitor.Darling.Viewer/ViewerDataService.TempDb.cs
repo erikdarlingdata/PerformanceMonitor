@@ -78,7 +78,8 @@ public sealed partial class ViewerDataService
     /// to mirror Lite's view-based query, filtered to tempdb, and computes per-collection average
     /// read/write latency (stall ms / operation count) with the delta-stall sums CAST to double
     /// precision before division. Grouped by (collection_time, file_name) so each tempdb data file is
-    /// its own series.
+    /// its own series. Rows whose stored <c>sample_interval_seconds</c> is 0 — no delta knowable, a
+    /// restart — are dropped rather than rendered as 0.00 ms (#3540).
     /// $1 server_id, $2 window start (naive UTC).
     /// </summary>
     public const string TempDbFileIoTrendSql = """
@@ -91,6 +92,11 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   database_name = 'tempdb'
+        /* #3540: a stored interval of 0 is the calculator's "no delta knowable" marker (first sighting,
+           counter reset, a gap past the policy) — the row is dropped so the point is ABSENT rather than the
+           confident "0.00 ms" a restart used to render. IS DISTINCT FROM 0 keeps pre-V127 rows (NULL: interval
+           never recorded), which carry on reading exactly as they always did. */
+        AND   sample_interval_seconds IS DISTINCT FROM 0
         GROUP BY collection_time, file_name
         ORDER BY collection_time, file_name
         """;

@@ -253,6 +253,12 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         Assert.Contains("wait_type LIKE 'LCK%'", sql, StringComparison.Ordinal);
         Assert.Contains("LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("CAST(delta_wait_time_ms AS double precision) / interval_seconds", sql, StringComparison.Ordinal);
+        /* #3540: the STORED interval first (0, the unknowable marker, → NULL through NULLIF); the LAG only for
+           pre-V127 rows; no ELSE 0 on the rate, so an unknowable interval reads NULL and never 0.00. */
+        Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("ELSE NULLIF(sample_interval_seconds, 0)", sql, StringComparison.Ordinal);
+        Assert.Contains("END AS interval_seconds", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ELSE 0 END", sql, StringComparison.Ordinal);
 
         /* A negative delta is the counter reset across a restart, not a negative wait. */
         Assert.Contains("WHERE delta_wait_time_ms >= 0", sql, StringComparison.Ordinal);

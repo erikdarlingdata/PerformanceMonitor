@@ -15,8 +15,9 @@ using Npgsql;
 namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>One point on a latch class's per-second wait trend (this interval's
-/// <c>delta_wait_time_ms</c> divided by the seconds since the previous collection of the SAME
-/// class, via a per-class <c>LAG</c> window — the wait-stats idiom, minus the avg-per-wait metric).</summary>
+/// <c>delta_wait_time_ms</c> divided by the seconds it accrued over — the row's stored
+/// <c>sample_interval_seconds</c>, or for pre-V127 rows the per-class <c>LAG</c> window — the wait-stats
+/// idiom, minus the avg-per-wait metric). A row whose interval is unknowable is not a point (#3540).</summary>
 public sealed record LatchStatsTrendPoint(string LatchClass, DateTime CollectionTime, double WaitTimeMsPerSecond);
 
 /// <summary>One row of the Latch Stats latest-snapshot grid: the cumulative counters plus the last
@@ -30,8 +31,8 @@ public sealed record LatchStatsSnapshotRow(
     long DeltaWaitTimeMs);
 
 /// <summary>One point on a spinlock's per-second collision trend (this interval's
-/// <c>delta_collisions</c> divided by the seconds since the previous collection of the SAME
-/// spinlock, via a per-name <c>LAG</c> window).</summary>
+/// <c>delta_collisions</c> divided by the seconds it accrued over — the stored interval, or for pre-V127
+/// rows the per-name <c>LAG</c> window). A row whose interval is unknowable is not a point (#3540).</summary>
 public sealed record SpinlockStatsTrendPoint(string SpinlockName, DateTime CollectionTime, double CollisionsPerSecond);
 
 /// <summary>One row of the Spinlock Stats latest-snapshot grid: the cumulative counters plus the
@@ -51,9 +52,9 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// The Latch Stats trend read: the per-second wait rate for the TOP 5 latch classes (by total delta
     /// wait time over the window), mirroring the Dashboard's <c>GetLatchStatsTopNAsync</c> top-5 grouping
-    /// but normalizing to ms/sec in SQL via the per-class <c>LAG</c> interval (Darling's cumulative-delta
-    /// tables have no stored <c>sample_interval_seconds</c>, so the seconds come from the same
-    /// truncate-then-diff epoch idiom the wait-stats trend uses). Runs on the <c>v_latch_stats</c>
+    /// but normalizing to ms/sec in SQL via each row's stored <c>sample_interval_seconds</c> (V127, #3540),
+    /// falling back to the per-class <c>LAG</c> interval — the same truncate-then-diff epoch idiom the
+    /// wait-stats trend uses — only for pre-V127 rows that never recorded one. Runs on the <c>v_latch_stats</c>
     /// passthrough view. $1 server_id, $2 window start, $3 window end (all naive UTC).
     /// </summary>
     public const string LatchTrendSql = """
@@ -74,7 +75,12 @@ public sealed partial class ViewerDataService
                 latch_class,
                 collection_time,
                 delta_wait_time_ms,
-                extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY latch_class ORDER BY collection_time)))) AS interval_seconds
+                /* #3540: the STORED interval where the row has one; 0 (no delta knowable) becomes NULL through NULLIF
+                   and the reader drops the row rather than reading 0.00. NULL (a pre-V127 row) falls back to the LAG. */
+                CASE WHEN sample_interval_seconds IS NULL
+                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY latch_class ORDER BY collection_time))))
+                     ELSE NULLIF(sample_interval_seconds, 0)
+                END AS interval_seconds
             FROM v_latch_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -84,7 +90,7 @@ public sealed partial class ViewerDataService
         SELECT
             latch_class,
             collection_time,
-            CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS wait_time_ms_per_second
+            CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second
         FROM raw
         ORDER BY latch_class, collection_time
         """;
@@ -120,8 +126,8 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// The Spinlock Stats trend read: the per-second collision rate for the TOP 5 spinlocks (by total
     /// delta collisions over the window), the collision analog of <see cref="LatchTrendSql"/> — top-5
-    /// grouping mirrors the Dashboard's <c>GetSpinlockStatsTopNAsync</c>, collisions/sec via the per-name
-    /// <c>LAG</c> interval. Runs on <c>v_spinlock_stats</c>. $1 server_id, $2 start, $3 end (naive UTC).
+    /// grouping mirrors the Dashboard's <c>GetSpinlockStatsTopNAsync</c>, collisions/sec via the stored
+    /// interval (per-name <c>LAG</c> for pre-V127 rows). Runs on <c>v_spinlock_stats</c>. $1 server_id, $2 start, $3 end (naive UTC).
     /// </summary>
     public const string SpinlockTrendSql = """
         WITH top_spinlocks AS
@@ -141,7 +147,12 @@ public sealed partial class ViewerDataService
                 spinlock_name,
                 collection_time,
                 delta_collisions,
-                extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY spinlock_name ORDER BY collection_time)))) AS interval_seconds
+                /* #3540: the STORED interval where the row has one; 0 (no delta knowable) becomes NULL through NULLIF
+                   and the reader drops the row rather than reading 0.00. NULL (a pre-V127 row) falls back to the LAG. */
+                CASE WHEN sample_interval_seconds IS NULL
+                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY spinlock_name ORDER BY collection_time))))
+                     ELSE NULLIF(sample_interval_seconds, 0)
+                END AS interval_seconds
             FROM v_spinlock_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -151,7 +162,7 @@ public sealed partial class ViewerDataService
         SELECT
             spinlock_name,
             collection_time,
-            CASE WHEN interval_seconds > 0 THEN CAST(delta_collisions AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS collisions_per_second
+            CASE WHEN interval_seconds > 0 THEN CAST(delta_collisions AS DOUBLE PRECISION) / interval_seconds END AS collisions_per_second
         FROM raw
         ORDER BY spinlock_name, collection_time
         """;
@@ -198,10 +209,16 @@ public sealed partial class ViewerDataService
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
+            if (reader.IsDBNull(2))
+            {
+                continue;
+            }
+
             result.Add(new LatchStatsTrendPoint(
                 reader.GetString(0),
                 reader.GetDateTime(1),
-                reader.IsDBNull(2) ? 0 : reader.GetDouble(2)));
+                reader.GetDouble(2)));
         }
 
         return result;
@@ -243,10 +260,16 @@ public sealed partial class ViewerDataService
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
+            if (reader.IsDBNull(2))
+            {
+                continue;
+            }
+
             result.Add(new SpinlockStatsTrendPoint(
                 reader.GetString(0),
                 reader.GetDateTime(1),
-                reader.IsDBNull(2) ? 0 : reader.GetDouble(2)));
+                reader.GetDouble(2)));
         }
 
         return result;

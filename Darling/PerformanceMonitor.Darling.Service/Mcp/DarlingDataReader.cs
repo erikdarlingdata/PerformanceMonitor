@@ -165,11 +165,21 @@ internal static class DarlingDataReader
                     + (TextFetchProbeMs ?? 0) + (TextFetchWriteMs ?? 0);
     }
 
-    /// <summary>One database file's latest I/O snapshot; avg latency is computed by the tool.</summary>
+    /// <summary>One database file's latest I/O snapshot; avg latency is computed by the tool.
+    /// <para><paramref name="SampleIntervalSeconds"/> (#3540): the measured seconds the deltas accrued over;
+    /// 0 is the calculator's "no delta knowable" marker (first sighting, counter reset, gap past the policy)
+    /// and null is a pre-V127 row that never recorded one. The tool reports latency as null on a 0 rather than
+    /// the "0.00 ms" a restart used to render.</para></summary>
     public sealed record FileIoRow(
         string DatabaseName, string FileName, string FileType, string PhysicalName, double SizeMb,
         long DeltaReads, long DeltaWrites, long DeltaReadBytes, long DeltaWriteBytes,
-        long DeltaStallReadMs, long DeltaStallWriteMs);
+        long DeltaStallReadMs, long DeltaStallWriteMs, int? SampleIntervalSeconds)
+    {
+        /// <summary>True when the row's deltas are the calculator's unknowable marker — a stored interval of
+        /// exactly 0. NULL (pre-V127, interval never recorded) is NOT unknowable: those rows keep the
+        /// pre-#3540 reading, because nothing about them can say otherwise.</summary>
+        public bool IsUnknowable => SampleIntervalSeconds == 0;
+    }
 
     /// <summary>One tempdb space-usage sample over the window.</summary>
     public sealed record TempDbSample(
@@ -429,9 +439,18 @@ internal static class DarlingDataReader
 
     /// <summary>
     /// A single wait type's per-second trend — Lite's <c>GetWaitStatsTrendAsync</c>: the interval rate is
-    /// this collection's delta divided by the seconds since the previous collection (a <c>LAG</c> over the
-    /// truncate-then-diff epoch idiom proven value-identical DuckDB↔Postgres). $1 server_id, $2 wait_type,
+    /// this collection's delta divided by the seconds the delta accrued over. $1 server_id, $2 wait_type,
     /// $3/$4 window (naive UTC).
+    ///
+    /// <para><b>The interval is the STORED one where the row has it (#3540).</b> <c>wait_stats</c> carries
+    /// <c>sample_interval_seconds</c> since V127 — the calculator's measured seconds, 0 when no delta was
+    /// knowable (first sighting, counter reset, a gap past the policy). A 0 maps to NULL through
+    /// <c>NULLIF</c>, so the rate is NULL rather than the confident 0.00 ms/sec this read used to emit at
+    /// exactly the moments (restarts) it was unknowable; the reader drops the row (a missing sample, never a
+    /// fabricated idle one). A NULL interval is a pre-V127 row whose interval was never recorded, and for
+    /// those the LAG over collection_time (the truncate-then-diff epoch idiom proven value-identical
+    /// DuckDB↔Postgres) is what this read always did, so history keeps rendering. The first row of the
+    /// window has no prior and no stored interval either way — NULL, not 0.</para>
     /// </summary>
     public const string WaitTrendSql = """
         WITH raw AS
@@ -440,7 +459,10 @@ internal static class DarlingDataReader
                 collection_time,
                 delta_wait_time_ms,
                 delta_signal_wait_time_ms,
-                extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_seconds
+                CASE WHEN sample_interval_seconds IS NULL
+                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                     ELSE NULLIF(sample_interval_seconds, 0)
+                END AS interval_seconds
             FROM v_wait_stats
             WHERE server_id = $1
             AND   wait_type = $2
@@ -449,8 +471,8 @@ internal static class DarlingDataReader
         )
         SELECT
             collection_time,
-            CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS wait_time_ms_per_second,
-            CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS signal_wait_time_ms_per_second
+            CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second,
+            CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS signal_wait_time_ms_per_second
         FROM raw
         ORDER BY collection_time
         """;
@@ -468,9 +490,16 @@ internal static class DarlingDataReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* A NULL rate is an unknowable interval (#3540) — the row is dropped rather than read as 0. Both
+               rates share one interval, so they are NULL together; the first is the test. */
+            if (reader.IsDBNull(1))
+            {
+                continue;
+            }
+
             items.Add(new WaitTrendPoint(
                 reader.GetDateTime(0),
-                reader.IsDBNull(1) ? 0 : reader.GetDouble(1),
+                reader.GetDouble(1),
                 reader.IsDBNull(2) ? 0 : reader.GetDouble(2)));
         }
 
@@ -577,7 +606,8 @@ internal static class DarlingDataReader
             delta_read_bytes,
             delta_write_bytes,
             delta_stall_read_ms,
-            delta_stall_write_ms
+            delta_stall_write_ms,
+            sample_interval_seconds
         FROM v_file_io_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_file_io_stats WHERE server_id = $1)
@@ -605,7 +635,8 @@ internal static class DarlingDataReader
                 reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
                 reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
                 reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
-                reader.IsDBNull(10) ? 0 : reader.GetInt64(10)));
+                reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+                reader.IsDBNull(11) ? null : reader.GetInt32(11)));
         }
 
         return rows;

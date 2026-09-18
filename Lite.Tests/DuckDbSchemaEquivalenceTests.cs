@@ -183,12 +183,26 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
     /// this side because the DuckDB appender writes one value per DECLARED payload column, so a database
     /// without it fails the whole batch. <see cref="DuckDbInitializer"/>'s v59 migration adds it to existing
     /// databases.</para>
+    ///
+    /// <para>#3540 / schema v60: <c>sample_interval_seconds</c> on <c>wait_stats</c>, <c>file_io_stats</c>,
+    /// <c>latch_stats</c> and <c>spinlock_stats</c> — the measured seconds each row's deltas accrued over,
+    /// the column perfmon_stats and query_stats were extracted WITH. The shared calculator's (0, 0)
+    /// "no delta knowable" marker could not survive these four tables' writes without it, so a restart's
+    /// fabricated zero read as a measured idle one. INTEGER, nullable, trailing — NULL on every pre-v60 row
+    /// is "interval never recorded", which the readers distinguish from 0, "unknowable".
+    /// <see cref="DuckDbInitializer"/>'s v60 migration adds it to existing databases;
+    /// <c>DeltaFamilyIntervalColumnTests</c> is the census that keeps a seventh delta family from shipping
+    /// without it.</para>
     /// </summary>
     private static readonly HashSet<string> IntentionalAppendedColumns = new(StringComparer.Ordinal)
     {
         "query_stats.host_object_name",
         "query_stats.query_plan_xml_bytes",
         "procedure_stats.query_plan_xml_bytes",
+        "wait_stats.sample_interval_seconds",
+        "file_io_stats.sample_interval_seconds",
+        "latch_stats.sample_interval_seconds",
+        "spinlock_stats.sample_interval_seconds",
     };
 
     [Fact]

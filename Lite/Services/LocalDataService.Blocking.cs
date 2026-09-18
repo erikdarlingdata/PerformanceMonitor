@@ -913,7 +913,12 @@ WITH raw AS
         collection_time,
         wait_type,
         delta_wait_time_ms,
-        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time)))) AS interval_seconds
+        /* #3540: the STORED interval where the row has one; 0 (no delta knowable) becomes NULL through NULLIF
+           and the reader drops the row rather than reading 0.00. NULL (a pre-v60 row) falls back to the LAG. */
+        CASE WHEN sample_interval_seconds IS NULL
+             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time))))
+             ELSE NULLIF(sample_interval_seconds, 0)
+        END AS interval_seconds
     FROM v_wait_stats
     WHERE server_id = $1
     AND   wait_type LIKE 'LCK%'
@@ -923,7 +928,7 @@ WITH raw AS
 SELECT
     collection_time,
     wait_type,
-    CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds ELSE 0 END AS wait_time_ms_per_second
+    CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second
 FROM raw
 WHERE delta_wait_time_ms >= 0
 ORDER BY collection_time, wait_type";
@@ -936,11 +941,17 @@ ORDER BY collection_time, wait_type";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
+            if (reader.IsDBNull(2))
+            {
+                continue;
+            }
+
             items.Add(new LockWaitTrendPoint
             {
                 CollectionTime = reader.GetDateTime(0),
                 WaitType = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
-                WaitTimeMsPerSecond = reader.IsDBNull(2) ? 0 : reader.GetDouble(2)
+                WaitTimeMsPerSecond = reader.GetDouble(2)
             });
         }
         return items;

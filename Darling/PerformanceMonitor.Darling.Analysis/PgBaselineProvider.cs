@@ -416,7 +416,10 @@ clean AS (
 
             /* QUALIFY rewrite 2 of 4 — cumulative counter, multiple rows per collection (per
                wait type): aggregate to total wait ms per collection FIRST, then restart
-               exclusion. Lite's DuckDB original applied QUALIFY inside the grouped CTE:
+               exclusion. Lite's DuckDB original applied QUALIFY inside the grouped CTE (since #3540
+               Lite's WHERE also carries sample_interval_seconds IS DISTINCT FROM 0, dropping the
+               calculator's unknowable rows before the sum; this arm reads the wait_stats_baseline
+               aggregate, which cannot carry that filter without a rebuild — V127's rung note):
 
                    WITH per_collection AS (
                        SELECT collection_time,
@@ -552,7 +555,13 @@ WITH clean AS (
 
             // ── Chart-unit baselines (for UI bands — units match what the chart displays) ──
 
-            /* QUALIFY rewrite 4 of 4 — wait ms per second (chart unit). Lite's DuckDB original:
+            /* QUALIFY rewrite 4 of 4 — wait ms per second (chart unit). Lite's DuckDB original (as it stood
+               when this rewrite was made; since #3540 Lite's per_collection takes the collection's STORED
+               sample_interval_seconds — MAX over its rows — and falls back to this LAG only for pre-v60
+               rows, so a restart collection's 0 becomes NULL and is dropped by with_rate's WHERE. This arm
+               cannot follow yet: it reads wait_stats_baseline, which materializes only (collection_time,
+               total_wait_ms) and cannot grow the interval without the drop-and-rebuild the #3527 note below
+               declines — see V127's rung note for the new-aggregate follow-up):
 
                    WITH per_collection AS (
                        SELECT collection_time,

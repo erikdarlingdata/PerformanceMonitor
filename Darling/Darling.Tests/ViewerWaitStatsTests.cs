@@ -55,14 +55,16 @@ public sealed class ViewerWaitStatsSqlTests
 
         Assert.Contains("WITH raw AS", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_wait_stats", sql, StringComparison.Ordinal);
-        /* The LAG window is partitioned per wait_type so each type's per-second rate is independent. */
-        Assert.Contains("LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time)", sql, StringComparison.Ordinal);
-        /* The truncate-then-diff epoch idiom proven value-identical between DuckDB and Postgres. */
-        Assert.Contains("extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time)", sql, StringComparison.Ordinal);
-        /* The three metric expressions: per-second wait, per-second signal, avg ms per wait. */
-        Assert.Contains("CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds", sql, StringComparison.Ordinal);
-        Assert.Contains("CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds", sql, StringComparison.Ordinal);
-        Assert.Contains("CAST(delta_wait_time_ms AS DOUBLE PRECISION) / delta_waiting_tasks", sql, StringComparison.Ordinal);
+        /* #3540: the STORED interval first — 0 (the calculator's unknowable marker) mapped to NULL — and the
+           per-type LAG window (the truncate-then-diff epoch idiom proven value-identical between DuckDB and
+           Postgres) only for pre-V127 rows that never recorded one. */
+        ViewerLatchSpinlockSqlTests.AssertStoredIntervalIdiom(sql, "wait_type");
+        /* The three metric expressions: per-second wait, per-second signal, avg ms per wait — none with an
+           ELSE 0, so an unknowable interval yields NULL and the reader drops the row. */
+        Assert.Contains("CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS signal_wait_time_ms_per_second", sql, StringComparison.Ordinal);
+        Assert.Contains("interval_seconds > 0 AND delta_waiting_tasks > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / delta_waiting_tasks", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY wait_type, collection_time", sql, StringComparison.Ordinal);
     }
 
@@ -278,34 +280,43 @@ public sealed class ViewerWaitStatsLivePostgresTests
         var bodySucceeded = false;
         try
         {
-            var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
+            var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-20));
             var t2 = t1.AddMinutes(5);   // 300 seconds later
+            var t3 = t2.AddMinutes(5);
+            var t4 = t3.AddMinutes(5);
 
-            /* CXPACKET across two collections; WRITELOG is a second type that must NOT appear when
-               only CXPACKET is requested (the IN filter). */
+            /* CXPACKET across four collections; WRITELOG is a second type that must NOT appear when
+               only CXPACKET is requested (the IN filter). t1/t2 are pre-V127 rows (NULL interval); t3
+               stores interval 0 — the calculator's "no delta knowable" marker, a restart (#3540); t4
+               stores a measured 120 s. */
             await InsertWaitRowAsync(connection, 1, t1, "CXPACKET", deltaWait: 100, deltaSignal: 10, deltaTasks: 5);
             await InsertWaitRowAsync(connection, 2, t2, "CXPACKET", deltaWait: 600, deltaSignal: 60, deltaTasks: 3);
             await InsertWaitRowAsync(connection, 2, t2, "WRITELOG", deltaWait: 900, deltaSignal: 90, deltaTasks: 9);
+            await InsertWaitRowAsync(connection, 3, t3, "CXPACKET", deltaWait: 0, deltaSignal: 0, deltaTasks: 0, sampleIntervalSeconds: 0);
+            await InsertWaitRowAsync(connection, 4, t4, "CXPACKET", deltaWait: 1200, deltaSignal: 120, deltaTasks: 4, sampleIntervalSeconds: 120);
 
             var trends = await viewer.GetWaitStatsTrendsByTypesAsync(
-                WaitServerId, new List<string> { "CXPACKET" }, t1.AddMinutes(-1), t2.AddMinutes(1));
+                WaitServerId, new List<string> { "CXPACKET" }, t1.AddMinutes(-1), t4.AddMinutes(1));
 
             Assert.True(trends.ContainsKey("CXPACKET"));
             Assert.False(trends.ContainsKey("WRITELOG"));   // the IN filter excluded it
 
             var cx = trends["CXPACKET"];
-            Assert.Equal(2, cx.Count);
 
-            /* First point: no prior collection → per-second 0; avg = 100/5 = 20. */
-            Assert.Equal(t1.Ticks, cx[0].CollectionTime.Ticks);
-            Assert.Equal(0.0, cx[0].WaitTimeMsPerSecond, precision: 3);
-            Assert.Equal(20.0, cx[0].AvgMsPerWait, precision: 3);
+            /* Two points, not four: t1 has no prior collection and no stored interval (it used to plot as
+               0.00 ms/sec — the fabricated first point), and t3 is the unknowable marker, which must be
+               ABSENT rather than a confident 0.00 at exactly the moment (a restart) nothing is knowable. */
+            Assert.Equal(new[] { t2.Ticks, t4.Ticks }, cx.Select(p => p.CollectionTime.Ticks).ToArray());
 
-            /* Second point: 600 ms over 300 s = 2.0 ms/sec; signal 60/300 = 0.2; avg 600/3 = 200. */
-            Assert.Equal(t2.Ticks, cx[1].CollectionTime.Ticks);
-            Assert.Equal(2.0, cx[1].WaitTimeMsPerSecond, precision: 3);
-            Assert.Equal(0.2, cx[1].SignalWaitTimeMsPerSecond, precision: 3);
-            Assert.Equal(200.0, cx[1].AvgMsPerWait, precision: 3);
+            /* t2 (pre-V127): 600 ms over the LAG's 300 s = 2.0 ms/sec; signal 60/300 = 0.2; avg 600/3 = 200. */
+            Assert.Equal(2.0, cx[0].WaitTimeMsPerSecond, precision: 3);
+            Assert.Equal(0.2, cx[0].SignalWaitTimeMsPerSecond, precision: 3);
+            Assert.Equal(200.0, cx[0].AvgMsPerWait, precision: 3);
+
+            /* t4: the STORED 120 s wins over the LAG's 300 s — 1200/120 = 10.0 ms/sec, signal 1.0, avg 300. */
+            Assert.Equal(10.0, cx[1].WaitTimeMsPerSecond, precision: 3);
+            Assert.Equal(1.0, cx[1].SignalWaitTimeMsPerSecond, precision: 3);
+            Assert.Equal(300.0, cx[1].AvgMsPerWait, precision: 3);
 
             bodySucceeded = true;
         }
@@ -318,14 +329,16 @@ public sealed class ViewerWaitStatsLivePostgresTests
 
     private static async Task InsertWaitRowAsync(
         NpgsqlConnection connection, long collectionId, DateTime collectionTimeUtc,
-        string waitType, long deltaWait, long deltaSignal, long deltaTasks)
+        string waitType, long deltaWait, long deltaSignal, long deltaTasks, int? sampleIntervalSeconds = null)
     {
+        /* sample_interval_seconds NULL by default — a pre-V127 row; pass 0 (unknowable) or a measured value
+           for the V127 contract (#3540). */
         using var command = new NpgsqlCommand(@"
 INSERT INTO wait_stats
     (collection_id, collection_time, server_id, server_name, wait_type,
      waiting_tasks_count, wait_time_ms, signal_wait_time_ms,
-     delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms)
-VALUES ($1, $2, $3, $4, $5, 0, 0, 0, $6, $7, $8)", connection);
+     delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, $5, 0, 0, 0, $6, $7, $8, $9)", connection);
         command.Parameters.AddWithValue(collectionId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(WaitServerId);
@@ -334,6 +347,7 @@ VALUES ($1, $2, $3, $4, $5, 0, 0, 0, $6, $7, $8)", connection);
         command.Parameters.AddWithValue(deltaTasks);
         command.Parameters.AddWithValue(deltaWait);
         command.Parameters.AddWithValue(deltaSignal);
+        command.Parameters.Add(new NpgsqlParameter { Value = (object?)sampleIntervalSeconds ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 

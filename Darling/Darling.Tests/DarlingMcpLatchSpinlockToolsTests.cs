@@ -87,6 +87,12 @@ public sealed class DarlingMcpLatchSpinlockToolsSurfaceAndSqlTests
         Assert.Contains("DISTINCT ON (latch_class)", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY a.total_delta_wait_time_ms DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
+        /* #3540: the STORED interval first (0, the unknowable marker, → NULL through NULLIF); the LAG only for
+           pre-V127 rows; no ELSE 0 on the rate, so an unknowable interval reads NULL and never 0.00. */
+        Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("ELSE NULLIF(sample_interval_seconds, 0)", sql, StringComparison.Ordinal);
+        Assert.Contains("END AS interval_seconds", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ELSE 0 END", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -101,6 +107,12 @@ public sealed class DarlingMcpLatchSpinlockToolsSurfaceAndSqlTests
         Assert.Contains("DISTINCT ON (spinlock_name)", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY a.total_delta_collisions DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
+        /* #3540: the STORED interval first (0, the unknowable marker, → NULL through NULLIF); the LAG only for
+           pre-V127 rows; no ELSE 0 on the rate, so an unknowable interval reads NULL and never 0.00. */
+        Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", sql, StringComparison.Ordinal);
+        Assert.Contains("ELSE NULLIF(sample_interval_seconds, 0)", sql, StringComparison.Ordinal);
+        Assert.Contains("END AS interval_seconds", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ELSE 0 END", sql, StringComparison.Ordinal);
     }
 
     [Theory]

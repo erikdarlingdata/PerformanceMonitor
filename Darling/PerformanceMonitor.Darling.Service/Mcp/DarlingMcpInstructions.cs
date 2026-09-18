@@ -164,7 +164,7 @@ internal static class DarlingMcpInstructions
 
         ### Resource-contention + jobs data-read tools
 
-        Deeper reads for an internal-contention / worker-thread / memory-grant / plan-cache / SQL Agent investigation. Same names + parameters Lite and the Dashboard expose. The Dashboard's per-class latch `severity` / `description` / `recommendation`, spinlock `description`, plan-cache `bloat_level`, and CPU-scheduler `pressure_level` / `recommendation` are the Dashboard / reporting-view CASE derivations (not collected columns) — reproduced here so the full result shape is served. Per-second latch/spinlock rates are derived from the collection interval (Darling's delta collectors store no `sample_interval_seconds`).
+        Deeper reads for an internal-contention / worker-thread / memory-grant / plan-cache / SQL Agent investigation. Same names + parameters Lite and the Dashboard expose. The Dashboard's per-class latch `severity` / `description` / `recommendation`, spinlock `description`, plan-cache `bloat_level`, and CPU-scheduler `pressure_level` / `recommendation` are the Dashboard / reporting-view CASE derivations (not collected columns) — reproduced here so the full result shape is served. Per-second latch/spinlock rates divide by the row's stored `sample_interval_seconds` (the measured seconds the deltas accrued over); they are `null`, never 0, when that interval was unknowable — the collector's first sighting, a counter reset, or a gap past the delta policy, typically a restart.
 
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|

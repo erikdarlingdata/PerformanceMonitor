@@ -315,7 +315,9 @@ internal static class DarlingTrendReader
     /// then per-collection average read/write latency (stall-ms / op, delta-stall sums CAST to double
     /// precision before division) is computed per (collection, database, file). The tool projects
     /// database_name + the two latencies (file_name rides the grouping but is not surfaced, mirroring Lite's
-    /// get_file_io_trend field set). $1 server_id, $2/$3 window (naive UTC).
+    /// get_file_io_trend field set). Rows whose stored <c>sample_interval_seconds</c> is 0 — no delta
+    /// knowable, a restart — are dropped rather than reported as 0.00 ms (#3540). $1 server_id, $2/$3
+    /// window (naive UTC).
     /// </summary>
     public const string FileIoLatencyTrendSql = """
         WITH top_files AS (
@@ -343,6 +345,11 @@ internal static class DarlingTrendReader
         WHERE f.server_id = $1
         AND   f.collection_time >= $2
         AND   f.collection_time <= $3
+        /* #3540: a stored interval of 0 is the calculator's "no delta knowable" marker (first sighting,
+           counter reset, a gap past the policy) — the row is dropped so the point is ABSENT rather than the
+           confident "0.00 ms" a restart used to render. IS DISTINCT FROM 0 keeps pre-V127 rows (NULL: interval
+           never recorded), which carry on reading exactly as they always did. */
+        AND   f.sample_interval_seconds IS DISTINCT FROM 0
         GROUP BY f.collection_time, f.database_name, f.file_name
         ORDER BY f.collection_time, f.database_name, f.file_name
         """;

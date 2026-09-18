@@ -96,10 +96,11 @@ public sealed partial class ViewerDataService
 
     /// <summary>
     /// LCK% wait per-second rates — Lite's <c>GetLockWaitTrendAsync</c> ported to Postgres. Reads
-    /// <c>v_wait_stats</c> filtered to lock waits, derives each row's collection interval from the LAG of
-    /// the prior collection_time (partitioned by wait type), and divides the delta wait time by that
-    /// interval for a per-second rate (delta cast to double precision). $1 server_id, $2 window start,
-    /// $3 window end (naive UTC).
+    /// <c>v_wait_stats</c> filtered to lock waits, takes each row's stored <c>sample_interval_seconds</c>
+    /// (falling back to the LAG of the prior collection_time, partitioned by wait type, for pre-V127 rows
+    /// that never recorded one — #3540), and divides the delta wait time by that interval for a per-second
+    /// rate (delta cast to double precision). A row whose stored interval is 0 — no delta knowable — yields
+    /// NULL and is dropped, never plotted as 0. $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
     public const string LockWaitTrendSql = """
         WITH raw AS
@@ -108,7 +109,12 @@ public sealed partial class ViewerDataService
                 collection_time,
                 wait_type,
                 delta_wait_time_ms,
-                extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time)))) AS interval_seconds
+                /* #3540: the STORED interval where the row has one; 0 (no delta knowable) becomes NULL through NULLIF
+                   and the reader drops the row rather than reading 0.00. NULL (a pre-V127 row) falls back to the LAG. */
+                CASE WHEN sample_interval_seconds IS NULL
+                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time))))
+                     ELSE NULLIF(sample_interval_seconds, 0)
+                END AS interval_seconds
             FROM v_wait_stats
             WHERE server_id = $1
             AND   wait_type LIKE 'LCK%'
@@ -118,7 +124,7 @@ public sealed partial class ViewerDataService
         SELECT
             collection_time,
             wait_type,
-            CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS double precision) / interval_seconds ELSE 0 END AS wait_time_ms_per_second
+            CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS double precision) / interval_seconds END AS wait_time_ms_per_second
         FROM raw
         WHERE delta_wait_time_ms >= 0
         ORDER BY collection_time, wait_type
@@ -239,10 +245,16 @@ public sealed partial class ViewerDataService
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
+            if (reader.IsDBNull(2))
+            {
+                continue;
+            }
+
             items.Add(new LockWaitTrendPoint(
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
-                reader.IsDBNull(2) ? 0 : reader.GetDouble(2)));
+                reader.GetDouble(2)));
         }
 
         return items;

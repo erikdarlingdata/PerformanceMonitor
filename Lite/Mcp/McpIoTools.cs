@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpIoTools
 {
-    [McpServerTool(Name = "get_file_io_stats"), Description("Gets the latest file I/O statistics per database file: read/write counts, bytes, stall times, and calculated latency. High read latency (>20ms) or write latency (>10ms for data, >2ms for log) often indicates storage bottlenecks.")]
+    [McpServerTool(Name = "get_file_io_stats"), Description("Gets the latest file I/O statistics per database file: read/write counts, bytes, stall times, and calculated latency. High read latency (>20ms) or write latency (>10ms for data, >2ms for log) often indicates storage bottlenecks. Each row carries sample_interval_seconds, the measured seconds its deltas accrued over; a 0 means no delta was knowable for that file at this collection (first sighting, counter reset, or a gap past the delta policy — typically a restart) and its latencies are null rather than 0.")]
     public static async Task<string> GetFileIoStats(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -40,8 +40,13 @@ public sealed class McpIoTools
                 delta_write_bytes = r.DeltaWriteBytes,
                 delta_stall_read_ms = r.DeltaStallReadMs,
                 delta_stall_write_ms = r.DeltaStallWriteMs,
-                avg_read_latency_ms = Math.Round(r.AvgReadLatencyMs, 2),
-                avg_write_latency_ms = Math.Round(r.AvgWriteLatencyMs, 2)
+                /* #3540: the measured seconds the deltas accrued over, handed to the caller as the perfmon
+                   tools hand theirs. 0 means no delta on this row was knowable (first sighting, counter reset,
+                   a gap past the policy) and the latencies are null for it rather than the "0.00 ms" a restart
+                   used to read as; null on the interval itself is a pre-v60 row that never recorded one. */
+                sample_interval_seconds = r.SampleIntervalSeconds,
+                avg_read_latency_ms = r.AvgReadLatencyMs is double readMs ? Math.Round(readMs, 2) : (double?)null,
+                avg_write_latency_ms = r.AvgWriteLatencyMs is double writeMs ? Math.Round(writeMs, 2) : (double?)null
             });
 
             return JsonSerializer.Serialize(new

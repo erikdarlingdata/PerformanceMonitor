@@ -378,13 +378,20 @@ AND   collection_time >= $2 AND collection_time < $3";
 WITH per_collection AS (
     SELECT collection_time,
            SUM(delta_wait_time_ms)::DOUBLE PRECISION AS total_wait_ms,
-           extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_sec
+           /* #3540: the collection's STORED interval (MAX over its rows — a wait type first seen in an otherwise
+              steady pass carries 0 beside its siblings' real interval and adds 0 to the sum; MAX is 0 only when
+              EVERY row was unknowable, a restart) mapped through NULLIF so that collection is NOT a sample; a
+              pre-v60 collection (NULL) falls back to the LAG this read always used. */
+           CASE WHEN MAX(sample_interval_seconds) IS NULL
+                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                ELSE NULLIF(MAX(sample_interval_seconds), 0)
+           END AS interval_sec
     FROM v_wait_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_wait_time_ms >= 0
     GROUP BY collection_time
 )
-SELECT MAX(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec ELSE 0 END) AS peak_ms_per_sec,
+SELECT MAX(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS peak_ms_per_sec,
        SUM(total_wait_ms) AS total_wait_ms,
        COUNT(*) FILTER (WHERE interval_sec IS NOT NULL) AS sample_count
 FROM per_collection";

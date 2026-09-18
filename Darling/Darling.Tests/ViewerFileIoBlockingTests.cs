@@ -62,12 +62,15 @@ public sealed class ViewerFileIoBlockingSqlTests
         Assert.Contains("WITH top_files AS", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY SUM(delta_read_bytes + delta_write_bytes) DESC", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
 
-        /* The per-file label is database.file, and the interval comes from LAG over collection_time. */
+        /* The per-file label is database.file, and the interval is the row's STORED sample_interval_seconds
+           (0 → NULL) with the LAG over collection_time only for pre-V127 rows (#3540). */
         Assert.Contains("f.database_name || '.' || f.file_name AS file_label", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN f.sample_interval_seconds IS NULL", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
         Assert.Contains("LAG(f.collection_time)", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
         Assert.Contains("EXTRACT(EPOCH FROM", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
+        Assert.Contains("ELSE NULLIF(f.sample_interval_seconds, 0)", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
 
-        /* Bytes / interval-seconds / 1 MiB, and the NULL-interval first row per file is dropped. */
+        /* Bytes / interval-seconds / 1 MiB, and the NULL-interval rows (first per file, or unknowable) are dropped. */
         Assert.Contains("/ interval_seconds / 1048576.0", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
         Assert.Contains("WHERE interval_seconds IS NOT NULL AND interval_seconds > 0", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
     }
@@ -116,8 +119,19 @@ public sealed class ViewerFileIoBlockingSqlTests
     {
         Assert.Contains("FROM v_wait_stats", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
         Assert.Contains("wait_type LIKE 'LCK%'", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
-        Assert.Contains("LAG(collection_time)", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
-        Assert.Contains("CAST(delta_wait_time_ms AS double precision) / interval_seconds", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
+        ViewerLatchSpinlockSqlTests.AssertStoredIntervalIdiom(ViewerDataService.LockWaitTrendSql, "wait_type");
+        Assert.Contains("CAST(delta_wait_time_ms AS double precision) / interval_seconds END AS wait_time_ms_per_second", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ELSE 0", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>#3540: the latency reads drop rows whose stored interval is 0 — the calculator's "no delta
+    /// knowable" marker — so a restart renders as an absent point, never "0.00 ms". IS DISTINCT FROM 0 keeps
+    /// pre-V127 rows (NULL). Both the File I/O tab's read and the tempdb tab's file read.</summary>
+    [Fact]
+    public void FileIoLatencyReads_DropTheUnknowableMarker_KeepPreV127Rows()
+    {
+        Assert.Contains("AND   f.sample_interval_seconds IS DISTINCT FROM 0", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+        Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -447,21 +461,24 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
         {
             var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
             var t2 = t1.AddSeconds(60);
+            var t3 = t2.AddSeconds(60);
 
-            /* Two collections of LCK_M_S 60s apart + a non-LCK wait that must be filtered out. */
+            /* Three collections of LCK_M_S 60s apart + a non-LCK wait that must be filtered out. t1/t2 are
+               pre-V127 rows (NULL interval); t3 stores the unknowable marker (#3540). */
             await InsertWaitStatAsync(connection, LockWaitServerId, t1, "LCK_M_S", deltaWaitTimeMs: 3000);
             await InsertWaitStatAsync(connection, LockWaitServerId, t2, "LCK_M_S", deltaWaitTimeMs: 6000);
             await InsertWaitStatAsync(connection, LockWaitServerId, t2, "SOS_SCHEDULER_YIELD", deltaWaitTimeMs: 99999);
+            await InsertWaitStatAsync(connection, LockWaitServerId, t3, "LCK_M_S", deltaWaitTimeMs: 0, sampleIntervalSeconds: 0);
 
-            var rows = await viewer.GetLockWaitTrendAsync(LockWaitServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
+            var rows = await viewer.GetLockWaitTrendAsync(LockWaitServerId, t1.AddMinutes(-1), t3.AddMinutes(1));
 
-            /* Only the two LCK_M_S rows survive the LIKE 'LCK%' filter. */
-            Assert.Equal(2, rows.Count);
-            Assert.All(rows, r => Assert.Equal("LCK_M_S", r.WaitType));
-            /* First collection has no prior sample → interval NULL → CASE ELSE 0. */
-            Assert.Equal(0.0, rows[0].WaitTimeMsPerSecond, precision: 3);
-            /* Second: 6000 ms / 60 s = 100 ms/sec. */
-            Assert.Equal(100.0, rows[1].WaitTimeMsPerSecond, precision: 3);
+            /* One row: t1 has no prior sample and no stored interval (it used to plot as 0.00), t3 is a
+               restart's unknowable marker (absent, never 0.00), and SOS_SCHEDULER_YIELD fails LIKE 'LCK%'. */
+            var row = Assert.Single(rows);
+            Assert.Equal("LCK_M_S", row.WaitType);
+            Assert.Equal(t2.Ticks, row.CollectionTime.Ticks);
+            /* 6000 ms / 60 s = 100 ms/sec. */
+            Assert.Equal(100.0, row.WaitTimeMsPerSecond, precision: 3);
 
             bodySucceeded = true;
         }
@@ -664,12 +681,14 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", connection);
     }
 
     private static async Task InsertWaitStatAsync(
-        NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc, string waitType, long deltaWaitTimeMs)
+        NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc, string waitType, long deltaWaitTimeMs,
+        int? sampleIntervalSeconds = null)
     {
+        /* sample_interval_seconds NULL by default — a pre-V127 row; 0 is the unknowable marker (#3540). */
         using var command = new NpgsqlCommand(@"
 INSERT INTO wait_stats
-    (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms)
-VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
+    (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", connection);
         command.Parameters.AddWithValue(1L);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(serverId);
@@ -677,6 +696,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
         command.Parameters.AddWithValue(waitType);
         command.Parameters.AddWithValue(1L);
         command.Parameters.AddWithValue(deltaWaitTimeMs);
+        command.Parameters.Add(new NpgsqlParameter { Value = (object?)sampleIntervalSeconds ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 

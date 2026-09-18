@@ -600,8 +600,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                    snapshots, no live hit). The Dashboard-only CASE enrichment (latch severity/description/
                    recommendation, spinlock description) and the #1410 client-side classifications (plan-cache
                    bloat_level, cpu-scheduler pressure_level) are reproduced service-side so the full result shape
-                   is served; Darling's delta collectors store no sample_interval_seconds, so per-second rates are
-                   derived from the LAG interval. */
+                   is served. Per-second rates divide by each row's stored sample_interval_seconds (V127, #3540),
+                   falling back to the LAG interval only for pre-V127 rows, and are null when the latest interval
+                   was unknowable rather than 0. */
                 .WithGeminiCompatibleTools<DarlingMcpLatchSpinlockTools>()
                 /* get_pg_wait_stats — PostgreSQL wait events for an Aurora target, paired with the
                    pg_wait_stats collector. A separate tool from get_wait_stats rather than a widened
