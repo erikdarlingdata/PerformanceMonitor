@@ -446,7 +446,8 @@ public sealed class AlertSettingsRow
     public int FleetSweepIntervalMinutes { get; set; } = FleetSweepCadence.DefaultIntervalMinutes;
 
     /* #2391: defaults mirror the V79 column defaults, so a viewer prefilling against a store that has
-       not seeded the row shows what the store would have given it. Ships OFF, per #2349. */
+       not seeded the row shows what the store would have given it. Ships OFF, per #2349. The rise column
+       is MB per HOUR averaged over the lookback (#3539 A8c) -- the Settings row's label says so. */
     public bool FileGrowthEnabled { get; set; }
     public int FileGrowthRiseMb { get; set; } = 10240;
     public int FileGrowthVolumePercent { get; set; } = 60;

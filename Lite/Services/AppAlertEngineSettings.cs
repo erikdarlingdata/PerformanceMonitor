@@ -89,7 +89,7 @@ public sealed class AppAlertEngineSettings : IAlertEngineSettings
 
     /* #2349: the file-growth gates, same clamps as Darling's adapter so the two SKUs cannot disagree about
        what a threshold means. Zero disables one gate rather than being nonsense, so rise-only or level-only
-       needs no second switch. */
+       needs no second switch. The rise is MB per HOUR averaged over the lookback (#3539 A8c). */
     public bool FileGrowthEnabled => App.AlertFileGrowthEnabled;
     public int FileGrowthRiseMb => Math.Max(0, App.AlertFileGrowthRiseMb);
     public int FileGrowthVolumePercent => Math.Clamp(App.AlertFileGrowthVolumePercent, 0, 100);

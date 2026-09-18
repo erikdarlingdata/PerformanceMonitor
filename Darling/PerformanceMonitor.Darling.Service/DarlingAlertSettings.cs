@@ -183,7 +183,8 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /* #2349: the file-growth gates. Clamped the same way the neighbours are -- a negative threshold would
        make the comparison always true, which for a gate whose whole job is to be quiet until something moves
        is the worst possible default. A ZERO is meaningful here rather than nonsense: it disables that one
-       gate, so an operator can run rise-only or level-only without a second switch. */
+       gate, so an operator can run rise-only or level-only without a second switch. The rise is MB per HOUR
+       averaged over the lookback (#3539 A8c); the clamp does not care about the unit, the builder does. */
     public bool FileGrowthEnabled => _config.Alerts.FileGrowthEnabled;
     public int FileGrowthRiseMb => Math.Max(0, _config.Alerts.FileGrowthRiseMb);
     public int FileGrowthVolumePercent => Math.Clamp(_config.Alerts.FileGrowthVolumePercent, 0, 100);

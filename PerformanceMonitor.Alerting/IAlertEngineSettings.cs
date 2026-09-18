@@ -217,9 +217,17 @@ public interface IAlertEngineSettings
     int PvsFloorGb { get; }
 
     /// <summary>
-    /// The RISE gate: a file that grew at least this many MB inside the lookback window (#2349). Primary
-    /// rather than the level, for #2157's reason — a level alone re-pages every cooldown about a size that has
-    /// been true for a week, which trains people to mute it, while a rise is an event.
+    /// The RISE gate: a file growing at least this many MB PER HOUR, averaged over
+    /// <see cref="FileGrowthLookbackMinutes"/> (#2349, unit fixed by #3539 A8c). Primary rather than the level,
+    /// for #2157's reason — a level alone re-pages every cooldown about a size that has been true for a week,
+    /// which trains people to mute it, while a rise is an event.
+    ///
+    /// <para>A rate, not an in-window delta. The name keeps its <c>Mb</c> suffix because the stored column
+    /// (<c>config_alert_settings.file_growth_rise_mb</c>) and the MCP key (<c>file_growth.rise_mb</c>) keep
+    /// theirs; the unit is stated where the number is shown — both Settings windows, the alert's threshold
+    /// line, the tool descriptions — with <see cref="AlertContextBuilders.FileGrowthRiseUnit"/>. Compared
+    /// through <see cref="AlertContextBuilders.FileGrowthRiseBarMb"/>, which scales it to the window; on the
+    /// shipped 60-minute lookback that is the number itself.</para>
     /// </summary>
     int FileGrowthRiseMb { get; }
 
@@ -230,8 +238,11 @@ public interface IAlertEngineSettings
     /// </summary>
     int FileGrowthVolumePercent { get; }
 
-    /// <summary>How far back the rise is measured (#2349). The window is MEASURED from the samples rather than
-    /// assumed, so a gap in collection cannot make a slow rise look fast.</summary>
+    /// <summary>The window the rise RATE is averaged over (#2349; #3539 A8c). A short window catches a burst, a
+    /// long one asks the rate to be sustained — it does not rescale the threshold, which is per hour whatever
+    /// this is set to. The span the samples actually cover inside it is MEASURED rather than assumed, so a gap
+    /// in collection cannot make a slow rise look fast; growth observed over less than the window is held to
+    /// the whole window's bar, which reads unobserved time as no growth.</summary>
     int FileGrowthLookbackMinutes { get; }
 
     /// <summary>Fire when a running job exceeds this multiple of its historical average duration.</summary>

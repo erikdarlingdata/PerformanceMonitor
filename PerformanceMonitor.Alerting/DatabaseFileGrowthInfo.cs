@@ -62,7 +62,10 @@ public class DatabaseFileGrowthInfo
     public double TotalSizeGb => TotalSizeMb / 1024.0;
     public double GrowthGb => GrowthMb / 1024.0;
 
-    /// <summary>Growth per hour, for a message that distinguishes "80 GB in an hour" from "80 GB since Tuesday".</summary>
+    /// <summary>Growth per hour over the MEASURED span, for a message that distinguishes "80 GB in an hour" from
+    /// "80 GB since Tuesday". Display only: the rise gate holds <see cref="GrowthMb"/> to the threshold scaled
+    /// to the CONFIGURED window (<see cref="AlertContextBuilders.FileGrowthRiseBarMb"/>), because this figure
+    /// extrapolates — one autogrowth inside a five-minute span reads as twelve an hour (#3539 A8c).</summary>
     public double GrowthMbPerHour =>
         GrowthWindowMinutes > 0 ? GrowthMb / (GrowthWindowMinutes / 60.0) : 0;
 }

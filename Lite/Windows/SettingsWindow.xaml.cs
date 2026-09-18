@@ -961,7 +961,10 @@ public partial class SettingsWindow : Window
         if (AlertPvsCheckBox.IsChecked == true)
             parts.Add($"PVS >= {AlertPvsThresholdPercentBox.Text}% of database");
         if (AlertFileGrowthCheckBox.IsChecked == true)
-            parts.Add($"file growth > {AlertFileGrowthRiseMbBox.Text}MB/{AlertFileGrowthLookbackMinutesBox.Text}m or volume > {AlertFileGrowthVolumePercentBox.Text}%");
+            /* #3539 A8c: the rise is a RATE (MB per hour) averaged over the lookback, in the same unit phrase the
+               row's label, the alert's threshold line and the MCP payload description use. It used to read
+               "10240MB/60m", which was the per-window delta the engine then compared literally. */
+            parts.Add($"file growth > {AlertFileGrowthRiseMbBox.Text} {AlertContextBuilders.FileGrowthRiseUnit} over {AlertFileGrowthLookbackMinutesBox.Text}m or volume > {AlertFileGrowthVolumePercentBox.Text}%");
         if (AlertLongRunningJobCheckBox.IsChecked == true)
             parts.Add($"jobs > {AlertLongRunningJobMultiplierBox.Text}x avg");
         if (AlertFailedJobCheckBox.IsChecked == true)

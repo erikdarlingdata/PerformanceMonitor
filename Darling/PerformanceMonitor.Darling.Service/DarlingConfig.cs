@@ -613,8 +613,11 @@ public sealed class AlertsConfig
     /* #2349: the database file-growth alert. Ships OFF -- a new alert that starts firing on upgrade is a bad
        citizen, and the right thresholds are a property of the fleet rather than of the product. */
     public bool FileGrowthEnabled { get; set; }
+    /* #3539 A8c: MB per HOUR, averaged over FileGrowthLookbackMinutes. Same column (file_growth_rise_mb), same
+       integer, one meaning on every lookback -- the engine scales it to the window at comparison time. */
     public int FileGrowthRiseMb { get; set; } = 10240;
     public int FileGrowthVolumePercent { get; set; } = 60;
+    /* The window the rise RATE is averaged over (#3539 A8c) -- it does not rescale the threshold. */
     public int FileGrowthLookbackMinutes { get; set; } = 60;
 
     /// <summary>#2107: the store volume's self-alert warning percent (was a compile-time 10.0;

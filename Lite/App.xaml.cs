@@ -183,9 +183,9 @@ public partial class App : Application
     public static int AlertPvsThresholdPercent { get; set; } = 40;      // Alert when an ADR database's PVS >= X% of its data files (0 disables this check)
     public static int AlertPvsFloorGb { get; set; } = 1;                // AND-qualifier: the PVS must also be >= X GB (0 removes the floor)
     public static bool AlertFileGrowthEnabled { get; set; }             // #2349 database file growth -- OFF by default
-    public static int AlertFileGrowthRiseMb { get; set; } = 10240;      // RISE gate: a file grew >= X MB in the window (0 disables this gate)
+    public static int AlertFileGrowthRiseMb { get; set; } = 10240;      // RISE gate: a file growing >= X MB per HOUR, averaged over the lookback (#3539 A8c; 0 disables this gate)
     public static int AlertFileGrowthVolumePercent { get; set; } = 60;  // LEVEL gate: a file is >= X% of its volume (0 disables this gate)
-    public static int AlertFileGrowthLookbackMinutes { get; set; } = 60;// how far back the rise is measured
+    public static int AlertFileGrowthLookbackMinutes { get; set; } = 60;// the window the rise rate is averaged over
     public static bool AlertLongRunningJobEnabled { get; set; } = true;
     public static int AlertLongRunningJobMultiplier { get; set; } = 3;
     public static bool AlertFailedJobEnabled { get; set; } = true;

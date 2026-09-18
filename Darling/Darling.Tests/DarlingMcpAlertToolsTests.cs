@@ -295,6 +295,37 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
     }
 
     /// <summary>
+    /// #3539 A8c: <c>file_growth.rise_mb</c> became a RATE (megabytes per hour, averaged over
+    /// <c>lookback_minutes</c>) without changing its key, its column or its integer — so the wire contract is
+    /// pinned as UNCHANGED here: the read emits the row's value under the same key, the write accepts the same
+    /// key into the same column, and the meaning lives in both tool descriptions, which is where an agent reads
+    /// it. A rename would have broken every client that reads or writes the setting to say something the
+    /// description says just as well.
+    /// </summary>
+    [Fact]
+    public void FileGrowthRise_KeepsItsKeyAndColumn_AndBothDescriptionsSayItIsPerHour()
+    {
+        var payload = SerializedSettingsPayload(SampleSettingsRow());
+        Assert.Equal(1024, payload["file_growth"]!["rise_mb"]!.GetValue<int>());
+        Assert.Equal(60, payload["file_growth"]!["lookback_minutes"]!.GetValue<int>());
+
+        var (targets, error) = ParseAsPartialUpdate((JsonObject)JsonNode.Parse(
+            "{\"file_growth\":{\"rise_mb\":2048}}")!);
+        Assert.Null(error);
+        Assert.Equal(new[] { (DarlingMcpAlertTools.AlertSettingsTable, "file_growth_rise_mb") }, targets.ToArray());
+
+        /* The unit, on both descriptions — read off the attributes the MCP host serves, the way the
+           get_alert_history pin above reads its own. The census in FileGrowthRiseUnitCensusTests holds the
+           phrase across every surface; this is the MCP half stated where the MCP contract is pinned. */
+        Assert.Contains("rise_mb is megabytes per HOUR", ToolDescription("get_alert_settings"), StringComparison.Ordinal);
+        Assert.Contains("file_growth.rise_mb is megabytes per HOUR", ToolDescription("update_alert_settings"), StringComparison.Ordinal);
+    }
+
+    private static string ToolDescription(string toolName) =>
+        ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == toolName)
+            .GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+    /// <summary>
     /// The SELECT's column count and the positional read must agree. Every field on
     /// <c>AlertSettingsReadRow</c> is read by ORDINAL, so a column inserted anywhere but the end re-maps
     /// every field after it — silently, since the types mostly line up. Derived rather than hand-counted so
