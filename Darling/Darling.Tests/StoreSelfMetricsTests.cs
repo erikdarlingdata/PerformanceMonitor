@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -1016,6 +1017,7 @@ SELECT
         public int BlockingCountThreshold { get; set; } = 1;
         public int BlockingWaitSecondsThreshold { get; set; }
         public int DeadlockCountThreshold { get; set; } = 1;
+        public DeadlockRateThresholds DeadlockRateThresholds => DeadlockRateThresholds.Default;
         public int PoisonWaitThresholdMs { get; set; } = 500;
         public int LongRunningQueryThresholdMinutes { get; set; } = 30;
         public int LongRunningQueryMaxResults { get; set; } = 5;

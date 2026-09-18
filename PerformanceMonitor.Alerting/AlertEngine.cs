@@ -15,6 +15,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Alerting;
@@ -686,19 +687,27 @@ public sealed class AlertEngine
 
                 var cpuDetailText = $"  {cpuMetricLabel}: {alertCpuValue:F0}%\n  Threshold: {_settings.CpuThresholdPercent}%{maintenanceDetail}"; /* :89 + #3495 */
 
-                /* :91-98 — CPU passes no context; ShortMessage = the toast body of :84 minus the
-                   server-name prefix. The numerics are REQUIRED, not optional (#1830): the ported
-                   no-numerics form left the history stores parsing "87% (Total CPU)", which fails on
-                   the parenthesized label, so every High CPU row stored current_value 0 in Lite AND
-                   Darling while the toast/email/webhook text stayed correct. alertCpuValue.HasValue is
-                   guaranteed here — the null arm above returns. */
+                /* :91-98 — ShortMessage = the toast body of :84 minus the server-name prefix. The numerics
+                   are REQUIRED, not optional (#1830): the ported no-numerics form left the history stores
+                   parsing "87% (Total CPU)", which fails on the parenthesized label, so every High CPU row
+                   stored current_value 0 in Lite AND Darling while the toast/email/webhook text stayed
+                   correct. alertCpuValue.HasValue is guaranteed here — the null arm above returns.
+
+                   #3653 (A8e): CPU used to pass NO context, and so no tier — every row rendered amber by
+                   name, a 100% fire indistinguishable from an 80% one while the card beside it was red. The
+                   context now exists for exactly one member: the grade (GradeCpuFire — the CPU health
+                   band's Critical bar). Details stay empty and DetailText stays the hand-built block above,
+                   byte-identical, so every channel renders what it rendered before plus the tier. Set on
+                   BOTH the context and the outcome for the reason the deadlock and Poison Wait sites give:
+                   Lite's deliverer persists only the context, Darling's folds the outcome in. */
+                var cpuGrade = GradeCpuFire(alertCpuValue.Value);
                 await FireAsync(new AlertOutcome(
                     key, serverName, "High CPU",
                     $"{alertCpuValue:F0}% ({cpuMetricLabel})",
                     $"{_settings.CpuThresholdPercent}%",
-                    Context: null, DetailText: cpuDetailText,
+                    Context: new AlertContext { SeverityOverride = cpuGrade }, DetailText: cpuDetailText,
                     NumericCurrentValue: alertCpuValue, NumericThresholdValue: _settings.CpuThresholdPercent,
-                    Muted: isMuted, Severity: null,
+                    Muted: isMuted, Severity: cpuGrade,
                     ShortMessage: $"{cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {_settings.CpuThresholdPercent}%)"), ct);
             }
         }
@@ -1173,6 +1182,24 @@ public sealed class AlertEngine
             /* :249-250 — context from this sweep's fetch. */
             var deadlockContext = AlertContextBuilders.BuildDeadlockContext(
                 serverName, deadlockRows, _settings.ExcludedDatabases, deadlockOccurrences.Decorate);
+
+            /* #3653 (A8e): GRADE the fire the gate already decided on. Until now this alert carried no tier,
+               so every row rendered by NAME — red for one deadlock and red for a hundred — while the fleet
+               card beside it banded the same hour Healthy / Warning / Critical on the measured rate tiers
+               (#3368: 5/hr is the 99.94th percentile of 14,448 measured server-hours; 20/hr sits inside the
+               empty interval between the routine mode's ceiling of 15 and the smallest storm's 90). One
+               instrument, both surfaces: the same classifier, the same window the count was taken over
+               (RollingCountWindowHours — one hour, so count and rate are one number here and the band's
+               one-hour minimum window is met by construction), the same store-tunable pair. The COUNT knob
+               still decides WHETHER it fires; the rate tiers decide only how it is coloured, so an operator
+               with a count threshold of 1 keeps every fire and a run of 25 in an hour finally reads as the
+               storm it is. Warning is the floor rather than the band's Healthy: a fire the operator asked
+               for is never rendered as nothing. The tier rides on the context (the #3635 row projection the
+               grids and get_alert_history read) AND on the outcome (Lite's deliverer does not fold the
+               outcome's severity into the context; Darling's does — setting both makes the two SKUs agree
+               by construction, the Poison Wait precedent). */
+            deadlockContext ??= new AlertContext();
+            deadlockContext.SeverityOverride = GradeDeadlockFire(effectiveDeadlockCount, _settings.DeadlockRateThresholds);
             var detailText = AlertContextBuilders.ContextToDetailText(deadlockContext);
 
             /* :252-260 — ShortMessage = the toast body of :244. Numerics carried explicitly (#1830):
@@ -1183,7 +1210,7 @@ public sealed class AlertEngine
                 _settings.DeadlockCountThreshold.ToString(),
                 deadlockContext, detailText,
                 NumericCurrentValue: effectiveDeadlockCount, NumericThresholdValue: _settings.DeadlockCountThreshold,
-                Muted: isMuted, Severity: deadlockContext?.SeverityOverride,
+                Muted: isMuted, Severity: deadlockContext.SeverityOverride,
                 ShortMessage: $"{effectiveDeadlockCount} deadlock(s) in the last hour"), ct);
         }
         else if (!deadlockDecision.Active && wasDeadlockActive)                     /* :262 */
@@ -1527,6 +1554,22 @@ public sealed class AlertEngine
                     _lastTempDbSpaceAlert[key] = now;                               /* :427 */
 
                     var tempDbContext = AlertContextBuilders.BuildTempDbSpaceContext(tempDb); /* :440 */
+
+                    /* #3653 (A8e): graded WARNING explicitly, and ONLY Warning — stated rather than left to the
+                       by-name map, so the row carries the tier it fired at like every other graded site and
+                       the map's arm styles only pre-#3653 replays. No Critical tier, on purpose: the product
+                       has no measured "tempdb nearly full" bar to cite. The candidates were checked and
+                       declined — the target-volume family's DiskCriticalFreePercent / DiskCriticalFreeGb are
+                       operator knobs about a VOLUME's free space (and the tempdb volume is already that
+                       alert's business); the store's Disk Pressure percent + GB floor (#3528) is a fire bar
+                       for the monitor's own disk, not a tier; and the percent this alert measures has two
+                       denominators (#2515: the growth ceiling where one exists, the allocation where not),
+                       so a single "95% reserved" would mean two different distances from failure. Inventing
+                       one would be exactly the folklore constant the repo's lineage rule exists to refuse.
+                       When a measured bar exists it lands here as a second tier; until then 100% reserved is
+                       a Warning the operator configured at TempDbSpaceThresholdPercent, honestly labelled. */
+                    tempDbContext ??= new AlertContext();
+                    tempDbContext.SeverityOverride = AlertSeverityLevel.Warning;
                     var detailText = AlertContextBuilders.ContextToDetailText(tempDbContext); /* :441 */
 
                     /* :443-453. ShortMessage = the toast body of :435. */
@@ -1537,7 +1580,7 @@ public sealed class AlertEngine
                         tempDbContext, detailText,
                         NumericCurrentValue: tempDb.ReservedPercent,
                         NumericThresholdValue: _settings.TempDbSpaceThresholdPercent,
-                        Muted: isMuted, Severity: tempDbContext?.SeverityOverride,
+                        Muted: isMuted, Severity: tempDbContext.SeverityOverride,
                         ShortMessage: $"tempdb {tempDb.ReservedPercent:F0}% reserved"), ct);
                     readClock.Restart();
                 }
@@ -2549,6 +2592,49 @@ public sealed class AlertEngine
         ConcurrentDictionary<TKey, DateTime> lastFired, TKey key, DateTime now, TimeSpan cooldown)
         where TKey : notnull =>
         !lastFired.TryGetValue(key, out var last) || now - last >= cooldown;
+
+    /// <summary>
+    /// The tier a "Deadlocks Detected" fire wears (#3653, A8e): Critical when the window's deadlock RATE
+    /// reaches the deadlock health band's Critical tier, Warning otherwise. The band's own classifier,
+    /// over the engine's own window — <see cref="RollingCountWindowHours"/> is one hour, so the count IS
+    /// the hourly rate and the band's one-hour minimum window is met — and the same store-tunable pair the
+    /// fleet card and calendar band on (<see cref="IAlertEngineSettings.DeadlockRateThresholds"/>). The
+    /// band's Healthy and Warning both map to Warning here: the count knob already decided this fire was
+    /// asked for, and a delivered alert is never rendered as nothing. Its Unknown arm is unreachable on a
+    /// non-null count over a window at the minimum, and would map to Warning too.
+    /// </summary>
+    public static AlertSeverityLevel GradeDeadlockFire(int deadlockCount, DeadlockRateThresholds tiers) =>
+        ServerHealthClassifier.DeadlockSeverity(deadlockCount, TimeSpan.FromHours(RollingCountWindowHours), tiers)
+            == HealthSeverity.Critical
+            ? AlertSeverityLevel.Critical
+            : AlertSeverityLevel.Warning;
+
+    /// <summary>
+    /// The tier a "High CPU" fire wears (#3653, A8e): Critical at the CPU health band's Critical bar
+    /// (<see cref="ServerHealthThresholds.CpuCriticalPercent"/>, 95% of a fixed host), Warning otherwise.
+    ///
+    /// <para><b>Which bar, and what its lineage is.</b> The product has two CPU ladders: the analysis
+    /// scorer's <c>CPU_SQL_PERCENT</c> pair (75, 95), a scoring formula with no stated measurement, and the
+    /// health band's (80, 95), the ONE ladder the fleet card, <c>get_fleet_overview</c>, <c>/api/fleet</c>
+    /// and the Performance Calendar's high-CPU day count all band on, pinned across both SKUs by #3539 A2 so
+    /// "high CPU" means one thing on the card and the day cell. Neither pair is a fleet percentile the way the
+    /// deadlock tiers are (#3368) — the band's own doc states its cutoffs against a quantity, not a
+    /// distribution — so this is not a claim that 95% is measured; it is the claim that the alert row and
+    /// the card must not disagree about the colour of the same minute. Before #3653 a 100% fire rendered the
+    /// same amber as an 80% one while the card beside it was red. If a measured CPU Critical bar is ever
+    /// established, the band's constant is where it lands, and this follows it.</para>
+    ///
+    /// <para>The quantity is the engine's <c>alertCpuValue</c> — SQL Server's ring-buffer percent of a FIXED
+    /// host (this arm never sees a PostgreSQL target: the PI/ACU reading is banded by the Darling host's own
+    /// CPU arm, and <c>cpu_utilization</c> has no row for one). The operator's <c>CpuThresholdPercent</c>
+    /// still decides WHETHER it fires — an operator who set 97 sees every fire Critical, which is a coherent
+    /// reading of a threshold above the Critical bar, the same way the deadlock record's Critical tier is
+    /// not floored at its Warning tier.</para>
+    /// </summary>
+    public static AlertSeverityLevel GradeCpuFire(double cpuPercent) =>
+        cpuPercent >= ServerHealthThresholds.CpuCriticalPercent
+            ? AlertSeverityLevel.Critical
+            : AlertSeverityLevel.Warning;
 
     /// <summary>
     /// Delivers one fired alert AND logs it (#1681). Every family routes through here rather than calling

@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Generic;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Alerting;
 
@@ -111,6 +112,24 @@ public interface IAlertEngineSettings
 
     /// <summary>Fire when the rolling-window deadlock count reaches this value (count-based; see class remarks).</summary>
     int DeadlockCountThreshold { get; }
+
+    /// <summary>
+    /// The deadlock RATE band's two tiers (#3368) — deadlocks per hour, the pair the fleet card, the daily
+    /// calendar and <c>get_fleet_overview</c> already band a server on. <b>Not a fire threshold</b>: whether
+    /// "Deadlocks Detected" fires is <see cref="DeadlockCountThreshold"/>'s business, unchanged. Since
+    /// #3653 (A8e) the engine GRADES the fire it has already decided on with these tiers — Warning by
+    /// default, Critical when the window's rate reaches <see cref="DeadlockRateThresholds.CriticalPerHour"/>
+    /// — so the alert row wears the colour the card would show for the same hour, instead of the by-name
+    /// red every deadlock row wore before (one deadlock and a hundred rendered identically).
+    ///
+    /// <para>Plumbed rather than read from <see cref="DeadlockRateThresholds.Default"/> inside the engine
+    /// because Darling's pair is a V120 store knob (<c>deadlockWarnPerHour</c> /
+    /// <c>deadlockCriticalPerHour</c>, <c>update_alert_settings</c>): an operator who raised the card's
+    /// Critical tier must not see the alert grade Critical on the shipped one. Lite has no such knob and
+    /// returns the shipped pair — the value its own card bands on. The clamp lives on the record, on read,
+    /// for the reason its Darling accessor states.</para>
+    /// </summary>
+    DeadlockRateThresholds DeadlockRateThresholds { get; }
 
     /// <summary>
     /// <b>Retired as a threshold by #3539 A4; kept as a shipped setting.</b> Until then: fire when a poison

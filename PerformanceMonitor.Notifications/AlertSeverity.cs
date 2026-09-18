@@ -48,10 +48,19 @@ internal static class AlertSeverity
             // #1839 total-blocked-wait gate — same tier as the count gate it sits beside; without an arm
             // here it would render INFO-blue in email and webhooks (the #1136 fall-through).
             "Blocking Wait Time" => ("#D97706", "ALERT", "\U0001F7E0"),
+            /* #3653 (A8e): GRADED at the engine's fire site now — Warning by default, Critical when the
+               hour's deadlock rate reaches the health band's Critical tier (the #3368 measured pair the
+               fleet card bands on). Every live fire carries the tier on Context.SeverityOverride, so this
+               arm styles only the override-less render: alert-history replays of rows written BEFORE
+               #3653, every one of which rendered red by name. Red is therefore the faithful replay, not a
+               default for the metric. */
             "Deadlocks Detected" => ("#DC2626", "ALERT", "\U0001F534"),
             // Blocking/deadlock capture is broken — emailed/webhooked, and fired as an Error toast,
             // so it must not render INFO-blue like an unmapped metric (mirrors the #1136 gap fix).
             "Capture Down" => ("#DC2626", "CRITICAL", "\U0001F534"),
+            /* #3653 (A8e): graded at the fire site — Warning, or Critical at the CPU health band's Critical
+               bar (95% of a fixed host, the card's ladder). Like the deadlock arm above, this styles only
+               pre-#3653 replays, all of which were amber. */
             "High CPU" => ("#F59E0B", "WARNING", "\U0001F7E1"),
             /* #3539 A4: GRADED at both engines' fire sites now — Warning at one task/backend continuously
                stuck across the ten-minute window, Critical at ten (PoisonWaitEvaluator's shared bars; the
@@ -62,6 +71,8 @@ internal static class AlertSeverity
                default for the metric; a new fire site for this name must pass its grade explicitly. */
             "Poison Wait" => ("#DC2626", "CRITICAL", "\U0001F534"),
             "Long-Running Query" => ("#D97706", "WARNING", "\U0001F7E0"),
+            /* #3653 (A8e): fires with an explicit WARNING override now (and only Warning — the engine's fire
+               site says why no Critical tier exists), so this arm styles pre-#3653 replays, which were amber. */
             "tempdb Space" => ("#D97706", "WARNING", "\U0001F7E0"),
             "Long-Running Job" => ("#D97706", "WARNING", "\U0001F7E0"),
             // Emailed/webhooked and fired as a Warning toast — was falling through to INFO-blue.

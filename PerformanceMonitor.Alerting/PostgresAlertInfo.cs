@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 
 namespace PerformanceMonitor.Alerting;
 
@@ -136,6 +137,50 @@ public sealed record PostgresPoisonWaitAlertInfo(
     long AccumulatedWaitMs,
     long AccumulatedWaits,
     DateTime NewestCollectionTime);
+
+/// <summary>
+/// What the poison-wait read hands the PostgreSQL host: the per-event accumulations over the window, AND
+/// whether the window was OBSERVED at all — the SQL Server engine's #3593 distinction (unwatched is not
+/// quiet), carried on the PostgreSQL side by a witness the rows themselves cannot supply (#3653).
+/// <para><b>Why the rows are not their own witness here.</b> On SQL Server an empty poison read is
+/// collector silence by construction: <c>wait_stats</c> lands a THREADPOOL row every cycle on any server
+/// old enough to fire the alert, so <c>AlertEngine.CheckPoisonWaitsAsync</c> can hold on "zero rows" and
+/// clear on "rows, all under the bar". <c>pg_wait_stats</c> does not work that way: since #2694 the
+/// collector SKIPS a wait event whose waits delta is zero over a real interval — an idle event writes no
+/// row — so a poison event that genuinely went quiet for ten minutes and a collector that stopped
+/// delivering both read as "no rows for that subject". Holding on that would never clear a finished storm;
+/// clearing on it (the pre-#3653 host) announced "Cleared" on collector silence. The witness has to come
+/// from somewhere that records a cycle whether or not it stored a row.</para>
+/// <para><b>The witness is the collector's own <c>collection_log</c> SUCCESS rows inside the window</b>
+/// (<paramref name="CapturesInWindow"/>) — the same source and the same reasoning the xmin-horizon read
+/// took for its denominator in #3537: the log gets a row per run INCLUDING a zero-row run, so a cycle that
+/// looked and stored nothing still counts as a look. A run that could not look (ERROR / ABANDONED /
+/// PERMISSIONS / YIELDED) is not evidence the event was quiet and is not counted. The log write is
+/// failure-isolated and can skip a row, so the count may UNDERCOUNT — which can only turn a clear into a
+/// hold for one more sweep, the conservative direction — and any accumulation row is itself proof the
+/// collector ran, so <see cref="Observed"/> accepts either.</para>
+/// </summary>
+/// <param name="Waits">One accumulation per poison event that wrote at least one row inside the window.
+/// Empty is the normal healthy read on any target (and the only possible read on a non-Aurora target,
+/// whose engine never populates the source).</param>
+/// <param name="CapturesInWindow">How many times the <c>pg_wait_stats</c> collector logged a SUCCESS run
+/// inside the window. 0 with no rows is an UNOBSERVED window: the host holds every standing poison alert
+/// where it is rather than announcing a recovery nobody measured.</param>
+public sealed record PostgresPoisonWaitWindow(
+    IReadOnlyList<PostgresPoisonWaitAlertInfo> Waits,
+    int CapturesInWindow)
+{
+    /// <summary>The read nothing came back from — what a fake or a failed adapter hands the host.</summary>
+    public static PostgresPoisonWaitWindow Unobserved { get; } = new(Array.Empty<PostgresPoisonWaitAlertInfo>(), 0);
+
+    /// <summary>
+    /// True when the collector demonstrably ran inside the window — it logged a run, or it stored a row —
+    /// so a subject with no row over the bar can honestly be called quiet. False is collector silence: the
+    /// host's clear arm must not fire on it (the #3282 rule for a CPU reading that stops arriving; the
+    /// SQL Server engine's <c>accumulated.Count > 0</c> arm since #3593).
+    /// </summary>
+    public bool Observed => CapturesInWindow > 0 || Waits.Count > 0;
+}
 
 /// <summary>
 /// One replication slot's retention risk.
